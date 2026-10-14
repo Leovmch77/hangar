@@ -30,8 +30,9 @@ struct SendRecord {
     pending: bool,
     confirmed: bool,
     outcome: Option<SendOutcome>,
-    /// Saiu do campo no Enter: a tela mostra o texto enquanto o envio não responde.
-    typed: bool,
+    /// O que saiu do campo no Enter: a bolha mostra isso enquanto o envio não responde e, se falhar, volta ao campo.
+    /// Com anexo é a legenda; o `text` leva também os caminhos.
+    field: Option<String>,
 }
 
 #[derive(Default)]
@@ -50,17 +51,17 @@ impl DeliveryTracker {
         if self.pending(&key) { return false; }
         // A pergunta lateral nunca vira mensagem da conversa: a resposta do backend já é a confirmação.
         let confirmed = crate::composer::side_question(&text);
-        self.records.insert(key, SendRecord { text, known, pending: true, confirmed, outcome: None, typed: false });
+        self.records.insert(key, SendRecord { text, known, pending: true, confirmed, outcome: None, field: None });
         true
     }
 
     /// O envio em voo saiu do campo: o texto dele fica à vista e, se falhar, volta para lá.
-    pub fn mark_typed(&mut self, key: &SessionKey) {
-        if let Some(record) = self.records.get_mut(key).filter(|record| record.pending) { record.typed = true; }
+    pub fn mark_typed(&mut self, key: &SessionKey, field: String) {
+        if let Some(record) = self.records.get_mut(key).filter(|record| record.pending) { record.field = Some(field); }
     }
 
-    pub fn typed(&self, key: &SessionKey, text: &str) -> bool {
-        self.records.get(key).is_some_and(|record| record.pending && record.typed && record.text == text)
+    pub fn typed(&self, key: &SessionKey, text: &str) -> Option<String> {
+        self.records.get(key).filter(|record| record.pending && record.text == text).and_then(|record| record.field.clone())
     }
 
     /// Enter com outro envio em voo: o texto espera a vez em vez de se perder.
@@ -83,7 +84,8 @@ impl DeliveryTracker {
     /// O que saiu do campo e o backend ainda não respondeu, na ordem do envio.
     pub fn outgoing(&self, key: &SessionKey) -> Vec<&str> {
         // Já confirmado pela conversa: a mensagem real está à vista e a bolha seria a segunda.
-        let flying = self.records.get(key).filter(|record| record.pending && record.typed && !record.confirmed).map(|record| record.text.as_str());
+        let flying = self.records.get(key).filter(|record| record.pending && !record.confirmed).and_then(|record| record.field.as_deref())
+            .filter(|field| !field.is_empty());
         flying.into_iter().chain(self.held.get(key).into_iter().flatten().map(|(text, ..)| text.as_str())).collect()
     }
 
@@ -192,7 +194,7 @@ mod tests {
     fn side_question_needs_no_transcript_echo() {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("one"), "/btw o que mudou?".into(), HashSet::new());
-        tracker.mark_typed(&key("one"));
+        tracker.mark_typed(&key("one"), "/btw o que mudou?".into());
         assert!(tracker.outgoing(&key("one")).is_empty(), "sem bolha apagada esperando a conversa");
         assert!(tracker.complete(&key("one"), "/btw o que mudou?", SendOutcome::Delivered));
         assert!(tracker.outcome(&key("one")).is_none(), "sem \"aguardando confirmação\" preso");
@@ -261,14 +263,14 @@ mod tests {
     fn text_sent_during_a_pending_send_waits_its_turn_in_order() {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("one"), "first".into(), HashSet::new());
-        tracker.mark_typed(&key("one"));
+        tracker.mark_typed(&key("one"), "first".into());
         tracker.hold(key("one"), "second".into(), false, None);
         tracker.hold(key("one"), "third".into(), true, None);
         assert_eq!(tracker.outgoing(&key("one")), vec!["first", "second", "third"]);
         assert!(tracker.outgoing(&key("other")).is_empty());
-        assert!(tracker.typed(&key("one"), "first"));
+        assert_eq!(tracker.typed(&key("one"), "first").as_deref(), Some("first"));
         tracker.complete(&key("one"), "first", SendOutcome::Queued);
-        assert!(!tracker.typed(&key("one"), "first"));
+        assert_eq!(tracker.typed(&key("one"), "first"), None);
         assert_eq!(tracker.next_held(&key("one")), Some(("second".into(), false, None)));
         assert_eq!(tracker.outgoing(&key("one")), vec!["third"]);
         assert_eq!(tracker.next_held(&key("one")), Some(("third".into(), true, None)));
@@ -293,7 +295,7 @@ mod tests {
     fn cleared_transcript_keeps_the_pending_send_and_its_queue() {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("before-clear"), "first".into(), HashSet::new());
-        tracker.mark_typed(&key("before-clear"));
+        tracker.mark_typed(&key("before-clear"), "first".into());
         tracker.hold(key("before-clear"), "second".into(), false, None);
         tracker.rekey(&key("before-clear"), &key("after-clear"));
         // Ainda "Enviando…" na chave nova: outro Enter espera em vez de sair em paralelo.
@@ -320,10 +322,24 @@ mod tests {
     fn send_confirmed_by_the_conversation_before_the_post_answers_is_not_shown_twice() {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("one"), "hello".into(), HashSet::new());
-        tracker.mark_typed(&key("one"));
+        tracker.mark_typed(&key("one"), "hello".into());
         tracker.confirm_real(&key("one"), "new-id", "hello");
         assert!(tracker.pending(&key("one")));
         assert!(tracker.outgoing(&key("one")).is_empty());
+    }
+
+    #[test]
+    fn attached_send_leaves_the_field_with_its_caption_and_gives_it_back_on_failure() {
+        let mut tracker = DeliveryTracker::default();
+        let prompt = "olha isso — 📎imagem: /tmp/up/colado-1.png";
+        tracker.begin(key("one"), prompt.into(), HashSet::new());
+        tracker.mark_typed(&key("one"), "olha isso".into());
+        // A bolha mostra o que a pessoa escreveu, não o prompt com os caminhos dos anexos.
+        assert_eq!(tracker.outgoing(&key("one")), vec!["olha isso"]);
+        // Falhou: volta ao campo a legenda, que é o que saiu dele no Enter.
+        assert_eq!(tracker.typed(&key("one"), prompt), Some("olha isso".to_owned()));
+        assert!(tracker.complete(&key("one"), prompt, SendOutcome::Rejected("HTTP 500".into())));
+        assert_eq!(tracker.typed(&key("one"), prompt), None);
     }
 
     #[test]

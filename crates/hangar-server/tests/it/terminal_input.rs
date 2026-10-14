@@ -103,6 +103,36 @@ async fn terminal_input_partial_cleanup_only_owned_without_internal_retry() {
  let io=Arc::new(FakeIo::new(vec![screen(""),screen("foreign message")]));*io.fail.lock().unwrap()=Some("long original message".into());
  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);
 }
+/// Fatos da conversa que somem depois da escrita (o `/pull` do plugin trocando, o transcript fechado):
+/// o texto é nosso e o pane é o mesmo, então ele sai do composer e a entrega adia, sem Enter nem trava.
+struct LostFacts { inner: Services, io: Arc<FakeIo>, allowed: usize, seen: Mutex<usize> }
+impl TerminalServices for LostFacts {
+ fn facts<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async move {
+  if self.io.writes().iter().any(|w| w.args.contains(&"-l".into())) {
+   let mut seen = self.seen.lock().unwrap(); *seen += 1;
+   if *seen > self.allowed { return Err(ServiceError("terminal_conversation_unavailable")); }
+  }
+  self.inner.facts(b).await
+ }) }
+ fn publish<'a>(&'a self, b: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { self.inner.publish(b, r) }
+ fn permission_guard<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, ()> { self.inner.permission_guard(b) }
+ fn life_check<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+}
+#[tokio::test]
+async fn terminal_input_facts_lost_after_write_clean_own_text_and_defer() {
+ // 0: a prova da tela já não tem fatos; 1: a prova passa e o Enter não tem.
+ for allowed in [0, 1] {
+  // Uma tela por captura: antes, a prova (só com fatos), a limpeza e depois do C-u.
+  let mut screens=vec![screen(""),screen("long original message")];if allowed==1 {screens.push(screen("long original message"));}screens.push(screen(""));
+  let io=Arc::new(FakeIo::new(screens));
+  let s=Arc::new(LostFacts {inner:Services::new(),io:io.clone(),allowed,seen:Mutex::new(0)});
+  let limits=InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3};
+  let r=TerminalDriver::new(binding(),s,io.clone(),limits).prompt("long original message","id").await;
+  assert_eq!((r.disposition,r.cleanup),(Disposition::Deferred,Cleanup::Proved),"allowed={allowed}: {r:?}");
+  assert_eq!(io.writes().last().unwrap().args.last().unwrap(),"C-u","allowed={allowed}");
+  assert!(io.writes().iter().all(|w|w.args.last().is_none_or(|a|a!="\r")),"sem fatos o Enter não sai");
+ }
+}
 #[tokio::test]
 async fn terminal_input_socket_partial_never_falls_back() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().native=Some(NativeMessage {socket:"/private/socket".into(),origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())});*io.socket.lock().unwrap()=WriteOutcome::Unknown;

@@ -67,6 +67,9 @@ pub trait TerminalServices: Send + Sync {
     fn writing<'a>(&'a self) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
     /// Os fatos terminam conferindo o mesmo pane do `verify_pane`, depois da tela: o driver não o repete.
     fn facts_check_pane(&self) -> bool { false }
+    /// Mesmo pane e mesmo processo do agente, sem provar a conversa: só para tirar o próprio texto do
+    /// composer quando a prova da conversa sumiu depois da escrita. Sem implementação, não limpa.
+    fn life_check<'a>(&'a self, _binding: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Err(ServiceError("life_check_unavailable")) }) }
     /// Tamanho do transcript antes do Enter; `None` sem transcript legível.
     fn transcript_mark<'a>(&'a self) -> ServiceFuture<'a, Option<u64>> { Box::pin(async { Ok(None) }) }
     /// O Claude pôs `text` na fila dele depois de `mark`, ou seja, aceitou o Enter.
@@ -917,13 +920,33 @@ impl TerminalDriver {
         }
         false
     }
+    /// O composer conferindo só o pane e o agente (`life_check`), sem os fatos da conversa.
+    async fn snapshot_agent(&self) -> Result<ComposerSnapshot, IoFailure> {
+        self.services.life_check(&self.binding).await.map_err(|error| IoFailure { code: error.0, may_have_written: false })?;
+        if !self.services.facts_check_pane() { self.verify_pane().await?; }
+        let (screen, typed) = self.composer_capture_unverified().await?;
+        Self::composer(&screen, &typed)
+    }
+    async fn key_agent(&self, key: &str) -> Result<(), IoFailure> {
+        self.services.life_check(&self.binding).await.map_err(|error| IoFailure { code: error.0, may_have_written: false })?;
+        if !self.services.facts_check_pane() { self.verify_pane().await?; }
+        let output = self.raw(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), key.into()], vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "mux_effect_failed", may_have_written: true }); }
+        Ok(())
+    }
     async fn cleanup_owned(&self, text: &str, before: &ComposerSnapshot) -> bool {
-        let Ok(mut now) = self.snapshot().await else { return false; };
+        // A prova da conversa sumiu depois da escrita: o pane e o agente conferidos bastam para
+        // reconhecer o próprio texto e tirá-lo, sem apagar o que não é nosso.
+        let (mut now, agent) = match self.snapshot().await {
+            Ok(now) => (now, false),
+            Err(error) if error.code == "facts_unavailable" => match self.snapshot_agent().await { Ok(now) => (now, true), Err(_) => return false },
+            Err(_) => return false,
+        };
         if !now.owned(text, before) { return false; }
         for _ in 0..self.limits.cleanup_attempts {
-            if self.key_inner("C-u").await.is_err() { return false; }
+            if if agent { self.key_agent("C-u").await } else { self.key_inner("C-u").await }.is_err() { return false; }
             self.settle().await;
-            let Ok(after) = self.snapshot().await else { return false; };
+            let Ok(after) = (if agent { self.snapshot_agent().await } else { self.snapshot().await }) else { return false; };
             if after.is_empty() { return true; }
             if !after.owned(text, before) || after.content.chars().count() >= now.content.chars().count() { return false; }
             now = after;
@@ -941,8 +964,11 @@ impl TerminalDriver {
         result
     }
     async fn submit(&self, text: &str, before: &ComposerSnapshot, draft: Option<&ComposerSnapshot>, expected: Option<&ExpectedInteraction>) -> DeliveryResult {
-        if !self.verify().await.is_ok_and(|facts| !facts.open_question) {
-            return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked");
+        match self.verify().await {
+            Ok(facts) if !facts.open_question => {}
+            // Sem os fatos da conversa o Enter não sai; o texto é nosso e sai do composer, como na prova.
+            Err(error) if error.code == "facts_unavailable" && expected.is_none() => return self.partial(text, before, DeliveryStage::Submit).await,
+            _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked"),
         }
         let mark = if expected.is_none() && !text.trim_start().starts_with('/') { self.services.transcript_mark().await.ok().flatten() } else { None };
         if let Err(error) = self.key_guarded("Enter", expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,before)),allow_owned:true })).await {

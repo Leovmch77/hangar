@@ -48,6 +48,7 @@ impl PolicyClient {
             accounts:None,ready_retry:(READY_FIRST_WAIT,READY_BUDGET),codex_env:None }
     }
     pub fn with_ready_retry(mut self,first_wait:Duration,budget:Duration) -> Self { self.ready_retry = (first_wait,budget); self }
+    pub(super) fn diag(&self) -> crate::diag::DiagClient { self.diag.clone() }
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
     #[doc(hidden)]
     pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.codex_env = Some(Arc::new(env)); self }

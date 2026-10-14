@@ -84,7 +84,7 @@ fn plugin_instance()->String {
     let mut stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     let mut instance=String::new();while stamp>0 {instance.insert(0,char::from_digit((stamp%36) as u32,36).unwrap());stamp/=36;}instance.push_str("-fixture");instance
 }
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>, calls:Arc<Mutex<Vec<Value>>>,status:StatusSender,server:tokio::task::JoinHandle<()> }
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, fill_plugin:Arc<std::sync::atomic::AtomicBool>, repull_ms:Arc<AtomicU64>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>, calls:Arc<Mutex<Vec<Value>>>,status:StatusSender,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
         let dir=tempfile::tempdir().unwrap();let io=Arc::new(Io::new());let config=dir.path().join("config");
@@ -96,6 +96,7 @@ impl Fixture {
         *io.native_record.lock().unwrap()=Some((config.join("sessions").join(format!("{pid}.json")),pid,socket));io.refresh_record();
         let (idle,ready,generation,native)=(io.idle.clone(),io.ready.clone(),io.generation.clone(),io.native.clone());
         let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false));let focus_plugin=Arc::new(std::sync::atomic::AtomicBool::new(false));let calls=Arc::new(Mutex::new(vec![]));
+        let (fill_plugin,repull_ms)=(Arc::new(std::sync::atomic::AtomicBool::new(false)),Arc::new(AtomicU64::new(0)));
         let plugin=Arc::new(hangar_server::plugin::Store::new(Arc::new(hangar_server::interactions::InteractionStore::default())));
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();let c=calls.clone();
         let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let c=c.clone();async move {
@@ -103,7 +104,7 @@ impl Fixture {
             (axum::http::StatusCode::SERVICE_UNAVAILABLE,[("content-type","application/json")],json!({"ok":false,"error_code":"retired_policy"}).to_string())
         }}));
         let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,unknown,focus_plugin,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),calls,status:tokio::sync::watch::channel(TerminalStatus::default()).0,server}
+        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,unknown,focus_plugin,fill_plugin,repull_ms,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),calls,status:tokio::sync::watch::channel(TerminalStatus::default()).0,server}
     }
     fn owner(&self,receipt:bool) {
         let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&self.target);
@@ -116,10 +117,11 @@ impl Fixture {
         if let Some(task)=self.plugin_task.lock().unwrap().take() {task.abort();}
         self.plugin.interactions().bind(&binding).unwrap();self.plugin.bind(&binding).unwrap();
         self.io.binding_generation.store(self.target.generation,std::sync::atomic::Ordering::Release);self.io.refresh_record();
-        if !self.unknown.load(std::sync::atomic::Ordering::Acquire) && !self.focus_plugin.load(std::sync::atomic::Ordering::Acquire) {return;}
+        if !self.unknown.load(std::sync::atomic::Ordering::Acquire) && !self.focus_plugin.load(std::sync::atomic::Ordering::Acquire) && !self.fill_plugin.load(std::sync::atomic::Ordering::Acquire) {return;}
         let (plugin,unknown,focus,io,requests,path)=(self.plugin.clone(),self.unknown.clone(),self.focus_plugin.clone(),self.io.clone(),self.plugin_requests.clone(),self.target.state_path.clone());
+        let (fill,repull)=(self.fill_plugin.clone(),self.repull_ms.clone());
         let instance=self.instance.clone();let task=tokio::spawn(async move {
-            while unknown.load(std::sync::atomic::Ordering::Acquire) || focus.load(std::sync::atomic::Ordering::Acquire) {
+            while unknown.load(std::sync::atomic::Ordering::Acquire) || focus.load(std::sync::atomic::Ordering::Acquire) || fill.load(std::sync::atomic::Ordering::Acquire) {
                 let mut modes=vec!["fill".into(),"user".into(),"receipt_v2".into()];if focus.load(std::sync::atomic::Ordering::Acquire) {modes.push("focus".into());}
                 let payload=plugin.begin_pull(&binding,Pull {instance:instance.clone(),modos:modes,estado:Some("idle".into()),session_id:Some(binding.conversation.clone())},std::time::Instant::now()).unwrap().wait().await;
                 if !payload["publication_id"].is_string() {continue;}
@@ -129,6 +131,8 @@ impl Fixture {
                 let mode:PluginMode=serde_json::from_value(payload["modo"].clone()).unwrap();let ok=!unknown.load(std::sync::atomic::Ordering::Acquire) || mode==PluginMode::Focus;
                 if mode==PluginMode::Focus {*io.mods_screen.lock().unwrap()=None;}else if ok && mode==PluginMode::Fill {*io.text.lock().unwrap()=payload["text"].as_str().unwrap().into();}
                 plugin.acknowledge(&binding,Some(&receipt),if mode==PluginMode::Focus {PluginMode::Fill}else{mode},ok).unwrap();
+                // O plugin real leva um tempo entre o aviso e o `/pull` seguinte.
+                tokio::time::sleep(Duration::from_millis(repull.load(std::sync::atomic::Ordering::Acquire))).await;
             }
         });*self.plugin_task.lock().unwrap()=Some(task);
     }
@@ -737,6 +741,37 @@ async fn terminal_runtime_same_process_new_conversation_without_native_record_ne
     assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]=="display-message"));
     assert!(f.io.socket_calls.lock().unwrap().is_empty());assert!(f.plugin_requests.lock().unwrap().is_empty());assert!(f.calls.lock().unwrap().is_empty());
     assert!(f.state()["rows"].as_array().unwrap().iter().all(|row|row["delivered"]!=true));h.stop().await.unwrap();
+}
+/// Sem o registro nativo, só o `/pull` aberto do plugin prova a conversa, e o `Fill` entrega esse
+/// `/pull` ao plugin: a prova sumia até ele voltar, o texto ficava no composer e a fila travava. A
+/// entrega vai pelo teclado, que deixa o `/pull` aberto.
+#[cfg(target_os="linux")]
+#[tokio::test]
+async fn terminal_runtime_fill_never_spends_the_only_conversation_proof() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    *f.io.native_record.lock().unwrap()=None;std::fs::remove_file(native).unwrap();
+    f.fill_plugin.store(true,std::sync::atomic::Ordering::Release);f.repull_ms.store(500,std::sync::atomic::Ordering::Release);
+    let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    f.wait_for("o /pull do plugin",||f.plugin.waiting(&binding).unwrap_or(false)).await;
+    let reply=h.command(f.command("fill","hello @peer")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{}",reply.payload);
+    assert!(f.io.text.lock().unwrap().is_empty(),"nada fica digitado no composer");
+    h.stop().await.unwrap();
+}
+/// Registro nativo ausente para o pid do agente e plugin sem `/pull`: nada prova a conversa. A sessão
+/// aparece como sem entrega segura antes de uma mensagem travar, e o aviso sai quando a prova volta.
+#[tokio::test]
+async fn terminal_runtime_missing_native_record_and_silent_plugin_mark_no_safe_delivery() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    let saved=f.io.native_record.lock().unwrap().take();std::fs::remove_file(native).unwrap();
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_millis(50));
+    f.wait_for("sem entrega segura",||f.status.borrow().input_stalled.as_deref()==Some("no_safe_delivery")).await;
+    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
+    *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
+    f.wait_for("o aviso sai com a prova de volta",||f.status.borrow().input_stalled.is_none()).await;
+    h.stop().await.unwrap();
 }
 #[tokio::test]
 async fn terminal_runtime_unreadable_capture_recovers_without_sse() {

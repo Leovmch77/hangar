@@ -91,7 +91,14 @@ pub struct RuntimeRegistry {
     /// quando o `Monitor` não está vivo.
     terminal_problems:std::sync::Mutex<BTreeMap<String,(u64,String)>>,
     terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
+    /// Última reabertura por entrega sem prova, por chave: sobrevive à troca do ator que ela mesma faz.
+    heal_attempts:std::sync::Mutex<BTreeMap<String,std::time::Instant>>,
 }
+/// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
+/// não vira laço de processos mortos.
+const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum Reopen {Bypass,Heal}
 
 /// Espera até 3 s pela trava; outro erro (pasta sem permissão, disco cheio) responde na hora.
 async fn wait_lease(path:&std::path::Path) -> Result<Arc<super::queue::Lease>,RuntimeError> {
@@ -240,7 +247,7 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
-        Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+        Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
@@ -352,10 +359,13 @@ impl RuntimeRegistry {
         let stalled=|code:&str| match code {
             "composer_busy"=>"terminal_input_composer_busy","composer_unreadable"=>"terminal_input_composer_unreadable",
             "capture_failed"|"capture_utf8"=>"terminal_input_capture_failed","clear_not_applied"=>"terminal_clear_not_applied",
+            "no_safe_delivery"=>"terminal_input_no_safe_delivery",
             _=>"terminal_input_stalled",
         };
-        let problem=if event.data["error"].is_string() {Some("runtime_falhou")}
-            else {event.data["view"]["input_stalled"].as_str().filter(|code|!code.is_empty()).map(stalled)};
+        let input=event.data["view"]["input_stalled"].as_str().filter(|code|!code.is_empty());
+        // Sem prova da conversa, a lista mostra a causa, não o erro que ela mesma causa na fila.
+        let explained=input==Some("no_safe_delivery") && event.data["error"].as_str().is_some_and(|error|crate::state::edges::explained(input,error));
+        let problem=if event.data["error"].is_string() && !explained {Some("runtime_falhou")} else {input.map(stalled)};
         let mut map=self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner());
         match problem {
             Some(code)=>{map.insert(event.key.clone(),(event.generation,code.into()));},
@@ -1214,9 +1224,37 @@ impl RuntimeRegistry {
 
     /// Admitida: a tarefa continua mesmo que o cliente HTTP deixe de esperar.
     pub async fn reopen_claude(self:Arc<Self>,name:String,key:String,generation:u64,operation_id:String)->Result<Value,RuntimeError> {
-        tokio::spawn(async move {self.reopen_claude_inner(&name,&key,generation,&operation_id).await}).await.map_err(|_|failure("lifecycle_panic"))?
+        tokio::spawn(async move {self.reopen_claude_inner(&name,&key,generation,&operation_id,Reopen::Bypass).await}).await.map_err(|_|failure("lifecycle_panic"))?
     }
-    async fn reopen_claude_inner(&self,name:&str,key:&str,generation:u64,id:&str)->Result<Value,RuntimeError> {
+    /// Claude com terminal sem prova da conversa (registro nativo do agente sumiu e o plugin não
+    /// responde): reabre na mesma conversa e no mesmo modo, parado e com mensagem esperando, e a vida
+    /// nova regrava o registro. No máximo uma por `HEAL_BACKOFF` por sessão; cada tentativa vai ao diário.
+    pub async fn heal_claude(self:Arc<Self>,name:String,key:String,generation:u64)->Result<Value,RuntimeError> {
+        {
+            let mut attempts=self.heal_attempts.lock().unwrap_or_else(|e|e.into_inner());
+            let now=std::time::Instant::now();
+            if attempts.get(&key).is_some_and(|at|now.duration_since(*at)<HEAL_BACKOFF) {return Err(failure("heal_backoff"));}
+            attempts.insert(key.clone(),now);
+        }
+        let diag=self.reopen_to.3.clone();
+        tracing::warn!(key,session=%name,code="terminal_heal_started","sessão sem entrega segura: o Claude é reaberto na mesma conversa e modo");
+        diag.report("rust.terminal_heal",&name,"started","sessão sem entrega segura: reabertura na mesma conversa e modo");
+        let id=format!("heal:{key}:{generation}:{}",crate::mods::state::random_hex(8));
+        let (session,owner)=(name.clone(),key.clone());
+        let result=tokio::spawn(async move {self.reopen_claude_inner(&session,&owner,generation,&id,Reopen::Heal).await}).await.map_err(|_|failure("lifecycle_panic")).and_then(|r|r);
+        match &result {
+            Ok(_)=>{
+                tracing::info!(key,session=%name,code="terminal_heal_done","Claude reaberto na mesma conversa; a fila segue na vida nova");
+                diag.report("rust.terminal_heal",&name,"relaunched","Claude reaberto na mesma conversa e modo");
+            },
+            Err(error)=>{
+                tracing::warn!(key,session=%name,code=%error.code,reason=%error.message,"reabertura por entrega sem prova falhou");
+                diag.report("rust.terminal_heal",&name,&error.code,"reabertura por entrega sem prova falhou");
+            },
+        }
+        result
+    }
+    async fn reopen_claude_inner(&self,name:&str,key:&str,generation:u64,id:&str,reopen:Reopen)->Result<Value,RuntimeError> {
         use crate::list::procs::ProcessView;
         let _ingress=super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?;
         let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
@@ -1224,33 +1262,36 @@ impl RuntimeRegistry {
             let entries=self.entries.lock().await;
             entries.get(key).filter(|entry|entry.name==name).map(|entry|entry.handle.clone()).ok_or_else(||failure("runtime_binding"))?
         };
+        let heal=reopen==Reopen::Heal;
         let (target,handle)=match entry {
             EntryHandle::Terminal {target,handle}=>(target,handle),
-            EntryHandle::Headless(_)=>return self.reopen_headless_locked(name,key,generation,id,Some("bypassPermissions"),false,None,0).await,
+            EntryHandle::Headless(_) if !heal=>return self.reopen_headless_locked(name,key,generation,id,Some("bypassPermissions"),false,None,0).await,
             _=>return Err(failure("lifecycle_provider")),
         };
         if target.generation!=generation {
-            if generation.checked_add(1)!=Some(target.generation) {return Err(failure("runtime_generation"));}
+            if heal || generation.checked_add(1)!=Some(target.generation) {return Err(failure("runtime_generation"));}
             let previous=handle.control(id.into(),"set_permission_mode".into(),json!({"mode":"bypassPermissions"})).await?;
             if previous.disposition==Disposition::Accepted && previous.payload["reopened"]==true {return Ok(previous.payload);}
             return Err(failure("runtime_generation"));
         }
         let next_generation=generation.checked_add(1).ok_or_else(||failure("runtime_generation"))?;
-        let phase=format!("claude-reopen:{id}");
+        let (phase,kind,guard)=if heal {(format!("claude-heal:{id}"),"claude_heal","heal_guard")} else {(format!("claude-reopen:{id}"),"claude_reopen","lifecycle_guard")};
         let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
-        handle.lifecycle(format!("{phase}:prepare"),Action::Prepare {id:phase.clone(),payload:json!({"logical_id":id,"kind":"claude_reopen","conversation":target.binding.conversation,"generation":generation}),entry_id:None}).await?;
-        handle.control(format!("guard:{id}"),"lifecycle_guard".into(),json!({})).await?;
+        handle.lifecycle(format!("{phase}:prepare"),Action::Prepare {id:phase.clone(),payload:json!({"logical_id":id,"kind":kind,"conversation":target.binding.conversation,"generation":generation}),entry_id:None}).await?;
+        handle.control(format!("guard:{id}"),guard.into(),json!({})).await?;
         let io=crate::terminal_input::ProcessIo::default();
         let procs=crate::list::procs::SystemProcs::default();
         let pane=super::lifecycle::pane(&io,&target.binding).await?;
         if pane.dead || pane.copy {return Err(failure("lifecycle_busy"));}
+        // A cura conserva o modo que o rodapé mostra; rodapé ilegível não reabre num modo inventado.
+        let mode=if heal {super::lifecycle::permission_mode(&io,&target.binding).await?} else {"bypassPermissions".to_owned()};
         let actual=procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?;
         let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&actual)?;
         let mut recipe=super::claude_relaunch::Recipe::capture(&procs,pane.pid,i64::from(target.metadata.agent_pid),target.metadata.agent_birth,&argv_sid,false)?;
         let directory=target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?;
-        recipe.policy_preflight(&target.metadata.config_dir)?;
+        if mode=="bypassPermissions" {recipe.policy_preflight(&target.metadata.config_dir)?;}
         recipe.preserve_settings(directory)?;
-        let mut launch=recipe.launch(&target.binding.conversation,"bypassPermissions")?;
+        let mut launch=recipe.launch(&target.binding.conversation,&mode)?;
         let choices=super::lifecycle::terminal_choices(&target)?;
         if let Some(choices)=&choices {recipe.apply_choices(&mut launch,choices.model.as_deref(),choices.effort.as_deref())?;}
         else {tracing::warn!(key,session=name,code="relaunch_choices_unpublished","modelo/esforço sem sidecar comprovado; conservada a receita viva sem padrão inventado");}
@@ -1269,7 +1310,7 @@ impl RuntimeRegistry {
         if launch.cgroup.is_some() && helper.cgroup!=launch.cgroup {return Err(failure("relaunch_scope_changed"));}
         let consumed=handoff.consume(&helper,&procs,&super::claude_relaunch::LaunchRecipe::from(&launch)).await.map_err(|_|failure("relaunch_ipc_consumption"))?;
         // Ainda sem parar a origem: reconfere ociosidade e toda a receita após criar o destino.
-        handle.control(format!("guard-final:{id}"),"lifecycle_guard".into(),json!({})).await?;
+        handle.control(format!("guard-final:{id}"),guard.into(),json!({})).await?;
         recipe.verify(&procs)?;
         if super::lifecycle::terminal_choices(&target)?!=choices {return Err(failure("lifecycle_choices_changed"));}
         handle.lifecycle(format!("{phase}:dispatch"),Action::BeginDispatch {id:phase.clone(),wire_id:phase.clone(),staged:false}).await?;
@@ -1294,7 +1335,7 @@ impl RuntimeRegistry {
                     next.metadata.agent_pid=u32::try_from(agent).map_err(|_|failure("lifecycle_process_read"))?;
                     next.metadata.agent_birth=birth;
                     if local.check(&next,&next.binding).await.is_ok()
-                        && super::lifecycle::permission_mode(&io,&next.binding).await.is_ok_and(|mode|mode=="bypassPermissions") {break (agent,birth);}
+                        && super::lifecycle::permission_mode(&io,&next.binding).await.is_ok_and(|shown|shown==mode) {break (agent,birth);}
                 }
                 if tokio::time::Instant::now()>=deadline {return Err(failure("relaunch_confirmation"));}
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1302,17 +1343,19 @@ impl RuntimeRegistry {
             next.metadata.agent_pid=u32::try_from(agent).map_err(|_|failure("lifecycle_process_read"))?;next.metadata.agent_birth=birth;
             recipe.pin_settings(agent,birth)?;
             next.metadata.legacy_import_after=Some(birth);
-                store.exec(generation,&format!("{phase}:advance"),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"terminal_lifecycle":{"target":super::lifecycle::target_value(&next),"conversation":next.binding.conversation,"permission_mode":"bypassPermissions"}})}).map_err(|_|failure("queue_io"))?;
-            let value=json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true});
+                store.exec(generation,&format!("{phase}:advance"),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"terminal_lifecycle":{"target":super::lifecycle::target_value(&next),"conversation":next.binding.conversation,"permission_mode":mode}})}).map_err(|_|failure("queue_io"))?;
+            let value=if heal {json!({"mode":mode,"reopened":true,"healed":true})}
+                else {json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true})};
             let reply=RuntimeReply {operation_id:id.into(),disposition:Disposition::Accepted,payload:value.clone()};
             drop(store);drop(lease);
             self.open_terminal_locked(next.clone()).await?;
             self.rebind_claude_hub(&next)?;
             if let Some(entry)=self.entries.lock().await.get_mut(key) {entry.relaunch=Some(recipe.clone());}
             let EntryHandle::Terminal {handle,..}=self.entry(key,next.generation).await? else {return Err(failure("lifecycle_provider"));};
-            handle.lifecycle(format!("{phase}:finish-root"),Action::Finish {id:id.into(),status:super::queue::Status::Accepted,result:serde_json::to_value(reply).unwrap()}).await?;
+            // A cura não tem pedido do app para fechar: só a fase dela.
+            if !heal {handle.lifecycle(format!("{phase}:finish-root"),Action::Finish {id:id.into(),status:super::queue::Status::Accepted,result:serde_json::to_value(reply).unwrap()}).await?;}
             handle.lifecycle(format!("{phase}:finish"),Action::Finish {id:phase.clone(),status:super::queue::Status::Accepted,result:value.clone()}).await?;
-            if let Some(memory)=&self.permissions {memory.lock().map_err(|_|failure("permission_store_poisoned"))?.observe(&target.binding.conversation,"bypassPermissions");}
+            if let Some(memory)=&self.permissions {memory.lock().map_err(|_|failure("permission_store_poisoned"))?.observe(&target.binding.conversation,&mode);}
             let _=self.events.send(RuntimeEvent {key:key.into(),generation:next.generation,revision:0,channel:"reset".into(),data:json!({"conversation":next.binding.conversation,"generation":next.generation})});
             Ok(value)
         }.await;
@@ -2123,10 +2166,74 @@ mod tests {
         assert_eq!(registry.terminal_problems().await,BTreeMap::from([("same".to_owned(),"terminal_input_composer_busy".to_owned())]));
         registry.note_terminal_problem(&snapshot(7,json!({"error":"terminal_delivery_unknown","view":{"terminal":true}})));
         assert_eq!(registry.terminal_problems().await["same"],"runtime_falhou");
+        registry.note_terminal_problem(&snapshot(7,json!({"error":"terminal_facts","view":{"terminal":true,"input_stalled":"no_safe_delivery"}})));
+        assert_eq!(registry.terminal_problems().await["same"],"terminal_input_no_safe_delivery","a causa, não o erro que ela causa");
         registry.note_terminal_problem(&snapshot(6,json!({"error":"x","view":{"terminal":true}})));
         assert!(registry.terminal_problems().await.is_empty(),"retrato de outra vida não vale");
         registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true}})));
         assert!(registry.terminal_problems().await.is_empty());
+        handle.stop().await.unwrap();
+    }
+
+    /// Pane parado com o composer vazio; o pane e o agente são este processo. O multiplexador da
+    /// reabertura (`ProcessIo` real com um programa que não existe) falha antes de qualquer efeito.
+    struct IdlePane {working:Arc<std::sync::atomic::AtomicBool>}
+    impl crate::terminal_input::TerminalIo for IdlePane {
+        fn command<'a>(&'a self,r:crate::terminal_input::CommandRequest)->crate::terminal_input::IoFuture<'a,crate::terminal_input::CommandOutput> {
+            Box::pin(async move {
+                let spinner=if self.working.load(std::sync::atomic::Ordering::Acquire) {"✻ Sketching… (3s · esc to interrupt)\n"} else {""};
+                let stdout=match r.args[0].as_str() {
+                    "display-message" if r.args.last().is_some_and(|a|a.starts_with("#{pane_pid}"))=>format!("{}\theal\t%9\t1\n",std::process::id()).into_bytes(),
+                    "display-message"=>b"heal\t%9\t1\n".to_vec(),
+                    "capture-pane"=>format!("{spinner}────────────────────────────────\n❯ \n────────────────────────────────\n").into_bytes(),
+                    _=>vec![],
+                };
+                Ok(crate::terminal_input::CommandOutput {success:true,stdout})
+            })
+        }
+        fn socket<'a>(&'a self,_:&'a crate::terminal_input::NativeMessage,_:Vec<u8>)->crate::terminal_input::IoFuture<'a,crate::terminal_input::WriteOutcome> {
+            Box::pin(async {panic!("a cura não escreve no socket")})
+        }
+    }
+    /// Sem registro nativo e sem plugin, parada e com mensagem esperando: o ator pede a reabertura uma
+    /// vez, e o registro recusa outra antes do intervalo, mesmo que a primeira tenha falhado.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn unproved_idle_session_with_queued_message_asks_one_heal() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));registry.bind_lifecycle();
+        let pid=std::process::id();
+        let target=super::super::terminal::TerminalTarget {key:"H".into(),generation:3,name:"heal".into(),
+            binding:TerminalBinding {name:"heal".into(),pane:"%9".into(),conversation:"sid".into(),generation:3,created:1,mux_argv:vec!["hangar-fixture-no-such-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:pid,agent_birth:crate::terminal_facts::agent_birth(pid).unwrap(),legacy_import_after:Some(1.0),fingerprint:"fixture-heal".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("H.json"),lease_path:dir.path().join("H.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("projects/p/sid.jsonl"),created:1.0,plugin_key:None};
+        std::fs::create_dir_all(target.transcript.parent().unwrap()).unwrap();std::fs::write(&target.transcript,b"").unwrap();
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let row=json!({"id":"row-h","text":"a","ts":1000.0,"delivered":false,"confirmed":false});
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("H",3,"heal",vec![row])).unwrap();
+        let working=Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(IdlePane {working:working.clone()}),tick:Duration::from_millis(10),stall_notice:Duration::from_millis(20),
+            lifecycle:Some(Arc::downgrade(&registry)),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        let binding=InteractionBinding {key:"H".into(),conversation:"sid".into(),generation:3};
+        registry.entries.lock().await.insert("H".into(),Entry {generation:3,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"heal".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("heal"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        // Trabalhando: o aviso sai, a reabertura espera.
+        tokio::time::timeout(Duration::from_secs(10),async {loop {
+            if handle.snapshot().await.unwrap()["view"]["input_stalled"]=="no_safe_delivery" {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("sem prova da conversa, o aviso aparece");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(registry.heal_attempts.lock().unwrap().is_empty(),"nunca com o Claude trabalhando");
+        working.store(false,std::sync::atomic::Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(10),async {loop {
+            if registry.heal_attempts.lock().unwrap().contains_key("H") {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("a sessão parada e sem prova pede a reabertura");
+        assert_eq!(handle.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
+        assert_eq!(registry.clone().heal_claude("heal".into(),"H".into(),3).await.unwrap_err().code,"heal_backoff");
         handle.stop().await.unwrap();
     }
 

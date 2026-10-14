@@ -477,6 +477,18 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `problema=terminal_input_*` e grava um `terminal.input_stalled` no diário. A fila continua
   tentando. Ver [Entrada terminal parada sem aviso](#entrada-terminal-parada-sem-aviso).
 
+- **Nada é digitado sem prova da conversa que sobreviva à própria escrita.** Sem o registro
+  nativo do agente, o `/pull` aberto do plugin é a prova, e o `Fill` o entrega ao plugin: o
+  `publish` responde `NotWritten` e a entrega vai pelo teclado, que deixa o `/pull` aberto (o modo
+  `User` segue, porque não precisa de prova da tela). Se a prova some depois da escrita, a limpeza
+  (e o Enter recusado) confere só pane e agente (`life_check`), tira o texto que é nosso e adia
+  sem trava. Sem registro nativo nem `/pull` por mais que o `stall_notice`,
+  `view.input_stalled=no_safe_delivery` (`problema=terminal_input_no_safe_delivery`, que vence o
+  `terminal_facts` que causa); parada, sem pergunta e com mensagem na fila, o Rust reabre o Claude
+  na mesma conversa e no modo do rodapé (`heal_claude`, a reabertura do bypass com `heal_guard`),
+  uma vez por incidente e no máximo uma a cada 15 min por sessão, com o diário
+  (`rust.terminal_heal`). Ver [Registro nativo sumido e a prova no /pull](#registro-nativo-sumido-e-a-prova-no-pull).
+
 - **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
   precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
@@ -3940,6 +3952,18 @@ fila e a mensagem nunca mais saiu (sessões `Crack` às 09:09 e `Desktop` às 11
 sozinho não diz se algo chegou ao terminal; daí o estado `staged` até o escritor avisar a escrita.
 Python antigo lendo `staged` continua conservador (incerta), e Rust antigo nunca grava `staged`:
 nenhuma combinação reenvia o que foi escrito.
+
+## Registro nativo sumido e a prova no /pull
+
+(14/10/2026, servidor em `be14a5ee6`.) Sessão `corrige-credenciais` com Claude Code 2.1.296; às
+06:23 outra sessão da mesma conta abriu com o 2.1.299 e o `sessions/<pid>.json` da primeira sumiu.
+Daí em diante só o `/pull` do plugin provava a conversa (o transcript não fica aberto com o Claude
+parado). O "a" do app foi pelo `Fill`, que consome o `/pull`; a prova da tela leu os fatos antes
+de o plugin abrir o seguinte, falhou, a limpeza falhou pelo mesmo motivo e o texto ficou no
+composer (`disposition:unknown`, `stage:input_proof`, `code:input_unproved`), segurando a fila por
+`delivery_unproved` às 07:44 e 08:26 também. Trocar o modo de execução (reabrir o processo)
+resolveu. O teste `terminal_runtime_fill_never_spends_the_only_conversation_proof` reproduz o
+resultado exato antes da correção.
 
 ## Provedor padrão da abertura
 

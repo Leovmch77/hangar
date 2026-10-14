@@ -1511,7 +1511,7 @@ impl Hangar {
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
             Payload::UploadsDone(key, draft, steer, known, group) => {
                 let key = self.delivery.current(key);
-                self.finish_uploads(key, draft, steer, known, group, cx);
+                self.finish_uploads(key, draft, steer, known, group, window, cx);
                 cx.notify();
                 return;
             }
@@ -1867,7 +1867,7 @@ impl Hangar {
         let confirmed = self.delivery.outcome(&key).is_none();
         if result.is_ok() || confirmed {
             // O que saiu do campo no Enter já não está nele: o que estiver lá agora é texto novo, mesmo que igual.
-            if !typed {
+            if typed.is_none() {
                 if self.drafts.get(&key).is_some_and(|saved| saved == &draft) { self.drafts.remove(&key); }
                 if current && !draft.is_empty() && self.composer.read(cx).value().as_ref() == draft {
                     self.composer.update(cx, |input, cx| input.set_value("", window, cx));
@@ -1888,7 +1888,7 @@ impl Hangar {
             if let Some((next, steer, group)) = self.delivery.next_held(&key) {
                 let known = if current { self.known_user_ids() } else { HashSet::new() };
                 if self.post(key.clone(), next.clone(), next.clone(), steer, known, group, cx) {
-                    self.delivery.mark_typed(&key);
+                    self.delivery.mark_typed(&key, next);
                     self.sync_working_row(cx);
                 } else {
                     let mut back = self.delivery.take_held(&key);
@@ -1898,9 +1898,11 @@ impl Hangar {
             }
         } else {
             let mut back = self.delivery.take_held(&key);
-            if typed { back.insert(0, text); }
+            let left_field = typed.is_some();
+            // Volta o que saiu do campo (com anexo, a legenda), não o prompt com os caminhos.
+            if let Some(field) = typed.filter(|field| !field.is_empty()) { back.insert(0, field); }
             if !back.is_empty() { self.return_to_field(&key, back, current, window, cx); }
-            if !typed && !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
+            if !left_field && !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
             if current && result.as_ref().err().is_some_and(|e| self.chat_auth_lost(e)) {
                 self.open_connection(window, cx);
             }
@@ -2446,11 +2448,15 @@ impl Hangar {
             return;
         }
         let known = self.known_user_ids();
-        if attached { self.start_uploads(key, text, steer, known, group, cx); return; }
-        self.deliver(key.clone(), text.clone(), text, steer, known, group, cx);
-        // O campo esvazia no Enter, sem esperar o backend: o que for digitado depois é outra mensagem.
-        if self.delivery.pending(&key) {
-            self.delivery.mark_typed(&key);
+        // O campo esvazia no Enter, sem esperar o backend: o que for digitado depois é outra mensagem. Com anexo também;
+        // a legenda viaja com os uploads e volta ao campo se o envio não sair.
+        if attached {
+            self.start_uploads(key.clone(), text, steer, known, group, cx);
+            if self.uploading.contains_key(&key) { self.clear_sent_field(&key, window, cx); }
+            return;
+        }
+        if self.deliver(key.clone(), text.clone(), text.clone(), steer, known, group, cx) {
+            self.delivery.mark_typed(&key, text);
             self.clear_sent_field(&key, window, cx);
         }
     }
@@ -2472,14 +2478,15 @@ impl Hangar {
     }
 
     /// `group`: com o "mandar pro grupo" ligado no Enter, os nomes que recebem (ela e os membros).
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
-        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return; }
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return false; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
         self.follow_engage(cx);
         // O envio muda o aviso, o botão e o erro da faixa de baixo, que é guardada entre quadros.
         cx.notify();
+        true
     }
 
     /// O envio em si, sem mexer na conversa aberta: serve também ao texto que esperava a vez noutra sessão.
@@ -2540,21 +2547,23 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
-        let Some(list) = self.attachments.get(&key) else { return; };
-        let mut uploads = Vec::new();
-        for attachment in list.iter().filter(|a| batch.contains(&a.id)) {
-            match &attachment.state {
-                AttachState::Uploaded(up) => uploads.push((attachment.image.is_some() || composer::image_format(&attachment.name).is_some(), up.clone())),
-                _ => {
-                    self.action_feedback.insert(key, (tr("attach_not_sent"), true));
-                    return;
-                }
-            }
-        }
+        let uploads: Option<Vec<_>> = self.attachments.get(&key).and_then(|list| list.iter().filter(|a| batch.contains(&a.id))
+            .map(|attachment| match &attachment.state {
+                AttachState::Uploaded(up) => Some((attachment.image.is_some() || composer::image_format(&attachment.name).is_some(), up.clone())),
+                _ => None,
+            }).collect());
+        let current = self.selected_key().as_ref() == Some(&key);
+        let Some(uploads) = uploads else {
+            self.action_feedback.insert(key.clone(), (tr("attach_not_sent"), true));
+            // A legenda saiu do campo no Enter: sem envio, ela volta.
+            if !draft.is_empty() { self.return_to_field(&key, vec![draft], current, window, cx); }
+            return;
+        };
         let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
-        self.deliver(key, message, draft, steer, known, group, cx);
+        if self.deliver(key.clone(), message, draft.clone(), steer, known, group, cx) { self.delivery.mark_typed(&key, draft); }
+        else if !draft.is_empty() { self.return_to_field(&key, vec![draft], current, window, cx); }
     }
 
     fn add_attachment(&mut self, key: &SessionKey, name: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -4390,14 +4399,17 @@ impl Hangar {
         let recent_btn = popup::anchor(div(), "attach-recent").child(chrome::icon_button("attach-recent", IconName::RotateCcwClock, tr("attach_recent"), cx)
             .disabled(!readable || uploading.is_some()).selected(self.recent.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_recent(cx))));
         let (microphone, dictation_style, dictation_strip) = self.render_dictation(attachable, cx);
-        let control_row = div().flex().items_center().gap_1()
-            .child(commands).child(attach).child(recent_btn).child(microphone).children(dictation_style)
-            .child(div().flex_1())
-            .when(steer_text, |el| el.child(chrome::pill_button("steer-text", cx).label(tr("steer_text")).disabled(blocked)
-                .on_click(cx.listener(|this, _, window, cx| this.submit(true, false, window, cx)))))
-            .children(pills)
-            .children(mode)
-            .child(div().ml(px(6.)).child(action));
+        // Coluna estreita (painel direito aberto): os seletores e o Enviar descem para a linha de baixo, e entre si quebram
+        // de novo se ainda não couberem, em vez de passar da borda do cartão por cima do painel.
+        let control_row = div().w_full().flex().flex_wrap().items_center().gap_1().gap_y(px(4.))
+            .child(div().flex_shrink_0().flex().items_center().gap_1()
+                .child(commands).child(attach).child(recent_btn).child(microphone).children(dictation_style))
+            .child(div().ml_auto().max_w_full().min_w_0().flex().flex_wrap().justify_end().items_center().gap_1().gap_y(px(4.))
+                .when(steer_text, |el| el.child(chrome::pill_button("steer-text", cx).label(tr("steer_text")).disabled(blocked)
+                    .on_click(cx.listener(|this, _, window, cx| this.submit(true, false, window, cx)))))
+                .children(pills)
+                .children(mode)
+                .child(div().ml(px(6.)).child(action)));
         let card = composer_card(focused)
             .when_some(tray, |el, tray| el.child(tray))
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
@@ -4576,6 +4588,7 @@ impl Hangar {
                 notes.push(tr("delivery_unproved"));
                 discard = event.id.strip_prefix("queued-").map(str::to_owned);
             }
+            else if let Some(note) = stuck_note(event, self.chat.state.problema.as_deref()) { notes.push(tr(note)); }
             else if event.queued() && event.queued_consumed != Some(true) { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
             if event.is_error == Some(true) { notes.push(tr("tool_error")); }
             (label, (!notes.is_empty()).then(|| notes.join(" · ")), event.kind == "user_msg", event.is_error == Some(true))
@@ -5728,6 +5741,16 @@ fn prepare_detail(full: String) -> Prepared {
 /// A bolha entregue sem prova que segura a fila: o servidor aceita descartá-la (desiste e tira).
 fn holds_queue(event: &ChatEvent, problem: Option<&str>) -> bool {
     problem == Some("terminal_input_delivery_unproved") && event.queued() && event.queued_delivered == Some(true) && event.desistiu != Some(true)
+}
+
+/// A bolha ainda na fila, parada pelo problema da sessão: o motivo vai nela, não só na faixa do fim.
+fn stuck_note(event: &ChatEvent, problem: Option<&str>) -> Option<&'static str> {
+    if !event.queued() || event.queued_delivered == Some(true) || event.desistiu == Some(true) { return None; }
+    match problem {
+        Some("terminal_input_delivery_unproved") => Some("queue_held"),
+        Some("terminal_input_no_safe_delivery") => Some("no_safe_delivery"),
+        _ => None,
+    }
 }
 
 fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {
@@ -6916,6 +6939,18 @@ mod tests {
         assert_eq!(problem_banner(&state).unwrap(), "codigo_sem_frase");
         state.problema = None;
         assert!(problem_banner(&state).is_none());
+    }
+
+    #[test]
+    fn queued_bubble_shows_why_the_queue_stopped() {
+        use super::stuck_note;
+        crate::i18n::set_language(crate::appearance::Language::Pt);
+        let queued = |delivered: Option<bool>| ChatEvent { kind: "user_msg".into(), id: "queued-a".into(), queued_delivered: delivered, ..Default::default() };
+        assert_eq!(stuck_note(&queued(Some(false)), Some("terminal_input_delivery_unproved")), Some("queue_held"));
+        assert_eq!(stuck_note(&queued(None), Some("terminal_input_no_safe_delivery")), Some("no_safe_delivery"));
+        assert_eq!(stuck_note(&queued(Some(true)), Some("terminal_input_no_safe_delivery")), None, "a entregue tem nota própria");
+        assert_eq!(stuck_note(&queued(Some(false)), None), None);
+        assert_eq!(tr("no_safe_delivery"), "Esperando: o Hangar não consegue confirmar a conversa do terminal e não digita nada. Ele reabre o Claude quando a sessão parar.");
     }
 
     #[test]

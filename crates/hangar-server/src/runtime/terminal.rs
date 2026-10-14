@@ -186,6 +186,9 @@ impl TerminalServices for Services {
         self.local.publish(&self.target,binding,request).await
     })}
     fn facts_check_pane(&self)->bool {true}
+    fn life_check<'a>(&'a self,binding:&'a TerminalBinding)->ServiceFuture<'a,()> {Box::pin(async move {
+        self.local.check_agent(&self.target,binding).await.map(|_|())
+    })}
     fn abandon_publication<'a>(&'a self,publication_id:&'a str)->ServiceFuture<'a,()> {Box::pin(async move {
         self.local.abandon_publication(&self.target,publication_id)
     })}
@@ -238,6 +241,13 @@ struct Executor {
     /// tique; a prova é a mesma (`confirm_rows`). Prazo para não vigiar uma linha que nunca chega.
     confirm_until:Option<tokio::time::Instant>,
     confirm_seen:Option<u64>,
+    /// Desde quando nada prova a conversa (sem registro nativo do agente nem `/pull` do plugin); passado o
+    /// `stall_notice`, a vista mostra `no_safe_delivery`.
+    unproved_since:Option<tokio::time::Instant>,
+    no_safe_delivery:bool,
+    /// A reabertura deste incidente já foi pedida: uma por incidente, e o registro espaça as seguintes.
+    heal_requested:bool,
+    diag:crate::diag::DiagClient,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
@@ -303,7 +313,7 @@ fn clear_on_disk(transcript:&std::path::Path,since:f64)->Result<bool,std::io::Er
 pub(crate) const MAX_MODS_HOLD:Duration=Duration::from_secs(10);
 pub struct TerminalActor;
 impl TerminalActor {
-    pub fn spawn(target:TerminalTarget,queue:QueueActor,_policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
+    pub fn spawn(target:TerminalTarget,queue:QueueActor,policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
         let previous=queue.initial_state().operations.keys().filter(|id|id.starts_with("call::terminal:") || id.starts_with("terminal-policy:") || id.starts_with("queue:"))
             .filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
@@ -312,7 +322,8 @@ impl TerminalActor {
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
-        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None};
+        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
+            unproved_since:None,no_safe_delivery:false,heal_requested:false,diag:policy.diag()};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -388,7 +399,8 @@ impl Executor {
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
             "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
                 "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))
-                    .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))},"channels":{},"error":self.last_error}))
+                    .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))
+                    .or_else(||self.no_safe_delivery.then(||"no_safe_delivery".to_owned()))},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -455,6 +467,7 @@ impl Executor {
                         if self.held() || !self.parked.is_empty() {continue;}
                         // Sem ciclo de vida ligado a reconciliação só falharia; a trava do `/clear` sai pelo `expire_clear` da drenagem.
                         if self.options.lifecycle.is_some() && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
+                        self.watch_proof().await?;
                         self.expire_uncertain().await;
                         if self.last_error.is_none() {self.expire_unproved().await;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
@@ -883,6 +896,10 @@ impl Executor {
             if state.rows.iter().any(|row|row["delivered"]==false) {return Err(error("erro_fila_pendente"));}
             return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
         }
+        if kind=="heal_guard" {
+            self.heal_ready().await?;
+            return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
+        }
         if matches!(kind,"permission_modes"|"set_permission_mode") {return self.permission(id,kind,payload).await;}
         validate(kind,&payload)?;
         let requested=json!({"operation_id":id,"kind":kind,"payload":payload});
@@ -1133,6 +1150,54 @@ impl Executor {
             self.confirm_until=Some(tokio::time::Instant::now()+CONFIRM_WINDOW); self.confirm_seen=None;
         }
         Ok(result)
+    }
+    /// Sem o registro nativo do agente e sem o `/pull` do plugin, nada prova a conversa: a entrega não
+    /// teria como provar nem limpar o que digitasse. Aparece depois do `stall_notice`, para não piscar na
+    /// troca do `/pull`, e pede a reabertura quando a sessão para com mensagem esperando.
+    async fn watch_proof(&mut self)->Result<(),RuntimeError> {
+        let unproved=self.conversation_unproved().await;
+        let now=tokio::time::Instant::now();
+        let surfaced=unproved && now.duration_since(*self.unproved_since.get_or_insert(now))>=self.options.stall_notice;
+        if !unproved {self.unproved_since=None;}
+        if surfaced!=self.no_safe_delivery {
+            self.no_safe_delivery=surfaced;
+            if surfaced {
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code="no_safe_delivery",agent=self.target.metadata.agent_pid,
+                    "registro nativo do agente ausente e plugin sem /pull: nada prova a conversa; a entrada não digita");
+                self.diag.report("rust.no_safe_delivery",&self.target.name,"lifecycle_native_read","registro nativo do agente ausente e plugin sem /pull");
+            } else {
+                self.heal_requested=false;
+                tracing::info!(key=%self.target.key,session=%self.target.name,code="no_safe_delivery_cleared","a prova da conversa voltou");
+            }
+            self.publish().await?;
+        }
+        if self.no_safe_delivery && !self.heal_requested {self.request_heal().await;}
+        Ok(())
+    }
+    async fn conversation_unproved(&self)->bool {
+        let binding=crate::terminal_facts::LocalTerminalFacts::binding(&self.target);
+        if self.options.plugin.as_ref().is_some_and(|store|store.conversation_proved(&binding).unwrap_or(false)) {return false;}
+        let (config,pid)=(self.target.metadata.config_dir.clone(),i64::from(self.target.metadata.agent_pid));
+        tokio::task::spawn_blocking(move||super::lifecycle::read_native_conversation(&config,pid).is_err_and(|failure|failure.code=="lifecycle_native_read")).await.unwrap_or(false)
+    }
+    /// Reabrir aqui só com a sessão parada, sem pergunta, sem entrega incerta e com mensagem esperando.
+    async fn heal_ready(&mut self)->Result<(),RuntimeError> {
+        if self.loaned() || self.held() || !self.uncertain.is_empty() || self.unprovable || self.mode_unproved
+            || self.last_error.as_deref().is_some_and(|code|code!="terminal_facts") {return Err(error("lifecycle_busy"));}
+        if !self.no_safe_delivery {return Err(error("heal_not_needed"));}
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if self.cleared(&state) || state.terminal_write_blocked(&self.target.binding.conversation) {return Err(error("lifecycle_uncertain"));}
+        if !state.rows.iter().any(|row|row["delivered"]==false) {return Err(error("heal_not_needed"));}
+        if self.options.terms.as_ref().is_some_and(|terms|terms.is_active(&self.target.name)) {return Err(error("terminal_panel_active"));}
+        self.local.idle_agent(&self.target).await.map_err(|failure|error(failure.0))
+    }
+    /// Espera a sessão parar; a reabertura roda fora do ator, que ela fecha e troca pela vida nova.
+    async fn request_heal(&mut self) {
+        let Some(registry)=self.options.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) else {return};
+        if self.heal_ready().await.is_err() {return;}
+        self.heal_requested=true;
+        let target=self.target.clone();
+        tokio::spawn(async move {let _=registry.heal_claude(target.name,target.key,target.generation).await;});
     }
     /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).
     fn track_stall(&mut self,row:&str,result:&RuntimeReply)->bool {

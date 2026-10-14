@@ -105,6 +105,14 @@ impl LocalTerminalFacts {
     }
     /// Mesmo pane e mesma vida (agente e conversa); devolve o pid do pane.
     pub(crate) async fn check(&self, target: &TerminalTarget, binding: &TerminalBinding) -> Result<i64, ServiceError> {
+        self.check_life(target, binding, true).await
+    }
+    /// Mesmo pane e mesmo processo do agente, sem provar a conversa: só para o que a entrega precisa
+    /// fazer quando a prova da conversa sumiu (tirar o próprio texto, reabrir na mesma conversa).
+    pub(crate) async fn check_agent(&self, target: &TerminalTarget, binding: &TerminalBinding) -> Result<i64, ServiceError> {
+        self.check_life(target, binding, false).await
+    }
+    async fn check_life(&self, target: &TerminalTarget, binding: &TerminalBinding, prove_conversation: bool) -> Result<i64, ServiceError> {
         if binding != &target.binding || binding.generation != target.generation || binding.name != target.name
             || target.metadata.fingerprint.is_empty() || !target.created.is_finite() || target.created < 0.0 {
             return Err(ServiceError("terminal_binding_changed"));
@@ -119,12 +127,7 @@ impl LocalTerminalFacts {
         let (metadata, conversation, transcript) = (target.metadata.clone(), binding.conversation.clone(), target.transcript.clone());
         // Sem o registro nativo, o `/pull` aberto do plugin desta vida prova a conversa (o Claude Code só o
         // aceita com o `session_id` dela), sem ler os arquivos abertos do processo.
-        let plugin_proof = match &self.plugin {
-            // Plugin sem vínculo ou ilegível não prova nada: segue a leitura do processo.
-            Some(store) => self.plugin_facts(target).is_ok_and(|facts| plugin_current(&facts, target.metadata.cut(target.created)))
-                && store.conversation_proved(&Self::binding(target)).unwrap_or(false),
-            None => false,
-        };
+        let plugin_proof = prove_conversation && self.plugin_proves(target);
         tokio::task::spawn_blocking(move || {
             let procs=SystemProcs::default();let children=procs.children(Duration::ZERO).map_err(|_|ServiceError("terminal_agent_unavailable"))?;
             if !crate::list::discover::descendants(pane_pid,&children).contains(&i64::from(metadata.agent_pid)) {return Err(ServiceError("terminal_agent_changed"));}
@@ -132,11 +135,46 @@ impl LocalTerminalFacts {
             #[cfg(not(windows))]
             if procs.argv_checked(i64::from(metadata.agent_pid)).map_err(|_|ServiceError("terminal_agent_unavailable"))?.is_empty() {return Err(ServiceError("terminal_agent_unavailable"));}
             if !same_birth(born, metadata.agent_birth) { return Err(ServiceError("terminal_agent_changed")); }
-            if native_record(&metadata, &conversation)?.is_none() && !plugin_proof {
+            // Registro de outra conversa é troca de vida mesmo sem a prova da conversa.
+            if native_record(&metadata, &conversation)?.is_none() && prove_conversation && !plugin_proof {
                 current_transcript(&procs, &metadata, &conversation, &transcript)?;
             }
             Ok(pane_pid)
         }).await.map_err(|_| ServiceError("terminal_agent_unavailable"))?
+    }
+    fn plugin_proves(&self, target: &TerminalTarget) -> bool {
+        // Plugin sem vínculo ou ilegível não prova nada: segue a leitura do processo.
+        self.plugin.as_ref().is_some_and(|store| self.plugin_facts(target).is_ok_and(|facts| plugin_current(&facts, target.metadata.cut(target.created)))
+            && store.conversation_proved(&Self::binding(target)).unwrap_or(false))
+    }
+    /// Sem o registro nativo, o `/pull` aberto do plugin é a prova da conversa: quem o entrega ao plugin
+    /// (`Fill`) fica sem ela até ele voltar.
+    async fn pull_is_the_proof(&self, target: &TerminalTarget) -> Result<bool, ServiceError> {
+        let (metadata, conversation) = (target.metadata.clone(), target.binding.conversation.clone());
+        tokio::task::spawn_blocking(move || native_record(&metadata, &conversation).map(|record| record.is_none()))
+            .await.map_err(|_| ServiceError("terminal_native_record_unavailable"))?
+    }
+    /// Parada e sem pergunta aberta, conferindo só o pane e o processo do agente: a reabertura que devolve
+    /// a prova da conversa não pode depender dela.
+    pub(crate) async fn idle_agent(&self, target: &TerminalTarget) -> Result<(), ServiceError> {
+        let binding = &target.binding;
+        self.check_agent(target, binding).await?;
+        let driver = TerminalDriver::new(binding.clone(), Arc::new(NoFacts), self.io.clone(), InputLimits::default());
+        let screen = driver.facts_screen().await.map_err(|error| ServiceError(error.code))?;
+        let (ready, idle) = input::input_state(&screen);
+        if !ready || !idle { return Err(ServiceError("erro_sessao_trabalhando")); }
+        let (files, store, frame) = (target.clone(), self.plugin.clone(), screen);
+        let (question, hook) = tokio::task::spawn_blocking(move || {
+            let question = match &store {
+                Some(store) => crate::state::ask::observe_terminal(store.interactions(), &Self::binding(&files), &files.transcript, &frame).map(|question| question.is_some()),
+                None => crate::state::ask::read_pending(&files.transcript).map(|question| question.is_some()),
+            }.map_err(|code| ServiceError(crate::state::ask::failure_code(&code)))?;
+            Ok::<_, ServiceError>((question, hook_state(&files.metadata, &files.binding.conversation, files.created)?))
+        }).await.map_err(|_| ServiceError("terminal_files_unavailable"))??;
+        let held = match &self.plugin { Some(store) => !store.pending_all(&Self::binding(target), Instant::now())?.is_empty(), None => false };
+        if question || held { return Err(ServiceError("erro_sessao_esperando_resposta")); }
+        if hook.is_some_and(|state| state != "idle") { return Err(ServiceError("erro_sessao_trabalhando")); }
+        self.check_agent(target, binding).await.map(|_| ())
     }
     pub async fn read(&self, target: &TerminalTarget, binding: &TerminalBinding, text: &str) -> Result<InputFacts, ServiceError> {
         self.read_facts(target, binding, text, true).await
@@ -192,6 +230,9 @@ impl LocalTerminalFacts {
     pub async fn publish(&self, target: &TerminalTarget, binding: &TerminalBinding, request: PluginRequest) -> Result<PluginReply, ServiceError> {
         self.check(target, binding).await?;
         if !plugin_current(&self.plugin_facts(target)?, target.metadata.cut(target.created)) { return Ok(PluginReply::NotWritten); }
+        // A prova da tela e a limpeza depois do `Fill` ficariam sem a conversa: a entrega vai pelo teclado,
+        // que deixa o `/pull` aberto.
+        if request.mode == input::PluginMode::Fill && self.pull_is_the_proof(target).await? { return Ok(PluginReply::NotWritten); }
         self.plugin.as_ref().ok_or(ServiceError("plugin_store_unavailable"))?.publish(&Self::binding(target), request).await
     }
     pub async fn plugin_question(&self, target: &TerminalTarget, expected: &ExpectedInteraction) -> Result<PluginQuestion, ServiceError> {
