@@ -74,6 +74,7 @@ vi.mock('../../paraglide/messages', () => ({
 }));
 vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => typeof fn === 'function' ? fn({ tokens: { bg: { surface: '#eee' }, text: { primary: '#000', secondary: '#666', muted: '#999' }, accent: { base: '#00f' }, status: { error: '#f00', success: '#0a0' } }, base: { space: [0, 4, 8, 12, 16], text: { xs: 12, sm: 14, base: 16, lg: 18, xl: 20 }, radius: { md: 8, lg: 12 }, fontMono: 'monospace' } }) : fn } }));
 
+import { motivoLoginIndisponivel, type Credencial } from '@hangar/core';
 import Contas from '../../../app/config/contas';
 
 describe('contas Codex', () => {
@@ -118,6 +119,31 @@ describe('contas Codex', () => {
     const novo = [...container.querySelectorAll('button')].find((button) => button.textContent === '+ Nova conta');
     await act(async () => novo!.click());
     expect(calls.login).toEqual({ server, accountId: undefined });
+    root.unmount();
+  });
+
+  it('diz por que o login não foi conferido no lugar do indisponível genérico', async () => {
+    const claude = { id: 'claude:/main', tipo: 'claude', auth_method: 'oauth', nome: 'Claude', nome_natural: 'Claude', ativa: true, usos: [],
+      login: { estado: 'indisponivel', loggedIn: null, email: null, plano: null, motivo: 'cli-indisponivel' } } as Credencial;
+    const codexConta = { id: 'codex:/work', tipo: 'codex', auth_method: 'oauth', codex_account: 'work', nome: 'Codex OAuth', nome_natural: 'Codex OAuth', ativa: false, usos: [],
+      login: { estado: 'indisponivel', loggedIn: null, email: null, plano: null, motivo: 'prazo' } } as Credencial;
+    const codexSolta = { id: 'codex:/solta', tipo: 'codex', auth_method: 'unknown', codex_account: 'solta', nome: 'Solta', nome_natural: 'Solta', ativa: false, usos: [],
+      login: { estado: 'indisponivel', loggedIn: null, email: null, plano: null, motivo: 'leitura-falhou' } } as Credencial;
+    calls.list.mockResolvedValue([
+      { id: 'work', credential_id: 'codex:/work', name: 'Trabalho', home: '/work', is_default: true, auth: { method: 'oauth', status: 'unavailable', email: null, plan: null }, sync: { status: 'ready', trust_pending: false, issues: [] } },
+    ]);
+    calls.credentials.mockResolvedValue([claude, codexConta, codexSolta]);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(Contas)));
+    await act(async () => Promise.resolve());
+
+    const description = (title: string) => [...container.querySelectorAll('section')]
+      .find((row) => row.querySelector('strong')?.textContent === title)?.querySelector('span')?.textContent;
+    for (const row of [claude, codexConta, codexSolta]) expect(motivoLoginIndisponivel(row)).toBeTruthy();
+    expect(description('Claude')).toContain(motivoLoginIndisponivel(claude));
+    expect(description('Trabalho')).toBe(motivoLoginIndisponivel(codexConta));
+    expect(description('Solta')).toBe(motivoLoginIndisponivel(codexSolta));
     root.unmount();
   });
 });

@@ -22,6 +22,7 @@ const calls = vi.hoisted(() => ({
   pickerActive: 0,
   pickerPeak: 0,
   pickerHistory: [] as number[],
+  cotas: [] as unknown[],
 }));
 const server = { id: 'server-b', label: 'Servidor B', baseUrl: 'https://b.local', token: 'token-b' };
 
@@ -127,7 +128,7 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   listClaudeConfigsForServer: calls.configs,
   getRootsForServer: calls.roots, scanDirForServer: calls.scan, fetchSessionsForServer: calls.sessions,
-  probeServerResponse: vi.fn().mockImplementation(async () => new Response('[]')),
+  probeServerResponse: vi.fn().mockImplementation(async () => new Response(JSON.stringify(calls.cotas))),
   getEnginesForServer: calls.engines,
   // Sonda de providers da folha nova: sem ela o teste fazia fetch de verdade para b.local.
   getProvidersForServer: calls.providers,
@@ -220,6 +221,7 @@ vi.mock('../../paraglide/messages', () => ({
   ).split(' ').map((k) => [k, () => k])),
 }));
 
+import { motivoCotaAntiga, type CotaContaResumo } from '@hangar/core';
 import { CreateSessionSheet } from './CreateSessionSheet';
 import { _resetNewConversationForTests } from '../../stores/newConversation';
 import { _resetCarriedForTests } from './NewConversation';
@@ -242,6 +244,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.pickerPeak = 0;
     calls.pickerHistory = [];
     calls.target = null;
+    calls.cotas = [];
     calls.save.mockReset();
     calls.roots.mockReset().mockResolvedValue([{ name: 'Repo', path: '/repo' }]);
     calls.scan.mockReset().mockResolvedValue({ entries: [] });
@@ -542,6 +545,17 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude', cwd: '/repo', name: 'meu-nome' }));
     expect(calls.send).toHaveBeenCalledWith(server, 'nova', 'oi');
     expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+    root.unmount();
+  });
+
+  it('diz por que a cota da conta não atualizou ao lado dos números antigos', async () => {
+    calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
+    const antiga: CotaContaResumo = { id: 'claude:/a', estado: 'lida', janelas: [{ rotulo: '5h', pct: 42 }], motivo: 'sem-resposta' };
+    calls.cotas = [antiga];
+    const { container, root } = await renderSheet(false, false);
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    expect(motivoCotaAntiga(antiga)).toBeTruthy();
+    expect(container.textContent).toContain(`5h 42% · ${motivoCotaAntiga(antiga)}`);
     root.unmount();
   });
 

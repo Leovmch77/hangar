@@ -6,7 +6,7 @@ import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
-import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
+import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
 import { MenuView, type MenuAction } from '@react-native-menu/menu';
@@ -615,6 +615,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       />
     );
   })();
+  // Leitura nova falhou e ficaram os números da anterior: sem o motivo, eles pareceriam atuais.
+  const cotaAntiga = motivoCotaAntiga(cotaSelecionada);
   // Conta com a janela em 100% não responde: o aviso diz isso em cor de alerta, além dos números.
   const quotaNotice = provider === 'claude' && cotaSelecionada ? (
     <Text style={[styles.hint, janelaCheia ? styles.hintAlerta : null]} accessibilityRole={janelaCheia ? 'alert' : undefined}>
@@ -625,6 +627,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
             ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
             : m.cota_precisa_entrar()
         }`.trim()}
+      {cotaAntiga ? ` · ${cotaAntiga}` : ''}
     </Text>
   ) : null;
 
