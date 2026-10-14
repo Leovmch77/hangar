@@ -126,7 +126,7 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
             hangar_server::accounts::environment::AccountEnvironment::from_map([
                 ("HOME".into(), home_text.clone()),
                 ("USERPROFILE".into(), home_text.clone()),
-                ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
+                ("PATH".into(), bin.to_string_lossy().into_owned()),
             ].into()),
         );
         state
