@@ -340,11 +340,14 @@ async fn late_wire_reply_resolves_parent() {
 }
 
 /// Cano Claude falso que só conta o que chega ao fio; a política aponta para uma porta fechada.
-async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
+/// Conta as escritas da conversa; o `initialize` que a subida pede sozinha só avisa o `Notify`.
+async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir,std::sync::Arc<tokio::sync::Notify>) {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let closed = crate::refused_address();
+    let booted = std::sync::Arc::new(tokio::sync::Notify::new());
+    let boot_signal = booted.clone();
     let server = tokio::spawn(async move {
         let (stream,_) = listener.accept().await.unwrap();
         let mut reader = BufReader::new(stream);
@@ -356,8 +359,9 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
         loop {
             let mut raw = String::new();
             if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
-            sent += 1;
             let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap_or("{}")).unwrap_or_default();
+            if frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" { boot_signal.notify_one(); } else { sent += 1; }
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
         }
@@ -374,13 +378,13 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
         .with_policy(PolicyClient::new(closed,"secret".into(),"instance".into()));
-    (RuntimeActor::spawn(target,queue,connection,engine),server,dir)
+    (RuntimeActor::spawn(target,queue,connection,engine),server,dir,booted)
 }
 
 #[tokio::test]
 async fn input_is_prepared_in_rust_even_when_the_python_policy_is_unreachable() {
     // O preparo do prompt é local: o Python fora do ar não adia mais a entrada.
-    let (handle,server,dir) = setup_claude_unreachable_policy(true).await;
+    let (handle,server,dir,_) = setup_claude_unreachable_policy(true).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
     let state:State = queue_state(dir.path());
@@ -640,7 +644,7 @@ async fn a_queue_refusal_carries_its_reason() {
 #[tokio::test]
 async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
     // Sessão ainda sem inicialização: o drain não entrega, e a entrada só pode mudar pela orientação.
-    let (handle,server,dir) = setup_claude_unreachable_policy(false).await;
+    let (handle,server,dir,booted) = setup_claude_unreachable_policy(false).await;
     handle.queue("append".into(),Action::Append { text:"Depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
     let steer = RuntimeCommand { operation_id:"steer-1".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":"later"}) };
     let reply = handle.command(steer).await.unwrap();
@@ -654,8 +658,10 @@ async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.unwrap_or_else(|_|panic!("a entrada precisa continuar na fila: {:?}",queue_state(dir.path()).rows));
+    // A subida pede o `initialize` sozinha; esperado no fio, ele não corre mais contra a parada.
+    tokio::time::timeout(std::time::Duration::from_secs(10),booted.notified()).await.expect("a subida não pediu o initialize");
     handle.stop().await.unwrap();
-    assert_eq!(server.await.unwrap(),0);
+    assert_eq!(server.await.unwrap(),0,"a orientação recusada não escreve nada");
 }
 
 #[tokio::test]
