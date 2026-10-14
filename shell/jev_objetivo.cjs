@@ -234,7 +234,10 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
         // tudo estava preenchido e "Salvar" ganhava do campo que faltava.
         + 'In valores_atuais, a required field whose value reads as an invitation to choose '
         + '("Buscar...", "Selecione...", "Escolha...") has NOT been filled yet, and filling it '
-        + 'also comes before submitting or saving.',
+        + 'also comes before submitting or saving. '
+        // Sem isto o Jev lia o alerta no texto da página e clicava em "Criar" de novo.
+        + 'When envio_recusado is present, the last submit was refused: fix the field or value it points to '
+        + 'instead of submitting again.',
       criteria: disponiveis,
     },
     // A ordem "preencher antes de salvar" tem que estar AQUI tambem: a pergunta da operacao nao
@@ -335,7 +338,7 @@ const JS_VALORES = `(() => {
   const comboEscrito = (e) => e.tagName !== 'INPUT' && e.tagName !== 'TEXTAREA' && e.getAttribute('role') === 'combobox';
   const espelho = (e) => (e.parentElement || {}).querySelector
     ? e.parentElement.querySelector('select') : null;
-  const fora = { valores: {}, obrigatorios_vazios: [], editaveis: [], lista_aberta: '' };
+  const fora = { valores: {}, obrigatorios_vazios: [], editaveis: [], lista_aberta: '', tipos: {}, avisos: [] };
   for (const e of document.querySelectorAll('input,textarea,select,[role=switch],[role=checkbox],[role=combobox],[contenteditable=true]')) {
     if (!visivel(e)) continue;
     // Editor rich text sem rotulo: mesmo nome que o parsarSnapshot da a ele, e o texto como valor.
@@ -387,10 +390,33 @@ const JS_VALORES = `(() => {
     const s = espelho(e);
     if (s && !s.value) fora.obrigatorios_vazios.push(chave);
   }
+  // Tipo do campo para quem escreve o valor: sem ele, "Data" virava texto livre e número virava frase.
+  for (const e of document.querySelectorAll('input,textarea')) {
+    const nome = nomeDe(e);
+    if (!nome || !visivel(e)) continue;
+    const t = [e.type && e.type !== 'text' ? 'type=' + e.type : '', e.inputMode ? 'inputmode=' + e.inputMode : '',
+      e.placeholder ? 'placeholder=' + e.placeholder : '', e.min ? 'min=' + e.min : '', e.max ? 'max=' + e.max : '']
+      .filter(Boolean).join(' ');
+    if (t) fora.tipos[nome.slice(0, 80)] = t.slice(0, 120);
+  }
+  // O porquê de um envio recusado: alerta, toast, campo marcado inválido com a mensagem dele.
+  const limpo = (t) => String(t || '').replace(/\\s+/g, ' ').trim();
+  const avisos = new Set();
+  for (const a of document.querySelectorAll('[role=alert],[role=status],[data-sonner-toast]')) {
+    const t = visivel(a) ? limpo(a.innerText).slice(0, 300) : '';
+    if (t) avisos.add(t);
+  }
+  for (const e of document.querySelectorAll('[aria-invalid=true]')) {
+    if (!visivel(e)) continue;
+    const ids = (e.getAttribute('aria-errormessage') || e.getAttribute('aria-describedby') || '').split(/\\s+/).filter(Boolean);
+    const msg = ids.map((id) => limpo((document.getElementById(id) || {}).innerText)).filter(Boolean).join(' ');
+    avisos.add(limpo((nomeDe(e) || 'campo') + ': ' + (msg || 'invalido')).slice(0, 300));
+  }
+  fora.avisos = [...avisos].slice(0, 6);
   return JSON.stringify(fora);
 })()`;
 
-const VAZIO = { valores: {}, obrigatorios_vazios: [], editaveis: new Set(), lista_aberta: '' };
+const VAZIO = { valores: {}, obrigatorios_vazios: [], editaveis: new Set(), lista_aberta: '', tipos: {}, avisos: [] };
 
 async function valoresAtuais(executar, log = () => {}) {
   try {
@@ -407,6 +433,8 @@ async function valoresAtuais(executar, log = () => {}) {
       obrigatorios_vazios: obj.obrigatorios_vazios ?? [],
       editaveis: new Set((obj.editaveis ?? []).map(normalizar)),
       lista_aberta: obj.lista_aberta ?? '',
+      tipos: obj.tipos ?? {},
+      avisos: Array.isArray(obj.avisos) ? obj.avisos.map(String) : [],
     };
   } catch (err) {
     // Anotação é melhoria, não requisito: o laço segue sem ela, mas a falha fica registrada.
@@ -570,13 +598,17 @@ function riscoDoClique(respostas, escolhido, candidatos, gemeos, limiares) {
 const OPERACOES_DO_AUXILIAR = new Set(['CLICK', 'SELECT', 'TYPE_TEXT']);
 
 /** O que o modelo auxiliar recebe quando o Jev não achou alvo: só observação, nunca valor de `dados`. */
-function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas }) {
+function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '' }) {
   return [
     'Voce ajuda um laco que navega numa pagina web rumo a um objetivo. O classificador do laco (Jev) '
       + 'nao achou um alvo confiavel para o proximo passo; escolha voce o proximo passo, um so.',
     `Objetivo do usuario: ${objetivo}`,
     `URL atual: ${url}`,
     `Ja feito: ${feito.slice(-8).join('; ') || 'nada ainda'}`,
+    ...(recusa ? [`Envio recusado: ${recusa}. Corrija o que o aviso aponta em vez de enviar de novo.`] : []),
+    // Sem isto o auxiliar recusava o rádio obrigatório "porque a escolha depende de avaliação".
+    ...(ehRegistroDeTeste(objetivo) ? ['O objetivo pede um registro de teste: escolha obrigatoria sem dado '
+      + '(radio, caixa, lista) leva uma opcao plausivel qualquer.'] : []),
     `Chaves de dados que quem chamou forneceu (so os nomes): ${Object.keys(cofre).join(', ') || 'nenhuma'}`,
     `O que o Jev queria fazer: ${distribuicao(respostas.operacao) || respostas.operacao?.choice || 'sem resposta'}`,
     'Elementos acionaveis (ref | papel | nome):',
@@ -615,21 +647,38 @@ function decidirPeloAuxiliar(bruto, respostas, candidatos, limiares = LIMIARES) 
   return { operacao: r.operacao, alvo: escolhido.ref, escolhido, confianca: null, arriscado: ehArriscado ? arriscado : null, via: 'auxiliar' };
 }
 
+// Só botão de envio arma a leitura de recusa: "Mais detalhes" ou uma aba não submetem nada.
+const ENVIO = /\b(?:salvar|gravar|criar|incluir|cadastrar|adicionar|confirmar|enviar|concluir|finalizar|registrar|aplicar|ok|save|submit|create|add|confirm)\b/i;
+const ehEnvio = (c) => PAPEIS_QUE_ENVIAM.has(c.papel) && ENVIO.test(c.nome);
+
+const textoDaRecusa = (r) => `clicar em "${r.nome}" nao fechou o formulario e a pagina diz: ${r.avisos.map((a) => `"${a}"`).join('; ')}`;
+
 /** O fim da linha de log de uma decisão: a confiança do Jev, ou de onde ela veio. */
 const origemDa = (d) => (d.via ? `via ${d.via}` : `conf=${d.confianca.toFixed(2)}`);
 
 /** O que o LLM de texto recebe: só o necessário para escrever um valor de campo. */
 const SEM_VALOR = 'SEM_VALOR';
 
-function pedidoDeTexto(objetivo, campo, feito) {
+// Registro de teste não tem dado verdadeiro a esperar: parar pedindo "Frequência cardíaca" a quem
+// mandou criar um registro de teste encerrava a corrida sem motivo.
+const ehRegistroDeTeste = (objetivo) => /\btest(?:e|es|ing)?\b/i.test(String(objetivo ?? ''));
+
+const LISTA_DA_PAGINA = 'lista de opcoes da pagina';
+
+const regraDeTeste = (sufixo) => 'O objetivo pede um registro de teste: campo de formulario cujo dado o objetivo nao contem '
+  + 'leva um valor de teste plausivel e valido para o tipo do campo (numero dentro da faixa normal, nome de cidade real, '
+  + `hora como 01:30, data como dd/mm/aaaa). Campo de busca, filtro ou ${LISTA_DA_PAGINA}, ${sufixo}`;
+
+function pedidoDeTexto(objetivo, campo, feito, tipo = '') {
   return [
     `Objetivo do usuario: ${objetivo}`,
     `Ja feito: ${feito.slice(-5).join('; ') || 'nada ainda'}`,
-    `Campo a preencher: ${campo}`,
+    `Campo a preencher: ${campo}${tipo ? ` (${tipo})` : ''}`,
     'Responda APENAS com o valor a digitar nesse campo, sem aspas, sem explicacao, sem prefixo.',
     // Sem esta saida o modelo responde em prosa ("Nao tenho a data de nascimento de...") e a frase
     // inteira vai parar dentro do campo do formulario.
-    `Se o objetivo nao contem esse dado, responda exatamente ${SEM_VALOR} e nada mais.`,
+    ehRegistroDeTeste(objetivo) ? regraDeTeste(`responde exatamente ${SEM_VALOR}.`)
+      : `Se o objetivo nao contem esse dado, responda exatamente ${SEM_VALOR} e nada mais.`,
   ].join('\n');
 }
 
@@ -648,14 +697,17 @@ function mascararValores(arvore) {
 }
 
 /** Um pedido só para vários campos: num formulário escrito pelo modelo eram uma ida por campo. */
-function pedidoDeTextos(objetivo, campos, feito) {
+function pedidoDeTextos(objetivo, campos, feito, tipos = {}) {
+  const comTipo = Object.entries(tipos).filter(([n, t]) => campos.includes(n) && t);
   return [
     `Objetivo do usuario: ${objetivo}`,
     `Ja feito: ${feito.slice(-5).join('; ') || 'nada ainda'}`,
     `Campos a preencher: ${JSON.stringify(campos)}`,
+    ...(comTipo.length ? [`Tipo dos campos: ${JSON.stringify(Object.fromEntries(comTipo))}`] : []),
     'Responda APENAS com um objeto JSON, sem cercas de codigo, com cada campo como chave e o valor a digitar.',
     'Cada campo leva so o dado que o objetivo atribui a ele; nao repita num campo o que pertence a outro.',
-    `Campo cujo dado o objetivo nao contem leva exatamente "${SEM_VALOR}".`,
+    ehRegistroDeTeste(objetivo) ? regraDeTeste(`leva exatamente "${SEM_VALOR}".`)
+      : `Campo cujo dado o objetivo nao contem leva exatamente "${SEM_VALOR}".`,
   ].join('\n');
 }
 
@@ -670,7 +722,7 @@ function lerTextos(resposta) {
  * escolhe qual chave), depois o LLM pequeno. Sem nenhum dos dois, para dizendo qual campo faltou —
  * quem chamou sabe o valor e pode mandar na próxima.
  */
-async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [] }) {
+async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [], tipos = {} }) {
   const chave = escolha?.choice;
   if (chave && chave !== NENHUM && forca(escolha) >= limiares.alvo && typeof cofre[chave] === 'string') {
     return { valor: cofre[chave], origem: `dados.${chave}` };
@@ -692,9 +744,14 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
   }
   if (!escritos.has(campo.nome)) {
     const nomes = [campo.nome, ...vizinhos.filter((n) => n !== campo.nome && !ehSegredo(n) && !escritos.has(n))];
+    // O tipo é lido do DOM e chega com o rótulo da página; o nome aqui é o da árvore.
+    // Combobox: o valor tem que ser uma opção que já existe, e um nome inventado não acha nenhuma.
+    const tipoDe = (n) => (n === campo.nome && campo.papel === 'combobox' ? `${LISTA_DA_PAGINA}, com busca` : '')
+      || (Object.entries(tipos).find(([k]) => normalizar(k) === normalizar(n))?.[1] ?? '');
     let lidos = null;
     if (nomes.length > 1) {
-      const resposta = await escreverTexto(pedidoDeTextos(objetivo, nomes, feito));
+      const resposta = await escreverTexto(pedidoDeTextos(objetivo, nomes, feito,
+        Object.fromEntries(nomes.map((n) => [n, tipoDe(n)]))));
       try {
         lidos = lerTextos(resposta);
       } catch {
@@ -702,7 +759,7 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
       }
     }
     if (lidos) for (const n of nomes) escritos.set(n, typeof lidos[n] === 'string' ? lidos[n] : SEM_VALOR);
-    else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito)));
+    else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito, tipoDe(campo.nome))));
   }
   const valor = String(escritos.get(campo.nome)).trim();
   if (!valor || valor.includes(SEM_VALOR)) {
@@ -736,6 +793,12 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   const camposSecretos = new Set();
   let reolhou = 0;
   let urlDosEscritos = '';
+  // Último clique de envio e a última recusa lida depois dele (botão + avisos da página).
+  let envio = null;
+  let ultimaRecusa = null;
+  let recusaNaTela = null;
+  // Parada com o formulário recusado ainda aberto: o porquê real é o aviso, não a última dúvida do Jev.
+  const comRecusa = (parou) => (recusaNaTela ? `${parou}; ultimo envio recusado: ${textoDaRecusa(recusaNaTela)}` : parou);
   const agir = async (verbo, args) => {
     const saida = String(await executar(verbo, args));
     if (saida.startsWith('erro:')) throw new FalhaDoNavegador(verbo, saida);
@@ -776,7 +839,22 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     for (const [k, v] of Object.entries(anotacao.valores)) {
       if (segredos.has(v) || camposSecretos.has(normalizar(k))) anotacao.valores[k] = '(oculto)';
     }
-    const estado = montarEstado(objetivo, url, feito, texto, anotacao, cofre);
+    // Envio cujo botão segue na tela e que deixou aviso novo foi recusado. Aviso que já estava antes
+    // do clique não conta, salvo se era a recusa anterior do mesmo envio, que persiste na tela.
+    // A recusa fica guardada até a próxima ação: o toast some sozinho em segundos.
+    if (envio && feito.length !== envio.depois) envio = null;
+    if (envio && !envio.recusa && candidatos.some((c) => c.nome === envio.nome)) {
+      const avisos = anotacao.avisos.filter((a) => !envio.antes.has(a)
+        || (ultimaRecusa?.nome === envio.nome && ultimaRecusa.avisos.includes(a)));
+      if (avisos.length) envio.recusa = { nome: envio.nome, avisos };
+    }
+    const recusa = envio?.recusa ?? null;
+    if (recusa) ultimaRecusa = recusa;
+    recusaNaTela = ultimaRecusa && candidatos.some((c) => c.nome === ultimaRecusa.nome) ? ultimaRecusa : null;
+    const estado = {
+      ...montarEstado(objetivo, url, feito, texto, anotacao, cofre),
+      ...(recusa ? { envio_recusado: textoDaRecusa(recusa) } : {}),
+    };
     if (!candidatos.length) {
       // Página de sucesso costuma não ter nada clicável: DONE ainda precisa ser perguntado, e com
       // a mesma prova do laço normal — a página confirmando, não só o Jev preferindo DONE.
@@ -865,7 +943,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (ajudar && decisao.parar && / sem alvo confiavel/.test(decisao.parar)) {
       let ajuda;
       try {
-        const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas }));
+        const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa: estado.envio_recusado }));
         ajuda = decidirPeloAuxiliar(bruto, respostas, candidatos);
         if (permitirRisco && ajuda.parar?.startsWith('operacao arriscada')) {
           log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${ajuda.parar}, via auxiliar)`);
@@ -876,7 +954,13 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       }
       decisao = ajuda.falhou ? { parar: `${decisao.parar}; auxiliar: ${ajuda.falhou}` } : ajuda;
     }
-    if (decisao.parar) return { feito, sucesso: decisao.sucesso === true, parou: decisao.parar };
+    if (decisao.parar) {
+      return { feito, sucesso: decisao.sucesso === true, parou: decisao.sucesso ? decisao.parar : comRecusa(decisao.parar) };
+    }
+    // Reenviar sem mudar nada repete a recusa: para dizendo o que a página respondeu.
+    if (recusa && decisao.operacao === 'CLICK' && decisao.escolhido?.nome === recusa.nome) {
+      return { feito, sucesso: false, parou: `${textoDaRecusa(recusa)}; clicar de novo sem corrigir nada nao adianta` };
+    }
 
     // As refs sao indice de arvore, nao identidade de no: renumeram a cada re-render (nesta mesma
     // tela, 40 refs com o formulario aberto e 10 com o popover aberto). Entre o snapshot e a
@@ -898,7 +982,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     repetidas = assinatura === anterior ? repetidas + 1 : 0;
     anterior = assinatura;
     if (repetidas >= 2) {
-      return { feito, sucesso: false, parou: `${decisao.operacao} em @${decisao.alvo} repetiu 3x sem avancar; parei` };
+      return { feito, sucesso: false, parou: comRecusa(`${decisao.operacao} em @${decisao.alvo} repetiu 3x sem avancar; parei`) };
     }
 
     // Clique ou digitação que o navegador recusou não aconteceu: seguir dali fazia o laço redigitar
@@ -906,7 +990,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     try {
       if (decisao.operacao === 'SELECT') {
         log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") ${origemDa(decisao)}`);
-        const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
+        // Lista ARIA aberta escolhe no clique da option. O Radix a espelha num <select> escondido:
+        // mudar o valor por ali pega, mas a lista fica aberta e o ciclo seguinte escolhia de novo.
+        const saida = /^\s*-\s+listbox\b/m.test(snapshot) ? SEM_SELECT
+          : await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
         if (String(saida).includes(SEM_SELECT)) {
           if (decisao.arriscado !== null && !permitirRisco) {
             return { feito, sucesso: false, parou: `operacao arriscada (${decisao.arriscado.toFixed(2)}): precisa da ordem do usuario` };
@@ -938,6 +1025,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           objetivo,
           feito,
           escreverTexto,
+          tipos: anotacao.tipos,
         });
         if (parou) return { feito, sucesso: false, parou, falta };
         const secreto = ehSegredo(decisao.escolhido.nome) || (origem.startsWith('dados.') && ehSegredo(origem.slice(6)));
@@ -995,6 +1083,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         log(`jev-objetivo passo ${passo}: CLICK @${decisao.alvo} (${rotulo(decisao.escolhido)}) ${origemDa(decisao)}`);
         await agir('click', [`@${decisao.alvo}`]);
         feito.push(`CLICK ${rotulo(decisao.escolhido)}`);
+        envio = ehEnvio(decisao.escolhido) ? { nome: decisao.escolhido.nome, depois: feito.length, antes: new Set(anotacao.avisos) } : null;
         // Lista recem-aberta com uma opcao de texto IDENTICO a um valor de `dados`: escolhe ja, sem
         // outra ida ao Jev. So igualdade exata e so um candidato; fora disso o ciclo seguinte decide.
         if (decisao.escolhido.papel === 'combobox' && Object.keys(cofre).length) {
@@ -1019,7 +1108,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
     await executar('wait', ESPERA_ASSENTAR);
   }
-  return { feito, sucesso: false, parou: `estourou ${maxPassos} passos` };
+  return { feito, sucesso: false, parou: comRecusa(`estourou ${maxPassos} passos`) };
 }
 
 /** `confere`: uma pergunta sobre o fato que a tela mostra, com o mesmo piso da conclusão do laço. */

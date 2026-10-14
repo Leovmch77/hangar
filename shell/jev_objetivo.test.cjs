@@ -771,3 +771,142 @@ test('clique do auxiliar num botao que envia respeita o risco do Jev', async () 
   assert.match(r.parou, /operacao arriscada \(0\.80\): clicar em button "Iniciar cadastro"/);
   assert.ok(!executados.some((l) => l.startsWith('click')), 'nao clica');
 });
+
+// --- varredura: listbox do Radix, campo sem dado em registro de teste, envio recusado ---
+
+test('SELECT numa listbox ARIA aberta clica na option, mesmo com <select> espelho na pagina', async () => {
+  const LISTA = `- RootWebArea "Clinica Web"
+  - listbox [ref=@e1]
+    - option "À Vista" [ref=@e2]
+    - option "A Prazo" [ref=@e3]`;
+  const executados = [];
+  let volta = 0;
+  const r = await rodar({
+    objetivo: 'escolher A Prazo',
+    maxPassos: 3,
+    // O Radix espelha a lista num <select> escondido: o valor pega, mas a lista continua aberta.
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 60));
+      if (verbo === 'snapshot') return LISTA;
+      if (verbo === 'url') return 'http://local/forma_pagto';
+      if (verbo === 'text') return 'pagina';
+      if (verbo === 'eval') return 'ok: "1"';
+      return 'ok';
+    },
+    perguntar: async () => (volta++ === 0 ? resposta({ op: 'SELECT', opcao: 'e3' }) : resposta({ op: 'DONE' })),
+  });
+  assert.ok(executados.includes('click @e3'), executados.join('\n'));
+  assert.ok(!executados.some((l) => l.startsWith('eval') && l.includes('dispatchEvent')), 'nao mexe no <select> escondido');
+  assert.deepEqual(r.feito, ['SELECT "A Prazo"']);
+});
+
+test('registro de teste: campo sem dado recebe um valor de teste inventado, respeitando o tipo', async () => {
+  const pedidos = [];
+  const escreverTexto = async (p) => { pedidos.push(p); return /valor de teste plausivel/.test(p) ? '80' : 'SEM_VALOR'; };
+  const args = {
+    campo: { ref: 'e15', papel: 'textbox', nome: 'Frequência cardíaca' },
+    escolha: { choice: NENHUM, probabilities: { [NENHUM]: 0.99 } },
+    cofre: { texto: 'TESTE AUTO E2E' },
+    feito: [],
+    escreverTexto,
+    tipos: { 'Frequência cardíaca': 'inputmode=decimal' },
+  };
+  const r = await valorDoCampo({ ...args, objetivo: 'incluir em escala_mews um novo registro de teste preenchendo os campos obrigatorios e salvar' });
+  assert.deepEqual(r, { valor: '80', origem: 'llm' });
+  assert.match(pedidos[0], /inputmode=decimal/);
+  // Fora de registro de teste, dado que falta continua parando.
+  const real = await valorDoCampo({ ...args, escritos: new Map(), objetivo: 'cadastrar a afericao do paciente' });
+  assert.equal(real.falta, 'Frequência cardíaca');
+});
+
+test('envio recusado: le o aviso da pagina, entrega ao Jev e para citando o aviso em vez de clicar de novo', async () => {
+  const FORM = `- RootWebArea "Clinica Web"
+  - dialog "Nova Abreviação"
+    - textbox "Abreviação" [ref=@e1]
+    - button "Criar Abreviação" [ref=@e2]
+    - button "Mais detalhes" [ref=@e3]`;
+  const executados = [];
+  const estados = [];
+  let leiturasAposClique = 0;
+  const r = await rodar({
+    objetivo: 'incluir uma abreviacao de teste e salvar',
+    maxPassos: 6,
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 60));
+      if (verbo === 'click') leiturasAposClique = 0;
+      if (verbo === 'snapshot') return FORM;
+      if (verbo === 'url') return 'http://local/abreviacoes';
+      if (verbo === 'text') return 'Nova Abreviação';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        // O toast aparece logo depois do clique e some sozinho antes do ciclo seguinte.
+        const visivel = executados.includes('click @e2') && leiturasAposClique++ === 0;
+        return JSON.stringify({ valores: { Abreviação: 'TESTE' }, obrigatorios_vazios: [], editaveis: ['Abreviação'],
+          avisos: visivel ? ['Erro ao criar: Não foi possível criar o registro. Tente novamente.'] : [] });
+      }
+      return 'ok';
+    },
+    // No primeiro ciclo depois da recusa o Jev fica sem alvo e o laço olha de novo; no seguinte, já
+    // sem o toast na tela, ele tenta reenviar.
+    perguntar: async (estado) => {
+      estados.push(estado);
+      return resposta({ op: 'CLICK', click: estados.length === 2 ? NENHUM : 'e2' });
+    },
+  });
+  assert.equal(executados.filter((l) => l === 'click @e2').length, 1, executados.join('\n'));
+  assert.match(r.parou, /Criar Abreviação.*Erro ao criar: Não foi possível criar o registro/);
+  assert.doesNotMatch(r.parou, /repetiu/);
+  assert.match(JSON.stringify(estados[1]), /Erro ao criar/);
+});
+
+test('parada qualquer depois de um envio recusado cita o aviso da pagina', async () => {
+  const FORM = `- RootWebArea "Clinica Web"
+  - dialog "Nova Abreviação"
+    - textbox "Abreviação" [ref=@e1]
+    - button "Criar Abreviação" [ref=@e2]`;
+  let clicou = false;
+  let ciclo = 0;
+  const r = await rodar({
+    objetivo: 'incluir uma abreviacao de teste e salvar',
+    maxPassos: 6,
+    executar: async (verbo, args) => {
+      if (verbo === 'click') clicou = true;
+      if (verbo === 'snapshot') return FORM;
+      if (verbo === 'url') return 'http://local/abreviacoes';
+      if (verbo === 'text') return 'Nova Abreviação';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        return JSON.stringify({ valores: {}, obrigatorios_vazios: [], editaveis: [], avisos: clicou ? ['Erro ao criar: chave duplicada'] : [] });
+      }
+      return 'ok';
+    },
+    perguntar: async () => (ciclo++ === 0 ? resposta({ op: 'CLICK', click: 'e2' }) : resposta({ op: 'BLOCKED', confOp: 0.35 })),
+  });
+  assert.match(r.parou, /BLOCKED fraco/);
+  assert.match(r.parou, /Erro ao criar: chave duplicada/);
+});
+
+test('registro de teste: combobox de lista nao recebe valor inventado', async () => {
+  const pedidos = [];
+  const r = await valorDoCampo({
+    campo: { ref: 'e9', papel: 'combobox', nome: 'Conta do Balancete' },
+    escolha: { choice: NENHUM, probabilities: { [NENHUM]: 0.99 } },
+    cofre: { texto: 'TESTE AUTO E2E' },
+    feito: [],
+    objetivo: 'incluir um novo registro de teste e salvar',
+    escreverTexto: async (p) => { pedidos.push(p); return 'SEM_VALOR'; },
+  });
+  assert.match(pedidos[0], /Conta do Balancete \(lista de opcoes da pagina/);
+  assert.equal(r.falta, 'Conta do Balancete');
+});
+
+test('registro de teste: o auxiliar sabe que escolha obrigatoria sem dado leva uma opcao plausivel', async () => {
+  const pedidos = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: navegador([]),
+    perguntar: async () => resposta({ click: NENHUM }),
+    ajudar: async (p) => { pedidos.push(p); return '{"operacao":"NONE","ref":null,"motivo":"x"}'; },
+  });
+  assert.match(pedidos[0], /registro de teste/);
+  assert.match(pedidos[0], /opcao plausivel/);
+});
