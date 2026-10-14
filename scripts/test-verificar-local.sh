@@ -34,6 +34,44 @@ caso ".github/workflows/server.yml" "" ""
 caso "docs/migracao-rust/pedidos/x.md" "" ""
 caso "docs/decisoes/instalacao.md" "backend" ""
 
+# Plano rápido (o padrão, que as travas exigem): só o ligado aos arquivos mudados; Windows só com
+# arquivo de Windows; documentação não roda nada.
+rapido() {   # $1 = arquivos, $2 = linux esperado, $3 = windows esperado
+    local saida lin win
+    saida="$(printf '%s\n' "$1" | "$V" --classificar-rapido)"
+    lin="$(sed -n 's/^linux: //p' <<< "$saida")"
+    win="$(sed -n 's/^windows: //p' <<< "$saida")"
+    if [[ "$lin" != "$2" || "$win" != "$3" ]]; then
+        printf 'FALHOU rápido %s\n  linux:   "%s" (esperado "%s")\n  windows: "%s" (esperado "%s")\n' \
+            "$(tr '\n' ' ' <<< "$1")" "$lin" "$2" "$win" "$3"
+        falhou=1
+    fi
+}
+rapido "crates/hangar-server/src/main.rs" "rust_rapido" ""
+rapido "crates/hangar-api/src/lib.rs" "rust_rapido nativo_rapido" ""
+rapido "backend/app/registry.py" "backend_rapido" ""
+rapido "backend/app/procinfo.py" "backend_rapido" "runtime"
+rapido "frontend/src/App.svelte" "front_rapido" ""
+rapido "packages/core/src/api.ts" "front_rapido" ""
+rapido "messages/pt.json" "front_rapido nativo_rapido" ""
+rapido "mobile/src/App.tsx" "mobile_rapido" ""
+rapido "desktop-native/src/main.rs" "nativo_rapido" ""
+rapido "install.ps1" "" "runtime"
+rapido "scripts/shell/claude.fish" "shell" ""
+rapido "scripts/configure-statusline.cjs" "statusline" "statusline"
+rapido "docs/decisoes/instalacao.md" "" ""
+rapido $'crates/hangar-server/src/a.rs\nfrontend/src/b.ts\ndocs/x.md' "rust_rapido front_rapido" ""
+
+# O passo completo já gravado cobre o rápido da mesma área; o rápido não cobre o completo.
+reg="$(mktemp)"
+printf 'passos=rust nativo\n' > "$reg"
+falta="$("$V" --faltando "$reg" rust_rapido nativo_rapido front_rapido)"
+[[ "$falta" == "front_rapido" ]] || { echo "FALHOU completo não cobriu o rápido: \"$falta\""; falhou=1; }
+printf 'passos=rust_rapido\n' > "$reg"
+falta="$("$V" --faltando "$reg" rust)"
+[[ "$falta" == "rust" ]] || { echo "FALHOU rápido cobriu o completo: \"$falta\""; falhou=1; }
+rm -f "$reg"
+
 # Erro no cálculo do plano nunca vira "nada a verificar".
 "$V" --plano --base ref-que-nao-existe >/dev/null 2>&1 && { echo "FALHOU --plano com base inválida saiu 0"; falhou=1; }
 "$V" --exigir 0000000000000000000000000000000000000000 >/dev/null 2>&1 && { echo "FALHOU --exigir com commit inválido saiu 0"; falhou=1; }
