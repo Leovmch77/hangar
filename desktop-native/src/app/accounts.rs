@@ -115,7 +115,8 @@ enum Tone { Muted, Warn, Danger }
 
 struct Bar { label: String, reset: String, pct: f64, reset_at: Option<f64>, per_model: bool }
 
-enum QuotaView { Bars { bars: Vec<Bar>, stale: Option<String> }, Note(String), Nothing }
+/// `stale` é a idade da leitura quando ela já envelheceu; `cause`, por que a leitura seguinte não trocou os números.
+enum QuotaView { Bars { bars: Vec<Bar>, stale: Option<String>, cause: Option<String> }, Note(String), Nothing }
 
 /// Uma linha pronta para desenhar.
 struct Row {
@@ -273,6 +274,39 @@ pub(super) fn kept_transcripts_notice(name: &str, keep: bool, body: &serde_json:
     }
 }
 
+/// Por que o login não foi conferido, como o `motivoLoginIndisponivel` do core: web, celular e app dizem o mesmo. O Codex
+/// sem CLI já tem frase própria; sem causa (preparo, conta ocupada) não há o que dizer.
+fn login_unchecked(login: Option<&Login>) -> Option<String> {
+    let reason = login.filter(|l| l.state == "indisponivel")?.reason.as_deref().filter(|r| !r.is_empty() && *r != "cli-ausente")?;
+    Some(crate::i18n::tr_shared(match reason {
+        "prazo" => "contas_login_prazo",
+        "leitura-falhou" => "contas_login_leitura_falhou",
+        "formato-desconhecido" => "contas_login_formato",
+        // No Claude, `cli-indisponivel` também sai com a conta ocupada por um login: causa incerta.
+        _ => "contas_login_nao_conferido",
+    }, &[]))
+}
+
+/// Cota lida com `motivo`: os números são da última leitura boa e a nova falhou. A frase é a do `motivoCotaAntiga` do core.
+fn quota_not_updated(q: &Quota) -> Option<String> {
+    use crate::i18n::tr_shared;
+    // Conta ocupada por login, renovação ou redefinição: não houve leitura que falhou.
+    let reason = q.reason.as_deref().filter(|r| q.state == "lida" && !r.is_empty() && *r != "sessao-viva")?;
+    let status = reason.strip_prefix("http-").filter(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()));
+    let cause = match (reason, status) {
+        ("sem-resposta", _) => tr_shared("cota_causa_sem_resposta", &[]),
+        ("http-429", _) => tr_shared("cota_causa_limite", &[]),
+        ("http-401" | "http-403", _) => tr_shared("cota_causa_recusou", &[]),
+        // 2xx chega quando o corpo não serve (vazio, JSON que não é objeto): é formato, não erro da fonte.
+        (_, Some(status)) if !status.starts_with('2') => tr_shared("cota_causa_http", &[("status", status)]),
+        (_, Some(_)) | ("formato-desconhecido" | "painel-sem-numeros" | "erro-leitor", _) => tr_shared("cota_causa_formato", &[]),
+        ("resposta-grande", _) => tr_shared("cota_causa_grande", &[]),
+        ("credencial-invalida" | "credencial-ilegivel", _) => tr_shared("cota_causa_credencial", &[]),
+        _ => tr_shared("cota_causa_outra", &[]),
+    };
+    Some(tr_shared("cota_nao_atualizou", &[("causa", &cause)]))
+}
+
 impl Credential {
     fn auth(&self) -> &str { self.auth_method.as_deref().unwrap_or(if self.kind == "claude" { "oauth" } else { "unknown" }) }
     fn engine_name(&self) -> Option<&str> { self.id.strip_prefix("chave:") }
@@ -331,7 +365,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
                 (Some(true), Some(days)) if days <= 0 => subtitle.push((tr("accounts_login_expired"), Tone::Danger)),
                 (Some(true), Some(days)) => subtitle.push((tr("accounts_login_expires").replace("{n}", &days.to_string()),
                     if days <= RENEW_DAYS { Tone::Warn } else { Tone::Muted })),
-                _ => {}
+                _ => subtitle.extend(login_unchecked(c.login.as_ref()).map(|text| (text, Tone::Warn))),
             }
             if let Some(email) = c.login.as_ref().filter(|_| logged == Some(true)).and_then(|l| l.email.clone()) { subtitle.push(muted(email)); }
             if logged == Some(false) || c.expired() { sign_in = Some(tr("accounts_sign_in")); }
@@ -351,6 +385,8 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
                 subtitle.extend(login.email.clone().map(muted));
             } else if logged == Some(false) {
                 subtitle.push(muted(tr("accounts_not_connected")));
+            } else {
+                subtitle.extend(login_unchecked(c.login.as_ref()).map(|text| (text, Tone::Warn)));
             }
             if !c.active && let Some(sync) = c.codex_sync.as_deref() {
                 subtitle.push(muted(tr(match sync { "ready" => "accounts_codex_inherited", "running" => "accounts_codex_preparing",
@@ -402,7 +438,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
             }).collect();
             bars.sort_by_key(|b| window_order(&b.label));
             let stale = q.age.filter(|a| *a > STALE_AFTER).map(|a| tr("accounts_last_read").replace("{n}", &age(a)));
-            QuotaView::Bars { bars, stale }
+            QuotaView::Bars { bars, stale, cause: quota_not_updated(q) }
         }
         _ if c.login.as_ref().and_then(|l| l.reason.as_deref()) == Some("cli-ausente") => QuotaView::Nothing,
         (_, Some(q)) if q.state == "expirada" || q.state == "sem_credencial" => QuotaView::Note(tr(match q.reason.as_deref() {
@@ -483,7 +519,7 @@ fn build_summary(sections: &[Section]) -> Summary {
     let mut full = Vec::new();
     for row in sections.iter().flat_map(|s| &s.rows) {
         if row.active { summary.in_use.push((row.glyph.0, row.name.clone())); }
-        if let QuotaView::Bars { bars, stale } = &row.quota && let Some(week) = bars.iter().find(|b| b.label == "7d" && b.pct >= 100.) {
+        if let QuotaView::Bars { bars, stale, .. } = &row.quota && let Some(week) = bars.iter().find(|b| b.label == "7d" && b.pct >= 100.) {
             full.push((week.reset_at.unwrap_or(f64::MAX), row.name.clone(), week.reset.clone()));
             summary.week_stale |= stale.is_some();
         }
@@ -981,7 +1017,7 @@ impl Hangar {
         let quota = div().w(px(if wide { columns_width(labels.len()) } else { 206. })).flex_shrink_0().flex().flex_col()
             .gap(px(if compact || wide { 4. } else { 8. }))
             .map(|el| match &row.quota {
-                QuotaView::Bars { bars, stale } => el.when(stale.is_some(), |el| el.opacity(0.6))
+                QuotaView::Bars { bars, stale, cause } => el.when(stale.is_some(), |el| el.opacity(0.6))
                     .map(|el| if wide {
                         el.child(div().flex().gap(px(COLUMN_GAP)).children(labels.iter().enumerate().map(|(n, label)| {
                             let key = SharedString::from(format!("accounts-bar-{}-{label}", row.id));
@@ -990,7 +1026,10 @@ impl Hangar {
                         })))
                     } else if compact { el.child(mini_quota(bars, labels)) } else { el.children(bars.iter().map(quota_bar)) })
                     .children(stale.clone().map(|text| div().flex().items_center().gap(px(5.)).text_size(px(11.5)).text_color(theme::muted())
-                        .child(chrome::small_icon(IconName::Clock, 12., theme::muted())).child(text))),
+                        .child(chrome::small_icon(IconName::Clock, 12., theme::muted())).child(text)))
+                    .children(cause.clone().map(|text| div().flex().items_start().gap(px(5.)).text_size(px(11.5)).text_color(theme::warning())
+                        .child(chrome::small_icon(IconName::TriangleAlert, 12., theme::warning()).mt(px(2.)))
+                        .child(div().min_w_0().whitespace_normal().child(text)))),
                 QuotaView::Note(text) => el.child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(text.clone())),
                 QuotaView::Nothing => el,
             });
@@ -1353,6 +1392,55 @@ mod tests {
         assert_eq!(build_row(&codex("none", "idle", false), &HashMap::new(), false, 0.).codex, Some(("b".into(), false)));
         assert_eq!(build_row(&codex("oauth", "idle", true), &HashMap::new(), false, 0.).codex, Some(("b".into(), true)));
         assert_eq!(build_row(&codex("oauth", "ready", true), &HashMap::new(), false, 0.).codex, None);
+    }
+
+    #[test]
+    fn unchecked_login_says_why_in_the_subtitle_like_the_web() {
+        use crate::i18n::tr_shared;
+        let row = |kind: &str, state: &str, reason: Value| build_row(&credential(json!({"id": format!("{kind}:/h/x"), "tipo": kind, "nome": "x",
+            "codex_account": "x", "login": {"estado": state, "loggedIn": null, "motivo": reason}})), &HashMap::new(), false, 0.);
+        for (reason, key) in [("prazo", "contas_login_prazo"), ("leitura-falhou", "contas_login_leitura_falhou"),
+            ("formato-desconhecido", "contas_login_formato"), ("cli-indisponivel", "contas_login_nao_conferido"), ("causa-nova", "contas_login_nao_conferido")] {
+            for kind in ["claude", "codex"] {
+                let (line, marks) = row(kind, "indisponivel", json!(reason)).subtitle;
+                assert!(marks.iter().any(|(range, tone)| *tone == Tone::Warn && line[range.clone()] == tr_shared(key, &[])), "{kind} {reason}: {line}");
+            }
+        }
+        // Sem causa (preparo, conta ocupada), login conferido e o Codex sem CLI (frase própria): nada novo.
+        for kind in ["claude", "codex"] {
+            assert!(row(kind, "indisponivel", Value::Null).subtitle.1.is_empty());
+            assert!(row(kind, "ok", json!("prazo")).subtitle.1.is_empty());
+        }
+        let (line, marks) = row("codex", "indisponivel", json!("cli-ausente")).subtitle;
+        assert!(marks.is_empty() && line.contains(&tr("accounts_codex_cli_missing")), "{line}");
+    }
+
+    #[test]
+    fn old_quota_numbers_say_why_they_did_not_update_like_the_web() {
+        use crate::i18n::tr_shared;
+        let quota = |reason: Value, age: f64| build_row(&credential(json!({"id": "claude:/h/a", "tipo": "claude", "nome": "a",
+            "cota": {"estado": "lida", "janelas": [{"rotulo": "5h", "pct": 40}], "idade_s": age, "motivo": reason}})), &HashMap::new(), false, 0.).quota;
+        let cause = |key: &str| tr_shared(key, &[]);
+        let other = cause("cota_causa_outra");
+        for (reason, said) in [("sem-resposta", cause("cota_causa_sem_resposta")), ("http-429", cause("cota_causa_limite")),
+            ("http-401", cause("cota_causa_recusou")), ("http-403", cause("cota_causa_recusou")),
+            ("http-502", tr_shared("cota_causa_http", &[("status", "502")])), ("http-5021", other.clone()), ("http-abc", other.clone()),
+            ("http-200", cause("cota_causa_formato")), ("http-204", cause("cota_causa_formato")),
+            ("formato-desconhecido", cause("cota_causa_formato")), ("painel-sem-numeros", cause("cota_causa_formato")),
+            ("erro-leitor", cause("cota_causa_formato")), ("resposta-grande", cause("cota_causa_grande")),
+            ("credencial-invalida", cause("cota_causa_credencial")), ("credencial-ilegivel", cause("cota_causa_credencial")), ("causa-nova", other)] {
+            let QuotaView::Bars { cause, .. } = quota(json!(reason), 30.) else { panic!("{reason}: bars") };
+            assert_eq!(cause, Some(tr_shared("cota_nao_atualizou", &[("causa", &said)])), "{reason}");
+        }
+        // A idade continua do jeito de antes, ao lado da causa; sem motivo, nenhuma causa.
+        let QuotaView::Bars { stale, cause, .. } = quota(json!("sem-resposta"), 7300.) else { panic!("bars") };
+        assert_eq!(stale, Some(tr("accounts_last_read").replace("{n}", "2 h")));
+        assert!(cause.is_some());
+        let QuotaView::Bars { stale, cause, .. } = quota(Value::Null, 7300.) else { panic!("bars") };
+        assert!(stale.is_some() && cause.is_none());
+        // Conta ocupada (login, renovação, redefinição): nenhuma leitura falhou, então nada de aviso.
+        let QuotaView::Bars { cause, .. } = quota(json!("sessao-viva"), 30.) else { panic!("bars") };
+        assert_eq!(cause, None);
     }
 
     #[test]
