@@ -837,7 +837,12 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 return Err(invalid("resultado incerto não permite reenvio"));
             }
             let finalized=op.terminal_finalized && op.status==status;
+            let consumed=terminal && status==Status::Accepted && result["payload"]["consumed"]==true;
+            let entry=op.entry_id.clone();
             op.status = status; op.result = result;op.terminal_finalized=finalized;
+            if consumed && let Some(row)=state.rows.iter_mut().find(|row|Some(row_id(row))==entry.as_deref()) && row["confirmed"]!=true {
+                row["consumed"]=json!(true);
+            }
             record_terminal_write_barrier(state,&id);
             release_terminal_write_barrier(state);
             if terminal {finalize_terminal(state,&id,clock)?;}

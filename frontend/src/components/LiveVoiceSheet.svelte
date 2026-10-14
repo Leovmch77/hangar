@@ -293,10 +293,10 @@
           <button type="button" class="lv-btn" onclick={() => target && liveVoiceStore.loadSettings(target, true)}>{m.sync_retry()}</button>
         {/if}
       </div>
-    {:else if !reply.enabled}
-      <p class="lv-error">{m.live_voice_error_disabled()}</p>
     {:else if !reply.codex}
       <p class="lv-error">{m.live_voice_error_codex_missing()}</p>
+    {:else if !reply.enabled}
+      <p class="lv-error">{m.live_voice_error_no_account()}</p>
     {:else if target}
       <button type="button" class="lv-primary" onclick={() => target && liveVoiceStore.start(target)}>{m.live_voice_start()}</button>
     {/if}

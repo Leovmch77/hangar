@@ -173,6 +173,8 @@ export interface PatchHunk { old_start: number; new_start: number; lines: string
 export interface ChatEvent {
   queued_delivered?: boolean | null;
   queued_confirmed?: boolean | null;
+  /** Aceita com a sessão parada: não está na fila interna do Claude, só falta o registro real. */
+  queued_consumed?: boolean | null;
   /** Só em bolha "queued-": relógio da entrada (epoch s), pra ordenar quando chega ao vivo. */
   queued_ts?: number | null;
   // `thinking` = resumo do raciocínio. Só chega quando a sessão foi aberta com o resumo ligado

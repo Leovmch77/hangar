@@ -1,4 +1,4 @@
-//! Configuração da voz: trava lida do runtime-config, escolhas gravadas pelo servidor.
+//! Configuração da voz: disponível com Codex e conta Codex, escolhas gravadas pelo servidor.
 #![cfg(unix)]
 use crate::fake;
 use serde_json::{Value, json};
@@ -18,14 +18,16 @@ async fn put(addr: std::net::SocketAddr, body: Value) -> (u16, Value) {
 }
 
 #[tokio::test]
-async fn gate_and_settings_round_trip() {
+async fn availability_and_settings_round_trip() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-    std::fs::write(home.path().join(".claude/runtime-config.json"), r#"{"codex_voice_beta": true, "jev_api_key": "sk-or-x"}"#).unwrap();
+    // A chave antiga do beta, desligada, não esconde mais a voz.
+    std::fs::write(home.path().join(".claude/runtime-config.json"), r#"{"codex_voice_beta": false, "jev_api_key": "sk-or-x"}"#).unwrap();
     let addr = crate::voice_support::server(home.path()).await;
     let (status, body) = get(addr, fake::OWNER).await;
     assert_eq!(status, 200);
-    assert_eq!(body["enabled"], true);
+    // Com conta Codex, só falta o Codex instalado; ele vem da máquina que roda o teste.
+    assert_eq!(body["enabled"], body["codex"]);
     assert_eq!(body["jev"], true);
     assert_eq!(body["settings"]["codex_account"], "default");
     assert_eq!(body["call"]["active"], false);
@@ -49,9 +51,12 @@ async fn invalid_voice_and_unknown_account_are_refused() {
 }
 
 #[tokio::test]
-async fn beta_off_by_default_and_guest_token_refused() {
+async fn no_codex_account_means_unavailable_and_guest_token_refused() {
     let home = tempfile::tempdir().unwrap();
-    let addr = crate::voice_support::server(home.path()).await;
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    // A chave antiga ligada não basta: sem conta Codex a voz não aparece.
+    std::fs::write(home.path().join(".claude/runtime-config.json"), r#"{"codex_voice_beta": true}"#).unwrap();
+    let addr = crate::voice_support::server_with_accounts(home.path(), Vec::new()).await;
     assert_eq!(get(addr, fake::OWNER).await.1["enabled"], false);
     // Quem não é dono segue ao Python (o falso responde texto a qualquer rota): nunca recebe a configuração.
     assert_eq!(get(addr, "outro-token").await.1, Value::Null);

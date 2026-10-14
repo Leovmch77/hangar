@@ -6,7 +6,7 @@ import tomllib
 import pytest
 from fastapi import HTTPException
 
-from app import codex_opcoes, harness_api
+from app import codex_opcoes, harness_api, runtime_config
 from app.codex_integracao import IntegracaoCodex
 from app.codex_opcoes import ler_opcoes, salvar_opcoes
 
@@ -59,37 +59,25 @@ def test_catalogo_anuncia_teto_real_sem_inventar_um_milhao(tmp_path):
     assert ler_opcoes(service)["modelos"] == [{"model": "gpt-6-astra", "default": 272000, "max": 872000}]
 
 
-async def test_falha_do_contexto_restaura_interruptor_de_voz(monkeypatch):
-    estado = {"voz": False}
-    escritas = []
-    monkeypatch.setattr(harness_api.runtime_config, "override", lambda _: (True, False))
-    monkeypatch.setattr(harness_api.runtime_config, "get", lambda _: estado["voz"])
-    def aplicar(mudancas):
-        estado["voz"] = mudancas["codex_voice_beta"]
-        escritas.append(estado["voz"])
-    monkeypatch.setattr(harness_api.runtime_config, "aplicar", aplicar)
+async def test_interruptor_antigo_da_voz_e_aceito_e_ignorado(monkeypatch):
+    def nao_gravar(*_, **__):
+        raise AssertionError("a voz não tem mais interruptor no runtime-config")
+    monkeypatch.setattr(runtime_config, "aplicar", nao_gravar)
+    pedidos = []
+    async def salvar(_servico, contexto):
+        pedidos.append(contexto)
+        return {"contexto_estendido": contexto}
+    monkeypatch.setattr(codex_opcoes, "salvar_opcoes", salvar)
+    resposta = await harness_api.codex_opcoes_salvar(harness_api.CodexOpcoesBody(
+        contexto_estendido=True, codex_voice_beta=True))
+    assert resposta == {"contexto_estendido": True, "codex_voice_beta": True}
+    assert pedidos == [True]
+
+
+async def test_falha_do_contexto_vira_409(monkeypatch):
     async def falhar(*_):
         raise RuntimeError("config Codex indisponível")
     monkeypatch.setattr(codex_opcoes, "salvar_opcoes", falhar)
     with pytest.raises(HTTPException) as exc:
-        await harness_api.codex_opcoes_salvar(harness_api.CodexOpcoesBody(
-            contexto_estendido=True, codex_voice_beta=True))
+        await harness_api.codex_opcoes_salvar(harness_api.CodexOpcoesBody(contexto_estendido=True))
     assert exc.value.status_code == 409
-    assert escritas == [True, False]
-    assert estado["voz"] is False
-
-
-async def test_rollback_remove_override_que_nao_existia(monkeypatch):
-    estado = {"override": None}
-    monkeypatch.setattr(harness_api.runtime_config, "override", lambda _: (False, None))
-    monkeypatch.setattr(harness_api.runtime_config, "get", lambda _: False)
-    def aplicar(mudancas, *, remover=None):
-        estado["override"] = None if remover else mudancas["codex_voice_beta"]
-    monkeypatch.setattr(harness_api.runtime_config, "aplicar", aplicar)
-    async def falhar(*_):
-        raise RuntimeError("config Codex indisponível")
-    monkeypatch.setattr(codex_opcoes, "salvar_opcoes", falhar)
-    with pytest.raises(HTTPException):
-        await harness_api.codex_opcoes_salvar(harness_api.CodexOpcoesBody(
-            contexto_estendido=True, codex_voice_beta=True))
-    assert estado["override"] is None

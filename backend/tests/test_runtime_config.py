@@ -72,14 +72,11 @@ def test_preferencia_statusline_ligada_por_padrao_e_persistida():
         rc.aplicar({"claude_statusline_update": "false"})
 
 
-def test_voz_codex_beta_nasce_desligada_e_exige_booleano():
-    assert rc.get("codex_voice_beta") is False
-    rc.aplicar({"codex_voice_beta": True})
-    assert rc.estado()["codex_voice_beta"]["valor"] is True
-    with pytest.raises(ValueError):
-        rc.aplicar({"codex_voice_beta": "true"})
-    rc.aplicar({}, remover={"codex_voice_beta"})
-    assert rc.override("codex_voice_beta") == (False, None)
+def test_chave_antiga_do_beta_da_voz_fica_no_arquivo_sem_virar_configuracao():
+    rc._caminho().write_text(json.dumps({"codex_voice_beta": True}))
+    assert "codex_voice_beta" not in rc.estado()
+    rc.aplicar({"claude_statusline_update": False})
+    assert json.loads(rc._caminho().read_text())["codex_voice_beta"] is True
 
 
 def test_segredo_volta_mascarado_nunca_inteiro():

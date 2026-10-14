@@ -64,9 +64,10 @@ impl SelfApi {
 
     /// Entrada do MCP `hangar` na config da thread do organizador: o bearer do dono e a assinatura da chamada vão só aqui,
     /// nunca no ambiente nem no prompt que o modelo lê. `None` quando o sistema não deu bytes aleatórios.
-    /// As tools liberadas ficam em `organizer::thread_config`.
+    /// As tools liberadas ficam em `organizer::thread_config`. `approve`: com `approvalPolicy: never` o Codex nega toda tool
+    /// MCP que pediria aprovação, e as do `hangar` não declaram ser só leitura.
     pub fn voice_mcp(&self, internal_secret: &str) -> Option<Value> {
-        Some(json!({"enabled": true, "url": format!("{}/mcp/", self.base),
+        Some(json!({"enabled": true, "url": format!("{}/mcp/", self.base), "default_tools_approval_mode": "approve",
             "http_headers": {"Authorization": format!("Bearer {}", self.token), VOICE_HEADER: voice_signature(internal_secret)?}}))
     }
 }
@@ -254,6 +255,7 @@ mod tests {
         let (a, b) = (api.voice_mcp("segredo").unwrap(), api.voice_mcp("segredo").unwrap());
         assert_eq!(a["url"], "http://127.0.0.1:8765/mcp/");
         assert_eq!(a["enabled"], true);
+        assert_eq!(a["default_tools_approval_mode"], "approve", "com approvalPolicy never, sem isto toda tool do hangar é negada");
         assert_eq!(a["http_headers"]["Authorization"], "Bearer tok");
         let signature = a["http_headers"][VOICE_HEADER].as_str().unwrap();
         assert_ne!(signature, b["http_headers"][VOICE_HEADER].as_str().unwrap(), "uma por chamada");

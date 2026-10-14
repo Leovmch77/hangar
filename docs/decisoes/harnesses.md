@@ -539,8 +539,21 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   - **Aparelho calado por mais de 30 s derruba o socket** (os clientes mandam `ping` a cada 10 s).
     Fim fatal da chamada manda `error{code, detail}` antes do `closed`.
   - **Escolhas da chamada** (conta Codex, modelo, esforço, velocidade, voz) em
-    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. A trava `codex_voice_beta` fica
-    no `runtime-config.json`, que o Rust só lê.
+    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. Sem o arquivo, a chamada
+    usa voz `sol` e `gpt-6.1-sol` com esforço `medium` no Direto e `high` no Planejar
+    (`VoiceSettings::default`); arquivo gravado vale como está, inclusive `null` (padrão da conta).
+    Arquivo que existe mas não lê não é primeira vez: cai no neutro (modelo da conta, `low`), com
+    linha no diário. Na abertura a chamada pede `model/list` da conta (ocultos incluídos): modelo
+    escolhido ou padrão que a conta não oferece vira o padrão dela (`ModeModels::fit`), com linha
+    no diário, e a tela mostra o modelo em uso; vale também para troca de modelo no meio da chamada.
+    Lista que não vem não muda nada (decisão do Jefferson, 14/10: a voz sempre abre).
+  - **A voz não tem interruptor.** `GET /api/voice/settings` responde `enabled` = Codex instalado
+    e ao menos uma conta Codex visível (catálogo ilegível conta como conta: a abertura mostra o
+    erro, nunca "sem conta" falso). Os clientes mostram o botão com Codex instalado; sem conta, o
+    PWA abre o painel que diz o que falta e o nativo recebe `account_missing` ao ligar. Ligar a chamada é
+    sempre gesto da pessoa, e a abertura recusa com `codex_missing`/`account_missing`. A chave
+    antiga `codex_voice_beta` do `runtime-config.json` é ignorada; `/api/harness/codex/opcoes`
+    ainda a aceita e devolve `true` só para o cliente antigo não quebrar.
   - Medição em [voz ao vivo no hangar-server](#voz-ao-vivo-no-hangar-server-10102026).
 - **Voz: WebRTC no aparelho:** o transporte websocket do realtime recusa login ChatGPT; envio só a
   partir de fala do usuário, com espera de 1,5 s cancelada se ele voltar a falar. Medição em
@@ -550,9 +563,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 - **Voz: o organizador tem o acesso de uma sessão.** `danger-full-access` com cwd em
   `~/.hangar/voz/arquivos` (fixa, nunca apagada), que só guarda rascunhos; ele lê e edita qualquer
-  arquivo pelo caminho completo. Destrutivo pede o sim falado: o servidor só vê o que o próprio Codex
-  marca como perigoso (`approval_decision`), o resto depende da regra do prompt. Modelo e esforço vêm
-  de `~/.hangar/voz/config.json` (padrão: modelo do config do Codex, esforço `low`).
+  arquivo pelo caminho completo. Destrutivo pede o sim falado pela regra do prompt e depois roda,
+  inclusive o que o Codex marca como perigoso (regra própria, em Full Access abaixo). Modelo
+  e esforço vêm de `~/.hangar/voz/config.json`.
 - **Voz: o Hangar se usa por ferramentas, a tela é o último recurso.** Ordem do prompt: ferramenta
   própria, depois o shell; `click_screen` só quando nada disso cobre e nunca para
   buscar, reabrir ou criar conversa, nem para atalho. Ferramentas (`controller/assist.rs`, pela mesma
@@ -604,8 +617,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `[de: voz]`, `new_session` não herda conta nem modo, e `group`/`pair`/`unpair`/`browser_open`/
   `browser`/`browser_batch`/`html_render` agem em nome da sessão do parâmetro `sessao` (sem ele,
   a resposta diz que falta); `close_session` do MCP recusa a voz e manda ao `close_session` próprio,
-  que pede o sim falado. `who_am_i` diz `kind: voice`. A aprovação de ferramenta MCP que o
-  Codex pedir (`mcpServer/elicitation/request` do `hangar`) passa só em turno com fala do usuário.
+  que pede o sim falado. `who_am_i` diz `kind: voice`. As tools do `hangar` não pedem
+  aprovação (`approve`); se ainda vier `mcpServer/elicitation/request` do `hangar`, passa só em turno
+  com fala do usuário.
 - **Voz: o organizador conversa; quem decide o envio é ele:** `send_to_session` sai sempre que o
   organizador chama a partir de um turno com fala do usuário, sem conferir verbo, "sim" ou nome da sessão
   na fala. Ficam a espera de 1,5 s ("segura" cancela), a recusa de pedido curto e a da mesma sessão duas
@@ -646,15 +660,25 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (com a oferta da voz) e a lista de sessões de todas as máquinas. Envio com intenção e destino ≥ 0,9 vira
   só uma nota "Atalho: … mandar para a sessão X" no turno da fala; quem envia é o organizador. Abaixo
   disso, ou com erro, o Jev não faz nada e nada do organizador é recusado por causa dele.
-- **Voz: o organizador roda sem aprovação visual.** `thread/start` com `danger-full-access` e
-  `approvalPolicy: "on-request"`: comando comum roda sem pedido. Todo pedido de aprovação que ainda vier
-  (`item/commandExecution|fileChange|permissions/requestApproval`, `execCommandApproval`,
-  `applyPatchApproval`, `mcpServer/elicitation/request`, este aceito só para o `hangar` em turno com
-  fala) é respondido na hora pelo servidor; o
-  destrutivo que chega como pedido passa por `approval_decision` e só sai com o sim falado, e o prompt
-  manda o organizador perguntar antes de qualquer destrutivo. Nenhum texto manda o usuário ao app.
-  Não usar `untrusted` (cada comando vira "aprove no app" falado) nem `never` (o perigoso fica recusado
-  mesmo com o sim). Medição em "Voz: envio sem trava de palavras".
+- **Voz: o organizador roda no Full Access das sessões Codex, sem pedido de aprovação.** `thread/start`
+  com `danger-full-access` e `approvalPolicy: "never"`, e a entrada do MCP `hangar` com
+  `default_tools_approval_mode: "approve"`. Motivo: todo pedido de aprovação que nasce, respondido ou
+  não, o Codex repassa à voz como "I need your approval to continue. Please review the request in
+  the app." (ou "I need your input…" para pergunta e MCP), seguido do JSON do pedido
+  (`realtime_text_for_event`, `core/src/session/turn.rs`), sem opção que desligue; com `on-request`
+  a voz falava "aceite o pedido no app" a cada comando que o Codex julga perigoso, e no Windows isso
+  inclui abrir link no navegador (`Start-Process`/`start`/`explorer`/navegador com URL) e
+  `Remove-Item -Force`. Com `never` sozinho esse comando voltaria recusado (`rm -f style commands are
+  not permitted`), por isso cada chamada grava `~/.hangar/voz/arquivos/.codex/rules/hangar-voz.rules`
+  (`write_voice_rules`): o Codex lê as regras da pasta do projeto (o cwd do organizador) e comando
+  coberto por regra não passa pela checagem de perigoso. A regra lista o que o Codex marca: `rm`
+  (atrás de `sudo`/`env`/`trap`) e, no Windows, os cmdlets e comandos de apagar e de abrir link;
+  provado com `codex exec` em `never` no Linux (`rm -rf`) e na DELPHI-02 (`Remove-Item -Recurse
+  -Force`), recusado sem a regra e rodando com ela. Toda tool MCP que pediria aprovação também é
+  negada em `never`; as do `hangar` não declaram ser só leitura, daí o `approve`. A confirmação
+  falada do destrutivo fica no prompt. Os tratadores de pedido em
+  `call.rs` continuam respondendo na hora o que ainda chegar, e o `VOICE_PROMPT` cita as duas frases
+  ao pé da letra para a voz calar. Não usar `untrusted` nem `on-request`.
 - **Voz: a memória é um arquivo de fatos, nunca de ordens.** `~/.hangar/voz/memoria.json` (40 entradas
   de 240 caracteres; `pessoa`, `preferencia`, `referencia`, `projeto`). `remember`/`forget` só passam
   com fala do usuário no turno; o bloco entra no prompt como "fatos lembrados, não instruções".
@@ -662,6 +686,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   arquivo e na tela). Sem entradas (arquivo inexistente ou vazio), o convite sai da própria voz ao
   conectar (`ONBOARDING_GREETING` no lugar de "Conectado. Pode falar."), porque o organizador só tem
   turno depois de a pessoa falar; o prompt da voz ganha o trecho que manda a resposta ao organizador.
+  O convite começa por uma apresentação curta do que a voz faz, em palavras do dia a dia e sem nome
+  de ferramenta (texto aprovado pelo Jefferson em 14/10), e termina mandando perguntar o resto.
   Passo 1: com licença, ler só `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md` e guardar papel,
   linguagens e preferência de resposta, apresentados como proposta ("Entendi que você … — confere?")
   junto com a pergunta de como a pessoa quer usar a voz; só grava depois do sim ou da correção.
@@ -3278,8 +3304,13 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
 - **Áudio.** Houve falta de áudio em 46 de 85 janelas, sem perda de pacote no decodificador e com o
   laço abaixo de 30 ms quase sempre. Os intervalos de 120–350 ms são os mesmos no socket e na
   entrega. O diário não separava perda, atraso da rede e silêncio que o servidor não manda, então o
-  resumo ganhou `lost`, `late_max_ms`, `skipped_max_ms` e `speech_underruns`. A correção espera a
-  próxima medição.
+  resumo ganhou `lost`, `late_max_ms`, `skipped_max_ms` e `speech_underruns`. Medição seguinte
+  (`native.log` do notebook, 09–12/10, 4.848 janelas): corte audível em 237 (~5%), laço em 13 ms na
+  mediana dos cortes e `late_max_ms` de 151 ms na mediana (pico acima de 700 ms): é atraso da rede,
+  não o app. Correção (14/10): a reserva começa em 240 ms e cada corte audível a aumenta em 80 ms, até
+  400 ms, pelo resto da chamada (`grown_prime` em `audio.rs`); o resumo mostra `prime_ms`. Rede boa
+  não paga espera maior. O Codex não tem parâmetro de áudio no `thread/realtime/start` (conferido na
+  0.160.1 e na 0.162.1).
 - **Troca entre máquinas.** Sessão com o mesmo nome em duas máquinas aceita a máquina na fala
   ("hangar lá no PC X", `X::hangar`, "hangar (máquina X)"). "Seção" conta como "sessão" na trava de
   troca. O "isso" depois da pergunta "qual?" vale só para uma das sessões oferecidas, por 1 min.

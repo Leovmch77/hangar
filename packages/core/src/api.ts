@@ -57,7 +57,6 @@ import type {
 
 export interface CodexOpcoes {
   contexto_estendido: boolean;
-  codex_voice_beta: boolean;
   contexto_configurado: number | null;
   compactacao: number | null;
   modelos: { model: string; default: number; max: number }[];
@@ -71,7 +70,7 @@ export function liveVoiceUrlForServer(server: Server, origin: string): string {
 export function codexOpcoes(
   alvo: Server | null,
   signal: AbortSignal,
-  mudancas?: boolean | Pick<CodexOpcoes, 'contexto_estendido' | 'codex_voice_beta'>,
+  mudancas?: boolean | Pick<CodexOpcoes, 'contexto_estendido'>,
 ): Promise<CodexOpcoes> {
   const body = typeof mudancas === 'boolean' ? { contexto_estendido: mudancas } : mudancas;
   const init = {

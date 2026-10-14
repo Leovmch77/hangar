@@ -4576,7 +4576,7 @@ impl Hangar {
                 notes.push(tr("delivery_unproved"));
                 discard = event.id.strip_prefix("queued-").map(str::to_owned);
             }
-            else if event.queued() { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
+            else if event.queued() && event.queued_consumed != Some(true) { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
             if event.is_error == Some(true) { notes.push(tr("tool_error")); }
             (label, (!notes.is_empty()).then(|| notes.join(" · ")), event.kind == "user_msg", event.is_error == Some(true))
         };

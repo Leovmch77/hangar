@@ -612,17 +612,13 @@ impl Hangar {
         if server != self.active_key() { return; }
         let before = (self.voice.settings.clone(), self.voice.accounts.clone(), self.voice.voices.clone());
         if let Some(body) = &body {
-            let codex = body["codex"] == true;
-            self.voice.enabled = body["enabled"] == true && codex;
+            // Só mostra ou esconde o botão; chamada viva não cai por esta leitura, quem a encerra é o servidor dela, com o motivo.
+            // Codex sem conta mostra o botão: ligar a chamada traz a recusa `account_missing` com o texto, em vez de sumir calado.
+            self.voice.enabled = body["codex"] == true;
             self.voice.voices = body["voices"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
             self.voice.busy = (body["call"]["active"] == true).then(|| body["call"]["client"].as_str().unwrap_or_default().to_owned());
             // Escolha feita aqui no meio da chamada não volta atrás pela leitura.
             if self.voice.call.is_none() && let Ok(settings) = serde_json::from_value(body["settings"].clone()) { self.voice.settings = Some(settings); }
-            // O servidor da chamada desligou a voz ou perdeu o Codex: ela encerra aqui também, sem esperar o aviso dele.
-            if !self.voice.enabled && self.voice.call.is_some() && self.voice.server.as_deref() == Some(server.as_str()) {
-                self.voice.error = Some(tr(if codex { "voice_gate_off" } else { "voice_codex_missing" }));
-                self.stop_voice(cx);
-            }
         }
         // Lista que não veio fica como estava: leitura falha não é "sem contas".
         if let Some(accounts) = accounts && self.voice.call.is_none() { self.voice.accounts = accounts; }

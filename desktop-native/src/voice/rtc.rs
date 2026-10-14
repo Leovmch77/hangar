@@ -165,10 +165,10 @@ fn drive(offer: Offer, answer: String, muted: Arc<AtomicBool>, events: &async_ch
         if last_summary.elapsed() >= SUMMARY_EVERY {
             let w = std::mem::take(&mut window);
             let flow = audio.take_flow();
-            log(format!("rtc summary connected={connected} written={} write_errors={} encode_errors={} no_writer={} no_opus={} received={} rtp_raw={} decode_errors={} max_in={:.4} raw_in_peak={:.4} max_out={:.4} capture_queue={} playback_queue={} underruns={} speech_underruns={} flow_in={} flow_played={} flow_dropped={} out_frames={} gap_raw_ms={} gap_media_ms={} loop_max_ms={} lost={} late_max_ms={} skipped_max_ms={}",
+            log(format!("rtc summary connected={connected} written={} write_errors={} encode_errors={} no_writer={} no_opus={} received={} rtp_raw={} decode_errors={} max_in={:.4} raw_in_peak={:.4} max_out={:.4} capture_queue={} playback_queue={} underruns={} speech_underruns={} prime_ms={} flow_in={} flow_played={} flow_dropped={} out_frames={} gap_raw_ms={} gap_media_ms={} loop_max_ms={} lost={} late_max_ms={} skipped_max_ms={}",
                 w.written, w.write_errors, w.encode_errors, w.no_writer, w.no_opus, w.received, w.rtp_raw, w.decode_errors,
                 w.max_in, audio.take_raw_peak(), w.max_out, audio.capture_len(), audio.playback_len(), audio.take_underruns(), audio.take_speech_underruns(),
-                flow[0], flow[1], flow[2], flow[3], w.gap_raw_ms, w.gap_media_ms, w.loop_max_ms, w.lost, w.late_max_ms, w.skipped_max_ms));
+                audio.prime_ms(), flow[0], flow[1], flow[2], flow[3], w.gap_raw_ms, w.gap_media_ms, w.loop_max_ms, w.lost, w.late_max_ms, w.skipped_max_ms));
             last_summary = Instant::now();
         }
         let timeout = match rtc.poll_output() {

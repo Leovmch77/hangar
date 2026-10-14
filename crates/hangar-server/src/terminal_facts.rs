@@ -186,6 +186,9 @@ impl LocalTerminalFacts {
     pub fn plugin_facts(&self, target: &TerminalTarget) -> Result<Value, ServiceError> {
         match &self.plugin { Some(store) => store.facts(&Self::binding(target), Instant::now()), None => Ok(Value::Null) }
     }
+    pub fn abandon_publication(&self, target: &TerminalTarget, publication_id: &str) -> Result<(), ServiceError> {
+        match &self.plugin { Some(store) => store.abandon(&Self::binding(target), publication_id), None => Ok(()) }
+    }
     pub async fn publish(&self, target: &TerminalTarget, binding: &TerminalBinding, request: PluginRequest) -> Result<PluginReply, ServiceError> {
         self.check(target, binding).await?;
         if !plugin_current(&self.plugin_facts(target)?, target.metadata.cut(target.created)) { return Ok(PluginReply::NotWritten); }

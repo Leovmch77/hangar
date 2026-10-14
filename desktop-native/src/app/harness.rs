@@ -117,7 +117,7 @@ struct CodexAccount { id: String, name: String, #[serde(default)] is_default: bo
 struct AccountAuth { email: Option<String> }
 
 #[derive(Clone, Deserialize)]
-struct CodexOptions { contexto_estendido: bool, codex_voice_beta: bool, compactacao: Option<u64>, #[serde(default)] modelos: Vec<CodexModel> }
+struct CodexOptions { contexto_estendido: bool, compactacao: Option<u64>, #[serde(default)] modelos: Vec<CodexModel> }
 
 #[derive(Clone, Deserialize)]
 struct CodexModel { model: String, max: u64 }
@@ -390,8 +390,7 @@ impl Hangar {
         let Some(api) = self.api.clone() else { return };
         let Some(current) = self.harness.codex_options.as_ref() else { return };
         if self.harness.codex_options_toggling { return; }
-        let mut body = serde_json::json!({ "contexto_estendido": current.contexto_estendido,
-            "codex_voice_beta": current.codex_voice_beta });
+        let mut body = serde_json::json!({ "contexto_estendido": current.contexto_estendido });
         body[key] = Value::Bool(on);
         self.harness.codex_options_toggling = true;
         self.harness.codex_options_error = None;
@@ -722,11 +721,7 @@ impl Hangar {
                 } else { Self::setting_failure(&error) })
                     .and_then(|value| serde_json::from_value::<CodexOptions>(value).map_err(|_| tr("invalid_response")));
                 match parsed {
-                    Ok(options) if seq == self.harness.codex_options_seq => {
-                        // A opção beta liga a voz do servidor: a pílula relê a trava dele.
-                        if write { self.refresh_voice_gate(cx); }
-                        self.harness.codex_options = Some(options);
-                    }
+                    Ok(options) if seq == self.harness.codex_options_seq => self.harness.codex_options = Some(options),
                     Ok(_) if write => self.read_codex_options(true, cx),
                     Err(error) if write => {
                         self.harness.codex_options_error = Some(error);
@@ -859,9 +854,8 @@ impl Hangar {
         if let Some(options) = &h.codex_options {
             for (key, label, help, on) in [
                 ("contexto_estendido", "codex_contexto_titulo", "codex_contexto_ajuda", options.contexto_estendido),
-                ("codex_voice_beta", "codex_voice_config_title", "codex_voice_config_help", options.codex_voice_beta),
             ] {
-                let title = if key == "codex_voice_beta" { format!("{} · {}", web(label), web("comum_beta")) } else { web(label) };
+                let title = web(label);
                 block = block.child(div().flex().items_center().gap_3().py(px(6.)).border_b_1().border_color(theme::border())
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title.clone()))

@@ -350,6 +350,7 @@ fn entry_event(entry: &Map<String, Value>) -> ChatEvent {
             text,
             queued_delivered: entry.get("delivered").and_then(Value::as_bool),
             desistiu: py::truthy(entry.get("desistiu")).then_some(true),
+            queued_consumed: (entry.get("consumed") == Some(&Value::Bool(true))).then_some(true),
             queued_ts: entry.get("ts").and_then(py::number),
             ..event(ChatKind::UserMsg, format!("queued-{id}"))
         }

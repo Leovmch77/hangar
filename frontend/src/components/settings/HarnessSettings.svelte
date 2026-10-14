@@ -281,33 +281,28 @@
 
   // Só depois de saber que o Codex está instalado: a tela de hoje também só oferecia estas opções
   // no card de um Codex presente.
-  async function consultarOpcoesCodex(ctx: ConsultaIntegracao, mudancas?: Pick<CodexOpcoes, 'contexto_estendido' | 'codex_voice_beta'>) {
+  async function consultarOpcoesCodex(ctx: ConsultaIntegracao, mudancas?: Pick<CodexOpcoes, 'contexto_estendido'>) {
     const requisicao = ++ctx.reqCodex;
     erroOpcoesCodex = '';
     try {
       const r = await codexOpcoes(ctx.alvo, ctx.controle.signal, mudancas);
       if (ctx.controle.signal.aborted || requisicao !== ctx.reqCodex) return;
       opcoesDoCodex = r;
-      if (mudancas) window.dispatchEvent(new CustomEvent('hangar:codex-voice-config', {
-        detail: { serverId: ctx.alvo?.id ?? null, enabled: r.codex_voice_beta },
-      }));
     } catch (e) {
       if (ctx.controle.signal.aborted || requisicao !== ctx.reqCodex) return;
       erroOpcoesCodex = e instanceof Error ? e.message : String(e);
     }
   }
 
-  function trocarOpcaoCodex(ev: Event, chave: 'contexto_estendido' | 'codex_voice_beta') {
+  function trocarOpcaoCodex(ev: Event) {
     const alvo = ev.currentTarget as HTMLInputElement;
     const querido = alvo.checked;
     alvo.checked = !querido;
     const ctx = consulta;
-    const atual = opcoesDoCodex;
-    if (!ctx || !atual || trocandoOpcoesCodex) return;
+    if (!ctx || !opcoesDoCodex || trocandoOpcoesCodex) return;
     trocandoOpcoesCodex = true;
-    void consultarOpcoesCodex(ctx, {
-      contexto_estendido: atual.contexto_estendido, codex_voice_beta: atual.codex_voice_beta, [chave]: querido,
-    }).finally(() => { if (consulta === ctx) trocandoOpcoesCodex = false; });
+    void consultarOpcoesCodex(ctx, { contexto_estendido: querido })
+      .finally(() => { if (consulta === ctx) trocandoOpcoesCodex = false; });
   }
 
   let trocandoAutomatica = $state(false);
@@ -876,17 +871,7 @@
               <input id="codex-contexto-estendido" type="checkbox" class="switch"
                 aria-label={m.codex_contexto_titulo()} aria-describedby="codex-contexto-ajuda"
                 checked={dado.contexto_estendido} disabled={trocandoOpcoesCodex}
-                onchange={(ev) => trocarOpcaoCodex(ev, 'contexto_estendido')} />
-            </label>
-            <label class="hs-item hs-opcao">
-              <span class="hs-item-txt">
-                <b>{m.codex_voice_config_title()} <i class="hs-beta">{m.comum_beta()}</i></b>
-                <span class="hs-ajuda" id="codex-voz-ajuda">{m.codex_voice_config_help()}</span>
-              </span>
-              <input id="codex-voice-beta" type="checkbox" class="switch"
-                aria-label="{m.codex_voice_config_title()} {m.comum_beta()}" aria-describedby="codex-voz-ajuda"
-                checked={dado.codex_voice_beta} disabled={trocandoOpcoesCodex}
-                onchange={(ev) => trocarOpcaoCodex(ev, 'codex_voice_beta')} />
+                onchange={trocarOpcaoCodex} />
             </label>
             <p class="hs-aviso">{m.codex_contexto_novas()}</p>
             {#if dado.modelos.length}
@@ -968,8 +953,6 @@
   .hs-item-txt { flex: 1; min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
   .hs-item-txt b { color: var(--text-primary); font-weight: 600; }
   .hs-automatica, .hs-opcao { cursor: pointer; }
-  .hs-beta { display: inline-block; margin-left: var(--space-1); padding: 1px 6px; border-radius: var(--radius-full);
-             background: var(--accent-dim); color: var(--accent); font-size: 10px; font-style: normal; text-transform: uppercase; }
   .hs-ajuda { display: block; font-size: var(--text-xs); color: var(--text-muted); }
   .hs-ajuda.erro { color: var(--error); }
   /* `.cfg-porque` é global (app.css). O recuo alinha o motivo com o texto da linha, e não com a

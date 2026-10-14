@@ -12,7 +12,7 @@ import { donoDaLinha } from './covers';
 export function waitsInQueue(e: ChatEvent, provider?: string | null, headless = false): boolean {
   // Codex e Claude sem terminal: a fila é do processo, entregue não conta mais como espera.
   const filaDoProcesso = provider === 'codex' || headless;
-  return e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu
+  return e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu && !e.queued_consumed
     && (!filaDoProcesso || !e.queued_delivered);
 }
 

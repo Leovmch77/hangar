@@ -138,7 +138,6 @@ async fn launch_full(caps: &[&str], peers: Option<Value>, audio_grace: Duration,
         std::fs::create_dir_all(dir.path().join("voz")).unwrap();
         std::fs::write(dir.path().join("voz").join("memoria.json"), body).unwrap();
     }
-    std::fs::write(dir.path().join("runtime-config.json"), r#"{"codex_voice_beta": true}"#).unwrap();
     let peers_path = peers.map(|p| { let path = dir.path().join("peers.json"); std::fs::write(&path, p.to_string()).unwrap(); path });
     let api: Shared = Arc::new(Mutex::new(Api {
         sessions: json!([{"name": "hangar", "provider": "claude", "state": "idle"}, {"name": "web", "provider": "codex", "state": "working"}]),
@@ -156,11 +155,10 @@ async fn launch_full(caps: &[&str], peers: Option<Value>, audio_grace: Duration,
         command_limit: crate::voice::call::COMMAND_LIMIT };
     let voice = Voice::start(options, spawn, tx);
     let (link, device) = DeviceLink::channel(caps, Some(Screen { server: String::new(), name: "hangar".into() }));
-    let gate = GateSource { home: dir.path().to_path_buf(), claude_dir: dir.path().to_path_buf(), every: Duration::from_secs(5) };
     let diag = DiagClient::new("127.0.0.1:9".parse().unwrap(), "x".into());
     let (to_ctl, from_device) = mpsc::unbounded_channel();
     let jev = jev::Config { key: "k".into(), url: format!("http://{addr}/jev"), model: "jev-test".into() };
-    let mut controller = Controller::new(voice, machines, Some(jev), link.clone(), gate, diag);
+    let mut controller = Controller::new(voice, machines, Some(jev), link.clone(), diag);
     if let Some(computer) = computer { controller.computer_runner = computer; }
     tokio::spawn(controller.run(events, from_device));
     Rig { seen, log: Vec::new(), push, to_ctl, device, api, link, _dir: dir }

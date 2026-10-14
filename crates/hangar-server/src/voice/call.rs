@@ -223,7 +223,12 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         log(format!("own folder create failed kind={:?}", error.kind()));
         let _ = events.send(VoiceEvent::Failed(VoiceFailure::OwnFolder)).await;
     }
+    // Sem a regra, o comando que o Codex julga perigoso volta recusado ao organizador, que diz isso em voz.
+    if let Err(error) = organizer::write_voice_rules(&own) { log(format!("voice rules write failed kind={:?}", error.kind())); }
+    let available = super::rpc::account_models(&rpc).await;
+    if available.is_none() { log("account model list unavailable; chosen models kept"); }
     let mut models = options.organizer.clone();
+    for model in models.fit(available.as_deref()) { log(format!("model {model} not in the account; using the account default")); }
     let mut applied = models.direct.clone();
     let memory_file = super::memory::memory_path(&options.voice_dir);
     // Ilegível: abre sem memória e sem convite de perfil; a tela mostra o erro. Vazia (sem arquivo ou sem entrada): a voz
@@ -451,6 +456,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                 }
                 Some(Command::Models(edited)) => {
                     models = edited;
+                    for model in models.fit(available.as_deref()) { log(format!("model {model} not in the account; using the account default")); }
                     // A falha já aparece no cartão; o modo não mudou, não há o que dizer ao organizador.
                     let _ = apply_models(&rpc, &thread, &mut applied, &models, planner.mode, &defaults, &mut effective, events).await;
                 }
@@ -1460,7 +1466,7 @@ mod tests {
         let voice = Voice::start(options(json!([])), spawn, tx);
         voice.offer(1, "v=0 offer A".into(), "ctx".into());
         let start = until(&mut seen, "thread/start", |m| m["method"] == "thread/start").await;
-        assert_eq!(start["params"]["approvalPolicy"], "on-request");
+        assert_eq!(start["params"]["approvalPolicy"], "never");
         assert_eq!(start["params"]["sandbox"], "danger-full-access");
         next_answer(&events).await;
         voice.live();
