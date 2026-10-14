@@ -86,6 +86,19 @@ describe('entradas de par externo', () => {
     expect(useServers.getState().activeId).toBe(dono.id);
   });
 
+  test('remover a ativa nunca escolhe a entrada temporária como nova ativa', async () => {
+    await useServers.getState().load();
+    useServers.getState().applyPairs([PAIR]);
+    const outra = { id: 's_b', label: 'b', baseUrl: 'http://10.0.0.3:8765', token: 'b' };
+    const ativa = { id: 's_a', label: 'a', baseUrl: 'http://10.0.0.2:8765', token: 'a' };
+    useServers.setState({ servers: [...useServers.getState().servers, outra, ativa], activeId: ativa.id });
+    expect(useServers.getState().servers[0].ephemeral).toBe(true);
+    useServers.getState().remove(ativa.id);
+    expect(useServers.getState().activeId).toBe(outra.id);
+    useServers.getState().remove(useServers.getState().servers.find((s) => s.ephemeral)!.id);
+    expect(useServers.getState().activeId).toBe(outra.id);
+  });
+
   test('máquinas próprias deixam a entrada temporária de fora', async () => {
     await useServers.getState().load();
     useServers.getState().add({ baseUrl: 'http://10.0.0.2:8765', token: 'abc' });

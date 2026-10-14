@@ -50,7 +50,7 @@ _GLOBAL_ROUTES = {
 # navsock registre tentativa falha contra o IP dele.
 _BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
             "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept",
-            "nav-remoto", "navegador"}
+            "pair-access", "nav-remoto", "navegador"}
 
 
 def guest_allowed_user(guest, method: str, path: str) -> bool:

@@ -161,7 +161,9 @@ Kimi Code. Setup details, Tailscale, the phone and every feature are in the
                                                ▼
                          hangar-server (Rust, :8765)
                           lists, live state, history, costs, groups,
-                          accounts, session attachments
+                          accounts, session attachments, sharing
+                          (guest port :8766 via Funnel, invites,
+                          external pairs)
                                                │
                          Python backend (loopback, behind it)
                           sessions, adapters, MCP

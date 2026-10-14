@@ -79,7 +79,7 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   remove(id) {
     const servers = get().servers.filter((s) => s.id !== id);
-    const activeId = get().activeId === id ? (servers[0]?.id ?? null) : get().activeId;
+    const activeId = get().activeId === id ? (ownServers(servers)[0]?.id ?? null) : get().activeId;
     void persistir(set, { servers, activeId });
     set({ servers, activeId });
   },

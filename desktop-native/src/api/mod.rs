@@ -787,7 +787,11 @@ pub enum ShareFailure { Blocked(SharePrereqs), Unreachable { stage: String, deta
 /// Recusa da criação que a tela trata à parte; o resto segue como falha comum.
 pub fn share_refusal(status: u16, body: &Value) -> Option<ShareFailure> {
     match status {
-        404 | 405 => Some(ShareFailure::NeedsRust),
+        // Só a rota ausente (sem código) ou a recusa explícita do Python; o 404 com código do Rust é falha comum.
+        404 | 405 => match body.get("detail").and_then(|d| d.get("code")).and_then(Value::as_str) {
+            None | Some("share_needs_rust_server") => Some(ShareFailure::NeedsRust),
+            Some(_) => None,
+        },
         409 => share_blocked(body).map(ShareFailure::Blocked).or_else(|| {
             let detail = body.get("detail")?;
             if detail.get("code")?.as_str()? != "share_reach_failed" { return None; }
@@ -850,6 +854,15 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn coded_not_found_is_not_needs_rust() {
+        let missing = json!({"detail": {"code": "erro_sessao_inexistente", "msg": "x"}});
+        assert!(share_refusal(404, &missing).is_none());
+        let python = json!({"detail": {"code": "share_needs_rust_server", "msg": "x"}});
+        assert!(matches!(share_refusal(404, &python), Some(ShareFailure::NeedsRust)));
+        assert!(matches!(share_refusal(405, &json!({"detail": "Method Not Allowed"})), Some(ShareFailure::NeedsRust)));
+    }
 
     #[test]
     fn pair_accept_without_level_is_view() {

@@ -40,9 +40,9 @@ fn remote_peer(s: &SessionInfo) -> bool {
 pub(super) struct Grant { pub session: String, pub alias: String, pub owner: String }
 
 /// Juntar `side` (uma sessão e seus membros locais) a um grupo cujo par de fora tem acesso completo: cada sessão que chega
-/// fica aberta para ele, e a tela confirma antes. Pendente conta como completo: o par tem, só falta liberar.
+/// fica aberta para ele, e a tela confirma antes. Pendente fica de fora: só o "Liberar" abre acesso completo.
 pub(super) fn full_grants(group: &SessionInfo, side: &SessionInfo) -> Vec<Grant> {
-    let full: Vec<PairExternalEntry> = group.outside_pairs().iter().filter(|p| p.level == "full" || p.pending).cloned().collect();
+    let full: Vec<PairExternalEntry> = group.outside_pairs().iter().filter(|p| p.level == "full" && !p.pending).cloned().collect();
     let mine = side.outside_pairs();
     let names = std::iter::once(side.name.clone()).chain(side.peers().iter().filter(|p| !p.contains("::")).cloned());
     names.flat_map(|session| full.iter().filter(|p| !mine.iter().any(|m| m.alias == p.alias && m.session == p.session))
@@ -718,8 +718,9 @@ mod tests {
         let got = full_grants(&group, &side);
         assert_eq!(got, vec![Grant { session: "a".into(), alias: "ana".into(), owner: "Ana".into() },
             Grant { session: "b".into(), alias: "ana".into(), owner: "Ana".into() }], "só o par completo, só as locais");
-        let pending = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", true)]), ..s("X", Some("g"), &["ana::Y"]) };
-        assert_eq!(full_grants(&pending, &s("a", None, &[])).len(), 1, "pendente é par com acesso completo");
+        let pending = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", true), ext("bia", "Bia", "Z", "full", true)]),
+            ..s("X", Some("g"), &["ana::Y", "bia::Z"]) };
+        assert!(full_grants(&pending, &s("a", None, &[])).is_empty(), "pendente só abre pelo Liberar");
         assert!(full_grants(&s("a", None, &[]), &group).is_empty(), "grupo sem par de fora não pede nada");
     }
 
