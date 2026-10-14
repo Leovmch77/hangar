@@ -978,7 +978,7 @@ fn decorate_context(cache: &mut ContextCache, row: &mut SessionRow, pid: Option<
         };
         let account_dir = context::config_dir_of(row.conta.as_deref()).unwrap_or_else(|| dirs.claude.clone());
         let scan = cache.scan(&row.name, &jsonl, &version);
-        let reading = context::claude_reading_from(&ReadingInputs { jsonl: Path::new(&jsonl), account_dir: &account_dir,
+        let reading = cache.reading(&ReadingInputs { jsonl: Path::new(&jsonl), account_dir: &account_dir,
             chosen: chosen.as_deref(), opened: opened.as_deref(), declared, engine: row.engine.is_some() }, &scan);
         cache.store_with(&row.name, &jsonl, mono, reading, version, Some(scan))
     } else {

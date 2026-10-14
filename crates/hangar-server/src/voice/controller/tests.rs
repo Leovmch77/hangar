@@ -152,7 +152,7 @@ async fn launch_full(caps: &[&str], peers: Option<Value>, audio_grace: Duration,
     let options = CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(),
         tools: tools_for(&caps), handoff_same_thread: true, voice_dir: dir.path().join("voz"), audio_grace,
         hangar_mcp: Some(json!({"enabled": true, "url": format!("http://{addr}/mcp/"), "http_headers": {"X-Hangar-Voice": "n.sig"}})),
-        command_limit: crate::voice::call::COMMAND_LIMIT };
+        command_limit: crate::voice::call::COMMAND_LIMIT, result_silence: crate::voice::organizer::RESULT_SILENCE };
     let voice = Voice::start(options, spawn, tx);
     let (link, device) = DeviceLink::channel(caps, Some(Screen { server: String::new(), name: "hangar".into() }));
     let diag = DiagClient::new("127.0.0.1:9".parse().unwrap(), "x".into());
@@ -285,6 +285,8 @@ async fn sending_to_a_session_follows_every_later_reply() {
     push_speech(&rig.push, "turn-1", "manda pra web revisar o login");
     push_tool(&rig.push, "s1", "send_to_session", json!({"request": "revisar o login", "session": "web"}), "turn-1");
     assert_eq!(rig.reply("s1").await["success"], true);
+    // Com o turno da fala aberto a conversa segue em curso e o resultado espera.
+    let _ = rig.push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-1", "status": "completed"}}}));
     rig.state("web acompanhada", |s| s["followed"].as_array().is_some_and(|f| f.iter().any(|e| e["name"] == "web"))).await;
     for (id, text) in [("9", "primeira"), ("10", "segunda")] {
         tokio::time::sleep(Duration::from_millis(1600)).await;
@@ -821,6 +823,39 @@ async fn sure_jev_send_steers_a_shortcut_to_the_organizer() {
     assert_eq!(rig.api.lock().unwrap().inputs, vec![("web".to_owned(), "revisar o login da tela".to_owned())]);
 }
 
+/// Jev certo de que a fala pede para ler ou explicar uma sessão: o Hangar lê em paralelo e entrega a leitura no turno da
+/// fala, e o organizador responde sem a ida e volta do read_session.
+#[tokio::test]
+async fn sure_jev_read_steers_the_session_reading_into_the_turn() {
+    let mut rig = rig(&[], None).await;
+    push_tool(&rig.push, "l1", "list_sessions", json!({}), "turn-0");
+    rig.reply("l1").await;
+    rig.api.lock().unwrap().history.insert("web".into(), long_history(&["roda os testes"]));
+    rig.api.lock().unwrap().jev = Some(json!({"intent": {"choice": "read", "probabilities": {"read": 0.95}},
+        "session": {"choice": "s2", "probabilities": {"s2": 0.94}}, "action": {"choice": "none", "probabilities": {"none": 0.9}}}));
+    push_speech(&rig.push, "turn-1", "o que a web fez?");
+    let note = rig.wait("leitura do Jev", |m| m["method"] == "turn/steer" && m["params"]["expectedTurnId"] == "turn-1"
+        && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.contains("O Hangar já leu a conversa da sessão web"))).await;
+    let text = note["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Usuário: roda os testes") && text.contains("não chame read_session"), "{text}");
+}
+
+/// Abaixo de `SURE` o Hangar não lê por conta própria: quem decide é o organizador.
+#[tokio::test]
+async fn unsure_jev_read_leaves_the_reading_to_the_organizer() {
+    let mut rig = rig(&[], None).await;
+    push_tool(&rig.push, "l1", "list_sessions", json!({}), "turn-0");
+    rig.reply("l1").await;
+    rig.api.lock().unwrap().history.insert("web".into(), long_history(&["roda os testes"]));
+    rig.api.lock().unwrap().jev = Some(json!({"intent": {"choice": "read", "probabilities": {"read": 0.8}},
+        "session": {"choice": "s2", "probabilities": {"s2": 0.94}}, "action": {"choice": "none", "probabilities": {"none": 0.9}}}));
+    push_speech(&rig.push, "turn-1", "o que a web fez?");
+    jev_answered(&rig, 1).await;
+    rig.drain();
+    assert!(!rig.log.iter().any(|m| m["method"] == "turn/steer"
+        && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.contains("já leu a conversa"))));
+}
+
 /// Jev incerto ou fora do ar: nenhum atalho, nenhum veto; o envio do organizador sai igual.
 #[tokio::test]
 async fn unsure_or_failed_jev_never_blocks_the_organizer_send() {
@@ -1078,6 +1113,12 @@ async fn open_session_passes_what_the_user_said_and_keeps_bypass_as_the_default(
     assert_eq!((created[1]["permission_mode"].as_str(), created[1]["headless"].as_bool(), created[1]["config_dir"].as_str()),
         (Some("plan"), Some(true), Some("/h/.claude-b")));
     assert_eq!(created[2]["permission_mode"], "bypassPermissions");
+    // Sem escolha, o corpo é o da tela de criação sem toque: modelo e esforço nulos (vale o settings.json da conta),
+    // e execução e conta ausentes (o backend aplica `headless_default` e a conta com cota).
+    assert!(created[2]["model"].is_null() && created[2]["effort"].is_null(), "{}", created[2]);
+    for key in ["headless", "config_dir", "engine"] {
+        assert!(created[2].get(key).is_none(), "{key}: {}", created[2]);
+    }
 }
 
 /// O MCP `hangar` entra na thread com a identidade da chamada; o pedido do Codex para usar a ferramenta só passa em turno

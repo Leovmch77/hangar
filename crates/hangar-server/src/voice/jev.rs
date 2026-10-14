@@ -95,11 +95,11 @@ fn picks(answers: &Value) -> std::collections::HashMap<String, Pick> {
 
 /// O que a fala pede, com as opções que o app conhece agora.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Intent { Switch, Screen, Send, Talk, Hold, Noise }
+pub enum Intent { Switch, Screen, Send, Read, Talk, Hold, Noise }
 
 impl Intent {
     fn from(choice: &str) -> Option<Self> {
-        Some(match choice { "switch" => Self::Switch, "screen" => Self::Screen, "send" => Self::Send, "talk" => Self::Talk,
+        Some(match choice { "switch" => Self::Switch, "screen" => Self::Screen, "send" => Self::Send, "read" => Self::Read, "talk" => Self::Talk,
             "hold" => Self::Hold, "none" => Self::Noise, _ => return None })
     }
 }
@@ -133,11 +133,12 @@ pub fn questions(utterance: &str, recent: &str, on_screen: Option<&str>, session
             "switch": "trocar a sessão aberta na tela para outra sessão",
             "screen": "abrir, fechar ou mostrar algo na tela do Hangar (configurações, terminal, painel, custos)",
             "send": "mandar um trabalho, mensagem, pergunta ou aviso para uma sessão",
+            "read": "saber o que uma sessão falou, fez, respondeu ou onde parou (ler ou explicar a conversa dela), sem mandar nada",
             "talk": "conversar, perguntar, analisar ou planejar junto com o assistente",
             "hold": "pedir para esperar ou não mandar ainda",
             "none": "fala incompleta, hesitação ou ruído"}},
-        "session": {"type": "choice", "instructions": "Para qual destas sessões a fala aponta: a que ele quer abrir na tela ou a que deve receber \
-            o pedido? Ele costuma dizer só um pedaço do nome ('voz' é voz-entendimento, 'api' é pm18920-api) ou indicar pela conversa ('manda \
+        "session": {"type": "choice", "instructions": "Para qual destas sessões a fala aponta: a que ele quer abrir na tela, a que deve receber \
+            o pedido ou a que ele quer entender? Sem nome nem referência na conversa, é a sessão na tela. Ele costuma dizer só um pedaço do nome ('voz' é voz-entendimento, 'api' é pm18920-api) ou indicar pela conversa ('manda \
             pra ela', 'pode' a uma oferta da voz), e a transcrição pode separar ou errar letras ('P-Workstation' é PWorkStation, 'seção' é \
             sessão). A máquina não precisa ser dita: a sessão pode estar em qualquer uma.", "criteria": criteria(sessions, 's')},
         "action": {"type": "choice", "instructions": "Se ele quer uma ação na tela do Hangar, qual destas?", "criteria": criteria(actions, 'a')},

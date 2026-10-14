@@ -50,8 +50,12 @@ pub fn claude_reading(inputs: &ReadingInputs) -> Reading {
 
 /// Como `claude_reading`, a partir do rabo já varrido (`scan_tail` ou `ContextCache::scan`).
 pub fn claude_reading_from(inputs: &ReadingInputs, scan: &Scan) -> Reading {
+    reading_with(inputs, scan, None)
+}
+
+fn reading_with(inputs: &ReadingInputs, scan: &Scan, learned: Option<u64>) -> Reading {
     let model = non_empty(inputs.chosen).or(non_empty(inputs.opened));
-    let (ctx, answered) = assemble(scan, inputs.jsonl, inputs.account_dir, model, inputs.declared);
+    let (ctx, answered) = assemble(scan, inputs.jsonl, inputs.account_dir, model, inputs.declared, learned);
     let used = ctx.map_or(0, |c| c.used);
     (ctx, session_model(answered.as_deref(), model, inputs.account_dir, used, inputs.engine))
 }
@@ -92,11 +96,11 @@ pub type Scan = Option<Option<(u64, Option<String>)>>;
 
 /// Contexto da última resposta do agente principal e o id do modelo que a deu.
 pub fn read(jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> Reading {
-    assemble(&scan_tail(jsonl), jsonl, account_dir, model, window_tokens)
+    assemble(&scan_tail(jsonl), jsonl, account_dir, model, window_tokens, None)
 }
 
 /// A janela depende do modelo e da declaração, que mudam sem o transcript mudar: fica fora da varredura.
-fn assemble(scan: &Scan, jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> Reading {
+fn assemble(scan: &Scan, jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>, learned: Option<u64>) -> Reading {
     let Some(found) = scan else { return (None, None) };
     let measured = measured(jsonl).map(|mut c| {
         if let Some(declared) = window_tokens.filter(|n| *n > 0) { c.window = declared; }
@@ -104,7 +108,7 @@ fn assemble(scan: &Scan, jsonl: &Path, account_dir: &Path, model: Option<&str>, 
     });
     match found {
         Some((used, answered)) => {
-            let ctx = ContextUse { used: *used, window: measured.map_or_else(|| window(*used, account_dir, model, window_tokens), |c| c.window) };
+            let ctx = ContextUse { used: *used, window: measured.map_or_else(|| window(*used, account_dir, model, window_tokens, learned), |c| c.window) };
             (Some(ctx), answered.clone())
         }
         None => (measured, None),
@@ -181,9 +185,10 @@ pub fn session_model(answered: Option<&str>, opened: Option<&str>, account_dir: 
     Some(if used > WINDOW_DEFAULT || same_1m { format!("{base}[1m]") } else { base })
 }
 
-/// 1M quando o modelo é a variante `[1m]` ou quando o uso já passou da janela padrão; o modelo da
-/// sessão vence o da conta, e a janela declarada vence os dois.
-pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> u64 {
+/// 1M quando o modelo é a variante `[1m]`; senão a janela que o Claude já informou para o modelo
+/// respondido (`learned`), e por fim o uso decide. O modelo da sessão vence o da conta, e a janela
+/// declarada vence tudo.
+pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>, learned: Option<u64>) -> u64 {
     if let Some(w) = window_tokens.filter(|w| *w > 0) {
         return w;
     }
@@ -191,13 +196,18 @@ pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens:
         Some(m) => m.to_lowercase().ends_with("[1m]"),
         None => account_model(account_dir).is_some_and(|m| m.to_lowercase().ends_with("[1m]")),
     };
-    if used > WINDOW_DEFAULT || is_1m { WINDOW_1M } else { WINDOW_DEFAULT }
+    if is_1m { return WINDOW_1M; }
+    // O alias `opus` não leva `[1m]` e já nasce em 1M: a primeira janela informada só chega no fim do turno.
+    if let Some(w) = learned.filter(|w| *w >= used) { return w; }
+    if used > WINDOW_DEFAULT { WINDOW_1M } else { WINDOW_DEFAULT }
 }
 
 /// Leitura por sessão com prazo de 20 s por (nome, transcript).
 #[derive(Default)]
 pub struct ContextCache {
     entries: Capped<String, Entry>,
+    /// Janela que o Claude informou por modelo respondido (sem a data).
+    windows: std::collections::HashMap<String, u64>,
 }
 
 struct Entry {
@@ -227,6 +237,18 @@ pub fn source_version(jsonl: &str) -> SourceVersion {
 /// Em duas pontas para o chamador ler os transcripts vencidos em paralelo, fora do lock, como o
 /// `gather` do Python. Só entra sessão Claude com transcript (o chamador filtra o vazio).
 impl ContextCache {
+    /// Como `claude_reading_from`, aprendendo e aplicando a janela informada por modelo respondido.
+    pub fn reading(&mut self, inputs: &ReadingInputs, scan: &Scan) -> Reading {
+        let key = match scan { Some(Some((_, Some(m)))) => Some(DATED.replace(m, "").to_lowercase()), _ => None };
+        // Só janela que o Claude informou ensina; a deduzida aqui se perpetuaria. Motor declara a
+        // janela dele, que não vale para o mesmo id na conta Anthropic.
+        let reported = if inputs.engine { None }
+            else { inputs.declared.filter(|w| *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window)) };
+        if let (Some(k), Some(w)) = (&key, reported) { self.windows.insert(k.clone(), w); }
+        let learned = key.and_then(|k| self.windows.get(&k).copied());
+        reading_with(inputs, scan, learned)
+    }
+
     /// `now` é relógio monotônico em segundos.
     pub fn stale(&self, name: &str, jsonl: &str, now: f64) -> bool {
         !self.entries.peek(name).is_some_and(|e| {
@@ -373,6 +395,27 @@ mod tests {
         assert_eq!(cache.scan("s", path, &source_version(path)), marked, "arquivo igual não é relido");
         std::fs::write(&jsonl, r#"{"type": "assistant", "message": {"usage": {"input_tokens": 110}}}"#).unwrap();
         assert_eq!(cache.scan("s", path, &source_version(path)), Some(Some((110, None))));
+    }
+
+    #[test]
+    fn window_reported_for_a_model_reaches_a_new_session_of_the_same_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("settings.json"), r#"{"model": "opus"}"#).unwrap();
+        let answer = |name: &str, model: &str, used: u64| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, format!(r#"{{"type":"assistant","message":{{"model":"{model}","usage":{{"input_tokens":{used}}}}}}}"#)).unwrap();
+            path
+        };
+        let (old, new, other) = (answer("old.jsonl", "claude-opus-5-5", 50_000), answer("new.jsonl", "claude-opus-5-5", 186_979),
+            answer("other.jsonl", "claude-sonnet-5-5", 1_000));
+        let inputs = |jsonl, declared| ReadingInputs { jsonl, account_dir: tmp.path(), chosen: None, opened: None, declared, engine: false };
+        let mut cache = ContextCache::default();
+        // Sessão sem terminal que já terminou um turno: o sidecar guarda a janela do `result`.
+        cache.reading(&inputs(&old, Some(WINDOW_1M)), &scan_tail(&old));
+        let (ctx, _) = cache.reading(&inputs(&new, None), &scan_tail(&new));
+        assert_eq!(ctx.map(|c| (c.used, c.window)), Some((186_979, WINDOW_1M)), "a nova, no meio do primeiro turno");
+        let (ctx, _) = cache.reading(&inputs(&other, None), &scan_tail(&other));
+        assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "outro modelo não herda");
     }
 
     #[test]
