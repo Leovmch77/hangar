@@ -7,28 +7,27 @@ type LoadedImage = Arc<std::sync::Mutex<Option<Result<Arc<RenderImage>, gpui_kit
 #[derive(Default, Clone)]
 pub(super) struct ReaderImages {
     cache: Arc<std::sync::Mutex<HashMap<String, LoadedImage>>>,
-    local: Arc<std::sync::Mutex<HashMap<String, Option<PathBuf>>>>,
 }
 
 impl ReaderImages {
-    pub fn resolve_local(root: &Path, document: &str, uri: &str) -> Option<PathBuf> {
-        let document = Path::new(document).strip_prefix(root).ok().and_then(Path::to_str).unwrap_or(document);
-        let path = link_target(document, uri)?;
-        super::super::tree::resolve(root, &path).ok()
+    fn read_local(root: &Path, path: &str) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        let opened = hangar_workspace::files::open_root_file(root, path).map_err(|error| error.detail.to_string())?;
+        let mut bytes = Vec::new();
+        opened.file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        if bytes.len() > 64 * 1024 * 1024 { return Err(tr(UNREADABLE_PICTURE)); }
+        Ok(bytes)
     }
 
     pub fn mapper(&self, document: String, external: bool, root: Option<PathBuf>, api: Option<Api>, name: String,
         runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64, id: u64)
         -> impl Fn(&gpui_kit::SharedUri) -> Option<ImageSource> + Send + Sync + 'static {
-        let (cache, local) = (self.cache.clone(), self.local.clone());
+        let cache = self.cache.clone();
         move |uri| {
             let (path, source) = match url::Url::parse(uri).ok().filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()) {
                 Some(url) => (url.to_string(), Source::Remote(url.to_string())),
                 None => {
                     let path = link_target(&document, uri)?;
-                    let resolved = local.lock().ok()?.entry(path.clone()).or_insert_with(||
-                        root.as_ref().and_then(|root| Self::resolve_local(root, &document, uri))).clone();
-                    if let Some(local) = resolved { return Some(local.into()); }
                     (path.clone(), if external { Source::Cited(path) } else { Source::Workspace(path) })
                 }
             };
@@ -36,14 +35,20 @@ impl ReaderImages {
             let loaded = cache.entry(path.clone()).or_insert_with(|| {
                 let loaded: LoadedImage = Arc::default();
                 let (target, tx, api, name) = (loaded.clone(), tx.clone(), api.clone(), name.clone());
+                let local = root.clone().filter(|_| matches!(source, Source::Workspace(_)));
                 runtime.spawn(async move {
-                    let result = match api {
-                        Some(api) => match api.fetch(&name, &source).await {
-                            Ok(bytes) => tokio::task::spawn_blocking(move || crate::media::decode(&bytes, PICTURE_SIDE, PICTURE_SIDE, None))
-                                .await.ok().flatten().ok_or_else(|| tr(UNREADABLE_PICTURE)),
-                            Err(error) => Err(file_failure(&error)),
+                    let bytes = match (local, source) {
+                        (Some(root), Source::Workspace(path)) => tokio::task::spawn_blocking(move || Self::read_local(&root, &path))
+                            .await.unwrap_or_else(|_| Err(tr(UNREADABLE_PICTURE))),
+                        (_, source) => match api {
+                            Some(api) => api.fetch(&name, &source).await.map_err(|error| file_failure(&error)),
+                            None => Err(tr(UNREADABLE_PICTURE)),
                         },
-                        None => Err(tr(UNREADABLE_PICTURE)),
+                    };
+                    let result = match bytes {
+                        Ok(bytes) => tokio::task::spawn_blocking(move || crate::media::decode(&bytes, PICTURE_SIDE, PICTURE_SIDE, None))
+                            .await.ok().flatten().ok_or_else(|| tr(UNREADABLE_PICTURE)),
+                        Err(error) => Err(error),
                     }.map_err(|error| gpui_kit::ImageCacheError::Io(Arc::new(std::io::Error::other(error))));
                     if let Ok(mut target) = target.lock() { *target = Some(result); }
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::FileView(FileReply::ReaderImageReady(id)) }).await;
@@ -70,14 +75,37 @@ mod tests {
     use super::ReaderImages;
 
     #[test]
+    fn local_mapper_completes_the_custom_loader_and_notifies_success_and_failure() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("hangar-reader-loader-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("docs/assets")).unwrap();
+        image::RgbaImage::new(2, 2).save(root.join("docs/assets/image.png")).unwrap();
+        let images = ReaderImages::default();
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let (tx, rx) = async_channel::unbounded();
+        let mapper = images.mapper("docs/guide.md".into(), false, Some(root.clone()), None, "fixture".into(), runtime.clone(), tx, 3, 41);
+        for (uri, path, succeeds) in [("assets/image.png", "docs/assets/image.png", true), ("assets/missing.png", "docs/assets/missing.png", false)] {
+            assert!(matches!(mapper(&uri.into()), Some(ImageSource::Custom(_))));
+            let envelope = runtime.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap() });
+            assert_eq!(envelope.connection, 3);
+            assert!(matches!(envelope.payload, Payload::FileView(FileReply::ReaderImageReady(41))));
+            let cache = images.cache.lock().unwrap();
+            let loaded = cache.get(path).unwrap().lock().unwrap();
+            assert_eq!(loaded.as_ref().unwrap().is_ok(), succeeds);
+        }
+        drop(mapper);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn relative_image_uses_document_directory_and_cannot_escape_root() {
         let root = std::env::temp_dir().join(format!("hangar-reader-images-{}", std::process::id()));
         std::fs::create_dir_all(root.join("docs/assets")).unwrap();
         std::fs::write(root.join("docs/assets/example image.png"), b"fixture").unwrap();
-        let expected = std::fs::canonicalize(root.join("docs/assets/example image.png")).unwrap();
-        assert_eq!(ReaderImages::resolve_local(&root, "docs/guide.md", "assets/example%20image.png"), Some(expected));
-        assert_eq!(ReaderImages::resolve_local(&root, "docs/guide.md", "../../outside.png"), None);
-        assert_eq!(ReaderImages::resolve_local(&root, "docs/guide.md", "file:///etc/passwd"), None);
+        let path = super::link_target("docs/guide.md", "assets/example%20image.png").unwrap();
+        assert_eq!(ReaderImages::read_local(&root, &path).unwrap(), b"fixture");
+        assert!(ReaderImages::read_local(&root, "../outside.png").is_err());
+        assert!(super::link_target("docs/guide.md", "file:///etc/passwd").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

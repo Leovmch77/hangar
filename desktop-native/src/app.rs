@@ -317,6 +317,10 @@ enum Confirm { Stop, Destructive(String), Replace(String), Prefill(String), Shor
 struct Recent { key: SessionKey, files: Option<Result<Vec<UploadFile>, String>> }
 
 struct Envelope { connection: u64, selection: Option<u64>, payload: Payload }
+
+fn delivery_is_current(connection: u64, selection: Option<u64>, current_connection: u64, current_selection: u64) -> bool {
+    connection == current_connection && selection.is_none_or(|selection| selection == current_selection)
+}
 struct RichText { source: String, view: Entity<TextViewState>, _observer: Subscription, touched: u64, row: String }
 enum ChatUpdate { Message(ChatEvent), Preview(Preview), State(SessionState), Question(Option<Ask>), Thinking(String), LiveTool(Option<LiveTool>), Reset }
 
@@ -1585,8 +1589,7 @@ impl Hangar {
             }
             payload => payload,
         };
-        if envelope.connection != self.connection { return; }
-        if envelope.selection.is_some_and(|selection| selection != self.selection) { return; }
+        if !delivery_is_current(envelope.connection, envelope.selection, self.connection, self.selection) { return; }
         let is_chat = envelope.selection.is_some();
         // A conversa só é refeita quando o chat mudou, e a janela só redesenha quando algo visível mudou:
         // ping, lista e estatísticas chegam o tempo todo e não mexem nas linhas.

@@ -62,6 +62,15 @@ impl Artifacts {
     }
 }
 
+async fn fetch_artifacts(api: Api, request: ArtifactRequest, connection: u64) -> Envelope {
+    #[derive(serde::Deserialize)]
+    struct Listing { items: Vec<ArtifactItem> }
+    let result = api.read(&request.owner.key.name, &["artifacts"], &[], 15).await
+        .and_then(|value| serde_json::from_value::<Listing>(value).map(|body| body.items).map_err(|_| Failure::local("invalid_response")));
+    // Dono e geração protegem o catálogo; reselecionar a mesma aba só muda a seleção do chat.
+    Envelope { connection, selection: None, payload: Payload::Artifacts(request, result) }
+}
+
 impl Hangar {
     fn artifact_owner(&self) -> Option<ArtifactOwner> {
         let session = self.selected.as_ref().filter(|session| session.readable() && session.provider == "claude")?;
@@ -85,13 +94,9 @@ impl Hangar {
     fn refresh_artifacts(&mut self, cx: &mut Context<Self>) {
         let Some(api) = self.session_api() else { return };
         let Some(request) = self.artifacts.begin() else { return };
-        let (tx, connection, selection) = (self.tx.clone(), self.connection, Some(self.selection));
+        let (tx, connection) = (self.tx.clone(), self.connection);
         self.runtime.spawn(async move {
-            #[derive(serde::Deserialize)]
-            struct Listing { items: Vec<ArtifactItem> }
-            let result = api.read(&request.owner.key.name, &["artifacts"], &[], 15).await
-                .and_then(|value| serde_json::from_value::<Listing>(value).map(|body| body.items).map_err(|_| Failure::local("invalid_response")));
-            let _ = tx.send(Envelope { connection, selection, payload: Payload::Artifacts(request, result) }).await;
+            let _ = tx.send(fetch_artifacts(api, request, connection).await).await;
         });
         self.redraw(panes::Area::Bottom, cx);
         cx.notify();
@@ -162,6 +167,40 @@ impl Hangar {
 mod tests {
     use super::{ArtifactOwner, Artifacts};
     use crate::delivery::SessionKey;
+
+    #[tokio::test]
+    async fn delayed_catalog_response_finishes_loading_after_reselecting_the_same_owner() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" { break; }
+            }
+            let body = r#"{"items":[{"id":"same-owner","url":"https://claude.ai/artifact/same-owner","title":"Resposta tardia preservada","version":"fixture-v1"}]}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let owner = ArtifactOwner { key: SessionKey { server: "fixture".into(), name: "same".into(), jsonl: "one".into() }, lifecycle: Some("life-1".into()), provider: "claude".into() };
+        let mut catalog = Artifacts::default();
+        catalog.set_owner(Some(owner.clone()));
+        let request = catalog.begin().unwrap();
+        let api = crate::api::Api::new(&format!("http://{address}"), "fixture-only").unwrap();
+        let reply = super::fetch_artifacts(api, request, 11).await;
+        server.await.unwrap();
+        catalog.set_owner(Some(owner));
+        assert!(!super::super::delivery_is_current(reply.connection, reply.selection, 12, 8));
+        if super::super::delivery_is_current(reply.connection, reply.selection, 11, 8) {
+            let super::super::Payload::Artifacts(request, result) = reply.payload else { panic!("tipo de resposta incorreto") };
+            assert!(catalog.accept(&request, result.map_err(|error| error.detail)));
+        }
+        assert!(!catalog.loading, "reselecionar o mesmo dono não pode descartar a resposta e prender o carregamento");
+        assert_eq!(catalog.items().unwrap()[0].title, "Resposta tardia preservada");
+    }
 
     #[test]
     fn catalog_deduplicates_updates_and_only_keeps_real_artifact_destinations() {
