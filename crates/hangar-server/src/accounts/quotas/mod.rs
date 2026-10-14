@@ -121,9 +121,6 @@ pub struct Quotas {
     pub endpoints: other::Endpoints,
     /// Problemas de config já levados ao diário: a lista é lida a cada poll e só a mudança conta.
     pub reported: Arc<std::sync::Mutex<Vec<&'static str>>>,
-    /// Clientes das contas e das outras fontes, montados uma vez: cada montagem relê os
-    /// certificados e começa sem conexão aberta.
-    clients: Arc<std::sync::OnceLock<(reqwest::Client, reqwest::Client)>>,
 }
 
 /// De onde sai a leitura de uma fonte.
@@ -248,14 +245,6 @@ impl AccountService {
         }
     }
 
-    fn quota_clients(&self) -> Result<(reqwest::Client, reqwest::Client), AccountError> {
-        if let Some(clients) = self.quotas.clients.get() {
-            return Ok(clients.clone());
-        }
-        let clients = (external_client(Duration::from_secs(8))?, other::client()?);
-        Ok(self.quotas.clients.get_or_init(|| clients).clone())
-    }
-
     /// Diário e log só quando o conjunto de problemas muda: a lista é relida a cada poll.
     fn report_config_problems(&self, problems: &[&'static str]) {
         let mut sorted = problems.to_vec();
@@ -335,7 +324,6 @@ impl AccountService {
             endpoints.push((source.id.clone(), source.reader.fingerprint(&self.quotas.endpoints)));
             sources.push((source.row(), Origin::Other(source.reader.clone())));
         }
-        let (client, other_client) = self.quota_clients()?;
         let signatures: std::collections::HashMap<String, Value> = sources
             .iter()
             .filter_map(|(row, origin)| {
@@ -381,7 +369,11 @@ impl AccountService {
         };
         // A rede roda sem o cache trancado: a leitura só do cache não espera as outras fontes.
         let mut readings = vec![];
-        {
+        // Clientes só quando há rede: a leitura só do cache roda a cada poll e montar um relê os
+        // certificados; montado a cada leitura, ele vê o proxy atual do sistema (registro no Windows).
+        if !selected.is_empty() {
+            let client = external_client(Duration::from_secs(8))?;
+            let other_client = other::client()?;
             let mut jobs = futures_util::stream::iter(selected)
                 .map(|(source, origin)| {
                     let (client, other_client) = (client.clone(), other_client.clone());
@@ -533,7 +525,7 @@ impl AccountService {
         };
         // Com a listagem já lendo a rede, ela grava o cache: a linha usa o que já houver.
         if stale && let Ok(_refresh) = self.quotas.refresh.try_lock() {
-            let (client, _) = self.quota_clients().map_err(|_| "quota_client")?;
+            let client = external_client(Duration::from_secs(8)).map_err(|_| "quota_client")?;
             let (value, signature) = self.read_quota(Provider::Claude, &account, &client, None).await;
             let mut held = self.quotas.cache.lock().await;
             let cache = held.get_or_insert_with(|| cache::QuotaCache::load(&self.quota_path()));
