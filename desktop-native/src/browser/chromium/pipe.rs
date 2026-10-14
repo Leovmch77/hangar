@@ -36,6 +36,9 @@ struct Wire {
     next: AtomicU64,
     /// id → (sessão, quem espera).
     pending: Mutex<HashMap<u64, (Option<String>, Box<dyn FnOnce(Reply) + Send>)>>,
+    /// Sessões cuja página caiu: o Chromium aceita o comando e nunca responde, então ele falha já.
+    /// ponytail: só cresce; uma entrada por página caída.
+    fallen: Mutex<HashSet<String>>,
     /// Quadro de screencast por sessão, tratado antes de chegar à interface.
     sinks: Mutex<HashMap<String, Sink>>,
     /// Clientes CDP de fora (`/cdp/browser`): cada um recebe os eventos das sessões dele, e só deles.
@@ -57,7 +60,7 @@ struct Tapped {
 
 impl Wire {
     fn new(writer: std::io::PipeWriter, child: Option<Child>) -> Arc<Wire> {
-        Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default(),
+        Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), fallen: Mutex::default(), sinks: Mutex::default(),
             taps: Mutex::default(), child: Mutex::new(child), gone: OnceLock::new(), asked: AtomicBool::new(false) })
     }
 
@@ -74,6 +77,10 @@ impl Wire {
         // Processo que já saiu: a escrita poderia até passar (pipe ainda aberto por um instante) e ninguém responderia.
         if let Some(gone) = self.gone.get() {
             if let Some(done) = done { done(Err(gone.clone())); }
+            return;
+        }
+        if session.is_some_and(|s| lock(&self.fallen).contains(s)) {
+            if let Some(done) = done { done(Err("a pagina fechou".into())); }
             return;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -115,6 +122,9 @@ pub struct Browser {
     initial: RefCell<Vec<String>>,
     /// Páginas que os navegadores do app abriram; qualquer outra é janela que a página abriu.
     owned: RefCell<HashSet<String>>,
+    /// Páginas que caíram. Sem renderer a página cai antes do `createTarget` responder, quando ninguém a ouve ainda.
+    /// ponytail: só cresce; queda é rara e o processo doente é trocado.
+    crashed: RefCell<HashSet<String>>,
     /// Aperto de mão do processo que nasceu sem travar a interface; `None` quando já respondeu.
     ready: RefCell<Option<Ready>>,
     _drain: RefCell<Option<Task<()>>>,
@@ -203,7 +213,7 @@ impl Browser {
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
             wire, handlers: RefCell::default(), watchers: RefCell::default(),
-            initial: RefCell::default(), owned: RefCell::default(), ready: RefCell::new(None),
+            initial: RefCell::default(), owned: RefCell::default(), crashed: RefCell::default(), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
         let weak = Rc::downgrade(&browser);
@@ -224,7 +234,10 @@ impl Browser {
     /// ponytail: SIGKILL sem `Browser.close`; o que o processo doente ainda não gravou do perfil se perde.
     pub fn retire(&self, reason: &str) {
         if !self.wire.retire(reason) { return; }
-        eprintln!("[nav] Chromium descartado: {reason}");
+        // Descarte também derruba as páginas de todas as sessões: vai ao diário, como a queda.
+        let line = format!("[nav] Chromium descartado: {reason}");
+        eprintln!("{line}");
+        crate::log_line(&line);
         if let Some(mut child) = lock(&self.wire.child).take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -242,6 +255,8 @@ impl Browser {
 
     pub fn owns(&self, target: &str) -> bool { self.owned.borrow().contains(target) }
 
+    pub fn crashed(&self, target: &str) -> bool { self.crashed.borrow().contains(target) }
+
     /// Fecha as abas que nasceram com o processo, depois que já existe outra (sem nenhuma o Chromium sairia).
     pub fn close_initial(&self) {
         for target in self.initial.take() { drop(self.call(None, "Target.closeTarget", json!({"targetId": target}))); }
@@ -258,6 +273,7 @@ impl Browser {
     fn dispatch(&self, message: Value) {
         let Some(method) = message["method"].as_str() else { return };
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        if method == "Target.targetCrashed" && let Some(id) = params["targetId"].as_str() { self.crashed.borrow_mut().insert(id.to_owned()); }
         let Some(session) = message["sessionId"].as_str() else { return self.notify(method, params) };
         let handlers = self.handlers.borrow().get(&(session.to_owned(), method.to_owned())).cloned().unwrap_or_default();
         for handler in handlers { (handler.borrow_mut())(params.clone()); }
@@ -504,8 +520,11 @@ impl Session {
     pub fn id(&self) -> &str { &self.id }
     pub fn browser(&self) -> &Rc<Browser> { &self.browser }
 
-    /// O alvo caiu ou a sessão se soltou: as chamadas em curso recebem erro em vez de esperar para sempre.
-    pub fn fail_pending(&self) { self.browser.wire.fail(&self.id); }
+    /// O alvo caiu ou a sessão se soltou: as chamadas em curso e as seguintes recebem erro em vez de esperar para sempre.
+    pub fn fail_pending(&self) {
+        lock(&self.browser.wire.fallen).insert(self.id.clone());
+        self.browser.wire.fail(&self.id);
+    }
 
     pub fn call(&self, method: &str, params: Value) -> impl Future<Output = Reply> + use<> {
         self.browser.call(Some(&self.id), method, params)

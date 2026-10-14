@@ -250,8 +250,6 @@ pub struct Engine {
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
-    /// Página ou site da conversa: screencast em PNG.
-    png: bool,
     /// Desenhada no dobro da tela (página e site da conversa).
     double: bool,
     /// Contexto próprio da página da conversa, fechado junto com ela.
@@ -354,12 +352,12 @@ impl Starter {
         panel: bool,
     ) -> Result<Engine, String> {
         let session = Rc::new(answer(&self.background, "Target.attachToTarget", Session::attach_async(browser, target)).await?);
+        // Caiu antes de haver ouvinte (renderer que nem subiu): sem isto o `Page.enable` espera o prazo inteiro.
+        if browser.crashed(target) { return Err(format!("{BORN_DEAD}: a pagina caiu ao nascer")); }
         // Ouvintes antes de qualquer espera: a interface segue rodando, e o que a página mandar enquanto nasce (a altura,
         // um pedido pausado) não pode chegar sem dono.
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        // PNG na conversa: o texto ao lado pede a nitidez que o JPEG perde. No painel, JPEG, mais leve em página animada.
-        let format = if panel { image::ImageFormat::Jpeg } else { image::ImageFormat::Png };
-        let surface = Surface::new(events.clone(), format, browser.acker(session.id()));
+        let surface = Surface::new(events.clone(), image::ImageFormat::Png, browser.acker(session.id()));
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -375,7 +373,7 @@ impl Starter {
             _ if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer")) }
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
-                surface, dead, png: !panel, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
+                surface, dead, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
                 pressed: Cell::new(false),
             }),
             Err(e) => { surface.close(); Err(e) }
@@ -521,8 +519,10 @@ fn listen(
             let Some(id) = info["targetId"].as_str() else { return };
             let Some(session) = weak.upgrade() else { return };
             let browser = session.browser();
-            if info["type"] != "page" || browser.owns(id) { return; }
             let (opener, url) = (info["openerId"].as_str().unwrap_or(""), info["url"].as_str().unwrap_or(""));
+            // Sem opener só nasce do `createTarget` de outra sessão do app, que o anuncia antes de responder e de marcá-lo
+            // como dela: fechá-lo derrubava a abertura dela e o Chromium inteiro. Popup, mesmo `noopener`, traz o opener.
+            if info["type"] != "page" || opener.is_empty() || browser.owns(id) { return; }
             let mine = opener == m;
             // Aberta por esta página: espera o endereço chegar. Por outra do app: o navegador dela cuida.
             if (mine && (url.is_empty() || url == "about:blank")) || (!mine && browser.owns(opener)) { return; }
@@ -544,8 +544,11 @@ fn listen(
             p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
-    let f = fell.clone();
-    let _ = session.on("Inspector.targetCrashed", move |params| f("Inspector.targetCrashed", &params));
+    // Renderer morto por fora (sem zygote) só manda `Inspector.detached`, e o `Page.enable` pendente nunca responde.
+    for event in ["Inspector.targetCrashed", "Inspector.detached"] {
+        let f = fell.clone();
+        let _ = session.on(event, move |params| f(event, &params));
+    }
     for (event, key, id) in [("Target.targetCrashed", "targetId", main.clone()), ("Target.detachedFromTarget", "sessionId", session.id().to_owned())] {
         let f = fell.clone();
         session.watch(event, move |params| { if params[key] == id.as_str() { f(event, &params); } });
@@ -626,7 +629,7 @@ impl Engine {
         let first = !self.visible.replace(true);
         if resized { self.placed.set(Some((bounds.size, scale))); }
         if first || resized {
-            let fit = Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double, png: self.png, w, h, frame_scale };
+            let fit = Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double, w, h, frame_scale };
             let turn = self.resizes.get() + 1;
             self.resizes.set(turn);
             if first {
@@ -706,25 +709,25 @@ impl Engine {
 const RESIZE_SETTLE_MS: u64 = 120;
 
 /// Tamanho e escala da página no painel, e como pedir ao Chromium.
-struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, png: bool, w: f32, h: f32, frame_scale: f32 }
+struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, w: f32, h: f32, frame_scale: f32 }
 
 impl Fit {
     fn apply(&self, resized: bool) {
-        let Fit { session, window, decoration, double, png, w, h, frame_scale } = self;
+        let Fit { session, window, decoration, double, w, h, frame_scale } = self;
         if resized {
             let size = json!({"width": w.round() as i64, "height": (h + decoration).round() as i64});
             drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
-            if *double {
+            // Sempre: só a janela nova não muda a página no Chromium sem janela, e depois de redimensionar o quadro
+            // chegava no tamanho antigo, esticado; em tela 1,25 sem a densidade dela o quadro também era esticado.
+            {
                 drop(session.call("Emulation.setDeviceMetricsOverride", json!({
                     "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
                 })));
             }
         }
         let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
-        // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
-        // legível (o q85 borrava). O `shot` continua em PNG.
-        let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
-        if *png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
+        // PNG: o painel tem que mostrar a página como o navegador mostra; JPEG borrava o texto.
+        let params = json!({"format": "png", "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
         drop(session.call("Page.startScreencast", params));
     }
 }
@@ -872,8 +875,10 @@ mod tests {
         let native_log = std::fs::read_to_string(home.join(".hangar/logs/privado/native.log")).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&home);
         outcome.take().expect("o cenario nao terminou").unwrap();
-        // Só a queda vai ao diário, uma vez, com o sinal e o fim do chromium.log; o descarte do doente não é queda.
-        assert_eq!(native_log.matches("chromium_exited").count(), 1, "{native_log}");
+        // A queda vai ao diário com o sinal e o fim do chromium.log; o fim do doente vai como descarte, não queda. Sem
+        // zygote o doente às vezes aborta sozinho antes do descarte, e aí o fim dele é queda de verdade.
+        let (exits, retired) = (native_log.matches("chromium_exited").count(), native_log.matches("Chromium descartado").count());
+        assert_eq!((exits + retired, retired <= 1), (2, true), "{native_log}");
         assert!(native_log.contains("(sinal 11); fim do chromium.log:") && native_log.contains("Received signal 11"), "{native_log}");
 
         async fn scenario(starter: impl Fn() -> super::Starter) -> Result<(), String> {
@@ -913,6 +918,62 @@ mod tests {
             check(pid(&c) != sick && c.alive(), format!("abertura no Chromium doente: pid {} (doente {sick})", pid(&c)))?;
             check(asked.elapsed() < Duration::from_secs(10), format!("troca do doente em {:?}", asked.elapsed()))?;
             check(!a.alive() && !b.alive(), "motores do Chromium descartado seguem vivos".into())?;
+            Ok(())
+        }
+    }
+
+    /// Duas sessões no mesmo Chromium: a página que a segunda abre não é popup de ninguém, e a primeira não a fecha (o
+    /// que derrubava a abertura, descartava o processo e levava junto a página da primeira).
+    #[test]
+    #[ignore = "sobe o Chromium da máquina"]
+    fn a_second_session_opens_beside_the_first_in_the_same_chromium() {
+        use std::{cell::RefCell, rc::Rc, time::Duration};
+        super::launch::find().unwrap();
+        let home = std::env::temp_dir().join(format!("hangar-second-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: antes de qualquer outra thread; o Chromium já foi achado com o HOME de verdade.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.join("config")); std::env::set_var("HOME", &home); }
+        let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::default();
+        let out = outcome.clone();
+        gpui_kit::platform::headless().run(move |cx| {
+            let (executor, background) = (cx.foreground_executor().clone(), cx.background_executor().clone());
+            let starter = move || super::Starter { executor: executor.clone(), background: background.clone() };
+            cx.spawn(async move |cx| {
+                *out.borrow_mut() = Some(scenario(starter).await);
+                let _ = cx.update(|cx| cx.quit());
+            }).detach();
+        });
+        let _ = std::fs::remove_dir_all(&home);
+        outcome.take().expect("o cenario nao terminou").unwrap();
+
+        async fn scenario(starter: impl Fn() -> super::Starter) -> Result<(), String> {
+            let pid = |e: &super::Engine| e.session.browser().pid().unwrap_or(0);
+            let (events, _kept) = async_channel::unbounded();
+            let first = starter().start(events.clone()).await?;
+            let old = pid(&first);
+            for round in 0..3 {
+                let second = starter().start(events.clone()).await?;
+                // O fechamento indevido chega depois da resposta: dá tempo dele aparecer.
+                starter().background.timer(Duration::from_millis(500)).await;
+                if !(first.alive() && second.alive() && pid(&second) == old) {
+                    return Err(format!("rodada {round}: primeira viva {}, segunda viva {}, pid {} (antes {old})",
+                        first.alive(), second.alive(), pid(&second)));
+                }
+            }
+            // Popup `noopener` de página do app segue fechando: ele traz o opener, que o filtro acima exige.
+            let browser = first.session.browser();
+            let (born, gone): (Rc<RefCell<Vec<(String, String)>>>, Rc<RefCell<Vec<String>>>) = (Rc::default(), Rc::default());
+            let b = born.clone();
+            browser.watch("teste", "Target.targetCreated", move |p| b.borrow_mut().push((
+                p["targetInfo"]["targetId"].as_str().unwrap_or("").into(), p["targetInfo"]["openerId"].as_str().unwrap_or("").into())));
+            let g = gone.clone();
+            browser.watch("teste", "Target.targetDestroyed", move |p| g.borrow_mut().push(p["targetId"].as_str().unwrap_or("").into()));
+            first.cdp().call("Runtime.evaluate", json!({"expression": "window.open('http://127.0.0.1:9/', '_blank', 'noopener')", "userGesture": true})).await?;
+            starter().background.timer(Duration::from_secs(2)).await;
+            let popup = born.borrow().iter().find(|(id, _)| *id != first.target).cloned().ok_or("o popup nao nasceu")?;
+            if popup.1 != first.target || !gone.borrow().contains(&popup.0) {
+                return Err(format!("popup {popup:?} (opener esperado {}), fechados {:?}", first.target, gone.borrow()));
+            }
             Ok(())
         }
     }
