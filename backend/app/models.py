@@ -266,8 +266,8 @@ class ChatEvent(BaseModel):
     queued_ts: Optional[float] = None
     # Remove o eco pelo id, mesmo quando a mensagem real saiu da janela do histórico.
     queued_confirmed: Optional[bool] = None
-    # Entregue e já tirada da fila interna do Claude (enqueue + dequeue): só falta o registro real,
-    # que sai depois dos hooks. O front a mostra como enviada, não como "na fila".
+    # Aceita com a sessão parada (o Rust decide e grava na fila): o turno começou com ela, então
+    # não está na fila interna do Claude. O front a mostra como enviada, não como "na fila".
     queued_consumed: Optional[bool] = None
     # Nº de imagens base64 anexadas a uma msg do user via TERMINAL (paste na TUI do Claude). O front
     # busca cada uma sob demanda em /transcript-image/{id}/{idx} (lazy; base64 não vai no payload).

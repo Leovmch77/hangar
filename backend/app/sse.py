@@ -1195,8 +1195,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         stats_task,
         # Fila duravel: user_msg sinteticos (id "queued-") pras msgs enfileiradas. O front faz o
         # dedup cruzado (queued- vs real) por texto.
-        asyncio.create_task(pump("message", pqueue.follow(
-            min_ts=start_ts, emit_confirmed=True, jsonl=jsonl if provider == "claude" else None))),
+        asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
         asyncio.create_task(band_pump()),

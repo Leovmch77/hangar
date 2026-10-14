@@ -769,7 +769,7 @@ impl Executor {
     }
 
     async fn plugin_control(&self,kind:&str,payload:&Value,expected:&ExpectedInteraction,publication:&str,services:&Services)->DeliveryResult {
-        let result=|disposition,code:&str|DeliveryResult {disposition,stage:input::DeliveryStage::Answer,cleanup:input::Cleanup::NotNeeded,native:false,message_id:None,code:code.into(),draft:None};
+        let result=|disposition,code:&str|DeliveryResult {disposition,stage:input::DeliveryStage::Answer,cleanup:input::Cleanup::NotNeeded,native:false,message_id:None,code:code.into(),draft:None,consumed:false};
         let question=match self.local.plugin_question(&self.target,expected).await {Ok(question)=>question,Err(error)=>return result(input::Disposition::Rejected,error.0)};
         let body=if kind=="select" && question.id.starts_with("perm:") {
             match payload["option"].as_u64() {Some(option @ (1|2))=>json!({"permitir":option==1}),_=>return result(input::Disposition::Rejected,"terminal_permission_option")}
@@ -1006,7 +1006,7 @@ impl Executor {
                         Ok(answers)=>driver.plugin_ask_keys(expected,&answers).await,
                         // Corpo torto recusa com o código, nunca derruba o executor.
                         Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
-                            native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                            native:false,message_id:None,code:"invalid_answer".into(),draft:None,consumed:false},
                     }}
                     else {self.plugin_control(kind,&payload,expected,&publication,&services).await}
                 } else {match kind {
@@ -1016,7 +1016,7 @@ impl Executor {
                         // e a guarda só custaria leituras e atraso.
                         "input"=>match if facts.as_ref().is_some_and(|f|f.as_ref().is_ok_and(|f|!input::presses_keys(f,text))) {None} else {self.focus_guard(root,facts.as_ref().is_some_and(|f|f.as_ref().is_ok_and(|f|f.plugin_live))).await} {
                             Some(code)=>DeliveryResult {disposition:input::Disposition::Deferred,stage:input::DeliveryStage::Composer,cleanup:input::Cleanup::NotNeeded,
-                                native:false,message_id:None,code:code.into(),draft:None},
+                                native:false,message_id:None,code:code.into(),draft:None,consumed:false},
                             None=>driver.prompt(text,&publication).await,
                         },
                         "steer"|"steer_queue"=>driver.steer().await,
@@ -1043,13 +1043,13 @@ impl Executor {
                                 }
                             }
                             Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
-                                native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                                native:false,message_id:None,code:"invalid_answer".into(),draft:None,consumed:false},
                         },
                         "answer_chat"=>match serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()) {
                             Ok(answers)=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&answers,&publication).await,
                             // Corpo torto recusa com o código, nunca derruba o executor.
                             Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
-                                native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                                native:false,message_id:None,code:"invalid_answer".into(),draft:None,consumed:false},
                         },
                         "submit_selected"=>driver.guarded_submit_selected(expected.as_ref().unwrap()).await,
                         "interrupt"=>driver.interrupt(payload["clear"].as_bool().unwrap_or(false)).await,

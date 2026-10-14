@@ -111,10 +111,13 @@ pub struct DeliveryResult {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftOutcome>,
+    /// Aceita com a sessão parada: o turno começou com ela, não ficou na fila interna do Claude.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consumed: bool,
 }
 impl DeliveryResult {
     fn new(disposition: Disposition, stage: DeliveryStage, code: &str) -> Self {
-        Self { disposition, stage, cleanup: Cleanup::NotNeeded, native: false, message_id: None, code: code.into(), draft: None }
+        Self { disposition, stage, cleanup: Cleanup::NotNeeded, native: false, message_id: None, code: code.into(), draft: None, consumed: false }
     }
 }
 #[derive(Clone, Debug)]
@@ -1024,13 +1027,19 @@ impl TerminalDriver {
             other => other,
         };
         let draft = match draft { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
-        if draft.is_empty() { return self.deliver(text, id, draft, None, None).await; }
+        let idle = facts.idle;
+        if draft.is_empty() {
+            let mut result = self.deliver(text, id, draft, None, None).await;
+            result.consumed = idle && result.disposition == Disposition::Accepted;
+            return result;
+        }
         // O guardado tem uma vaga só: ocupado, o Ctrl+S jogaria fora o que já estava nele.
         if draft.stashed { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Composer, "composer_busy"); }
         let mut result = match self.stash_draft(&draft).await {
             Ok(before) => self.deliver(text, id, before, Some(&draft), None).await,
             Err(e) => Self::failed(e, DeliveryStage::Composer),
         };
+        result.consumed = idle && result.disposition == Disposition::Accepted;
         result.draft = Some(self.settle_draft(&draft, result.disposition).await);
         result
     }
@@ -1056,7 +1065,10 @@ impl TerminalDriver {
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
                         if self.services.transcript_enqueued(mark, text).await.unwrap_or(false) {
                             drop(publish);
-                            let _ = self.services.abandon_publication(id).await;
+                            // Falhar aqui deixa a publicação no lugar: a próxima entrega sai incerta até o prazo dela.
+                            if let Err(error) = self.services.abandon_publication(id).await {
+                                tracing::warn!(code = error.0, "publicação do plugin não saiu depois da prova pelo transcript");
+                            }
                             return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_enqueued");
                         }
                     }
