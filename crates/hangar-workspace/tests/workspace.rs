@@ -198,8 +198,9 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
     git(&main, &["worktree", "add", "-q", "-b", "feat", other.to_str().unwrap()]);
 
     let from_main = op(&main, "list_branches", json!({}));
-    // No Windows o git devolve `C:/…`: compara como caminho, não como texto.
-    let same_path = |value: &serde_json::Value, path: &std::path::Path| value.as_str().is_some_and(|text| std::path::Path::new(text) == path);
+    // O git devolve o caminho resolvido (`C:/…` no Windows, `/private/var/…` no macOS): compara resolvido.
+    let same_path = |value: &serde_json::Value, path: &std::path::Path| value.as_str()
+        .is_some_and(|text| std::fs::canonicalize(text).ok() == std::fs::canonicalize(path).ok());
     assert!(same_path(&from_main["elsewhere"]["feat"]["path"], &other), "{}", from_main["elsewhere"]);
     assert_eq!(from_main["elsewhere"]["feat"]["main"], json!(false));
     assert!(from_main["elsewhere"].get("main").is_none(), "a própria pasta não é outra worktree");
