@@ -29,6 +29,10 @@ export type BackgroundShell = {
   startedAt: number;
   endedAt?: number;
   status?: string;
+  pids?: number[];
+  path?: string;
+  tail?: string[];
+  current?: string;
 };
 
 export type VerificarBoard = { now: number; runs: VerificarRun[] };

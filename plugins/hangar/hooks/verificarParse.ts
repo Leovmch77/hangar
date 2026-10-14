@@ -1,6 +1,65 @@
-import type { VerificarRun, VerificarStep } from "../types";
+import type { BackgroundShell, VerificarRun, VerificarStep } from "../types";
 
 export type ParsedRun = Omit<VerificarRun, "isAlive">;
+
+export type FdScan = Map<string, { pids: number[]; path: string }>;
+
+// O Claude Code liga stdout/stderr de cada comando de fundo a <...>/tasks/<id>.output:
+// processo segurando esse arquivo aberto = comando ainda vivo. Linhas de
+// `find /proc/*/fd -lname '*/tasks/*.output' -printf '%h %l\n'`.
+export function parseFdScan(text: string): FdScan {
+  const out: FdScan = new Map();
+  for (const line of text.split("\n")) {
+    const m = /^\/proc\/(\d+)\/fd (.+\/tasks\/([^/]+)\.output)$/.exec(line.trim());
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const id = m[3] ?? "";
+    const hit = out.get(id) ?? { pids: [], path: m[2] ?? "" };
+    if (!hit.pids.includes(pid)) hit.pids.push(pid);
+    out.set(id, hit);
+  }
+  return out;
+}
+
+// A notificação de fim pode nunca chegar (tarefa de subagente, sessão reaberta);
+// sem processo segurando o arquivo, o comando acabou.
+const BIRTH_GRACE_MS = 5000;
+
+export function reconcileShells(list: BackgroundShell[], scan: FdScan, now: number): BackgroundShell[] {
+  return list.map((s) => {
+    if (s.endedAt !== undefined) return s;
+    const hit = scan.get(s.id);
+    if (hit) return { ...s, pids: hit.pids, path: hit.path };
+    if (now - s.startedAt < BIRTH_GRACE_MS) return s;
+    return { ...s, endedAt: now, status: s.status ?? "terminou" };
+  });
+}
+
+// Saída de `ps -o pid=,args= -p <pids>`. O zsh que embrulha o comando (carrega o
+// shell-snapshot) não diz nada; o filho de pid maior é o que roda agora.
+// ponytail: pid maior = mais novo, erra só quando o contador de pids dá a volta.
+export function currentCommands(psOut: string, scan: FdScan): Map<string, string> {
+  const args = new Map<number, string>();
+  for (const line of psOut.split("\n")) {
+    const m = /^\s*(\d+) (.+)$/.exec(line);
+    if (m && !m[2]?.includes("/shell-snapshots/")) args.set(Number(m[1]), m[2]?.trim() ?? "");
+  }
+  const out = new Map<string, string>();
+  for (const [id, hit] of scan) {
+    const pid = hit.pids.filter((p) => args.has(p)).sort((a, b) => b - a)[0];
+    if (pid !== undefined) out.set(id, args.get(pid) ?? "");
+  }
+  return out;
+}
+
+export function lastLines(text: string, n: number): string[] {
+  return text
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+    .split("\n")
+    .map((l) => (l.replace(/\r+$/, "").split("\r").pop() ?? "").trimEnd())
+    .filter(Boolean)
+    .slice(-n);
+}
 
 // Formato gravado pelo scripts/verificar-local em <estado>/hangar-verificacao/andamento/<sha>-<pid>:
 //   <epoch> plano <sha> linux=a,b windows=c vm=<host>

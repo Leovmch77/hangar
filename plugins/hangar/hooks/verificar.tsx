@@ -2,7 +2,16 @@ import { atom, read, update } from "claude-code";
 import type { EngineInterface, Hook, On } from "claude-code";
 
 import type { BackgroundShell, VerificarBoard, VerificarRun, VerificarStep } from "../types";
-import { formatDuration, parseNotifications, parseRun } from "./verificarParse";
+import type { FdScan } from "./verificarParse";
+import {
+  currentCommands,
+  formatDuration,
+  lastLines,
+  parseFdScan,
+  parseNotifications,
+  parseRun,
+  reconcileShells,
+} from "./verificarParse";
 
 // Andamento do scripts/verificar-local e dos comandos em segundo plano: faixa acima do prompt e o
 // painel do /andamento. Lê os arquivos que o script grava; não fala com o backend.
@@ -55,8 +64,66 @@ async function scanRuns($: EngineInterface, now: number): Promise<VerificarRun[]
   return runs.sort((a, b) => a.startedAt - b.startedAt);
 }
 
+// Rodando primeiro, depois os que acabaram há pouco; dentro de cada grupo, o mais novo antes.
 function liveShells(list: BackgroundShell[], now: number): BackgroundShell[] {
-  return list.filter((s) => s.endedAt === undefined || now - s.endedAt < KEEP_SHELL_MS);
+  return list
+    .filter((s) => s.endedAt === undefined || now - s.endedAt < KEEP_SHELL_MS)
+    .sort((a, b) => Number(a.endedAt !== undefined) - Number(b.endedAt !== undefined) || b.startedAt - a.startedAt);
+}
+
+const SCAN = "find /proc/[0-9]*/fd -maxdepth 1 -lname '*/tasks/*.output' -printf '%h %l\\n' 2>/dev/null";
+
+async function scanShells($: EngineInterface, now: number) {
+  const open = new Set((await read($, shells)).filter((s) => s.endedAt === undefined).map((s) => s.id));
+  if (open.size === 0) return;
+  const r = await $.process.run(["sh", "-c", SCAN], { timeoutMs: 5000 }).catch(() => undefined);
+  // Processo sumindo no meio da varredura dá código 1; saída vazia com erro não prova que nada roda.
+  if (!r || (r.exitCode !== 0 && !r.stdout.trim())) return;
+  // A varredura vê os comandos de todas as sessões; só os desta interessam.
+  const scan: FdScan = new Map([...parseFdScan(r.stdout)].filter(([id]) => open.has(id)));
+  const tails = new Map<string, string[]>();
+  for (const [id, hit] of scan) {
+    const t = await $.process.run(["tail", "-c", "4000", hit.path], { timeoutMs: 3000 }).catch(() => undefined);
+    if (t && t.exitCode === 0) tails.set(id, lastLines(t.stdout, 3));
+  }
+  const pids = [...scan.values()].flatMap((h) => h.pids);
+  const ps = pids.length
+    ? await $.process.run(["ps", "-o", "pid=,args=", "-p", pids.join(",")], { timeoutMs: 3000 }).catch(() => undefined)
+    : undefined;
+  const current = currentCommands(ps?.stdout ?? "", scan);
+  await update($, shells, (list) =>
+    reconcileShells(list, scan, now).map((s) =>
+      scan.has(s.id) ? { ...s, tail: tails.get(s.id) ?? s.tail, current: current.get(s.id) } : s,
+    ),
+  );
+}
+
+// TaskStop é o caminho do próprio Claude Code; comando de outra vida da sessão ele não conhece,
+// e aí o pedido vai direto aos processos que seguram o arquivo de saída.
+async function stopShell($: EngineInterface, id: string): Promise<string> {
+  const s = (await read($, shells)).find((x) => x.id === id);
+  if (!s || s.endedAt !== undefined) return `bg ${id} já não está rodando.`;
+  const r = await $.tool.call({ tool: "TaskStop", task_id: id }).catch(() => undefined);
+  const viaTool = !!r && r.deny === undefined && !r.isError;
+  if (!viaTool) {
+    if (!s.pids?.length) return `bg ${id}: o TaskStop recusou e não achei o processo.`;
+    const k = await $.process.run(["kill", "-TERM", ...s.pids.map(String)], { timeoutMs: 5000 }).catch(() => undefined);
+    if (!k || k.exitCode !== 0) return `bg ${id}: kill falhou${k ? `: ${k.stderr.trim()}` : ""}.`;
+  }
+  const now = await $.clock.now();
+  await update($, shells, (list) =>
+    list.map((x) => (x.id === id && x.endedAt === undefined ? { ...x, endedAt: now, status: "killed" } : x)),
+  );
+  return `bg ${id} parado${viaTool ? "" : ` (kill ${s.pids?.join(" ")})`}.`;
+}
+
+const SHELL_STATUS: Record<string, string> = { completed: "ok", failed: "falhou", killed: "parado", terminou: "fim" };
+
+function shellState(s: BackgroundShell, now: number): string {
+  if (s.endedAt === undefined) return formatDuration(now - s.startedAt);
+  const label = SHELL_STATUS[s.status ?? ""] ?? s.status ?? "fim";
+  // Nunca visto vivo pela varredura: a hora do fim é desconhecida.
+  return s.pids ? `${label} em ${formatDuration(s.endedAt - s.startedAt)}` : label;
 }
 
 function runVerdict(run: VerificarRun): { text: string; tone: "ok" | "bad" | "dim" } {
@@ -86,6 +153,7 @@ async function tick($: EngineInterface) {
   isBusy = true;
   try {
     const now = await $.clock.now();
+    await scanShells($, now);
     const runs = await scanRuns($, now);
     const prev = await read($, board);
     const list = await read($, shells);
@@ -102,7 +170,7 @@ async function tick($: EngineInterface) {
 const start: Hook<"session.start"> = async ($, e, next) => {
   await $.command.register({
     name: "andamento",
-    description: "Mostra o verificar-local e os comandos em segundo plano com o fim dos logs",
+    description: "Verificar-local e comandos em segundo plano; /andamento parar [n|id] encerra um",
   });
   $.clock.every(TICK_MS, () => tick($));
   void tick($);
@@ -114,7 +182,23 @@ export function registerVerificar(on: On) {
   on("session.start", { isInteractive: true }, start);
   on("session.start", { isInteractive: false }, start);
 
-  on("command.run", { command: "andamento" }, async ($) => {
+  on("command.run", { command: "andamento" }, async ($, e) => {
+    const [verb, target] = e.args.trim().split(/\s+/);
+    if (verb === "parar") {
+      const now = await $.clock.now();
+      const running = liveShells(await read($, shells), now).filter((s) => s.endedAt === undefined);
+      if (!target) {
+        if (running.length === 0) return { text: "Nada rodando em segundo plano." };
+        return {
+          text: running
+            .map((s, i) => `${i + 1}. ${s.id} · ${shellState(s, now)} · ${s.command.split("\n")[0]?.slice(0, 80)}`)
+            .join("\n")
+            .concat("\n/andamento parar <número ou id>"),
+        };
+      }
+      const byIndex = /^\d+$/.test(target) ? running[Number(target) - 1] : undefined;
+      return { text: await stopShell($, byIndex?.id ?? target) };
+    }
     await $.ui.open({ id: VERIFICAR_PANE, title: "Andamento" });
     return { text: "Painel de andamento aberto." };
   });
@@ -147,7 +231,7 @@ export function registerVerificar(on: On) {
       await update($, shells, (list) =>
         list.map((s) => {
           const d = done.find((x) => x.id === s.id);
-          return d ? { ...s, endedAt: now, status: d.status } : s;
+          return d ? { ...s, endedAt: s.endedAt ?? now, status: d.status } : s;
         }),
       );
     }
@@ -159,7 +243,7 @@ export function registerVerificar(on: On) {
     const { now, runs } = await read($, board);
     const sh = liveShells(await read($, shells), now);
     if (runs.length === 0 && sh.length === 0) return next(e);
-    const { Box, Text } = $.ui.resolve(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
     // A faixa é dividida com os outros mods: responder sem `next` os esconde.
     const below = await next(e).catch(() => null);
 
@@ -199,21 +283,36 @@ export function registerVerificar(on: On) {
             </Box>
           );
         })}
-        {sh.slice(0, 3).map((s) => (
-          <Box key={s.id}>
-            <Text dimColor>
-              bg {s.endedAt === undefined ? formatDuration(now - s.startedAt) : s.status ?? "fim"} · {s.command.split("\n")[0]?.slice(0, 70)}
-            </Text>
-          </Box>
-        ))}
-        {sh.length > 3 && <Text dimColor>+{sh.length - 3} em segundo plano · /andamento</Text>}
+        {sh.slice(0, 3).map((s, i) => {
+          const last = s.tail?.at(-1) ?? (s.endedAt === undefined && s.current ? `agora: ${s.current}` : undefined);
+          return (
+            <Box key={s.id} flexDirection="row">
+              {s.endedAt === undefined ? (
+                <Button key={`parar-${s.id}`} plain hotkey={String(i + 1)} dimColor onPress={() => void stopShell($, s.id)}>
+                  parar
+                </Button>
+              ) : (
+                <Text dimColor>{"        "}</Text>
+              )}
+              <Text dimColor wrap="truncate-end">
+                {" "}bg {shellState(s, now)} · {s.command.split("\n")[0]?.slice(0, 60)}
+                {last ? ` │ ${last}` : ""}
+              </Text>
+            </Box>
+          );
+        })}
+        {sh.length > 3 && (
+          <Text dimColor>
+            +{sh.length - 3} em segundo plano ({sh.filter((s) => s.endedAt === undefined).length} rodando) · /andamento
+          </Text>
+        )}
         {below}
       </Box>
     );
   });
 
   on("ui.render", { component: "Pane", requestId: VERIFICAR_PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
     const { now, runs } = await read($, board);
     const sh = liveShells(await read($, shells), now);
 
@@ -248,10 +347,38 @@ export function registerVerificar(on: On) {
             ))}
           </Box>
         ))}
-        {sh.map((s) => (
-          <Text key={s.id} dimColor={s.endedAt !== undefined}>
-            bg {s.id} · {s.endedAt === undefined ? `rodando ${formatDuration(now - s.startedAt)}` : s.status ?? "fim"} · {s.command.slice(0, 200)}
-          </Text>
+        {sh.map((s, i) => (
+          <Box key={s.id} flexDirection="column" marginBottom={1}>
+            <Box flexDirection="row">
+              <Text bold={s.endedAt === undefined} dimColor={s.endedAt !== undefined}>
+                bg {s.id} · {s.endedAt === undefined ? `rodando há ${shellState(s, now)}` : shellState(s, now)}
+                {s.endedAt === undefined && s.pids ? ` · pid ${s.pids.join(" ")}` : ""}
+                {"  "}
+              </Text>
+              {s.endedAt === undefined && (
+                <Button key={`parar-${s.id}`} hotkey={i < 9 ? String(i + 1) : undefined} onPress={() => void stopShell($, s.id)}>
+                  parar
+                </Button>
+              )}
+            </Box>
+            {s.command
+              .split("\n")
+              .slice(0, 3)
+              .map((l, j) => (
+                <Text key={`c${j}`} dimColor wrap="truncate-end">
+                  {"  $ "}
+                  {l}
+                </Text>
+              ))}
+            {(s.tail ?? []).map((l, j) => (
+              <Text key={`t${j}`} dimColor wrap="truncate-end">
+                {"    "}
+                {l}
+              </Text>
+            ))}
+            {s.endedAt === undefined && s.current && <Text wrap="truncate-end">{`    agora: ${s.current}`}</Text>}
+            {s.path && <Text dimColor wrap="truncate-end">{`    log: ${s.path}${s.tail?.length ? "" : " (vazio)"}`}</Text>}
+          </Box>
         ))}
       </Box>
     );
