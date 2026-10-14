@@ -27,6 +27,8 @@
 //   hangar-preview tab close [id]          fecha a aba (sem id, a ativa; a última fecha o navegador)
 //   hangar-preview <verbo> --aba <id>      age nessa aba SEM trocar a ativa (verbos de página)
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
+//   hangar-preview --cdp <url> [--alvo <trecho da url>] <verbo>   os mesmos verbos numa página FORA do app
+//                                          (CDP só em loopback, ex.: túnel até um WebView2); env HANGAR_PREVIEW_CDP
 //
 // A sessão é resolvida pela chave estável do sidecar no modo sem terminal e pelo tmux no modo com
 // terminal. Para operar o navegador de OUTRA sessão, use --sessao <nome>.
@@ -76,11 +78,16 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--refazer') flags.refazer = true;
   else if (args[i] === '--pasta') {
     flags.pasta = args[++i];
-    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta .hangar/roteiros');
+    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta e2e/roteiros');
   }
   else if (args[i] === '--cwd') flags.cwd = args[++i];
+  else if (args[i] === '--cdp') flags.cdp = args[++i];
+  else if (args[i] === '--alvo') flags.alvo = args[++i];
   else pos.push(args[i]);
 }
+// Página de fora do app: quem conecta e confere o loopback é o app nativo; sessão e sidecar não entram.
+const externo = (flags.cdp ?? process.env.HANGAR_PREVIEW_CDP ?? '').trim();
+if (flags.alvo !== undefined && !externo) erro('--alvo só vale com --cdp <url>');
 if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
 const cmd = pos[0];
 if (!cmd || cmd === 'help' || cmd === '--help') {
@@ -125,8 +132,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
     --passos <n>          teto de passos (default 15)
     --refazer             ignora o roteiro gravado do mesmo objetivo (o Jev decide tudo e regrava)
-    --pasta <dir>         onde ficam os roteiros (padrão: .hangar/roteiros na raiz do git do cwd;
-                          fora de repo, ~/.cache/hangar/roteiros)
+    --pasta <dir>         onde ficam os roteiros (padrão: e2e/roteiros na raiz do git do cwd, lendo
+                          .hangar/roteiros antigo como reserva; fora de repo, ~/.cache/hangar/roteiros)
     --permitir-risco      libera, so nesta chamada, o clique que exclui, compra, envia ou publica
                           (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
@@ -134,6 +141,10 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
                           (modelo auxiliar do Jev: JEV_AUX_BASE_URL/_API_KEY/_MODELO/_ESFORCO,
                           ou JEV_TEXTO_CMD)
   confere <estado>        o Jev diz se a tela já mostra o estado (sai 0 = sim); use antes do shot
+  --cdp <url>             os verbos de página (e objetivo/confere) numa página FORA do app, pelo CDP dela;
+                          só loopback (ex.: http://127.0.0.1:9222 de um túnel). Env HANGAR_PREVIEW_CDP.
+                          Precisa do app desktop aberto nesta máquina; open não vale (use goto)
+  --alvo <trecho>         com --cdp, escolhe a página pela URL quando há mais de uma
   JEV_ENDPOINT / JEV_MODEL  onde e com qual modelo o Jev decide (configuração do servidor; vazio = typesafe.ai)
 
 Referência completa: skill hangar-preview.`);
@@ -225,6 +236,9 @@ function sidecarDa(nome) {
   erro(`"${nome}" existe em mais de um servidor — use a chave completa:\n` + achados.map((s) => `  ${s.chave}`).join('\n'));
 }
 
+// Com --cdp não há chave: a página é escolhida pelo endereço e pelo --alvo.
+const chaveAlvo = () => (externo ? null : sidecarDa(nomeSessao()).chave);
+
 // --- CDP mínimo, só pro liveness check do `list` ---
 async function targets() {
   try {
@@ -235,7 +249,9 @@ async function targets() {
 }
 
 // --- cliente do servidor local (Task 5) ---
-const MSG_SHELL_FORA = 'o app desktop do Hangar nao esta aberto nesta maquina (ou esta reiniciando, como na atualizacao): espere ele voltar e reabra o navegador com: hangar-preview open <url>';
+const MSG_SHELL_FORA = externo
+  ? 'erro: --cdp roda dentro do app desktop do Hangar, e ele nao esta aberto nesta maquina (ou esta reiniciando): abra o app e repita'
+  : 'o app desktop do Hangar nao esta aberto nesta maquina (ou esta reiniciando, como na atualizacao): espere ele voltar e reabra o navegador com: hangar-preview open <url>';
 
 // A porta de loopback do sidecar pode ter sido RECICLADA por outro processo depois que o app
 // fechou (o _srv.json não é apagado na saída — só no will-quit do main.cjs, e sinal/crash ainda
@@ -269,11 +285,13 @@ async function chamar(chave, verbo, cmdArgs, aba = flags.aba, sair = erro) {
     r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
+      // O token vai só ao app local; o CDP de fora quem abre é o app, sem credencial.
+      body: JSON.stringify({ ...(externo ? { cdp: externo, alvo: flags.alvo } : { chave }), verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
     });
     texto = await r.text();
   } catch (err) {
     // App fechado ou reiniciado (a atualização reinicia) no meio do comando: frase, não a pilha do Node.
+    if (externo) return sair(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e repita`);
     const reabrir = urlAberta ? `hangar-preview open '${semToken(urlAberta)}'` : 'hangar-preview open <url>';
     return sair(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
   }
@@ -293,6 +311,7 @@ if (cmd === 'open') {
   // (quem posiciona o view é o painel; não existe view invisível). Token do backend/.env ao lado
   // do script, mesmo padrão do hangar-send.
   const url = pos[1];
+  if (externo) erro('open nao vale com --cdp: a pagina ja esta aberta no app de fora; navegue com goto <url>');
   if (!url) erro('open precisa de uma url: hangar-preview open localhost:3000');
   const nome = nomeSessao();
   if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>');
@@ -362,14 +381,14 @@ if (cmd === 'list') {
 }
 
 if (cmd === 'tab') {
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const { verbo, args: cmdArgs } = fmt.verboDeTab(pos.slice(1));
   process.exit(await comando(chave, verbo, cmdArgs));
 }
 
 if (VERBOS_SERVIDOR.has(cmd)) {
   if (cmd === 'eval' && !pos[1]) erro('eval precisa de um trecho JS: hangar-preview eval \'document.title\'');
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const cmdArgs = pos.slice(1);
   // Sempre absoluto, resolvido contra o cwd do CLI (é o cwd que o agente conhece) — um caminho
   // relativo mandado cru pro shell grava no cwd de onde o ELECTRON subiu, não no do agente, e a
@@ -402,7 +421,7 @@ if (cmd === 'folha') {
 }
 
 if (cmd === 'batch') {
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const linhas = readFileSync(0, 'utf8'); // stdin inteiro
   const comandos = fmt.parseLote(linhas);
   // Para na PRIMEIRA linha que falhar: seguir depois de um `click` que não achou o alvo faz o
@@ -569,7 +588,7 @@ if (cmd === 'confere') {
   if (!estado) erro('confere precisa do estado: hangar-preview confere "o dialogo fechou e a lista mostra o item novo"');
   const chaveJev = process.env.TYPESAFE_API_KEY;
   if (!chaveJev) erro(semJev(), 2);
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   // O corte daqui (cabeça e cauda) é o que vale: o teto do snapshot só corta a cauda, onde a prova
   // pode estar, então ele recebe a página inteira.
   const snap = await chamar(chave, 'snapshot', ['--max', '1000000']);
@@ -599,7 +618,7 @@ if (cmd === 'objetivo') {
   if (!objetivo) erro('objetivo precisa do texto: hangar-preview objetivo "faz login e abre a agenda"');
   const chaveJev = process.env.TYPESAFE_API_KEY;
   if (!chaveJev) erro(semJev());
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   let dados;
   try {
     dados = flags.dados ? JSON.parse(flags.dados) : undefined;
@@ -621,6 +640,7 @@ if (cmd === 'objetivo') {
     // O MCP roda este script no cwd do backend: ele manda o da sessão em --cwd.
     // --pasta relativa é relativa ao cwd da sessão, não ao do backend.
     pasta: flags.pasta ? resolve(flags.cwd || process.cwd(), flags.pasta) : roteiro.pastaDe(flags.cwd || process.cwd()),
+    reserva: flags.pasta ? null : roteiro.reservaDe(flags.cwd || process.cwd()),
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),
