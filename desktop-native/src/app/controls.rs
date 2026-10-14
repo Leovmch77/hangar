@@ -67,7 +67,7 @@ pub(super) struct Controls {
     plan: Option<(SessionKey, Option<Result<Value, String>>, Option<Result<Value, String>>)>,
     plans_done: HashSet<String>,
     planning: HashSet<SessionKey>,
-    preselect: Option<SessionKey>,
+    preselect: Option<(SessionKey, String)>,
     prethread_since: Option<Instant>,
     // Linha sob o teclado; `None` é a atual (ou a primeira livre) até ↑↓ ou o ponteiro moverem.
     highlight: Option<usize>,
@@ -785,8 +785,8 @@ impl Hangar {
                 if content { *body = Some(result); } else { *meta = Some(result); }
             }
             Reply::PreSelect(snapshot) => {
-                if self.controls.preselect.as_ref() == Some(&key) { self.controls.preselect = None; }
-                let _ = snapshot;
+                if self.controls.preselect.as_ref().is_none_or(|(owner, pending)| owner != &key || pending != &snapshot) { return; }
+                self.controls.preselect = None;
                 let note = match result {
                     Ok(_) => (tr("option_sent"), false),
                     Err(error) if error.uncertain => (tr("action_uncertain"), true),
@@ -1292,7 +1292,7 @@ impl Hangar {
 
     fn prethread_snapshot(&self) -> Option<String> {
         let session = self.selected.as_ref()?;
-        (session.state == "awaiting_input").then(|| json!([session.question, session.options]).to_string())
+        (session.state == "awaiting_input").then(|| json!([session.question, session.options, session.interaction_id]).to_string())
     }
 
     fn preselect(&mut self, option: usize, snapshot: String, cx: &mut Context<Self>) {
@@ -1303,11 +1303,12 @@ impl Hangar {
             cx.notify();
             return;
         }
-        self.controls.preselect = Some(key.clone());
+        let Some(body) = select_body(&snapshot, Some(option)) else { return; };
+        self.controls.preselect = Some((key.clone(), snapshot.clone()));
         self.action_feedback.remove(&key);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&key.name, &["select"], Some(json!({"option": option})), false, 30).await;
+            let result = api.act(&key.name, &["select"], Some(body), false, 30).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::PreSelect(snapshot), result) }).await;
         });
         cx.notify();

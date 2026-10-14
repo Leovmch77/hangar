@@ -79,6 +79,8 @@ pub struct TerminalView {
     pub panes: Vec<TerminalPane>,
     pub shown: Option<String>,
     pub caps: Vec<String>,
+    /// A largura que corta a prévia com painel ancorado: o `columns` do plugin (`bodyColumns` mais o `[-]`).
+    pub crop_columns: Option<u64>,
 }
 
 impl TerminalView {

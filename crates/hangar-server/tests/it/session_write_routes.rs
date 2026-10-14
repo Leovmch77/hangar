@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 async fn cano() -> String { cano_with(None).await }
 
 /// `kill`: quando avisado, o cano falso cai e a entrada fica doente (`cano_exited`).
-async fn cano_with(kill: Option<Arc<tokio::sync::Notify>>) -> String {
+pub(crate) async fn cano_with(kill: Option<Arc<tokio::sync::Notify>>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -50,20 +50,26 @@ async fn cano_with(kill: Option<Arc<tokio::sync::Notify>>) -> String {
 }
 
 /// Python falso da política: responde `ok` a tudo.
-async fn policy() -> std::net::SocketAddr {
+async fn policy() -> std::net::SocketAddr { policy_seen(Arc::default()).await }
+
+/// O mesmo, guardando a linha de cada pedido (método e caminho).
+async fn policy_seen(seen: Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
+            let seen = seen.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 loop {
                     let mut length = 0usize;
+                    let mut first = true;
                     loop {
                         let mut line = String::new();
                         if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if std::mem::take(&mut first) { seen.lock().unwrap().push(line.trim_end().to_owned()); }
                         if line == "\r\n" { break; }
                         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                     }
@@ -83,7 +89,7 @@ async fn open_entry(registry: &RuntimeRegistry, dir: &std::path::Path, key: &str
     open_entry_with(registry, dir, key, name, 1, cano().await).await
 }
 
-async fn open_entry_with(registry: &RuntimeRegistry, dir: &std::path::Path, key: &str, name: &str, generation: u64, escuta: String) {
+pub(crate) async fn open_entry_with(registry: &RuntimeRegistry, dir: &std::path::Path, key: &str, name: &str, generation: u64, escuta: String) {
     registry.open(RuntimeTarget { key: key.into(), generation, name: name.into(), provider: "claude".into(),
         metadata: json!({"name": name, "headless": true, "session_id": "sid-1", "initialized": true}),
         binding: CanoBinding { pid: 42, escuta, token: "secret-test".into(), versao: 2 },
@@ -92,7 +98,7 @@ async fn open_entry_with(registry: &RuntimeRegistry, dir: &std::path::Path, key:
 }
 
 async fn registry() -> Arc<RuntimeRegistry> {
-    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
+    crate::runtime_open::with_hubs(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))))
 }
 
 /// Servidor com o runtime ligado (como `serve_until_with_state` faz) e o Python falso.
@@ -128,16 +134,17 @@ async fn without_runtime_every_write_route_reaches_python_with_the_same_body() {
 }
 
 #[tokio::test]
-async fn open_entry_with_an_extra_body_field_still_reaches_python_intact() {
+async fn open_entry_with_a_body_the_route_refuses_is_a_rust_422_never_python() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_entry(&registry, dir.path(), "k", "s").await;
     let (python, server) = serve_with(Some(registry)).await;
-    let body = r#"{"text":"oi","x":1}"#;
-    assert_eq!(post(server, "input", body, OWNER).await, (200, "from-python".into()));
-    assert_eq!(python.last_body(), body.as_bytes());
-    // Corpo que não é JSON de objeto também segue intacto: a recusa é do FastAPI.
-    assert_eq!(post(server, "input", "não é json", OWNER).await.0, 200);
-    assert_eq!(python.last_body(), "não é json".as_bytes());
+    // Campo a mais e corpo que não é JSON de objeto: a recusa é do Rust, com código.
+    for body in [r#"{"text":"oi","x":1}"#, "não é json"] {
+        let (status, text) = post(server, "input", body, OWNER).await;
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
+    }
+    assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
 #[tokio::test]
@@ -158,9 +165,10 @@ async fn gate_reopened_in_time_lets_the_request_through() {
     let (python, server) = serve_with(Some(registry.clone())).await;
     let reopen = registry.clone();
     tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; reopen.ingress().open("s"); });
-    // `/answer` ainda é o repasse provisório; as outras escritas já são do Rust.
-    assert_eq!(post(server, "answer", "{}", OWNER).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/s/answer"), 1);
+    // A porta reabriu e o Rust atendeu: corpo sem `answers` é a recusa dele, não o Python.
+    let (status, text) = post(server, "answer", "{}", OWNER).await;
+    assert_eq!(status, 422, "{text}");
+    assert_eq!(python.hits_to("/api/sessions/s/answer"), 0);
 }
 
 #[tokio::test]
@@ -259,19 +267,57 @@ async fn forwarding_never_holds_the_ingress_pass() {
     }
     assert!(!registry.writable("doente").await.unwrap().healthy, "a entrada ficou doente");
     let (python, server) = serve_with(Some(registry.clone())).await;
-    // Sem entrada, doente e saudável com corpo que o Rust não atende (o FastAPI recusa): em todos o
-    // `close` do Python não espera.
-    for name in ["sem-entrada", "doente", "s"] {
-        python.hold_input(true);
-        let url = format!("http://{server}/api/sessions/{name}/input");
-        let sending = tokio::spawn(client().post(url).header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi","x":1}"#).send());
-        let path = format!("/api/sessions/{name}/input");
-        for _ in 0..100 { if python.hits_to(&path) == 1 { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
-        assert_eq!(python.hits_to(&path), 1, "o pedido chegou ao Python");
-        assert!(registry.ingress().close(name, Duration::from_millis(300)).await.is_ok(), "{name}: passe na mão durante o repasse");
+    // Sem entrada (abertura, do Python): o `close` do Python não espera o nosso passe.
+    python.hold_input(true);
+    let url = format!("http://{server}/api/sessions/sem-entrada/input");
+    let sending = tokio::spawn(client().post(url).header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi"}"#).send());
+    let path = "/api/sessions/sem-entrada/input";
+    for _ in 0..100 { if python.hits_to(path) == 1 { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
+    assert_eq!(python.hits_to(path), 1, "o pedido chegou ao Python");
+    assert!(registry.ingress().close("sem-entrada", Duration::from_millis(300)).await.is_ok(), "passe na mão durante o repasse");
+    registry.ingress().open("sem-entrada");
+    python.hold_input(false);
+    python.release.notify_one();
+    assert_eq!(sending.await.unwrap().unwrap().status().as_u16(), 200);
+    // Doente e corpo que a rota recusa: o Rust responde com código, nunca repassa, e solta o passe.
+    for (name, body, status, code) in [("doente", r#"{"text":"oi"}"#, 503, "runtime_unhealthy"), ("s", r#"{"text":"oi","x":1}"#, 422, "erro_corpo_invalido")] {
+        let (got, text) = post_to(server, name, "input", body).await;
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!((got, reply["detail"]["code"].as_str()), (status, Some(code)), "{name}");
+        assert_eq!(python.hits_to(&format!("/api/sessions/{name}/input")), 0, "{name}: nunca ao Python");
+        assert!(registry.ingress().close(name, Duration::from_millis(300)).await.is_ok(), "{name}: passe solto");
         registry.ingress().open(name);
-        python.hold_input(false);
-        python.release.notify_one();
-        assert_eq!(sending.await.unwrap().unwrap().status().as_u16(), 200);
     }
+}
+
+async fn post_to(server: std::net::SocketAddr, name: &str, route: &str, body: &str) -> (u16, String) {
+    let response = client().post(format!("http://{server}/api/sessions/{name}/{route}"))
+        .header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
+        .body(body.to_owned()).send().await.unwrap();
+    (response.status().as_u16(), response.text().await.unwrap())
+}
+
+/// Parity A3: escrever para a sessão doente pede a reabertura ao coordenador do Python (o 503 fica).
+#[tokio::test]
+async fn unhealthy_write_asks_python_to_reopen_the_session() {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new(policy_seen(seen.clone()).await, "secret-test".into(), "instance-test".into())
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
+    let kill = Arc::new(tokio::sync::Notify::new());
+    open_entry_with(&registry, dir.path(), "d", "doente", 1, cano_with(Some(kill.clone())).await).await;
+    kill.notify_one();
+    for _ in 0..100 {
+        if !registry.writable("doente").await.unwrap().healthy { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_python, server) = serve_with(Some(registry.clone())).await;
+    let (status, _) = post_to(server, "doente", "input", r#"{"text":"oi"}"#).await;
+    assert_eq!(status, 503);
+    let wanted = "POST /internal/sessions/doente/reopen HTTP/1.1";
+    for _ in 0..100 {
+        if seen.lock().unwrap().iter().any(|line| line == wanted) { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(seen.lock().unwrap().iter().any(|line| line == wanted), "{:?}", seen.lock().unwrap());
 }

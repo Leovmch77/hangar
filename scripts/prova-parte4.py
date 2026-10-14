@@ -520,7 +520,7 @@ class Prova(sombra.Prova):
                      ("pane mostra o cartão", None if not tela_cartao else True, "" if tela_cartao else "cartão segurado pelo hook")]
             if chat:
                 itens.append(("chat awaiting_input", "awaiting_input" in chat.estados(t0), ""))
-            st, corpo, *_ = self.api("POST", f"/api/sessions/{nome}/select", {"option": 2}, timeout=30)
+            st, corpo, *_ = self.api("POST", f"/api/sessions/{nome}/select", {"option": 2, "interaction_id": s.get("interaction_id")}, timeout=30)
             saiu = esperar(lambda: (self.sessao(nome) or {}).get("state") not in (None, "awaiting_input"), 30, 0.5)
             itens += [("negar pelo app", st == 200, f"{st} {base.codigo(corpo)}"), ("sai do cartão", bool(saiu), "")]
             working_preso = sum(1 for e, _ in vistos if e == "working")
@@ -624,7 +624,7 @@ class Prova(sombra.Prova):
             no_chat = "awaiting_input" in chat.estados(t0)
             opc_chat = max([c.get("opcoes", 0) for *_, c in chat.desde(t0, "state")] or [0])
             tela = "" if headless else self.tela(nome)
-            st, corpo, *_ = self.api("POST", f"/api/sessions/{nome}/select", {"option": 2}, timeout=60)
+            st, corpo, *_ = self.api("POST", f"/api/sessions/{nome}/select", {"option": 2, "interaction_id": s.get("interaction_id")}, timeout=60)
             saiu = esperar(lambda: (self.sessao(nome) or {}).get("state") not in (None, "awaiting_input"), 60, 0.5)
             itens = [("lista awaiting_input com opções", bool(cartao), f"{s.get('state')}, {len(s.get('options') or [])} opções"),
                      ("chat awaiting_input com opções", no_chat and opc_chat > 0, f"{opc_chat} opções no state"),
@@ -738,14 +738,16 @@ class Prova(sombra.Prova):
             ("tamanho reposto", self.tamanho("b1") == "200x50", self.tamanho("b1"))])
 
     def t_409(self):
+        shown = self.sessao("b1") or {}
+        selection = {"option": 1, "interaction_id": shown.get("interaction_id")}
         ws = self.ws("/api/sessions/b1/term")
         self.eco(ws, "PROVA-409")
-        st, corpo, *_ = self.api("POST", "/api/sessions/b1/select", {"option": 1}, timeout=30)
+        st, corpo, *_ = self.api("POST", "/api/sessions/b1/select", selection, timeout=30)
         det = (corpo or {}).get("detail") if isinstance(corpo, dict) else None
         msg = isinstance(det, dict) and bool(det.get("message") or det.get("mensagem") or det.get("msg"))
         ws.close()
         esperar(lambda: self.clientes("b1") == [], 15, 0.3)
-        st2, corpo2, *_ = self.api("POST", "/api/sessions/b1/select", {"option": 1}, timeout=30)
+        st2, corpo2, *_ = self.api("POST", "/api/sessions/b1/select", selection, timeout=30)
         self.conferir("28", "409 com o painel aberto", [
             ("409 erro_terminal_aberto", st == 409 and base.codigo(corpo) == "erro_terminal_aberto", f"{st} {base.codigo(corpo)}"),
             ("resposta traz o texto", msg, ""),

@@ -302,9 +302,14 @@ def status(target: str) -> tuple[bool, int | None]:
     """(vivo, codigo de saida). Sem resposta do tmux conta como vivo: nada a relatar ainda."""
     if _IS_WINDOWS:
         return _windows_status(target.rsplit("-", 1)[-1])
-    cp = tmux._run(["tmux", "display", "-p", "-t", f"={target}:", "#{pane_dead}\t#{pane_dead_status}"])
-    dead, _, code = cp.stdout.strip().partition("\t")
+    cp = tmux._run(["tmux", "display", "-p", "-t", f"={target}:",
+                    "#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}"])
+    dead, code, signal = (cp.stdout.rstrip("\r\n").split("\t") + ["", ""])[:3]
     if cp.returncode != 0 or dead != "1":
+        return True, None
+    # O tmux marca o pane morto ao ler o fim do pty e só recolhe o código no SIGCHLD seguinte:
+    # sem código nem sinal, a saída ainda não chegou.
+    if not code and not signal:
         return True, None
     return False, int(code) if code.lstrip("-").isdigit() else None
 

@@ -56,12 +56,9 @@ pub struct Fake {
     last_body: Mutex<Vec<u8>>,
     /// Enquanto ligado, `/input` só responde depois de `release`.
     hold_input: std::sync::atomic::AtomicBool,
-    /// A pergunta que o plugin segura (`/internal/sessions/{name}/plugin`), o status que a faz falhar,
-    /// quantas leituras chegaram e os corpos do aviso de interrupção.
-    plugin_pending: Mutex<Value>,
+    /// A antiga rota da pergunta do plugin (`/internal/sessions/{name}/plugin`), só para provar que o Rust
+    /// não a chama mais: o status que a faz falhar, as leituras e os avisos que chegaram.
     plugin_status: Mutex<Option<StatusCode>>,
-    /// Corpo que substitui `{"pending": …}` na leitura (o Python respondendo outra coisa).
-    plugin_reply: Mutex<Option<Value>>,
     plugin_gets: AtomicUsize,
     plugin_posts: Mutex<Vec<Value>>,
     /// Resposta do `/api/sessions/{n}/input` repassado; `None` = o "from-python" de sempre.
@@ -121,15 +118,9 @@ impl Fake {
     pub fn hold_input(&self, on: bool) {
         self.hold_input.store(on, SeqCst);
     }
-    pub fn set_plugin_pending(&self, pending: Value) {
-        *self.plugin_pending.lock().unwrap() = pending;
-    }
     /// A rota interna do plugin responde só este status (o Python caído ou recusando).
     pub fn fail_plugin(&self, s: Option<StatusCode>) {
         *self.plugin_status.lock().unwrap() = s;
-    }
-    pub fn set_plugin_reply(&self, reply: Option<Value>) {
-        *self.plugin_reply.lock().unwrap() = reply;
     }
     pub fn plugin_gets(&self) -> usize {
         self.plugin_gets.load(SeqCst)
@@ -182,9 +173,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         plugin_ui: Mutex::default(),
         last_body: Mutex::default(),
         hold_input: std::sync::atomic::AtomicBool::new(false),
-        plugin_pending: Mutex::new(Value::Null),
         plugin_status: Mutex::default(),
-        plugin_reply: Mutex::default(),
         plugin_gets: AtomicUsize::new(0),
         plugin_posts: Mutex::default(),
         input_reply: Mutex::default(),
@@ -268,8 +257,7 @@ async fn fake_plugin_get(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Resp
     if let Some(s) = *f.plugin_status.lock().unwrap() {
         return status(s);
     }
-    let body = f.plugin_reply.lock().unwrap().clone().unwrap_or_else(|| json!({"pending": f.plugin_pending.lock().unwrap().clone()}));
-    Response::builder().header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
+    Response::builder().header("content-type", "application/json").body(Body::from(r#"{"pending":null}"#)).unwrap()
 }
 
 async fn fake_plugin_post(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {

@@ -162,7 +162,7 @@ def test_convidado_nao_fecha_a_sessao_do_dono():
 
 def test_fechar_sessao_revoga(cli, syncs, monkeypatch):
     cli.post("/api/sessions/proj/share", headers=AUTH)
-    monkeypatch.setattr(api.registry, "kill", lambda name: None)
+    monkeypatch.setattr(api.registry, "kill", lambda name, closed_by_rust=False: None)
     r = cli.delete("/api/sessions/proj", headers=AUTH)
     assert r.status_code == 200
     assert share_store.has_active() is False

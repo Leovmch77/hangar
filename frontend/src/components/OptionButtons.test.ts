@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
+import { createClassComponent } from 'svelte/legacy';
 import OptionButtons from './OptionButtons.svelte';
 import { overwriteGetLocale } from '../paraglide/runtime';
 
@@ -13,6 +14,86 @@ async function montar(question: string) {
   await tick();
   return { el, fim: () => { unmount(comp); el.remove(); } };
 }
+
+describe('OptionButtons: identidade exibida', () => {
+  it('o callback retido de A não responde B com a mesma pergunta', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const onSelect = vi.fn();
+    const comp = createClassComponent({ component: OptionButtons, target: el, props: {
+      question: 'Permitir?', options: ['Sim'], interactionId: 'interaction-a', onSelect, onCancel: vi.fn(),
+    } });
+    await tick();
+    const first = el.querySelector<HTMLButtonElement>('.option-btn')!;
+    comp.$set({ interactionId: 'interaction-b' });
+    await tick();
+    const second = el.querySelector<HTMLButtonElement>('.option-btn')!;
+    expect(first).not.toBe(second);
+    // Reanexa o nó retido para exercitar o callback antigo com a delegação do Svelte.
+    el.appendChild(first);
+    first.click();
+    second.click();
+    expect(onSelect.mock.calls).toEqual([[1, 'interaction-a'], [1, 'interaction-b']]);
+    comp.$destroy(); el.remove();
+  });
+
+  it('marcação e Submit conservam o mesmo ID; legado passa undefined', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const onSelect = vi.fn();
+    const onSubmit = vi.fn();
+    const comp = createClassComponent({ component: OptionButtons, target: el, props: {
+      question: 'Escolha', options: ['[ ] Alfa'], interactionId: 'multi-a', onSelect, onSubmit, onCancel: vi.fn(),
+    } });
+    await tick();
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click();
+    comp.$set({ options: ['[✔] Alfa'] });
+    await tick();
+    el.querySelector<HTMLButtonElement>('.option-btn--enviar')!.click();
+    expect(onSelect).toHaveBeenCalledWith(1, 'multi-a');
+    expect(onSubmit).toHaveBeenCalledWith('multi-a');
+    comp.$set({ interactionId: undefined, options: ['Sim'] });
+    await tick();
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click();
+    expect(onSelect).toHaveBeenLastCalledWith(1, undefined);
+    comp.$destroy(); el.remove();
+  });
+});
+
+describe('OptionButtons: o que mudar no plano', () => {
+  it('envio em voo da pergunta A não trava o campo da B', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    let release!: () => void;
+    const onSelect = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const options = ['Yes, and auto-accept edits', 'Tell Claude what to change'];
+    const comp = createClassComponent({ component: OptionButtons, target: el, props: {
+      question: 'Plano?', options, interactionId: 'plan-a', planReview: true, onSelect, onCancel: vi.fn(),
+    } });
+    const abrirEEnviar = async () => {
+      el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click();
+      await tick();
+      const area = el.querySelector<HTMLTextAreaElement>('.plan-feedback textarea')!;
+      area.value = 'menos passos';
+      area.dispatchEvent(new Event('input'));
+      await tick();
+      el.querySelector<HTMLFormElement>('.plan-feedback')!.requestSubmit();
+      await tick();
+      return area;
+    };
+    await tick();
+    expect((await abrirEEnviar()).disabled).toBe(true);
+    comp.$set({ interactionId: 'plan-b' });
+    await tick();
+    el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click();
+    await tick();
+    expect(el.querySelector<HTMLTextAreaElement>('.plan-feedback textarea')!.disabled).toBe(false);
+    release();
+    await tick();
+    expect(onSelect).toHaveBeenCalledWith(2, 'plan-a', 'menos passos');
+    comp.$destroy(); el.remove();
+  });
+});
 
 describe('OptionButtons: links na pergunta', () => {
   it('URL vira link que abre fora do app', async () => {

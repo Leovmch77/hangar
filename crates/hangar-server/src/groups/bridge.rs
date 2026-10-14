@@ -49,6 +49,7 @@ fn group_failed(e: GroupError) -> Failed {
     match e {
         GroupError::Refused(JoinRefusal::Mix | JoinRefusal::AlreadyGrouped) => fail("erro_pareamento_mistura_cross", super::routes::MIX_MSG),
         GroupError::Refused(JoinRefusal::TaskConflict { existing }) => fail("erro_pareamento_tarefa_existente", existing),
+        GroupError::Refused(JoinRefusal::Orq) => fail("erro_par_externo_orq", "a sessão é árbitra de uma orquestração e não pareia com outra máquina"),
         GroupError::Orq(PromoteError::Conflict(text)) => fail("erro_orq_arquivo_mudou", text),
         GroupError::Orq(PromoteError::Unavailable(code)) => fail("erro_grupo_indisponivel", code),
         GroupError::Store(e) => fail("groups_store_failed", e.to_string()),

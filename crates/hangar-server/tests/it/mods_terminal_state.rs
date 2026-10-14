@@ -15,7 +15,7 @@ fn pane(id: &str, placement: &str) -> TerminalPane {
 fn view(ids: &[&str], shown: Option<&str>) -> TerminalView {
     TerminalView { above: json!({"type": "Box", "children": [{"type": "Button", "props": {"key": "abrir", "label": "▸ Abrir painéis"},
         "press": {"plugin": "m", "handle": 1}}]}), columns: Some(82), panes: ids.iter().map(|id| pane(id, "dock")).collect(),
-        shown: shown.map(str::to_owned), caps: Vec::new() }
+        shown: shown.map(str::to_owned), caps: Vec::new(), crop_columns: None }
 }
 
 fn setup() -> (Mods, Arc<Probe>) {

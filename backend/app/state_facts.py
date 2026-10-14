@@ -1,8 +1,8 @@
-"""Fatos do estado de uma sessão Claude com terminal que só o Python sabe (plugin, troca, operação
-de permissão controlada), para o `Monitor` do Rust. O retrato (`GET /internal/sessions/{name}/
-state-facts`) registra o interesse da sessão por `INTEREST_S`; só sessão com interesse recebe o
-empurrão (`state.facts` pela ponte privada da lista), e só quando um valor muda. Instante
-monotônico daqui não vale no Rust: tudo que vence vai como idade em ms."""
+"""Só referência: o `Monitor` do Rust lê plugin, modo e vida no próprio Store e a rota do retrato
+saiu, então nenhum interesse é registrado e `notify` não envia nada. Eram os fatos do estado de uma
+sessão Claude com terminal que só o Python sabia (plugin, troca, operação de permissão controlada);
+o empurrão ia pela ponte privada da lista só para sessão com interesse e só quando um valor mudava.
+Instante monotônico daqui não vale no Rust: tudo que vence ia como idade em ms."""
 import logging
 import threading
 import time

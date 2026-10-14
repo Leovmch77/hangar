@@ -92,6 +92,42 @@ export async function returnFocus(read: () => Promise<{ text: string }>,
   return { moved, restored };
 }
 
+type AgentSent = { isDelivered: boolean; reason?: string };
+// Id já tratado: de novo, só a confirmação sai outra vez, nunca uma segunda entrega.
+const agentHandled = new Map<string, AgentSent>();
+const AGENT_HANDLED_KEPT = 32;
+
+/** O `SendMessage` direto, sem o modelo pai: agente vivo recebe na fila, o parado é retomado. */
+export async function deliverAgentMessage($: Pick<EngineInterface, "session" | "http" | "ui">, ponte: Bridge,
+  msg: { id: string; to: string; text: string }): Promise<void> {
+  let sent: AgentSent | undefined = agentHandled.get(msg.id);
+  if (!sent) {
+    try {
+      sent = (await $.session.send({ to: { agentId: msg.to }, text: msg.text })) ?? { isDelivered: false, reason: "sem resposta do Claude Code" };
+    } catch (err) {
+      sent = { isDelivered: false, reason: String(err) };
+    }
+    agentHandled.set(msg.id, sent);
+    if (agentHandled.size > AGENT_HANDLED_KEPT) agentHandled.delete(agentHandled.keys().next().value!);
+  }
+  let failure = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await $.http.fetch(`${ponte.url}/agent-sent`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id: msg.id, ...sent }),
+      });
+      if (r.status === 200) return;
+      failure = `${r.status} ${r.text}`;
+    } catch (err) {
+      failure = String(err);
+    }
+  }
+  // O app recebe 504 "resultado desconhecido"; a entrega em si já aconteceu ou não, conforme `sent`.
+  $.ui.log(`hangar: confirmação da mensagem ${msg.id} ao subagente ${msg.to} não chegou (${sent.isDelivered ? "entregue" : "recusada"}): ${failure}`, { to: "debug" });
+}
+
 async function pull($: EngineInterface, ponte: Bridge) {
   let espera = REARM_MS;
   try {
@@ -101,7 +137,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
       // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
       // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
       body: JSON.stringify({
-        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2", "focus"], estado: lastState(),
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2", "focus", "agent_message"], estado: lastState(),
         session_id: await $.session.id(),
       }),
     });
@@ -110,12 +146,16 @@ async function pull($: EngineInterface, ponte: Bridge) {
     if (r.status === 409) clearBridge();
     else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
-      const { text, modo, faixa, publication_id, generation, session_id } = JSON.parse(r.text) as {
+      const { text, modo, faixa, publication_id, generation, session_id, agent_message } = JSON.parse(r.text) as {
         text?: string | null; modo?: string; faixa?: boolean; publication_id?: string; generation?: number; session_id?: string;
+        agent_message?: { id: string; to: string; text: string };
       };
       if (faixa === false) askResend();
       const receipt = { publication_id, generation };
-      if (modo === "focus") {
+      // A resposta com texto para um subagente não traz prompt: nada abaixo vale para ela.
+      if (agent_message) {
+        await deliverAgentMessage($, ponte, agent_message);
+      } else if (modo === "focus") {
         let ok = false;
         try {
           if (!session_id || await $.session.id() === session_id) {

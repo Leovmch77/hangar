@@ -91,7 +91,7 @@ from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
-from app.connect_port import ConnectPortGate
+from app.connect_port import CONNECT_PORT, ConnectPortGate
 from app import guest_users, guest_users_api
 from app.share_gate import GUEST_TOKEN_KEY, ShareGate, guest_of
 from app.share_life import session_life
@@ -506,6 +506,31 @@ async def _transfer_check(name: str):
         raise HTTPException(exc.status, detail=public_error(exc)) from None
 
 
+class _RustReply(Exception):
+    """Resposta do Rust a uma escrita repassada pela ponte do Codex com terminal: volta como veio."""
+
+
+async def _codex_rust_port(name: str, request: Request):
+    """Escrita que entrou pelo convite ou pelo Connect num Codex com terminal do Rust: a autenticação foi a
+    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A pergunta do Claude vai do mesmo
+    jeito à ponte do Claude. Fora disso (421 do Rust) não faz nada."""
+    from app import runtime_coordinator
+    from app.share_tunnel import GUEST_PORT
+    port = (request.scope.get("server") or (None, None))[1]
+    if port in (GUEST_PORT, CONNECT_PORT) and port != settings.port:
+        route, body = request.url.path.split("/", 4)[4] + (f"?{request.url.query}" if request.url.query else ""), await request.body()
+        # Só Codex consulta a ponte dele: com a ponte ainda sem endereço, Pi/omp/Kimi levariam o 503 dela.
+        reply = None
+        if codex_sessions.exists(name):
+            reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
+        # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
+        if reply is None and route.split("?")[0] in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} \
+                and getattr(await _cached_info(name), "provider", "claude") == "claude":
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
+        if reply:
+            raise _RustReply(*reply)
+
+
 def _transfer_send_error(name: str) -> dict | None:
     from app.conversation_transfer import transfer_active, TransferError, public_error
     if transfer_active(name):
@@ -516,6 +541,11 @@ def _transfer_send_error(name: str) -> dict | None:
 app = FastAPI(title="hangar", lifespan=_lifespan)
 
 from app.runtime_terminal import TerminalControlError
+
+
+@app.exception_handler(_RustReply)
+async def _rust_reply(request: Request, exc: _RustReply):
+    return Response(exc.args[1], status_code=exc.args[0], media_type="application/json")
 
 
 @app.exception_handler(TerminalControlError)
@@ -1212,6 +1242,16 @@ def _do_notify_awaiting(session_id: str) -> None:
         if getattr(info, "headless", False):
             # Sem pane: quem sabe da permissão/pergunta em aberto é o adapter. `registry.list`
             # não calcula estado (sai sempre idle), então ler dali nunca mandava o push.
+            from app import runtime_coordinator
+            coordinator = runtime_coordinator.current()
+            if coordinator is not None and coordinator.managed_runtime(info.name):
+                # Com o Rust de pé a sessão é dele: o estado é o último que ele publicou.
+                state = ((coordinator.slot(info.name).view or {}).get("view") or {}).get("public_state")
+                if not isinstance(state, dict):
+                    _log.warning("push aguardando: sem a vista do Rust para %s; push não enviado", info.name)
+                    return False
+                info.state, info.question = state.get("state"), state.get("question")
+                return state.get("state") == "awaiting_input"
             snap = get_adapter(CLAUDE_HEADLESS).snapshot(info.name)
             if snap is None:
                 return False
@@ -1371,6 +1411,9 @@ def _confirm_and_drain(name: str) -> None:
             return  # nada a confirmar: nao paga registry nem o scan do transcript
         info = _cached_info_sync(name)
         if not info or not info.jsonl:
+            return
+        # Fila e confirmação do Codex com terminal são do Rust: gravar na projeção dele seria um segundo escritor.
+        if info.provider == "codex" and not info.headless and runtime_coordinator.rust_owns_codex_terminal():
             return
         from app.conversation_history import confirmation_options
         confirmation = confirmation_options(name, info.jsonl, info.provider)
@@ -1969,6 +2012,7 @@ class BroadcastBody(_StrictBody):
 
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
+    interaction_id: str | None = None    # do cliente; quem confere é o Rust
 
 
 class BtwBody(_StrictBody):
@@ -2715,28 +2759,37 @@ def _jsonl_of_session(name: str) -> str | None:
 
 
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def kill_session(name: str, by: str | None = None):
+async def kill_session(name: str, by: str | None = None, request: Request = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
     # responde 404/500. Antes era {"ok": true} incondicional: o card sumia da UI e a sessao reaparecia
     # na varredura seguinte, sem fila e sem pareamento (ver SessionRegistry.kill).
     # Os peers são lidos ANTES do kill: registry.kill -> _clear_pair já limpa o sidecar, e depois
     # dele ninguém sabe quem ficou.
     await asyncio.to_thread(_recusa_orq, name)
+    # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
+    closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
-    link = None if groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
-    jsonl = await asyncio.to_thread(_jsonl_of_session, name)
+    link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
+    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
+    if closed:
+        jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
+    else:
+        jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
-        errs = await asyncio.to_thread(registry.kill, name) or []
+        errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
     except KillFailed as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, e.detail or str(e)) from None
     finally:
-        await asyncio.to_thread(_invalidate_lists)
+        if not closed:
+            await asyncio.to_thread(_invalidate_lists)
     if jsonl:
         try:
             await asyncio.to_thread(closed_names.record, jsonl, name)
         except OSError:
             # Fechar já aconteceu; sem o nome, a conversa só não volta pelo nome antigo.
             _log.warning("closed name not recorded for %s", name, exc_info=True)
+    elif closed:
+        _log.warning("closed name not recorded for %s: Rust close sent no transcript", name)
     else:
         _log.info("closed name not recorded for %s: no transcript", name)
     plugin_bridge.esquecer(name)
@@ -2842,7 +2895,7 @@ def _requeue_unanswered(name: str) -> int:
     return requeued
 
 
-@app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth)])
+@app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def recarregar_sessao(name: str):
     """Recicla o processo de uma sessão Claude sem terminal na mesma conversa (`--resume`): é o
     jeito de ela reler MCP, hooks e settings da conta. Só ociosa e sem nada em aberto."""
@@ -2899,7 +2952,7 @@ async def _reload_session(name: str):
     return {"ok": True}
 
 
-@app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth)])
+@app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
@@ -3636,7 +3689,7 @@ def clear_then_link(name: str):
     return {"ok": True}
 
 
-@app.delete("/api/sessions/{name}/queue/{entry_id}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.delete("/api/sessions/{name}/queue/{entry_id}", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def descartar_da_fila(name: str, entry_id: str):
     # O botao "descartar" da bolha perdida: a entrada desistida sai da fila e do chat. So o id
     # (a bolha `queued-<id>` do front); `remove` recusa o que ainda esta por entregar.
@@ -4276,28 +4329,14 @@ async def peer_address(name: str):
 
 
 @app.get("/api/sessions/{name}/subagents", dependencies=[Depends(require_auth)])
-async def subagents_list(name: str):
-    # Subagentes soltos (tool Agent). O transcript de cada um mora em <session-dir>/subagents/ —
-    # e é a ÚNICA fonte do que ele está chamando enquanto roda; o jsonl do pai só tem o pedido.
-    info = await _cached_info(name)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.subagents import list_subagents
-    return await asyncio.to_thread(list_subagents, info.jsonl)
-
-
 @app.get("/api/sessions/{name}/subagents/{agent_id}", dependencies=[Depends(require_auth)])
-async def subagent_detail(name: str, agent_id: str, events: int = 0):
-    info = await _cached_info(name)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.subagents import get_subagent
-    # events=N -> devolve tambem o transcript do subagente nos MESMOS ChatEvent do chat, pra a UI
-    # reusar a lista de mensagens em vez de desenhar um formato proprio.
-    a = await asyncio.to_thread(get_subagent, info.jsonl, agent_id, 40, events)
-    if a is None:
-        raise HTTPException(404, detail=erro("erro_subagente_inexistente", "subagent not found"))
-    return a
+async def subagents_pelo_rust(request: Request, name: str, agent_id: str | None = None):
+    # Subagentes são do Rust, que sabe qual conversa é a da sessão: convidado e Connect só repassam.
+    from app import account_bridge
+    if account_bridge.owner_mode() == "python":
+        raise HTTPException(503, detail=erro("erro_subagentes_precisa_rust",
+                                             "o servidor está sem o processo Rust; reinicie o Hangar"))
+    return await account_bridge.forward_public(request, "/__hangar_server/subagents")
 
 
 @app.get("/api/sessions/events", dependencies=[Depends(require_auth)])
@@ -4756,6 +4795,14 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
+    # Codex com terminal do Rust (broadcast, grupo, par, MCP): o envio vai à ponte dele, num sentido só.
+    from app import runtime_coordinator
+    # A checagem de posse é memória: só a ponte (rede) vai a uma thread, e sem o Rust dono a entrega não
+    # depende do executor padrão.
+    if runtime_coordinator.rust_owns_codex_terminal() and (rust := await asyncio.to_thread(
+            runtime_coordinator.rust_codex_terminal, name, "input", "POST", json.dumps({"text": text}).encode())):
+        reply = json.loads(rust[1] or b"{}")
+        return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}
     managed = await _send_managed(name, text, "codex", track_entry=track_entry)
     if managed is not None:
         return managed
@@ -5003,7 +5050,7 @@ def _headless(name: str) -> bool:
     return headless_sessions.exists(name)
 
 
-@app.post("/api/sessions/{name}/input", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/input", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def input_prompt(name: str, body: InputBody):
     # Ramifica por provider: Claude via _send_thread (_send_one e SYNC/bloqueante — tmux), Codex via
     # _send_one_codex (async, app-server). Default "claude" pra qualquer nome nao-Codex.
@@ -5064,7 +5111,7 @@ async def input_prompt(name: str, body: InputBody):
             "native": bool(res.get("native"))}
 
 
-@app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def steer_session(name: str, body: InputBody | None = None):
     """Orienta o turno do Codex por RPC ou promove a fila da TUI (Kimi: ctrl-s; Claude: ctrl+x ctrl+s)."""
     if not await _send_thread(_session_exists, name):
@@ -6198,7 +6245,7 @@ def _falha_do_runtime(e: Exception) -> HTTPException:
     return HTTPException(502, detail=erro("erro_envio_falhou", str(e), erro=str(e)))
 
 
-@app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def select(name: str, body: SelectBody):
     from app.runtime_terminal import TerminalOutcomeUnknown, route_sync
     info = _cached_info_sync(name)
@@ -6289,7 +6336,7 @@ def select(name: str, body: SelectBody):
     return {"ok": True}
 
 
-@app.post("/api/sessions/{name}/select/submit", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/select/submit", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def select_submit(name: str):
     """Envia as opções JÁ MARCADAS de um picker de múltipla escolha.
 
@@ -6423,7 +6470,7 @@ async def _acao_de_mod(acao):
         raise HTTPException(409, detail=e.detail)
 
 
-@app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def interrupt(name: str, clear: bool = False):
     await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
@@ -6556,7 +6603,7 @@ def _normalize_rate_window(window: dict | None) -> dict | None:
     }
 
 
-@app.get("/api/sessions/{name}/limits", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/limits", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def limits(name: str):
     # So Codex tem rate limits expostos pelo app-server (account/rateLimits/read) -- Claude tem o
     # proprio chip de rate-limit (status_line), fora do escopo aqui (regra de ouro: Claude intocado).
@@ -6603,7 +6650,7 @@ class CodexModelBody(_StrictBody):
     effort: str | None = None
 
 
-@app.get("/api/sessions/{name}/models", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/models", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def modelos_da_sessao_codex(name: str):
     # Task C: modelo + reasoning effort so pra Codex (via model/list) -- o /model do Claude e o
     # picker interativo dedicado (/model-effort), sem esta rota.
@@ -6617,7 +6664,7 @@ async def modelos_da_sessao_codex(name: str):
     return {"models": await adapter.list_models(name), "current": current}
 
 
-@app.post("/api/sessions/{name}/model", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/model", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def set_codex_model(name: str, body: CodexModelBody):
     # A thread compartilha a escolha com a TUI, sem reiniciar o processo.
     if _provider_of(name) != "codex":
@@ -6633,7 +6680,7 @@ class CodexServiceTierBody(_StrictBody):
     service_tier: Literal["default", "priority"]
 
 
-@app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
     if _provider_of(name) == "claude":
         info = await _cached_info(name)
@@ -6701,7 +6748,7 @@ async def _aquecer_codex_sem_terminal(name: str) -> None:
         _tarefas_soltas.discard(asyncio.current_task())
 
 
-@app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def permissoes_do_codex(name: str):
     if _codex_sem_terminal(name):
         if _provider_of(name) != "codex":
@@ -6715,7 +6762,7 @@ async def permissoes_do_codex(name: str):
         raise HTTPException(exc.status, detail=erro("erro_permissao_picker", exc.detail))
 
 
-@app.post("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
     if _codex_sem_terminal(name):
         from app.adapters.codex.sem_terminal import Ocupada
@@ -6738,7 +6785,7 @@ class CodexModeBody(_StrictBody):
     mode: Literal["default", "plan"]
 
 
-@app.post("/api/sessions/{name}/codex/mode", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/codex/mode", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def set_codex_mode(name: str, body: CodexModeBody):
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_model_so_codex", "model só existe para sessões Codex"))
@@ -6754,7 +6801,7 @@ def _menu_de_implementar_plano(pane: str) -> bool:
                 and menu[1][0].startswith("Yes, implement this plan"))
 
 
-@app.post("/api/sessions/{name}/codex/plan/implement", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/codex/plan/implement", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def implementar_plano_codex(name: str):
     if not _session_exists(name):
         raise HTTPException(404, detail=erro(
@@ -6808,7 +6855,7 @@ def pane(name: str, lines: int = 200):
             "scrollback": tmux.pane_scrollback(name)}
 
 
-@app.post("/api/sessions/{name}/keys", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/keys", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def keys(name: str, body: KeyBody):
     # Uma tecla de navegacao (allowlist) pro pane — dirige overlays so-TUI a partir do espelho.
     try:
@@ -6822,7 +6869,7 @@ def keys(name: str, body: KeyBody):
     return {"ok": True}
 
 
-@app.post("/api/sessions/{name}/term-input", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/term-input", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def term_input(name: str, body: TermInputBody):
     # Terminal interativo (so desktop): manda texto digitado (literal) e/ou uma tecla nomeada pro pane.
     try:
@@ -9480,6 +9527,7 @@ class AnswerItem(_StrictBody):
 class AnswerBody(_StrictBody):
     answers: list[AnswerItem]
     request_id: int | str | None = None
+    interaction_id: str | None = None
 
 
 def _askq_fallback_text(answers: list[dict], jsonl: str | None) -> str:
@@ -9575,9 +9623,10 @@ def _pi_answer_fallback_text(a: dict) -> str:
 
 class SkipQuestionBody(_StrictBody):
     request_id: str
+    interaction_id: str | None = None
 
 
-@app.post("/api/sessions/{name}/question/skip", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/question/skip", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def skip_question(name: str, body: SkipQuestionBody):
     if getattr(_cached_info_sync(name), "provider", "claude") != "codex":
         raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente."))
@@ -9596,7 +9645,7 @@ def skip_question(name: str, body: SkipQuestionBody):
     return {"ok": True}
 
 
-@app.post("/api/sessions/{name}/answer", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/answer", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def answer(name: str, body: AnswerBody):
     # Dirige o AskUserQuestion tabbed: reproduz as teclas (nav em malha fechada), confere o Review e
     # submete. Input invalido -> 409. Drive falhou (DriveError: nada submetido, sem Escape) ->
@@ -9890,7 +9939,7 @@ def _guard_perm(name: str, info) -> None:
     if pane and is_overlay(pane):
         raise HTTPException(409, "ha um menu aberto no terminal da sessao")
 
-@app.get("/api/sessions/{name}/permission-modes", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/permission-modes", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def permission_modes(name: str, sondar: bool = False):
     """Lista dos modos de permissão.
 
@@ -9972,7 +10021,7 @@ async def permission_modes(name: str, sondar: bool = False):
     return {"current": cur, "modes": modos, "sondavel": cur != "dontAsk",
             "restaurado": restaurado, "previous_non_plan": anterior_nao_plan}
 
-@app.post("/api/sessions/{name}/permission-mode", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/permission-mode", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def permission_mode_set(name: str, body: PermissionModeBody):
     """Troca o modo de permissão via BTab até casar o alvo (teto 6 teclas).
 
@@ -11061,7 +11110,7 @@ def navegador_da_sessao(name: str):
     return {"url": None}
 
 
-@app.get("/api/sessions/{name}/commands", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/commands", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def commands(name: str):
     if _provider_of(name) == "codex":
         try:

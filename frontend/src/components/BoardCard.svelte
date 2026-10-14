@@ -365,15 +365,17 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   }
 
-  let optBusy = $state(false);
-  async function answer(i: number) {
-    if (optBusy) return;
-    optBusy = true;
+  let optBusy = $state.raw<{ interactionId: string | null | undefined } | null>(null);
+  async function answer(i: number, displayed: { server: Server; name: string; interactionId: string | null | undefined }) {
+    if (optBusy && optBusy.interactionId === displayed.interactionId) return;
+    optBusy = displayed;
     onSendError('');
     // option é 1-BASED (api.ts:150 -> backend Field(ge=1) -> (option-1)×Down + Enter).
-    try { await selectOptionForServer(server, session.name, i + 1); }
-    catch (err) { onSendError(err instanceof Error ? err.message : 'falha'); }
-    finally { optBusy = false; }
+    try { await selectOptionForServer(displayed.server, displayed.name, i + 1, displayed.interactionId); }
+    catch (err) {
+      if (session.interaction_id === displayed.interactionId) onSendError(err instanceof Error ? err.message : 'falha');
+    }
+    finally { if (optBusy === displayed) optBusy = null; }
   }
 
   // Corte da cauda crua em bolhas (sem resposta órfã) — puro/testável em format.ts, junto do
@@ -574,11 +576,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
         <div class="bc-question">
           <p>{session.question}</p>
           {#if session.options?.length}
-            <div class="bc-options">
-              {#each session.options as opt, i (i)}
-                <button class="bc-opt" disabled={optBusy} onclick={() => answer(i)}>{opt}</button>
-              {/each}
-            </div>
+            {#each [{ server, name: session.name, interactionId: session.interaction_id }] as displayed (displayed.interactionId)}
+              <div class="bc-options">
+                {#each session.options as opt, i (i)}
+                  <button class="bc-opt" disabled={!!optBusy && optBusy.interactionId === displayed.interactionId} onclick={() => answer(i, displayed)}>{opt}</button>
+                {/each}
+              </div>
+            {/each}
           {/if}
         </div>
       {/if}

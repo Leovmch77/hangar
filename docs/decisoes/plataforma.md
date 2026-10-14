@@ -711,10 +711,14 @@ Computer Use (`jev_windows_api_key`, gravada só no `env` do MCP) saiu: duas cha
 diferentes eram a confusão da tela, e com chave do OpenRouter o Computer Use respondia 401 porque
 tinha a TypeSafe fixa.
 
-- **Uma regra de destino, em quatro cópias que precisam casar:** `runtime_config.destino_jev`
+- **Uma regra de destino, em cinco cópias que precisam casar:** `runtime_config.destino_jev`
   (Python), `destination` em `crates/hangar-server/src/voice/jev.rs` (voz, que saiu do nativo para
   o servidor em 10/10/2026), `jev::destination` em `desktop-native/src/app/server_config.rs` (tela
-  do Jev no nativo) e `jev_config` do `orq.py`. OpenRouter quando o
+  do Jev no nativo), `destinoDoJev` do `shell/jev_objetivo.cjs` (só o CLI fora de sessão; o `orq.py`
+  não tem mais cópia, ver 12/10 abaixo) e `jev_destination` de
+  `crates/hangar-server/src/runtime/codex_launch.rs`, chamada pelo `jev_env` (11/10/2026: o Rust monta o ambiente do Codex
+  que ele lança e relança, e o `hangar-server` não tinha leitor do Jev; o `env_jev` do Python foi
+  portado, nunca copiado do processo que morre). OpenRouter quando o
   endereço é dele ou, sem endereço, quando a chave começa com `sk-or-`. Padrões: TypeSafe
   `https://api.typesafe.ai/v1/systemone` + `jev-latest`; OpenRouter
   `https://openrouter.ai/api/alpha/decisions` + `~typesafe/jev-latest`. No OpenRouter,
@@ -1600,7 +1604,9 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   último valor ao conectar e só acorda por mudanças da sua sessão; não assina o canal global nem
   consulta o ator para recuperar eventos perdidos. A reabertura limpa o erro da vida anterior;
   erro e frase continuam visíveis na reconexão. O canal global continua atendendo os consumidores
-  do coordenador Python (inicialização, recuperação, controles e troca de conversa).
+  do coordenador Python (inicialização, recuperação, controles e troca de conversa). Falha de
+  abertura ou de ciclo de vida gravada no canal `live` do nome aparece ao conectar, quando o ator
+  não tem erro, até ele publicar de novo; a mesma tarefa segue o `plugin::Store` da sessão.
 - `rebind` (`/clear`, troca do filho) acorda o `Monitor` na hora: o retrato perde o estado e o novo
   sai sem esperar o tique. A captura é recriada na época nova (o pool solta o vínculo velho do
   mesmo consumidor) e solta ao fim do `Monitor`.
@@ -1612,6 +1618,13 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   (`state_facts_missing` no detalhe quando não houve resposta nenhuma).
 - O `Sources` não tem corpo padrão em método nenhum: a fonte de produção que esquecer um não
   compila (a remoção já pegou duas fontes de teste incompletas).
+- **Atualização de 11/10/2026 (contrato 52).** O retrato e os serviços que o `Monitor` pedia ao
+  Python saíram: `GET /internal/sessions/{name}/state-facts` e `POST …/state-service`
+  (`permission.observe`, `session.dead`, `session.deliverable`). Os fatos do plugin vêm do
+  `plugin::Store` do Rust, a memória do modo de permissão é a `PermissionMemory` do Rust e a
+  entrega é `RuntimeRegistry::drain` chamado por `LiveSources::deliverable`. O texto acima que cita
+  esses serviços é histórico. Ver
+  [fronteira](#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
 - Medida (`docs/migracao-rust/parte4/medicao.md`, Task 5): 20 chats trabalhando, Python de 176,5
   para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
   Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
@@ -1928,6 +1941,12 @@ duplicar. É raro e aceito; o app não manda id do cliente para deduplicar.
 **Fora da cobertura da porta.** Envios que nascem no Python (broadcast, grupo, par, MCP) seguem
 por `_send_one` e ficam protegidos só pelo `freeze`, não pela porta. Seguem assim até a parte 6.
 
+**Atualização de 11/10/2026 (contrato 52).** Duas exceções acima deixaram de existir: o `/clear`
+com terminal é conduzido pelo ator Rust (barreira, vigia da conversa nova e `reconcile_claude`),
+sem repasse; e o Codex, com e sem terminal, entrou na mesma tabela (`session_write/table.rs`). As
+respostas de pergunta que chegam pelo convidado e pelo Connect vão ao Rust pela ponte privada.
+Ver [fronteira](#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
+
 Roteiro de medição (sem números ainda, vêm do uso real):
 [medicao-5-0.md](../migracao-rust/parte5-claude/medicao-5-0.md).
 
@@ -2090,3 +2109,133 @@ juntava isso às falhas sem resposta (`method: unknown`). Agora a recusa do logi
 desconectada (`method: none`), que os dois clientes já mostram com Entrar; prazo, CLI ausente e
 outras falhas continuam `unknown`. No nativo, a conta Codex do app fica em Assinaturas mesmo com o
 login `unknown`: "Outros agentes" é o grupo das chaves de API.
+
+## Perguntas, permissões e ciclo de vida no Rust: fronteira com o Python
+
+(11/10/2026, branch `Hangar-rust`, contrato interno **52**; **58** depois das fusões com a
+`main`, que chegou a 57 com a descoberta da conversa no Rust; **63** na abertura do PR #158; desenho [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md),
+decisões A/B do usuário de 11/10.) Perguntas, aprovações de ferramenta e modos de permissão do
+Claude e do Codex, e o ciclo de vida da sessão já aberta, passaram a ter um dono só: o
+`hangar-server`. O motivo é o mesmo do dono único: cada ida Rust → Python → Rust era um ponto onde
+uma resposta podia ir para a pergunta errada ou ficar sem dono. Detalhes do Codex com terminal em
+[harnesses.md](harnesses.md#codex-com-terminal-no-rust-adoção-e-dono-único).
+
+### Identidade da interação
+
+- Toda pergunta, permissão, formulário e menu publicado leva `interaction_id` (`StateEvent`,
+  `AskQuestion`, `codex_question`, linha da lista em `SessionRow`). O ID é opaco e liga chave da
+  sessão, conversa/geração e revisão da pergunta; não muda a cada poll nem com o cursor.
+- `/select`, `/select/submit` e `/answer` (e `/question/skip` do Codex) devolvem o ID do cartão em
+  que a pessoa agiu, capturado no clique: `packages/core`, PWA, app `mobile/` e nativo foram
+  ajustados sem mudar controles. O dono confere o ID antes do primeiro efeito
+  (`interactions.rs`, `session_write/control.rs::expected`).
+- Recusas: sem ID, 409 `erro_interacao_sem_identidade` ("Atualize o app ou recarregue a página
+  antes de responder."); pergunta trocada, encerrada ou de outra vida, 409
+  `erro_interacao_desatualizada`; vínculo ilegível, 503 `erro_interacao_indisponivel`. Nada é
+  enviado em nenhum dos três.
+- **Mudança deliberada de contrato:** antes, `/select` só com `{option}` e `/answer` sem
+  `request_id` caíam na pergunta atual, e um clique atrasado em A respondia B. Cliente antigo sem
+  ID (PWA aberta com o bundle anterior, app não atualizado) agora é recusado com a frase acima.
+- O ID passa intacto pelas portas Python (`SelectBody`, `AnswerBody` e `SkipQuestionBody` aceitam
+  o campo e não o interpretam). A matriz de identidade Python antiga (`interactions.py` e seus
+  testes) não foi recriada.
+- **Codex com terminal não informa autoria da resolução.** A resposta escrita do app é
+  `Disposition::Unknown` com `decision_confirmed: false` (409 `erro_sem_confirmacao_resposta`) e o
+  cartão fecha no `serverRequest/resolved`, que não diz quem venceu. O app nunca anuncia
+  "permitido" ou "negado por você" nesse caso.
+
+### Fronteira
+
+**Rust** (responsabilidade migrada, sem reserva Python em `rust`/`pending`):
+
+- Plugin do Claude: as nove rotas `/api/plugin/*` (`plugin/routes.rs`), instância, espera,
+  publicação, pergunta e permissão seguradas, resposta, confirmação e sugestão, num
+  `plugin::Store`. O `/interrupt` do Claude com terminal lê e avisa esse Store.
+- Fatos e entrega do `Monitor`, da lista e do feed (`state/live.rs`, `list/bridge.rs`,
+  `state/runtime_feed.rs`); drenagem direta (`RuntimeRegistry::drain`).
+- Modos de permissão do Claude com e sem terminal (`session_write/permissions.rs`, `PermissionMemory`):
+  leitura, sondagem, troca e base anterior ao plano; reabertura para bypass com a receita do
+  processo vivo (`claude_relaunch.rs`), recusada antes de matar se a receita não se prova.
+- Codex com terminal adotado (envio, fila, controles, perguntas, `/codex-permissions`).
+- Ciclo de vida da sessão aberta: pane morto, fechamento e limpeza de terminal/sidecar, `/clear`,
+  troca de conversa e sidecar, nova geração.
+- Relançamento da sessão já aberta: Codex terminal ↔ sem terminal e `/recarregar`
+  (`codex_relaunch.rs`); no Claude, só a reabertura para bypass. Os demais relançamentos do Claude
+  (terminal ↔ sem terminal, recarregar) ficaram fora do recorte, com o comportamento anterior.
+- Modo de permissão gravado: texto desconhecido é recusado (`launch_permission_mode`,
+  `erro_modo_desconhecido`); ausente é o padrão da abertura (Full Access no Codex).
+
+**Python** (não migrado, segue funcionando):
+
+- Criação e abertura inicial (`POST /api/sessions`), lançador (`hangar-codex-tui`), preparo de
+  conta, registros iniciais, `launch_env` do Claude e importação Claude → Codex
+  (`publish_imported`, que abre um Codex novo).
+- Autorização das portas 8766/8768 com o repasse mínimo da decisão B: depois de autenticar, o
+  pedido vai num sentido só, corpo e `interaction_id` intactos, a
+  `/__hangar_server/claude/<nome>/{answer,select,select/submit}` ou
+  `/__hangar_server/codex/<nome>/<rota>` (`_codex_rust_port` em `api.py`, `_rust_bridge` em
+  `runtime_coordinator.py`). O mesmo repasse leva ao Codex com terminal o texto de broadcast,
+  grupo, par e MCP (`_send_one_codex`). 421 devolve ao Python o que o Rust não atende; transporte
+  que falha vira 5xx `claude_bridge_failed`/`codex_bridge_failed`, nunca resposta local. O Python
+  não recalcula aprovação nem guarda pendência.
+- Limpeza externa depois do `DELETE` de Codex com terminal (decisão A): o Rust encerra a sessão e
+  repassa o pedido; o Python limpa só `share_store`/`sync_tunnel`, `ThenLink`, atalhos e caches
+  (`registry.kill` com `closed_by_rust`), sem chamar o Rust de volta.
+- Histórico do convidado, estatística, voz, custos, MCP, grupos, navegador, atalhos, atualizações e
+  Pi/omp/Kimi não migraram por vizinhança.
+
+**Recuperação quando o Rust cai: pendente de decisão do usuário.** Em `rust`/`pending`, a
+responsabilidade migrada responde erro visível com código (503 nas pontes, `runtime_unhealthy`
+nas escritas) e nunca é executada pelo Python. A desistência do Supervisor (modo `python`) ainda
+roda o código antigo para tudo, inclusive perguntas, permissões e Codex com terminal, o que
+contraria o contrato da migração; o desenho do Supervisor e da disponibilidade da porta pública
+não foi decidido e não foi alterado. A abertura inicial completa no Rust é o segundo trabalho
+contratado, também não iniciado.
+
+### O que saiu do caminho ativo do Python
+
+- `GET /internal/sessions/{name}/state-facts` e `POST …/state-service` (`permission.observe`,
+  `session.dead`, `session.deliverable`).
+- Despacho do Rust para `terminal_facts`/`terminal_publish`/`terminal_plugin_control`; o despacho
+  continua só para a reserva do modo `python` (`runtime_terminal._service`).
+- `launch_env`, `patch_meta` e `clear_cano` do Codex em `runtime_policy.py` (o Rust monta argv/env
+  e grava o sidecar).
+- `hand-over` do relançamento (`open_terminal` no `lifecycle_call`, `python_client_released`).
+- `plugin_bridge.app_remoto` e `_held` nos fatos da lista; `held` segue no contrato como `{}`.
+- Reconciliação da fila do Codex com terminal do Rust pelo Python (`_confirm_codex_queue`).
+
+Os corpos antigos ficam como referência, sem chamador ativo nos modos `rust`/`pending`; a rota
+`/internal/sessions/{name}/plugin` também ficou sem chamador Rust. Seguem no Python, fora deste
+recorte e ainda pedidos pelo Rust: `native_message` (recado `[de: …]` por socket nativo) e os
+fatos de contagem, conta e atividade do Codex em `/internal/list/facts`.
+
+### Saldo de linhas Python por arquivo
+
+`git diff --numstat 0264a8150 HEAD -- backend/app` (base publicada antes do trabalho; HEAD
+`42c48eb2f`), linhas adicionadas e removidas por arquivo:
+
+| arquivo | líquido | repasse B / limpeza DELETE-A | resto |
+|---|---|---|---|
+| `api.py` | +34 | +34 (`_codex_rust_port`, `_RustReply`, repasse em `_send_one_codex`, ID nos corpos) | 0 |
+| `registry.py` | +12 | +12 (`closed_by_rust`, `kill` pela ponte, `KillFailed.detail`) | 0 |
+| `runtime_coordinator.py` | +28 | +48 (`rust_owns_codex_terminal`, `rust_codex_terminal`, `rust_claude`, `_rust_bridge`) | −20 |
+| `adapters/codex/adapter.py` | +6 | 0 | +6 |
+| `sse.py` | +2 | 0 | +2 |
+| `internal_api.py` | −29 | 0 | −29 |
+| `list_facts.py` | −11 | 0 | −11 |
+| `runtime_policy.py` | −64 | 0 | −64 |
+| `runtime_adapter.py`, `rust_server.py`, `state_facts.py` | 0 | 0 | 0 |
+| **total** | **−22** (+174 −196) | **+94** | **−116** |
+
+Dois arquivos crescem fora do repasse e não estão cobertos pelo total: `adapter.py` +6 (+5 do
+`publish_imported`, mantido porque a importação é abertura e não pode ter dois clientes; +2 da
+recusa do cliente Python em `_conectar`; −1) e `sse.py` +2 (guarda que impede o Python de gravar a
+fila do Codex do Rust, que era um segundo escritor do mesmo arquivo). O total negativo não aprova
+esses dois por soma.
+
+### Estado das provas
+
+Nada desta entrega foi compilado nem testado: as regressões foram escritas e revisadas, sem
+execução. O uso real (Task 13, Steps 3 e 4: Claude e clientes reais, Codex com terminal no Linux e
+na DELPHI-02) está pendente, assim como qualquer medida de tempo; não há ganho de velocidade
+declarado.

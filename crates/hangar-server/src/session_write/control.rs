@@ -1,25 +1,24 @@
 //! `/interrupt`, `/select`, `/select/submit`, `/keys`, `/term-input` e `DELETE …/queue/{id}` de sessão
-//! Claude, com a mesma resposta do Python (`api.py`). Daqui para baixo o Rust é o dono: falha é erro
-//! com código, nunca repasse. A pergunta que o plugin segura ainda mora no Python e vem pela rota
-//! interna temporária `/internal/sessions/{name}/plugin` (sai quando o plugin for do Rust).
+//! Claude e Codex, com a mesma resposta do Python (`api.py`). Daqui para baixo o Rust é o dono: falha é
+//! erro com código, nunca repasse. A pergunta que o plugin segura é do Rust: o ator do terminal a
+//! confere e a fecha no próprio Esc.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use http_body_util::BodyExt;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 
 use super::input::{
     Diary, MSG_CODEX_CONTROL, MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, MSG_STEER_REFUSED, MSG_STEER_UNKNOWN, answer, codex_control,
     control_failed, diary_code, json_content_type, payload_code, runtime_failed, sem_turno,
 };
-use super::{Ctx, WriteRoute, admit, detail_body, relay};
+use super::{Ctx, WriteRoute, admit, detail_body, invalid_body};
 use crate::mods::state::random_hex;
+use crate::interactions::{ExpectedInteraction, InteractionError};
 use crate::routes::AppState;
 use crate::runtime::gateway::EntryHandle;
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
@@ -27,23 +26,40 @@ use crate::runtime::queue::Action;
 
 type Answer = (StatusCode, Value);
 
-/// Pergunta humana e de uma vez só: sem resposta a escrita falha com código, não espera.
-const PLUGIN_TIMEOUT: Duration = Duration::from_secs(5);
-const PLUGIN_BODY_LIMIT: usize = 64 * 1024;
-
 const MSG_NO_TURN: &str = "Não há turno ativo para interromper.";
 const MSG_CODEX_NO_TURN: &str = "Não há turno Codex ativo para interromper.";
 const MSG_PERM_OPTION: &str = "opção fora do pedido de permissão";
 const MSG_PANEL_OPEN: &str = "Terminal aberto nesta sessao. Feche o painel pra responder por aqui.";
 const MSG_NOT_SENT: &str = "não consegui responder pelo terminal — opção NÃO enviada";
-const MSG_UNCONFIRMED_ANSWER: &str = "resposta enviada, mas nao deu pra confirmar a tempo — confira na sessao antes de responder de novo";
+pub(super) const MSG_UNCONFIRMED_ANSWER: &str = "resposta enviada, mas nao deu pra confirmar a tempo — confira na sessao antes de responder de novo";
 const MSG_NOT_MARKED: &str = "não consegui marcar essa opção no terminal — tente de novo";
 const MSG_NOT_SUBMITTED: &str = "não consegui enviar as opções marcadas — tente de novo";
+const MSG_PLAN_GONE: &str = "o terminal não mostra mais a aprovação do plano — nada foi enviado";
 const MSG_NO_PERMISSION: &str = "nenhum pedido de permissão pendente";
 const MSG_NOT_IN_QUEUE: &str = "entrada não está na fila";
-const MSG_PLUGIN_DOWN: &str = "não consegui conferir a pergunta pendente — nada foi enviado";
 
 fn ok() -> Answer { (StatusCode::OK, json!({"ok": true})) }
+
+pub(super) fn interaction_failure(error: InteractionError) -> Answer {
+    (error.status(), detail_body(error.code(), error.message(), json!({})))
+}
+
+pub(super) fn interaction_result(sent: &Result<RuntimeReply, RuntimeError>) -> Option<Answer> {
+    let code = match sent {
+        Err(error) => error.code.as_str(),
+        Ok(reply) if reply.disposition == Disposition::Rejected => payload_code(reply)?,
+        _ => return None,
+    };
+    InteractionError::from_code(code).map(interaction_failure)
+}
+
+pub(super) async fn expected(ctx: &Ctx, supplied: Option<&str>) -> Result<ExpectedInteraction, Answer> {
+    if supplied.is_none_or(str::is_empty) { return Err(interaction_failure(InteractionError::Missing)); }
+    let runtime = ctx.st.state.runtime.get().ok_or_else(|| interaction_failure(InteractionError::Unavailable))?;
+    let binding = runtime.interaction_binding(&ctx.name).await.map_err(|_| interaction_failure(InteractionError::Unavailable))?;
+    if binding.key != ctx.target.key || binding.generation != ctx.target.generation { return Err(interaction_failure(InteractionError::Changed)); }
+    ctx.st.interactions.expected(&binding, supplied).map_err(interaction_failure)
+}
 
 fn failure(code: &str, msg: &str, params: Value) -> Answer { (StatusCode::CONFLICT, detail_body(code, msg, params)) }
 
@@ -52,25 +68,16 @@ pub fn panel_open_refusal() -> Answer { failure("erro_terminal_aberto", MSG_PANE
 
 // ── /select ─────────────────────────────────────────────────────────────────────────────────────
 
-/// O que o Python decide antes do ator: o controle a enviar, ou a recusa pronta. A pergunta que o
-/// plugin segura (`pending`) manda no `request_id`; permissão `perm:` só tem as opções 1 e 2.
-pub fn select_plan(pending: Option<&Value>, option: u64, panel_open: bool) -> Result<Value, Answer> {
-    let mut payload = json!({"option": option});
-    let held = pending.map(|p| p["id"].as_str().map_or_else(|| p["id"].to_string(), str::to_owned));
-    let permission = held.as_deref().is_some_and(|id| id.starts_with("perm:"));
-    if let Some(id) = &held {
-        payload["request_id"] = json!(id);
-        if permission && !matches!(option, 1 | 2) { return Err(failure("erro_opcao_nao_convergiu", MSG_PERM_OPTION, json!({}))); }
-    }
-    if !permission {
-        // `ask:` pode acabar no teclado da TUI: vale a trava do painel e o cursor tem de ser lido.
-        if panel_open { return Err(panel_open_refusal()); }
-        if held.is_some() { payload["require_cursor"] = json!(true); }
-    }
-    Ok(payload)
+pub fn select_plan(expected: &ExpectedInteraction, option: u64, panel_open: bool) -> Result<Value, Answer> {
+    if expected.target.kind == crate::interactions::InteractionKind::Question { return Err(interaction_failure(InteractionError::Changed)); }
+    let permission = expected.target.request_key.starts_with("plugin:perm:");
+    if permission && !matches!(option, 1 | 2) { return Err(failure("erro_opcao_nao_convergiu", MSG_PERM_OPTION, json!({}))); }
+    if !permission && panel_open { return Err(panel_open_refusal()); }
+    Ok(json!({"option": option, "interaction_id": expected.interaction_id}))
 }
 
 pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diary) {
+    if let Some(failed) = interaction_result(sent) { return (failed, None); }
     let reply = match sent {
         Ok(reply) => reply,
         // Antes da entrega: nada chegou ao pane.
@@ -80,6 +87,7 @@ pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Ans
         Disposition::Accepted => (ok(), None),
         Disposition::Deferred => (control_failed(MSG_CONTROL_DEFERRED), None),
         Disposition::Unknown => (failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})), None),
+        Disposition::Rejected if payload_code(reply) == Some("plan_dialog_missing") => (failure("erro_plano_fora_da_tela", MSG_PLAN_GONE, json!({})), None),
         Disposition::Rejected => {
             let code = payload_code(reply).unwrap_or("rejected");
             (failure("erro_opcao_nao_convergiu", MSG_NOT_MARKED, json!({"detalhe": code})), Some(("opcao.nao_convergiu", diary_code(code))))
@@ -89,32 +97,58 @@ pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Ans
 
 /// Sem terminal a opção responde ao pedido de permissão em aberto (1 permite, 2 nega).
 pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    if let Some(failed) = interaction_result(sent) { return failed; }
     let not_answered = |msg: &str| (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_opcao_nao_convergiu", &format!("não consegui responder: {msg}"), json!({})));
     match sent {
         // O ator recusa a opção sem permissão em aberto com este código (não como resposta).
         Err(error) if error.code == "no_pending_permission" => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
+        // Opção que o cartão do Codex não tem: erro de quem respondeu, não falha de envio.
+        Err(error) if error.code == crate::runtime::codex::INVALID_ANSWER => failure("erro_codex_resposta_invalida", &error.message, json!({})),
         Err(error) => not_answered(&error.to_string()),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => ok(),
-            Disposition::Unknown => not_answered("resultado incerto; a operação foi conservada sem reenvio"),
+            Disposition::Unknown => failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})),
             Disposition::Rejected => not_answered(reply.payload["error"].as_str().filter(|e| !e.is_empty()).unwrap_or(MSG_STEER_REFUSED)),
             Disposition::Deferred => not_answered(MSG_STEER_REFUSED),
         },
     }
 }
 
-/// Corpo do `SelectBody`: só `option`, inteiro de 1 a 50. O resto (texto "1", decimal, campo a mais)
-/// é a conversão e o 422 do FastAPI, que recebe o pedido intacto.
-fn parse_option(bytes: &Bytes) -> Option<u64> {
+/// Formas normalizáveis e inválidas seguem intactas ao FastAPI, inclusive o ID recebido.
+/// `text` vazio vale como ausente; com texto, só a terceira opção do plano (o retorno a Claude), numa linha.
+fn parse_option(bytes: &Bytes) -> Option<(u64, Option<String>, Option<String>)> {
     let object = serde_json::from_slice::<Value>(bytes).ok()?;
     let object = object.as_object()?;
-    if object.len() != 1 { return None; }
-    object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))
+    if object.keys().any(|key| key != "option" && key != "interaction_id" && key != "text") { return None; }
+    let field = |name: &str| match object.get(name) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
+        _ => None,
+    };
+    let (supplied, text) = (field("interaction_id")?, field("text")?.filter(|t| !t.trim().is_empty()));
+    let option = object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))?;
+    if text.as_deref().is_some_and(|t| option != 3 || t.chars().any(char::is_control)) { return None; }
+    Some((option, supplied, text))
+}
+
+/// Diálogo do `ExitPlanMode`: o cartão vem do aviso do plugin, a resposta são as teclas do diálogo.
+pub fn plan_interaction(expected: &ExpectedInteraction) -> bool { expected.target.request_key.starts_with("plugin:plan:") }
+
+fn parse_submit(bytes: &Bytes) -> Option<Option<String>> {
+    let object = if bytes.is_empty() { json!({}) } else { serde_json::from_slice::<Value>(bytes).ok()? };
+    let object = object.as_object()?;
+    if object.keys().any(|key| key != "interaction_id") { return None; }
+    match object.get("interaction_id") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(id)) => Some(Some(id.clone())),
+        _ => None,
+    }
 }
 
 // ── /select/submit ──────────────────────────────────────────────────────────────────────────────
 
 pub fn submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diary) {
+    if let Some(failed) = interaction_result(sent) { return (failed, None); }
     let reply = match sent {
         Ok(reply) => reply,
         Err(error) => return (runtime_failed(error), None),
@@ -122,7 +156,7 @@ pub fn submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diar
     match reply.disposition {
         Disposition::Accepted => (ok(), None),
         Disposition::Deferred => (control_failed(MSG_CONTROL_DEFERRED), None),
-        Disposition::Unknown => (control_failed(MSG_CONTROL_UNCONFIRMED), None),
+        Disposition::Unknown => (failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})), None),
         Disposition::Rejected => {
             let code = payload_code(reply).unwrap_or("rejected");
             (failure("erro_opcao_nao_convergiu", MSG_NOT_SUBMITTED, json!({"detalhe": code})), Some(("opcao.envio_falhou", diary_code(code))))
@@ -141,6 +175,18 @@ pub fn control_step_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Result<
         Disposition::Deferred => Err(control_failed(MSG_CONTROL_DEFERRED)),
         Disposition::Rejected if payload_code(reply) == Some("key_not_allowed") => Err((StatusCode::BAD_REQUEST, json!({"detail": "tecla não permitida"}))),
         Disposition::Rejected if payload_code(reply) == Some("invalid_text") => Err((StatusCode::BAD_REQUEST, json!({"detail": "texto inválido para terminal"}))),
+        _ => Err(control_failed(MSG_CONTROL_UNCONFIRMED)),
+    }
+}
+
+/// O desfecho do escritor de pane do Codex com terminal, com as mesmas respostas do `control_step_answer`.
+pub fn pane_step_answer(result: &crate::terminal_input::DeliveryResult) -> Result<(), Answer> {
+    use crate::terminal_input::Disposition as Pane;
+    match (result.disposition, result.code.as_str()) {
+        (Pane::Accepted, _) => Ok(()),
+        (Pane::Rejected, "key_not_allowed") => Err((StatusCode::BAD_REQUEST, json!({"detail": "tecla não permitida"}))),
+        (Pane::Rejected, "invalid_text") => Err((StatusCode::BAD_REQUEST, json!({"detail": "texto inválido para terminal"}))),
+        (Pane::Deferred, _) => Err(control_failed(MSG_CONTROL_DEFERRED)),
         _ => Err(control_failed(MSG_CONTROL_UNCONFIRMED)),
     }
 }
@@ -227,42 +273,6 @@ pub fn queue_answer(removed: &Result<Value, RuntimeError>) -> Answer {
     }
 }
 
-// ── a pergunta do plugin, pela rota interna do Python ───────────────────────────────────────────
-
-fn plugin_request(st: &AppState, name: &str, post: Option<Value>) -> Option<Request> {
-    let url = format!("http://{}/internal/sessions/{}/plugin", st.cfg.upstream, utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let builder = match post { Some(_) => Request::post(url).header("content-type", "application/json"), None => Request::get(url) };
-    builder.header("x-hangar-internal", &st.cfg.internal_secret).body(post.map_or_else(Body::empty, |body| Body::from(body.to_string()))).ok()
-}
-
-async fn plugin_call(st: &AppState, name: &str, post: Option<Value>) -> Option<Value> {
-    let request = plugin_request(st, name, post)?;
-    let response = tokio::time::timeout(PLUGIN_TIMEOUT, st.http.request(request)).await.ok()?.ok()?;
-    if !response.status().is_success() { return None; }
-    let limited = http_body_util::Limited::new(response.into_body(), PLUGIN_BODY_LIMIT);
-    let body = tokio::time::timeout(PLUGIN_TIMEOUT, limited.collect()).await.ok()?.ok()?.to_bytes();
-    serde_json::from_slice(&body).ok()
-}
-
-/// A pergunta que o plugin segura; `Err` quando o Python não respondeu (a escrita não começa).
-pub(super) async fn plugin_pending(ctx: &Ctx) -> Result<Option<Value>, ()> {
-    match plugin_call(&ctx.st, &ctx.name, None).await {
-        // Sem a chave `pending` não é "sem pergunta": é um Python que não entendeu o pedido.
-        Some(body) if body.get("pending").is_some() => Ok(Some(body["pending"].clone()).filter(|p| !p.is_null())),
-        _ => {
-            ctx.st.diag.report("rust.plugin_lookup_failed", &ctx.name, "plugin_lookup", "a pergunta do plugin não foi lida; a escrita não saiu");
-            Err(())
-        }
-    }
-}
-
-/// O Esc já foi dado: falha aqui não desfaz nada, só vai ao diário.
-async fn plugin_interrupted(ctx: &Ctx, id: Option<&str>) {
-    if plugin_call(&ctx.st, &ctx.name, Some(json!({"interrupted": id}))).await.is_none() {
-        ctx.st.diag.report("rust.plugin_notice_failed", &ctx.name, "plugin_notice", "o plugin não soube da interrupção; a pergunta pode seguir aberta");
-    }
-}
-
 // ── rotas ───────────────────────────────────────────────────────────────────────────────────────
 
 fn report(ctx: &Ctx, diary: Diary) {
@@ -271,43 +281,44 @@ fn report(ctx: &Ctx, diary: Diary) {
     ctx.st.diag.report(event, &ctx.name, &code, reason);
 }
 
-pub(super) fn plugin_down(code: &str) -> Answer {
-    (StatusCode::SERVICE_UNAVAILABLE, detail_body(code, MSG_PLUGIN_DOWN, json!({"detalhe": "plugin_unavailable"})))
-}
-
 pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Select, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Select).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(option) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some((option, supplied, text)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
+    if text.is_some() && !plan_interaction(&expected) { return invalid_body(ctx.headers()); }
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
-        EntryHandle::Terminal { handle, .. } => match plugin_pending(&ctx).await {
-            Err(()) => plugin_down("erro_opcao_nao_convergiu"),
-            Ok(pending) => match select_plan(pending.as_ref(), option, st.term.is_active(&ctx.name)) {
-                Err(refused) => refused,
-                Ok(payload) => {
-                    let (answered, diary) = select_terminal_answer(&handle.control(operation_id, "select".into(), payload).await);
-                    report(&ctx, diary);
-                    answered
-                }
-            },
+        EntryHandle::Terminal { handle, .. } => match select_plan(&expected, option, st.term.is_active(&ctx.name)) {
+            Err(refused) => refused,
+            Ok(mut payload) => {
+                if let Some(text) = text { payload["text"] = json!(text); }
+                let (answered, diary) = select_terminal_answer(&handle.control(operation_id, "select".into(), payload).await);
+                report(&ctx, diary);
+                answered
+            }
         },
-        headless => select_headless_answer(&headless.command(RuntimeCommand { operation_id, kind: OperationKind::Select, payload: json!({"option": option}) }).await),
+        headless => select_headless_answer(&headless.command(RuntimeCommand { operation_id, kind: OperationKind::Select,
+            payload: json!({"option": option, "interaction_id": supplied}) }).await),
     };
     answer(&ctx, result)
 }
 
 pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::SelectSubmit, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::SelectSubmit).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    // Sem pane não há aba Submit para dirigir: quem responde, como hoje, é o Python.
-    let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { return relay(ctx, bytes).await };
+    let Some(supplied) = parse_submit(&bytes).filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
+    // A TUI do Codex não tem a aba Submit do Claude: a pergunta dele se responde pelo `/answer`.
+    if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
+    let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { unreachable!("a tabela manda o sem terminal ao Python") };
+    if expected.target.kind != crate::interactions::InteractionKind::Menu { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
     let result = if st.term.is_active(&ctx.name) { panel_open_refusal() } else {
-        let (answered, diary) = submit_answer(&handle.control(random_hex(16), "submit_selected".into(), json!({})).await);
+        let (answered, diary) = submit_answer(&handle.control(random_hex(16), "submit_selected".into(), json!({"interaction_id": supplied})).await);
         report(&ctx, diary);
         answered
     };
@@ -316,22 +327,15 @@ pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): C
 
 pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let query = req.uri().query().map(str::to_owned);
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Interrupt, |_| false).await {
+    let (ctx, _) = match admit(&st, peer, req, WriteRoute::Interrupt).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(clear) = parse_clear(query.as_deref()) else { return relay(ctx, bytes).await };
+    let Some(clear) = parse_clear(query.as_deref()) else { return invalid_body(ctx.headers()) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
-        EntryHandle::Terminal { handle, .. } => match plugin_pending(&ctx).await {
-            Err(()) => plugin_down("erro_envio_falhou"),
-            Ok(pending) => {
-                let asked = pending.as_ref().and_then(|p| p["id"].as_str()).map(str::to_owned);
-                let interrupted = interrupt_terminal_answer(&handle.control(operation_id, "interrupt".into(), json!({"clear": clear})).await);
-                if interrupted.0 == StatusCode::OK { plugin_interrupted(&ctx, asked.as_deref()).await; }
-                interrupted
-            }
-        },
+        // O ator lê a pergunta do plugin antes do Esc e a fecha só se o Esc saiu.
+        EntryHandle::Terminal { handle, .. } => interrupt_terminal_answer(&handle.control(operation_id, "interrupt".into(), json!({"clear": clear})).await),
         headless => {
             let sent = headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await;
             let codex = ctx.target.provider == "codex";
@@ -343,27 +347,41 @@ pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
 }
 
 pub async fn keys(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Keys, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Keys).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (EntryHandle::Terminal { handle, .. }, Some(key)) = (&ctx.target.handle, parse_key(&bytes).filter(|_| json_content_type(ctx.headers()))) else { return relay(ctx, bytes).await };
-    let result = control_step_answer(&handle.control(random_hex(16), "navigation_key".into(), json!({"key": key})).await).map_or_else(|refused| refused, |()| ok());
-    answer(&ctx, result)
+    let Some(key) = parse_key(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let result = match &ctx.target.handle {
+        EntryHandle::Terminal { handle, .. } => control_step_answer(&handle.control(random_hex(16), "navigation_key".into(), json!({"key": key})).await),
+        // Codex com terminal: o pane é do Rust também, pelo mesmo escritor de teclas.
+        EntryHandle::CodexTerminal { target, cell, .. } => pane_step_answer(&crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), None).key(&key, false).await),
+        EntryHandle::Headless(_) => unreachable!("a tabela manda o sem terminal ao Python"),
+    };
+    answer(&ctx, result.map_or_else(|refused| refused, |()| ok()))
 }
 
 pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::TermInput, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::TermInput).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (EntryHandle::Terminal { handle, .. }, Some((text, key))) = (&ctx.target.handle, parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers()))) else { return relay(ctx, bytes).await };
+    let Some((text, key)) = parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let result = match term_input_steps(text.as_deref(), key.as_deref()) {
         Err(refused) => refused,
         Ok(steps) => {
             let mut done = ok();
             for (control, payload) in steps {
-                if let Err(refused) = control_step_answer(&handle.control(random_hex(16), control.into(), payload).await) { done = refused; break; }
+                let step = match &ctx.target.handle {
+                    EntryHandle::Terminal { handle, .. } => control_step_answer(&handle.control(random_hex(16), control.into(), payload).await),
+                    EntryHandle::CodexTerminal { target, cell, .. } => {
+                        let driver = crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), None);
+                        pane_step_answer(&if control == "terminal_input" { driver.text(payload["text"].as_str().unwrap_or("")).await }
+                            else { driver.key(payload["key"].as_str().unwrap_or(""), true).await })
+                    }
+                    EntryHandle::Headless(_) => unreachable!("a tabela manda o sem terminal ao Python"),
+                };
+                if let Err(refused) = step { done = refused; break; }
             }
             done
         }
@@ -372,14 +390,14 @@ pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
 }
 
 pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::QueueRemove, |_| false).await {
+    let (ctx, _) = match admit(&st, peer, req, WriteRoute::QueueRemove).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    // `/api/sessions/{name}/queue/{id}`: o id é um segmento só; o que sobrar é rota que o FastAPI não casa.
+    // `/api/sessions/{name}/queue/{id}`: o id é um segmento só.
     let path = ctx.parts.uri.path().to_owned();
     let segments: Vec<&str> = path.trim_start_matches("/api/sessions/").split('/').collect();
-    let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return relay(ctx, bytes).await };
+    let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return invalid_body(ctx.headers()) };
     let entry_id = entry_id.into_owned();
     let mut removed = ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id: entry_id.clone() }).await;
     // A entrega incerta não sai por `Remove` (segura a escrita): descartar é desistir dela e então tirá-la.

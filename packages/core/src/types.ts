@@ -31,6 +31,10 @@ export interface LoopState {
 export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp' | 'orq';
 
 export interface SessionInfo {
+  interaction_id?: string | null;
+  /** Formulário da pergunta aberta (AskUserQuestion, também a segurada pelo plugin), com o ID dele:
+   *  o card responde pelo `/answer`, como o passo a passo do chat. */
+  ask_form?: AskQuestionPayload | null;
   codex_account?: string | null;
   codex_home?: string | null;
   name: string;
@@ -203,6 +207,7 @@ export interface ChatEvent {
 }
 
 export interface StateEvent {
+  interaction_id?: string | null;
   codex_buffering?: boolean;
   codex_mode?: 'default' | 'plan' | null;
   claude_permission_mode?: string | null;
@@ -403,6 +408,7 @@ export interface AskQuestionItem {
   isSecret?: boolean;
 }
 export interface AskQuestionPayload {
+  interaction_id?: string | null;
   is_async?: boolean;
   questions: AskQuestionItem[];
   provider?: 'codex';

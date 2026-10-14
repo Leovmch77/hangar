@@ -12,11 +12,13 @@ pub mod costs_routes;
 pub mod costs_failure;
 pub mod diag;
 pub mod groups;
+pub mod interactions;
 pub mod list;
 pub mod locate;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;
+pub mod plugin;
 pub mod proxy;
 pub mod query;
 mod plugin_listener;
@@ -25,11 +27,14 @@ pub mod runtime;
 pub mod session_write;
 pub mod side;
 pub mod state;
+pub mod subagents;
 pub mod tail;
 pub mod term;
 pub mod terminal_state;
 pub mod terminal_control;
 pub mod terminal_input;
+pub mod permission_control;
+pub mod terminal_facts;
 mod terminal_process;
 mod thumbnail;
 pub mod terminal_routes;
@@ -44,7 +49,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 57;
+pub const INTERNAL_PROTOCOL: u32 = 63;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -103,16 +108,36 @@ pub async fn serve_until_with_state(
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
-            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone()));
+            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone())
+            .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
+            .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
+            .with_permissions(state.state.permissions.clone()));
+        registry.bind_lifecycle();
+        state.state.lifecycle.set(registry.clone()).map_err(|_|std::io::Error::other("state_lifecycle_already_bound"))?;
         runtime_registry=Some(registry.clone());
         state.list.set_runtime(registry.clone());
+        state.list.set_plugin_runtime(registry.clone());
         let _ = state.state.runtime.set(registry.clone());
+        // O hub do chat pergunta ao registro quem é dono do Codex com terminal, e o registro o avisa na troca.
+        registry.bind_hubs(state.side.hubs.downgrade());
+        let _ = state.side.runtime.set(registry.clone());
         let _ = state.accounts.quotas.runtime.set(registry.clone());
         let quota_bridge=accounts::bridge::AccountsBridge::new(cfg.upstream,cfg.internal_secret.clone(),instance.clone())
             .map_err(std::io::Error::other)?;
         refresh_loop=Some(accounts::claude_refresh::start(state.accounts.clone(),quota_bridge,registry.clone()));
         let _watchdog = std::env::home_dir().map(|home| AbortOnDrop(tokio::spawn(
             watchdog::run(state.http.clone(), cfg.upstream, cfg.internal_secret.clone(), home))));
+        // A vigia do Codex com terminal precisa das pastas da lista (sidecars e fila).
+        let _codex_watch = match state.list.env().dirs.clone() {
+            Some(dirs) => {
+                let watcher = std::sync::Arc::new(runtime::codex_terminal::Watcher::new(runtime::codex_terminal::WatchConfig {
+                    home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
+                    mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
+                registry.bind_watcher(watcher.clone());
+                Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
+            }
+            _ => None,
+        };
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {

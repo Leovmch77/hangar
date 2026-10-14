@@ -333,6 +333,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_envio_falhou_desconhecida: () => m.erro_envio_falhou_desconhecida(),
   erro_envio_falhou: (p) => m.erro_envio_falhou({ erro: fmtParam(p.erro) }),
   erro_comando_nao_executado: (p) => m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
+  erro_aguarde_clear: () => m.erro_aguarde_clear(),
   erro_group_message_slash: () => m.erro_group_message_slash(),
   erro_group_message_resposta: () => m.erro_group_message_resposta(),
   erro_group_message_tempestade: (p) => m.erro_group_message_tempestade({ max: fmtParam(p.max), janela: fmtParam(p.janela) }),
@@ -468,6 +469,9 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_sessao_iniciando: () => m.erro_sessao_iniciando(),
   erro_sessao_esperando_resposta: () => m.erro_sessao_esperando_resposta(),
   erro_fila_pendente: () => m.erro_fila_pendente(),
+  erro_permissao_reabrir: () => m.erro_permissao_reabrir(),
+  erro_menu_aberto: () => m.erro_menu_aberto(),
+  erro_par_externo_orq: () => m.erro_par_externo_orq(),
   erro_modo_so_claude: () => m.erro_modo_so_claude(),
   erro_troca_modo: (p) => m.erro_troca_modo({ erro: String(p.erro ?? '') }),
   erro_conta_so_claude: () => m.erro_conta_so_claude(),
@@ -484,6 +488,10 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_drive_sem_fallback: (p) => m.erro_drive_sem_fallback({ erro: String(p.erro) }),
   erro_drive_fallback_falhou: (p) => m.erro_drive_fallback_falhou({ erro: fmtParam(p.erro) }),
   erro_resposta_nao_entregue: () => m.erro_resposta_nao_entregue(),
+  // Resposta sem prova de que é da pergunta exibida (crates/hangar-server/src/interactions.rs).
+  erro_interacao_sem_identidade: () => m.erro_interacao_sem_identidade(),
+  erro_interacao_desatualizada: () => m.erro_interacao_desatualizada(),
+  erro_interacao_indisponivel: () => m.erro_interacao_indisponivel(),
   erro_catalogo_pi_indisponivel: () => m.erro_catalogo_pi_indisponivel(),
   // Mesmo motivo do erro_omp_list_models: codigo proprio pra sessao omp mostrar "feche e reabra"
   // em vez da instrucao do Pi ("reinicie a sessao").
@@ -550,6 +558,12 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
   session_transfer_busy: () => m.session_transfer_busy(),
   session_transfer_gate_unavailable: () => m.session_transfer_gate_unavailable(),
+  // Falhas da ponte e do runtime que a tela mostra sem que se saiba se a ação aconteceu.
+  codex_bridge_uncertain: () => m.codex_bridge_uncertain(),
+  claude_bridge_uncertain: () => m.claude_bridge_uncertain(),
+  close_python_cleanup_skipped: () => m.close_python_cleanup_skipped(),
+  relaunch_panicked: () => m.relaunch_panicked(),
+  broadcast_reply_unreadable: () => m.broadcast_reply_unreadable(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

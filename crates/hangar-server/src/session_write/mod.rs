@@ -1,16 +1,19 @@
-//! Rotas de escrita de sessão Claude. O Rust as reivindica na tabela (`table`) e decide por pedido;
-//! `/input` e `/steer` (`input`), o controle (`control`) e `/answer` (`answer`) têm corpo no Rust;
-//! as rotas só do Codex sem terminal moram em `codex`; o que o Rust admite mas não atende (corpo que o
-//! FastAPI recusa) volta ao Python por `relay`.
+//! Rotas de escrita de sessão Claude e Codex. O Rust as reivindica na tabela (`table`) e decide por
+//! pedido; `/input` e `/steer` (`input`), o controle (`control`) e `/answer` (`answer`) têm corpo no
+//! Rust; as rotas só do Codex moram em `codex`. Sessão do Rust com corpo que a rota não aceita recebe
+//! `erro_corpo_invalido` (`invalid_body`), nunca o repasse.
 //!
-//! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
+//! Ordem fixa de `admit`: dono → porta (`enter`) → entrada (`writable`) → decisão → corpo. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
 pub mod answer;
+pub mod bridge;
 pub mod codex;
 pub mod control;
 pub mod input;
+pub mod permissions;
+pub mod relaunch;
 pub mod table;
 
 use std::net::SocketAddr;
@@ -34,15 +37,17 @@ pub use table::{Owner, Provider, WriteRoute, decide};
 /// Mesmo teto do middleware de corpo do Python (`uploads.MAX_BYTES`), que recusa antes da rota.
 pub(crate) const BODY_LIMIT: usize = 100 * 1024 * 1024;
 const BUSY_MSG: &str = "A sessão está trocando de agente; tente novamente quando terminar.";
+const INVALID_BODY_MSG: &str = "Pedido em formato inválido para esta rota; nada foi enviado.";
+const UNHEALTHY_MSG: &str = "A sessão está com problema no Rust; tente de novo em instantes.";
 
 /// O que a rota precisa para escrever: o passe mantém a porta aberta até o fim da escrita.
 pub(crate) struct Ctx {
     pub(crate) st: Arc<AppState>,
     pub(crate) name: String,
     pub(crate) target: WriteTarget,
-    pub(crate) pass: IngressPass,
+    // Só segura a porta: o `Drop` a solta quando a escrita termina.
+    pub(crate) _pass: IngressPass,
     parts: Parts,
-    fwd: Forward,
 }
 
 impl Ctx {
@@ -74,14 +79,13 @@ pub(crate) fn session_name(path: &str) -> Option<String> {
     percent_decode_str(raw).decode_utf8().ok().map(|n| n.into_owned())
 }
 
-async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward) -> Response {
+pub(crate) async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward) -> Response {
     pass(st, Request::from_parts(parts, Body::from(bytes)), fwd).await
 }
 
 /// Decide quem atende. `Ok`: o Rust atende, com o passe na mão e o corpo já lido. `Err`: a resposta
-/// pronta (repasse ao Python com o corpo intacto, ou a recusa da porta fechada).
-pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute,
-    early: impl Fn(&Bytes) -> bool) -> Result<(Ctx, Bytes), Response> {
+/// pronta (repasse ao Python com o corpo intacto, recusa da porta fechada, ou a recusa do Rust).
+pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Result<(Ctx, Bytes), Response> {
     let (fwd, owner) = gate(st, peer, &req);
     let runtime = st.state.runtime.get().cloned();
     let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path())) else {
@@ -89,14 +93,18 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
     };
     let (parts, body) = req.into_parts();
     let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else { return Err(too_large(&parts.headers)) };
-    if !table::body_ok(route, &bytes) || early(&bytes) {
-        return Err(forward_whole(st, parts, bytes, &fwd).await);
-    }
+    let shaped = table::body_ok(route, &bytes);
     match route_write(&runtime, &name, route, st.write_gate_wait).await {
-        Write::Rust(pass_in, target) => Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts, fwd }, bytes)),
+        Write::Rust(_, _) if !shaped => Err(invalid_body(&parts.headers)),
+        Write::Rust(pass_in, target) => Ok((Ctx { st: st.clone(), name, target, _pass: pass_in, parts }, bytes)),
         Write::Python => Err(forward_whole(st, parts, bytes, &fwd).await),
         Write::Busy => {
             let mut response = json_response(StatusCode::CONFLICT, busy_body());
+            cors(&parts.headers, response.headers_mut());
+            Err(response)
+        }
+        Write::Failed(error) => {
+            let mut response = detail(StatusCode::SERVICE_UNAVAILABLE, &error.code, &error.message, json!({}));
             cors(&parts.headers, response.headers_mut());
             Err(response)
         }
@@ -110,27 +118,50 @@ pub(crate) fn too_large(headers: &axum::http::HeaderMap) -> Response {
     response
 }
 
-/// Quem atende uma escrita de corpo já aceito.
-pub(crate) enum Write { Rust(IngressPass, WriteTarget), Python, Busy }
+/// Quem atende uma escrita. `Failed`: a sessão é do Rust e não pôde ser atendida (entrada doente,
+/// Codex com terminal que não deu para adotar); a escrita nunca cai no Python.
+pub(crate) enum Write { Rust(IngressPass, WriteTarget), Python, Busy, Failed(crate::runtime::protocol::RuntimeError) }
 
-/// Porta, entrada e tabela, nessa ordem. O passe só volta com `Rust`: repasse nunca o segura.
+/// Porta, entrada e tabela, nessa ordem. O passe só volta com `Rust`: repasse nunca o segura. Sem
+/// entrada, o Codex com terminal do Rust é adotado na hora (`adopt_now`) e a entrada procurada de novo;
+/// sem entrada nem Codex com terminal (abertura, Pi/omp/Kimi), segue ao Python.
 pub(crate) async fn route_write(runtime: &RuntimeRegistry, name: &str, route: WriteRoute, wait: Duration) -> Write {
-    match enter_then_find(runtime, name, wait).await {
-        Err(GateClosed) => Write::Busy,
-        Ok(None) => Write::Python,
-        Ok(Some((pass_in, target))) => {
-            let rust = Provider::from_str(&target.provider).is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
-            if rust { Write::Rust(pass_in, target) } else { Write::Python }
-        }
+    use crate::runtime::protocol::RuntimeError;
+    let (pass_in, target) = match enter_then_find(runtime, name, wait).await {
+        Err(GateClosed) => return Write::Busy,
+        Ok(Some(found)) => found,
+        Ok(None) => match runtime.adopt_now(name).await {
+            None => return Write::Python,
+            Some(Err(error)) => return Write::Failed(error),
+            Some(Ok(())) => match enter_then_find(runtime, name, wait).await {
+                Err(GateClosed) => return Write::Busy,
+                Ok(Some(found)) => found,
+                Ok(None) => return Write::Failed(RuntimeError::new("codex_terminal_unadopted", "o Codex com terminal foi adotado e fechou em seguida")),
+            },
+        },
+    };
+    let Some(provider) = Provider::from_str(&target.provider) else { return Write::Python };
+    if decide(route, provider, target.terminal) == Owner::Python { return Write::Python; }
+    // Exceção da entrada doente: o modo de permissão do Codex sem terminal cujo processo caiu e não voltou
+    // é lido e gravado no arquivo da sessão, e vale na próxima subida (como no Python).
+    if !target.healthy && route == WriteRoute::CodexPermission && dead_headless_codex(&target).await { return Write::Rust(pass_in, target); }
+    if !target.healthy {
+        // O 503 fica; a reabertura que o Python fazia antes de entregar é pedida agora.
+        runtime.request_reopen(name);
+        return Write::Failed(RuntimeError::new("runtime_unhealthy", UNHEALTHY_MSG));
     }
+    Write::Rust(pass_in, target)
+}
+
+async fn dead_headless_codex(target: &WriteTarget) -> bool {
+    target.provider == "codex" && !target.terminal && target.handle.view().await.is_ok_and(|view| view["alive"] == false)
 }
 
 pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }
 
-/// Repassa ao Python o que o Rust admitiu mas não atende (corpo que o FastAPI recusa), soltando
-/// antes o passe.
-pub(crate) async fn relay(ctx: Ctx, bytes: Bytes) -> Response {
-    let Ctx { st, pass: held, parts, fwd, .. } = ctx;
-    drop(held);
-    forward_whole(&st, parts, bytes, &fwd).await
+/// Corpo que a rota do Rust não aceita: 422 com código, nunca o repasse ao Python.
+pub(crate) fn invalid_body(headers: &axum::http::HeaderMap) -> Response {
+    let mut response = detail(StatusCode::UNPROCESSABLE_ENTITY, "erro_corpo_invalido", INVALID_BODY_MSG, json!({}));
+    cors(headers, response.headers_mut());
+    response
 }

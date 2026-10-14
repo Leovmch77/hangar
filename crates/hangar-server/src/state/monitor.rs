@@ -24,6 +24,10 @@ pub const POLL: Duration = Duration::from_millis(750);
 /// Rodadas sem spinner depois das quais o marcador `working` deixa de valer (`HOOK_WORKING_GRACE`).
 pub const HOOK_GRACE: u32 = 8;
 pub const OBSERVATION_FAILED: &str = "terminal_observacao_falhou";
+/// Falhas da observação que são a troca de conversa em curso (`/clear`, reabertura): o vínculo muda e a
+/// entrada fecha e reabre. Como o Python, essas rodadas são puladas; a que dura além disto aparece.
+const SWITCHING: [&str; 2] = ["state_binding_changed", "runtime_binding"];
+const SWITCH_GRACE: u8 = 8;
 pub const PERMISSION_FAILED: &str = "permission_observe_failed";
 
 /// Quadro capturado e a análise que o pool já fez dele.
@@ -42,8 +46,15 @@ pub struct RoundFacts {
     pub plugin_state: Option<String>,
     /// A pergunta segurada no formato de `pergunta_pendente` (`id`, `questions`, `tool`, `resumo`).
     pub question: Option<Value>,
+    pub questions: Vec<Value>,
+    pub binding: Option<crate::interactions::InteractionBinding>,
+    pub native_selector: Option<String>,
+    /// O plano do `ExitPlanMode` cujo diálogo o pane mostra (`claude_plan_pending`).
+    pub plan_pending: Option<serde_json::Map<String, Value>>,
     pub in_transfer: bool,
     pub permission_op: bool,
+    pub permission_uncertain: bool,
+    pub permission_revision: Option<permission::MemoryRevision>,
     /// A sugestão do plugin; `None` sem fato nenhum (nada muda).
     pub suggestion: Option<String>,
     /// O retrato não veio: código, e o último valor fica.
@@ -60,8 +71,10 @@ impl RoundFacts {
             alive: r.alive(now),
             plugin_state: r.plugin_state(now).map(|p| p.state.clone()),
             question: r.question(now).map(|q| json!({"id": q.id, "questions": q.questions, "tool": q.tool, "resumo": q.resumo})),
+            questions: Vec::new(), binding: None, native_selector: None, plan_pending: None,
             in_transfer: r.in_transfer(now),
             permission_op: r.facts.permission_op,
+            permission_uncertain: false, permission_revision: None,
             suggestion: Some(r.facts.suggestion.clone()),
             unavailable,
             body_columns: r.facts.body_columns,
@@ -146,11 +159,27 @@ struct Memory {
     key: Option<StateEvent>,
     last: Option<StateEvent>,
     permission: permission::Watch,
+    permission_revision: Option<permission::MemoryRevision>,
     /// Em falha da observação: a tentativa do pool já conferida com `has-session`.
     failure: Option<Option<u32>>,
     preview: preview::Slot,
-    /// `ask_question` já saiu para a pergunta na tela; zera quando ela sai e no `/clear`.
-    asked: bool,
+    held_form: Option<Value>,
+    native_form: Option<Value>,
+    binding: Option<crate::interactions::InteractionBinding>,
+    /// Rodadas seguidas puladas pela troca de conversa.
+    switch_misses: u8,
+    /// Última linha de status sem métrica de contexto já registrada.
+    ctx_warned: Option<String>,
+}
+
+static CTX_PAIR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"([\d.,]+)\s*[kKmM]?\s*/\s*([\d.,]+)\s*[kKmM]?").unwrap());
+static CTX_LABELED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\bctx\s*[\d.,]+\s*[kKmM]?\s*/\s*[\d.,]+\s*[kKmM]?").unwrap());
+
+/// `sse.context_pairs`: pares numéricos no segmento 💬 (2 ou mais: há métrica); "ctx x/y" conta como 2.
+fn context_pairs(line: &str) -> usize {
+    let Some(segment) = line.split_once('💬').map(|(_, rest)| rest.split('│').next().unwrap_or("")) else { return 0 };
+    let n = CTX_PAIR.find_iter(segment).count();
+    if CTX_LABELED.is_match(segment) { n.max(2) } else { n }
 }
 
 pub struct Monitor<S> { src: S, poll: Duration, mem: Memory, epoch: u64, edges: Edges }
@@ -182,8 +211,8 @@ impl<S: Sources> Monitor<S> {
             let exit = match self.round().await {
                 Step::Exit(exit) => Some(exit),
                 Step::Again => None,
-                Step::Sleep | Step::Wait { alive: false } => self.idle(None, &runtime, &hub).await,
-                Step::Wait { alive: true } => self.idle(Some(notified.as_mut()), &runtime, &hub).await,
+                Step::Sleep => self.idle(None, &runtime, &hub).await,
+                Step::Wait { .. } => self.idle(Some(notified.as_mut()), &runtime, &hub).await,
             };
             if let Some(exit) = exit {
                 return exit;
@@ -239,37 +268,65 @@ impl<S: Sources> Monitor<S> {
 
     /// `ask_question` uma vez por pergunta na tela. Enquanto ela não sai, o sidecar é relido a cada
     /// rodada, como o Python a cada tique: o hook pode gravá-lo depois de o menu aparecer.
-    async fn ask(&mut self, event: &StateEvent) -> Option<Step> {
+    async fn ask(&mut self, event: &mut StateEvent) -> Option<Step> {
+        let form = event.codex_question.as_ref().map(|question| Value::Object(question.clone()));
+        if form != self.mem.held_form {
+            self.mem.held_form = form.clone();
+            if !self.src.emit("ask_question", form.clone().unwrap_or(Value::Null)).await {
+                return Some(Step::Exit(Exit::Closed));
+            }
+        }
+        if form.is_some() { return None; }
         if event.state != "awaiting_input" {
-            self.mem.asked = false;
+            if event.problema.is_none() && self.mem.native_form.take().is_some()
+                && !self.src.emit("ask_question", Value::Null).await { return Some(Step::Exit(Exit::Closed)); }
             return None;
         }
-        if self.mem.asked {
-            return None;
-        }
-        let failed = match self.src.ask_payload().await {
+        let epoch = self.src.epoch();
+        let payload = self.src.ask_payload().await;
+        if self.src.epoch() != epoch { return Some(Step::Again); }
+        let failed = match payload {
+            Ok(Some(payload)) if ask::matches(event, &payload) && payload.interaction_id.as_deref().is_none_or(str::is_empty) => "erro_interacao_indisponivel".to_owned(),
             Ok(Some(payload)) if ask::matches(event, &payload) => match serde_json::to_value(&payload) {
                 Ok(data) => {
-                    self.mem.asked = true;
-                    return (!self.src.emit("ask_question", data).await).then_some(Step::Exit(Exit::Closed));
+                    if self.mem.native_form.as_ref() != Some(&data) {
+                        self.mem.native_form = Some(data.clone());
+                        return (!self.src.emit("ask_question", data).await).then_some(Step::Exit(Exit::Closed));
+                    }
+                    return None;
                 }
                 Err(_) => "askq_serialize".to_owned(),
             },
+            Ok(None) if event.problema.is_none() => {
+                if self.mem.native_form.take().is_some() && !self.src.emit("ask_question", Value::Null).await {
+                    return Some(Step::Exit(Exit::Closed));
+                }
+                return None;
+            }
             Ok(_) => return None,
             Err(code) => code,
         };
         if crate::warn_limit::allow(Some(self.src.name()), &failed) {
             tracing::warn!(session = self.src.name(), code = failed.as_str(), "estado: pergunta nativa sem sidecar legível");
         }
+        event.problema.get_or_insert_with(|| UNAVAILABLE.into());
+        event.problema_detalhe.get_or_insert(failed);
         None
     }
 
-    async fn publish(&mut self, event: StateEvent) -> Option<Step> {
-        // Como o laço do `sse.py`: a pergunta nativa sai antes do estado que a mostra.
-        if let Some(step) = self.ask(&event).await {
-            return Some(step);
+    async fn publish(&mut self, mut event: StateEvent) -> Option<Step> {
+        if let Some(step) = self.ask(&mut event).await { return Some(step); }
+        let key = key_of(&event);
+        if self.mem.key.as_ref() == Some(&key) { return None; }
+        self.mem.key = Some(key);
+        self.mem.preview.state = Some(event.state.clone());
+        // Diagnóstico do "medição indisponível" (`sse.py`): a linha de status crua, uma vez por linha distinta.
+        if let Some(line) = event.status_line.as_deref().filter(|line| context_pairs(line) < 2 && self.mem.ctx_warned.as_deref() != Some(*line)) {
+            tracing::info!(session = self.src.name(), statusline = line, "estado: sem métrica de contexto");
+            self.mem.ctx_warned = Some(line.to_owned());
         }
-        if self.edges.deliverable(&event) {
+        // Como o Python, a borda vale com problema na linha; só o estado que não foi observado não decide.
+        if event.problema.as_deref() != Some(OBSERVATION_FAILED) && self.edges.deliverable(&event) {
             self.src.deliverable();
         }
         self.mem.last = Some(event.clone());
@@ -293,7 +350,6 @@ impl<S: Sources> Monitor<S> {
         }
         let (problema, problema_detalhe) = now.unzip();
         let event = StateEvent { problema, problema_detalhe, ..last.clone() };
-        self.mem.key = Some(key_of(&event));
         self.publish(event).await
     }
 
@@ -308,6 +364,13 @@ impl<S: Sources> Monitor<S> {
         let facts = self.src.facts().await;
         if self.src.epoch() != epoch {
             return Step::Again;
+        }
+        if facts.binding.is_some() && self.mem.binding != facts.binding {
+            self.mem = Memory { binding: facts.binding.clone(), ..Default::default() };
+        }
+        if facts.permission_uncertain || self.mem.permission_revision != facts.permission_revision {
+            self.mem.permission = permission::Watch::default();
+            self.mem.permission_revision = facts.permission_revision;
         }
         // A sugestão sai quando muda, mesmo com o estado parado.
         if let Some(text) = self.edges.suggestion(facts.suggestion.as_deref())
@@ -346,8 +409,20 @@ impl<S: Sources> Monitor<S> {
             }
         }
         match captured {
-            Err(f) => self.fail(OBSERVATION_FAILED, f.code, &facts).await,
-            Ok(frame) => self.reduce(frame, facts, epoch).await,
+            Err(f) if SWITCHING.contains(&f.code.as_str()) && self.mem.switch_misses < SWITCH_GRACE => {
+                self.mem.switch_misses += 1;
+                Step::Sleep
+            }
+            Err(f) => {
+                let step = self.fail(OBSERVATION_FAILED, f.code, &facts).await;
+                // O arquivo do hook não depende da captura: a prévia segue andando com a observação caída.
+                if !preview::tick(&self.src, &mut self.mem.preview, None, epoch).await { return Step::Exit(Exit::Closed); }
+                step
+            }
+            Ok(frame) => {
+                self.mem.switch_misses = 0;
+                self.reduce(frame, facts, epoch).await
+            }
         }
     }
 
@@ -355,7 +430,8 @@ impl<S: Sources> Monitor<S> {
     async fn fail(&mut self, problem: &str, detail: String, facts: &RoundFacts) -> Step {
         // A prévia fica com o texto que tinha e espera a próxima rodada boa.
         self.mem.preview.fast = false;
-        if self.mem.last.as_ref().is_some_and(|l| l.problema_detalhe.as_deref() == Some(detail.as_str())) {
+        let mode = self.mem.permission.current.as_ref().map(|(mode, _)| mode.clone());
+        if self.mem.last.as_ref().is_some_and(|l| l.problema_detalhe.as_deref() == Some(detail.as_str()) && l.claude_permission_mode == mode) {
             return Step::Sleep;
         }
         let base = match self.mem.last.take() {
@@ -375,7 +451,7 @@ impl<S: Sources> Monitor<S> {
         if crate::warn_limit::allow(Some(self.src.name()), problem) {
             tracing::warn!(session = self.src.name(), code = problem, detail, "estado: rodada sem quadro");
         }
-        let event = StateEvent { problema: Some(problem.to_owned()), problema_detalhe: Some(detail), ..base };
+        let event = StateEvent { problema: Some(problem.to_owned()), problema_detalhe: Some(detail), claude_permission_mode: mode, ..base };
         // A rodada boa seguinte publica de novo, mesmo igual à de antes da falha.
         self.mem.key = None;
         self.publish(event).await.unwrap_or(Step::Sleep)
@@ -390,15 +466,17 @@ impl<S: Sources> Monitor<S> {
         let mut problem = facts.unavailable.clone().or_else(|| files.unavailable.clone()).map(|d| (UNAVAILABLE, d));
         if let Some(observed) = permission::parse_permission_mode(&frame.text) {
             let key = sid.clone().unwrap_or_else(|| name.clone());
-            if self.mem.permission.due(&key, observed, facts.permission_op) {
-                match self.src.observe_permission(&key, observed).await {
-                    Ok(answer) => self.mem.permission.answered(&key, observed, facts.permission_op, answer),
-                    Err(code) => {
-                        if crate::warn_limit::allow(Some(&name), PERMISSION_FAILED) {
-                            tracing::warn!(session = name.as_str(), code = PERMISSION_FAILED, detail = code.as_str(), "estado: permission.observe falhou");
-                        }
-                        problem.get_or_insert((PERMISSION_FAILED, code));
+            // A operação pode terminar depois dos fatos; cada quadro valida sua revisão.
+            match self.src.observe_permission(&key, observed).await {
+                Ok(answer) => self.mem.permission.answered(&key, observed, facts.permission_op, answer),
+                Err(code) => {
+                    if matches!(code.as_str(), "permission_capture_stale" | "permission_mode_unknown") {
+                        self.mem.permission = permission::Watch::default();
                     }
+                    if crate::warn_limit::allow(Some(&name), PERMISSION_FAILED) {
+                        tracing::warn!(session = name.as_str(), code = PERMISSION_FAILED, detail = code.as_str(), "estado: permission.observe falhou");
+                    }
+                    problem.get_or_insert((PERMISSION_FAILED, code));
                 }
             }
         }
@@ -410,8 +488,10 @@ impl<S: Sources> Monitor<S> {
         if !preview::tick(&self.src, &mut self.mem.preview, Some(&frame), epoch).await {
             return Step::Exit(Exit::Closed);
         }
+        let selectors: Vec<_> = facts.questions.iter().filter(|q| q["id"].as_str().is_some_and(|id| id.starts_with("perm:"))).cloned().collect();
+        let selector = super::facts::plugin_surfaces(&selectors).ok().and_then(|(question, _)| question.cloned()).or_else(|| facts.question.clone());
         let reducer_facts = ReducerFacts {
-            open_question: files.open_question, plugin_question: facts.question, plugin_state: facts.plugin_state,
+            open_question: files.open_question, plugin_question: selector, plugin_state: facts.plugin_state,
             hook_state: files.marker, hook_grace: Some(HOOK_GRACE), status_line: files.status_line,
         };
         let (reduced, diagnostic) = terminal_state::reduce_analysis(frame.analysis, std::mem::take(&mut self.mem.reducer), reducer_facts);
@@ -425,22 +505,26 @@ impl<S: Sources> Monitor<S> {
         // O problema do runtime entra na chave: muda o evento mesmo com a tela parada.
         let problem = problem.map(|(p, d)| (p.to_owned(), d)).or_else(|| self.src.runtime_problem());
         let (problema, problema_detalhe) = problem.unzip();
-        let event = StateEvent {
+        let mut event = StateEvent {
             session: name, state: a.state, label: a.label, question: a.question, options: a.options,
             status_line: a.status_line, overlay: a.overlay, login: a.login, limited: a.limit_reset.is_some(),
             limit_reset: a.limit_reset, loop_status: loop_info.status, loop_iter: loop_info.iter, loop_max: loop_info.max,
             claude_permission_mode: mode, claude_previous_non_plan: previous, shells: files.shells,
-            problema, problema_detalhe, ..Default::default()
+            problema, problema_detalhe, interaction_id: facts.native_selector.clone(),
+            claude_plan_pending: facts.plan_pending.clone(), ..Default::default()
         };
-        let key = key_of(&event);
-        if self.mem.key.as_ref() != Some(&key) {
-            self.mem.key = Some(key);
-            if let Some(step) = self.publish(event).await {
-                return step;
-            }
-        } else if let Some(step) = self.ask(&event).await {
-            return step;
+        let projection = super::facts::project_plugin_state(&mut event, &facts.questions);
+        if let Err(code) = &projection {
+            event.problema = Some(UNAVAILABLE.into());
+            event.problema_detalhe = Some(code.clone());
         }
+        // Sem o aviso do plano não há cartão a guardar: o anterior seria de um diálogo que já fechou.
+        if (projection.is_err() || facts.unavailable.as_deref().is_some_and(|code| code != "plan_notice_missing") || files.unavailable.is_some())
+            && let Some(previous) = &self.mem.last {
+            super::facts::preserve_cards(&mut event, previous);
+        }
+        if self.src.epoch() != epoch { return Step::Again; }
+        if let Some(step) = self.publish(event).await { return step; }
         Step::Wait { alive: facts.alive }
     }
 }
@@ -498,6 +582,11 @@ mod tests {
         ask_reads: AtomicU32,
         deliveries: Mutex<Vec<u32>>,
         files_failed: Mutex<Option<String>>,
+        permissions: Mutex<Option<permission::PermissionStore>>,
+        captured_permission: Mutex<Option<permission::MemoryRevision>>,
+        finish_mode: Mutex<Option<String>>,
+        hook: Mutex<Vec<HookFile>>,
+        previews: Mutex<Vec<String>>,
     }
 
     impl Fake {
@@ -505,7 +594,8 @@ mod tests {
             Arc::new(Self { frames, round: AtomicU32::new(0), has_session: AtomicU32::new(0), facts: Mutex::default(),
                 wake: Arc::default(), epoch: AtomicU64::new(0), events: Mutex::default(), others: Mutex::default(),
                 runtime: Mutex::default(), runtime_wake: Arc::default(), ask: Mutex::default(), ask_reads: AtomicU32::new(0),
-                deliveries: Mutex::default(), files_failed: Mutex::default() })
+                deliveries: Mutex::default(), files_failed: Mutex::default(), permissions: Mutex::default(), captured_permission: Mutex::default(), finish_mode: Mutex::default(),
+                hook: Mutex::default(), previews: Mutex::default() })
         }
         fn rounds(&self) -> u32 { self.round.load(Ordering::SeqCst) }
         fn states(&self) -> Vec<String> { self.events.lock().unwrap().iter().map(|(_, e)| e.state.clone()).collect() }
@@ -516,15 +606,39 @@ mod tests {
         fn sid(&self) -> Option<String> { Some("sid".into()) }
         fn epoch(&self) -> u64 { self.epoch.load(Ordering::SeqCst) }
         fn wake(&self) -> Arc<Notify> { self.wake.clone() }
-        async fn facts(&self) -> RoundFacts { self.facts.lock().unwrap().clone() }
+        async fn facts(&self) -> RoundFacts {
+            let mut facts = self.facts.lock().unwrap().clone();
+            if let Some(memory) = self.permissions.lock().unwrap().as_ref() {
+                let memory = memory.lock().unwrap();
+                facts.permission_revision = Some(memory.revision("sid"));
+                facts.permission_uncertain = memory.is_uncertain("sid");
+            }
+            facts
+        }
         async fn capture(&self) -> Result<Frame, CaptureFailed> {
+            if let Some(memory) = self.permissions.lock().unwrap().as_ref() {
+                *self.captured_permission.lock().unwrap() = Some(memory.lock().unwrap().revision("sid"));
+            }
             let i = self.round.fetch_add(1, Ordering::SeqCst) as usize;
             let frame = self.frames[i.min(self.frames.len() - 1)].clone();
+            if let Some(mode) = self.finish_mode.lock().unwrap().take() {
+                let memory = self.permissions.lock().unwrap().as_ref().unwrap().clone();
+                let mut memory = memory.lock().unwrap();
+                assert!(memory.begin("sid"));
+                memory.finish("sid", &mode);
+            }
             frame.map(|t| Frame { text: t.into(), analysis: terminal_state::analyze(t) })
         }
         async fn has_session(&self) -> Option<bool> { self.has_session.fetch_add(1, Ordering::SeqCst); Some(true) }
         async fn dead(&self) -> Result<Dead, String> { Ok(Dead::Ok) }
-        async fn observe_permission(&self, _: &str, mode: &str) -> Result<(String, String), String> { Ok((mode.into(), "manual".into())) }
+        async fn observe_permission(&self, _: &str, mode: &str) -> Result<(String, String), String> {
+            if let Some(memory) = self.permissions.lock().unwrap().as_ref() {
+                let revision = self.captured_permission.lock().unwrap().unwrap();
+                let view = memory.lock().unwrap().observe_capture("sid", mode, revision).map_err(str::to_owned)?;
+                return Ok((view.current, view.previous_non_plan));
+            }
+            Ok((mode.into(), "manual".into()))
+        }
         async fn files(&self, _: Option<&str>) -> FileFacts {
             FileFacts { unavailable: self.files_failed.lock().unwrap().clone(), ..FileFacts::default() }
         }
@@ -545,13 +659,70 @@ mod tests {
         fn deliverable(&self) { self.deliveries.lock().unwrap().push(self.rounds()); }
         fn hub_wake(&self) -> Arc<Notify> { Arc::default() }
         async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { None }
-        async fn preview_files(&self, _: &str) -> Vec<HookFile> { Vec::new() }
+        async fn preview_files(&self, _: &str) -> Vec<HookFile> { self.hook.lock().unwrap().clone() }
         fn committed(&self) -> Option<Arc<str>> { None }
-        async fn publish_preview(&self, _: PreviewEvent) -> bool { true }
+        async fn publish_preview(&self, event: PreviewEvent) -> bool { self.previews.lock().unwrap().push(event.text); true }
         fn wall(&self) -> f64 { wall_now() }
     }
 
     const SPINNER: &str = "✻ Thinking…\n────────────\n❯\n────────────";
+
+    #[tokio::test]
+    async fn known_finish_invalidates_unchanged_mode_frame_without_removing_form() {
+        let fake = Fake::new(vec![Ok("────────────\n❯\n────────────\n⏵ manual mode on"),
+            Ok("────────────\n❯\n────────────\n⏵ manual mode on"), Ok("────────────\n❯\n────────────\n⏵ plan mode on")]);
+        let memory: permission::PermissionStore = Arc::default();
+        *fake.permissions.lock().unwrap() = Some(memory);
+        fake.facts.lock().unwrap().questions = vec![json!({"id":"ask:b","interaction_id":"form-b","questions":[{"question":"Pasta?","options":[]} ]})];
+        let mut monitor = Monitor::new(fake.clone());
+        monitor.round().await;
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.claude_permission_mode.as_deref(),Some("manual"));
+        *fake.finish_mode.lock().unwrap() = Some("plan".into());
+        monitor.round().await;
+        let invalid = fake.events.lock().unwrap().last().unwrap().1.clone();
+        assert!(invalid.claude_permission_mode.is_none(), "quadro manual anterior ao finish não é o modo atual");
+        assert_eq!(invalid.problema_detalhe.as_deref(),Some("permission_capture_stale"));
+        assert_eq!(invalid.codex_question.as_ref().unwrap()["interaction_id"],"form-b");
+        monitor.round().await;
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.claude_permission_mode.as_deref(),Some("plan"));
+    }
+
+    #[tokio::test]
+    async fn independent_held_surfaces_keep_ids_and_form_survives_selector_conflict() {
+        let fake = Fake::new(vec![Ok(SPINNER), Ok(MENU)]);
+        fake.facts.lock().unwrap().questions = vec![
+            json!({"id":"ask:b","interaction_id":"form-b","questions":[{"question":"Pasta?","options":[]}]}),
+        ];
+        let mut monitor = Monitor::new(fake.clone());
+        monitor.round().await;
+        fake.facts.lock().unwrap().questions.push(json!({"id":"perm:a","interaction_id":"selector-a","questions":[],"tool":"Bash","resumo":"cmd"}));
+        monitor.round().await;
+        let events = fake.events.lock().unwrap();
+        let last = &events.last().unwrap().1;
+        assert_eq!(last.codex_question.as_ref().unwrap()["interaction_id"], "form-b");
+        assert_eq!(last.problema.as_deref(), Some(UNAVAILABLE));
+        assert!(!fake.others.lock().unwrap().iter().any(|(_, kind, data)| *kind == "ask_question" && data.is_null()));
+    }
+
+    #[tokio::test]
+    async fn unavailable_store_keeps_cards_only_until_hub_generation_changes() {
+        let fake = Fake::new(vec![Ok(SPINNER)]);
+        fake.facts.lock().unwrap().questions = vec![
+            json!({"id":"perm:a","interaction_id":"selector-a","questions":[],"tool":"Bash","resumo":"cmd"}),
+            json!({"id":"ask:b","interaction_id":"form-b","questions":[{"question":"Pasta?","options":[]}]}),
+        ];
+        let mut monitor = Monitor::new(fake.clone());
+        monitor.round().await;
+        let first = fake.events.lock().unwrap().last().unwrap().1.clone();
+        assert_eq!(first.interaction_id.as_deref(), Some("selector-a"));
+        assert_eq!(first.codex_question.as_ref().unwrap()["interaction_id"], "form-b");
+        *fake.facts.lock().unwrap() = RoundFacts { unavailable: Some("plugin_store_unavailable".into()), ..Default::default() };
+        monitor.round().await;
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.codex_question, first.codex_question);
+        fake.epoch.fetch_add(1, Ordering::SeqCst);
+        monitor.round().await;
+        assert!(fake.events.lock().unwrap().last().unwrap().1.codex_question.is_none());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn rounds_counted_like_python() {
@@ -568,15 +739,15 @@ mod tests {
         assert_eq!(fake.rounds(), 5, "uma rodada no início e uma por empurrão");
         assert_eq!(fake.states(), ["working", "idle"]);
         assert_eq!(fake.events.lock().unwrap()[1].0, 4, "idle na 4ª rodada, como o Python");
-        // Sem plugin vivo, o empurrão não acorda: só o relógio.
+        // O Store pode abrir a primeira pergunta sem long-poll anterior.
         fake.facts.lock().unwrap().alive = false;
         tokio::time::sleep(POLL).await;
         let before = fake.rounds();
         fake.wake.notify_waiters();
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_eq!(fake.rounds(), before, "empurrão sem long-poll vivo não conta rodada");
+        assert_eq!(fake.rounds(), before + 1, "primeira pergunta local também acorda");
         tokio::time::sleep(POLL).await;
-        assert_eq!(fake.rounds(), before + 1);
+        assert_eq!(fake.rounds(), before + 2);
         task.abort();
     }
 
@@ -599,6 +770,22 @@ mod tests {
         let problems: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| e.problema.clone()).collect();
         assert_eq!(problems, [None, Some(OBSERVATION_FAILED.into()), None, Some(OBSERVATION_FAILED.into())],
             "um evento por código; a volta publica de novo");
+        task.abort();
+    }
+
+    /// Parity B7: as rodadas da troca de conversa (`/clear`: vínculo trocando, entrada fechada e reaberta)
+    /// não publicam problema; só a falha que dura além da troca aparece.
+    #[tokio::test(start_paused = true)]
+    async fn conversation_switch_rounds_do_not_flicker_a_problem() {
+        let switching = |code: &str| Err(CaptureFailed { code: code.into(), attempt: None });
+        let mut frames = vec![Ok(SPINNER), switching("state_binding_changed"), switching("runtime_binding"), Ok(SPINNER)];
+        frames.extend(std::iter::repeat_n(switching("state_binding_changed"), SWITCH_GRACE as usize + 1));
+        let fake = Fake::new(frames);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * (SWITCH_GRACE as u32 + 6)).await;
+        let problems: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| e.problema.clone()).collect();
+        assert_eq!(problems.first(), Some(&None));
+        assert_eq!(problems.iter().filter(|p| p.is_some()).count(), 1, "só a troca que não termina aparece: {problems:?}");
         task.abort();
     }
 
@@ -646,7 +833,7 @@ mod tests {
     const MENU: &str = "   Qual cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n";
 
     fn payload(labels: &[&str]) -> AskQuestion {
-        AskQuestion { questions: vec![hangar_api::ask::AskQuestionItem { header: "Cor".into(), question: "Qual cor?".into(),
+        AskQuestion { interaction_id: Some("native-form".into()), questions: vec![hangar_api::ask::AskQuestionItem { header: "Cor".into(), question: "Qual cor?".into(),
             multi_select: false, options: labels.iter().map(|l| hangar_api::ask::AskOption { label: (*l).into(), ..Default::default() }).collect() }] }
     }
 
@@ -665,10 +852,10 @@ mod tests {
         *fake.ask.lock().unwrap() = Some(payload(&["Azul", "Verde"]));
         let task = tokio::spawn(Monitor::new(fake.clone()).run());
         tokio::time::sleep(POLL * 9 + Duration::from_millis(10)).await;
-        let asks = others(&fake, "ask_question");
+        let asks: Vec<_> = others(&fake, "ask_question").into_iter().filter(|(_, data)| !data.is_null()).collect();
         assert_eq!(asks.len(), 2, "{asks:?}");
         assert_eq!(asks[0].1, serde_json::to_value(payload(&["Azul", "Verde"])).unwrap());
-        assert_eq!(fake.ask_reads.load(Ordering::SeqCst), 2, "o sidecar só é lido quando a pergunta aparece");
+        assert!(fake.ask_reads.load(Ordering::SeqCst) >= 7, "revisão conferida enquanto a pergunta está na tela");
         // O sidecar chega depois do menu: a rodada seguinte o relê, com a tela parada.
         task.abort();
         let _ = task.await;
@@ -718,6 +905,43 @@ mod tests {
         task.abort();
     }
 
+    /// Parity estado B1 (`test_drain_fires_once_on_overlay_to_idle`): a borda "voltou a aceitar texto"
+    /// drena mesmo com um problema do runtime na linha, como o Python.
+    #[tokio::test(start_paused = true)]
+    async fn deliverable_edge_drains_with_a_runtime_problem() {
+        let mut frames = vec![Ok(MENU), Ok(MENU)];
+        frames.extend(std::iter::repeat_n(Ok(IDLE), 6));
+        let fake = Fake::new(frames);
+        *fake.runtime.lock().unwrap() = Some(("terminal_input_composer_busy".into(), "composer_busy".into()));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 8).await;
+        assert_eq!(fake.deliveries.lock().unwrap().len(), 1, "{:?}", fake.states());
+        task.abort();
+    }
+
+    /// Parity estado B4: a contagem do diagnóstico de contexto é a do Python.
+    #[test]
+    fn context_pairs_like_python() {
+        assert_eq!(context_pairs("🤖 Opus │ 💬 46k/200k │ 💵 1"), 1);
+        assert_eq!(context_pairs("💬 46k/200k · 12k/50k"), 2);
+        assert_eq!(context_pairs("💬 ctx 46k/200k"), 2);
+        assert_eq!(context_pairs("sem segmento"), 0);
+    }
+
+    /// Parity estado B2: com a observação do pane falhando, a prévia do hook (MessageDisplay) segue andando:
+    /// o arquivo não depende da captura, como no `PreviewBroker` do Python.
+    #[tokio::test(start_paused = true)]
+    async fn hook_preview_keeps_going_while_the_observation_fails() {
+        let fail = || Err(CaptureFailed { code: "terminal observer EOF".into(), attempt: None });
+        let fake = Fake::new(vec![Ok(SPINNER), fail()]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2).await;
+        *fake.hook.lock().unwrap() = vec![HookFile { text: "resposta em andamento no hook".into(), ts: Some(wall_now()) }];
+        tokio::time::sleep(POLL * 3).await;
+        assert!(fake.previews.lock().unwrap().iter().any(|t| t == "resposta em andamento no hook"), "{:?}", fake.previews.lock().unwrap());
+        task.abort();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn runtime_problem_in_key_and_wakes() {
         let fake = Fake::new(vec![Ok(IDLE)]);
@@ -759,7 +983,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { upstream: "127.0.0.1:9".parse().unwrap(), secret: "s".into(), http: crate::proxy::client(),
-            watchers: Default::default(), hubs: Hubs::default(), locate: std::sync::Arc::new(crate::locate::Unavailable), monitors: Some(spawn), mods: Default::default() };
+            watchers: Default::default(), hubs: Hubs::default(), locate: std::sync::Arc::new(crate::locate::Unavailable), monitors: Some(spawn), mods: Default::default(), runtime: Default::default() };
         let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         // Dono no celular, dono no desktop e o canal do convidado: um hub, um Monitor.
         let leases: Vec<_> = (0..3).map(|_| ctx.hubs.acquire("s", binding(Provider::Claude), &ctx)).collect();

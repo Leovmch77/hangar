@@ -16,11 +16,13 @@ const VERSION: u32 = 2;
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
 const RECENT_CALLS: u64 = 256;
 const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
-    "preserve_binding", "queued", "already_confirmed", "disposition", "draft"];
+    "preserve_binding", "queued", "already_confirmed", "disposition", "draft",
+    // A repetição da reabertura em bypass só se reconhece por estes campos (`reopen_claude`).
+    "reopened", "mode", "current", "previous_non_plan"];
 /// Ações cujo resultado é a operação inteira. Mesmo conjunto de `_OPERATION_RECEIPTS` em runtime_queue.py.
 const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status { Prepared, Dispatching, Accepted, Deferred, Rejected, Unknown, Confirmed }
 
@@ -191,6 +193,9 @@ pub enum Action {
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
     GiveUp { entry_id:String },
+    /// Entregue há mais de `grace` s e sem prova vira desistida; o prazo conta do despacho (`dispatched_ts`) ou da
+    /// reivindicação (`claimed_ts`), campos só do Rust na linha.
+    GiveUpUnproved { now:f64, grace:f64 },
     BumpAttempts { entry_id:String },
     EntryDelivered { entry_id:String },
     Confirm { entry_ids:Vec<String> },
@@ -201,6 +206,8 @@ pub enum Action {
     Clear,
     Rename { name:String },
     Prepare { id:String, payload:Value, entry_id:Option<String> },
+    /// Resposta assíncrona reservada: a entrada e a operação de mesmo id nascem juntas, ou nenhuma.
+    ReserveAsyncAnswer { entry_id:String, text:String, payload:Value },
     BindDispatch { id:String, cursor:Value },
     /// `staged`: o despacho começou sem efeito no terminal; `MarkWriting` avisa antes da primeira
     /// escrita. Interrompida antes disso, a tentativa volta à fila em vez de ficar incerta.
@@ -213,6 +220,8 @@ pub enum Action {
     Recover,
     EnsureProjection,
     SetRuntimeState { state:Value },
+    /// Sob a mesma lease, depois de parar o ator antigo. Não devolve entradas incertas à fila.
+    AdvanceLifecycle { generation:u64, state:Value },
     ReplaceRows { rows:Vec<Value> },
 }
 
@@ -248,6 +257,27 @@ pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     file.try_lock().map_err(io::Error::from)?;
     Ok(Arc::new(file))
 }
+/// TUI e app-server que a vigia adotou nesta fila: outra TUI com a mesma chave é outra sessão.
+pub const CODEX_LIFE: &str = "codex_life";
+
+/// Apaga a fila de uma sessão encerrada (o estado e, com `projection`, a projeção por nome). Chamar
+/// com a trava; ausente é nada a apagar.
+pub fn discard(state_path: &Path, projection_dir: &Path, projection: bool) -> io::Result<()> {
+    let bytes = match std::fs::read(state_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let ignore_missing = |result: io::Result<()>| match result {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    if projection && let Ok((state, _)) = State::load(&bytes) {
+        ignore_missing(std::fs::remove_file(projection_dir.join(format!("{}.jsonl", sanitize(&state.name)))))?;
+    }
+    ignore_missing(std::fs::remove_file(state_path))
+}
+
 fn row_id(row: &Value) -> &str { row["id"].as_str().unwrap_or("") }
 fn is_false(value:&bool)->bool {!*value}
 fn current(row: &Value, min_ts: f64) -> bool {
@@ -256,6 +286,9 @@ fn current(row: &Value, min_ts: f64) -> bool {
 fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c,'_' | '-' | '.') { c } else { '-' }).collect()
 }
+
+/// A projeção da fila de `name`: o mesmo `.jsonl` que o `PromptQueue` do Python lê e grava pelo nome.
+pub(crate) fn projection_path(projection_dir: &Path, name: &str) -> PathBuf { projection_dir.join(format!("{}.jsonl", sanitize(name))) }
 
 impl Store {
     pub fn open(state_path: &Path, projection_dir: &Path, initial: State) -> io::Result<Self> {
@@ -324,10 +357,15 @@ impl Store {
         let was_held = self.held;
         let binds = matches!(&action, Action::BindDispatch { .. });
         self.unfence()?;
-        if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
         let payload = receipt_payload(serde_json::to_value(&action)?);
+        if generation != self.state.generation {
+            let same_advance=matches!(&action,Action::AdvanceLifecycle {generation:next,..}
+                if generation.checked_add(1)==Some(*next) && *next==self.state.generation)
+                && self.state.operations.get(&receipt_id).is_some_and(|receipt|receipt.payload==payload);
+            if !same_advance { return Err(invalid("geração da fila mudou")); }
+        }
         if let Some(previous) = self.state.operations.get(&receipt_id) {
             if receipt_payload(previous.payload.clone()) != payload { return Err(invalid("identificador reutilizado com outra operação")); }
             let result = previous.result.clone();
@@ -338,7 +376,8 @@ impl Store {
         if readonly { self.ensure_projection()?; }
         let target = match &action {
             Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. } | Action::MarkWriting { id, .. }
-            | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. } => Some(id.clone()),
+            | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. }
+            | Action::ReserveAsyncAnswer { entry_id:id, .. } => Some(id.clone()),
             _ => None,
         };
         let targeted = target.is_some();
@@ -597,7 +636,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             for row in &mut state.rows {
                 if protected.contains(row_id(row)) || entry_id.as_deref().is_some_and(|id| id != row_id(row)) { continue; }
                 if row["delivered"] == false && current(row,min_ts) {
-                    row["delivered"] = json!(true);
+                    row["delivered"] = json!(true); row["claimed_ts"] = json!(clock.epoch_s);
                     claimed.push(row.clone());
                     if limit.is_some_and(|limit| claimed.len() >= limit) { break; }
                 }
@@ -641,6 +680,30 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             release_terminal_write_barrier(state);
             json!(!ids.is_empty())
         }
+        // Sem terminal a escrita no stdin é a entrega e nada é redigitado: sem prova no prazo, a entrada vira
+        // "não chegou" (descartável) e a incerta deixa de segurar a fila. A prova que chegar depois a resgata.
+        Action::GiveUpUnproved { now, grace } => {
+            let mut given = Vec::new();
+            let mut next_due: Option<f64> = None;
+            for row in &mut state.rows {
+                if row["delivered"] != true || row["confirmed"] == true || row["desistiu"] == true
+                    || row["papel"] == "assistant" || row["steered"] == true { continue; }
+                let id = row_id(row).to_owned();
+                let ops = || state.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id.as_str()));
+                // Escrita em curso: o desfecho é do ator.
+                if ops().any(|(_, op)| op.status == Status::Dispatching) { continue; }
+                let since = ["dispatched_ts","claimed_ts","ts"].iter().find_map(|key| row[*key].as_f64()).unwrap_or(0.0);
+                if since + grace > now { next_due = Some(next_due.map_or(since + grace, |due: f64| due.min(since + grace))); continue; }
+                row["desistiu"] = json!(true); row["desistiu_ts"] = json!(now);
+                given.push(id);
+            }
+            for op in state.operations.iter_mut().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.status == Status::Unknown
+                && op.entry_id.as_ref().is_some_and(|entry| given.contains(entry))).map(|(_, op)| op) {
+                op.status = Status::Rejected;
+                op.result = json!({"operation_id":op.id,"disposition":"rejected","payload":{"code":"delivery_given_up"}});
+            }
+            json!({"given_up":given,"next_due":next_due})
+        }
         Action::BumpAttempts { entry_id } => {
             if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && !protected.contains(&entry_id)) {
                 let count = row["attempts"].as_u64().unwrap_or(0) + 1;
@@ -649,11 +712,14 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
         Action::EntryDelivered { entry_id } => state.rows.iter().find(|r| row_id(r) == entry_id)
             .map(|r|json!(r["delivered"].as_bool().unwrap_or(false))).unwrap_or(Value::Null),
+        // Prova direta da CLI (eco da mensagem ou resposta de comando local): vale mesmo com a escrita ainda sem
+        // desfecho (o eco e o `result` podem vir antes do `Finish`) e resgata a desistida.
         Action::Confirm { entry_ids } => {
             let mut count = 0;
             for row in &mut state.rows {
-                if !protected.contains(row_id(row)) && entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true {
+                if entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true {
                     row["confirmed"] = json!(true); count += 1;
+                    row.as_object_mut().unwrap().remove("desistiu");
                 }
             }
             json!(count)
@@ -696,6 +762,16 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if let Some(entry)=state.operations[&id].entry_id.clone().filter(|entry|entry_was_materialized(state,entry)) {mark_materialized(state,&entry);}
             serde_json::to_value(&state.operations[&id])?
         }
+        Action::ReserveAsyncAnswer { entry_id, text, payload } => {
+            if entry_id.is_empty() || entry_id.starts_with(CALL_PREFIX) { return Err(invalid("identificador reservado")); }
+            if let Some(old) = state.operations.get(&entry_id) {
+                if old.payload != payload || old.entry_id.as_deref() != Some(entry_id.as_str()) { return Err(invalid("intenção da operação mudou")); }
+            } else {
+                append_row(state,json!({"id":entry_id,"text":text,"ts":clock.epoch_s,"delivered":false}))?;
+                state.operations.insert(entry_id.clone(),Operation::new(&entry_id,payload,Some(entry_id.clone())));
+            }
+            serde_json::to_value(&state.operations[&entry_id])?
+        }
         Action::BindDispatch { id, cursor } => {
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
             if op.status != Status::Prepared { return Err(invalid("cursor precisa preceder o despacho")); }
@@ -707,7 +783,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if !matches!(op.status,Status::Prepared | Status::Dispatching) { return Err(invalid("operação não pode ser reenviada")); }
             op.wire_attempts.entry(wire_id).or_insert_with(||json!({"status":if staged {"staged"} else {"dispatching"},"result":null}));
             op.status = Status::Dispatching;
-            for row in &mut state.rows { if Some(row_id(row)) == op.entry_id.as_deref() { row["delivered"] = json!(true); } }
+            for row in &mut state.rows { if Some(row_id(row)) == op.entry_id.as_deref() {
+                row["delivered"] = json!(true);
+                if row.get("dispatched_ts").is_none() { row["dispatched_ts"] = json!(clock.epoch_s); }
+            } }
             serde_json::to_value(op)?
         }
         Action::MarkWriting { id, wire_id } => {
@@ -810,9 +889,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 .filter_map(|op|op.payload["logical_id"].as_str()).collect();
             let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed|Status::Rejected)
                 || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
-            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|call.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim")
+            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|["call::terminal:queue:","call::claim:","call::steer-claim:"]
+                    .iter().any(|prefix|call.starts_with(prefix)) && op.payload["kind"]=="claim")
                 .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
-            // Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+            // Só o claim do executor (terminal ou drain sem terminal), sem despacho, prova ausência de efeito.
             for row in &mut state.rows {
                 let id=row_id(row);
                 if row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && claimed.contains(id) && !protected.contains(id) {
@@ -824,9 +904,38 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         Action::SetRuntimeState { state: runtime_state } => {
             if !runtime_state.is_object() { return Err(invalid("estado privado inválido")); }
             let barrier=state.runtime_state["terminal_write_barrier"].clone();
+            let life=state.runtime_state[CODEX_LIFE].clone();
             state.runtime_state = runtime_state;
             if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
+            // A vida da adoção é da vigia, não da vista que o ator grava.
+            if !life.is_null() {state.runtime_state[CODEX_LIFE]=life;}
             Value::Null
+        }
+        Action::AdvanceLifecycle { generation, state:next } => {
+            let advanced=generation!=state.generation;
+            if advanced && state.generation.checked_add(1)!=Some(generation) || !next.is_object() {return Err(invalid("avanço de vida inválido"));}
+            let mut patch=next.as_object().unwrap().clone();
+            if let Some(reset)=patch.remove("conversation_reset") {
+                let previous=reset["previous"].as_str().filter(|sid|!sid.is_empty()).ok_or_else(||invalid("conversa anterior inválida"))?;
+                let next=reset["next"].as_str().filter(|sid|!sid.is_empty()).ok_or_else(||invalid("conversa nova inválida"))?;
+                if !advanced || previous==next || reset.as_object().is_none_or(|o|o.len()!=2)
+                    || state.runtime_state["view"]["conversation"]!=previous || patch.get("metadata").and_then(|metadata|metadata["session_id"].as_str())!=Some(next) {return Err(invalid("troca de conversa inválida"));}
+                state.rows.clear();
+            }
+            let barrier=state.runtime_state["terminal_write_barrier"].clone();
+            if patch.get("terminal_write_barrier").is_some_and(|b|b!=&barrier) {return Err(invalid("avanço removeria uma entrega incerta"));}
+            if let Some(name)=patch.remove("name") {
+                let name=name.as_str().filter(|n|!n.is_empty()).ok_or_else(||invalid("nome vazio na fila"))?;
+                if state.name!=name {state.runtime_state["_queue_previous_name"]=json!(state.name);state.name=name.into();}
+            }
+            let runtime=state.runtime_state.as_object_mut().ok_or_else(||invalid("estado privado inválido"))?;
+            if advanced {
+                for key in ["view","channels","preview","thinking","tool","alive","working","deliverable","error","terminal_lifecycle"] {runtime.remove(key);}
+            }
+            runtime.extend(patch);
+            if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
+            state.generation=generation;
+            json!({"generation":generation})
         }
         Action::ReplaceRows { rows } => {
             if state.rows.iter().any(|r| protected.contains(row_id(r)) && !rows.contains(r)) {
@@ -1048,5 +1157,126 @@ impl QueueActor {
     pub async fn shutdown(self) -> io::Result<()> {
         self.sender.send(QueueMessage::Stop).await.map_err(|_|invalid("fila já encerrada"))?;
         self.task.await.map_err(|_|invalid("persistência da fila interrompida"))
+    }
+}
+
+#[cfg(test)]
+mod headless_delivery_tests {
+    use super::*;
+    fn store(dir:&tempfile::TempDir) -> Store {
+        Store::open(&dir.path().join("state.json"),dir.path(),State::new("key",1,"session",vec![])).unwrap()
+    }
+    fn clock(epoch_s:f64) -> ClockSample { ClockSample { monotonic_s:0.0,epoch_s } }
+    fn append(store:&mut Store,id:&str,ts:f64) {
+        store.exec(1,&format!("append:{id}"),clock(ts),Action::Append { text:id.into(),delivered:false,ts:Some(ts),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
+    }
+    fn row(store:&Store,id:&str) -> Value { store.state().rows.iter().find(|r|r["id"] == id).unwrap().clone() }
+
+    #[test]
+    fn headless_claim_that_never_dispatched_goes_back_to_the_queue_on_recovery() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a",10.0);
+        store.exec(1,"claim:x",clock(11.0),Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None }).unwrap();
+        store.exec(1,"stop-recover:x",clock(12.0),Action::Recover).unwrap();
+        assert_eq!(row(&store,"a")["delivered"],false,"reivindicada e nunca despachada ficou como entregue");
+    }
+
+    #[test]
+    fn steered_entry_never_gives_up() {
+        // Decisão do usuário (paridade com o Python): orientação sem prova não vira "não chegou".
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"steer",10.0);
+        store.exec(1,"steered",clock(11.0),Action::SetDelivered { entry_id:"steer".into(),value:true,steered:true }).unwrap();
+        let outcome=store.exec(1,"give-up",clock(500.0),Action::GiveUpUnproved { now:500.0,grace:60.0 }).unwrap();
+        assert_eq!(outcome["given_up"],json!([]));
+        assert!(row(&store,"steer")["desistiu"].is_null());
+    }
+
+    #[test]
+    fn local_command_answered_before_the_write_finished_is_confirmed() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"/cost",10.0);
+        store.exec(1,"prepare",clock(11.0),Action::Prepare { id:"/cost".into(),payload:json!({"kind":"input"}),entry_id:Some("/cost".into()) }).unwrap();
+        store.exec(1,"begin",clock(11.0),Action::BeginDispatch { id:"/cost".into(),wire_id:"w".into(),staged:false }).unwrap();
+        // O `result` local chegou antes do `Finish` da escrita.
+        assert_eq!(store.exec(1,"local-confirm",clock(12.0),Action::Confirm { entry_ids:vec!["/cost".into()] }).unwrap(),json!(1));
+        assert_eq!(row(&store,"/cost")["confirmed"],true);
+    }
+
+    #[test]
+    fn give_up_counts_from_the_dispatch_and_frees_the_uncertain_entry() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        // Esperou na fila muito tempo e foi despachada agora: o prazo conta do despacho.
+        append(&mut store,"late",10.0);
+        append(&mut store,"lost",10.0);
+        append(&mut store,"writing",10.0);
+        for id in ["late","lost","writing"] {
+            store.exec(1,&format!("prepare:{id}"),clock(100.0),Action::Prepare { id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into()) }).unwrap();
+        }
+        store.exec(1,"begin:lost",clock(100.0),Action::BeginDispatch { id:"lost".into(),wire_id:"w-lost".into(),staged:false }).unwrap();
+        store.exec(1,"finish:lost",clock(100.0),Action::Finish { id:"lost".into(),status:Status::Unknown,result:json!({}) }).unwrap();
+        store.exec(1,"begin:writing",clock(100.0),Action::BeginDispatch { id:"writing".into(),wire_id:"w-writing".into(),staged:false }).unwrap();
+        store.exec(1,"begin:late",clock(150.0),Action::BeginDispatch { id:"late".into(),wire_id:"w-late".into(),staged:false }).unwrap();
+        store.exec(1,"finish:late",clock(150.0),Action::Finish { id:"late".into(),status:Status::Accepted,result:json!({}) }).unwrap();
+        let outcome=store.exec(1,"give-up",clock(170.0),Action::GiveUpUnproved { now:170.0,grace:60.0 }).unwrap();
+        assert_eq!(outcome,json!({"given_up":["lost"],"next_due":210.0}));
+        assert_eq!(row(&store,"lost")["desistiu"],true);
+        assert!(row(&store,"late")["desistiu"].is_null() && row(&store,"writing")["desistiu"].is_null());
+        assert_eq!(store.state().operations["lost"].status,Status::Rejected,"a incerta desistida não segura mais o descarte");
+        assert_eq!(store.exec(1,"remove",clock(171.0),Action::Remove { entry_id:"lost".into() }).unwrap(),json!(true));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn sid_commit_clears_a_and_advances_b_in_one_store_write() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut initial=State::new("key",4,"session",vec![json!({"id":"a","text":"only-a","delivered":false,"ts":1.0})]);
+        initial.runtime_state["view"]=json!({"conversation":"sid-a","deliverable":true});
+        let mut store=Store::open(&dir.path().join("state.json"),dir.path(),initial).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:10.0};
+        let action=||Action::AdvanceLifecycle {generation:5,state:json!({"conversation_reset":{"previous":"sid-a","next":"sid-b"},"metadata":{"key":"key","session_id":"sid-b"}})};
+        store.exec(4,"sid-commit",clock,action()).unwrap();
+        assert_eq!(store.state().generation,5);assert!(store.state().rows.is_empty());
+        assert_eq!(store.state().runtime_state["metadata"]["session_id"],"sid-b");
+        assert!(store.state().runtime_state["view"].is_null());
+        assert!(store.state().runtime_state.get("conversation_reset").is_none());
+        assert!(store.exec(4,"old-claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).is_err());
+        assert!(store.exec(5,"b-claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
+        assert_eq!(store.exec(4,"sid-commit",clock,action()).unwrap(),json!({"generation":5}));
+    }
+    #[test]
+    fn advance_preserves_unknown_and_only_repeats_the_same_transition() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut initial=State::new("key",4,"session",vec![json!({"id":"row","text":"pending","delivered":true,"confirmed":false,"desistiu":false,"ts":1000.0})]);
+        let mut unknown=Operation::new("input",json!({"kind":"input"}),Some("row".into()));
+        unknown.status=Status::Unknown;
+        initial.operations.insert("input".into(),unknown);
+        initial.runtime_state["terminal_write_barrier"]=json!({"conversation":"sid","generation":4,"operation_id":"input"});
+        initial.runtime_state["view"]=json!({"working":true});
+        let before=initial.runtime_state["terminal_write_barrier"].clone();
+        let mut store=Store::open(&dir.path().join("state.json"),dir.path(),initial).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        assert_eq!(store.exec(4,"same-life",clock,Action::AdvanceLifecycle {generation:4,state:json!({"name":"renamed","metadata":{"setting":true}})}).unwrap(),json!({"generation":4}));
+        assert_eq!(store.state().name,"renamed");
+        assert_eq!(store.state().runtime_state["_queue_previous_name"],"session");
+        assert_eq!(store.state().runtime_state["view"],json!({"working":true}));
+        assert!(store.state().runtime_state.get("name").is_none());
+        let advance=||Action::AdvanceLifecycle {generation:5,state:json!({"terminal_lifecycle":{"conversation":"sid"}})};
+        assert_eq!(store.exec(4,"advance",clock,advance()).unwrap(),json!({"generation":5}));
+        assert_eq!(store.exec(4,"advance",clock,advance()).unwrap(),json!({"generation":5}));
+        assert!(store.exec(4,"another",clock,advance()).is_err());
+        assert!(store.exec(4,"advance",clock,Action::AdvanceLifecycle {generation:5,state:json!({"other":true})}).is_err());
+        assert!(store.exec(5,"skip",clock,Action::AdvanceLifecycle {generation:7,state:json!({})}).is_err());
+        assert_eq!(store.state().runtime_state["terminal_write_barrier"],before);
+        assert!(store.state().runtime_state["view"].is_null());
+        assert_eq!(store.state().runtime_state["metadata"],json!({"setting":true}));
+        assert_eq!(store.state().name,"renamed");
+        assert_eq!(store.state().operations["input"].status,Status::Unknown);
+        assert_eq!(store.state().rows.len(),1);
+        assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
+        assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
     }
 }

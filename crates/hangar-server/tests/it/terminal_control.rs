@@ -547,6 +547,39 @@ async fn control_observer_never_subscribes_to_pane_output_nor_blocks_typing() {
     pool.release("state").await.unwrap();
 }
 
+/// tmux de verdade, sem TUI do Codex: o seletor nunca abre. Digita uma vez, tenta o segundo Enter só com
+/// nada aberto e fecha com um Esc; outro pedido de tecla espera a trava da vida até o fim.
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_permission_selector_on_a_real_pane_that_never_opens_it() {
+    use hangar_server::permission_control::{PermissionAction, codex};
+    let server = IsolatedTmux::new();
+    // O `cat` ecoa um composer vazio do Codex (`›`): sem ele o seletor recusa antes de digitar.
+    server.run(&["send-keys", "-t", "fixture", "-l", "--", "›"]);
+    let ids = server.run(&["display-message", "-p", "-t", "fixture", "#{pane_id}\t#{session_created}"]);
+    let (pane, created) = ids.trim().split_once('\t').unwrap();
+    let binding = hangar_server::terminal_input::TerminalBinding { name: "fixture".into(), pane: pane.into(), conversation: "thread".into(),
+        generation: 1, created: created.parse().unwrap(), mux_argv: vec!["tmux".into(), "-u".into(), "-L".into(), server.label.clone()],
+        windows: false, clipboard_lock_path: None };
+    let serial = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let selector = std::sync::Arc::new(hangar_server::runtime::codex_terminal::pane_driver(&binding, serial.clone(), None));
+    let keys = hangar_server::runtime::codex_terminal::pane_driver(&binding, serial, None);
+    let read = { let d = selector.clone(); tokio::spawn(async move { codex(&d, PermissionAction::Read { probe: false }).await }) };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let typed = keys.text("depois");
+    let (read, typed) = tokio::join!(read, typed);
+    assert_eq!(read.unwrap().unwrap_err().code, "permission_picker_not_opened");
+    assert!(hangar_server::session_write::control::pane_step_answer(&typed).is_ok());
+    let screen = server.run(&["capture-pane", "-p", "-t", "fixture"]);
+    let (permissions, after) = (screen.find("/permissions").unwrap(), screen.rfind("depois").unwrap());
+    assert!(permissions < after, "a tecla concorrente sai depois da sequência inteira: {screen}");
+    // Outro nascimento com o mesmo nome: nada é digitado.
+    let stale = hangar_server::terminal_input::TerminalBinding { created: 1, ..binding };
+    let error = codex(&hangar_server::runtime::codex_terminal::pane_driver(&stale, Default::default(), None), PermissionAction::Read { probe: false }).await.unwrap_err();
+    assert_eq!(error.code, "stale_mux");
+    assert_eq!(server.run(&["capture-pane", "-p", "-t", "fixture"]), screen);
+}
+
 #[test]
 fn stray_hook_output_outside_a_frame_is_ignored() {
     let mut parser = ControlParser::default();

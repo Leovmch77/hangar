@@ -1,6 +1,12 @@
-//! Runtime exclusivo do Claude terminal/sem terminal e do Codex sem terminal.
+//! Runtime exclusivo do Claude terminal/sem terminal, do Codex sem terminal e do Codex com terminal adotado.
 pub mod protocol;
 pub mod cano;
+pub mod websocket;
+pub mod codex_terminal;
+pub mod codex_sidecar;
+pub mod codex_launch;
+pub mod codex_pane;
+pub mod codex_relaunch;
 pub mod queue;
 pub mod receipt;
 pub mod claude;
@@ -12,6 +18,8 @@ pub mod terminal;
 pub mod terminal_status;
 pub mod local_policy;
 pub mod process;
+pub mod claude_relaunch;
+pub mod lifecycle;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {

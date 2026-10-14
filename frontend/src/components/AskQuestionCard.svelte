@@ -8,8 +8,8 @@
   interface Props {
     open: boolean;
     payload: AskQuestionPayload | null;
-    onSubmit: (answers: AnswerItem[]) => Promise<void>;
-    onClose: () => void;
+    onSubmit: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
+    onClose: (payload: AskQuestionPayload) => void;
     /** Repassado ao stepper: ver a prop lá. */
     escapes?: boolean;
   }

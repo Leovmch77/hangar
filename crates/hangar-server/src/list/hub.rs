@@ -51,7 +51,7 @@ pub trait HeadlessSource: Send + Sync {
 }
 
 impl HeadlessSource for crate::runtime::gateway::RuntimeRegistry {
-    fn snapshots(&self) -> BoxFuture<'_, BTreeMap<String, Value>> { Box::pin(self.list_snapshots()) }
+    fn snapshots(&self) -> BoxFuture<'_, BTreeMap<String, Value>> { Box::pin(self.list_snapshots_readonly()) }
 }
 
 /// O que o produtor publicou por último, em quadros prontos: cada conexão só clona o `Bytes`.

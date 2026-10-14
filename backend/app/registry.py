@@ -1017,9 +1017,9 @@ class KillFailed(Exception):
     """A sessao continuou de pe depois do kill. Existe pra a rota DELETE reportar em vez de responder
     {"ok": true} e a UI sumir com um card de sessao que segue viva (ver SessionRegistry.kill)."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, detail: dict | None = None):
         super().__init__(f"a sessao '{name}' continua de pe depois do kill-session")
-        self.name = name
+        self.name, self.detail = name, detail
 
 
 def _rename_pair_python(old: str, new: str) -> None:
@@ -1638,6 +1638,31 @@ class SessionRegistry:
         _decorate_transfers(out)
         return out
 
+    def _decorate_replies(self, infos: list[SessionInfo]) -> None:
+        """Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
+        /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo."""
+        for info in infos:
+            info.last_reply = None
+            info.last_reply_at = None
+            if info.state != "idle" or not info.jsonl:
+                continue
+            provider = getattr(info, "provider", "claude")
+            marker = (info.jsonl, info.last_activity, provider)
+            cached = self._reply_cache.get(info.name)
+            if cached is None or cached[:3] != marker:
+                try:
+                    event = next((ev for ev in reversed(merged_history(
+                        info.name, info.jsonl, provider, limit=8
+                    )) if ev.kind == "assistant_msg" and ev.text), None)
+                except Exception:
+                    _log.warning("lista: falha lendo ultima resposta sessao=%s", info.name,
+                                 exc_info=True)
+                    continue
+                text = _texto_simples(event.text)[:160] if event and event.text else None
+                cached = (*marker, text, (event.ts or info.last_activity) if event else None)
+                self._reply_cache[info.name] = cached
+            info.last_reply, info.last_reply_at = cached[3], cached[4]
+
     async def _radar_de_limite(self, infos: list[SessionInfo], raspadas: set[str]) -> None:
         """Preenche limited/limit_reset das sessoes TRAVADAS que o fast-path de marcador nao raspou.
         Uma sessao esperando o limite voltar e `working` pelo hook e sem transcript avancando —
@@ -2078,33 +2103,10 @@ class SessionRegistry:
             )
         await self._radar_de_limite(infos, raspadas={i.name for i in pending})
         if state_only:
+            # Pi, omp e Kimi: o histórico deles ainda é do Python, então a última resposta vai nos fatos.
+            await asyncio.to_thread(self._decorate_replies, [i for i in infos if i.provider in ("pi", "omp", "kimi")])
             return infos
-        # Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
-        # /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo.
-        def _decorate_replies() -> None:
-            for info in infos:
-                info.last_reply = None
-                info.last_reply_at = None
-                if info.state != "idle" or not info.jsonl:
-                    continue
-                provider = getattr(info, "provider", "claude")
-                marker = (info.jsonl, info.last_activity, provider)
-                cached = self._reply_cache.get(info.name)
-                if cached is None or cached[:3] != marker:
-                    try:
-                        event = next((ev for ev in reversed(merged_history(
-                            info.name, info.jsonl, provider, limit=8
-                        )) if ev.kind == "assistant_msg" and ev.text), None)
-                    except Exception:
-                        _log.warning("lista: falha lendo ultima resposta sessao=%s", info.name,
-                                     exc_info=True)
-                        continue
-                    text = _texto_simples(event.text)[:160] if event and event.text else None
-                    cached = (*marker, text, (event.ts or info.last_activity) if event else None)
-                    self._reply_cache[info.name] = cached
-                info.last_reply, info.last_reply_at = cached[3], cached[4]
-
-        await asyncio.to_thread(_decorate_replies)
+        await asyncio.to_thread(self._decorate_replies, infos)
         # Estado de git por sessão — SÓ aqui (payload do /api/sessions), nunca em list(): git_summary
         # forka `git status` e list() é o caminho leve chamado por kill()/resume/SSE. E como
         # list_with_state é awaitado direto no event loop (/api/sessions, sse, stall_watch), o loop
@@ -3155,11 +3157,19 @@ class SessionRegistry:
         if tmux.is_hidden(alvo) and not tmux.kill_session(alvo):
             _log.debug("kill: shell escondido de %r nao saiu (pode nao existir)", name)
 
-    def kill(self, name: str) -> list[dict]:
+    def kill(self, name: str, *, closed_by_rust: bool = False) -> list[dict]:
         """Devolve os avisos de saída do grupo que o Rust não entregou (vazio no modo Python, onde a
-        rota avisa depois)."""
+        rota avisa depois). `closed_by_rust`: o Rust já encerrou a sessão (pane, app-server, sidecar,
+        fila, grupo) e repassou; só as lojas daqui, sem nenhuma chamada de volta a ele."""
         from app.conversation_transfer import require_available
         require_available(name)
+        if closed_by_rust:
+            shortcut_terminals.close_all(name)
+            self._forget_local(name)
+            ThenLink(name).clear()
+            if apos_saida_codex:
+                apos_saida_codex(name)
+            return []
 
         # Levanta KillFailed quando a sessao SOBREVIVE. Antes o retorno do tmux era descartado e a
         # limpeza duravel (cache, fila, then, pareamento) rodava do mesmo jeito: o card sumia da UI, o
@@ -3190,9 +3200,13 @@ class SessionRegistry:
             # tentado: falhando ele (o caso que esta funcao existe pra pegar), a excecao dizia "nao
             # consegui encerrar" com a TUI ja sem servidor — sinal trocado, e a sessao que sobrou na
             # tela nao fala mais com ninguem. Agora falha antes de qualquer estrago.
-            if not (codex_sessions.load(name) or {}).get("headless") and not tmux.kill_session(name):
+            # Codex com terminal do Rust: quem encerra (pane, app-server, sidecar, fila) é ele; as lojas daqui seguem abaixo.
+            from app.runtime_coordinator import rust_codex_terminal
+            if (rust := rust_codex_terminal(name, "kill")) is not None and rust[0] != 200:
+                raise KillFailed(name, json.loads(rust[1]).get("detail"))
+            if rust is None and not (codex_sessions.load(name) or {}).get("headless") and not tmux.kill_session(name):
                 raise KillFailed(name)
-            get_adapter("codex").close_sync(name)
+            get_adapter("codex").close_sync(name) if rust is None else get_adapter("codex").forget_memory(name)
             self._kill_hidden_shell(name)
             shortcut_terminals.close_all(name)
             codex_sessions.delete(name)

@@ -130,6 +130,7 @@ mod contract_list;
 mod contract_pyjson;
 mod contract_tail;
 mod contract_terminal;
+mod conversation_contract;
 mod conversations;
 mod costs_fast_paths;
 mod costs_fx;
@@ -175,6 +176,8 @@ mod runtime_actor;
 mod runtime_cano;
 mod runtime_claude;
 mod runtime_codex;
+#[cfg(unix)]
+mod runtime_codex_watch;
 mod runtime_contract;
 mod runtime_gateway;
 mod runtime_ingress;

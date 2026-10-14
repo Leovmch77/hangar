@@ -208,18 +208,22 @@ mod monitor {
             *pane.0.lock().unwrap() = frame["pane"].as_str().unwrap().to_owned();
             std::fs::write(cfg.join(".hangar-state/fixture-sid.json"),
                 format!(r#"{{"state":"{}","ts":999.0}}"#, frame["marker"].as_str().unwrap())).unwrap();
-            // O Python só manda a pergunta ainda valendo (`pergunta_pendente`).
+            // O Store só mostra a pergunta ainda valendo; ela entra depois da classificação, com o ID que o
+            // Store dá a ela, como em `ListBridge::project_plugins`.
             let q = &frame["facts"]["question"];
-            let held: BTreeMap<String, Value> = (!q.is_null() && q["seen_age_ms"].as_u64() <= Some(35_000))
-                .then(|| ("fixture".to_owned(), q.clone())).into_iter().collect();
+            let held: Vec<Value> = (!q.is_null() && q["seen_age_ms"].as_u64() <= Some(35_000))
+                .then(|| { let mut q = q.clone(); q["interaction_id"] = Value::from("shown"); q }).into_iter().collect();
             let hooks = HookStates::load(&dirs);
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
-                                problems: &problems, stall_seconds: 300.0, held: &held, monitors: &monitors };
+                                problems: &problems, stall_seconds: 300.0, monitors: &monitors };
             // Cada tique parte da linha da descoberta, como na produção.
             let mut session = base.clone();
             classifier.classify(std::slice::from_mut(&mut session), &facts, &pane).await;
-            assert_eq!(Some(session.state.as_str()), monitor_state.as_deref(), "rodada {i}: lista × Monitor");
-            awaiting += usize::from(session.state == "awaiting_input");
+            let mut state = hangar_api::state::StateEvent { state: session.state.clone(), label: session.label.clone(),
+                question: session.question.clone(), options: session.options.clone(), interaction_id: session.interaction_id.clone(), ..Default::default() };
+            let _ = hangar_server::state::facts::project_plugin_state(&mut state, &held);
+            assert_eq!(Some(state.state.as_str()), monitor_state.as_deref(), "rodada {i}: lista × Monitor");
+            awaiting += usize::from(state.state == "awaiting_input");
         }
         assert!(awaiting >= 4, "a espera pela permissão aparece na lista");
     }

@@ -22,7 +22,7 @@ const STATUS_MAX_AGE: f64 = 86_400.0;
 /// Rabo do transcript lido para achar a resposta da pergunta.
 const ANSWER_SPAN: u64 = 256 * 1024;
 /// Prazo para a chamada da pergunta aparecer no transcript depois do sidecar.
-const ASK_GRACE: f64 = 5.0;
+pub(crate) const ASK_GRACE: f64 = 5.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Marker {
@@ -276,6 +276,11 @@ impl HookStates {
                         // O estado da sessão some com a leitura: é mudança, e o próximo tique tenta de novo.
                         changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
                         return;
+                    };
+                    // Marcador rasgado (lido no meio da escrita): vale o último bom, como o `hook_state` do Python.
+                    let parsed = match (parsed, &before) {
+                        (Parsed::Marker(None), Some((_, last @ Parsed::Marker(Some(_))))) => last.clone(),
+                        (parsed, _) => parsed,
                     };
                     // Reler o mesmo conteúdo (escrita recente, dentro da janela do mtime) não é mudança.
                     if before.as_ref().is_none_or(|(_, b)| *b != parsed) {
@@ -546,6 +551,8 @@ pub fn open_question(stem: Option<&str>, dirs: &[PathBuf]) -> Option<OpenQuestio
             continue;
         };
         let since = mtime.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        // O fim da chamada (ou da vida) visto pelo plugin vale antes da leitura do transcript.
+        if crate::state::ask::ended_by_plugin(stem, data.get("tool_use_id").and_then(Value::as_str), since) { continue; }
         if answered_cached(stem, tp, since, data.get("tool_use_id").and_then(Value::as_str)) {
             continue;
         }
@@ -671,6 +678,21 @@ mod tests {
             assert_eq!(hs.refresh(&dirs), ["s3"]);
             assert_eq!((blocked, hs.get_state(Some("s3"), |_| false)), (None, Some(Marker { state: "idle".into(), ts: 5.0 })));
         }
+    }
+
+    #[test]
+    /// Parity estado B3: o marcador lido no meio da escrita não derruba o estado; vale o último bom.
+    fn torn_marker_keeps_the_last_good_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        let marker = cfg.join(".hangar-state/torn.json");
+        write(&marker, r#"{"state": "working", "ts": 1}"#);
+        let mut hs = HookStates::default();
+        let dirs = vec![cfg];
+        hs.refresh(&dirs);
+        write(&marker, r#"{"state": "wor"#);
+        hs.refresh(&dirs);
+        assert_eq!(hs.get_state(Some("torn"), |_| false).map(|m| m.state).as_deref(), Some("working"));
     }
 
     #[test]

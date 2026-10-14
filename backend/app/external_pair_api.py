@@ -24,6 +24,7 @@ router = APIRouter()
 
 _CODE_RE = re.compile(r"[A-Za-z0-9]{1,64}")
 _MSG_JA_PAREADA = "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"
+_MSG_ORQ = "a sessão é árbitra de uma orquestração e não pareia com outra máquina"
 _REMOTE_LABEL = "resposta da outra máquina: "
 _MSG_PARCIAL = "pareamento desfeito aqui, mas a outra máquina pode continuar pareada: desfaça lá"
 # Falhas da ponte depois de o pedido sair (`groups_bridge.call`): o Rust pode ter gravado.
@@ -107,7 +108,11 @@ async def pair_redeem(body: PairRedeemBody):
         raise HTTPException(503, detail=erro("erro_sessao_indisponivel", "indisponível por instantes"))
     name = invite.session
     # Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
-    if await asyncio.to_thread(lambda: pair.PairLink(name).get()) is not None:
+    link = await asyncio.to_thread(lambda: pair.PairLink(name).get())
+    if link is not None and link.get("orq") is True:
+        # Árbitro de uma orquestração: o grupo dela fica como está, e o aviso diz por quê.
+        raise HTTPException(409, detail=erro("erro_par_externo_orq", _MSG_ORQ))
+    if link is not None:
         raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", _MSG_JA_PAREADA))
     alias = external_pairs.free_alias(body.owner)
     peer = f"{alias}::{body.session}"
@@ -154,6 +159,8 @@ async def _join_external(name: str, peer: str, harness: dict[str, str]):
         except groups_bridge.GroupsBridgeError as e:
             if e.code == "erro_pareamento_mistura_cross":
                 raise pair.PairMixError(e.detail) from None
+            if e.code == "erro_par_externo_orq":
+                raise HTTPException(409, detail=erro("erro_par_externo_orq", _MSG_ORQ)) from None
             if e.code in _BRIDGE_UNCERTAIN:
                 # O pedido pode ter chegado e gravado: o unlink só age se o endereço estiver lá.
                 await _guarded_async("restaurar o grupo", _restore_external, (name, peer))
