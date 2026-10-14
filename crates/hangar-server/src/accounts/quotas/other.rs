@@ -600,7 +600,10 @@ pub fn client() -> Result<reqwest::Client, crate::accounts::catalog::AccountErro
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()
-        .map_err(|_| crate::accounts::catalog::AccountError::io())
+        .map_err(|error| {
+            tracing::warn!(code = "quota_client_build_failed", %error, "cliente HTTP das fontes de cota não montou");
+            crate::accounts::catalog::AccountError::io()
+        })
 }
 
 /// Teto do corpo lido: `base_url` é editável e uma resposta sem fim viraria memória.

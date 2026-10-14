@@ -672,7 +672,10 @@ pub(crate) fn external_client(timeout: Duration) -> Result<reqwest::Client, Acco
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .build()
-        .map_err(|_| AccountError::io())
+        .map_err(|error| {
+            tracing::warn!(code = "quota_client_build_failed", %error, "cliente HTTP das cotas não montou");
+            AccountError::io()
+        })
 }
 
 #[cfg(test)]
