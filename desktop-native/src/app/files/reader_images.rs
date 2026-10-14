@@ -41,7 +41,7 @@ impl ReaderImages {
             let key = match (&source, &root) {
                 (Source::Remote(_), _) => path,
                 (Source::Workspace(_), Some(root)) => format!("{connection}\0{}\0{path}", root.display()),
-                _ => format!("{connection}\0\0{path}"),
+                _ => format!("{connection}\0{name}\0{path}"),
             };
             let mut cache = cache.lock().ok()?;
             let loaded = cache.entry(key).or_insert_with(|| {
