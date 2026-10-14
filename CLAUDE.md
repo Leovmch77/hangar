@@ -97,7 +97,8 @@ npm --prefix frontend run dev              # Vite dev server
 npm --prefix frontend run build            # production build — does NOT typecheck
 npm --prefix frontend run check            # svelte-check + tsc — THIS is the type gate
 
-scripts/verificar-local                    # o que o CI rodaria para o commit (Linux + VM Windows); a trava pre-push exige
+scripts/verificar-local                    # só o ligado aos arquivos mudados (o que a trava pre-push exige)
+scripts/verificar-local --completo         # o que o CI rodaria para o commit (Linux + VM Windows)
 scripts/verificar-local --passos rust      # repete só um passo (o que já passou nesta árvore fica gravado)
 ./scripts/test-wrappers.sh                 # claude-engine (bash/zsh/fish) against a fake `claude`, no tmux
 ./scripts/test-statusline.sh               # statusline.js contract (engine sessions suppress cost), needs node
@@ -111,8 +112,9 @@ arquivos tocados (`cd backend && uv run pytest tests/test_x.py tests/test_y.py`,
 `cd frontend && npx vitest run src/x.test.ts src/y.test.ts`); falhou → repita só o que falhou.
 Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. **`scripts/verificar-local` é exigido ao
 abrir PR e ao subir para a `main` ou para branch com PR aberto**: ele roda, numa árvore fixa da
-máquina e em fila única, o que o CI rodaria para o que o commit muda, no Linux e no Windows da VM
-(`git config hangar.verificarWindows <host>`), e grava pela árvore cada passo que passou. No Linux os
+máquina e em fila única, só o ligado aos arquivos que o commit muda (`--completo`: o que o CI rodaria),
+no Linux e, com arquivo de Windows no diff, na VM (`git config hangar.verificarWindows <host>`, teto de
+10 min), e grava pela árvore cada passo que passou. No Linux os
 passos rodam em faixas paralelas e o pytest em vários processos: `git config hangar.verificarProcessos <n>`
 (padrão 4; `1` = tudo em fila). O Node é o do `.node-version`, o mesmo do CI: com o `fnm` instalado, o
 script e o `ci-gates.sh` trocam sozinhos; sem ele, o aviso diz que front e mobile podem falhar por isso. O hook do
