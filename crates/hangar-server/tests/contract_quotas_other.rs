@@ -224,8 +224,11 @@ fn sources_match_python() {
         let mut want = if expected.get("erro").is_some() { json!({"erro": true}) } else { expected.clone() };
         // Motor com `label` que não é texto sai da cota como já saía da lista de credenciais; o
         // Python o lia e dava `sem-resposta`.
-        if let Some(rows) = want["sources"].as_array_mut() {
-            rows.retain(|row| row["label"].is_string());
+        if name == "kimi_e_motores_na_ordem_dos_arquivos" {
+            let rows = want["sources"].as_array_mut().unwrap();
+            let before = rows.len();
+            rows.retain(|row| row["id"] != "chave:rotulo-numero");
+            assert_eq!(rows.len(), before - 1, "o caso perdeu o motor com rótulo numérico");
         }
         // O motor que não é objeto sai sozinho; os outros continuam fontes.
         if name == "motor_nao_objeto_derruba" {
