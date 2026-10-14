@@ -67,6 +67,26 @@ pub trait TerminalServices: Send + Sync {
     fn writing<'a>(&'a self) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
     /// Os fatos terminam conferindo o mesmo pane do `verify_pane`, depois da tela: o driver não o repete.
     fn facts_check_pane(&self) -> bool { false }
+    /// Tamanho do transcript antes do Enter; `None` sem transcript legível.
+    fn transcript_mark<'a>(&'a self) -> ServiceFuture<'a, Option<u64>> { Box::pin(async { Ok(None) }) }
+    /// O Claude pôs `text` na fila dele depois de `mark`, ou seja, aceitou o Enter.
+    fn transcript_enqueued<'a>(&'a self, _mark: u64, _text: &'a str) -> ServiceFuture<'a, bool> { Box::pin(async { Ok(false) }) }
+    /// Tira a publicação do plugin já provada pelo transcript, sem esperar o aviso dele.
+    fn abandon_publication<'a>(&'a self, _publication_id: &'a str) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+}
+
+/// O Claude grava `queue-operation`/`enqueue` ao aceitar o Enter, antes dos hooks `UserPromptSubmit`
+/// da conta; o composer só esvazia depois deles.
+pub(crate) fn enqueued_since(path: &std::path::Path, mark: u64, text: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    if file.seek(SeekFrom::Start(mark)).is_err() { return false; }
+    let mut tail = Vec::new();
+    if file.take(4 << 20).read_to_end(&mut tail).is_err() { return false; }
+    let want = compact(text);
+    String::from_utf8_lossy(&tail).lines().any(|line| line.contains("\"enqueue\"")
+        && serde_json::from_str::<Value>(line).is_ok_and(|v| v["type"] == "queue-operation" && v["operation"] == "enqueue"
+            && v["content"].as_str().is_some_and(|content| compact(content) == want)))
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -921,6 +941,7 @@ impl TerminalDriver {
         if !self.verify().await.is_ok_and(|facts| !facts.open_question) {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked");
         }
+        let mark = if expected.is_none() && !text.trim_start().starts_with('/') { self.services.transcript_mark().await.ok().flatten() } else { None };
         if let Err(error) = self.key_guarded("Enter", expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,before)),allow_owned:true })).await {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, if expected.is_some() { "erro_sem_confirmacao_resposta" } else { error.code });
         }
@@ -962,6 +983,9 @@ impl TerminalDriver {
                         if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, e.code); }
                     }
                 }
+            }
+            if let Some(mark) = mark && self.services.transcript_enqueued(mark, text).await.unwrap_or(false) {
+                return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted_enqueued");
             }
         }
         // Limpar depois do Enter nunca demonstra que a mensagem não foi consumida.
@@ -1020,7 +1044,25 @@ impl TerminalDriver {
             let mode = if user_mode(&facts, text, before.stashed) { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
             if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
-            match self.services.publish(&self.binding, request).await {
+            // Modo `user`: o aviso do plugin só sai depois dos hooks da conta. Vale o que vier antes,
+            // ele ou o `enqueue` no transcript, como no Python.
+            let mark = if mode == PluginMode::User { self.services.transcript_mark().await.ok().flatten() } else { None };
+            let publish = self.services.publish(&self.binding, request);
+            tokio::pin!(publish);
+            let reply = loop {
+                let Some(mark) = mark else { break (&mut publish).await };
+                tokio::select! {
+                    reply = &mut publish => break reply,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        if self.services.transcript_enqueued(mark, text).await.unwrap_or(false) {
+                            drop(publish);
+                            let _ = self.services.abandon_publication(id).await;
+                            return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_enqueued");
+                        }
+                    }
+                }
+            };
+            match reply {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {

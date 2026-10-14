@@ -450,6 +450,15 @@ impl Store {
         Ok(reply)
     }
 
+    /// A entrega já se provou no transcript: a publicação sai sem esperar o aviso, que chega depois
+    /// dos hooks da conta e cai no vazio, como no Python.
+    pub fn abandon(&self, binding: &InteractionBinding, publication_id: &str) -> Result<(), ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let s = session(&mut memory, binding)?;
+        if s.publication.as_ref().is_some_and(|p| p.receipt.publication_id == publication_id) { s.publication = None; }
+        Ok(())
+    }
+
     pub fn acknowledge(&self, binding: &InteractionBinding, receipt: Option<&Receipt>, mode: PluginMode, ok: bool) -> Result<(), ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;

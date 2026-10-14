@@ -103,6 +103,8 @@ pub struct ChatEvent {
     pub queued_delivered: Option<bool>,
     pub queued_ts: Option<f64>,
     pub queued_confirmed: Option<bool>,
+    /// Entregue e já fora da fila interna do Claude: falta só o registro real, que sai depois dos hooks.
+    pub queued_consumed: Option<bool>,
     pub image_count: Option<u32>,
     /// Byte logo após a linha do transcript: vira o `id:` do SSE e nunca vai no JSON (`exclude=True`).
     #[serde(skip)]

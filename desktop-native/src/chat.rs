@@ -232,7 +232,7 @@ impl Chat {
     pub fn waiting(&self, provider: &str, headless: bool) -> usize {
         let process = provider == "codex" || headless;
         self.events.iter().filter(|e| e.kind == "user_msg" && e.queued() && e.desistiu != Some(true)
-            && !(process && e.queued_delivered == Some(true))).count()
+            && e.queued_consumed != Some(true) && !(process && e.queued_delivered == Some(true))).count()
     }
 
     pub fn retire(&mut self, id: &str) {

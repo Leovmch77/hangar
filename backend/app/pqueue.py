@@ -992,13 +992,14 @@ class PromptQueue:
                 continue
         return out
 
-    async def follow(self, min_ts: float = 0.0, emit_confirmed: bool = False) -> AsyncIterator[ChatEvent]:
+    async def follow(self, min_ts: float = 0.0, emit_confirmed: bool = False,
+                     jsonl: str | None = None) -> AsyncIterator[ChatEvent]:
         # Emite as entradas existentes e depois vigia novos appends, como user_msg sintetico.
         # Guarda os estados já vistos (o append reescreve o arquivo inteiro -> rastrear posicao
         # quebraria; reload + dedup por id e simples e correto). min_ts: descarta entradas anteriores
         # ao inicio da sessao atual (ex: pre-/clear) — espelha a poda do merged_history no live SSE.
         # Entrega e desistência mudam depois do primeiro evento. O front substitui pelo mesmo id.
-        seen: dict[str, tuple[bool | None, bool | None, bool]] = {}
+        seen: dict[str, tuple[bool | None, bool | None, bool, bool | None]] = {}
         inicio: float = time.time()
         primeira: bool = True
         last_marker = object()
@@ -1014,6 +1015,7 @@ class PromptQueue:
             if marker == last_marker:
                 return []
             evs = []
+            consumo: tuple[set[str], set[str]] | None = None
             for entry in self.load():
                 eid = str(entry.get("id"))
                 if not eid:
@@ -1025,7 +1027,12 @@ class PromptQueue:
                 event = _entry_event(entry)
                 if confirmed:
                     event.queued_confirmed = True
-                signature = (event.desistiu, event.queued_delivered, confirmed)
+                elif jsonl and event.queued_delivered and not event.desistiu and not _saida_local(entry):
+                    if consumo is None:
+                        consumo = (committed_user_lines(jsonl) or set(), fila_interna_pendente(jsonl))
+                    linhas = _linhas_da_entrada(entry)
+                    event.queued_consumed = bool(linhas & consumo[0] and not linhas & consumo[1]) or None
+                signature = (event.desistiu, event.queued_delivered, confirmed, event.queued_consumed)
                 if eid in seen and seen[eid] == signature:
                     continue
                 seen[eid] = signature

@@ -186,6 +186,17 @@ impl TerminalServices for Services {
         self.local.publish(&self.target,binding,request).await
     })}
     fn facts_check_pane(&self)->bool {true}
+    fn abandon_publication<'a>(&'a self,publication_id:&'a str)->ServiceFuture<'a,()> {Box::pin(async move {
+        self.local.abandon_publication(&self.target,publication_id)
+    })}
+    fn transcript_mark<'a>(&'a self)->ServiceFuture<'a,Option<u64>> {Box::pin(async move {
+        let path=self.target.transcript.clone();
+        tokio::task::spawn_blocking(move||std::fs::metadata(path).ok().map(|m|m.len())).await.map_err(|_|ServiceError("terminal_transcript_unavailable"))
+    })}
+    fn transcript_enqueued<'a>(&'a self,mark:u64,text:&'a str)->ServiceFuture<'a,bool> {Box::pin(async move {
+        let (path,text)=(self.target.transcript.clone(),text.to_owned());
+        tokio::task::spawn_blocking(move||crate::terminal_input::enqueued_since(&path,mark,&text)).await.map_err(|_|ServiceError("terminal_transcript_unavailable"))
+    })}
 }
 
 struct Executor {
