@@ -1327,6 +1327,47 @@ export async function deleteMergedWorktreesForServer(server: Server, repo: strin
     { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;
 }
+export type WorktreeBatchProgress = {
+  total: number;
+  done: number;
+  current: WorktreeStatus | null;
+  removed: WorktreeStatus[];
+  /** `error: null`: o servidor a deixou de fora (mudou depois da confirmação). */
+  failed: { worktree: WorktreeStatus; error: string | null }[];
+  freed: { bytes: number; partial: boolean };
+};
+
+/** Uma por pedido, em fila: o progresso só avança quando o servidor confirma cada uma, e a falha
+ *  de uma não interrompe as outras. O liberado é o tamanho medido das que saíram. */
+export async function runWorktreeBatch(chosen: WorktreeStatus[], removeOne: (w: WorktreeStatus) => Promise<boolean>,
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  const p: WorktreeBatchProgress = { total: chosen.length, done: 0, current: null, removed: [], failed: [],
+                                     freed: { bytes: 0, partial: false } };
+  const report = () => onProgress({ ...p, removed: [...p.removed], failed: [...p.failed] });
+  for (const w of chosen) {
+    p.current = w;
+    report();
+    try {
+      if (await removeOne(w)) p.removed.push(w);
+      else p.failed.push({ worktree: w, error: null });
+    } catch (e) {
+      p.failed.push({ worktree: w, error: e instanceof Error ? e.message : String(e) });
+    }
+    p.done++;
+    p.freed = worktreesSizeTotal(p.removed);
+  }
+  p.current = null;
+  report();
+  return p;
+}
+
+/** O lote pelo servidor: cada pedido leva só uma, com a mesma regra de perda da confirmação. */
+export function deleteWorktreeBatchForServer(server: Server, repo: string, chosen: WorktreeStatus[],
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  return runWorktreeBatch(chosen, async (w) => (await deleteMergedWorktreesForServer(server, repo, [w])).includes(w.path),
+                          onProgress);
+}
+
 /** Nome curto do chip: a pasta da worktree onde o agente está. */
 export function worktreeLabel(s: SessionInfo): string | null {
   const p = s.worktree_path ?? (s.worktree ? s.cwd : null);

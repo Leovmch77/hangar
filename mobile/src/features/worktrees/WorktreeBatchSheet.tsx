@@ -1,23 +1,26 @@
 import { useEffect, useState } from 'react';
 import { Pressable, Switch, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { basename, deleteMergedWorktreesForServer, fmtBytes, worktreeReady, type Server, type WorktreeStatus } from '@hangar/core';
+import { basename, deleteWorktreeBatchForServer, fmtBytes, worktreeReady, type Server, type WorktreeBatchProgress,
+         type WorktreeStatus } from '@hangar/core';
 import { Sheet } from '../../ui/Sheet';
 import * as m from '../../paraglide/messages';
 import { dropWorktreeStatus } from './worktreeStatus';
+import { sizeSumLabel } from './worktreeUi';
 
 export type WorktreeBatch = { repo: string; deletable: WorktreeStatus[]; blocked: WorktreeStatus[] };
-type Props = { server: Server | null; batch: WorktreeBatch | null; onClose: () => void; onDeleted: (leftOut: string[]) => void };
+type Props = { server: Server | null; batch: WorktreeBatch | null; onClose: () => void; onDeleted: () => void };
 
 /** Confirmação do lote de mescladas: as prontas entram sempre; as com alteração não commitada só se a pessoa marcar. */
 export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }: Props) {
   const [apagando, setApagando] = useState(false);
   const [erro, setErro] = useState('');
   const [marcadas, setMarcadas] = useState<Set<string>>(new Set());
+  const [progresso, setProgresso] = useState<WorktreeBatchProgress | null>(null);
   // O último lote continua desenhado enquanto a folha anima a saída.
   const [batch, setBatch] = useState(aberto);
   useEffect(() => {
-    if (aberto) { setBatch(aberto); setErro(''); setMarcadas(new Set()); }
+    if (aberto) { setBatch(aberto); setErro(''); setMarcadas(new Set()); setProgresso(null); }
   }, [aberto]);
 
   const prontas = batch?.deletable.filter(worktreeReady) ?? [];
@@ -35,17 +38,18 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
   async function apagar() {
     if (!server || !batch || apagando || !n) return;
     setApagando(true); setErro('');
+    const tiradas = new Set<string>();
     try {
       // O core marca como "perde arquivos" só as que esta tela mostrou perdendo.
-      const removidas = await deleteMergedWorktreesForServer(server, batch.repo, escolhidas);
-      removidas.forEach((p) => dropWorktreeStatus(server.id, p));
-      onDeleted(escolhidas.filter((w) => !removidas.includes(w.path)).map((w) => basename(w.path)));
-      onClose();
+      await deleteWorktreeBatchForServer(server, batch.repo, escolhidas, (p) => {
+        setProgresso(p);
+        p.removed.forEach((w) => { if (!tiradas.has(w.path)) { tiradas.add(w.path); dropWorktreeStatus(server.id, w.path); } });
+      });
     } catch (e) {
       setErro(e instanceof Error ? e.message : String(e));
-      onDeleted([]);   // algumas podem ter saído antes do erro: a lista recarrega
     } finally {
       setApagando(false);
+      onDeleted();   // mesmo com erro, algumas podem ter saído: a lista recarrega
     }
   }
 
@@ -55,6 +59,46 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
       {w.ignored.map((f) => <Text key={f} style={styles.arquivo}>{f}</Text>)}
     </>
   );
+
+  if (progresso) {
+    const pct = progresso.total ? (progresso.done / progresso.total) * 100 : 100;
+    return (
+      <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose} dismissible={!apagando}>
+        <View style={styles.inner}>
+          <Text style={styles.title}>{apagando ? m.worktree_lote_apagando_titulo() : m.worktree_lote_fim_titulo()}</Text>
+          <View accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: progresso.total, now: progresso.done }}
+            style={styles.trilho}>
+            <View style={[styles.preenchido, { width: `${pct}%` }]} />
+          </View>
+          <Text accessibilityLiveRegion="polite" style={styles.text}>
+            {m.worktree_lote_progresso({ feitas: progresso.removed.length, total: progresso.total, tamanho: sizeSumLabel(progresso.removed) })}
+          </Text>
+          {apagando && progresso.current ? (
+            <Text style={styles.muted}>{m.worktree_lote_apagando({ nome: basename(progresso.current.path) })}</Text>
+          ) : null}
+          {progresso.failed.length ? (
+            <View accessibilityRole="alert" style={styles.item}>
+              <Text style={styles.erro}>{m.worktree_lote_falhas({ n: progresso.failed.length })}</Text>
+              {progresso.failed.map(({ worktree: w, error }) => (
+                <Text key={w.path} style={styles.erro}>
+                  {error == null ? m.worktree_lote_mudou({ nome: basename(w.path) })
+                    : m.worktree_lote_erro_item({ nome: basename(w.path), motivo: error })}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          {erro ? <Text accessibilityRole="alert" style={styles.erro}>{erro}</Text> : null}
+          {!apagando ? (
+            <View style={styles.acoes}>
+              <Pressable onPress={onClose} accessibilityRole="button" style={styles.cancelar}>
+                <Text style={styles.text}>{m.worktree_lote_fechar()}</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+      </Sheet>
+    );
+  }
 
   return (
     <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose}>
@@ -131,6 +175,8 @@ const styles = StyleSheet.create((theme) => ({
   ok: { color: theme.tokens.status.success },
   arquivo: { color: theme.tokens.text.secondary, fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, paddingLeft: theme.base.space[3] },
   erro: { color: theme.tokens.status.error },
+  trilho: { height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: theme.tokens.border.default },
+  preenchido: { height: '100%', backgroundColor: theme.tokens.accent.base },
   acoes: { flexDirection: 'row', justifyContent: 'flex-end', gap: theme.base.space[2], marginTop: theme.base.space[2] },
   cancelar: { minHeight: 44, paddingHorizontal: theme.base.space[4], justifyContent: 'center', borderRadius: theme.base.radius.md,
               borderWidth: 1, borderColor: theme.tokens.border.default },
