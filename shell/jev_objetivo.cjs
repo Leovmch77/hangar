@@ -26,6 +26,8 @@ const PAPEIS_INTERATIVOS = new Set([
 // porque opção omitida é opção que o modelo não pode escolher.
 const MAX_CANDIDATOS = 255;
 const PAPEIS_QUE_ENVIAM = new Set(['button', 'link', 'menuitem']);
+// Os papéis que a leitura dos valores (JS_VALORES) também enxerga, e numera do mesmo jeito.
+const PAPEIS_COM_VALOR = new Set([...PAPEIS_DE_TEXTO, 'combobox', 'checkbox', 'switch', 'radio']);
 const NENHUM = '_nenhum';
 const SEM_ROTULO = 'campo de texto sem rotulo';
 const semRotulo = (nome) => String(nome).startsWith(SEM_ROTULO);
@@ -39,6 +41,28 @@ const ESPERA_ASSENTAR = ['--idle', '--timeout', '800'];
 
 /** O rótulo da página traz o asterisco de obrigatório, o da árvore de acessibilidade não. */
 const normalizar = (nome) => String(nome).replace(/\s*\*\s*$/, '').trim().toLowerCase();
+
+/**
+ * Dois campos com o mesmo rótulo ("Conta do Balancete" em dois grupos) viram "X" e "X (2)", na
+ * ordem da página. Lidos só pelo nome, o valor de um cobria o do outro e o laço reabria o campo já
+ * preenchido sem fim. A árvore e a leitura dos valores numeram igual, então o nome continua a chave.
+ * Vai para a página por toString: precisa ser autossuficiente.
+ */
+function nomeComOrdem(vistos, nome) {
+  const k = String(nome).replace(/\s*\*\s*$/, '').trim().toLowerCase();
+  vistos[k] = (vistos[k] || 0) + 1;
+  return vistos[k] > 1 ? `${String(nome).replace(/\s*\*\s*$/, '').trim()} (${vistos[k]})` : nome;
+}
+
+/**
+ * Aviso de sucesso no mesmo lugar dos erros: o toast verde "Rascunho gravado" também é role=alert,
+ * e lido como recusa ele travava o passo seguinte. Vai para a página por toString.
+ */
+function avisoDeSucesso(texto, marcas = '') {
+  if (/success|sucesso|green|emerald/i.test(marcas)) return true;
+  return /\b(?:sucesso|gravad[oa]s?|salv[oa]s?|criad[oa]s?|inclu[ií]d[oa]s?|cadastrad[oa]s?|atualizad[oa]s?|registrad[oa]s?)\b/i.test(texto)
+    && !/\b(?:n[aã]o|erro|falh\w*|inv[aá]lid\w*|recusad\w*|imposs[ií]vel)\b/i.test(texto);
+}
 
 const OPERACOES = {
   CLICK: 'click an element to move one step toward the goal',
@@ -119,6 +143,7 @@ const CHAVE_SECRETA = /senha|password|passwd|token|secret|segredo|api[-_ ]?key|c
 // Uma vaga a menos que o teto: todo head de alvo leva também a opção `_nenhum`.
 function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
   const achados = [];
+  const vistos = {};
   for (const linha of String(texto).split('\n')) {
     const m = linha.match(/^\s*-\s+(\w+)(?:\s+"([\s\S]*?)")?\s+\[ref=@(e\d+)\]((?: \[\w+\])*)/);
     if (!m) continue;
@@ -133,12 +158,15 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     // texto é a exceção: editor rich text (Tiptap, ProseMirror) costuma não ter rótulo, e sem ele não
     // havia onde escrever o corpo de uma evolução.
     if ((!nome || !nome.trim()) && !PAPEIS_DE_TEXTO.has(papel)) continue;
+    // Numera antes do filtro de desabilitado: a leitura dos valores também conta o campo travado.
+    const comOrdem = nome?.trim() && !mostrado && PAPEIS_COM_VALOR.has(papel)
+      ? nomeComOrdem(vistos, nome.trim().slice(0, 120)) : nome;
     // Desabilitado não reage ao clique nem aceita texto: como alvo, só gastaria um passo.
     if (/\[ref=@e\d+\](?: \[\w+\])* \[disabled\]/.test(linha)) continue;
     // Estado que o Jev precisa para nao desfazer o proprio passo: "Filtros" ja aberto, clicado de
     // novo, fecha o painel. Fica fora do nome, que e a identidade usada na reconferencia da ref.
     const estado = (marcas.match(/\[(expanded|collapsed|checked|pressed|selected)\]/g) ?? []).join(' ');
-    achados.push({ ref, papel, nome: (nome?.trim() || `${SEM_ROTULO} ${ref}`).slice(0, 120), ...(estado ? { estado } : {}) });
+    achados.push({ ref, papel, nome: (comOrdem?.trim() || `${SEM_ROTULO} ${ref}`).slice(0, 130), ...(estado ? { estado } : {}) });
     if (achados.length >= max) break;
   }
   return achados;
@@ -334,7 +362,13 @@ function montarEstado(objetivo, url, feito, textoDaPagina = '', anotacao = {}, d
  * preencher. Lê por NOME, que é a mesma chave que o Jev usa para decidir — evita manter um segundo
  * sistema de identidade em paralelo às refs.
  */
-const JS_VALORES = `(() => {
+const SELETOR_DE_CAMPOS = 'input,textarea,select,[role=switch],[role=checkbox],[role=radio],[role=combobox],[contenteditable=true]';
+// Clique que deveria marcar e não marcou caiu no que está por cima (cabeçalho fixo do formulário).
+const PAPEIS_MARCAVEIS = new Set(['radio', 'checkbox', 'switch']);
+
+// Comum aos scripts de página que acham um campo pelo nome: a mesma regra de nome e de numeração
+// de homônimos que a leitura dos valores usa.
+const JS_CAMPOS = `
   const nomeDe = (e) => (
     e.getAttribute('aria-label')
     || (e.labels && e.labels[0] && e.labels[0].innerText)
@@ -344,6 +378,19 @@ const JS_VALORES = `(() => {
     || ''
   ).trim();
   const visivel = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const nomeComOrdem = ${nomeComOrdem.toString()};
+  const normalizar = ${normalizar.toString()};
+  const acharCampo = (rotulo) => {
+    const vistos = {};
+    return [...document.querySelectorAll(${JSON.stringify(SELETOR_DE_CAMPOS)})]
+      .filter((e) => visivel(e) && nomeDe(e))
+      .find((e) => normalizar(nomeComOrdem(vistos, nomeDe(e).slice(0, 80))) === normalizar(rotulo)) || null;
+  };`;
+
+const JS_VALORES = `(() => {${JS_CAMPOS}
+  const vistos = {};
+  const chaves = new Map();
+  const avisoDeSucesso = ${avisoDeSucesso.toString()};
   // Um combobox do Radix e um <button>: o .value dele e sempre "", e o valor escolhido so existe
   // como texto. Lido pelo .value ele parecia eternamente vazio, e o Jev re-mirava o campo que
   // acabara de preencher. Quando o Radix espelha num <select> escondido, esse select e a verdade.
@@ -351,7 +398,7 @@ const JS_VALORES = `(() => {
   const espelho = (e) => (e.parentElement || {}).querySelector
     ? e.parentElement.querySelector('select') : null;
   const fora = { valores: {}, obrigatorios_vazios: [], editaveis: [], lista_aberta: '', tipos: {}, avisos: [] };
-  for (const e of document.querySelectorAll('input,textarea,select,[role=switch],[role=checkbox],[role=combobox],[contenteditable=true]')) {
+  for (const e of document.querySelectorAll(${JSON.stringify(SELETOR_DE_CAMPOS)})) {
     if (!visivel(e)) continue;
     // Editor rich text sem rotulo: mesmo nome que o parsarSnapshot da a ele, e o texto como valor.
     const rico = e.isContentEditable && !/^(INPUT|TEXTAREA)$/.test(e.tagName);
@@ -377,7 +424,8 @@ const JS_VALORES = `(() => {
     const valor = marcado !== null ? (marcado ? 'marcado' : 'desmarcado')
       : (aberto ? 'lista aberta, buscando "' + String((busca || {}).value || '') + '"'
         : (combo ? String(e.innerText || '').replace(/\\s+/g, ' ').trim() : String(e.value ?? '')));
-    const chave = nome.slice(0, 80);
+    const chave = nomeComOrdem(vistos, nome.slice(0, 80));
+    chaves.set(e, chave);
     // O estado vai ao Jev, fora da maquina: o que esta digitado num campo de senha nao vai junto.
     const segredo = e.type === 'password' || ${CHAVE_SECRETA}.test(nome);
     // Vazio entra como "": ausente, o Jev nao sabia se o campo estava vazio ou se nem era lido, e o
@@ -409,7 +457,7 @@ const JS_VALORES = `(() => {
     const t = [e.type && e.type !== 'text' ? 'type=' + e.type : '', e.inputMode ? 'inputmode=' + e.inputMode : '',
       e.placeholder ? 'placeholder=' + e.placeholder : '', e.min ? 'min=' + e.min : '', e.max ? 'max=' + e.max : '']
       .filter(Boolean).join(' ');
-    if (t) fora.tipos[nome.slice(0, 80)] = t.slice(0, 120);
+    if (t) fora.tipos[chaves.get(e) || nome.slice(0, 80)] = t.slice(0, 120);
   }
   // O porquê de um envio recusado: alerta, toast, campo marcado inválido com a mensagem dele.
   const limpo = (t) => String(t || '').replace(/\\s+/g, ' ').trim();
@@ -417,7 +465,8 @@ const JS_VALORES = `(() => {
   // Só aviso de erro: "Salvo com sucesso" num role=status fazia o envio que deu certo parecer recusado.
   for (const a of document.querySelectorAll('[role=alert],[data-sonner-toast][data-type=error],[data-sonner-toast][data-type=warning]')) {
     const t = visivel(a) ? limpo(a.innerText).slice(0, 300) : '';
-    if (t) avisos.add(t);
+    const marcas = [a.className, a.getAttribute('data-type'), a.getAttribute('data-variant')].join(' ');
+    if (t && !avisoDeSucesso(t, marcas)) avisos.add(t);
   }
   for (const e of document.querySelectorAll('[aria-invalid=true]')) {
     if (!visivel(e)) continue;
@@ -483,14 +532,31 @@ const JS_ESPERAR_OPCOES = `new Promise((pronto) => {
   requestAnimationFrame(olhar);
 })`;
 
+/** Esvazia o campo com foco pelo setter nativo, que o React escuta; sem o evento ele restaurava o texto. */
+const JS_LIMPAR_FOCO = `(() => {
+  const e = document.activeElement;
+  if (!e || !/^(INPUT|TEXTAREA)$/.test(e.tagName) || !e.value) return 'vazio';
+  const proto = e.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, '');
+  e.dispatchEvent(new Event('input', { bubbles: true }));
+  return 'limpo';
+})()`;
+
 /** `aria-expanded` do combobox de nome `rotuloDoCampo` — clicar num ja aberto o FECHA. */
 function jsDeEstarAberto(rotuloDoCampo) {
-  return `(() => {
-    const alvo = ${JSON.stringify(normalizar(rotuloDoCampo))};
-    const nome = (e) => ((e.labels && e.labels[0] && e.labels[0].innerText) || e.getAttribute('aria-label') || '')
-      .replace(/\\s*\\*\\s*$/, '').trim().toLowerCase();
-    const e = [...document.querySelectorAll('[role=combobox]')].find((x) => nome(x) === alvo);
+  return `(() => {${JS_CAMPOS}
+    const e = acharCampo(${JSON.stringify(rotuloDoCampo)});
     return e ? String(e.getAttribute('aria-expanded') === 'true') : 'sem campo';
+  })()`;
+}
+
+/** Centraliza o campo na tela: perto do cabeçalho ou do rodapé fixo, o clique do `fill` cai no que está por cima. */
+function jsDeCentralizar(rotuloDoCampo) {
+  return `(() => {${JS_CAMPOS}
+    const e = acharCampo(${JSON.stringify(rotuloDoCampo)});
+    if (!e) return 'sem campo';
+    e.scrollIntoView({ block: 'center' });
+    return 'centralizado';
   })()`;
 }
 
@@ -611,7 +677,7 @@ function riscoDoClique(respostas, escolhido, candidatos, gemeos, limiares) {
 const OPERACOES_DO_AUXILIAR = new Set(['CLICK', 'SELECT', 'TYPE_TEXT']);
 
 /** O que o modelo auxiliar recebe quando o Jev não achou alvo: só observação, nunca valor de `dados`. */
-function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '', bloqueados = [] }) {
+function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '', bloqueados = [], valores = {}, vazios = [] }) {
   // O auxiliar é outro terceiro: senha de `dados` que a página reexibe (revisão, OTP) não sai daqui.
   const segredos = Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v);
   const oculto = (s) => segredos.reduce((t, v) => t.split(v).join('(oculto)'), String(s ?? ''));
@@ -634,6 +700,9 @@ function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respost
     // Sem isto o auxiliar via "Novo Serviço" no texto, não achava o elemento e respondia NONE, sem
     // saber que um filtro da página o habilita.
     ...(bloqueados.length ? [`Desabilitados agora (nao sao alvo; costumam liberar depois de escolher um filtro ou campo): ${bloqueados.join('; ')}`] : []),
+    // Sem os valores o auxiliar reabria a data já preenchida a cada passo: a árvore não os mostra.
+    ...(Object.keys(valores).length ? [`Valores atuais dos campos (campo que ja mostra um valor valido nao precisa ser aberto de novo): ${oculto(JSON.stringify(valores))}`] : []),
+    ...(vazios.length ? [`Obrigatorios ainda vazios: ${oculto(vazios.join('; '))}`] : []),
     'Texto da pagina:',
     recortarTexto(texto),
     '---',
@@ -698,11 +767,36 @@ const regraDeTeste = (sufixo) => 'O objetivo pede um registro de teste: campo de
   + 'leva um valor de teste plausivel e valido para o tipo do campo (numero dentro da faixa normal, nome de cidade real, '
   + `hora como 01:30, data como dd/mm/aaaa). Campo de busca, filtro ou ${LISTA_DA_PAGINA}, ${sufixo}`;
 
-function pedidoDeTexto(objetivo, campo, feito, tipo = '') {
+/**
+ * O que a página recusou da última vez. Sem isto o modelo reescrevia o mesmo valor (a ordem que já
+ * existe, a faixa que se sobrepõe) e o laço redigitava até a trava de repetição.
+ */
+function linhasDaRecusa(recusa, campos) {
+  if (!recusa?.texto) return [];
+  const tentados = Object.fromEntries(Object.entries(recusa.tentados ?? {}).filter(([n]) => campos.includes(n)));
+  return [
+    `A pagina recusou a tentativa anterior: ${recusa.texto}`,
+    ...(Object.keys(tentados).length ? [`Valores ja tentados e recusados (escreva outros que resolvam o aviso): ${JSON.stringify(tentados)}`] : []),
+    ...(Object.keys(recusa.valores ?? {}).length ? [`Valores atuais do formulario (o novo valor tem que ser coerente com eles): ${JSON.stringify(recusa.valores)}`] : []),
+  ];
+}
+
+function pedidoDeBusca(objetivo, campo) {
+  return [
+    `Objetivo do usuario: ${objetivo}`,
+    `A lista com busca "${campo}" nao listou nenhuma opcao para a busca "${BUSCA_GENERICA}".`,
+    'Responda APENAS com um termo de busca de teste, com 3 letras ou mais, plausivel para essa lista '
+      + '(a pagina pode aceitar o termo como item livre). Sem termo plausivel, responda exatamente '
+      + `${SEM_VALOR}.`,
+  ].join('\n');
+}
+
+function pedidoDeTexto(objetivo, campo, feito, tipo = '', recusa = null) {
   return [
     `Objetivo do usuario: ${objetivo}`,
     `Ja feito: ${feito.slice(-5).join('; ') || 'nada ainda'}`,
     `Campo a preencher: ${campo}${tipo ? ` (${tipo})` : ''}`,
+    ...linhasDaRecusa(recusa, [campo]),
     'Responda APENAS com o valor a digitar nesse campo, sem aspas, sem explicacao, sem prefixo.',
     // Sem esta saida o modelo responde em prosa ("Nao tenho a data de nascimento de...") e a frase
     // inteira vai parar dentro do campo do formulario.
@@ -729,13 +823,14 @@ function mascararValores(arvore) {
 }
 
 /** Um pedido só para vários campos: num formulário escrito pelo modelo eram uma ida por campo. */
-function pedidoDeTextos(objetivo, campos, feito, tipos = {}) {
+function pedidoDeTextos(objetivo, campos, feito, tipos = {}, recusa = null) {
   const comTipo = Object.entries(tipos).filter(([n, t]) => campos.includes(n) && t);
   return [
     `Objetivo do usuario: ${objetivo}`,
     `Ja feito: ${feito.slice(-5).join('; ') || 'nada ainda'}`,
     `Campos a preencher: ${JSON.stringify(campos)}`,
     ...(comTipo.length ? [`Tipo dos campos: ${JSON.stringify(Object.fromEntries(comTipo))}`] : []),
+    ...linhasDaRecusa(recusa, campos),
     'Responda APENAS com um objeto JSON, sem cercas de codigo, com cada campo como chave e o valor a digitar.',
     'Cada campo leva so o dado que o objetivo atribui a ele; nao repita num campo o que pertence a outro.',
     ehRegistroDeTeste(objetivo) ? regraDeTeste(`leva exatamente "${SEM_VALOR}".`)
@@ -754,8 +849,13 @@ function lerTextos(resposta) {
  * escolhe qual chave), depois o LLM pequeno. Sem nenhum dos dois, para dizendo qual campo faltou —
  * quem chamou sabe o valor e pode mandar na próxima.
  */
-async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [], tipos = {} }) {
+async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [], tipos = {}, recusa = null, buscasSemOpcao = 0 }) {
   const chave = escolha?.choice;
+  // O texto de um registro de teste é o conteúdo do registro, não termo de busca: digitado no filtro
+  // da lista, ele escondia tudo, o auxiliar limpava a busca e o Jev digitava de novo, sem fim.
+  if (campo.papel === 'searchbox' && ehRegistroDeTeste(objetivo)) {
+    return { pular: `"${campo.nome}" e busca ou filtro num registro de teste; deixei de lado` };
+  }
   if (chave && chave !== NENHUM && forca(escolha) >= limiares.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(campo, cofre[chave])) {
     return { valor: cofre[chave], origem: `dados.${chave}` };
   }
@@ -783,7 +883,7 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
     let lidos = null;
     if (nomes.length > 1) {
       const resposta = await escreverTexto(pedidoDeTextos(objetivo, nomes, feito,
-        Object.fromEntries(nomes.map((n) => [n, tipoDe(n)]))));
+        Object.fromEntries(nomes.map((n) => [n, tipoDe(n)])), recusa));
       try {
         lidos = lerTextos(resposta);
       } catch {
@@ -791,15 +891,22 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
       }
     }
     if (lidos) for (const n of nomes) escritos.set(n, typeof lidos[n] === 'string' ? lidos[n] : SEM_VALOR);
-    else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito, tipoDe(campo.nome))));
+    else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito, tipoDe(campo.nome), recusa)));
   }
   const valor = String(escritos.get(campo.nome)).trim();
   if ((!valor || valor.includes(SEM_VALOR)) && ehRegistroDeTeste(objetivo)) {
     // Registro de teste não espera dado: a lista com busca recebe uma letra, que lista opções reais
     // para o ciclo seguinte escolher qualquer uma; busca ou filtro sem dado só fica de lado.
-    // ponytail: uma letra fixa; lista que não acha nada com "a" cai na trava de repetição.
-    if (campo.papel === 'combobox') return { valor: BUSCA_GENERICA, origem: 'busca generica' };
-    return { pular: `"${campo.nome}" e busca ou filtro sem dado num registro de teste; deixei de lado` };
+    if (campo.papel === 'combobox' && !buscasSemOpcao) return { valor: BUSCA_GENERICA, origem: 'busca generica' };
+    // A letra não listou nada (catálogo vazio, busca que pede 3 letras para criar item livre): o
+    // modelo escreve um termo de teste, uma vez. Repetir a letra só levava à trava de repetição.
+    if (campo.papel === 'combobox' && buscasSemOpcao === 1 && escreverTexto) {
+      const termo = String(await escreverTexto(pedidoDeBusca(objetivo, campo.nome))).trim();
+      if (termo && !termo.includes(SEM_VALOR)) return { valor: termo, origem: 'busca de teste' };
+    }
+    return { pular: campo.papel === 'combobox'
+      ? `"${campo.nome}": a busca nao listou opcao e nao ha termo de teste; deixei de lado`
+      : `"${campo.nome}" e busca ou filtro sem dado num registro de teste; deixei de lado` };
   }
   if (!valor || valor.includes(SEM_VALOR)) {
     return { parou: `o campo "${campo.nome}" precisa de um dado que nao esta no objetivo: ${porque}`, falta: campo.nome };
@@ -837,12 +944,33 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let envio = null;
   let ultimaRecusa = null;
   let recusaNaTela = null;
+  // Quantas vezes cada recusa (botão + avisos) apareceu: a mesma de novo depois de corrigir é erro do
+  // servidor ou regra que o laço não alcança, e mais passos só repetiriam a volta.
+  const recusasVistas = new Map();
+  // O porquê que acompanha o próximo pedido ao modelo de texto, depois de jogar fora o que ele escreveu.
+  let recusaParaTexto = null;
+  let recusados = {};
+  // Último valor do modelo digitado num campo: lido vazio no ciclo seguinte, a página não o aceitou.
+  let ultimoEscrito = null;
+  // Quantas buscas de teste não listaram nada em cada lista: a mesma busca não se repete nelas.
+  const buscasVazias = new Map();
   // Parada com o formulário recusado ainda aberto: o porquê real é o aviso, não a última dúvida do Jev.
   const comRecusa = (parou) => (recusaNaTela ? `${parou}; ultimo envio recusado: ${textoDaRecusa(recusaNaTela)}` : parou);
   const agir = async (verbo, args) => {
     const saida = String(await executar(verbo, args));
     if (saida.startsWith('erro:')) throw new FalhaDoNavegador(verbo, saida);
     return saida;
+  };
+  // Campo sob um cabeçalho ou rodapé fixo conta como visível, e o clique do `fill` cai no que está
+  // por cima. Centralizado, a segunda tentativa acerta; qualquer outra falha segue sendo parada.
+  const preencher = async (campo, valor) => {
+    const saida = String(await executar('fill', [`@${campo.ref}`, valor]));
+    if (!/nao deixou um campo de texto com foco/.test(saida)) {
+      if (saida.startsWith('erro:')) throw new FalhaDoNavegador('fill', saida);
+      return saida;
+    }
+    if (!String(await executar('eval', [jsDeCentralizar(campo.nome)])).includes('centralizado')) throw new FalhaDoNavegador('fill', saida);
+    return agir('fill', [`@${campo.ref}`, valor]);
   };
   for (let passo = 1; passo <= maxPassos; passo += 1) {
     // Em paralelo: sao leituras independentes, e em serie somavam um ida e volta cada por passo.
@@ -858,9 +986,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
     // Texto escrito para um campo vale so na pagina em que foi pedido.
-    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); urlDosEscritos = url; }
+    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); recusados = {}; urlDosEscritos = url; }
     // Campo deixado de lado sai dos alvos: oferecido de novo, o Jev voltava a mirar o mesmo filtro.
-    const candidatos = parsarSnapshot(snapshot).filter((c) => !(PAPEIS_DE_TEXTO.has(c.papel) && pulados.has(c.nome)));
+    const candidatos = parsarSnapshot(snapshot).filter((c) => !((PAPEIS_DE_TEXTO.has(c.papel) || c.papel === 'combobox') && pulados.has(c.nome)));
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
     if (!candidatos.length && !esperouCarregar) {
       esperouCarregar = true;
@@ -887,7 +1015,32 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (envio && !envio.recusa && candidatos.some((c) => c.nome === envio.nome)) {
       const avisos = anotacao.avisos.filter((a) => !envio.antes.has(a)
         || (ultimaRecusa?.nome === envio.nome && ultimaRecusa.avisos.includes(a)));
-      if (avisos.length) envio.recusa = { nome: envio.nome, avisos };
+      if (avisos.length) {
+        envio.recusa = { nome: envio.nome, avisos };
+        const texto = textoDaRecusa(envio.recusa);
+        const vezes = (recusasVistas.get(texto) ?? 0) + 1;
+        recusasVistas.set(texto, vezes);
+        // Duas chances de corrigir: na terceira vez o mesmo aviso não depende do que o laço muda.
+        if (vezes >= 3) return { feito, sucesso: false, parou: `${texto}; o mesmo aviso voltou depois de corrigir, parei` };
+        // O que o modelo escreveu foi recusado junto: reescreve sabendo o porquê e tudo o que já falhou,
+        // senão a terceira tentativa voltava ao valor da primeira.
+        for (const [n, v] of escritos) {
+          if (!String(v).includes(SEM_VALOR)) recusados[n] = [...new Set([...(recusados[n] ?? []), String(v).trim()])];
+        }
+        recusaParaTexto = { texto, tentados: recusados, valores: anotacao.valores };
+        escritos.clear();
+      }
+    }
+    // Valor do modelo que a página apagou (máscara, faixa, tipo) não é reescrito igual.
+    if (ultimoEscrito) {
+      const lido = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(ultimoEscrito.nome))?.[1];
+      if (lido === '' && escritos.get(ultimoEscrito.nome) === ultimoEscrito.valor) {
+        escritos.delete(ultimoEscrito.nome);
+        recusados[ultimoEscrito.nome] = [...new Set([...(recusados[ultimoEscrito.nome] ?? []), ultimoEscrito.valor])];
+        recusaParaTexto = { texto: `o campo "${ultimoEscrito.nome}" nao aceitou "${ultimoEscrito.valor}" e ficou vazio`,
+          tentados: recusados, valores: anotacao.valores };
+      }
+      ultimoEscrito = null;
     }
     const recusa = envio?.recusa ?? null;
     if (recusa) ultimaRecusa = recusa;
@@ -975,7 +1128,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (decisao.parar && / sem alvo confiavel/.test(decisao.parar) && reolhou !== passo) {
       reolhou = passo;
       await executar('wait', ['500']);
-      await executar('wait', ESPERA_ASSENTAR);
+      // Controle desabilitado na tela costuma ser dado ainda chegando (os tipos de registro só liberam
+      // depois da carga): o teto curto de 800 ms acabava antes, e o laço desistia de uma tela pronta.
+      await executar('wait', desabilitados(snapshot).length ? ['--idle', '--timeout', '5000'] : ESPERA_ASSENTAR);
       passo -= 1;
       continue;
     }
@@ -985,7 +1140,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       let ajuda;
       try {
         const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas,
-          recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot) }));
+          recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot),
+          valores: anotacao.valores, vazios: anotacao.obrigatorios_vazios }));
         ajuda = decidirPeloAuxiliar(bruto, respostas, candidatos);
         if (permitirRisco && ajuda.parar?.startsWith('operacao arriscada')) {
           log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${ajuda.parar}, via auxiliar)`);
@@ -995,6 +1151,11 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         ajuda = { falhou: String(err?.message ?? err).slice(0, 200) };
       }
       decisao = ajuda.falhou ? { parar: `${decisao.parar}; auxiliar: ${ajuda.falhou}` } : ajuda;
+      // Clicar num campo de digitar vazio não muda nada na página: o auxiliar repetia o clique na busca
+      // de itens até a trava. O passo útil ali é digitar, e o valor vem do caminho de sempre.
+      const vazioNaPagina = (c) => !Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
+      if (decisao.operacao === 'CLICK' && (PAPEIS_DE_TEXTO.has(decisao.escolhido.papel) || ehEditavel(decisao.escolhido, anotacao.editaveis))
+        && (vazioNaPagina(decisao.escolhido) || buscasVazias.has(decisao.escolhido.nome))) decisao = { ...decisao, operacao: 'TYPE_TEXT' };
     }
     if (decisao.parar) {
       return { feito, sucesso: decisao.sucesso === true, parou: decisao.sucesso ? decisao.parar : comRecusa(decisao.parar) };
@@ -1069,6 +1230,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           feito,
           escreverTexto,
           tipos: anotacao.tipos,
+          recusa: recusaParaTexto,
+          buscasSemOpcao: buscasVazias.get(decisao.escolhido.nome) ?? 0,
         });
         if (parou) return { feito, sucesso: false, parou, falta };
         if (pular) {
@@ -1080,7 +1243,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         if (secreto) camposSecretos.add(normalizar(decisao.escolhido.nome));
         const mostrado = secreto ? '(oculto)' : valor.slice(0, 40);
         log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) ${origemDa(decisao)}`);
-        if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
+        const naLista = ehEditavel(decisao.escolhido, anotacao.editaveis);
+        if (naLista) {
           // O campo de busca do popover nao tem nome acessivel, entao nao tem ref: o caminho e abrir
           // e digitar no que ganhou foco. Clicar num popover JA aberto o fecharia, dai a conferida.
           const aberto = await executar('eval', [jsDeEstarAberto(decisao.escolhido.nome)]);
@@ -1088,12 +1252,19 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
             await agir('click', [`@${decisao.alvo}`]);
             await executar('wait', ESPERA_ASSENTAR);
           }
+          // `type` acrescenta ao que já está na busca: o termo depois da letra genérica virava "aamox".
+          await executar('eval', [JS_LIMPAR_FOCO]);
           await agir('type', [valor]);
           // Sem esta espera o ciclo seguinte fotografa a lista ainda vazia e o Jev nao tem no que
           // mirar; o proprio laco entao re-mirava o campo e a guarda de repeticao o matava.
-          log(`jev-objetivo passo ${passo}: ${await executar('eval', [JS_ESPERAR_OPCOES])}`);
+          const opcoes = String(await executar('eval', [JS_ESPERAR_OPCOES]));
+          log(`jev-objetivo passo ${passo}: ${opcoes}`);
+          if (origem.startsWith('busca ') && /opcoes: 0\b/.test(opcoes)) {
+            buscasVazias.set(decisao.escolhido.nome, (buscasVazias.get(decisao.escolhido.nome) ?? 0) + 1);
+          }
         } else {
-          await agir('fill', [`@${decisao.alvo}`, valor]);
+          await preencher(decisao.escolhido, valor);
+          if (origem === 'llm') ultimoEscrito = { nome: decisao.escolhido.nome, valor };
         }
         feito.push(`TYPE_TEXT "${decisao.escolhido.nome}"`);
         // Os outros campos de texto que o Jev ja casou com um valor de `dados` neste mesmo pedido vao
@@ -1103,8 +1274,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         const usados = new Set(origem.startsWith('dados.') ? [origem.slice(6)] : []);
         const atual = (c) => Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
         // O fill do alvo pode redesenhar a pagina: so vai junto o campo cuja ref ainda tem o mesmo nome.
-        const extras = candidatos.filter((c) => c.ref !== decisao.alvo && PAPEIS_DE_TEXTO.has(c.papel)
-          && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis));
+        // Com a lista recem-aberta por cima do formulario, o clique do fill cai no popover: nada vai junto.
+        const extras = naLista ? [] : candidatos.filter((c) => c.ref !== decisao.alvo && PAPEIS_DE_TEXTO.has(c.papel)
+          && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis) && !(c.papel === 'searchbox' && ehRegistroDeTeste(objetivo)));
         const agora = extras.length ? new Map(parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO)).map((c) => [c.ref, c.nome])) : new Map();
         for (const c of extras) {
           if (agora.get(c.ref) !== c.nome) continue;
@@ -1115,7 +1287,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           if (!(chave && chave !== NENHUM && forca(v) >= LIMIARES.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(c, cofre[chave]))) {
             if (!escrito || escrito.includes(SEM_VALOR) || ehSegredo(c.nome) || atual(c)) continue;
             log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${escrito.slice(0, 40)} via llm) (mesmo pedido)`);
-            await agir('fill', [`@${c.ref}`, escrito]);
+            await preencher(c, escrito);
             feito.push(`TYPE_TEXT "${c.nome}"`);
             continue;
           }
@@ -1124,12 +1296,24 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           usados.add(chave);
           if (ehSegredo(c.nome) || ehSegredo(chave)) camposSecretos.add(normalizar(c.nome));
           log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${ehSegredo(c.nome) || ehSegredo(chave) ? '(oculto)' : cofre[chave].slice(0, 40)} via dados.${chave}) conf=${forca(v).toFixed(2)} (mesmo pedido)`);
-          await agir('fill', [`@${c.ref}`, cofre[chave]]);
+          await preencher(c, cofre[chave]);
           feito.push(`TYPE_TEXT "${c.nome}"`);
         }
       } else {
         log(`jev-objetivo passo ${passo}: CLICK @${decisao.alvo} (${rotulo(decisao.escolhido)}) ${origemDa(decisao)}`);
         await agir('click', [`@${decisao.alvo}`]);
+        if (PAPEIS_MARCAVEIS.has(decisao.escolhido.papel)) {
+          // O navegador rola só até o elemento "aparecer", e sob o cabeçalho fixo ele aparece: o clique
+          // pega no cabeçalho, o rádio segue desmarcado e o laço voltava a ele a cada poucos passos.
+          await executar('wait', ESPERA_ASSENTAR);
+          const depois = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO))
+            .find((c) => c.ref === decisao.alvo && c.nome === decisao.escolhido.nome);
+          if (depois && (depois.estado ?? '') === (decisao.escolhido.estado ?? '')
+            && String(await executar('eval', [jsDeCentralizar(decisao.escolhido.nome)])).includes('centralizado')) {
+            log(`jev-objetivo passo ${passo}: o clique nao mudou ${rotulo(decisao.escolhido)}; centralizei e cliquei de novo`);
+            await agir('click', [`@${decisao.alvo}`]);
+          }
+        }
         feito.push(`CLICK ${rotulo(decisao.escolhido)}`);
         envio = ehEnvio(decisao.escolhido) ? { nome: decisao.escolhido.nome, depois: feito.length, antes: new Set(anotacao.avisos) } : null;
         // Lista recem-aberta com uma opcao de texto IDENTICO a um valor de `dados`: escolhe ja, sem
@@ -1230,7 +1414,7 @@ async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_
 module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
-  perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
+  perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev, nomeComOrdem, avisoDeSucesso,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
   SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda,
 };
