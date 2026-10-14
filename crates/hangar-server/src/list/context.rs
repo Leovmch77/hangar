@@ -239,10 +239,15 @@ pub fn source_version(jsonl: &str) -> SourceVersion {
 impl ContextCache {
     /// Como `claude_reading_from`, aprendendo e aplicando a janela informada por modelo respondido.
     pub fn reading(&mut self, inputs: &ReadingInputs, scan: &Scan) -> Reading {
-        let key = match scan { Some(Some((_, Some(m)))) => Some(DATED.replace(m, "").to_lowercase()), _ => None };
+        // Por conta: o plano dela decide a janela do mesmo modelo.
+        let key = match scan {
+            Some(Some((_, Some(m)))) => Some(format!("{}\n{}", inputs.account_dir.display(), DATED.replace(m, "").to_lowercase())),
+            _ => None,
+        };
         // Só janela que o Claude informou ensina; a deduzida aqui se perpetuaria. Motor declara a
-        // janela dele, que não vale para o mesmo id na conta Anthropic.
-        let reported = if inputs.engine { None }
+        // janela dele, que não vale para o mesmo id na conta Anthropic; `[1m]` pedido é variante, não o padrão.
+        let variant = [inputs.chosen, inputs.opened].into_iter().flatten().any(|m| m.to_lowercase().ends_with("[1m]"));
+        let reported = if inputs.engine || variant { None }
             else { inputs.declared.filter(|w| *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window)) };
         if let (Some(k), Some(w)) = (&key, reported) { self.windows.insert(k.clone(), w); }
         let learned = key.and_then(|k| self.windows.get(&k).copied());

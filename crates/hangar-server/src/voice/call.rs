@@ -346,6 +346,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut offer_note: Option<String> = None;
     // Turno de resumo que a fala dele cortou: o fim dele não é falha de turno de fala.
     let mut cut_summary: Option<String> = None;
+    // Preferências gravadas nesta chamada, que o prompt da abertura não tem.
+    let mut new_prefs: Vec<String> = Vec::new();
     // Cada pedido leva o destino falado (vazio = a sessão da tela) e o turno da fala que o pediu.
     let mut gate: SendGate<(Value, Option<String>, String)> = SendGate::default();
     let mut organizer_busy = false;
@@ -404,7 +406,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         }
         // Conversa em curso: fala dele dentro da janela, turno do organizador para a fala dele, ou nenhum aparelho ouvindo.
         // Só a transcrição conta como fala: ruído no microfone seguraria os avisos para sempre.
-        let talking = out.away || delegated.is_some() || last_user_voice.is_some_and(|at| at.elapsed() < result_silence);
+        // O turno da fala dele conta com teto: sem o `turn/completed` dele, os resultados ficariam presos para sempre.
+        let talking = out.away || delegated.as_ref().is_some_and(|(_, at)| at.elapsed() < command_limit * 2)
+            || last_user_voice.is_some_and(|at| at.elapsed() < result_silence);
         if talking != was_talking {
             was_talking = talking;
             if talking {
@@ -478,7 +482,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let mut again = realtime_start.clone();
                     again["transport"] = json!({"type": "webrtc", "sdp": sdp});
                     again["includeStartupContext"] = json!(true);
-                    again["initialItems"] = json!([{"role": "developer", "text": context}]);
+                    // A conversa falada recomeça com o prompt da abertura: as preferências gravadas depois vão junto.
+                    let mut items = vec![json!({"role": "developer", "text": context})];
+                    items.extend(new_prefs.iter().map(|text| json!({"role": "developer", "text": text})));
+                    again["initialItems"] = json!(items);
                     if let Err(error) = rpc.request("thread/realtime/start", again).await {
                         log(format!("handoff realtime/start failed kind={}", rpc_error_kind(&error)));
                         break Err(VoiceFailure::Realtime(String::new()));
@@ -704,6 +711,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                         let added = rpc.request("thread/realtime/appendText",
                                             json!({"threadId": thread, "text": text, "role": "developer"})).await;
                                         log(format!("preference appendText ok={}", added.is_ok()));
+                                        new_prefs.push(text);
                                     }
                                     "remembered"
                                 }
@@ -1017,7 +1025,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             if params["turn"]["id"].as_str().is_some_and(|t| delegated.as_ref().is_some_and(|(d, _)| d == t)) {
                                 delegated = None; continuation.clear(); continuation_cut = false; speaking = None;
                             }
-                            if let Some(turn) = params["turn"]["id"].as_str() { repeated.remove(turn); results.take_summary(turn); }
+                            if let Some(turn) = params["turn"]["id"].as_str() {
+                                repeated.remove(turn);
+                                // Resumo que acabou sem mensagem: nada chegou à voz, o resultado volta como aviso.
+                                if results.take_summary(turn) { log("summary turn ended without a message: result kept"); results.interrupted(); }
+                            }
                             organizer_busy = false;
                             let _ = events.send(VoiceEvent::TurnDone).await;
                             spoken.turn_completed(&params);
@@ -1654,6 +1666,22 @@ mod tests {
         let cut = until(&mut seen, "corte do resumo", |m| m["method"] == "turn/interrupt").await;
         assert_eq!(cut["params"]["turnId"], "turn-s1");
         push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-s1", "status": "interrupted"}}})).unwrap();
+        let offer = until(&mut seen, "aviso", |m| spoke(m, "resultado")).await;
+        assert_eq!(offer["params"]["text"], "Chegou um resultado da deploy. Quer ouvir?");
+    }
+
+    /// Turno de resumo que acaba sem mensagem (falhou, vazio): nada foi à voz, então o resultado volta como aviso.
+    #[tokio::test]
+    async fn summary_turn_without_a_message_keeps_the_result() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "resumo", summary_of("deploy")).await;
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-s1", "status": "failed"}}})).unwrap();
         let offer = until(&mut seen, "aviso", |m| spoke(m, "resultado")).await;
         assert_eq!(offer["params"]["text"], "Chegou um resultado da deploy. Quer ouvir?");
     }
