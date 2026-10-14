@@ -365,7 +365,23 @@ def list_branches(cwd: str) -> dict:
         current = None
     st = _run(cwd, "status", "--porcelain")
     dirty = st.returncode == 0 and bool(st.stdout.strip())
-    return {"current": current, "branches": branches, "remotes": remotes, "dirty": dirty}
+    return {"current": current, "branches": branches, "remotes": remotes, "dirty": dirty,
+            "elsewhere": _branches_elsewhere(cwd)}
+
+
+def _branches_elsewhere(cwd: str) -> dict:
+    """Branches abertas em outra worktree do repositório (`main`: a pasta principal), como o
+    `git::branches` do Rust: o `switch` para elas é recusado pelo git."""
+    here = os.path.realpath(_run(cwd, "rev-parse", "--show-toplevel").stdout.strip())
+    out = _run(cwd, "worktree", "list", "--porcelain").stdout
+    found: dict = {}
+    for n, block in enumerate(out.split("\n\n")):
+        lines = block.splitlines()
+        path = next((l[len("worktree "):] for l in lines if l.startswith("worktree ")), None)
+        branch = next((l[len("branch refs/heads/"):] for l in lines if l.startswith("branch refs/heads/")), None)
+        if path and branch and os.path.realpath(path) != here:
+            found[branch] = {"path": path, "main": n == 0}
+    return found
 
 
 def switch_branch(cwd: str, branch: str) -> dict:
