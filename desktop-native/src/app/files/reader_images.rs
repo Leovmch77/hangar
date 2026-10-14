@@ -4,9 +4,15 @@ use std::path::Path;
 
 type LoadedImage = Arc<std::sync::Mutex<Option<Result<Arc<RenderImage>, gpui_kit::ImageCacheError>>>>;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(super) struct ReaderImages {
     cache: Arc<std::sync::Mutex<HashMap<String, LoadedImage>>>,
+    // O servidor tem 8 vagas de leitura e recusa o excedente na hora; a falha ficaria guardada no cache.
+    fetches: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for ReaderImages {
+    fn default() -> Self { Self { cache: Arc::default(), fetches: Arc::new(tokio::sync::Semaphore::new(4)) } }
 }
 
 impl ReaderImages {
@@ -22,7 +28,7 @@ impl ReaderImages {
     pub fn mapper(&self, document: String, external: bool, root: Option<PathBuf>, api: Option<Api>, name: String,
         runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64, id: u64)
         -> impl Fn(&gpui_kit::SharedUri) -> Option<ImageSource> + Send + Sync + 'static {
-        let cache = self.cache.clone();
+        let (cache, fetches) = (self.cache.clone(), self.fetches.clone());
         move |uri| {
             let (path, source) = match url::Url::parse(uri).ok().filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()) {
                 Some(url) => (url.to_string(), Source::Remote(url.to_string())),
@@ -34,14 +40,17 @@ impl ReaderImages {
             let mut cache = cache.lock().ok()?;
             let loaded = cache.entry(path.clone()).or_insert_with(|| {
                 let loaded: LoadedImage = Arc::default();
-                let (target, tx, api, name) = (loaded.clone(), tx.clone(), api.clone(), name.clone());
+                let (target, tx, api, name, fetches) = (loaded.clone(), tx.clone(), api.clone(), name.clone(), fetches.clone());
                 let local = root.clone().filter(|_| matches!(source, Source::Workspace(_)));
                 runtime.spawn(async move {
                     let bytes = match (local, source) {
                         (Some(root), Source::Workspace(path)) => tokio::task::spawn_blocking(move || Self::read_local(&root, &path))
                             .await.unwrap_or_else(|_| Err(tr(UNREADABLE_PICTURE))),
                         (_, source) => match api {
-                            Some(api) => api.fetch(&name, &source).await.map_err(|error| file_failure(&error)),
+                            Some(api) => {
+                                let _slot = fetches.acquire_owned().await;
+                                api.fetch(&name, &source).await.map_err(|error| file_failure(&error))
+                            }
                             None => Err(tr(UNREADABLE_PICTURE)),
                         },
                     };
@@ -95,6 +104,45 @@ mod tests {
         }
         drop(mapper);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_workspace_images_never_take_more_than_four_server_read_slots_at_once() {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let (active, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server_active, server_peak) = (active.clone(), peak.clone());
+        runtime.spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                let (active, peak) = (server_active.clone(), server_peak.clone());
+                tokio::spawn(async move {
+                    let mut stream = BufReader::new(stream);
+                    loop {
+                        let mut line = String::new();
+                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                    }
+                    peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                });
+            }
+        });
+        let api = crate::api::Api::new(&format!("http://{address}"), "fixture-only").unwrap();
+        let images = ReaderImages::default();
+        let (tx, rx) = async_channel::unbounded();
+        let mapper = images.mapper("docs/guide.md".into(), false, None, Some(api), "fixture".into(), runtime.clone(), tx, 3, 41);
+        for index in 0..10 { assert!(mapper(&format!("img-{index}.png").into()).is_some()); }
+        runtime.block_on(async {
+            for _ in 0..10 { tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.unwrap().unwrap(); }
+        });
+        assert!(peak.load(Ordering::SeqCst) <= 4, "o servidor tem 8 vagas de leitura e recusa o excedente na hora");
     }
 
     #[test]
