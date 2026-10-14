@@ -172,7 +172,7 @@ async fn notice_to_a_claude_terminal_session_goes_through_rust() {
     assert_eq!(deliver_text(&st, "t", "aviso").await, Ok(()));
     assert_eq!(python.input_calls(), 0);
     // Sem pane de verdade o ator deixa o recado na fila dele: a prova de que foi o Rust que recebeu.
-    let queued = String::from_utf8(hangar_server::runtime::queue::read_replaced(&dir.path().join("t.projection").join("t.jsonl")).unwrap()).unwrap();
+    let queued = hangar_server::runtime::queue::read_replaced_to_string(&dir.path().join("t.projection").join("t.jsonl")).unwrap();
     assert!(queued.contains("\"aviso\""), "{queued}");
 }
 

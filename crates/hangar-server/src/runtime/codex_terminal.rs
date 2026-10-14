@@ -328,13 +328,7 @@ pub(super) fn io_failure(error:std::io::Error) -> RuntimeError {
 
 /// A trava solta pelo ator que acabou de parar pode demorar um pouco (as tarefas de E/S dele).
 pub(super) fn lease_blocking(path:&Path) -> std::io::Result<Arc<std::fs::File>> {
-    for _ in 0..60 {
-        match acquire_lease(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
-            other => return other,
-        }
-    }
-    acquire_lease(path)
+    super::queue::acquire_lease_within(path,Duration::from_secs(3))
 }
 
 /// Chave e geração da adoção, com a vida gravada na fila. O mesmo terminal e o mesmo app-server mantêm a
@@ -393,8 +387,7 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
 /// Entradas não entregues da projeção pelo nome: as que o Python gravou sem a fila desta chave. Ausente é
 /// fila vazia; ilegível recusa a adoção, que regravaria a projeção por cima do que não leu.
 fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeError> {
-    let raw = match super::queue::read_replaced(&super::queue::projection_path(queue_dir,name))
-        .and_then(|raw|String::from_utf8(raw).map_err(|_|std::io::ErrorKind::InvalidData.into())) {
+    let raw = match super::queue::read_replaced_to_string(&super::queue::projection_path(queue_dir,name)) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(RuntimeError::new("codex_queue_projection_unreadable",

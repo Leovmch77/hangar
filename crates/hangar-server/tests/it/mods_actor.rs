@@ -70,7 +70,7 @@ async fn surface_session_publishes_the_band_and_answers_a_press() {
     let pressed = link.call(ModsCall::Press { site: "above-prompt".into(), plugin: "vitrine".into(), key: "abrir-vitrine-botoes".into() },budget()).await.unwrap();
     assert_eq!(pressed["element"],"abrir-vitrine-botoes");
     wait_ui(&mods,|ui|ui["panes"][0]["id"] == "vitrine-botoes").await;
-    let journal = String::from_utf8(hangar_server::runtime::queue::read_replaced(&dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let journal = hangar_server::runtime::queue::read_replaced_to_string(&dir.path().join("key.queue-state.json")).unwrap();
     assert!(!journal.contains("ui_attach") && !journal.contains("ui_render") && !journal.contains("ui_press"),"pedido da superfície não entra no diário");
     registry.close("key",1).await.unwrap();
     assert!(!mods.owns("session"),"fechar esquece a sessão (S9)");

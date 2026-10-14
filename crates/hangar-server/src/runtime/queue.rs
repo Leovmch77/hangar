@@ -248,6 +248,19 @@ pub fn refusal(error: &io::Error) -> Option<&'static str> {
     error.get_ref().and_then(|inner|inner.downcast_ref::<QueueRefusal>()).map(|refusal|refusal.0)
 }
 
+/// A trava solta por um dono que acabou de sair pode demorar (as tarefas de E/S dele, o `LockFileEx`
+/// do Windows). Só "ocupada" espera, até `limit` pelo relógio: contar voltas estendia o prazo quando
+/// cada tentativa demorava.
+pub fn acquire_lease_within(path: &Path, limit: std::time::Duration) -> io::Result<Arc<File>> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match acquire_lease(path) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline =>
+                std::thread::sleep(std::time::Duration::from_millis(50).min(deadline.saturating_duration_since(std::time::Instant::now()))),
+            outcome => return outcome,
+        }
+    }
+}
 pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let mut options = OpenOptions::new();
@@ -1048,21 +1061,17 @@ static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// troca recebe NotFound ou acesso negado, inclusive na troca POSIX: ausente ou recusado de verdade é o
 /// que continua assim depois da espera curta.
 pub fn read_replaced(path: &Path) -> io::Result<Vec<u8>> {
-    #[cfg(windows)]
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-        loop {
-            match std::fs::read(path) {
-                Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
-                    && std::time::Instant::now() < deadline => {
-                    std::thread::yield_now();
-                }
-                outcome => return outcome,
-            }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    loop {
+        match std::fs::read(path) {
+            Err(error) if cfg!(windows) && matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
+                && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(1)),
+            outcome => return outcome,
         }
     }
-    #[cfg(not(windows))]
-    std::fs::read(path)
+}
+pub fn read_replaced_to_string(path: &Path) -> io::Result<String> {
+    String::from_utf8(read_replaced(path)?).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// `rename` que sobrevive ao Windows: lá um leitor aberto sem FILE_SHARE_DELETE (o CLI lendo

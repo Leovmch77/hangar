@@ -331,16 +331,16 @@ async fn open_answers_before_initialize() {
 
 #[tokio::test]
 async fn open_waits_for_lease_then_refuses() {
-    // `None`: a trava fica presa até o `open` responder. A linha própria solta no relógio, sem depender
-    // de quando o executor do teste a atende.
-    for (held,opens) in [(Some(Duration::from_secs(1)),true),(None,false)] {
+    // A linha própria solta no relógio, sem depender de quando o executor do teste a atende; `MAX`
+    // segura até o `open` responder.
+    for (held,opens) in [(Duration::from_secs(1),true),(Duration::MAX,false)] {
         let dir = tempfile::tempdir().unwrap();
         let (escuta,_,server) = cano(None,None).await;
         let target = target(dir.path(),escuta,true);
         let registry = registry().await;
         let lease = acquire_lease(&target.lease_path).unwrap();
         let (release,released) = std::sync::mpsc::channel::<()>();
-        let holder = std::thread::spawn(move || { let _ = released.recv_timeout(held.unwrap_or(Duration::MAX)); drop(lease); });
+        let holder = std::thread::spawn(move || { let _ = released.recv_timeout(held); drop(lease); });
         match registry.open(target).await {
             Ok(_)=>{ assert!(opens,"abriu com a trava presa"); registry.close("key",1).await.unwrap(); }
             Err(error)=>{ assert!(!opens,"recusou com a trava presa por {held:?}: {} {}",error.code,error.message); assert_eq!(error.code,"runtime_lease"); }

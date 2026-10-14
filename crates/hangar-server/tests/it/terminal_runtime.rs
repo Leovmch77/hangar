@@ -1718,8 +1718,7 @@ async fn each_mods_hold_checks_the_pane_again() {
 }
 
 fn projection(f:&Fixture)->Vec<Value> {
-    let raw=queue::read_replaced(&f.target.projection_dir.join("session.jsonl")).unwrap_or_default();
-    String::from_utf8(raw).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
+    queue::read_replaced_to_string(&f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
 }
 
 #[tokio::test]

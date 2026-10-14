@@ -124,10 +124,8 @@ impl Process {
         self.child.take();
         self.tree.take();
         self.stderr.abort();
-        if let Some(directory) = self.directory.take() {
-            release(directory).await;
-        }
         self.account_guard.take();
+        release(self.directory.take());
         status
     }
 }
@@ -143,10 +141,8 @@ impl Drop for Process {
                 runtime.spawn(async move {
                     crate::terminal_process::finish(&mut tree).await;
                     let _ = child.wait().await;
-                    if let Some(directory) = directory {
-                        release(directory).await;
-                    }
                     drop(account_guard);
+                    release(directory);
                 });
             }
         }
@@ -181,24 +177,32 @@ pub async fn limited_output_guarded(
     }
 }
 /// No Windows o Job zera antes de quem saiu fechar seus handles, a pasta corrente entre eles; o
-/// `TempDir` desiste calado na primeira recusa e largava a pasta para trás.
-async fn release(directory: tempfile::TempDir) {
+/// `TempDir` desiste calado na primeira recusa e largava a pasta para trás. Roda à parte: a resposta
+/// e a guarda da conta não esperam a pasta sair.
+fn release(directory: Option<tempfile::TempDir>) {
+    let Some(directory) = directory else { return };
     let path = directory.keep();
-    let started = tokio::time::Instant::now();
-    loop {
-        let error = match std::fs::remove_dir_all(&path) {
-            Ok(()) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(error) => error,
-        };
-        if started.elapsed() >= Duration::from_secs(5) {
-            if crate::warn_limit::allow(None, "dictation_directory_kept") {
-                tracing::warn!(code = "dictation_directory_kept", io_kind = ?error.kind(), os_error = ?error.raw_os_error(),
-                    reason = "pasta temporária do ditado ainda em uso; ficou para trás");
+    let remove = move || {
+        let started = std::time::Instant::now();
+        loop {
+            let error = match std::fs::remove_dir_all(&path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => error,
+            };
+            if started.elapsed() >= Duration::from_secs(5) {
+                if crate::warn_limit::allow(None, "dictation_directory_kept") {
+                    tracing::warn!(code = "dictation_directory_kept", io_kind = ?error.kind(), os_error = ?error.raw_os_error(),
+                        reason = "pasta temporária do ditado ainda em uso; ficou para trás");
+                }
+                return;
             }
-            return;
+            std::thread::sleep(Duration::from_millis(20));
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+        Err(_) => remove(),
     }
 }
 
@@ -221,11 +225,12 @@ mod tests {
             let _ = wait.blocking_recv();
             drop(held);
         });
-        let removal = tokio::spawn(super::release(directory));
+        super::release(Some(directory));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         released.send(()).unwrap();
         holder.join().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), removal).await.unwrap().unwrap();
-        assert!(!path.exists(), "a pasta ficou para trás depois de liberada");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while path.exists() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.expect("a pasta ficou para trás depois de liberada");
     }
 }
