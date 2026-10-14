@@ -20,7 +20,7 @@ fi
 
 # Arquivos dos commits do intervalo sem a marca; merges ficam de fora (trazem o que já foi conferido).
 arquivos_sem_marca() {
-    local intervalo="$1" cobertos c s pula
+    local intervalo="$1" filtro="${2:-ACMR}" cobertos c s pula
     cobertos="$(git log --format=%B "$intervalo" | grep -oE 'HANGAR_SEM_PASSO=1( [0-9a-f]{7,40})+' \
         | tr ' ' '\n' | grep -Ex '[0-9a-f]{7,40}' || true)"
     for c in $(git rev-list --no-merges "$intervalo"); do
@@ -28,14 +28,16 @@ arquivos_sem_marca() {
         pula=""
         for s in $cobertos; do [[ "$c" == "$s"* ]] && pula=1; done
         [[ -n "$pula" ]] && continue
-        git diff-tree --no-commit-id --name-only -r --diff-filter=ACMR "$c"
+        git diff-tree --no-commit-id --name-only -r --diff-filter="$filtro" "$c"
     done | sort -u
 }
 
 case "${1:-}" in
-    --staged) arquivos="$(git diff --cached --name-only --diff-filter=ACMR)" ;;
+    --staged) arquivos="$(git diff --cached --name-only --diff-filter=ACMR)"
+              novos="$(git diff --cached --name-only --diff-filter=A)" ;;
     *..*)     git rev-list "$1" >/dev/null || { echo "intervalo inválido: $1" >&2; exit 2; }
-              arquivos="$(arquivos_sem_marca "$1"; git diff --name-only --diff-filter=ACMR "$1" | grep -E '^docs/atualizacoes/')" ;;
+              arquivos="$(arquivos_sem_marca "$1"; git diff --name-only --diff-filter=ACMR "$1" | grep -E '^docs/atualizacoes/')"
+              novos="$(arquivos_sem_marca "$1" A)" ;;
     *) echo "uso: $0 --staged | <de>..<para>" >&2; exit 2 ;;
 esac
 [[ -z "$arquivos" ]] && exit 0
@@ -46,6 +48,9 @@ relevantes="$(printf '%s\n' "$arquivos" | grep -E \
     '^(install\.(sh|ps1)|scripts/[^/]+\.(sh|ps1|py|mjs|cjs|js|fish)|hooks/.*|backend/app/[a-z_]*installer\.py|backend/app/hook_installer\.py)$' \
     | grep -Ev '^scripts/(hooks/|test-|check-passo-de-atualizacao\.sh)' \
     | grep -Ev '\.test\.(mjs|cjs|js)$' || true)"
+# Skill nova só chega a quem atualiza pelo link que o instalador cria; editar uma existente não precisa.
+skills_novas="$(printf '%s\n' "$novos" | grep -E '^skills/[^/]+/SKILL\.md$' || true)"
+relevantes="$(printf '%s\n%s\n' "$relevantes" "$skills_novas" | grep -v '^$' || true)"
 [[ -z "$relevantes" ]] && exit 0
 
 passos="$(printf '%s\n' "$arquivos" | grep -E '^docs/atualizacoes/[^/]+\.md$' | grep -v 'README\.md$' || true)"
