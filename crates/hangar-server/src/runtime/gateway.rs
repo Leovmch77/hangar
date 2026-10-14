@@ -174,7 +174,7 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
         }
     };
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
-    if let Err(error) = launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await {
+    if let Err(error) = cano_recorded(launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await) {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
         if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
             tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
@@ -184,6 +184,12 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
     target.metadata["cano"] = value;
     Ok(Some(cano))
+}
+/// A gravação do cano só vale confirmada: recusada como velha (`stale`), o processo novo ficaria sem o
+/// arquivo da sessão apontar para ele.
+fn cano_recorded(result:Result<Value,RuntimeError>) -> Result<(),RuntimeError> {
+    if result?["updated"] == true { Ok(()) }
+    else { Err(RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o processo novo")) }
 }
 /// Arquivo da sessão na subida e na religação, gravado aqui (a vida é a chave, a vista vem do arquivo da
 /// fila, como o Python lia).
@@ -2504,6 +2510,13 @@ mod tests {
 
     /// Nada da subida vai ao Python (porta fechada): o Codex grava o arquivo da sessão e monta o comando;
     /// o Claude grava o arquivo da sessão e nunca sobe por aqui.
+    #[test]
+    fn a_cano_the_session_file_did_not_take_is_a_failure() {
+        assert!(cano_recorded(Ok(json!({"updated":true}))).is_ok());
+        assert_eq!(cano_recorded(Ok(json!({"updated":false,"stale":true}))).unwrap_err().code,"session_patch_stale");
+        assert_eq!(cano_recorded(Err(RuntimeError::new("claude_sidecar_io","x"))).unwrap_err().code,"claude_sidecar_io");
+    }
+
     #[tokio::test]
     async fn sidecar_launch_policies_never_reach_python() {
         let dir = tempfile::tempdir().unwrap();
