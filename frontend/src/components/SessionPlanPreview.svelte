@@ -58,9 +58,9 @@
   const html = $derived(renderMarkdown(semTituloRepetido(markdown, title), { joinWrapped: true }));
 
   // Plano esperando a decisão: aberto acima das opções, porque escolher sem ler era o problema.
-  // Sem terminal o texto vem no estado; com terminal ele é buscado pela prévia.
-  const emAprovacao = $derived(aprovacaoPendente
-    || (provider === 'claude' && revision === 'awaiting_input' && !!metadataAtual && codexPlan === null));
+  // Sem terminal o texto vem no estado; com terminal ele é buscado pela prévia. Só no celular: a
+  // vista desktop da web não ganha recurso novo.
+  const emAprovacao = $derived(aprovacaoPendente && !desktop);
   let inlineMarkdown = $state('');
   let inlineLoading = $state(false);
   let inlineError = $state('');

@@ -197,7 +197,7 @@ it('carregamento sem plano confirmado não cria cartão', async () => {
 
 it('plano aguardando aprovação aparece aberto, sem precisar abrir a folha', async () => {
   await montar({ aprovacaoPendente: true, codexPlan: '# Migrar a fila\n\n1. Ler\n2. Gravar', caminho: '/c/plans/fila.md',
-    discovery: null, revision: 'awaiting_input' });
+    discovery: null, revision: 'awaiting_input', desktop: false });
   const corpo = document.querySelector('.plan-inline .prose');
   expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Migrar a fila');
   expect(corpo?.querySelector('h1'), 'o título não se repete no topo do texto').toBeNull();
@@ -209,7 +209,7 @@ it('plano aguardando aprovação aparece aberto, sem precisar abrir a folha', as
 
 it('com terminal, o plano descoberto na espera da aprovação é buscado e mostrado aberto', async () => {
   getPreview.mockResolvedValue({ name: 'fila', path: '/c/plans/fila.md', markdown: '# Fila\n\nPasso único.' });
-  await montar({ revision: 'awaiting_input', discovery: { name: 'fila', path: '/c/plans/fila.md' } });
+  await montar({ revision: 'awaiting_input', aprovacaoPendente: true, desktop: false, discovery: { name: 'fila', path: '/c/plans/fila.md' } });
   expect(getPreview.mock.calls[0].slice(0, 2)).toEqual(['sessao', true]);
   expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Fila');
   expect(document.querySelector('.plan-inline .prose')?.textContent).toContain('Passo único.');
@@ -218,15 +218,19 @@ it('com terminal, o plano descoberto na espera da aprovação é buscado e mostr
 it('falha ao buscar o plano aberto mostra o motivo e tenta de novo', async () => {
   getPreview.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 500 }))
     .mockResolvedValueOnce({ name: 'fila', path: '/c/plans/fila.md', markdown: '# Fila' });
-  await montar({ revision: 'awaiting_input', discovery: { name: 'fila', path: '/c/plans/fila.md' } });
+  await montar({ revision: 'awaiting_input', aprovacaoPendente: true, desktop: false, discovery: { name: 'fila', path: '/c/plans/fila.md' } });
   expect(document.querySelector('.plan-inline [role="alert"]')?.textContent).toBe(m.chat_plan_erro());
   botao(m.lista_tentar_novamente())?.click();
   await estabilizar();
   expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Fila');
 });
 
-it('fora da aprovação o cartão continua compacto', async () => {
-  await montar({ revision: 'idle', discovery: { name: 'fila', path: '/c/plans/fila.md' } });
+it('fora da aprovação, ou na vista desktop, o cartão continua compacto', async () => {
+  await montar({ revision: 'awaiting_input', desktop: false, discovery: { name: 'fila', path: '/c/plans/fila.md' } });
   expect(document.querySelector('.plan-inline')).toBeNull();
   expect(botao(m.chat_plan_ver())).toBeDefined();
+  for (const componente of montados.splice(0)) await unmount(componente);
+  document.body.innerHTML = '';
+  await montar({ revision: 'awaiting_input', aprovacaoPendente: true, desktop: true, discovery: { name: 'fila', path: '/c/plans/fila.md' } });
+  expect(document.querySelector('.plan-inline')).toBeNull();
 });

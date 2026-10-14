@@ -103,10 +103,10 @@ async function montar(desktop = true) {
   await flush(); await flush();
   await emit('state', { session: 'codex-flow', state: 'working', codex_mode: 'default' });
 }
-async function montarClaude() {
+async function montarClaude(desktop = true) {
   const target = document.createElement('div'); document.body.appendChild(target);
   components.push(mount(Chat, { target, props: {
-    sessionName: 'codex-flow', desktop: true, showContextPanel: false,
+    sessionName: 'codex-flow', desktop, showContextPanel: false,
     onBack: vi.fn(), onNavigateToChat: vi.fn(),
   } }));
   await flush(); await flush();
@@ -617,4 +617,56 @@ it('Claude com terminal mostra o plano pendente e pede alteração com texto', a
   expect(enviar.disabled).toBe(false);
   enviar.click(); await flush();
   expect(api.selectOption).toHaveBeenLastCalledWith('codex-flow', 3, 'plan-term', expect.anything(), 'troque o passo 2');
+
+it('celular: com terminal, o plano abre acima das opções só enquanto o ExitPlanMode espera', async () => {
+  harness.provider = 'claude';
+  vi.mocked(api.getHistory).mockResolvedValueOnce([]);
+  vi.mocked(api.getSessionPlanPreview).mockImplementation(async (_name, content) => ({
+    name: 'plano', path: '/p/plano.md', anchor_id: 'a-write',
+    ...(content ? { markdown: '# Plano do terminal\n\n1. Ler' } : {}),
+  }) as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+  await montarClaude(false);
+  // A sequência real: o Write do arquivo do plano, o ExitPlanMode e só depois o resultado do Write.
+  await emit('message', { id: 'a-write', kind: 'tool_use', tool_name: 'Write', tool_use_id: 'toolu_w', tool_input: { file_path: '/p/plano.md' }, ts: 1 });
+  await emit('message', { id: 'a-exit', kind: 'tool_use', tool_name: 'ExitPlanMode', tool_use_id: 'toolu_t', tool_input: {}, ts: 1 });
+  await emit('message', { id: 'r-write', kind: 'tool_result', tool_use_id: 'toolu_w', text: 'ok', ts: 1 });
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  await emit('state', { session: 'codex-flow', state: 'awaiting_input', question: 'Would you like to proceed?', options: ['Yes', 'No'] });
+  await flush();
+  expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Plano do terminal');
+  expect(document.querySelector('.plan-inline .prose li')?.textContent).toBe('Ler');
+
+  await emit('message', { id: 'r-exit', kind: 'tool_result', tool_use_id: 'toolu_t', text: 'ok', ts: 2 });
+  await flush();
+  expect(document.querySelector('.plan-inline')).toBeNull();
+});
+
+it('celular: outra pergunta depois de um plano gravado não vira aprovação do plano', async () => {
+  harness.provider = 'claude';
+  vi.mocked(api.getHistory).mockResolvedValueOnce([]);
+  vi.mocked(api.getSessionPlanPreview).mockResolvedValue({ name: 'plano', path: '/p/plano.md', anchor_id: 'a-plan' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+  await montarClaude(false);
+  await emit('message', { id: 'a-plan', kind: 'assistant_msg', text: 'Rascunho do plano gravado.', ts: 1 });
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  await emit('state', { session: 'codex-flow', state: 'awaiting_input', question: 'Rodar o comando?', options: ['Sim', 'Não'] });
+  await flush();
+  expect(document.querySelector('.plan-inline')).toBeNull();
+  expect(document.querySelector('.plan-preview')).not.toBeNull();
+});
+
+it('celular: sem terminal, o plano pendente aparece aberto sem buscar no servidor', async () => {
+  harness.provider = 'claude';
+  await montarClaude(false);
+  await emit('state', { session: 'codex-flow', state: 'working', headless: true, claude_permission_mode: 'plan' });
+  await emit('message', { id: 'a-exit:1', kind: 'tool_use', tool_name: 'ExitPlanMode', tool_use_id: 'toolu_plano', tool_input: { plan: '# Plano do teste\n\n- passo' }, ts: 1 });
+  vi.mocked(api.getSessionPlanPreview).mockClear();
+  await emit('state', {
+    session: 'codex-flow', state: 'awaiting_input', headless: true, claude_permission_mode: 'plan',
+    question: 'Aprovar o plano?', options: ['Aprovar plano', 'Continuar planejando'],
+    claude_plan_pending: { plan: '# Plano do teste\n\n- passo', path: 'C:/conta/plans/p.md', tool_use_id: 'toolu_plano' },
+  });
+  await flush();
+  expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Plano do teste');
+  expect(document.querySelector('.plan-inline')?.textContent).toContain('C:/conta/plans/p.md');
+  expect(api.getSessionPlanPreview).not.toHaveBeenCalledWith('codex-flow', true, expect.anything());
 });

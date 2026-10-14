@@ -1419,6 +1419,20 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
     return null;
   });
+  // Com terminal o diálogo do ExitPlanMode só existe no pane: a aprovação pendente é a chamada dele
+  // neste turno, ainda sem resultado. A âncora da descoberta pode ser o Write do arquivo do plano, e
+  // outra pergunta depois de um plano gravado não conta.
+  const terminalPlanoPendente = $derived.by(() => {
+    if (sessionHeadless || sessionProvider !== 'claude' || currentState !== 'awaiting_input' || !planAnchorId) return false;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return false;
+      if (event.kind === 'tool_use' && event.tool_name === 'ExitPlanMode') {
+        return !events.slice(i + 1).some((later) => later.kind === 'tool_result' && later.tool_use_id === event.tool_use_id);
+      }
+    }
+    return false;
+  });
   const planControls = $derived((sessionProvider === 'claude' || planAnchorId) ? {
     eventId: planAnchorId,
     serverId: chatServerId,
@@ -1429,7 +1443,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     disabled: currentState !== 'idle' || pending.length > 0,
     onImplement: sessionHeadless ? implementHeadlessPlan : implementCodexPlan,
     discovery: sessionProvider === 'claude' ? (planAnchorId && !headlessPlanoPendente ? claudePlanDiscovery : null) : undefined,
-    aprovacaoPendente: headlessPlanoPendente !== null,
+    aprovacaoPendente: headlessPlanoPendente !== null || terminalPlanoPendente,
     caminho: headlessPlanoPendente?.path ?? null,
     discoveryLoading: sessionProvider === 'claude' ? claudePlanDiscoveryLoading : false,
     discoveryError: sessionProvider === 'claude' ? claudePlanDiscoveryError : '',
