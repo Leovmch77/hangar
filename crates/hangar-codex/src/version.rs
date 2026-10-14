@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn only_major_minor_counts() {
         assert!(!differs(CHECKED));
-        assert!(!differs("0.161.9"));
+        assert!(!differs("0.162.9"));
         assert!(differs("0.160.1-alpha.2"));
         assert!(!differs("lixo"));
     }
