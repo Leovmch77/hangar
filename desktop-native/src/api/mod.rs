@@ -38,7 +38,7 @@ const UPLOAD_SECONDS: u64 = 180;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 /// `Memory` é o anexo ainda no compositor (nome, bytes): não passa pela rede.
-pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remote(String), Memory(String, Shared) }
+pub enum Source { Upload(String), Cited(String), Workspace(String), Transcript(String, usize), Remote(String), Memory(String, Shared) }
 
 /// Bytes de um anexo na chave do cache do visor: iguais pelo endereço, não pelo conteúdo. Comparar e fazer hash de uma
 /// imagem inteira a cada abertura custava milissegundos, e o `Debug` imprimia os bytes no rastro.
@@ -364,9 +364,10 @@ impl Api {
         let mut client = &self.client;
         match source {
             Source::Upload(file) => { url.path_segments_mut().expect("validated HTTP base").extend(["uploads", file]); }
-            Source::Cited(path) => {
+            Source::Cited(path) | Source::Workspace(path) => {
                 url.path_segments_mut().expect("validated HTTP base").push("file");
                 url.query_pairs_mut().append_pair("path", path);
+                if matches!(source, Source::Workspace(_)) { url.query_pairs_mut().append_pair("root", "1"); }
             }
             Source::Transcript(id, index) => { url.path_segments_mut().expect("validated HTTP base").extend(["transcript-image", id, &index.to_string()]); }
             Source::Remote(address) => {
@@ -993,6 +994,41 @@ mod tests {
             Some("/home/u/.hangar/uploads/p-1a/s1/ditado.wav"), "o caminho absoluto vai inteiro, para valer depois do /clear");
         let fresh = api.transcribe_url(Some("s"), None, false, Some("prosa"));
         assert_eq!(fresh.query(), Some("limpar=0"), "sem limpar o estilo não vai, e áudio novo não leva nome");
+    }
+
+    #[tokio::test]
+    async fn review_regression_reader_asset_keeps_root_and_citation_scopes_separate_from_external_auth() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for scope in ["root", "cited", "remote"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    request.push_str(&line);
+                    if line == "\r\n" { break; }
+                }
+                let uri = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                let url = url::Url::parse(&format!("http://fixture{uri}")).unwrap();
+                let authenticated = request.lines().any(|line| line.eq_ignore_ascii_case("authorization: Bearer fixture-owner"));
+                assert_eq!(authenticated, scope != "remote");
+                if scope != "remote" {
+                    assert_eq!(url.path(), "/api/sessions/fixture/file");
+                    assert_eq!(url.query_pairs().find(|(key, _)| key == "path").map(|(_, value)| value.into_owned()).as_deref(), Some("docs/assets/example.png"));
+                    assert_eq!(url.query_pairs().find(|(key, _)| key == "root").map(|(_, value)| value.into_owned()).as_deref(), (scope == "root").then_some("1"));
+                }
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nPNG\0").await.unwrap();
+            }
+        });
+        let api = super::Api::new(&format!("http://{address}"), "fixture-owner").unwrap();
+        for source in [super::Source::Workspace("docs/assets/example.png".into()), super::Source::Cited("docs/assets/example.png".into()), super::Source::Remote(format!("http://{address}/external.png"))] {
+            assert_eq!(api.fetch("fixture", &source).await.unwrap(), b"PNG\0");
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]

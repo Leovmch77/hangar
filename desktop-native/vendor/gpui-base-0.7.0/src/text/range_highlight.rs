@@ -56,6 +56,25 @@ pub struct RenderedText {
     index: Arc<OnceLock<RenderedIndex>>,
 }
 
+/// Um título do AST, endereçado tanto no original quanto no texto renderizado.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkdownHeading {
+    pub level: u8,
+    pub text: SharedString,
+    pub source_range: Range<usize>,
+    pub rendered_range: Range<usize>,
+    pub block_index: usize,
+}
+
+impl super::MarkdownExtensions {
+    /// Lê o sumário com o mesmo parser e as mesmas extensões do renderizador.
+    pub fn headings(&self, source: &str) -> Result<Vec<MarkdownHeading>, SharedString> {
+        let mut context = super::node::NodeContext { markdown_extensions: Arc::new(self.clone()), ..Default::default() };
+        let document = super::format::markdown::parse(source, &mut context)?;
+        Ok(RenderedIndex::new(&document).headings)
+    }
+}
+
 impl std::fmt::Debug for RenderedText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderedText")
@@ -84,6 +103,11 @@ impl RenderedText {
     /// The rendered text.
     pub fn as_str(&self) -> &str {
         &self.index().text
+    }
+
+    /// Títulos do mesmo retrato que `as_str`, sem analisar o original novamente.
+    pub fn headings(&self) -> &[MarkdownHeading] {
+        &self.index().headings
     }
 
     /// The length of the rendered text, in bytes.
@@ -171,6 +195,7 @@ pub(super) struct RenderedIndex {
     leaves: Vec<LeafSpan>,
     /// Where the text of each top-level block sits, in document order.
     blocks: Vec<Range<usize>>,
+    headings: Vec<MarkdownHeading>,
 }
 
 #[derive(Debug)]
@@ -208,7 +233,8 @@ impl RenderedIndex {
     pub(super) fn new(document: &ParsedDocument) -> Self {
         let mut builder = IndexBuilder::default();
         let mut blocks = Vec::with_capacity(document.blocks.len());
-        for block in document.blocks.iter() {
+        for (ix, block) in document.blocks.iter().enumerate() {
+            builder.block_index = ix;
             let start = builder.text.len();
             builder.push_block(block);
             blocks.push(start..builder.text.len());
@@ -216,6 +242,7 @@ impl RenderedIndex {
         let index = Self {
             text: builder.text.into(),
             leaves: builder.leaves,
+            headings: builder.headings,
             blocks,
         };
         debug_assert_eq!(index.text.as_ref(), document.text());
@@ -315,6 +342,8 @@ impl RenderedIndex {
 struct IndexBuilder {
     text: String,
     leaves: Vec<LeafSpan>,
+    headings: Vec<MarkdownHeading>,
+    block_index: usize,
 }
 
 impl IndexBuilder {
@@ -338,8 +367,15 @@ impl IndexBuilder {
                     paragraph.span.map(|span| TextLeafKey::block(span.start)),
                 );
             }
-            BlockNode::Heading { children, span, .. } => {
+            BlockNode::Heading { level, children, span } => {
                 self.push_paragraph(children, span.map(|span| TextLeafKey::block(span.start)));
+                if let Some(span) = span {
+                    self.headings.push(MarkdownHeading {
+                        level: *level, text: self.text[start..].to_owned().into(),
+                        source_range: span.start..span.end, rendered_range: start..self.text.len(),
+                        block_index: self.block_index,
+                    });
+                }
             }
             BlockNode::Table(table) => {
                 let mut ordinal = 0;

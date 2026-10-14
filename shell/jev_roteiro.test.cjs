@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { rodarComRoteiro, relocalizar, elementoDe, arquivo, pastaDe, juntar, salvar, gravador, PASTA } = require('./jev_roteiro.cjs');
+const { rodarComRoteiro, relocalizar, elementoDe, arquivo, pastaDe, reservaDe, juntar, salvar, gravador, PASTA } = require('./jev_roteiro.cjs');
 const { parsarSnapshot, jsDeSelecionar } = require('./jev_objetivo.cjs');
 
 const OBJETIVO = 'incluir uma alergia com descrição {descricao}';
@@ -103,6 +103,32 @@ test('repete sem perguntar ao Jev, com outro valor e outra numeracao de refs', a
   assert.equal(s2.st.descricao, 'B');
   assert.deepEqual(s2.st.cliques, ['@e40', '@e50', '@e51']);
   assert.match(r.roteiro, /repetidos 3 de 3/);
+});
+
+test('roteiro da pasta antiga (reserva) repete e passa a morar na pasta nova', async () => {
+  const antiga = pastaNova();
+  const s1 = site();
+  await rodarComRoteiro({ pasta: antiga, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s1.executar, perguntar: jevDoSite(s1) });
+  const nova = pastaNova();
+  const s2 = site({ base: 40 });
+  const r = await rodarComRoteiro({ pasta: nova, reserva: antiga, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s2.executar, perguntar: proibido });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /repetidos 3 de 3/);
+  assert.equal(lerUnico(nova).variantes.length, 1, 'regravado na pasta nova');
+});
+
+test('roteiro antigo ilegivel na reserva nao impede gravar na pasta nova', async () => {
+  const antiga = pastaNova();
+  const s0 = site();
+  await rodarComRoteiro({ pasta: antiga, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s0.executar, perguntar: jevDoSite(s0) });
+  const [quebrado] = fs.readdirSync(antiga);
+  fs.writeFileSync(path.join(antiga, quebrado), '{ quebrado');
+  const nova = pastaNova();
+  const s = site();
+  const r = await rodarComRoteiro({ pasta: nova, reserva: [antiga], objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /gravado em/);
+  assert.equal(lerUnico(nova).variantes.length, 1);
 });
 
 test('entre gemeos, a repeticao escolhe pela ordem gravada', async () => {
@@ -216,13 +242,17 @@ test('nome legivel, sem a origem: o mesmo roteiro vale em outra porta', async ()
   assert.match(r.roteiro, /repetidos 3 de 3/);
 });
 
-test('pasta: .hangar/roteiros na raiz do git de qualquer subpasta; fora de repo, o cache', () => {
+test('pasta: automacao/gravacoes na raiz do git de qualquer subpasta; fora de repo, o cache; as antigas só como reserva', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'));
   execFileSync('git', ['init', '-q', repo]);
   fs.mkdirSync(path.join(repo, 'src'));
   const raiz = fs.realpathSync(repo);
-  assert.equal(pastaDe(path.join(repo, 'src')), path.join(raiz, '.hangar', 'roteiros'));
+  assert.equal(pastaDe(path.join(repo, 'src')), path.join(raiz, 'automacao', 'gravacoes'));
   assert.equal(pastaDe(fs.mkdtempSync(path.join(os.tmpdir(), 'solto-'))), PASTA);
+  assert.deepEqual(reservaDe(path.join(repo, 'src')), [], 'sem pasta antiga, nada de reserva');
+  fs.mkdirSync(path.join(repo, '.hangar', 'roteiros'), { recursive: true });
+  fs.mkdirSync(path.join(repo, 'e2e', 'roteiros'), { recursive: true });
+  assert.deepEqual(reservaDe(path.join(repo, 'src')), [path.join(raiz, 'e2e', 'roteiros'), path.join(raiz, '.hangar', 'roteiros')]);
 });
 
 /** Grava a corrida boa e devolve o arquivo e a variante dela, para montar outras à mão. */

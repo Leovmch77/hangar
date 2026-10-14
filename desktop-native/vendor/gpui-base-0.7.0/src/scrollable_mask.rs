@@ -50,7 +50,14 @@ pub(crate) fn horizontal_scroll_area(
                 .track_scroll(scroll_handle)
                 .child(child),
         )
-        .child(ScrollableMask::new(Axis::Horizontal, scroll_handle).id(id))
+        .child(ScrollableMask::new(Axis::Horizontal, scroll_handle).id(id.clone()))
+        // Modified for Hangar: barra sempre à vista quando há o que rolar; sem ela ninguém
+        // descobre que a tabela rola. Some sozinha quando o conteúdo cabe.
+        .child(
+            crate::Scrollbar::horizontal(scroll_handle)
+                .id(ElementId::NamedChild(std::sync::Arc::new(id), "scrollbar".into()))
+                .mode(crate::ScrollbarMode::Always),
+        )
 }
 
 /// Make a scrollable mask element to cover the parent view with the mouse wheel event listening.

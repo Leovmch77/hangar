@@ -78,3 +78,9 @@ Não compilados aqui: gpui-pre-apple/-macos (revisados só por leitura).
 | Clique pela acessibilidade só quando o elemento do nó está sob o ponto | gpui-pre `window.rs` (`handle_a11y_action`), `elements/div.rs` | o clique é por coordenada; coberto por popup ele acionava o controle de cima |
 | Nome do `Button` cai na dica; `Button::aria_selected`; botão escolhido (`selected`) anuncia selecionado | gpui-component `button/button.rs` | botão só de ícone saía sem nome; aba, modo e opção escolhidos precisam do estado |
 | `Slider::aria_label` | gpui-base e gpui-component `slider.rs` | slider não tem texto próprio para ser nomeado |
+
+## Tabela do markdown
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| Coluna encolhe até a maior palavra (teto 160 px) e barra horizontal sempre visível quando a tabela rola | gpui-base `text/node.rs` (`measure_table_columns`, `render_scroll_table`), `scrollable_mask.rs` (`horizontal_scroll_area`) | o piso do kit (metade do conteúdo, 160 a 480 px) fazia tabela de prosa de 4 colunas passar da coluna do chat, e a rolagem não tinha barra |

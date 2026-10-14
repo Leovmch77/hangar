@@ -198,16 +198,17 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
     git(&main, &["worktree", "add", "-q", "-b", "feat", other.to_str().unwrap()]);
 
     let from_main = op(&main, "list_branches", json!({}));
-    // O git devolve o caminho resolvido (`C:/…` no Windows, `/private/var/…` no macOS): compara resolvido.
-    let same_path = |value: &serde_json::Value, path: &std::path::Path| value.as_str()
-        .is_some_and(|text| std::fs::canonicalize(text).ok() == std::fs::canonicalize(path).ok());
-    assert!(same_path(&from_main["elsewhere"]["feat"]["path"], &other), "{}", from_main["elsewhere"]);
+    let from_main_path = std::path::Path::new(from_main["elsewhere"]["feat"]["path"].as_str().unwrap());
+    assert!(from_main_path.is_absolute());
+    assert_eq!(hangar_workspace::real(from_main_path), hangar_workspace::real(&other));
     assert_eq!(from_main["elsewhere"]["feat"]["main"], json!(false));
     assert!(from_main["elsewhere"].get("main").is_none(), "a própria pasta não é outra worktree");
     assert!(from_main["elsewhere"].get("livre").is_none());
 
     let from_other = op(&other, "list_branches", json!({}));
-    assert!(same_path(&from_other["elsewhere"]["main"]["path"], &main), "{}", from_other["elsewhere"]);
+    let from_other_path = std::path::Path::new(from_other["elsewhere"]["main"]["path"].as_str().unwrap());
+    assert!(from_other_path.is_absolute());
+    assert_eq!(hangar_workspace::real(from_other_path), hangar_workspace::real(&main));
     assert_eq!(from_other["elsewhere"]["main"]["main"], json!(true));
     assert!(from_other["elsewhere"].get("feat").is_none());
 }

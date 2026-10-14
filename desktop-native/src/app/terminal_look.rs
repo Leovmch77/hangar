@@ -3,6 +3,116 @@
 use super::*;
 use crate::editdiff::{self, Edit, Op};
 
+#[derive(Default)]
+struct BodyGesture {
+    origin: Option<Point<Pixels>>,
+    dragged: bool,
+    epoch: u64,
+}
+
+type BodyCollapse = std::rc::Rc<dyn Fn(&String, &mut Window, &mut App)>;
+
+#[derive(IntoElement)]
+struct ToolBodySurface {
+    key: String,
+    body: AnyElement,
+    on_collapse: BodyCollapse,
+}
+
+impl RenderOnce for ToolBodySurface {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // A seleção redesenha entre pressionar e soltar; o gesto precisa sobreviver a esse quadro.
+        let id = SharedString::from(format!("term-body-{}", self.key));
+        let gesture = window.use_keyed_state(id.clone(), cx, |_, _| BodyGesture::default());
+        let (down, movement) = (gesture.clone(), gesture.clone());
+        div().id(id)
+            // O arrasto pode sair do corpo e voltar; a janela observa sem tomar a seleção do filho.
+            .child(canvas(|_, _, _| (), move |_, _, window, _| {
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture || event.pressed_button != Some(MouseButton::Left) { return; }
+                    movement.update(cx, |gesture, _| {
+                        if gesture.origin.is_some_and(|origin| (event.position - origin).magnitude() > 3.) {
+                            gesture.dragged = true;
+                        }
+                    });
+                });
+            }).size(px(0.)))
+            .child(self.body)
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| down.update(cx, |gesture, _| {
+                gesture.origin = Some(event.position);
+                gesture.dragged = false;
+                gesture.epoch += 1;
+            }))
+            .on_click(move |event, window, cx| {
+                let ClickEvent::Mouse(event) = event else { return; };
+                if event.down.button != MouseButton::Left || event.up.button != MouseButton::Left
+                    || event.down.click_count != 1 || event.up.click_count != 1
+                    || event.down.modifiers != Modifiers::default() || event.up.modifiers != Modifiers::default()
+                    || gesture.read(cx).dragged || (event.up.position - event.down.position).magnitude() > 3.
+                    || gpui_kit::base::TextSelection::has_selection(window, cx) { return; }
+                // A primeira soltura também chega no duplo clique; esperar mantém o texto montado para selecionar.
+                let (epoch, pending, owner) = (gesture.read(cx).epoch, gesture.downgrade(), window.window_handle());
+                let (on_collapse, key) = (self.on_collapse.clone(), self.key.clone());
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    let _ = owner.update(cx, |_, window, cx| {
+                        let Some(pending) = pending.upgrade() else { return; };
+                        if pending.read(cx).epoch == epoch && !pending.read(cx).dragged
+                            && !gpui_kit::base::TextSelection::has_selection(window, cx) {
+                            on_collapse(&key, window, cx);
+                        }
+                    });
+                }).detach();
+            })
+    }
+}
+
+/// Superfície do corpo aberto; não transforma texto selecionável em botão.
+fn terminal_tool_body(
+    key: String,
+    body: impl IntoElement,
+    on_collapse: impl Fn(&String, &mut Window, &mut App) + 'static,
+) -> Div {
+    div().child(ToolBodySurface { key, body: body.into_any_element(), on_collapse: std::rc::Rc::new(on_collapse) })
+}
+
+pub(super) fn tool_body_control(
+    look: appearance::ToolLook,
+    key: &str,
+    control: impl IntoElement,
+) -> AnyElement {
+    if look != appearance::ToolLook::Terminal { return control.into_any_element(); }
+    // Só o clique do controle para aqui; seleção, foco e teclado continuam com o filho.
+    div().id(SharedString::from(format!("term-control-{key}"))).child(control)
+        .on_click(|_, _, cx| cx.stop_propagation()).into_any_element()
+}
+
+fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
+    let dim = theme::muted();
+    let style = theme::conversation_markdown(cx).with_foreground(dim).with_muted_foreground(dim)
+        .with_link(dim).with_list_marker_color(Some(dim))
+        .with_inline_code(HighlightStyle { color: Some(dim), ..Default::default() });
+    div().flex().items_start().gap(px(8.)).pl(px(INDENT - 8.)).text_color(dim)
+        .child(div().flex_none().italic().child("∴"))
+        .child(div().flex_1().min_w_0().child(gpui_kit::base::TextView::new(view)
+            .selectable(true).scrollable(false).style(style)))
+}
+
+pub(super) fn live_thinking_content(
+    look: appearance::ToolLook,
+    view: &Entity<TextViewState>,
+    cx: &App,
+) -> AnyElement {
+    if look == appearance::ToolLook::Terminal { return terminal_thinking_text(view, cx).into_any_element(); }
+    div().flex().flex_col().gap_1().px_3().py_2()
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent()).child(tr("thinking_live")))
+        .child(chat_text(view, cx).text_sm().text_color(theme::muted()))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod interaction_tests;
+
 /// Linhas de um arquivo novo antes do "… +N linhas": o mesmo corte do Claude Code.
 pub(super) const WRITE_SHOWN: usize = 10;
 /// Linhas de uma edição antes do "… +N linhas": acima disso o cabeçalho expande.
@@ -297,6 +407,24 @@ pub(super) fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind
 }
 
 impl Hangar {
+    pub(super) fn render_terminal_thinking(&mut self, row: &str, parts: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        let mut body = Vec::new();
+        for &i in parts {
+            let event = &self.chat.events[i];
+            if event.tool_name.as_deref() == Some("ToolSearch") { continue; }
+            if event.kind == "thinking" {
+                let (key, source) = (format!("{}:thought", event.id), safe_markdown(event.text.as_deref().unwrap_or("")));
+                if source.trim().is_empty() { continue; }
+                let view = self.text_view(&key, row, source, cx);
+                body.push(terminal_thinking_text(&view, cx).into_any_element());
+            } else {
+                let result = self.conversation.paired.get(&i).copied();
+                body.push(self.render_tool(Tool { call: i, result }, row, cx));
+            }
+        }
+        div().flex().flex_col().gap_2().children(body).into_any_element()
+    }
+
     /// Uma chamada na pele Terminal. Edição mostra o diff sempre; o resto abre entrada e saída no clique.
     pub(super) fn render_terminal_tool(&mut self, tool: Tool, row: &str, cx: &mut Context<Self>) -> AnyElement {
         if let Some(card) = self.render_agent_card(tool, cx) { return card; }
@@ -358,9 +486,13 @@ impl Hangar {
                 let clipped = (more.is_none() && total > super::edits::SHOWN_MAX).then(|| faint(tr("diff_clipped")
                     .replace("{shown}", &super::edits::SHOWN_MAX.to_string()).replace("{total}", &total.to_string())));
                 let collapse = (open && expandable).then(|| faint(crate::i18n::tr_shared("term_recolher", &[])));
-                Some(div().pl(px(INDENT + 16.)).flex().flex_col().children(rows).children(more).children(clipped).children(collapse))
+                Some(div().pl(px(INDENT + 16.)).flex().flex_col().children(rows).children(more).children(clipped).children(collapse).into_any_element())
             }
-            None => open.then(|| self.tool_body(tool, row, cx).pl(px(INDENT + 16.))),
+            None => open.then(|| terminal_tool_body(key.clone(), self.tool_body(tool, row, cx),
+                cx.listener(|this, key: &String, _, cx| {
+                    if this.expanded.contains(key) { this.toggle(key.clone(), cx); }
+                }))
+                .pl(px(INDENT + 16.)).into_any_element()),
         };
         // O que o SendUserFile mandou fica à vista: é a razão da chamada, e no Claude Code a imagem chega à pessoa.
         let call = &self.chat.events[tool.call];

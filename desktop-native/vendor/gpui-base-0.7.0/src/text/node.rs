@@ -2040,6 +2040,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
     pub(crate) image_source: Option<Arc<super::text_view::ImageSourceFn>>,
+    pub(crate) image_source_mapper: Option<Arc<super::text_view::ImageSourceMapperFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
     /// This frame's streamed fade-in, when any text is still fading.
@@ -2054,12 +2055,12 @@ impl NodeContext {
     fn image_source(&self, image: &ImageNode) -> ImageSource {
         match &self.image_source {
             Some(resolve) => resolve(&image.url),
-            None => image.source(),
+            None => self.image_source_mapper.as_ref().and_then(|resolve| resolve(&image.url)).unwrap_or_else(|| image.source()),
         }
     }
 
     pub(super) fn add_ref(&mut self, identifier: SharedString, link: LinkMark) {
-        self.link_refs.insert(identifier, link);
+        self.link_refs.entry(identifier).or_insert(link);
     }
 
     /// The fade ranges of the text leaf `key`, in its rendered byte space.
@@ -2592,19 +2593,23 @@ const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the las
 /// shaped with the runs the cell renders with, plus the cell's padding and
 /// border. Never capped: a cap would clip overflowing text *and* leave it
 /// outside the scrollable width, making it unreachable.
+// Modified for Hangar: devolve também a maior palavra de cada coluna, o piso
+// até onde a coluna de prosa encolhe.
 fn measure_table_columns(
     table: &Table,
     col_count: usize,
     node_cx: &NodeContext,
     window: &mut Window,
     cx: &mut App,
-) -> Vec<f32> {
+) -> (Vec<f32>, Vec<f32>) {
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
     let mut col_w = vec![CELL_MIN_PX; col_count];
+    let mut col_word_w = vec![0.0_f32; col_count];
     for row in table.children.iter() {
         for (ix, cell) in row.children.iter().enumerate() {
-            let Some(slot) = col_w.get_mut(ix) else {
+            let (Some(slot), Some(word_slot)) = (col_w.get_mut(ix), col_word_w.get_mut(ix))
+            else {
                 continue;
             };
             if cell
@@ -2621,11 +2626,13 @@ fn measure_table_columns(
                     0.
                 };
                 *slot = slot.max(f32::from(width) + CELL_PAD_PX + border);
+                *word_slot = word_slot.max(f32::from(width) + CELL_PAD_PX + border);
                 continue;
             }
             let text = cell.children.text();
             let highlights = cell.children.inline_highlights(node_cx, cx);
             let mut w = 0.0_f32;
+            let mut word_w = 0.0_f32;
             let mut line_start = 0;
             for line in text.split('\n') {
                 let start = line_start + (line.len() - line.trim_start().len());
@@ -2662,8 +2669,25 @@ fn measure_table_columns(
                     let runs = text_runs(range.len(), &text_style, &highlights);
                     line_w += window
                         .text_system()
-                        .layout_line(&line[range], font_size * scale, &runs, None)
+                        .layout_line(&line[range.clone()], font_size * scale, &runs, None)
                         .width;
+                    let segment = &line[range.clone()];
+                    for piece in segment.split(char::is_whitespace).filter(|p| !p.is_empty()) {
+                        let piece_start =
+                            range.start + (piece.as_ptr() as usize - segment.as_ptr() as usize);
+                        let piece_highlights = slice_ranges(
+                            &line_highlights,
+                            piece_start,
+                            piece_start + piece.len(),
+                            |range, highlight| (range, highlight.clone()),
+                        );
+                        let runs = text_runs(piece.len(), &text_style, &piece_highlights);
+                        let piece_w = window
+                            .text_system()
+                            .layout_line(piece, font_size * scale, &runs, None)
+                            .width;
+                        word_w = word_w.max(f32::from(piece_w));
+                    }
                 }
                 w = w.max(f32::from(line_w));
             }
@@ -2675,9 +2699,10 @@ fn measure_table_columns(
                 0.
             };
             *slot = slot.max(w + CELL_PAD_PX + border);
+            *word_slot = word_slot.max(word_w + CELL_PAD_PX + border);
         }
     }
-    col_w
+    (col_w, col_word_w)
 }
 
 impl Paragraph {
@@ -3127,17 +3152,14 @@ impl BlockNode {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // Shrinking columns stop (and the table starts to scroll) at a floor
-        // scaled to their content: roughly the width at which the text wraps
-        // to `CELL_WRAP_MAX_LINES` lines, clamped between the two bounds so
-        // moderate columns can still wrap meaningfully while one huge column
-        // cannot push the scroll threshold arbitrarily high.
-        const CELL_WRAP_MAX_LINES: f32 = 2.0;
-        const CELL_WRAP_MIN_PX: f32 = 160.0;
-        const CELL_WRAP_MAX_PX: f32 = 480.0;
+        // Modified for Hangar: a coluna encolhe até a maior palavra, como a
+        // tabela do navegador, com teto para um identificador longo não forçar
+        // a rolagem. O piso do kit (metade do conteúdo) fazia tabela de prosa
+        // rolar numa coluna de chat comum.
+        const CELL_WORD_MAX_PX: f32 = 160.0;
         const TABLE_BORDER_PX: f32 = 2.0; // the track's border_1, left + right
 
-        let col_w = measure_table_columns(table, col_count, node_cx, window, cx);
+        let (col_w, col_word_w) = measure_table_columns(table, col_count, node_cx, window, cx);
         let style = &node_cx.style;
         // Nowrap cells (via the `table_cell` refinement, which cascades to
         // the cell text) must never shrink below their single-line content,
@@ -3148,11 +3170,8 @@ impl BlockNode {
         } else {
             col_w
                 .iter()
-                .map(|w| {
-                    (w / CELL_WRAP_MAX_LINES)
-                        .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
-                        .min(*w)
-                })
+                .zip(&col_word_w)
+                .map(|(w, word)| word.clamp(CELL_MIN_PX, CELL_WORD_MAX_PX).min(*w))
                 .collect()
         };
         let min_total_w: f32 = col_min_w.iter().sum::<f32>() + TABLE_BORDER_PX;
@@ -3248,7 +3267,12 @@ impl BlockNode {
                     // shrink-to-fit (their text wrapping), the definite
                     // `w(min_total_w)` keeps the floors once they are reached,
                     // letting the track exceed the viewport and scroll.
-                    div().min_w_full().w(px(min_total_w)).children(rows),
+                    // Modified for Hangar: alvo do teste de largura da tabela.
+                    div()
+                        .debug_selector(|| "table-track".into())
+                        .min_w_full()
+                        .w(px(min_total_w))
+                        .children(rows),
                 ),
             )
             // Custom actions row (e.g. copy / download) rendered below the
@@ -3668,7 +3692,7 @@ mod tests {
             for expected in [400, 600] {
                 width.store(expected, std::sync::atomic::Ordering::Relaxed);
                 assert_eq!(
-                    measure_table_columns(&table, 1, &node_cx, window, cx)[0],
+                    measure_table_columns(&table, 1, &node_cx, window, cx).0[0],
                     expected as f32 + CELL_PAD_PX
                 );
             }
@@ -3708,7 +3732,7 @@ mod tests {
             cx.set_global(theme);
             let font_size = window.text_style().font_size.to_pixels(window.rem_size());
             (
-                measure_table_columns(&table, 1, &node_cx, window, cx),
+                measure_table_columns(&table, 1, &node_cx, window, cx).0,
                 font_size,
             )
         });

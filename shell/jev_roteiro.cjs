@@ -48,14 +48,23 @@ function arquivo(pasta, tela, objetivo, dados) {
   return path.join(pasta, `${slug(objetivo)}-${createHash('sha256').update(semente).digest('hex').slice(0, 8)}.json`);
 }
 
-/** `.hangar/roteiros` na raiz do git de `cwd`, para o roteiro ir junto com o projeto; fora de repo, o cache. */
-function pastaDe(cwd) {
+function raizDoGit(cwd) {
   try {
-    const raiz = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { stdio: ['ignore', 'pipe', 'ignore'] })
-      .toString().trim();
-    if (raiz) return path.join(raiz, '.hangar', 'roteiros');
-  } catch { /* fora de repositório git */ }
-  return PASTA;
+    return execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() || null;
+  } catch { return null; /* fora de repositório git */ }
+}
+
+/** `automacao/gravacoes` na raiz do git de `cwd`, para a gravação ir junto com o projeto; fora de repo, o cache. */
+function pastaDe(cwd) {
+  const raiz = raizDoGit(cwd);
+  return raiz ? path.join(raiz, 'automacao', 'gravacoes') : PASTA;
+}
+
+/** Pastas antigas que existirem, só para ler, da mais recente para a mais antiga. */
+function reservaDe(cwd) {
+  const raiz = raizDoGit(cwd);
+  if (!raiz) return [];
+  return [path.join(raiz, 'e2e', 'roteiros'), path.join(raiz, '.hangar', 'roteiros')].filter((p) => fs.existsSync(p));
 }
 
 /** null só quando ainda não há roteiro; qualquer outra coisa ilegível é erro que o resultado mostra. */
@@ -369,7 +378,7 @@ async function repetir({ passos, fim = null, executar, dados, log, vista: primei
  * perguntar ao Jev e, na divergência, o Jev continua da página de agora — nunca outra variante
  * depois de uma ter agido. Toda corrida que dá certo vira a variante 0. `jev` conta por fase.
  */
-async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer = false, pasta = PASTA, comHost = path.resolve(pasta) === PASTA, log = () => {}, ...resto }) {
+async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer = false, pasta = PASTA, reserva = null, comHost = path.resolve(pasta) === PASTA, log = () => {}, ...resto }) {
   const jevConta = { acoes: 0, verificacao: 0 };
   let fase = 'acoes';
   const contado = async (estado, perguntas) => { jevConta[fase] += 1; return perguntar(estado, perguntas); };
@@ -389,10 +398,13 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
     return { ...r, roteiro: motivo, jev: jevConta };
   }
   const arq = arquivo(pasta, tela, objetivo, cofre);
+  // Roteiro gravado antes da troca de pasta: lido de lá, regravado na nova quando a corrida passa.
+  const antigos = [reserva ?? []].flat().map((p) => arquivo(p, tela, objetivo, cofre));
+  const ler = () => [arq, ...antigos].reduce((achado, a) => achado ?? carregar(a), null);
   const avisos = [];
   let gravado = null;
   try {
-    gravado = carregar(arq);
+    gravado = ler();
   } catch (err) {
     avisos.push(`roteiro ilegível, seguindo pelo Jev: ${String(err?.message ?? err).slice(0, 200)}`);
     log(`jev-objetivo: ${avisos.at(-1)}`);
@@ -406,12 +418,22 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
           // Relido agora: outra corrida pode ter gravado enquanto esta rodava.
           let atuais = [];
           try {
-            atuais = carregar(arq)?.variantes ?? [];
+            atuais = carregar(arq)?.variantes ?? null;
           } catch (err) {
             // Versão desconhecida nunca é sobrescrita; JSON quebrado sai do caminho, guardado.
             if (err?.versao !== undefined) throw new Error(`arquivo em versão ${err.versao}`);
             avisos.push(`arquivo ilegível guardado em ${guardarIlegivel(arq)}`);
           }
+          // Sem arquivo na pasta nova, as variantes vêm da reserva; reserva ilegível não impede gravar.
+          for (const a of antigos) {
+            if (atuais) break;
+            try {
+              atuais = carregar(a)?.variantes ?? null;
+            } catch (err) {
+              avisos.push(`roteiro antigo ilegível em ${a}, ignorado (${String(err?.message ?? err).slice(0, 120)})`);
+            }
+          }
+          atuais ??= [];
           // --refazer descarta as variantes antigas.
           salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(refazer ? [] : atuais, variante) });
           avisos.push(`gravado em ${arq}`);
@@ -454,4 +476,4 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
   return fechar(await jev.rodar({ ...resto, objetivo, dados, log, perguntar: contado, executar: g.executar, feitoInicial: feito }));
 }
 
-module.exports = { rodarComRoteiro, gravador, repetir, relocalizar, elementoDe, arquivo, pastaDe, carregar, salvar, juntar, classeDe, VERSAO, MAX_VARIANTES, PASTA };
+module.exports = { rodarComRoteiro, gravador, repetir, relocalizar, elementoDe, arquivo, pastaDe, reservaDe, carregar, salvar, juntar, classeDe, VERSAO, MAX_VARIANTES, PASTA };

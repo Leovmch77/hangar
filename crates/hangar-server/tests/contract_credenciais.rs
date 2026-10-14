@@ -126,9 +126,7 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
             hangar_server::accounts::environment::AccountEnvironment::from_map([
                 ("HOME".into(), home_text.clone()),
                 ("USERPROFILE".into(), home_text.clone()),
-                // Só a pasta dos falsos: o `/usr/bin` de uma máquina com o Codex instalado mudaria os
-                // casos sem Codex (os falsos acham o `node` pelo link desta pasta).
-                ("PATH".into(), bin.display().to_string()),
+                ("PATH".into(), bin.to_string_lossy().into_owned()),
             ].into()),
         );
         state

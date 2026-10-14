@@ -38,7 +38,22 @@ pub(crate) struct Frame { pub opcode: u8, fin: bool, pub data: Vec<u8> }
 pub(crate) trait Incoming: Send + 'static {
     const CONNECTED: Self;
     const CLOSED: Self;
+    /// Teto de uma mensagem recebida.
+    const MAX: usize = MAX_MESSAGE;
     fn message(opcode: u8, data: Vec<u8>) -> Result<Self, Error> where Self: Sized;
+}
+
+/// CDP de um navegador de fora do app: árvore de acessibilidade e screenshot passam fácil de 1 MiB.
+pub enum CdpEvent { Connected, Text(String), Closed }
+
+impl Incoming for CdpEvent {
+    const CONNECTED: Self = Self::Connected;
+    const CLOSED: Self = Self::Closed;
+    const MAX: usize = 64 << 20;
+    fn message(opcode: u8, data: Vec<u8>) -> Result<Self, Error> {
+        if opcode != 1 { return Err(Error::Protocol); }
+        String::from_utf8(data).map(Self::Text).map_err(|_| Error::Utf8)
+    }
 }
 
 impl Incoming for Event {
@@ -66,6 +81,7 @@ pub struct Socket<E> {
 
 pub type Terminal = Socket<Event>;
 pub type TextSocket = Socket<TextEvent>;
+pub type CdpSocket = Socket<CdpEvent>;
 
 impl Terminal {
     /// `token` é a credencial da conexão de `api`, nunca o texto atual do formulário.
@@ -90,6 +106,13 @@ impl TextSocket {
     pub fn open(runtime: &Handle, api: &Api, path: &str, token: String) -> Self {
         Self::connect(runtime, text_url(api, path, &token))
     }
+
+    pub fn send(&self, text: &str) -> Result<(), Error> { self.enqueue(1, text.as_bytes()) }
+}
+
+impl CdpSocket {
+    /// `url` http do WebSocket, sem credencial nenhuma: quem está do outro lado não é o Hangar.
+    pub fn open_url(runtime: &Handle, url: url::Url) -> Self { Self::connect(runtime, url) }
 
     pub fn send(&self, text: &str) -> Result<(), Error> { self.enqueue(1, text.as_bytes()) }
 }
@@ -188,8 +211,14 @@ async fn handshake(url: url::Url) -> Result<reqwest::Upgraded, Error> {
     let mut nonce = [0; 16];
     SystemRandom::new().fill(&mut nonce).map_err(|_| Error::Network)?;
     let key = STANDARD.encode(nonce);
-    let client = Client::builder().http1_only().redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10)).build().map_err(|_| Error::Network)?;
+    let mut builder = Client::builder().http1_only().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10));
+    // Loopback nunca passa pelo proxy do ambiente: o CDP de fora (túnel local) iria parar nele.
+    if url.host().is_some_and(|host| match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }) { builder = builder.no_proxy(); }
+    let client = builder.build().map_err(|_| Error::Network)?;
     // Nunca transportar erros do reqwest: eles podem conter a URL autenticada.
     timeout(Duration::from_secs(10), async {
         let response = client.get(url).header(header::UPGRADE, "websocket").header(header::CONNECTION, "Upgrade")
@@ -240,12 +269,13 @@ async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), opcode: u8, bytes: 
         .map_err(|_| Error::Network)?.map_err(|_| Error::Network)
 }
 
-async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, false).await }
+#[cfg(test)]
+async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, false, MAX_MESSAGE).await }
 
 /// Leitura do lado servidor: o cliente é obrigado a mascarar.
-pub(crate) async fn read_client_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, true).await }
+pub(crate) async fn read_client_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, true, MAX_MESSAGE).await }
 
-async fn read_frame_as(reader: &mut (impl AsyncRead + Unpin), masked: bool) -> Result<Frame, Error> {
+async fn read_frame_as(reader: &mut (impl AsyncRead + Unpin), masked: bool, max: usize) -> Result<Frame, Error> {
     let mut head = [0; 2];
     reader.read_exact(&mut head).await.map_err(|_| Error::Network)?;
     let (opcode, fin, short) = (head[0] & 15, head[0] & 128 != 0, head[1] & 127);
@@ -259,7 +289,7 @@ async fn read_frame_as(reader: &mut (impl AsyncRead + Unpin), masked: bool) -> R
     if (short == 126 && len < 126) || (short == 127 && (len < 65536 || len >> 63 != 0)) {
         return Err(Error::Protocol);
     }
-    if len > MAX_MESSAGE as u64 { return Err(Error::TooLarge); }
+    if len > max as u64 { return Err(Error::TooLarge); }
     let mut mask = [0; 4];
     if masked { reader.read_exact(&mut mask).await.map_err(|_| Error::Network)?; }
     let mut data = vec![0; len as usize];
@@ -272,13 +302,15 @@ async fn read_frame_as(reader: &mut (impl AsyncRead + Unpin), masked: bool) -> R
 pub(crate) struct Message { opcode: Option<u8>, data: Vec<u8> }
 
 impl Message {
-    pub(crate) fn push(&mut self, frame: Frame) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn push(&mut self, frame: Frame) -> Result<Option<Vec<u8>>, Error> { self.push_up_to(frame, MAX_MESSAGE) }
+
+    fn push_up_to(&mut self, frame: Frame, max: usize) -> Result<Option<Vec<u8>>, Error> {
         match (self.opcode, frame.opcode) {
             (None, 1 | 2) => self.opcode = Some(frame.opcode),
             (Some(_), 0) => {},
             _ => return Err(Error::Protocol),
         }
-        if self.data.len() + frame.data.len() > MAX_MESSAGE { return Err(Error::TooLarge); }
+        if self.data.len() + frame.data.len() > max { return Err(Error::TooLarge); }
         self.data.extend(frame.data);
         if !frame.fin { return Ok(None); }
         if self.opcode == Some(1) && std::str::from_utf8(&self.data).is_err() { return Err(Error::Utf8); }
@@ -315,7 +347,7 @@ async fn pump<E: Incoming>(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), i
     loop {
         let frame = {
             // Preserva a leitura parcial enquanto chegam teclas ou redimensionamentos.
-            let next = read_frame(&mut reader);
+            let next = read_frame_as(&mut reader, false, E::MAX);
             tokio::pin!(next);
             loop {
                 tokio::select! {
@@ -338,7 +370,7 @@ async fn pump<E: Incoming>(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), i
             10 => {},
             _ => {
                 if frame.opcode != 0 { kind = frame.opcode; }
-                if let Some(bytes) = message.push(frame)? { deliver(output, E::message(kind, bytes)?, stop).await?; }
+                if let Some(bytes) = message.push_up_to(frame, E::MAX)? { deliver(output, E::message(kind, bytes)?, stop).await?; }
             }
         }
     }

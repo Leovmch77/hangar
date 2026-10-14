@@ -1,7 +1,7 @@
 //! Um Chromium por processo do app, compartilhado pelos navegadores das sessões, e as sessões CDP sobre o pipe dele.
 //! Respostas voltam direto da thread de leitura; eventos são entregues na thread da interface, como no WebView2.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     future::Future,
     io::{BufRead, BufReader, Write},
@@ -505,6 +505,17 @@ impl Port {
 pub struct Session {
     browser: Rc<Browser>,
     id: String,
+    /// O motor do painel e o controlador do hangar-preview dividem esta sessão: aqui um sabe o tamanho que o outro pôs.
+    pub viewport: Viewport,
+}
+
+/// Um dono por vez para o tamanho da página: o painel, ou o layout pedido pelo agente enquanto ele valer.
+#[derive(Default)]
+pub struct Viewport {
+    /// Largura, altura e densidade que o painel aplicou por último.
+    pub panel: Cell<Option<(u32, u32, f32)>>,
+    /// Layout pedido (`mobile`, `<l> <a>`) em vigor: o painel não aplica o dele.
+    pub held: Cell<bool>,
 }
 
 impl Session {
@@ -513,7 +524,7 @@ impl Session {
         let (call, browser) = (browser.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})), browser.clone());
         async move {
             let id = call.await?["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
-            Ok(Session { browser, id })
+            Ok(Session { browser, id, viewport: Viewport::default() })
         }
     }
 

@@ -42,7 +42,8 @@ struct Head {
 #[derive(Debug, PartialEq, Eq)]
 enum Route { Cmd, Cdp(String), Browser(String), Local(String) }
 
-struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64> }
+/// `cdp`: a página é de fora do app (`hangar-preview --cdp`), e `alvo` escolhe qual; aí a chave de sessão não entra.
+struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64>, cdp: Option<String>, alvo: Option<String> }
 
 fn nav_dir() -> Option<PathBuf> { std::env::home_dir().map(|h| h.join(".hangar").join("nav")) }
 
@@ -198,10 +199,11 @@ fn check_local(head: &Head, name: &str, port: u16) -> Result<Route, (u16, String
 fn parse_body(bytes: &[u8]) -> Result<Body, String> {
     let invalid = || "erro: corpo invalido".to_string();
     let v: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    let key = v["chave"].as_str().ok_or_else(invalid)?.to_owned();
+    let cdp = v["cdp"].as_str().map(str::to_owned);
+    let key = match v["chave"].as_str() { Some(k) => k.to_owned(), None if cdp.is_some() => String::new(), None => return Err(invalid()) };
     let verb = v["verbo"].as_str().ok_or_else(invalid)?.to_owned();
     let args = v["args"].as_array().into_iter().flatten().map(|a| a.as_str().map_or_else(|| a.to_string(), str::to_owned)).collect();
-    Ok(Body { key, verb, args, tab: v["aba"].as_i64() })
+    Ok(Body { key, verb, args, tab: v["aba"].as_i64(), cdp, alvo: v["alvo"].as_str().map(str::to_owned) })
 }
 
 pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std::io::Result<u16> {
@@ -335,10 +337,16 @@ async fn answer(bytes: &[u8], requests: &async_channel::Sender<Request>) -> Stri
     let path = (body.verb == "shot").then(|| body.args.first().cloned()).flatten();
     if body.verb == "shot" && path.is_none() { return "erro: shot precisa de um caminho de arquivo".into(); }
     let verb_is_login = body.verb == "login";
-    let (tx, rx) = oneshot::channel();
-    if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
-        return "erro: o app nativo esta fechando".into();
-    }
+    let rx = if let Some(cdp) = body.cdp {
+        if body.tab.is_some() { return "erro: --cdp nao tem abas: escolha a pagina com --alvo <trecho da url>".into(); }
+        match super::external::submit(&cdp, body.alvo, body.verb, body.args) { Ok(rx) => rx, Err(e) => return e }
+    } else {
+        let (tx, rx) = oneshot::channel();
+        if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
+            return "erro: o app nativo esta fechando".into();
+        }
+        rx
+    };
     // `login` espera a pessoa aprovar no painel e, às vezes, escolher o perfil.
     let secs = if verb_is_login { LOGIN_SECS } else { REPLY_SECS };
     match tokio::time::timeout(Duration::from_secs(secs), rx).await {
@@ -484,6 +492,16 @@ mod tests {
         assert_eq!(parse_body(br#"{"verbo":"snapshot"}"#).err(), Some("erro: corpo invalido".into()));
         let with_tab = parse_body(br#"{"chave":"k","verbo":"url","aba":2}"#).unwrap();
         assert_eq!((with_tab.tab, with_tab.args.len()), (Some(2), 0));
+        let external = parse_body(br#"{"cdp":"http://127.0.0.1:9222","alvo":"/agenda","verbo":"url"}"#).unwrap();
+        assert_eq!((external.key.as_str(), external.cdp.as_deref(), external.alvo.as_deref()), ("", Some("http://127.0.0.1:9222"), Some("/agenda")));
+    }
+
+    #[tokio::test]
+    async fn external_cdp_outside_loopback_is_refused_before_any_connection() {
+        let (requests, ui) = async_channel::unbounded();
+        let text = answer(br#"{"cdp":"http://192.168.77.142:9222","verbo":"snapshot"}"#, &requests).await;
+        assert!(text.starts_with("erro: --cdp so aceita"), "{text}");
+        assert!(ui.is_empty(), "nada vai ao navegador da sessao");
     }
 
     #[test]

@@ -76,6 +76,7 @@ pub(crate) type TableActionsFn =
     dyn Fn(&TableData, &mut Window, &mut App) -> AnyElement + Send + Sync;
 
 pub(crate) type ImageSourceFn = dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync;
+pub(crate) type ImageSourceMapperFn = dyn Fn(&gpui::SharedUri) -> Option<gpui::ImageSource> + Send + Sync;
 
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
@@ -137,6 +138,7 @@ pub struct TextView {
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     image_source: Option<Arc<ImageSourceFn>>,
+    image_source_mapper: Option<Arc<ImageSourceMapperFn>>,
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
@@ -184,6 +186,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -208,6 +211,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -232,6 +236,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -248,6 +253,15 @@ impl TextView {
         F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
     {
         self.image_source = Some(Arc::new(resolver));
+        self
+    }
+
+    /// Resolve apenas as imagens reconhecidas pelo chamador. `None` conserva
+    /// a resolução padrão, inclusive o cache das imagens `data:` do AST.
+    pub fn image_source_mapper<F>(mut self, resolver: F) -> Self
+    where F: Fn(&gpui::SharedUri) -> Option<gpui::ImageSource> + Send + Sync + 'static,
+    {
+        self.image_source_mapper = Some(Arc::new(resolver));
         self
     }
 
@@ -641,6 +655,7 @@ impl Element for TextView {
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
             state.image_source = self.image_source.clone();
+            state.image_source_mapper = self.image_source_mapper.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             if let Some(motion) = &self.motion {
                 state.set_motion(motion.clone());
@@ -1763,6 +1778,46 @@ mod tests {
             );
             assert_eq!(data.span, Some(0..52));
         }
+    }
+
+    // Modified for Hangar: tabela de prosa cabe na coluna do chat, quebrando o texto, sem rolar.
+    #[gpui::test]
+    fn scroll_table_of_prose_fits_the_frame(cx: &mut TestAppContext) {
+        struct ProseTable;
+
+        impl Render for ProseTable {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let prose = "o texto da celula e longo e quebra em varias linhas ";
+                let cell = prose.repeat(3);
+                let row = format!("| 1 | {cell} | {cell} | `codigo` {cell} |\n");
+                let markdown = format!(
+                    "| # | Problema | Medida | De quem é |\n|---|---|---|---|\n{row}{row}"
+                );
+                let mut table_style = StyleRefinement::default();
+                table_style.overflow.x = Some(Overflow::Scroll);
+                div().w(px(880.)).child(
+                    TextView::markdown("prose-table", markdown)
+                        .style(TextViewStyle::default().with_table(table_style)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| ProseTable);
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let track = cx
+            .debug_bounds("table-track")
+            .expect("table track should be painted");
+        assert!(
+            track.size.width <= px(880.),
+            "the prose table should fit the 880px frame, got {:?}",
+            track.size.width
+        );
     }
 
     #[test]

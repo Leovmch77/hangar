@@ -11,6 +11,8 @@ pub mod control;
 pub mod server;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod relay;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub mod external;
 #[cfg(target_os = "windows")]
 pub mod cdp;
 /// Mesmo nome nos dois sistemas: uma sessão CDP no pipe do Chromium faz o papel do CDP do WebView2.
