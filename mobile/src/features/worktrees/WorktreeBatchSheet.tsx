@@ -108,7 +108,7 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
   }
 
   return (
-    <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose}>
+    <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose} dismissible={!apagando}>
       <View style={styles.inner}>
         <Text style={styles.title}>{m.worktree_lote_titulo({ n })}</Text>
         {libera ? <Text style={styles.ok}>{m.worktree_libera({ tamanho: fmtBytes(libera) })}</Text> : null}

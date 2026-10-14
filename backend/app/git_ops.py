@@ -376,7 +376,7 @@ def _branches_elsewhere(cwd: str) -> dict:
     out = _run(cwd, "worktree", "list", "--porcelain").stdout
     found: dict = {}
     for n, block in enumerate(out.split("\n\n")):
-        lines = block.splitlines()
+        lines = block.split("\n")
         path = next((l[len("worktree "):] for l in lines if l.startswith("worktree ")), None)
         branch = next((l[len("branch refs/heads/"):] for l in lines if l.startswith("branch refs/heads/")), None)
         if path and branch and os.path.realpath(path) != here:
