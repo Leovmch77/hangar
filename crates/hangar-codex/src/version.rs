@@ -2,7 +2,7 @@
 //! aviso: os tipos continuam tolerantes, mas campo renomeado pode faltar.
 #[macro_export]
 #[doc(hidden)]
-macro_rules! checked_version { () => { "0.161.0" } }
+macro_rules! checked_version { () => { "0.162.1" } }
 
 pub const CHECKED:&str = checked_version!();
 
