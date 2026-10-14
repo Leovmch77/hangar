@@ -204,7 +204,7 @@ pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sid
 }
 /// `runtime_state.view` do arquivo da fila, lido como o `session.patch_meta` do Python lia.
 fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
-    let state:Value = std::fs::read(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
+    let state:Value = super::queue::read_replaced(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
     Ok(match &state["runtime_state"]["view"] { Value::Null=>json!({}),view=>view.clone() })
 }
 async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {

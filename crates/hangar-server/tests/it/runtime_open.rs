@@ -298,7 +298,7 @@ async fn open_runs_queue_recover() {
     let (escuta,_,server) = cano(None,None).await;
     let registry = registry().await;
     registry.open(RuntimeTarget { binding:CanoBinding { escuta,..target.binding.clone() },..target.clone() }).await.unwrap();
-    let state:Value = serde_json::from_slice(&std::fs::read(&target.state_path).unwrap()).unwrap();
+    let state:Value = serde_json::from_slice(&hangar_server::runtime::queue::read_replaced(&target.state_path).unwrap()).unwrap();
     assert_eq!(state["operations"]["op"]["status"],"unknown","entrada em despacho vira incerta ao abrir, antes de o ator olhar");
     registry.close("key",1).await.unwrap();
     server.abort();

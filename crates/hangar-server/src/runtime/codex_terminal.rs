@@ -393,7 +393,8 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
 /// Entradas não entregues da projeção pelo nome: as que o Python gravou sem a fila desta chave. Ausente é
 /// fila vazia; ilegível recusa a adoção, que regravaria a projeção por cima do que não leu.
 fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeError> {
-    let raw = match std::fs::read_to_string(super::queue::projection_path(queue_dir,name)) {
+    let raw = match super::queue::read_replaced(&super::queue::projection_path(queue_dir,name))
+        .and_then(|raw|String::from_utf8(raw).map_err(|_|std::io::ErrorKind::InvalidData.into())) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(RuntimeError::new("codex_queue_projection_unreadable",

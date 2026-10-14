@@ -1044,6 +1044,27 @@ fn reconcile(state: &mut State, protected: &BTreeSet<String>, committed: Vec<Str
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Lê um arquivo que outro escritor troca por `atomic_write`. No Windows quem abre no instante da
+/// troca recebe NotFound ou acesso negado, inclusive na troca POSIX: ausente ou recusado de verdade é o
+/// que continua assim depois da espera curta.
+pub fn read_replaced(path: &Path) -> io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        loop {
+            match std::fs::read(path) {
+                Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
+                    && std::time::Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                outcome => return outcome,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::read(path)
+}
+
 /// `rename` que sobrevive ao Windows: lá um leitor aberto sem FILE_SHARE_DELETE (o CLI lendo
 /// o JSON) recusa a troca por um instante. No POSIX a troca nunca falha por leitor aberto.
 pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
@@ -1278,5 +1299,40 @@ mod lifecycle_tests {
         assert_eq!(store.state().rows.len(),1);
         assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
         assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod replaced_read_tests {
+    use super::*;
+    #[test]
+    fn a_file_being_replaced_never_reads_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.queue-state.json");
+        atomic_write(&path, b"{}").unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = { let (path, stop) = (path.clone(), stop.clone()); std::thread::spawn(move || {
+            // A troca de produção sem o fsync do `atomic_write`: o que está à prova é o leitor, e mais trocas por segundo.
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                let temp = path.with_extension(format!("{n}.tmp"));
+                std::fs::write(&temp, format!("{{\"n\":{n}}}")).unwrap();
+                replace(&temp, &path).unwrap();
+            }
+        }) };
+        let (mut reads, mut missing) = (0u32, 0u32);
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(3) {
+            match read_replaced(&path) {
+                Ok(_) => reads += 1,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => missing += 1,
+                Err(error) => panic!("leitura recusada: {error}"),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(reads > 100, "poucas leituras para provar algo: {reads}");
+        assert_eq!(missing, 0, "o arquivo trocado sumiu em {missing} de {} leituras", reads + missing);
     }
 }
