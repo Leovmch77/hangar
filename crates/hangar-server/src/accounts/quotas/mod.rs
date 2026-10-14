@@ -121,34 +121,6 @@ pub struct Quotas {
     pub endpoints: other::Endpoints,
     /// Problemas de config já levados ao diário: a lista é lida a cada poll e só a mudança conta.
     pub reported: Arc<std::sync::Mutex<Vec<&'static str>>>,
-    pub renewals: RenewalBackoff,
-}
-
-/// Renovação rápida que falhou não roda de novo a cada leitura: ela sobe o CLI do Claude com
-/// todos os MCPs (segundos no Windows) e a lista de credenciais esperava por ela. Credencial
-/// trocada (login novo) libera na hora.
-#[derive(Clone, Default)]
-pub struct RenewalBackoff(Arc<std::sync::Mutex<std::collections::HashMap<AccountKey, (Value, f64, u32, &'static str)>>>);
-
-impl RenewalBackoff {
-    const WAITS: [f64; 4] = [1800.0, 3600.0, 7200.0, 21600.0];
-
-    /// Motivo da última falha enquanto a espera vale para esta credencial.
-    pub fn pending(&self, key: &AccountKey, credential: &Value, at: f64) -> Option<&'static str> {
-        let map = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        map.get(key).filter(|(seen, until, _, _)| seen == credential && at < *until).map(|entry| entry.3)
-    }
-
-    pub fn failed(&self, key: &AccountKey, credential: Value, reason: &'static str, at: f64) {
-        let mut map = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let attempts = map.get(key).filter(|entry| entry.0 == credential).map_or(0, |entry| entry.2);
-        let wait = Self::WAITS[(attempts as usize).min(Self::WAITS.len() - 1)];
-        map.insert(key.clone(), (credential, at + wait, attempts + 1, reason));
-    }
-
-    pub fn clear(&self, key: &AccountKey) {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);
-    }
 }
 
 /// De onde sai a leitura de uma fonte.
@@ -652,9 +624,6 @@ impl AccountService {
                     && let Some(bridge) = bridge
                 {
                     drop(guard);
-                    if let Some(reason) = self.quotas.renewals.pending(&key, &signature(), now()) {
-                        return (reading("expirada", vec![], Some(reason)), None);
-                    }
                     if let Err(reason) = self
                         .refresh_claude(
                             account,
@@ -664,13 +633,8 @@ impl AccountService {
                         )
                         .await
                     {
-                        // Só a falha que custou o CLI espera; conta ocupada ou sem refresh é barata.
-                        if reason == "renovacao-falhou" {
-                            self.quotas.renewals.failed(&key, signature(), reason, now());
-                        }
                         return (reading("expirada", vec![], Some(reason)), None);
                     }
-                    self.quotas.renewals.clear(&key);
                     guard = match self.locks.try_acquire(&key, GuardMode::Shared) {
                         Ok(guard) => guard,
                         Err(error) => return (self.lock_refused(error), None),
@@ -717,24 +681,6 @@ pub(crate) fn external_client(timeout: Duration) -> Result<reqwest::Client, Acco
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn failed_quick_renewal_waits_until_the_credential_changes_or_the_wait_ends() {
-        let temp = tempfile::tempdir().unwrap();
-        let key = AccountKey::new(Provider::Claude, temp.path()).unwrap();
-        let backoff = RenewalBackoff::default();
-        let old = json!("sig-a");
-        assert_eq!(backoff.pending(&key, &old, 1000.0), None);
-        backoff.failed(&key, old.clone(), "renovacao-falhou", 1000.0);
-        assert_eq!(backoff.pending(&key, &old, 1000.0 + 300.0), Some("renovacao-falhou"));
-        assert_eq!(backoff.pending(&key, &json!("sig-b"), 1000.0 + 300.0), None);
-        assert_eq!(backoff.pending(&key, &old, 1000.0 + 1800.0), None);
-        backoff.failed(&key, old.clone(), "renovacao-falhou", 3000.0);
-        assert_eq!(backoff.pending(&key, &old, 3000.0 + 3599.0), Some("renovacao-falhou"));
-        assert_eq!(backoff.pending(&key, &old, 3000.0 + 3600.0), None);
-        backoff.clear(&key);
-        assert_eq!(backoff.pending(&key, &old, 3000.0), None);
-    }
 
     #[tokio::test]
     async fn external_reads_go_through_the_environment_proxy() {
