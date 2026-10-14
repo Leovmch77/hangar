@@ -442,6 +442,8 @@ pub fn py_iso(value: &Value) -> Option<f64> {
         Some(offset) => midnight.and_utc().timestamp_micros() + micros_of_day - offset,
         None => {
             use chrono::TimeZone;
+            // Hora sem fuso na troca do horário de verão: a que não existe sai sem reset e a que
+            // se repete fica com a primeira. O Kimi manda `Z`, então isso fica como limite.
             let local = midnight + chrono::Duration::microseconds(micros_of_day);
             chrono::Local.from_local_datetime(&local).earliest()?.timestamp_micros()
         }
