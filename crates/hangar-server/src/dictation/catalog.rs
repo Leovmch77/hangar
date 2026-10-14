@@ -25,7 +25,8 @@ pub struct Models {
     codex_endpoint: Option<String>,
 }
 
-const CODEX_CATALOG_KEYS: [&str; 9] = [
+const CODEX_CATALOG_KEYS: [&str; 10] = [
+    "model_catalog_json",
     "profile",
     "profiles",
     "model_provider",
@@ -49,7 +50,12 @@ fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
     ]
     .iter()
     .map(|file| {
-        let bytes = std::fs::read(home.join(file)).ok()?;
+        let bytes = match std::fs::read(home.join(file)) {
+            Ok(bytes) => bytes,
+            // Ausente vale como vazio, como em `codex_configuration`.
+            Err(error) if *file == "config.toml" && error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return None,
+        };
         let identity = match *file {
             "auth.json" => serde_json::from_slice::<Value>(&bytes).ok().map(|mut value| {
                 if let Some(tokens) = value.get_mut("tokens").and_then(Value::as_object_mut) {
@@ -1035,7 +1041,7 @@ mod concurrency_tests {
         );
     }
 
-    async fn codex_catalog_while_config_changes(before: &str, after: &str) -> Result<Vec<Value>, &'static str> {
+    async fn codex_catalog_while_config_changes(before: Option<&str>, after: &str) -> Result<Vec<Value>, &'static str> {
         use base64::Engine;
         let root = tempfile::tempdir().unwrap();
         let service = Arc::new(service(root.path()));
@@ -1043,7 +1049,9 @@ mod concurrency_tests {
         let payload =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"exp":4102444800}"#);
         std::fs::write(context.home.join("auth.json"), json!({"tokens":{"access_token":format!("fixture.{payload}.signature"),"account_id":"fixture-account"}}).to_string()).unwrap();
-        std::fs::write(context.home.join("config.toml"), before).unwrap();
+        if let Some(before) = before {
+            std::fs::write(context.home.join("config.toml"), before).unwrap();
+        }
         let (url, seen, release) = endpoint(200, json!({"models":[{"slug":"gpt-fixture","display_name":"Fixture","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]})).await;
         let models = Arc::new(Models { codex_endpoint: Some(url), ..Models::default() });
         let pending = tokio::spawn({
@@ -1059,7 +1067,7 @@ mod concurrency_tests {
     #[tokio::test]
     async fn codex_bookkeeping_in_config_during_the_request_keeps_the_catalog() {
         let models = codex_catalog_while_config_changes(
-            "model = \"gpt-fixture\"\n[marketplaces.m]\nlast_updated = \"2026-10-13T10:00:00Z\"\n",
+            Some("model = \"gpt-fixture\"\n[marketplaces.m]\nlast_updated = \"2026-10-13T10:00:00Z\"\n"),
             "model = \"gpt-fixture\"\n[marketplaces.m]\nlast_updated = \"2026-10-14T15:03:50Z\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n[notice]\nhide_full_access_warning = true\n",
         )
         .await
@@ -1068,9 +1076,17 @@ mod concurrency_tests {
     }
 
     #[tokio::test]
+    async fn codex_config_created_during_the_request_keeps_the_catalog() {
+        let models = codex_catalog_while_config_changes(None, "[projects.\"/w\"]\ntrust_level = \"trusted\"\n")
+            .await
+            .expect("config.toml ausente vale como vazio, como em codex_configuration");
+        assert_eq!(models[0]["id"], "gpt-fixture");
+    }
+
+    #[tokio::test]
     async fn codex_profile_change_during_the_request_still_refuses_the_catalog() {
         assert_eq!(
-            codex_catalog_while_config_changes("profile = \"a\"\n[profiles.a]\n[profiles.b]\n", "profile = \"b\"\n[profiles.a]\n[profiles.b]\n").await,
+            codex_catalog_while_config_changes(Some("profile = \"a\"\n[profiles.a]\n[profiles.b]\n"), "profile = \"b\"\n[profiles.a]\n[profiles.b]\n").await,
             Err("dictation_target_changed")
         );
     }
