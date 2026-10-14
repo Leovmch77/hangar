@@ -30,7 +30,7 @@ fn response(result: Result<Value, AccountError>) -> Response {
     }
 }
 
-/// O cliente desiste em 8 s: leitura de rede que passa disto sai do cache, e a leitura segue.
+/// O cliente desiste em 8 s; aos 6 s a resposta sai do cache, e a leitura de rede segue.
 pub const CLIENT_DEADLINE: Duration = Duration::from_secs(6);
 
 pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Response {
