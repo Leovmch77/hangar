@@ -395,8 +395,14 @@ impl AccountService {
         let Ok(key) = AccountKey::new(Provider::Codex, &account.home) else {
             return unavailable(false);
         };
-        let Ok(_guard) = self.locks.try_acquire(&key, GuardMode::Shared) else {
-            return busy();
+        let _guard = match self.locks.try_acquire(&key, GuardMode::Shared) {
+            Ok(guard) => guard,
+            Err(super::locks::LockError::Busy) => return busy(),
+            // Trava que não abre é falha de leitura: vira `leitura-falhou` na lista, com diário.
+            Err(super::locks::LockError::Io(error)) => {
+                tracing::warn!(code = "codex_account_lock_failed", io_kind = ?error.kind(), "trava da conta Codex não abriu");
+                return unavailable(false);
+            }
         };
         let Ok(current) = self.resolve(Provider::Codex, &account.id) else {
             return unavailable(false);
@@ -579,6 +585,25 @@ mod tests {
         // Login revogado: o `account/read` do Codex responde erro interno citando o 401.
         let refused = Err(ClientError::Rpc { code: -32603, message: "workspace routing discovery unauthorized (401)".into() });
         assert_eq!(read_reply(refused).unwrap(), json!({"method":"none","status":"disconnected","email":null,"plan":null}));
+    }
+
+    /// Pasta das travas que não abre (arquivo no lugar, permissão) é leitura que falhou, não conta
+    /// ocupada: ocupada sai sem motivo e sem diário, e a falha ficaria calada para sempre.
+    #[tokio::test]
+    async fn unreadable_lock_folder_is_a_failed_read_not_a_busy_account() {
+        use crate::accounts::{Provider, catalog::AccountService, environment::AccountEnvironment};
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().to_string_lossy().into_owned();
+        let service = AccountService::new(AccountEnvironment::from_map(
+            [("HOME".into(), home.clone()), ("USERPROFILE".into(), home)].into()));
+        let account = service.create(Provider::Codex, "work", |_| Ok(())).unwrap();
+        let locks = root.path().join(".hangar/account-locks");
+        let _ = std::fs::remove_dir_all(&locks);
+        std::fs::create_dir_all(locks.parent().unwrap()).unwrap();
+        std::fs::write(&locks, "não é pasta").unwrap();
+        let auth = service.read_codex_auth(&account).await;
+        assert_eq!(auth["status"], "unavailable");
+        assert_ne!(auth["reason"], "busy", "{auth}");
     }
 
     #[test]

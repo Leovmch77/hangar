@@ -245,6 +245,22 @@ impl AccountService {
         }
     }
 
+    /// Conta ocupada (login, renovação, redefinição) é `sessao-viva`, que as telas calam; trava que
+    /// não abre é leitura que falhou e vai ao diário.
+    fn lock_refused(&self, error: crate::accounts::locks::LockError) -> Value {
+        match error {
+            crate::accounts::locks::LockError::Busy => reading("indisponivel", vec![], Some("sessao-viva")),
+            crate::accounts::locks::LockError::Io(error) => {
+                tracing::warn!(code = "quota_account_lock_failed", io_kind = ?error.kind(), "trava da conta não abriu; cota sem leitura");
+                if let Some(diag) = self.quotas.diag.get() {
+                    diag.report("rust.quota_sources_partial", "cotas", "quota_account_lock_failed",
+                        "trava da conta não abriu; cota sem leitura");
+                }
+                reading("indisponivel", vec![], Some("erro-trava"))
+            }
+        }
+    }
+
     /// Diário e log só quando o conjunto de problemas muda: a lista é relida a cada poll.
     fn report_config_problems(&self, problems: &[&'static str]) {
         let mut sorted = problems.to_vec();
@@ -568,8 +584,9 @@ impl AccountService {
                 None,
             );
         };
-        let Ok(mut guard) = self.locks.try_acquire(&key, GuardMode::Shared) else {
-            return (reading("indisponivel", vec![], Some("sessao-viva")), None);
+        let mut guard = match self.locks.try_acquire(&key, GuardMode::Shared) {
+            Ok(guard) => guard,
+            Err(error) => return (self.lock_refused(error), None),
         };
         let valid = match provider {
             Provider::Claude => self.validate_claude(account, &key).is_ok(),
@@ -620,9 +637,7 @@ impl AccountService {
                     }
                     guard = match self.locks.try_acquire(&key, GuardMode::Shared) {
                         Ok(guard) => guard,
-                        Err(_) => {
-                            return (reading("indisponivel", vec![], Some("sessao-viva")), None);
-                        }
+                        Err(error) => return (self.lock_refused(error), None),
                     };
                     if self.validate_claude(account, &key).is_err() {
                         return (
@@ -796,6 +811,19 @@ mod tests {
         let rows = service.quotas(None, false, false).await.expect("a cota das outras fontes sai");
         assert_eq!(row(&rows, "chave:test").unwrap()["estado"], "lida");
         server.abort();
+    }
+
+    /// Pasta das travas que não abre não é conta ocupada: `sessao-viva` as telas calam de propósito.
+    #[tokio::test]
+    async fn unreadable_lock_folder_is_a_failed_read_not_a_busy_account() {
+        let (temp, service) = service_with_engine("http://127.0.0.1:9/v1");
+        let locks = temp.path().join(".hangar/account-locks");
+        std::fs::create_dir_all(locks.parent().unwrap()).unwrap();
+        std::fs::write(&locks, "não é pasta").unwrap();
+        let rows = service.quotas(None, false, false).await.unwrap();
+        let claude = rows.as_array().unwrap().iter().find(|row| row["provedor"] == "claude").expect("conta padrão");
+        assert_eq!(claude["estado"], "indisponivel");
+        assert_ne!(claude["motivo"], "sessao-viva", "{claude}");
     }
 
     /// Leitura em voo não é prazo estourado; a forçada espera a vez e só ela pode estourar.
