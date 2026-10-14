@@ -1012,3 +1012,353 @@ test('registro de teste: campo de busca sem dado e deixado de lado em vez de par
   assert.ok(!executados.some((l) => l.startsWith('fill')), 'nao digita no filtro');
   assert.deepEqual(ofertas[1], [], 'o filtro sai dos alvos de TYPE_TEXT');
 });
+
+// --- varredura: recusa, campos homônimos, campo coberto e lista aberta ---
+
+// Página falsa para rodar os scripts de página (JS_VALORES, jsDeEstarAberto) de verdade, em node.
+const vm = require('node:vm');
+const { jsDeEstarAberto } = require('./jev_objetivo.cjs');
+
+const campoFalso = ({ tag = 'input', attrs = {}, rotulo = '', ...resto } = {}) => ({
+  tagName: tag.toUpperCase(),
+  type: attrs.type ?? (tag === 'input' ? 'text' : ''),
+  value: '',
+  innerText: '',
+  className: '',
+  labels: rotulo ? [{ innerText: rotulo }] : [],
+  required: false,
+  isContentEditable: false,
+  parentElement: null,
+  getAttribute: (a) => (a in attrs ? String(attrs[a]) : null),
+  getBoundingClientRect: () => ({ width: 10, height: 10 }),
+  scrollIntoView() { this.rolado = true; },
+  ...resto,
+});
+
+function paginaFalsa(elementos) {
+  const casa = (e, simples) => {
+    const tag = simples.match(/^[a-z]+/i)?.[0];
+    if (tag && e.tagName !== tag.toUpperCase()) return false;
+    return [...simples.matchAll(/\[([\w-]+)(?:=([^\]]+))?\]/g)]
+      .every(([, a, v]) => (v === undefined ? e.getAttribute(a) !== null : e.getAttribute(a) === v));
+  };
+  const document = {
+    querySelectorAll: (sel) => elementos.filter((e) => sel.split(',').some((s) => casa(e, s.trim()))),
+    querySelector: (sel) => document.querySelectorAll(sel)[0] ?? null,
+    getElementById: (id) => elementos.find((e) => e.getAttribute('id') === id) ?? null,
+  };
+  return (js) => vm.runInNewContext(js, { document });
+}
+
+// O laço de verdade, com a leitura dos valores rodando na página falsa.
+async function estadoLido(arvore, elementos) {
+  const naPagina = paginaFalsa(elementos);
+  let visto = null;
+  await rodar({
+    objetivo: 'conferir',
+    maxPassos: 1,
+    executar: async (verbo, args) => {
+      if (verbo === 'snapshot') return arvore;
+      if (verbo === 'url') return 'http://local/x';
+      if (verbo === 'text') return 'pagina';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) return naPagina(args[0]);
+      return 'ok';
+    },
+    perguntar: async (estado) => { visto = estado; return resposta({ op: 'DONE' }); },
+  });
+  return visto;
+}
+
+const FORMA_PAGTO = `- RootWebArea "Clinica Web"
+  - dialog "Nova forma"
+    - spinbutton "% Desconto" [ref=@e6]
+    - combobox "Conta do Balancete" [ref=@e7] [collapsed] value="ACUCAR"
+    - spinbutton "% Desconto" [ref=@e8]
+    - combobox "Conta do Balancete" [ref=@e9] [collapsed] value="Selecione a conta..."
+    - button "Criar Registro" [ref=@e10]`;
+
+test('dois campos com o mesmo rotulo sao dois campos: arvore e valores numeram na ordem da pagina', async () => {
+  assert.deepEqual(parsarSnapshot(FORMA_PAGTO).map((c) => c.nome),
+    ['% Desconto', 'Conta do Balancete', '% Desconto (2)', 'Conta do Balancete (2)', 'Criar Registro']);
+  const combo = (texto) => campoFalso({ tag: 'button', attrs: { role: 'combobox', 'aria-label': 'Conta do Balancete' }, innerText: texto });
+  const estado = await estadoLido(FORMA_PAGTO, [
+    campoFalso({ rotulo: '% Desconto', value: '5' }), combo('ACUCAR'),
+    campoFalso({ rotulo: '% Desconto', value: '' }), combo('Selecione a conta...'),
+  ]);
+  assert.deepEqual(estado.valores_atuais, {
+    '% Desconto': '5', 'Conta do Balancete': 'ACUCAR',
+    '% Desconto (2)': '', 'Conta do Balancete (2)': 'Selecione a conta...',
+  });
+});
+
+test('o popover do segundo homonimo e achado pela ordem, nao pelo primeiro de mesmo nome', () => {
+  const naPagina = paginaFalsa([
+    campoFalso({ tag: 'button', attrs: { role: 'combobox', 'aria-label': 'Conta do Balancete', 'aria-expanded': 'false' } }),
+    campoFalso({ tag: 'button', attrs: { role: 'combobox', 'aria-label': 'Conta do Balancete', 'aria-expanded': 'true' } }),
+  ]);
+  assert.equal(naPagina(jsDeEstarAberto('Conta do Balancete (2)')), 'true');
+  assert.equal(naPagina(jsDeEstarAberto('Conta do Balancete')), 'false');
+});
+
+test('aviso de sucesso se reconhece pela cor ou pelo texto; o de erro nao', () => {
+  const { avisoDeSucesso } = require('./jev_objetivo.cjs');
+  assert.equal(avisoDeSucesso('Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.', 'border-green-200'), true);
+  assert.equal(avisoDeSucesso('Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.'), true);
+  assert.equal(avisoDeSucesso('Rascunho não gravado Responda os 6 critérios.', 'border-red-200'), false);
+  assert.equal(avisoDeSucesso('Erro ao gravar rascunho Erro interno', 'border-red-200'), false);
+});
+
+test('rascunho gravado depois do clique nao vira envio recusado', async () => {
+  const FORM = `- RootWebArea "Clinica Web"
+  - button "Gravar rascunho" [ref=@e2]
+  - button "Assinar" [ref=@e3]`;
+  const elementos = [];
+  const naPagina = paginaFalsa(elementos);
+  const estados = [];
+  const r = await rodar({
+    objetivo: 'incluir um registro de teste e salvar',
+    maxPassos: 2,
+    executar: async (verbo, args) => {
+      if (verbo === 'click') elementos.push(campoFalso({ tag: 'div', attrs: { role: 'alert' }, className: 'border-green-200 bg-green-50',
+        innerText: 'Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.' }));
+      if (verbo === 'snapshot') return FORM;
+      if (verbo === 'url') return 'http://local/escala';
+      if (verbo === 'text') return 'Nova avaliação';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) return naPagina(args[0]);
+      return 'ok';
+    },
+    perguntar: async (estado) => { estados.push(estado); return resposta({ op: 'CLICK', click: estados.length === 1 ? 'e2' : NENHUM }); },
+  });
+  assert.equal(estados[1].envio_recusado, undefined, JSON.stringify(estados[1]));
+  assert.doesNotMatch(r.parou, /recusado/);
+});
+
+test('o auxiliar recebe os valores atuais: data ja preenchida nao e reaberta', async () => {
+  const pedidos = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: async (verbo, args) => {
+      if (verbo === 'snapshot') return '- combobox "Data da avaliação" [ref=@e8] [collapsed] value="14/10/2026"\n- button "Gravar" [ref=@e2]';
+      if (verbo === 'url') return 'http://local/escala';
+      if (verbo === 'text') return 'Nova avaliação';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        return JSON.stringify({ valores: { 'Data da avaliação': '14/10/2026' }, obrigatorios_vazios: ['Convênio'] });
+      }
+      return 'ok';
+    },
+    perguntar: async () => resposta({ click: NENHUM }),
+    ajudar: async (p) => { pedidos.push(p); return '{"operacao":"NONE","ref":null,"motivo":"x"}'; },
+  });
+  assert.match(pedidos[0], /Data da avaliação[^\n]*14\/10\/2026/);
+  assert.match(pedidos[0], /Obrigatorios ainda vazios: Convênio/);
+});
+
+// Formulário com um campo numérico e o botão de envio; o aviso aparece depois de cada clique no envio.
+function formularioQueRecusa({ aviso, campo = 'Ordem', botao = 'Criar Tubo' }) {
+  const FORM = `- RootWebArea "Clinica Web"
+  - spinbutton "${campo}" [ref=@e2]
+  - button "${botao}" [ref=@e4]
+  - combobox "Convênio" [ref=@e5] [collapsed] value="PARTICULAR"`;
+  const executados = [];
+  let valor = '';
+  let avisos = [];
+  const executar = async (verbo, args) => {
+    executados.push([verbo, ...args].join(' ').slice(0, 80));
+    if (verbo === 'fill') { valor = args[1]; avisos = []; }
+    if (verbo === 'click' && args[0] === '@e4') avisos = [typeof aviso === 'function' ? aviso(valor) : aviso];
+    if (verbo === 'click' && args[0] !== '@e4') avisos = [];
+    if (verbo === 'snapshot') return FORM;
+    if (verbo === 'url') return 'http://local/tubo';
+    if (verbo === 'text') return 'Novo Tubo';
+    if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+      return JSON.stringify({ valores: { [campo]: valor }, obrigatorios_vazios: [], editaveis: [campo], avisos });
+    }
+    return 'ok';
+  };
+  return { executar, executados };
+}
+
+test('valor do modelo recusado pela pagina e reescrito sabendo o porque, nunca redigitado igual', async () => {
+  const { executar, executados } = formularioQueRecusa({ aviso: (v) => `Erro ao cadastrar tubo Já existe um tubo cadastrado com a ordem ${v}.` });
+  const pedidos = [];
+  const roteiro = ['TYPE_TEXT', 'CLICK', 'TYPE_TEXT', 'CLICK', 'TYPE_TEXT'];
+  let ciclo = 0;
+  await rodar({
+    objetivo: 'incluir em tubo_lab um novo registro de teste e salvar',
+    maxPassos: 5,
+    executar,
+    escreverTexto: async (p) => { pedidos.push(p); return String(pedidos.length); },
+    perguntar: async () => resposta({ op: roteiro[ciclo++], click: 'e4', campo: 'e2' }),
+  });
+  assert.deepEqual(executados.filter((l) => l.startsWith('fill')), ['fill @e2 1', 'fill @e2 2', 'fill @e2 3']);
+  assert.match(pedidos[1], /Já existe um tubo cadastrado com a ordem 1/);
+  assert.match(pedidos[1], /"Ordem":\["1"\]/);
+  // A terceira tentativa sabe das duas anteriores: não volta ao primeiro valor.
+  assert.match(pedidos[2], /"Ordem":\["1","2"\]/);
+});
+
+test('a mesma recusa depois da correcao para na hora, sem gastar os passos restantes', async () => {
+  const { executar, executados } = formularioQueRecusa({ aviso: 'Erro ao gravar rascunho Erro interno', campo: 'Tempo', botao: 'Gravar rascunho' });
+  const roteiro = ['CLICK:e4', 'CLICK:e5', 'CLICK:e4', 'CLICK:e5', 'CLICK:e4', 'CLICK:e5', 'CLICK:e4', 'CLICK:e5'];
+  let ciclo = 0;
+  const r = await rodar({
+    objetivo: 'incluir um registro de teste e salvar',
+    maxPassos: 8,
+    executar,
+    perguntar: async () => resposta({ click: roteiro[ciclo++].split(':')[1] }),
+  });
+  assert.equal(executados.filter((l) => l === 'click @e4').length, 3, executados.join('\n'));
+  assert.match(r.parou, /Erro interno.*o mesmo aviso voltou/);
+  assert.equal(r.sucesso, false);
+});
+
+test('busca generica que nao listou nada nao se repete: vem um termo de teste, e depois a lista fica de lado', async () => {
+  const executados = [];
+  let ciclo = 0;
+  const pedidos = [];
+  const r = await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 4,
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 60));
+      if (verbo === 'snapshot') return '- combobox "Item, serviço ou modelo" [ref=@e15] [collapsed]\n- button "Salvar" [ref=@e2]';
+      if (verbo === 'url') return 'http://local/prescricao';
+      if (verbo === 'text') return 'Nova prescrição';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        return JSON.stringify({ valores: { 'Item, serviço ou modelo': '' }, editaveis: ['Item, serviço ou modelo'] });
+      }
+      if (verbo === 'eval' && args[0].includes('role=option')) return 'ok: "opcoes: 0"';
+      return 'ok';
+    },
+    escreverTexto: async (p) => { pedidos.push(p); return /3 letras ou mais/.test(p) ? 'dipirona' : 'SEM_VALOR'; },
+    perguntar: async () => (ciclo++ < 2 ? resposta({ op: 'TYPE_TEXT', campo: 'e15' }) : resposta({ op: 'DONE' })),
+  });
+  assert.deepEqual(executados.filter((l) => l.startsWith('type ')), ['type a', 'type dipirona'], executados.join('\n'));
+  // A busca é esvaziada antes do termo: sem isso ficava "adipirona".
+  const limpeza = executados.findLastIndex((l) => l.startsWith('eval') && l.includes('activeElement'));
+  assert.ok(limpeza >= 0 && limpeza < executados.indexOf('type dipirona'), executados.join('\n'));
+  assert.equal(r.sucesso, true, r.parou);
+  // O termo também não listou nada: a lista fica de lado em vez de redigitar.
+  const depois = await valorDoCampo({ campo: { ref: 'e15', papel: 'combobox', nome: 'Item' }, escolha: null, cofre: {}, feito: [],
+    objetivo: 'incluir um novo registro de teste e salvar', escreverTexto: async () => 'SEM_VALOR', buscasSemOpcao: 2 });
+  assert.match(depois.pular ?? '', /deixei de lado/);
+});
+
+test('com a lista recem-aberta por cima, os outros campos nao vao junto no mesmo passo', async () => {
+  const executados = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 60));
+      if (verbo === 'snapshot') return '- textbox "Razão Social" [ref=@e2]\n- combobox "Conta do Balancete" [ref=@e13] [collapsed]';
+      if (verbo === 'url') return 'http://local/fornecedor';
+      if (verbo === 'text') return 'Fornecedor';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        return JSON.stringify({ valores: { 'Razão Social': '', 'Conta do Balancete': 'Selecione' }, editaveis: ['Razão Social', 'Conta do Balancete'] });
+      }
+      if (verbo === 'eval' && args[0].includes('role=option')) return 'ok: "opcoes: 50"';
+      return 'ok';
+    },
+    escreverTexto: async () => '{"Conta do Balancete":"SEM_VALOR","Razão Social":"Fornecedor Teste Ltda"}',
+    perguntar: async () => resposta({ op: 'TYPE_TEXT', campo: 'e13' }),
+  });
+  assert.ok(executados.includes('type a'), executados.join('\n'));
+  assert.ok(!executados.some((l) => l.startsWith('fill')), executados.join('\n'));
+});
+
+test('campo coberto por rodape fixo: centraliza e preenche de novo, sem parar o laco', async () => {
+  const executados = [];
+  let fills = 0;
+  const r = await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    dados: { nome: 'VT * 0,2' },
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 40));
+      if (verbo === 'snapshot') return '- textbox "Fórmula para Pediatra" [ref=@e9]\n- button "Criar Fórmula" [ref=@e11]';
+      if (verbo === 'url') return 'http://local/formula';
+      if (verbo === 'text') return 'Nova Fórmula';
+      if (verbo === 'fill' && fills++ === 0) return 'erro: fill @e9: o clique nao deixou um campo de texto com foco (foco em div) — a ref e mesmo um campo? rode snapshot';
+      if (verbo === 'eval' && args[0].includes('scrollIntoView')) return 'ok: "centralizado"';
+      return 'ok';
+    },
+    perguntar: async () => ({ ...resposta({ op: 'TYPE_TEXT', campo: 'e9' }), [cabecaDoValor('e9')]: { choice: 'nome', confidence: 0.9 } }),
+  });
+  assert.equal(fills, 2, executados.join('\n'));
+  assert.doesNotMatch(r.parou, /navegador falhou/);
+});
+
+test('registro de teste: o texto de dados nao vai para a busca da lista, mesmo casado pelo Jev', async () => {
+  const executados = [];
+  let ciclo = 0;
+  await rodar({
+    objetivo: 'incluir em sae_guiada um novo registro de teste preenchendo os campos obrigatorios e salvar',
+    dados: { texto: 'TESTE AUTO E2E' },
+    maxPassos: 2,
+    executar: navegador(executados, `- RootWebArea "Clinica Web"
+  - searchbox "Buscar achado ou evidência" [ref=@e12]
+  - button "Próximo" [ref=@e25]`),
+    perguntar: async () => (ciclo++ === 0
+      ? { ...resposta({ op: 'TYPE_TEXT', campo: 'e12' }), [cabecaDoValor('e12')]: { choice: 'texto', confidence: 0.95 } }
+      : resposta({ op: 'DONE' })),
+  });
+  assert.ok(!executados.some((l) => l.startsWith('fill')), executados.join('\n'));
+});
+
+test('radio que segue desmarcado depois do clique foi coberto: centraliza e clica de novo', async () => {
+  const executados = [];
+  let cliques = 0;
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 40));
+      if (verbo === 'click') cliques += 1;
+      // O primeiro clique cai no cabeçalho fixo; só o segundo, com o rádio no centro, marca.
+      if (verbo === 'snapshot') return `- radio "Orientação (1 ponto)" [ref=@e21] [${cliques >= 2 ? 'checked' : 'unchecked'}]\n- button "Gravar" [ref=@e2]`;
+      if (verbo === 'url') return 'http://local/escala';
+      if (verbo === 'text') return 'Nova aferição';
+      if (verbo === 'eval' && args[0].includes('scrollIntoView')) return 'ok: "centralizado"';
+      return 'ok';
+    },
+    perguntar: async () => resposta({ click: 'e21' }),
+  });
+  assert.equal(cliques, 2, executados.join('\n'));
+});
+
+test('clique do auxiliar num campo de digitar vazio vira digitacao, nao um clique que nada muda', async () => {
+  const executados = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: async (verbo, args) => {
+      executados.push([verbo, ...args].join(' ').slice(0, 40));
+      if (verbo === 'snapshot') return '- combobox "Item, serviço ou modelo" [ref=@e15] [collapsed]\n- button "Salvar" [ref=@e2]';
+      if (verbo === 'url') return 'http://local/prescricao';
+      if (verbo === 'text') return 'Nova prescrição';
+      if (verbo === 'eval' && args[0].includes('obrigatorios_vazios')) {
+        return JSON.stringify({ valores: { 'Item, serviço ou modelo': '' }, editaveis: ['Item, serviço ou modelo'] });
+      }
+      return 'ok';
+    },
+    escreverTexto: async () => 'SEM_VALOR',
+    perguntar: async () => resposta({ click: NENHUM }),
+    ajudar: async () => '{"operacao":"CLICK","ref":"e15","motivo":"abrir a busca"}',
+  });
+  assert.ok(executados.includes('type a'), executados.join('\n'));
+});
+
+test('sem alvo com controles desabilitados na tela: espera a carga terminar antes de desistir', async () => {
+  const executados = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: navegador(executados, `- RootWebArea "Clinica Web"
+  - tab "Eventos adversos" [ref=@e2] [selected]
+  - button "Evento adverso" [ref=@e12] [disabled]`),
+    perguntar: async () => resposta({ click: NENHUM }),
+  });
+  assert.ok(executados.includes('wait --idle --timeout 5000'), executados.join('\n'));
+});
