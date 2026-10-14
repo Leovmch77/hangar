@@ -44,7 +44,6 @@ _TASK_RE = re.compile(r"^### (Task\b[^\n]*)$", re.M)
 # isto, um plano recem-escrito ja nasce com "3/47 feitos" e acende a barra antes de comecar
 # (medido no proprio plano deste trabalho: 47 casados vs 42 reais, 3 "marcados" vs 0).
 _FENCE_RE = re.compile(r"^(```|~~~).*?^\1[^\n]*$", re.M | re.S)
-_MANUAL_RE = re.compile(r"verifica(?:ção|cao|r)\s+manual|manual\s+verification", re.I)
 _DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
 
 
@@ -52,11 +51,6 @@ _DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
 class StepProgress:
     title: str
     done: bool
-    manual: bool
-    # Posicao 0-based na ordem do DOCUMENTO (nao dentro da Task). E a chave que o cliente devolve
-    # pra marcar/desmarcar: titulo repete entre Tasks e o par (task, step) exigiria refazer o
-    # recorte de Task no caminho de escrita.
-    idx: int
 
 
 @dataclass(frozen=True)
@@ -118,7 +112,7 @@ def _pin_path(root: str) -> str:
     return os.path.join(root, "." + PIN_FILE)
 
 
-def is_safe_stem(v: str) -> bool:
+def _is_safe_stem(v: str) -> bool:
     """Guarda anti-traversal: o valor vira nome de arquivo. So o stem, sem separador. Vale pra
     TODA entrada de stem — a do disco (read_pin) e a que vem do cliente (endpoint do pin)."""
     return bool(v) and "/" not in v and "\\" not in v and v not in (".", "..")
@@ -137,7 +131,7 @@ def read_pin(root: str) -> str | None:
         v = Path(_pin_path(root)).read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return None
-    if not is_safe_stem(v):
+    if not _is_safe_stem(v):
         return None
     if v == PIN_NONE:
         return v      # sentinela: nao tem arquivo pra conferir
@@ -212,8 +206,8 @@ def parse_plan(path: str, require_started: bool = True) -> PlanProgress | None:
             title=title,
             done=sum(1 for _, ok, _, _ in mine if ok),
             total=len(mine),
-            steps=tuple(StepProgress(title=t, done=ok, manual=bool(_MANUAL_RE.search(t)), idx=i)
-                        for _, ok, t, i in mine),
+            steps=tuple(StepProgress(title=t, done=ok)
+                        for _, ok, t, _ in mine),
         ))
 
     # ORDINAL, nao o N do heading: existe "### Task 0" nos planos (pi-adapter), e "Task 0/6" no chip

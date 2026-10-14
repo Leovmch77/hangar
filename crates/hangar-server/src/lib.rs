@@ -45,6 +45,7 @@ pub mod workspace_routes;
 pub mod uploads;
 pub mod voice;
 pub mod plans;
+mod forwarded;
 pub mod worktree_routes;
 mod warn_limit;
 

@@ -63,8 +63,6 @@ def test_parcial_e_ignora_fence(tmp_path):
     assert r.complete is False
     assert r.tasks[0].title == "Task 0: Medir o que o resto assume"
     assert (r.tasks[0].done, r.tasks[0].total) == (2, 2)
-    assert r.tasks[1].steps[2].manual is True
-    assert r.tasks[1].steps[0].manual is False
 
 
 def test_step_orfao_antes_da_1a_task_vira_task_implicita(tmp_path):

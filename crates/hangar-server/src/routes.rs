@@ -242,7 +242,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/transcription/{operation}", axum::routing::post(crate::transcription::routes::private))
         .route("/__hangar_server/dictation/{operation}", axum::routing::post(crate::dictation::routes::private))
         .route("/__hangar_server/claude/customizations", axum::routing::post(crate::claude_customizations::private))
-        .route("/__hangar_server/forwarded", axum::routing::any(crate::plans::routes::forwarded))
+        .route("/__hangar_server/forwarded", axum::routing::any(crate::forwarded::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/accounts", axum::routing::post(crate::accounts::http::private))
         .route("/__hangar_server/uploads/{name}", axum::routing::any(crate::uploads::http::private))
@@ -369,6 +369,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::groups::routes::router())
         // Planos e catálogo de plugins e skills: o dono no Rust; o resto segue ao Python.
         .merge(crate::plans::routes::router())
+        .route("/api/claude/customizations", get(crate::claude_customizations::catalog_route).fallback(pass_any))
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state)

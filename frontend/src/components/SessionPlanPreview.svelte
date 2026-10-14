@@ -1,7 +1,7 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
-  import { getSessionPlanPreview, planTitle, type SessionPlanPreview } from '@hangar/core';
+  import { getSessionPlanPreview, planHeading, type SessionPlanPreview } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
   import BottomSheet from './BottomSheet.svelte';
 
@@ -54,8 +54,9 @@
   const discoveryErrorAtual = $derived(discoveryControlada ? discoveryError : discoveryErrorInterno);
   const metadataModal = $derived(modalMetadata ?? metadataAtual);
   const titleText = $derived(codexPlan ?? (markdown || metadataModal?.markdown || ''));
-  const title = $derived(planTitle(titleText) ?? m.chat_plan_proposto());
-  const html = $derived(renderMarkdown(semTituloRepetido(markdown, title), { joinWrapped: true }));
+  const title = $derived(planHeading(titleText).title ?? m.chat_plan_proposto());
+  // O título vai no cabeçalho: no topo do texto ele sairia repetido.
+  const html = $derived(renderMarkdown(planHeading(markdown).body, { joinWrapped: true }));
 
   // Plano esperando a decisão: aberto acima das opções, porque escolher sem ler era o problema.
   // Sem terminal o texto vem no estado; com terminal ele é buscado pela prévia. Só no celular: a
@@ -67,16 +68,16 @@
   let inlineRetry = $state(0);
   let inlineKey = '';
   let inlineGeneration = 0;
-  const inlineTexto = $derived(aprovacaoPendente && codexPlan ? codexPlan : inlineMarkdown);
-  const inlineTitulo = $derived(planTitle(inlineTexto) ?? metadataAtual?.name ?? m.chat_plan_proposto());
-  // O título já está no cabeçalho do cartão: o `# título` do topo do texto sairia repetido.
-  const inlineHtml = $derived(renderMarkdown(semTituloRepetido(inlineTexto, inlineTitulo), { joinWrapped: true }));
+  const inlineTexto = $derived(codexPlan ?? inlineMarkdown);
+  const inlineCabecalho = $derived(planHeading(inlineTexto));
+  const inlineTitulo = $derived(inlineCabecalho.title ?? metadataAtual?.name ?? m.chat_plan_proposto());
+  const inlineHtml = $derived(renderMarkdown(inlineCabecalho.body, { joinWrapped: true }));
   const inlineCaminho = $derived(metadataAtual?.path ?? caminho ?? null);
   let corpo = $state<HTMLElement | null>(null);
   let temMais = $state(false);
 
   $effect(() => {
-    if (!emAprovacao || (aprovacaoPendente && codexPlan)) return;
+    if (!emAprovacao || codexPlan) return;
     const key = `${serverId}\0${sessionName}\0${metadataAtual?.path ?? ''}\0${inlineRetry}`;
     if (key === inlineKey) return;
     inlineKey = key;
@@ -95,38 +96,20 @@
     });
   });
 
-  function semTituloRepetido(texto: string, titulo: string): string {
-    const linhas = texto.split(/\r?\n/);
-    const primeira = linhas.findIndex((linha) => linha.trim() !== '');
-    const cabecalho = primeira >= 0 ? linhas[primeira].match(/^ {0,3}#\s+(.*?)\s*#*\s*$/) : null;
-    if (!cabecalho || cabecalho[1] !== titulo) return texto;
-    return linhas.slice(primeira + 1).join('\n');
-  }
-
   // Esmaece o pé do texto enquanto houver mais plano abaixo da dobra.
   function medir() {
     if (!corpo) return;
     temMais = corpo.scrollHeight - corpo.scrollTop - corpo.clientHeight > 4;
   }
   $effect(() => {
-    void inlineHtml;
     if (!corpo) return;
+    void inlineHtml;
     medir();
     const observador = new ResizeObserver(medir);
     observador.observe(corpo);
     return () => observador.disconnect();
   });
 
-  function telaCheia() {
-    if (inlineTexto) {
-      generation++;
-      error = '';
-      loading = false;
-      modalMetadata = metadataAtual ?? null;
-      markdown = inlineTexto;
-      open = true;
-    } else void show();
-  }
 
   $effect(() => {
     const name = sessionName;
@@ -183,7 +166,9 @@
     try {
       // Sem arquivo descoberto o plano É o texto da resposta (Codex, Claude sem terminal sem
       // arquivo): nada a buscar no servidor.
-      if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
+      // Plano aberto na aprovação já está em mãos: a tela cheia mostra o mesmo texto.
+      if (emAprovacao && inlineTexto) markdown = inlineTexto;
+      else if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
       else {
         const result = await getSessionPlanPreview(sessionName, true, sessionServer()) as ClaudePlanPreview | null;
         if (request !== generation) return;
@@ -219,7 +204,7 @@
         <h3>{inlineTitulo}</h3>
         <p>{m.chat_plan_aprovar_dica()}</p>
       </div>
-      <button class="icon-btn" onclick={telaCheia} aria-label={m.chat_plan_tela_cheia()} title={m.chat_plan_tela_cheia()}>
+      <button class="icon-btn" onclick={show} aria-label={m.chat_plan_tela_cheia()} title={m.chat_plan_tela_cheia()}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
     </header>

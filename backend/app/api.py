@@ -630,68 +630,60 @@ async def _grupos_indisponiveis(request: Request, exc: Exception):
     return JSONResponse(status_code=503, content={"detail": _group_unavailable(code).detail})
 
 
-@app.middleware("http")
-async def _contas_pelo_rust(request: Request, call_next):
-    """Contas e cotas têm um dono só, o Rust: Connect e convidado chegam aqui e o pedido
-    autenticado segue para ele pela ponte privada, e a resposta dele volta como veio. Sem o Rust
-    não há reserva Python: a rota responde indisponível."""
+async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str):
+    """Pedido de uma rota que só o Rust atende, chegado por uma porta do Python (Connect,
+    convidado): autenticado aqui, ele segue pela ponte privada e a resposta volta como veio. Sem o
+    Rust não há reserva Python: a rota responde indisponível, com o código de `sem_rust`."""
     from app import account_bridge
-    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
-        return await call_next(request)
     try:
         require_auth(request)
     except HTTPException as error:
         return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
     if account_bridge.owner_mode() == "python":
-        return JSONResponse({"detail": account_bridge.NEED_RUST}, status_code=503)
-    return await account_bridge.forward_public(request)
+        return JSONResponse({"detail": sem_rust}, status_code=503)
+    return await account_bridge.forward_public(request, destino)
+
+
+@app.middleware("http")
+async def _contas_pelo_rust(request: Request, call_next):
+    """Contas e cotas têm um dono só, o Rust."""
+    from app import account_bridge
+    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
+        return await call_next(request)
+    return await _repasse_ao_rust(request, account_bridge.NEED_RUST, "/__hangar_server/accounts/public")
 
 
 @app.middleware("http")
 async def _jev_aux_pelo_rust(request: Request, call_next):
-    """A busca de modelos do Jev é do Rust: o dono que entra pela porta do Python (Connect) segue para
-    ele pela ponte; sem o Rust, o erro diz isso em vez de um 404 que a tela leria como servidor antigo."""
+    """A busca de modelos do Jev é do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
+    leria como servidor antigo."""
     if not request.url.path.startswith("/api/jev/aux/"):
         return await call_next(request)
-    try:
-        require_auth(request)
-    except HTTPException as error:
-        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
-    from app import account_bridge
-    if account_bridge.owner_mode() == "python":
-        return JSONResponse({"detail": erro("erro_jev_aux_precisa_rust",
-                                            "o servidor está sem o processo Rust; reinicie o Hangar")}, status_code=503)
-    return await account_bridge.forward_public(request, "/__hangar_server/jev/aux")
+    return await _repasse_ao_rust(request, erro("erro_jev_aux_precisa_rust", "o servidor está sem o processo Rust; reinicie o Hangar"),
+                                  "/__hangar_server/jev/aux")
 
 
-# Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`).
-_PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$|^/api/claude/customizations$")
+# Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
+_PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$")
 _PLANOS_ESCRITA = re.compile(r"^/api/sessions/[^/]+/plan-(pin|step|archive)$")
+_CATALOGO = "/api/claude/customizations"
 
 
 @app.middleware("http")
 async def _planos_pelo_rust(request: Request, call_next):
-    """Convidado e Connect chegam aqui (o `ShareGate` já filtrou o convidado) e seguem para o Rust
-    pela ponte privada. Sem o Rust não há reserva Python: a rota responde indisponível."""
-    path = request.url.path
-    padrao = _PLANOS_ESCRITA if request.method == "POST" else _PLANOS_LEITURA if request.method == "GET" else None
+    """Os porteiros do convidado rodam por fora deste middleware; aqui só o catálogo, que é do
+    dono, recusa o convidado."""
+    path, metodo = request.url.path, request.method
+    if metodo == "GET" and path == _CATALOGO:
+        if guest_of(request) is not None or guest_users.current.get() is not None:
+            return JSONResponse({"detail": erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono")}, status_code=403)
+        return await _repasse_ao_rust(request, erro("claude_customizations_unavailable", "a seleção de plugins e skills precisa do servidor Rust"),
+                                      "/__hangar_server/forwarded")
+    padrao = _PLANOS_ESCRITA if metodo == "POST" else _PLANOS_LEITURA if metodo == "GET" else None
     if padrao is None or not padrao.match(path):
         return await call_next(request)
-    try:
-        require_auth(request)
-    except HTTPException as error:
-        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
-    catalogo = path == "/api/claude/customizations"
-    if catalogo and (guest_of(request) is not None or guest_users.current.get() is not None):
-        return JSONResponse({"detail": erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono")}, status_code=403)
-    from app import account_bridge
-    if account_bridge.owner_mode() == "python":
-        if catalogo:
-            detail = erro("claude_customizations_unavailable", "a seleção de plugins e skills precisa do servidor Rust")
-        else:
-            detail = erro("erro_planos_precisa_rust", "os planos precisam do servidor Rust, que não está rodando")
-        return JSONResponse({"detail": detail}, status_code=503)
-    return await account_bridge.forward_public(request, "/__hangar_server/forwarded")
+    return await _repasse_ao_rust(request, erro("erro_planos_precisa_rust", "os planos precisam do servidor Rust, que não está rodando"),
+                                  "/__hangar_server/forwarded")
 
 
 @app.middleware("http")

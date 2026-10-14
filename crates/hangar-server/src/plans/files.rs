@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::list::plan::{blank_fences, pin_path, read_pin, safe_stem, STEP_RE};
 
@@ -21,7 +20,6 @@ impl From<std::io::Error> for WriteError {
 /// Serializa o ler-alterar-gravar: celular e desktop marcando na mesma sessão liam o mesmo texto
 /// e o segundo regravava por cima do primeiro. A seção crítica é ler um `.md` e trocar um byte.
 static WRITE: Mutex<()> = Mutex::new(());
-static TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// Fixa o plano da pasta, ou solta com `None`.
 pub fn write_pin(root: &Path, stem: Option<&str>) -> Result<(), WriteError> {
@@ -65,7 +63,8 @@ pub fn mark_step(path: &Path, idx: i64, done: bool) -> Result<(), WriteError> {
     }
     let mut updated = raw;
     updated[pos] = if done { b'x' } else { b' ' };
-    let temp = PathBuf::from(format!("{}.{}.{}.tmp", path.display(), std::process::id(), TEMP.fetch_add(1, Ordering::Relaxed)));
+    // Um temporário por vez neste processo (a trava acima); o pid separa os processos.
+    let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
     let written = fs::write(&temp, &updated).and_then(|()| crate::runtime::queue::replace(&temp, path));
     if written.is_err() {
         let _ = fs::remove_file(&temp);

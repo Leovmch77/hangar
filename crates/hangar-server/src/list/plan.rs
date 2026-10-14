@@ -7,7 +7,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hangar_api::session::SessionRow;
@@ -36,7 +36,7 @@ static MANUAL_RE: LazyLock<regex::Regex> =
 static DATE_PREFIX_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d{2}-\d{2}-").unwrap());
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct StepProgress {
     pub title: String,
     pub done: bool,
@@ -46,7 +46,7 @@ pub struct StepProgress {
     pub idx: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct TaskProgress {
     pub title: String,
     pub done: u32,
@@ -70,7 +70,8 @@ pub struct Plan {
 #[derive(Default)]
 pub struct PlanTracker {
     /// (arquivo, exige começado) → (mtime, plano). O `None` memoriza "li e não serve".
-    files: Capped<(PathBuf, bool), (SystemTime, Option<Plan>)>,
+    /// `Arc`: a decoração lê o plano a cada rodada e só usa os números; cópia seria dos títulos todos.
+    files: Capped<(PathBuf, bool), (SystemTime, Option<Arc<Plan>>)>,
     /// pasta de planos → (relógio monotônico, eleito).
     discovery: Capped<PathBuf, (f64, Option<PathBuf>)>,
     /// Eleito anterior: mantém o posto enquanto tiver step pendente.
@@ -79,7 +80,7 @@ pub struct PlanTracker {
 
 impl PlanTracker {
     /// `plan_progress`: o plano que o painel mostra para o cwd, o mesmo eleito da lista.
-    pub fn active(&mut self, cwd: &Path, wall: f64, mono: f64) -> Option<Plan> {
+    pub fn active(&mut self, cwd: &Path, wall: f64, mono: f64) -> Option<Arc<Plan>> {
         let root = plans_dir(cwd)?;
         let pin = read_pin(&root);
         if pin.as_deref() == Some(PIN_NONE) {
@@ -105,7 +106,8 @@ impl PlanTracker {
             let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let Some(stem) = file.strip_suffix(".md") else { continue };
             let got = match fs::metadata(&path) {
-                Ok(meta) if meta.is_file() => meta.modified().and_then(|m| self.load(&path, m, true)),
+                // A variante do pin conta também o plano não começado, e fica no cache.
+                Ok(meta) if meta.is_file() => meta.modified().and_then(|m| self.load(&path, m, false)),
                 Ok(_) => continue,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => Err(e),
@@ -118,12 +120,11 @@ impl PlanTracker {
                     continue;
                 }
             };
-            let total = got.as_ref().map_or_else(|| count_steps(&path), |p| p.total);
             items.push(serde_json::json!({
                 "stem": stem,
                 "name": DATE_PREFIX_RE.replace(stem, ""),
                 "done": got.as_ref().map_or(0, |p| p.done),
-                "total": total,
+                "total": got.as_ref().map_or(0, |p| p.total),
                 "complete": got.as_ref().is_some_and(|p| p.complete),
             }));
         }
@@ -151,7 +152,7 @@ impl PlanTracker {
             return;
         }
         let Some(p) = self.progress(&root, pin.as_deref(), wall, mono) else { return };
-        row.plan_name = Some(p.name);
+        row.plan_name = Some(p.name.clone());
         row.plan_task = Some(p.task_idx);
         row.plan_task_total = Some(p.task_total);
         row.plan_done = Some(p.done);
@@ -160,7 +161,7 @@ impl PlanTracker {
         row.plan_tasks = Some(p.tasks.iter().take(MAX_TASK_SEGMENTS).map(|t| (t.done, t.total)).collect());
     }
 
-    fn progress(&mut self, root: &Path, pin: Option<&str>, wall: f64, mono: f64) -> Option<Plan> {
+    fn progress(&mut self, root: &Path, pin: Option<&str>, wall: f64, mono: f64) -> Option<Arc<Plan>> {
         // Pin vence a eleição só enquanto tiver step pendente; completo, volta ao automático.
         if let Some(stem) = pin {
             let path = root.join(format!("{stem}.md"));
@@ -197,7 +198,7 @@ impl PlanTracker {
         }
     }
 
-    fn load(&mut self, path: &Path, mtime: SystemTime, require_started: bool) -> io::Result<Option<Plan>> {
+    fn load(&mut self, path: &Path, mtime: SystemTime, require_started: bool) -> io::Result<Option<Arc<Plan>>> {
         // A chave leva o require_started: o mesmo arquivo dá None na eleição e plano pelo pin.
         let key = (path.to_path_buf(), require_started);
         if let Some((m, p)) = self.files.get(&key) {
@@ -205,7 +206,7 @@ impl PlanTracker {
                 return Ok(p.clone());
             }
         }
-        let got = parse(&fs::read(path)?, path, require_started);
+        let got = parse(&fs::read(path)?, path, require_started).map(Arc::new);
         self.files.insert(key, (mtime, got.clone()));
         Ok(got)
     }
@@ -422,15 +423,6 @@ fn parse(raw: &[u8], path: &Path, require_started: bool) -> Option<Plan> {
     })
 }
 
-/// Total de steps de um plano que a eleição descartou (nenhum marcado): o seletor mostra "0/28",
-/// não "0/0". Ilegível conta zero, como o Python.
-fn count_steps(path: &Path) -> u32 {
-    let Ok(raw) = fs::read(path) else { return 0 };
-    let mut text = String::from_utf8_lossy(&raw).into_owned().into_bytes();
-    blank_fences(&mut text);
-    STEP_RE.find_iter(&text).count() as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,7 +575,7 @@ mod tests {
         aged(&plans, "2026-07-02-nao-comecado.md", "- [ ] **Step 1: a**\n", 20.0);
         aged(&plans, "2026-07-03-completo.md", "- [x] **Step 1: a**\n", 30.0);
         let pin = repo.join(".git").join(PIN_FILE);
-        let elected = |mono: f64| PlanTracker::default().active(&repo, now(), mono).map(|p| p.name);
+        let elected = |mono: f64| PlanTracker::default().active(&repo, now(), mono).map(|p| p.name.clone());
         fs::write(&pin, "2026-07-02-nao-comecado\n").unwrap();
         assert_eq!(elected(1.0).as_deref(), Some("nao-comecado"));
         fs::write(&pin, "2026-07-03-completo\n").unwrap();

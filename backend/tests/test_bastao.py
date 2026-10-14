@@ -892,8 +892,8 @@ def test_sem_plano_citado_ignora_o_plano_da_barra(tmp_path, monkeypatch):
     from app.planprog import PlanProgress, TaskProgress, StepProgress
     prog = PlanProgress(name="x", path="/p/x.md", task_idx=1, task_total=1, done=1, total=2, complete=False,
                         tasks=(TaskProgress(title="Task 1: A", done=1, total=2,
-                                            steps=(StepProgress("Step 1: a", True, False, 0),
-                                                   StepProgress("Step 2: b", False, False, 1))),))
+                                            steps=(StepProgress("Step 1: a", True),
+                                                   StepProgress("Step 2: b", False))),))
     monkeypatch.setattr(planprog, "plan_progress", lambda cwd: prog)
     bloco = _bloco(bastao.montar(str(FIX / "jsonl_samples.jsonl"), str(tmp_path), "claude", "s"), "O que falta")
     assert "Plano" not in bloco and "Step 2: b" not in bloco

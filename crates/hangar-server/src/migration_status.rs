@@ -171,7 +171,8 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         | ("DELETE", Some("pair")) | ("GET", Some("pair/contract"))) {
         return true;
     }
-    crate::plans::routes::matches(method, path) || crate::workspace_routes::matches(method, path)
+    (*method == Method::GET && path == crate::claude_customizations::CATALOG_PATH)
+        || crate::plans::routes::matches(method, path) || crate::workspace_routes::matches(method, path)
         || crate::worktree_routes::matches(method, path)
 }
 

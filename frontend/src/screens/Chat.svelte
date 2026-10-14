@@ -25,7 +25,7 @@
   import TerminalMobile from '../components/TerminalMobile.svelte';
   import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
-  import { proposedPlan } from '@hangar/core';
+  import { pendingExitPlanMode, proposedPlan } from '@hangar/core';
   import { implementCodexPlan as requestCodexPlanImplementation } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
@@ -1419,20 +1419,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
     return null;
   });
-  // Com terminal o diálogo do ExitPlanMode só existe no pane: a aprovação pendente é a chamada dele
-  // neste turno, ainda sem resultado. A âncora da descoberta pode ser o Write do arquivo do plano, e
-  // outra pergunta depois de um plano gravado não conta.
-  const terminalPlanoPendente = $derived.by(() => {
-    if (sessionHeadless || sessionProvider !== 'claude' || currentState !== 'awaiting_input' || !planAnchorId) return false;
-    for (let i = events.length - 1; i >= 0; i--) {
-      const event = events[i];
-      if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return false;
-      if (event.kind === 'tool_use' && event.tool_name === 'ExitPlanMode') {
-        return !events.slice(i + 1).some((later) => later.kind === 'tool_result' && later.tool_use_id === event.tool_use_id);
-      }
-    }
-    return false;
-  });
+  // Enquanto o estado com terminal não traz o `claude_plan_pending`, a aprovação pendente sai dos
+  // eventos do turno; outra pergunta depois de um plano gravado não conta.
+  const terminalPlanoPendente = $derived(!sessionHeadless && sessionProvider === 'claude'
+    && currentState === 'awaiting_input' && !!planAnchorId && pendingExitPlanMode(events));
   const planControls = $derived((sessionProvider === 'claude' || planAnchorId) ? {
     eventId: planAnchorId,
     serverId: chatServerId,

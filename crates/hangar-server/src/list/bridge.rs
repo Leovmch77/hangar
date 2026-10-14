@@ -425,6 +425,22 @@ impl ListBridge {
     /// Depois de gravar pin ou mover plano: a pasta é redescoberta, sem esperar a rodada em curso.
     pub fn forget_plans(&self, root: PathBuf) { self.caches.plans.apply(move |t| t.forget_root(&root)) }
 
+    /// A linha da sessão pelo retrato e, faltando o nome (sessão criada agora, o retrato tem até 2 s),
+    /// por uma rodada nova. Sem os fatos do Python as linhas de transferência e `orq` faltam: aí a
+    /// ausência não prova nada e volta `list_facts_unknown`.
+    pub async fn find_row(&self, name: &str) -> Result<Option<SessionRow>, ListError> {
+        let found = |rows: &[SessionRow]| rows.iter().find(|r| r.name == name).cloned();
+        if let Some(row) = found(&self.snapshot().await?.rows) {
+            return Ok(Some(row));
+        }
+        let produced = self.refresh().await?;
+        match found(&produced.rows) {
+            Some(row) => Ok(Some(row)),
+            None if produced.facts.unknown => Err(fail("list_facts_unknown", "fatos da lista indisponíveis")),
+            None => Ok(None),
+        }
+    }
+
     /// `registry.list()`. `newer_than` (época em s) é a sessão criada há menos de 1 s: só vale uma
     /// descoberta que começou depois disso, com o mapa de processos relido.
     pub async fn discover(&self, newer_than: Option<f64>) -> Result<Arc<Vec<SessionRow>>, ListError> {
