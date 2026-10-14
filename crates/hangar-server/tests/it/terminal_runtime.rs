@@ -162,17 +162,8 @@ impl Fixture {
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
-    /// Lê o estado que o ator grava por troca atômica. No Windows quem abre o arquivo no instante da troca
-    /// recebe NotFound ou acesso negado; a leitura seguinte já vê o arquivo novo.
     fn state(&self)->Value {
-        let deadline=std::time::Instant::now()+Duration::from_secs(1);
-        loop {
-            match std::fs::read(&self.target.state_path) {
-                Ok(bytes) => return serde_json::from_slice(&bytes).unwrap(),
-                Err(error) if cfg!(windows) && matches!(error.kind(),std::io::ErrorKind::NotFound|std::io::ErrorKind::PermissionDenied) && std::time::Instant::now()<deadline => std::thread::yield_now(),
-                Err(error) => panic!("estado ilegível: {error}"),
-            }
-        }
+        serde_json::from_slice(&queue::read_replaced(&self.target.state_path).unwrap_or_else(|error|panic!("estado ilegível: {error}"))).unwrap()
     }
     /// Espera com prazo; no estouro mostra onde a operação parou (política, multiplexador e diário).
     /// O teto cobre o runner Windows, onde cada leitura de fatos grava o diário durável em ~0,1–0,3 s.
@@ -233,7 +224,9 @@ elif mode=='send-keys' and '-l' in sys.argv:
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
         limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
-    let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
+    // Teto só contra travamento: o fluxo parte o multiplexador falso umas 16 vezes, e cada partida do
+    // Python demora muito mais com a máquina carregada.
+    let result=tokio::time::timeout(Duration::from_secs(30),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
     h.stop().await.unwrap();let python_lease=crate::lease_when_free(&f.target.lease_path);
     let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
@@ -1725,7 +1718,7 @@ async fn each_mods_hold_checks_the_pane_again() {
 }
 
 fn projection(f:&Fixture)->Vec<Value> {
-    std::fs::read_to_string(f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
+    queue::read_replaced_to_string(&f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
 }
 
 #[tokio::test]

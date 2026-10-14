@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { proposedPlan, planDisplayText, planTitle, pendingProposedPlan, pendingReplyPlan, planChoiceKey } from './proposedPlan';
+import { proposedPlan, planDisplayText, planTitle, planHeading, pendingProposedPlan, pendingReplyPlan, planChoiceKey } from './proposedPlan';
 import type { ChatEvent } from './types';
 
 describe('plano à espera de decisão', () => {
@@ -63,5 +63,16 @@ describe('planChoiceKey', () => {
     expect(planChoiceKey('No, keep planning')).toBe('keep');
     expect(planChoiceKey('Yes, and use auto mode')).toBe('auto_mode');
     expect(planChoiceKey('Outra coisa')).toBeNull();
+  });
+});
+
+describe('planHeading', () => {
+  it('tira do corpo o mesmo título que o planTitle acha, em qualquer forma', () => {
+    expect(planHeading('# Migrar\n\nTexto')).toEqual({ title: 'Migrar', body: '\nTexto' });
+    expect(planHeading('\n## Passo a passo ##\nTexto')).toEqual({ title: 'Passo a passo', body: '\nTexto' });
+    expect(planHeading('Plano setext\n====\nTexto')).toEqual({ title: 'Plano setext', body: 'Texto' });
+    expect(planHeading('```md\n# exemplo\n```\n# Real\nTexto')).toEqual({ title: 'Real', body: '```md\n# exemplo\n```\nTexto' });
+    expect(planHeading('só texto')).toEqual({ title: null, body: 'só texto' });
+    expect(planTitle('Plano setext\n====\nTexto')).toBe('Plano setext');
   });
 });

@@ -145,8 +145,15 @@ async fn facts_down_marks_rows_not_list() {
     let ok: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
     assert_eq!(ok[0]["problema"], Value::Null);
     *srv.python.list_facts.lock().unwrap() = (json!({"quebrado": true}), Duration::ZERO);
-    let marked: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
-    assert_eq!(marked[0]["problema"], "list_facts_unavailable");
+    // Uma rodada que buscou os fatos antes da quebra ainda pode publicar: o que vale é a marca chegar
+    // sem a lista sumir no caminho.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
+            assert_eq!(names(&rows), ["s0"], "a lista continua servida");
+            if rows[0]["problema"] == "list_facts_unavailable" { break; }
+        }
+    }).await.expect("a linha não foi marcada com os fatos fora");
 }
 
 struct Runtime(BTreeMap<String, Value>);

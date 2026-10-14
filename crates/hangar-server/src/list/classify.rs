@@ -545,7 +545,7 @@ pub struct MuxCapture {
 }
 
 /// Uma origem por processo: os caches do `Classifier` atravessam rodadas e instâncias de captura.
-fn process_start() -> std::time::Instant {
+pub(crate) fn process_start() -> std::time::Instant {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *START.get_or_init(std::time::Instant::now)
 }

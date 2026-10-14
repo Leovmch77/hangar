@@ -248,14 +248,38 @@ pub fn refusal(error: &io::Error) -> Option<&'static str> {
     error.get_ref().and_then(|inner|inner.downcast_ref::<QueueRefusal>()).map(|refusal|refusal.0)
 }
 
-pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
+/// A trava solta por um dono que acabou de sair pode demorar (as tarefas de E/S dele, o `LockFileEx`
+/// do Windows). Só "ocupada" espera, até `limit` pelo relógio: contar voltas estendia o prazo quando
+/// cada tentativa demorava.
+pub fn acquire_lease_within(path: &Path, limit: std::time::Duration) -> io::Result<Arc<Lease>> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match acquire_lease(path) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline =>
+                std::thread::sleep(std::time::Duration::from_millis(50).min(deadline.saturating_duration_since(std::time::Instant::now()))),
+            outcome => return outcome,
+        }
+    }
+}
+/// Trava da fila de uma sessão. Solta por `unlock` no fim: fechar só o descritor a deixava presa
+/// enquanto um filho de `fork` ainda antes do `exec` guardava a cópia herdada.
+#[derive(Debug)]
+pub struct Lease(File);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(code = "queue_lease_unlock_failed", io_kind = ?error.kind(), "trava da fila não foi solta; o descritor será fechado");
+        }
+    }
+}
+pub fn acquire_lease(path: &Path) -> io::Result<Arc<Lease>> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
     let file = options.open(path)?;
     file.try_lock().map_err(io::Error::from)?;
-    Ok(Arc::new(file))
+    Ok(Arc::new(Lease(file)))
 }
 /// TUI e app-server que a vigia adotou nesta fila: outra TUI com a mesma chave é outra sessão.
 pub const CODEX_LIFE: &str = "codex_life";
@@ -1044,6 +1068,23 @@ fn reconcile(state: &mut State, protected: &BTreeSet<String>, committed: Vec<Str
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Lê um arquivo que outro escritor troca por `atomic_write`. No Windows quem abre no instante da
+/// troca recebe NotFound ou acesso negado, inclusive na troca POSIX: ausente ou recusado de verdade é o
+/// que continua assim depois da espera curta.
+pub fn read_replaced(path: &Path) -> io::Result<Vec<u8>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    loop {
+        match std::fs::read(path) {
+            Err(error) if cfg!(windows) && matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
+                && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(1)),
+            outcome => return outcome,
+        }
+    }
+}
+pub fn read_replaced_to_string(path: &Path) -> io::Result<String> {
+    String::from_utf8(read_replaced(path)?).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 /// `rename` que sobrevive ao Windows: lá um leitor aberto sem FILE_SHARE_DELETE (o CLI lendo
 /// o JSON) recusa a troca por um instante. No POSIX a troca nunca falha por leitor aberto.
 pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
@@ -1093,11 +1134,11 @@ pub struct QueueActor {
     sender: mpsc::Sender<QueueMessage>,
     task: tokio::task::JoinHandle<()>,
     initial: State,
-    lease: Arc<File>,
+    lease: Arc<Lease>,
 }
 
 impl QueueActor {
-    pub fn start(store: Store, lease: Arc<File>) -> Self {
+    pub fn start(store: Store, lease: Arc<Lease>) -> Self {
         let initial = store.state().clone();
         let actor_lease = lease.clone();
         let (sender,mut receiver) = mpsc::channel(32);
@@ -1135,7 +1176,7 @@ impl QueueActor {
     }
 
     pub fn initial_state(&self) -> &State { &self.initial }
-    pub fn lease(&self) -> Arc<File> { self.lease.clone() }
+    pub fn lease(&self) -> Arc<Lease> { self.lease.clone() }
 
     pub async fn exec(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action) -> io::Result<Value> {
         self.exec_held(generation,call_id,clock,action,false).await
@@ -1278,5 +1319,40 @@ mod lifecycle_tests {
         assert_eq!(store.state().rows.len(),1);
         assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
         assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod replaced_read_tests {
+    use super::*;
+    #[test]
+    fn a_file_being_replaced_never_reads_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.queue-state.json");
+        atomic_write(&path, b"{}").unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = { let (path, stop) = (path.clone(), stop.clone()); std::thread::spawn(move || {
+            // A troca de produção sem o fsync do `atomic_write`: o que está à prova é o leitor, e mais trocas por segundo.
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                let temp = path.with_extension(format!("{n}.tmp"));
+                std::fs::write(&temp, format!("{{\"n\":{n}}}")).unwrap();
+                replace(&temp, &path).unwrap();
+            }
+        }) };
+        let (mut reads, mut missing) = (0u32, 0u32);
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(3) {
+            match read_replaced(&path) {
+                Ok(_) => reads += 1,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => missing += 1,
+                Err(error) => panic!("leitura recusada: {error}"),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(reads > 100, "poucas leituras para provar algo: {reads}");
+        assert_eq!(missing, 0, "o arquivo trocado sumiu em {missing} de {} leituras", reads + missing);
     }
 }

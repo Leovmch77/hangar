@@ -170,7 +170,7 @@ impl<T> Guarded<T> {
 
 /// O que a decoração das linhas Claude e de todas guarda entre rodadas.
 #[derive(Default)]
-struct Decor { context: ContextCache, replies: ReplyCache, plans: PlanTracker }
+struct Decor { context: ContextCache, replies: ReplyCache }
 
 /// Marcadores junto da classificação: duas produções seguidas não releem tudo do zero.
 #[derive(Default)]
@@ -181,6 +181,8 @@ struct Classify { classifier: Classifier, hooks: HookStates }
 struct Caches {
     resolver: Guarded<Resolver>,
     decor: Guarded<Decor>,
+    /// Trava própria: a rota de plano não espera a decoração inteira da rodada.
+    plans: Guarded<PlanTracker>,
     classify: Guarded<Classify>,
     /// Último resumo de Git por pasta: a lista não espera o `git status` (`_git_ultimo`).
     git: Mutex<HashMap<String, (Value, Value)>>,
@@ -415,6 +417,29 @@ impl ListBridge {
 
     /// Mudança de membro ou de modo: a próxima pergunta não serve a lista de antes.
     pub fn invalidate(&self) { self.epoch.fetch_add(1, Ordering::SeqCst); }
+
+    /// O rastreador de planos da lista, para as rotas de plano: o eleito é o mesmo da linha.
+    /// Lê disco: chamar fora do executor assíncrono.
+    pub fn with_plans<R>(&self, f: impl FnOnce(&mut PlanTracker) -> R) -> R { self.caches.plans.with(f) }
+
+    /// Depois de gravar pin ou mover plano: a pasta é redescoberta, sem esperar a rodada em curso.
+    pub fn forget_plans(&self, root: PathBuf) { self.caches.plans.apply(move |t| t.forget_root(&root)) }
+
+    /// A linha da sessão pelo retrato e, faltando o nome (sessão criada agora, o retrato tem até 2 s),
+    /// por uma rodada nova. Sem os fatos do Python as linhas de transferência e `orq` faltam: aí a
+    /// ausência não prova nada e volta `list_facts_unknown`.
+    pub async fn find_row(&self, name: &str) -> Result<Option<SessionRow>, ListError> {
+        let found = |rows: &[SessionRow]| rows.iter().find(|r| r.name == name).cloned();
+        if let Some(row) = found(&self.snapshot().await?.rows) {
+            return Ok(Some(row));
+        }
+        let produced = self.refresh().await?;
+        match found(&produced.rows) {
+            Some(row) => Ok(Some(row)),
+            None if produced.facts.unknown => Err(fail("list_facts_unknown", "fatos da lista indisponíveis")),
+            None => Ok(None),
+        }
+    }
 
     /// `registry.list()`. `newer_than` (época em s) é a sessão criada há menos de 1 s: só vale uma
     /// descoberta que começou depois disso, com o mapa de processos relido.
@@ -910,13 +935,13 @@ fn decorate(env: &ListEnv, caches: &Caches, dirs: &Dirs, config_dirs: &[PathBuf]
             }
             list_facts::note("rust.list_reply_unreadable", &name, format!("{:?}", error.kind()), "última resposta ilegível");
         }
-        for row in rows.iter_mut() {
-            d.plans.decorate(row, wall, mono);
-            if let Some(p) = super::links::fill_loop(row, dirs) {
-                list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
-            }
-        }
     });
+    caches.plans.with(|plans| rows.iter_mut().for_each(|row| plans.decorate(row, wall, mono)));
+    for row in rows.iter_mut() {
+        if let Some(p) = super::links::fill_loop(row, dirs) {
+            list_facts::note("rust.list_discovery", &p.key, p.code.to_owned(), p.reason);
+        }
+    }
     let mut git = lock(&caches.git);
     for row in rows.iter_mut() {
         let (summary, diff) = git.get(git_dir(row)).cloned().unwrap_or_default();

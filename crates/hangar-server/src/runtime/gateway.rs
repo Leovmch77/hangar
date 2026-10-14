@@ -1,4 +1,4 @@
-use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease_within}};
 use super::codex_terminal::{Adoption,AdoptionCell,CodexTerminalTarget};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
@@ -93,26 +93,20 @@ pub struct RuntimeRegistry {
     terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
 }
 
-/// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
-/// Rust que acabou de cair no Windows. Espera até 3 s por ela.
-/// Só "trava ocupada" espera; outro erro (pasta sem permissão, disco cheio) responde na hora.
-async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeError> {
-    for attempt in 0..60 {
-        if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
-        let path = path.to_owned();
-        match tokio::task::spawn_blocking(move ||acquire_lease(&path)).await.map_err(|_|failure("queue_job"))? {
-            Ok(lease)=>return Ok(lease),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>{},
-            Err(error)=>return Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
-        }
+/// Espera até 3 s pela trava; outro erro (pasta sem permissão, disco cheio) responde na hora.
+async fn wait_lease(path:&std::path::Path) -> Result<Arc<super::queue::Lease>,RuntimeError> {
+    let path = path.to_owned();
+    match tokio::task::spawn_blocking(move ||acquire_lease_within(&path,Duration::from_secs(3))).await.map_err(|_|failure("queue_job"))? {
+        Ok(lease)=>Ok(lease),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s")),
+        Err(error)=>Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
     }
-    Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s"))
 }
 
 /// Abre a fila sob a trava e roda `Recover`: entrada que estava em despacho quando o dono anterior
 /// parou vira incerta antes de o ator olhar para ela.
 async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,key:&str,generation:u64,name:&str,
-    lease:Arc<std::fs::File>) -> Result<Store,RuntimeError> {
+    lease:Arc<super::queue::Lease>) -> Result<Store,RuntimeError> {
     let (state_path,projection_dir) = (state_path.to_owned(),projection_dir.to_owned());
     let initial = QueueState::new(key,generation,name,Vec::new());
     static OPENS:AtomicU64 = AtomicU64::new(0);
@@ -204,7 +198,7 @@ pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sid
 }
 /// `runtime_state.view` do arquivo da fila, lido como o `session.patch_meta` do Python lia.
 fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
-    let state:Value = std::fs::read(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
+    let state:Value = super::queue::read_replaced(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
     Ok(match &state["runtime_state"]["view"] { Value::Null=>json!({}),view=>view.clone() })
 }
 async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
@@ -1444,7 +1438,7 @@ impl RuntimeRegistry {
         if let Some(meta)=store.state().runtime_state.get("metadata").filter(|meta|meta["key"]==key) {target.metadata=meta.clone();}
         if target.metadata["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
         let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
-        let persisted:Value=serde_json::from_slice(&std::fs::read(sidecar).map_err(|_|failure("lifecycle_sidecar_read"))?).map_err(|_|failure("lifecycle_sidecar_read"))?;
+        let persisted:Value=serde_json::from_slice(&super::queue::read_replaced(&sidecar).map_err(|_|failure("lifecycle_sidecar_read"))?).map_err(|_|failure("lifecycle_sidecar_read"))?;
         if persisted["key"]!=key || persisted["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
         let sidecar_expected_pid=if persisted["cano"].is_null() {0} else {persisted["cano"]["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("lifecycle_sidecar_read"))?};
         if attempt>0 && persisted["cano"]["pid"].as_u64().and_then(|p|u32::try_from(p).ok()).is_some_and(|pid|process::liveness(pid,key)==process::Liveness::Ours) {return Err(failure("relaunch_previous_still_alive"));}
@@ -1567,7 +1561,7 @@ impl RuntimeRegistry {
             if closed.name!=name || !super::lifecycle::matches_life(&closed.binding,key,conversation,generation) {return Ok(Dead::InTransfer);}
             if !super::lifecycle::process_absent(&procs,closed.pid,closed.birth)? {return Ok(Dead::InTransfer);}
             let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
-            match std::fs::read(&sidecar) {
+            match super::queue::read_replaced(&sidecar) {
                 Ok(bytes)=> {let _:Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;return Ok(Dead::InTransfer);},
                 Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
                 Err(_)=>return Err(failure("lifecycle_sidecar_read")),
@@ -1985,6 +1979,23 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::queue::acquire_lease;
+
+    /// Executor disputado, como no servidor carregado: cada volta da espera atrasa além dos 50 ms.
+    #[tokio::test]
+    async fn busy_lease_is_refused_after_three_seconds_of_clock_even_on_a_busy_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.lock");
+        let _held = acquire_lease(&path).unwrap();
+        let hog = tokio::spawn(async { loop { std::thread::sleep(Duration::from_millis(50)); tokio::task::yield_now().await; } });
+        let started = std::time::Instant::now();
+        let refused = wait_lease(&path).await;
+        let elapsed = started.elapsed();
+        hog.abort();
+        assert_eq!(refused.unwrap_err().code,"runtime_lease");
+        assert!(elapsed >= Duration::from_secs(3),"recusou antes dos 3 s: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(4500),"a espera passou dos 3 s prometidos: {elapsed:?}");
+    }
 
     struct SidRecipeProcesses {dir:std::path::PathBuf}
     impl crate::list::procs::ProcessView for SidRecipeProcesses {

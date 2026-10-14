@@ -72,7 +72,7 @@ pub async fn assert_closed(address: std::net::SocketAddr, what: &str) {
 
 /// O lease, esperando a cópia que um filho de outro teste carrega entre o fork e o exec: a trava do
 /// flock é da descrição aberta, e o exec a solta em instantes. Dono de verdade segura além do prazo.
-pub fn lease_when_free(path: &std::path::Path) -> std::sync::Arc<std::fs::File> {
+pub fn lease_when_free(path: &std::path::Path) -> std::sync::Arc<hangar_server::runtime::queue::Lease> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         match hangar_server::runtime::queue::acquire_lease(path) {
@@ -169,6 +169,7 @@ mod mods_terminal_state;
 mod mods_tree;
 mod pages_routes;
 mod perf_accounts_uploads;
+mod plans_routes;
 mod plugin_loopback;
 mod proxy;
 mod queue_v2_terminal;

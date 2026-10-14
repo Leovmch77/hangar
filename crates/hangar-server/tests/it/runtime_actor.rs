@@ -21,7 +21,7 @@ async fn setup_recovered(reply_before_ack:bool,blocked_rpc:bool,compound:bool,pr
     let state_path = dir.path().join("key.queue-state.json");
     let state_check = state_path.clone();
     let late_frame = if late_reply {
-        let state:State = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        let state:State = queue_state(dir.path());
         let request_id = state.operations.values().find(|phase|phase.payload["logical_id"] == "op-1").unwrap().payload["frame"]["id"].clone();
         Some(json!({"type":"cano_output","frame":json!({"id":request_id,"result":{"data":[]}}).to_string()}))
     } else { None };
@@ -81,7 +81,7 @@ async fn no_sse_runtime_still_drains() {
         pre_transcript:false,entry_id:Some("input-entry".into()) }).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
-            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            let state:State = queue_state(dir.path());
             if state.operations.get("input-entry").is_some_and(|operation|operation.status == Status::Accepted) { break; }
             tokio::task::yield_now().await;
         }
@@ -109,7 +109,7 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
             "content":[{"type":"input_text","text":"Olá"}]}})).unwrap();
         assert_eq!(handle.confirm().await.unwrap()["confirmed"],1);
     }
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(state.rows.iter().all(|row|row["confirmed"] == true));
     // As duas confirmadas: não resta operação que possa casar os ecos, e o uso sai da poda.
     assert!(state.used_occurrences.is_empty());
@@ -136,7 +136,7 @@ async fn row_delivered_before_the_runtime_is_confirmed_once_by_a_later_echo() {
     std::fs::write(dir.path().join("key.queue-state.json"),serde_json::to_vec(&State::new("key",1,"session",rows.to_vec())).unwrap()).unwrap();
     let (handle,server,dir) = setup_recovered(true,false,false,Some(dir),false).await;
     let confirmed = || {
-        let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+        let state:State = queue_state(dir.path());
         state.rows.iter().filter(|row|row["confirmed"] == true).filter_map(|row|row["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()
     };
     // A rodada do primeiro ocioso corre junto desta: a contagem é de quem gravou primeiro, o estado não.
@@ -161,7 +161,7 @@ async fn resubmit_after_prune_of_confirmed_row_does_not_send_again() {
     for index in 0..300 { handle.queue(format!("fill:{index}"),Action::SetRuntimeState { state:json!({}) }).await.unwrap(); }
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),1);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(!state.operations.contains_key("msg"));
     // Ator novo, sem a resposta guardada: a linha confirmada responde e nada vai ao fio.
     let (handle,server,_dir) = setup_recovered(true,false,false,Some(dir),false).await;
@@ -177,7 +177,7 @@ async fn prepare_before_every_write_and_cli_reply_before_ack_is_final() {
     assert!(result.disposition == Disposition::Accepted);
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),1);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     let phase = state.operations.values().find(|operation|operation.payload["logical_id"] == "op-1").unwrap();
     assert_eq!(phase.result["disposition"],"accepted");
 }
@@ -208,7 +208,7 @@ async fn published_view_has_durable_state() {
     handle.command(command()).await.unwrap();
     while let Ok(event) = events.try_recv() {
         if event.channel == "view" {
-            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            let state:State = queue_state(dir.path());
             assert!(state.runtime_state["view"].is_object());
         }
     }
@@ -288,7 +288,7 @@ async fn ack_timeout_is_unknown_without_resend() {
     assert!(result.disposition == Disposition::Unknown);
     let again = handle.command(command()).await.unwrap();
     assert!(again.disposition == Disposition::Unknown);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(state.operations["op-1"].status == Status::Unknown);
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),1);
@@ -301,7 +301,7 @@ async fn wire_ids_distinguish_compound_control() {
     assert!(result.disposition == Disposition::Accepted);
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),2);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     let phases:Vec<_> = state.operations.values().filter(|operation|operation.payload["logical_id"] == "interrupt:read").collect();
     assert_eq!(phases.len(),1);
     assert_ne!(phases[0].id,"interrupt");
@@ -340,11 +340,14 @@ async fn late_wire_reply_resolves_parent() {
 }
 
 /// Cano Claude falso que só conta o que chega ao fio; a política aponta para uma porta fechada.
-async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
+/// Conta as escritas da conversa; o `initialize` que a subida pede sozinha só avisa o `Notify`.
+async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir,std::sync::Arc<tokio::sync::Notify>) {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let closed = crate::refused_address();
+    let booted = std::sync::Arc::new(tokio::sync::Notify::new());
+    let boot_signal = booted.clone();
     let server = tokio::spawn(async move {
         let (stream,_) = listener.accept().await.unwrap();
         let mut reader = BufReader::new(stream);
@@ -356,8 +359,9 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
         loop {
             let mut raw = String::new();
             if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
-            sent += 1;
             let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap_or("{}")).unwrap_or_default();
+            if frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" { boot_signal.notify_one(); } else { sent += 1; }
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
         }
@@ -374,16 +378,16 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
         .with_policy(PolicyClient::new(closed,"secret".into(),"instance".into()));
-    (RuntimeActor::spawn(target,queue,connection,engine),server,dir)
+    (RuntimeActor::spawn(target,queue,connection,engine),server,dir,booted)
 }
 
 #[tokio::test]
 async fn input_is_prepared_in_rust_even_when_the_python_policy_is_unreachable() {
     // O preparo do prompt é local: o Python fora do ar não adia mais a entrada.
-    let (handle,server,dir) = setup_claude_unreachable_policy(true).await;
+    let (handle,server,dir,_) = setup_claude_unreachable_policy(true).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(!state.operations.keys().any(|id|id.contains("prepare_prompt")),"cálculo puro não entra no diário");
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),1,"a mensagem chegou ao fio");
@@ -617,7 +621,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
     handle.stop().await.unwrap();
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0,"nenhum serviço deste turno precisa mais do Python");
     server.await.unwrap();
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");
     let views = state.operations.values().filter(|op|op.payload["kind"] == "set_runtime_state").count();
     assert!(views <= 3,"vista gravada {views} vezes num turno sem mudança durável relevante");
@@ -640,7 +644,7 @@ async fn a_queue_refusal_carries_its_reason() {
 #[tokio::test]
 async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
     // Sessão ainda sem inicialização: o drain não entrega, e a entrada só pode mudar pela orientação.
-    let (handle,server,dir) = setup_claude_unreachable_policy(false).await;
+    let (handle,server,dir,booted) = setup_claude_unreachable_policy(false).await;
     handle.queue("append".into(),Action::Append { text:"Depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
     let steer = RuntimeCommand { operation_id:"steer-1".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":"later"}) };
     let reply = handle.command(steer).await.unwrap();
@@ -649,13 +653,15 @@ async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
     // A entrada continua na fila e não ganha a marca de entregue: a orientação recusada não escreve nada.
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
-            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            let state:State = queue_state(dir.path());
             if state.rows.iter().any(|row|row["id"] == "later" && row["delivered"] == false) { break; }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.unwrap_or_else(|_|panic!("a entrada precisa continuar na fila: {}",std::fs::read_to_string(dir.path().join("key.queue-state.json")).unwrap()));
+    }).await.unwrap_or_else(|_|panic!("a entrada precisa continuar na fila: {:?}",queue_state(dir.path()).rows));
+    // A subida pede o `initialize` sozinha; esperado no fio, ele não corre mais contra a parada.
+    tokio::time::timeout(std::time::Duration::from_secs(10),booted.notified()).await.expect("a subida não pediu o initialize");
     handle.stop().await.unwrap();
-    assert_eq!(server.await.unwrap(),0);
+    assert_eq!(server.await.unwrap(),0,"a orientação recusada não escreve nada");
 }
 
 #[tokio::test]
@@ -719,7 +725,7 @@ async fn local_command_result_confirms_the_slash_entry() {
 
 
 fn epoch_now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() }
-fn queue_state(dir:&std::path::Path) -> State { serde_json::from_slice(&std::fs::read(dir.join("key.queue-state.json")).unwrap()).unwrap() }
+fn queue_state(dir:&std::path::Path) -> State { serde_json::from_slice(&read_replaced(&dir.join("key.queue-state.json")).unwrap()).unwrap() }
 
 #[tokio::test]
 async fn headless_entry_without_proof_gives_up_after_the_deadline_and_can_be_discarded() {
@@ -1050,7 +1056,7 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
     let reply = handle.command(input).await.unwrap();
     assert!(reply.disposition == Disposition::Unknown,"prazo com envio nativo em curso é incerto, nunca adiado");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    let state:State = queue_state(dir.path());
     assert!(state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == true),"a entrada não volta para a fila");
     assert!(state.operations.get("msg").is_some_and(|op|op.status != Status::Deferred));
     handle.stop().await.unwrap();
@@ -1946,7 +1952,6 @@ mod terminal_async {
         RuntimeActor::spawn(target,queue,connection,engine)
     }
 
-    fn queue_state(dir:&std::path::Path) -> State { serde_json::from_slice(&std::fs::read(dir.join("key.queue-state.json")).unwrap()).unwrap() }
 
     async fn until(what:&str,check:impl Fn() -> bool) {
         tokio::time::timeout(std::time::Duration::from_secs(5),async { while !check() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })

@@ -442,6 +442,18 @@ ali trocaria o `gid` já anotado.
   show someone else's plan ("no bar" is a limitation, "wrong bar" is a bug). Executing a superpowers
   plan: mark `- [ ]` → `- [x]` at the end of each Step — that's what feeds this feature.
 
+**Rotas no Rust (13/10/2026).** `/plan`, `/plans`, `/plan-pin`, `/plan-step`, `/plan-archive`,
+`/plan-preview` e o `GET /api/claude/customizations` saíram do Python para o `hangar-server`
+(`list/plan.rs`, `plans/`, `claude_customizations.rs`). O rastreador de planos deixou a trava da
+decoração da lista e virou um só para a lista e as rotas: antes o Python e o Rust tinham cada um o
+seu eleito (sticky), e o painel podia mostrar um plano e a linha outro. A escrita mantém as regras
+do Python: um byte por marcação sob trava global (duas marcações quase juntas, do celular e do
+desktop, se desfaziam), só UTF-8, arquivar tudo ou nada sem sobrescrever `feitos/` e soltando o
+pin do plano arquivado. As escritas entram na porta de entrada da sessão, como o `_transfer_guard`.
+Convidado e Connect chegam pela ponte privada `/__hangar_server/forwarded`; no modo `python` as
+rotas de plano respondem `erro_planos_precisa_rust`. Ficam no Python só a leitura que a decoração
+da lista do Python e o bastão usam (`plan_progress`, `plano_escondido`, `parse_plan`).
+
 ## Cota: cache em disco e espera após 429
 
 (`app/cotas.py`, 14/09/2026.) O cache das cotas era só memória: cada restart do backend relia

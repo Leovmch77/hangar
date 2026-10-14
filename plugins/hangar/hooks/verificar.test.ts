@@ -28,8 +28,14 @@ async function band($: Engine, on: On, run: string, alive: boolean, opened: stri
   });
   await $.session.start({ cwd: "/tmp", surface: "terminal", isInteractive: true });
   await clock.settle();
-  const drawn = await $.ui.mount({ plugin: "hangar", surface: "terminal", component: "AbovePrompt", props: { bodyColumns: 80, hasSurvey: false } as never });
-  return JSON.stringify(await drawn.drawn());
+  // Faixa sem nada a mostrar passa a vez; sem outro mod embaixo, o mount não acha quem desenhe.
+  const drawn = await $.ui
+    .mount({ plugin: "hangar", surface: "terminal", component: "AbovePrompt", props: { bodyColumns: 80, hasSurvey: false } as never })
+    .catch((err: unknown) => {
+      if (String(err).includes("no implementation for ui.render")) return undefined;
+      throw err;
+    });
+  return drawn ? JSON.stringify(await drawn.drawn()) : "";
 }
 
 test("a faixa acima do prompt mostra o verificar-local em andamento e o /andamento abre o painel", async ($, on) => {

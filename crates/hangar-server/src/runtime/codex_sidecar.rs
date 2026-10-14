@@ -35,13 +35,13 @@ pub fn locked<T>(dir:&Path,name:&str,body:impl FnOnce(&Path) -> io::Result<T>) -
 
 /// Ausente, ilegível ou não-objeto: nenhum sidecar, como o `load` do Python.
 pub fn load(path:&Path) -> Option<Meta> {
-    match serde_json::from_slice::<Value>(&std::fs::read(path).ok()?).ok()? { Value::Object(meta)=>Some(meta), _=>None }
+    match serde_json::from_slice::<Value>(&super::queue::read_replaced(path).ok()?).ok()? { Value::Object(meta)=>Some(meta), _=>None }
 }
 
 /// Como `load`, mas só a ausência é `Ok(None)`: arquivo que existe e não se lê é erro, para quem
 /// decide pelo sidecar se a sessão é dele.
 pub fn read(path:&Path) -> io::Result<Option<Meta>> {
-    let raw = match std::fs::read(path) {
+    let raw = match super::queue::read_replaced(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),

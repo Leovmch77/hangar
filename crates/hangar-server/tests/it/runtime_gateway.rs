@@ -155,8 +155,13 @@ async fn an_actor_that_ended_with_an_error_is_released_and_leaves_the_others_alo
     // reabria e o retrato inicial de eventos (de todas as sessões) respondia erro.
     let dir = tempfile::tempdir().unwrap();
     let (registry,_,cano) = opened(dir.path()).await;
-    // A parada falha ao reparar a projeção: o ator termina com erro.
-    std::fs::remove_dir_all(dir.path().join("projection")).unwrap();
+    // A parada falha ao reparar a projeção: o ator termina com erro. O ator ainda confere a projeção
+    // sozinho depois de abrir, e no Windows o arquivo apagado com o leitor aberto segura a pasta até ele fechar.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while let Err(error) = std::fs::remove_dir_all(dir.path().join("projection")) {
+        assert!(std::time::Instant::now() < deadline,"a projeção não foi liberada: {error}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     std::fs::write(dir.path().join("projection"),"").unwrap();
     let closed = registry.close("key",1).await.unwrap();
     assert_eq!(closed["closed"],true);
