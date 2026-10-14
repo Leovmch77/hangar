@@ -127,6 +127,7 @@ impl Hangar {
 
     /// Clique na linha da outra pessoa: abre a sessão dela pela entrada da máquina dela.
     fn open_external_pair(&mut self, own: &str, alias: &str, session: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.machines_tray.open { self.close_popups(); cx.notify(); }
         let address = self.external_pairs.iter().find(|(key, p)| key == own && p.alias == alias && p.session == session)
             .map(|(_, p)| p.address.clone());
         let Some(key) = address.map(|a| servers::norm(&a)) else {

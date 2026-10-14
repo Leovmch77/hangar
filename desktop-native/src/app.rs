@@ -69,6 +69,7 @@ mod session_picker;
 mod side;
 mod terminal;
 mod sidebar;
+mod machines_tray;
 mod subagent;
 mod dictation;
 mod sync;
@@ -621,6 +622,7 @@ pub struct Hangar {
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
     sidebar: sidebar::Sidebar,
+    machines_tray: machines_tray::Tray,
     terminal: Option<terminal::Panel>,
     terminal_serial: u64,
     // Busca do seletor de modelo quando a lista é longa.
@@ -866,6 +868,7 @@ impl Hangar {
         let list_state = ListState::new(0, ListAlignment::Bottom, px(300.)).hold_tail(px(160.));
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
+        let machines_tray = machines_tray::Tray::new(cx);
         let panes = panes::Panes::new(cx);
         let owner = window.window_handle();
         let weak = cx.weak_entity();
@@ -910,7 +913,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
-            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             window_tray: window_tray::WindowTray::new(tray_tx), presence: Default::default(),
@@ -5114,7 +5117,7 @@ impl Hangar {
             let menu_target = sidebar::Target::new(&active, &session.name);
             let label = self.session_number_label(&menu_target, label);
             let number = self.session_number_badge(&menu_target);
-            Some(div().id(SharedString::from(format!("tab-{}", session.name))).track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
+            Some(div().id(SharedString::from(format!("tab-{}", session.name))).relative().track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
                     else { el.border_color(transparent_black()).text_color(theme::muted()).hover(|el| el.bg(theme::hover())) })
@@ -5139,6 +5142,7 @@ impl Hangar {
                 }))
                 // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
+                .when(!self.active_invite() && !session.read_only(), |el| self.group_row(el, session, None, 6., cx))
                 .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
         }).collect::<Vec<_>>();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
@@ -5164,6 +5168,7 @@ impl Hangar {
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
+            .child(self.render_machines_tray_button(cx))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
                 .child(strip)
