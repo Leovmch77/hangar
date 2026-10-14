@@ -205,7 +205,8 @@ async fn credentials_match_python() {
                 row["login"]["motivo"] = json!("prazo");
             }
         }
-        if body != expected_body {
+        // Serializado: a ordem das chaves (a do pydantic) e o `-0.0` contam.
+        if body.to_string() != expected_body.to_string() {
             failures.push(format!("{name}:\n rust   {body}\n python {expected_body}"));
         }
     }

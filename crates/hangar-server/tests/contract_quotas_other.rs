@@ -3,7 +3,8 @@
 //! dá a MESMA resposta HTTP, e a leitura e o pedido têm de sair iguais. A enumeração das fontes
 //! parte dos mesmos arquivos. Casos com `diferenca` seguem a saída nova aprovada (decisoes.md):
 //! D5 (chave/cookie com quebra de linha vira `credencial-invalida`, sem rede) e D6 (redirecionamento
-//! não é seguido: `http-<3xx>`) e D8 (o Kimi recebe `User-Agent: hangar`). Processo próprio porque troca o TZ.
+//! não é seguido: `http-<3xx>`) e D8 (o Kimi recebe `User-Agent: hangar`). A comparação é do JSON
+//! serializado, então a ordem das chaves e o `-0.0` contam. Processo próprio porque troca o TZ.
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::accounts::quotas::other::{self, Endpoints, Reader};
 use serde_json::{Value, json};
@@ -142,7 +143,7 @@ async fn readers_match_python() {
         } else {
             expected
         };
-        if got != expected {
+        if got.to_string() != expected.to_string() {
             failures.push(format!("{name}: leitura\n  python {expected}\n  rust   {got}"));
         }
         if unreachable != (case["refused"] == true) {
@@ -234,7 +235,7 @@ fn sources_match_python() {
             }
             continue;
         }
-        if got != want {
+        if got.to_string() != want.to_string() {
             failures.push(format!("{name}:\n  python {want}\n  rust   {got}"));
         }
     }
