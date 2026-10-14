@@ -39,8 +39,9 @@ impl ReaderImages {
             };
             // A aba sobrevive à troca de conexão, e a raiz local pode mudar com ela.
             let key = match (&source, &root) {
-                (Source::Workspace(_), Some(root)) => format!("{}\0{path}", root.display()),
-                _ => path,
+                (Source::Remote(_), _) => path,
+                (Source::Workspace(_), Some(root)) => format!("{connection}\0{}\0{path}", root.display()),
+                _ => format!("{connection}\0\0{path}"),
             };
             let mut cache = cache.lock().ok()?;
             let loaded = cache.entry(key).or_insert_with(|| {
