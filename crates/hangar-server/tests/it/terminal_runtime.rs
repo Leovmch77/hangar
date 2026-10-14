@@ -224,7 +224,9 @@ elif mode=='send-keys' and '-l' in sys.argv:
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
         limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
-    let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
+    // Teto só contra travamento: o fluxo parte o multiplexador falso umas 16 vezes, e cada partida do
+    // Python demora muito mais com a máquina carregada.
+    let result=tokio::time::timeout(Duration::from_secs(30),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
     h.stop().await.unwrap();let python_lease=crate::lease_when_free(&f.target.lease_path);
     let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
