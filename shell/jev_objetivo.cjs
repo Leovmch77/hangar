@@ -402,7 +402,8 @@ const JS_VALORES = `(() => {
   // O porquê de um envio recusado: alerta, toast, campo marcado inválido com a mensagem dele.
   const limpo = (t) => String(t || '').replace(/\\s+/g, ' ').trim();
   const avisos = new Set();
-  for (const a of document.querySelectorAll('[role=alert],[role=status],[data-sonner-toast]')) {
+  // Só aviso de erro: "Salvo com sucesso" num role=status fazia o envio que deu certo parecer recusado.
+  for (const a of document.querySelectorAll('[role=alert],[data-sonner-toast][data-type=error],[data-sonner-toast][data-type=warning]')) {
     const t = visivel(a) ? limpo(a.innerText).slice(0, 300) : '';
     if (t) avisos.add(t);
   }
@@ -599,6 +600,11 @@ const OPERACOES_DO_AUXILIAR = new Set(['CLICK', 'SELECT', 'TYPE_TEXT']);
 
 /** O que o modelo auxiliar recebe quando o Jev não achou alvo: só observação, nunca valor de `dados`. */
 function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '' }) {
+  // O auxiliar é outro terceiro: senha de `dados` que a página reexibe (revisão, OTP) não sai daqui.
+  const segredos = Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v);
+  const oculto = (s) => segredos.reduce((t, v) => t.split(v).join('(oculto)'), String(s ?? ''));
+  url = oculto(url);
+  texto = oculto(texto);
   return [
     'Voce ajuda um laco que navega numa pagina web rumo a um objetivo. O classificador do laco (Jev) '
       + 'nao achou um alvo confiavel para o proximo passo; escolha voce o proximo passo, um so.',
@@ -640,7 +646,11 @@ function decidirPeloAuxiliar(bruto, respostas, candidatos, limiares = LIMIARES) 
   if (!OPERACOES_DO_AUXILIAR.has(r.operacao)) return { falhou: `sem passo (${String(r.operacao)}: ${String(r.motivo ?? '').slice(0, 80)})` };
   const escolhido = candidatos.find((c) => c.ref === r.ref);
   if (!escolhido) return { falhou: `escolheu ${String(r.ref)}, que nao esta na pagina` };
-  const risco = r.operacao === 'CLICK' ? riscoDoClique(respostas, escolhido, candidatos, false, limiares) : null;
+  // O mesmo recorte de alvos que o Jev tem por operação: um SELECT num botão virava clique sem a trava.
+  const cabe = r.operacao === 'SELECT' ? escolhido.papel === PAPEL_DE_OPCAO || escolhido.papel === 'combobox'
+    : r.operacao === 'TYPE_TEXT' ? PAPEIS_DE_TEXTO.has(escolhido.papel) || escolhido.papel === 'combobox' : true;
+  if (!cabe) return { falhou: `${r.operacao} em ${rotulo(escolhido)} nao combina com o papel do elemento` };
+  const risco = riscoDoClique(respostas, escolhido, candidatos, false, limiares);
   if (risco) return { parar: risco };
   const arriscado = respostas.arriscado?.noul;
   const ehArriscado = typeof arriscado === 'number' && arriscado >= limiares.arriscado;
@@ -1184,5 +1194,5 @@ module.exports = {
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
-  SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo,
+  SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda,
 };

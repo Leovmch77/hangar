@@ -245,8 +245,9 @@ struct Executor {
     /// `stall_notice`, a vista mostra `no_safe_delivery`.
     unproved_since:Option<tokio::time::Instant>,
     no_safe_delivery:bool,
-    /// A reabertura deste incidente já foi pedida: uma por incidente, e o registro espaça as seguintes.
-    heal_requested:bool,
+    /// Quando a reabertura deste incidente foi pedida. Reabertura que falhou é pedida de novo depois do
+    /// intervalo do registro, senão a fila ficava parada para sempre com o aviso prometendo reabrir.
+    heal_requested:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
@@ -323,7 +324,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:false,diag:policy.diag()};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,diag:policy.diag()};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -1166,19 +1167,20 @@ impl Executor {
                     "registro nativo do agente ausente e plugin sem /pull: nada prova a conversa; a entrada não digita");
                 self.diag.report("rust.no_safe_delivery",&self.target.name,"lifecycle_native_read","registro nativo do agente ausente e plugin sem /pull");
             } else {
-                self.heal_requested=false;
+                self.heal_requested=None;
                 tracing::info!(key=%self.target.key,session=%self.target.name,code="no_safe_delivery_cleared","a prova da conversa voltou");
             }
             self.publish().await?;
         }
-        if self.no_safe_delivery && !self.heal_requested {self.request_heal().await;}
+        if self.no_safe_delivery && self.heal_requested.is_none_or(|at|now.duration_since(at)>=super::gateway::HEAL_BACKOFF) {self.request_heal().await;}
         Ok(())
     }
     async fn conversation_unproved(&self)->bool {
         let binding=crate::terminal_facts::LocalTerminalFacts::binding(&self.target);
         if self.options.plugin.as_ref().is_some_and(|store|store.conversation_proved(&binding).unwrap_or(false)) {return false;}
         let (config,pid)=(self.target.metadata.config_dir.clone(),i64::from(self.target.metadata.agent_pid));
-        tokio::task::spawn_blocking(move||super::lifecycle::read_native_conversation(&config,pid).is_err_and(|failure|failure.code=="lifecycle_native_read")).await.unwrap_or(false)
+        // Qualquer falha de leitura (ausente, corrompido, de outro pid) deixa a conversa sem prova.
+        tokio::task::spawn_blocking(move||super::lifecycle::read_native_conversation(&config,pid).is_err()).await.unwrap_or(true)
     }
     /// Reabrir aqui só com a sessão parada, sem pergunta, sem entrega incerta e com mensagem esperando.
     async fn heal_ready(&mut self)->Result<(),RuntimeError> {
@@ -1195,7 +1197,7 @@ impl Executor {
     async fn request_heal(&mut self) {
         let Some(registry)=self.options.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) else {return};
         if self.heal_ready().await.is_err() {return;}
-        self.heal_requested=true;
+        self.heal_requested=Some(tokio::time::Instant::now());
         let target=self.target.clone();
         tokio::spawn(async move {let _=registry.heal_claude(target.name,target.key,target.generation).await;});
     }

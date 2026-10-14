@@ -96,7 +96,7 @@ pub struct RuntimeRegistry {
 }
 /// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
 /// não vira laço de processos mortos.
-const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
+pub(super) const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum Reopen {Bypass,Heal}
 

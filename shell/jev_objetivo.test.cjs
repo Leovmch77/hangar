@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT } = require('./jev_objetivo.cjs');
+const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda } = require('./jev_objetivo.cjs');
 
 const SNAPSHOT = `- RootWebArea "Cadastro"
   - link "Ver ajuda" [ref=@e1]
@@ -786,7 +786,8 @@ test('SELECT numa listbox ARIA aberta clica na option, mesmo com <select> espelh
     maxPassos: 3,
     // O Radix espelha a lista num <select> escondido: o valor pega, mas a lista continua aberta.
     executar: async (verbo, args) => {
-      executados.push([verbo, ...args].join(' ').slice(0, 60));
+      // Inteiro: cortado, o `dispatchEvent` do eval ficava fora e a asserção abaixo nunca falharia.
+      executados.push([verbo, ...args].join(' '));
       if (verbo === 'snapshot') return LISTA;
       if (verbo === 'url') return 'http://local/forma_pagto';
       if (verbo === 'text') return 'pagina';
@@ -909,4 +910,21 @@ test('registro de teste: o auxiliar sabe que escolha obrigatoria sem dado leva u
   });
   assert.match(pedidos[0], /registro de teste/);
   assert.match(pedidos[0], /opcao plausivel/);
+});
+
+test('auxiliar nao escapa da trava de risco trocando a operacao', () => {
+  const candidatos = [{ ref: 'e1', papel: 'button', nome: 'Excluir' }, { ref: 'e2', papel: 'textbox', nome: 'Nome' }];
+  const respostas = { click_risk: { probabilities: { e1: 0.9, [NENHUM]: 0.1 } } };
+  // SELECT num botão viraria clique sem a trava; o papel não combina com a operação.
+  assert.match(decidirPeloAuxiliar('{"operacao":"SELECT","ref":"e1"}', respostas, candidatos).falhou, /nao combina/);
+  assert.match(decidirPeloAuxiliar('{"operacao":"TYPE_TEXT","ref":"e1"}', respostas, candidatos).falhou, /nao combina/);
+  assert.match(decidirPeloAuxiliar('{"operacao":"CLICK","ref":"e1"}', respostas, candidatos).parar, /operacao arriscada/);
+  assert.equal(decidirPeloAuxiliar('{"operacao":"TYPE_TEXT","ref":"e2"}', respostas, candidatos).operacao, 'TYPE_TEXT');
+});
+
+test('pedido ao auxiliar esconde a senha de dados que a pagina reexibe', () => {
+  const pedido = pedidoDeAjuda({ objetivo: 'entrar', url: 'https://x/?otp=S3gr3do!', candidatos: [], texto: 'Senha: S3gr3do!',
+    feito: [], cofre: { senha: 'S3gr3do!', nome: 'Ana' }, respostas: {} });
+  assert.ok(!pedido.includes('S3gr3do!'), pedido);
+  assert.match(pedido, /\(oculto\)/);
 });
