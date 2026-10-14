@@ -25,7 +25,7 @@
   import TerminalMobile from '../components/TerminalMobile.svelte';
   import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
-  import { pendingExitPlanMode, proposedPlan } from '@hangar/core';
+  import { proposedPlan } from '@hangar/core';
   import { implementCodexPlan as requestCodexPlanImplementation } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
@@ -1419,10 +1419,6 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
     return null;
   });
-  // Enquanto o estado com terminal não traz o `claude_plan_pending`, a aprovação pendente sai dos
-  // eventos do turno; outra pergunta depois de um plano gravado não conta.
-  const terminalPlanoPendente = $derived(!sessionHeadless && sessionProvider === 'claude'
-    && currentState === 'awaiting_input' && !!planAnchorId && pendingExitPlanMode(events));
   const planControls = $derived((sessionProvider === 'claude' || planAnchorId) ? {
     eventId: planAnchorId,
     serverId: chatServerId,
@@ -1433,7 +1429,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     disabled: currentState !== 'idle' || pending.length > 0,
     onImplement: sessionHeadless ? implementHeadlessPlan : implementCodexPlan,
     discovery: sessionProvider === 'claude' ? (planAnchorId && !headlessPlanoPendente ? claudePlanDiscovery : null) : undefined,
-    aprovacaoPendente: headlessPlanoPendente !== null || terminalPlanoPendente,
+    aprovacaoPendente: headlessPlanoPendente !== null,
     caminho: headlessPlanoPendente?.path ?? null,
     discoveryLoading: sessionProvider === 'claude' ? claudePlanDiscoveryLoading : false,
     discoveryError: sessionProvider === 'claude' ? claudePlanDiscoveryError : '',

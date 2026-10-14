@@ -617,26 +617,24 @@ it('Claude com terminal mostra o plano pendente e pede alteração com texto', a
   expect(enviar.disabled).toBe(false);
   enviar.click(); await flush();
   expect(api.selectOption).toHaveBeenLastCalledWith('codex-flow', 3, 'plan-term', expect.anything(), 'troque o passo 2');
+});
 
-it('celular: com terminal, o plano abre acima das opções só enquanto o ExitPlanMode espera', async () => {
+it('celular: com terminal, o plano pendente do estado abre acima das opções sem buscar no servidor', async () => {
   harness.provider = 'claude';
   vi.mocked(api.getHistory).mockResolvedValueOnce([]);
-  vi.mocked(api.getSessionPlanPreview).mockImplementation(async (_name, content) => ({
-    name: 'plano', path: '/p/plano.md', anchor_id: 'a-write',
-    ...(content ? { markdown: '# Plano do terminal\n\n1. Ler' } : {}),
-  }) as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+  vi.mocked(api.getSessionPlanPreview).mockResolvedValue(null);
   await montarClaude(false);
-  // A sequência real: o Write do arquivo do plano, o ExitPlanMode e só depois o resultado do Write.
-  await emit('message', { id: 'a-write', kind: 'tool_use', tool_name: 'Write', tool_use_id: 'toolu_w', tool_input: { file_path: '/p/plano.md' }, ts: 1 });
   await emit('message', { id: 'a-exit', kind: 'tool_use', tool_name: 'ExitPlanMode', tool_use_id: 'toolu_t', tool_input: {}, ts: 1 });
-  await emit('message', { id: 'r-write', kind: 'tool_result', tool_use_id: 'toolu_w', text: 'ok', ts: 1 });
-  await emit('state', { session: 'codex-flow', state: 'working' });
-  await emit('state', { session: 'codex-flow', state: 'awaiting_input', question: 'Would you like to proceed?', options: ['Yes', 'No'] });
+  vi.mocked(api.getSessionPlanPreview).mockClear();
+  const pendente = { plan: '# Plano do terminal\n\n1. Ler', path: '/p/plano.md', tool_use_id: 'toolu_t' };
+  await emit('state', { session: 'codex-flow', state: 'awaiting_input', headless: false, question: 'Would you like to proceed?',
+    options: ['Yes', 'No'], claude_plan_pending: pendente });
   await flush();
   expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Plano do terminal');
   expect(document.querySelector('.plan-inline .prose li')?.textContent).toBe('Ler');
+  expect(api.getSessionPlanPreview).not.toHaveBeenCalledWith('codex-flow', true, expect.anything());
 
-  await emit('message', { id: 'r-exit', kind: 'tool_result', tool_use_id: 'toolu_t', text: 'ok', ts: 2 });
+  await emit('state', { session: 'codex-flow', state: 'working', headless: false });
   await flush();
   expect(document.querySelector('.plan-inline')).toBeNull();
 });

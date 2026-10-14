@@ -133,16 +133,3 @@ export function planChoiceKey(option: string): PlanChoiceKey | null {
     default: return null;
   }
 }
-
-// Claude com terminal: o diálogo do ExitPlanMode só existe no pane, então a aprovação pendente é a
-// chamada dele neste turno ainda sem resultado. O Write do arquivo do plano pode responder depois.
-export function pendingExitPlanMode(events: ChatEvent[]): boolean {
-  const answered = new Set<string>();
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return false;
-    if (event.kind === 'tool_result' && event.tool_use_id) answered.add(event.tool_use_id);
-    if (event.kind === 'tool_use' && event.tool_name === 'ExitPlanMode') return !answered.has(event.tool_use_id ?? '');
-  }
-  return false;
-}
