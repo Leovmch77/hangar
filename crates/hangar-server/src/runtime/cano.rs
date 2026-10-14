@@ -54,7 +54,7 @@ pub struct IoTasks {
 }
 
 impl IoTasks {
-    pub fn hold_lease(mut self, lease: std::sync::Arc<std::fs::File>) -> Self {
+    pub fn hold_lease(mut self, lease: std::sync::Arc<super::queue::Lease>) -> Self {
         let reader = self.reader_task;
         let writer = self.writer_task;
         let reader_lease = lease.clone();

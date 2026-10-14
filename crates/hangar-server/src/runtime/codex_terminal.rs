@@ -327,7 +327,7 @@ pub(super) fn io_failure(error:std::io::Error) -> RuntimeError {
 }
 
 /// A trava solta pelo ator que acabou de parar pode demorar um pouco (as tarefas de E/S dele).
-pub(super) fn lease_blocking(path:&Path) -> std::io::Result<Arc<std::fs::File>> {
+pub(super) fn lease_blocking(path:&Path) -> std::io::Result<Arc<super::queue::Lease>> {
     super::queue::acquire_lease_within(path,Duration::from_secs(3))
 }
 

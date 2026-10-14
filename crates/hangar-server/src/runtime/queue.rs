@@ -251,7 +251,7 @@ pub fn refusal(error: &io::Error) -> Option<&'static str> {
 /// A trava solta por um dono que acabou de sair pode demorar (as tarefas de E/S dele, o `LockFileEx`
 /// do Windows). Só "ocupada" espera, até `limit` pelo relógio: contar voltas estendia o prazo quando
 /// cada tentativa demorava.
-pub fn acquire_lease_within(path: &Path, limit: std::time::Duration) -> io::Result<Arc<File>> {
+pub fn acquire_lease_within(path: &Path, limit: std::time::Duration) -> io::Result<Arc<Lease>> {
     let deadline = std::time::Instant::now() + limit;
     loop {
         match acquire_lease(path) {
@@ -261,14 +261,25 @@ pub fn acquire_lease_within(path: &Path, limit: std::time::Duration) -> io::Resu
         }
     }
 }
-pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
+/// Trava da fila de uma sessão. Solta por `unlock` no fim: fechar só o descritor a deixava presa
+/// enquanto um filho de `fork` ainda antes do `exec` guardava a cópia herdada.
+#[derive(Debug)]
+pub struct Lease(File);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(code = "queue_lease_unlock_failed", io_kind = ?error.kind(), "trava da fila não foi solta; o descritor será fechado");
+        }
+    }
+}
+pub fn acquire_lease(path: &Path) -> io::Result<Arc<Lease>> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
     let file = options.open(path)?;
     file.try_lock().map_err(io::Error::from)?;
-    Ok(Arc::new(file))
+    Ok(Arc::new(Lease(file)))
 }
 /// TUI e app-server que a vigia adotou nesta fila: outra TUI com a mesma chave é outra sessão.
 pub const CODEX_LIFE: &str = "codex_life";
@@ -1123,11 +1134,11 @@ pub struct QueueActor {
     sender: mpsc::Sender<QueueMessage>,
     task: tokio::task::JoinHandle<()>,
     initial: State,
-    lease: Arc<File>,
+    lease: Arc<Lease>,
 }
 
 impl QueueActor {
-    pub fn start(store: Store, lease: Arc<File>) -> Self {
+    pub fn start(store: Store, lease: Arc<Lease>) -> Self {
         let initial = store.state().clone();
         let actor_lease = lease.clone();
         let (sender,mut receiver) = mpsc::channel(32);
@@ -1165,7 +1176,7 @@ impl QueueActor {
     }
 
     pub fn initial_state(&self) -> &State { &self.initial }
-    pub fn lease(&self) -> Arc<File> { self.lease.clone() }
+    pub fn lease(&self) -> Arc<Lease> { self.lease.clone() }
 
     pub async fn exec(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action) -> io::Result<Value> {
         self.exec_held(generation,call_id,clock,action,false).await

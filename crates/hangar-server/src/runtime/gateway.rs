@@ -94,7 +94,7 @@ pub struct RuntimeRegistry {
 }
 
 /// Espera até 3 s pela trava; outro erro (pasta sem permissão, disco cheio) responde na hora.
-async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeError> {
+async fn wait_lease(path:&std::path::Path) -> Result<Arc<super::queue::Lease>,RuntimeError> {
     let path = path.to_owned();
     match tokio::task::spawn_blocking(move ||acquire_lease_within(&path,Duration::from_secs(3))).await.map_err(|_|failure("queue_job"))? {
         Ok(lease)=>Ok(lease),
@@ -106,7 +106,7 @@ async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeE
 /// Abre a fila sob a trava e roda `Recover`: entrada que estava em despacho quando o dono anterior
 /// parou vira incerta antes de o ator olhar para ela.
 async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,key:&str,generation:u64,name:&str,
-    lease:Arc<std::fs::File>) -> Result<Store,RuntimeError> {
+    lease:Arc<super::queue::Lease>) -> Result<Store,RuntimeError> {
     let (state_path,projection_dir) = (state_path.to_owned(),projection_dir.to_owned());
     let initial = QueueState::new(key,generation,name,Vec::new());
     static OPENS:AtomicU64 = AtomicU64::new(0);
