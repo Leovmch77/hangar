@@ -178,7 +178,7 @@ export default function Harnesses() {
     const s = server, e = epoch.current, n = next('codexOptions');
     setCodexOptionsToggling(true);
     setCodexOptionsError('');
-    const body = { contexto_estendido: current.contexto_estendido, [key]: on };
+    const body = { [key]: on };
     codexOpcoes(s, controller.current.signal, body).then((value) => {
       if (e !== epoch.current) return;
       if (n === seq.current.codexOptions) { codexOptionsRef.current = value; setCodexOptions(value); } else readCodexOptions(s, true);
