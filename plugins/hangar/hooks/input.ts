@@ -36,6 +36,36 @@ export function registerInput(on: On) {
     $.ui.invalidate("ui.render");
     return next(e);
   });
+  // Sem terminal a entrada vai pelo stdin do runtime; o `/pull` daqui só leva texto a subagentes, e a ponte
+  // dos outros hooks fica nula. Um `claude -p` filho que herdou o ambiente recebe 409 (outra conversa).
+  on("session.start", { isInteractive: false }, async ($, e, next) => {
+    const url = await $.env.get("HANGAR_PLUGIN_URL");
+    const token = await $.env.get("HANGAR_PLUGIN_TOKEN");
+    const sessao = await $.env.get("CP_SESSION_NAME");
+    if (url && token && sessao) $.clock.after(REARM_MS, () => void pullAgentMessages($, { url, token, sessao }));
+    return next(e);
+  });
+}
+
+async function pullAgentMessages($: EngineInterface, ponte: Bridge) {
+  let espera = REARM_MS;
+  try {
+    const r = await $.http.fetch(`${ponte.url}/pull`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["agent_message"],
+        session_id: await $.session.id() }),
+    });
+    if (r.status === 200) {
+      const { agent_message } = JSON.parse(r.text) as { agent_message?: { id: string; to: string; text: string } };
+      if (agent_message) await deliverAgentMessage($, ponte, agent_message);
+    } else {
+      espera = r.status === 409 ? BACKOFF_DONO_MS : BACKOFF_MS;
+    }
+  } catch {
+    espera = BACKOFF_MS;
+  }
+  $.clock.after(espera, () => void pullAgentMessages($, ponte));
 }
 
 // `{sessao: null}` nem sempre é definitivo: o marcador do state hook ou o vínculo da conversa podem

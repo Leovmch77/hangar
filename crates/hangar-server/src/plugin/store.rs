@@ -237,8 +237,10 @@ impl Store {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         if pull.session_id.as_deref() != Some(binding.conversation.as_str()) {
             // O processo trocou de conversa (`/clear`, `/resume`): o plugin já fala com o id novo, e é por
-            // ele que o ciclo de vida sabe da troca, sem reler o registro nativo a cada tique.
-            if let Some(sid) = pull.session_id.filter(|sid| !sid.is_empty() && sid.len() <= 128 && sid.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
+            // ele que o ciclo de vida sabe da troca, sem reler o registro nativo a cada tique. O `/pull` só de
+            // subagentes vem de um `claude -p`, que pode ser filho da sessão com o ambiente dela: não conta.
+            let agents_only = !pull.modos.is_empty() && pull.modos.iter().all(|mode| mode == AGENT_MESSAGE_MODE);
+            if !agents_only && let Some(sid) = pull.session_id.filter(|sid| !sid.is_empty() && sid.len() <= 128 && sid.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
                 && let Ok(s) = session(&mut memory, binding) && s.reported.as_deref() != Some(sid.as_str()) {
                 s.reported = Some(sid);
                 self.notify(&binding.key);
@@ -1142,6 +1144,20 @@ mod tests {
     }
 
     fn msg_id(got: &Value) -> String { got["agent_message"]["id"].as_str().unwrap().to_owned() }
+
+    /// O `claude -p` (sem terminal, ou filho de uma sessão que herdou a ponte) abre o `/pull` só com
+    /// `agent_message`: não fala de troca de conversa nem recebe a entrada da sessão.
+    #[tokio::test]
+    async fn agent_only_pull_reports_no_conversation_and_takes_no_input() {
+        let (store, binding) = setup();
+        let only_agents = |sid: &str| Pull { instance: "p".into(), modos: vec![AGENT_MESSAGE_MODE.into()], estado: None, session_id: Some(sid.into()) };
+        assert_eq!(store.begin_pull(&binding, only_agents("child"), Instant::now()).err().unwrap().0, "plugin_conversation_mismatch");
+        assert_eq!(store.reported_conversation(&binding).unwrap(), None, "o filho não troca a conversa da sessão");
+        let _poll = store.begin_pull(&binding, only_agents("sid"), Instant::now()).unwrap();
+        assert!(store.can_message_agents(&binding, Instant::now()));
+        assert_eq!(store.publish(&binding, request(PluginMode::User)).await.unwrap(), PluginReply::NotWritten);
+        assert_eq!(store.recent_state(&binding, Instant::now()).unwrap(), None);
+    }
 
     #[tokio::test]
     async fn agent_message_ids_do_not_repeat_across_backend_restarts() {
