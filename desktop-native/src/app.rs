@@ -525,6 +525,8 @@ pub struct Hangar {
     uploading: HashMap<SessionKey, Vec<u64>>,
     commands: HashMap<String, Result<Vec<CommandInfo>, String>>,
     suggest_pick: usize,
+    /// O campo já mostrava sugestões do `/`: a lista é revalidada só quando elas abrem.
+    slash_open: bool,
     suggest_dismissed: Option<String>,
     mention: mention::Mention,
     command_panel: bool,
@@ -806,7 +808,14 @@ impl Hangar {
                 }
                 // A lista de comandos acompanha o que se digita.
                 // Texto e sugestões só aparecem na faixa de baixo.
-                InputEvent::Change => { this.suggest_pick = 0; this.redraw(panes::Area::Bottom, cx); }
+                InputEvent::Change => {
+                    this.suggest_pick = 0;
+                    // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta.
+                    let slash = this.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some());
+                    if slash && !this.slash_open { this.ensure_commands(true); }
+                    this.slash_open = slash;
+                    this.redraw(panes::Area::Bottom, cx);
+                }
                 _ => {}
             }
         });
@@ -900,7 +909,7 @@ impl Hangar {
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
-            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
+            suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
@@ -1727,7 +1736,12 @@ impl Hangar {
                 }
             }
             Payload::History(..) => return,
-            Payload::Commands(cache, result) => { self.commands.insert(cache, result.map_err(|error| Self::failure(&error))); }
+            Payload::Commands(cache, result) => {
+                // Revalidação que falha não troca a lista boa que já está na tela pelo erro.
+                if result.is_ok() || !self.commands.get(&cache).is_some_and(Result::is_ok) {
+                    self.commands.insert(cache, result.map_err(|error| Self::failure(&error)));
+                }
+            }
             Payload::Recent(key, result) => {
                 if let Some(recent) = self.recent.as_mut().filter(|recent| recent.key == key) {
                     recent.files = Some(result.map(|mut files| {
@@ -2336,7 +2350,8 @@ impl Hangar {
         self.commands_key().and_then(|key| self.commands.get(&key)).and_then(|r| r.as_ref().ok()).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    // Codex muda a lista conforme o modo: sempre relê. Os demais usam a lista já buscada.
+    // Codex muda a lista conforme o modo: sempre relê. Os demais usam a lista já buscada, salvo `force`
+    // (abrir o `/` ou o painel), que mantém a guardada na tela enquanto a nova chega.
     fn ensure_commands(&mut self, force: bool) {
         let (Some(api), Some(session), Some(cache)) = (self.session_api(), self.selected.clone(), self.commands_key()) else { return; };
         if !force && session.provider != "codex" && self.commands.get(&cache).is_some_and(|r| r.is_ok()) { return; }
@@ -4353,7 +4368,7 @@ impl Hangar {
                 if this.command_panel {
                     this.close_controls();
                     this.close_recent();
-                    this.ensure_commands(false);
+                    this.ensure_commands(true);
                     this.command_search.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
                 }
                 cx.notify();

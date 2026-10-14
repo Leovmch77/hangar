@@ -178,18 +178,39 @@ def test_commands_route(monkeypatch, tmp_path):
     assert "argumentHint" in data[0]
 
 
-def test_escolha_da_sessao_tira_plugin_e_skill_desligados():
-    from app.commands import sem_os_desligados
-    from app.models import CommandInfo
-    cmds = [CommandInfo(name=n, display="/" + n, source="plugin" if ":" in n else "skill")
-            for n in ("superpowers:brainstorming", "ecc:hookify", "ecc:ecc-guide", "ecc:review", "falar", "clear",
-                      "superpowers", "dup:x")]
-    escolha = {"enabledPlugins": {"superpowers@claude-plugins-official": False, "ecc@market": True,
-                                  "dup@a": False, "dup@b": True},
-               "skillOverrides": {"falar": "off"},
-               "permissions": {"deny": ["Skill(ecc:hookify *)", "Skill(ecc:review)"]}}
-    assert _names(sem_os_desligados(cmds, escolha)) == {"ecc:ecc-guide", "clear", "superpowers", "dup:x"}
-    assert sem_os_desligados(cmds, None) == cmds
+def _commands_of(monkeypatch, tmp_path, hidden):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    proj = tmp_path / "proj"
+    (proj / ".claude" / "skills" / "falar").mkdir(parents=True)
+    (proj / ".claude" / "skills" / "falar" / "SKILL.md").write_text("---\ndescription: Falar\n---\n", encoding="utf-8")
+    settings.auth_token = "secret"
+    from app.api import app
+    with patch("app.api.registry.list", return_value=[SessionInfo(name="cc", cwd=str(proj))]), \
+            patch("app.api.comandos_da_cli", return_value=None), \
+            patch("app.api.claude_customizations.hidden_commands", side_effect=hidden) as filtro:
+        r = TestClient(app).get("/api/sessions/cc/commands", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200
+    return {c["name"] for c in r.json()}, filtro, proj
+
+
+def test_commands_route_tira_o_que_o_rust_desligou(monkeypatch, tmp_path):
+    names, filtro, proj = _commands_of(monkeypatch, tmp_path, lambda *a: {"falar"})
+    assert "falar" not in names and "clear" in names
+    cwd, _config_dir, escolha, enviados = filtro.call_args.args
+    assert cwd == str(proj) and escolha is None
+    # Os embutidos do Claude Code nenhuma configuração desliga: nem vão ao filtro.
+    assert "falar" in enviados and "clear" not in enviados
+
+
+def test_commands_route_sem_o_filtro_devolve_a_lista_inteira(monkeypatch, tmp_path):
+    from app.claude_customizations import CustomizationsError
+
+    def fora(*_a):
+        raise CustomizationsError(503, "claude_customizations_unavailable", "fora")
+    names, _filtro, _proj = _commands_of(monkeypatch, tmp_path, fora)
+    assert {"falar", "clear"} <= names
 
 
 def test_frontmatter_cache_rele_quando_o_arquivo_muda(tmp_path):

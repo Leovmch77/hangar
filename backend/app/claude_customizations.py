@@ -122,6 +122,15 @@ def resume_settings(session_id: str, current_session_id: str | None, process_set
     return stored_settings(session_id)
 
 
+def hidden_commands(cwd: str | None, config_dir: str, settings: dict | None, commands: list[str]) -> set[str]:
+    """Nomes que a conta, o `.claude/settings*.json` do projeto e a escolha da sessão desligaram."""
+    result = _request("hidden", {"cwd": cwd, "config_dir": config_dir, "settings": settings, "commands": commands})
+    hidden = result.get("hidden")
+    if not isinstance(hidden, list) or any(not isinstance(name, str) for name in hidden):
+        raise CustomizationsError(503, "claude_customizations_unavailable", "Resposta de customização inválida.")
+    return set(hidden)
+
+
 def remember(session_id: str, settings: dict | None) -> None:
     settings = _validated_settings(settings)
     if settings:

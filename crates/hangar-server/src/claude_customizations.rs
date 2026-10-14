@@ -52,6 +52,7 @@ enum Operation {
     Catalog(Context),
     Prepare(Prepare),
     Remember(Remember),
+    Hidden(Hidden),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +92,19 @@ struct Remember {
     session_id: String,
     settings: Value,
 }
+/// A lista do `/` da sessão: o Python monta, aqui se decide o que a conta, o projeto e a escolha da
+/// sessão desligaram (a sonda da CLI roda fora do projeto e só vê a conta).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hidden {
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    config_dir: PathBuf,
+    #[serde(default)]
+    settings: Value,
+    /// Só os que não são embutidos do Claude Code: esses nenhuma configuração desliga.
+    commands: Vec<String>,
+}
 
 pub async fn private(
     State(st): State<Arc<AppState>>,
@@ -108,8 +122,13 @@ pub async fn private(
         Ok(op) => op,
         Err(_) => return envelope(Err(invalid())),
     };
-    let slots = if matches!(&op, Operation::Catalog(_)) { &st.workspace_read_slots } else { &st.workspace_slots };
-    let permit = match slots.clone().try_acquire_owned() {
+    let slots = match &op {
+        // Só lê poucos JSON: sem vaga, para a lista do `/` nunca sair sem filtro por fila.
+        Operation::Hidden(_) => None,
+        Operation::Catalog(_) => Some(&st.workspace_read_slots),
+        _ => Some(&st.workspace_slots),
+    };
+    let permit = match slots.map(|slots| slots.clone().try_acquire_owned()).transpose() {
         Ok(permit) => permit,
         Err(_) => return envelope(Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada."))),
     };
@@ -125,6 +144,7 @@ pub async fn private(
                 session_key(&args.session_id)?;
                 restricted_settings(&args.settings)?;
             },
+            Operation::Hidden(_) => {},
         }
         Ok::<_, CustomizationError>(op)
     }).await {
@@ -308,20 +328,32 @@ impl Policy {
             let Some(source) = source else { continue; };
             let source: PolicySource = serde_json::from_str(&source)
                 .map_err(|_| error(422, "claude_settings_invalid", "As restrições de skills estão inválidas."))?;
-            if source.enabled_plugins.len() > MAX_ITEMS || source.skill_overrides.len() > MAX_ITEMS
-                || source.permissions.deny.len() > MAX_ITEMS
-                || source.permissions.deny.iter().any(|rule| rule.len() > 4096)
-                || source.skill_overrides.iter().any(|(name, state)| !valid_skill(name) || !matches!(state.as_str(), "on" | "off" | "name-only" | "user-invocable-only")) {
-                return Err(error(422, "claude_settings_invalid", "As restrições de skills estão inválidas."));
-            }
-            policy.enabled_plugins.extend(source.enabled_plugins);
-            policy.skill_overrides.extend(source.skill_overrides);
-            policy.deny.extend(source.permissions.deny);
-            if policy.enabled_plugins.len() > MAX_ITEMS || policy.skill_overrides.len() > MAX_ITEMS || policy.deny.len() > MAX_ITEMS {
-                return Err(error(422, "claude_settings_invalid", "As restrições de skills excedem o limite."));
-            }
+            policy.merge(source)?;
         }
         Ok(policy)
+    }
+    fn merge(&mut self, source: PolicySource) -> Result<()> {
+        if source.enabled_plugins.len() > MAX_ITEMS || source.skill_overrides.len() > MAX_ITEMS
+            || source.permissions.deny.len() > MAX_ITEMS
+            || source.permissions.deny.iter().any(|rule| rule.len() > 4096)
+            || source.skill_overrides.iter().any(|(name, state)| !valid_skill(name) || !matches!(state.as_str(), "on" | "off" | "name-only" | "user-invocable-only")) {
+            return Err(error(422, "claude_settings_invalid", "As restrições de skills estão inválidas."));
+        }
+        self.enabled_plugins.extend(source.enabled_plugins);
+        self.skill_overrides.extend(source.skill_overrides);
+        self.deny.extend(source.permissions.deny);
+        if self.enabled_plugins.len() > MAX_ITEMS || self.skill_overrides.len() > MAX_ITEMS || self.deny.len() > MAX_ITEMS {
+            return Err(error(422, "claude_settings_invalid", "As restrições de skills excedem o limite."));
+        }
+        Ok(())
+    }
+    /// Nomes de plugin desligados: o comando leva só o nome, então o mesmo nome ligado noutro
+    /// marketplace continua valendo.
+    fn disabled_plugin_names(&self) -> HashSet<&str> {
+        let names = |enabled: bool| self.enabled_plugins.iter().filter(move |(_, on)| **on == enabled)
+            .map(|(id, _)| id.split_once('@').map_or(id.as_str(), |(name, _)| name));
+        let on: HashSet<&str> = names(true).collect();
+        names(false).filter(|name| !on.contains(name)).collect()
     }
     fn denied(&self, name: &str) -> bool {
         self.deny.iter().any(|rule| {
@@ -846,6 +878,25 @@ fn merge_settings(mut saved: Value, delta: Value) -> Result<Value> {
 fn settings_result(settings: Value) -> Value {
     json!({"settings":if settings.as_object().is_some_and(|settings| settings.is_empty()) { Value::Null } else { settings }})
 }
+fn hidden(args: Hidden) -> Result<Value> {
+    if args.commands.len() > MAX_ITEMS { return Err(invalid()); }
+    let dirs = match &args.cwd {
+        Some(cwd) => { validate_context(cwd, &args.config_dir)?; project_dirs(cwd)? },
+        None => Vec::new(),
+    };
+    let mut policy = Policy::load(&args.config_dir, &dirs)?;
+    // A escolha da sessão chega ao Claude pelo `--settings`, que vale por cima do projeto.
+    if !args.settings.is_null() {
+        restricted_settings(&args.settings)?;
+        policy.merge(serde_json::from_value(args.settings).map_err(|_| invalid())?)?;
+    }
+    let plugins = policy.disabled_plugin_names();
+    // O plugin desligado vem antes das regras de negação, que podem compilar padrão por nome.
+    let hidden: Vec<&String> = args.commands.iter()
+        .filter(|name| name.split_once(':').is_some_and(|(plugin, _)| plugins.contains(plugin)) || !policy.enabled(name))
+        .collect();
+    Ok(json!({"hidden": hidden}))
+}
 fn execute(op: Operation, installations: Vec<Installation>, root: &Path) -> Result<Value> {
     match op {
         Operation::Catalog(ctx) => Ok(json!(catalog(&ctx.cwd, &ctx.config_dir, installations)?)),
@@ -868,6 +919,7 @@ fn execute(op: Operation, installations: Vec<Installation>, root: &Path) -> Resu
             save_settings(root, &args.session_id, &args.settings)?;
             Ok(settings_result(args.settings))
         },
+        Operation::Hidden(args) => hidden(args),
     }
 }
 
@@ -1072,6 +1124,39 @@ mod tests {
         assert!(result.skills[0].blocked);
         assert_eq!(validate_targets(&selection, &result).unwrap_err().code, "claude_skill_restricted");
         assert!(result.plugins[0].skills.iter().find(|skill| skill.name == "tools:review").unwrap().enabled);
+    }
+
+    fn hidden_names(cwd: Option<&Path>, account: &Path, settings: Value, commands: &[&str]) -> Vec<String> {
+        let args: Hidden = serde_json::from_value(json!({"cwd": cwd, "config_dir": account, "settings": settings, "commands": commands})).unwrap();
+        serde_json::from_value(hidden(args).unwrap()["hidden"].take()).unwrap()
+    }
+
+    #[test]
+    fn hidden_commands_follow_account_project_local_and_session_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().join("account"); let project = dir.path().join("project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(project.join("sub")).unwrap();
+        write(&account.join("settings.json"), r#"{"enabledPlugins":{"superpowers@official":true,"matt@market":true,"tools@market":true}}"#);
+        write(&project.join(".claude/settings.json"), r#"{"skillOverrides":{"falar":"off"},"permissions":{"deny":["Skill","Bash(rm *)"]}}"#);
+        write(&project.join(".claude/settings.local.json"), r#"{"enabledPlugins":{"superpowers@official":false,"superpowers@other":false,"matt@market":false}}"#);
+        let commands = ["superpowers:brainstorming", "matt:tdd", "tools:deploy", "falar", "superpowers"];
+        // Do subdiretório também: as camadas vêm de cada pasta até a raiz do git.
+        assert_eq!(hidden_names(Some(&project.join("sub")), &account, Value::Null, &commands),
+            ["superpowers:brainstorming", "matt:tdd", "tools:deploy", "falar", "superpowers"]);
+        // A escolha da sessão vale por cima do projeto, como o `--settings` no Claude Code.
+        write(&project.join(".claude/settings.json"), r#"{"skillOverrides":{"falar":"off"}}"#);
+        let session = json!({"enabledPlugins":{"matt@market":true},"skillOverrides":{"falar":"on"},"permissions":{"deny":["Skill(tools:deploy *)"]}});
+        assert_eq!(hidden_names(Some(&project), &account, session, &commands), ["superpowers:brainstorming", "tools:deploy"]);
+        // Sem pasta conhecida, só a conta e a sessão.
+        assert!(hidden_names(None, &account, Value::Null, &commands).is_empty());
+    }
+
+    #[test]
+    fn hidden_commands_refuse_bad_session_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let args: Hidden = serde_json::from_value(json!({"config_dir": dir.path(), "settings": {"model": "x"}, "commands": []})).unwrap();
+        assert_eq!(hidden(args).unwrap_err().code, "claude_customizations_invalid");
     }
 
     #[test]

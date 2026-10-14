@@ -16,7 +16,7 @@
 
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
-  import { tick, onDestroy } from 'svelte';
+  import { tick, onDestroy, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import { novoEstadoVad, passoVad } from '@hangar/core';
@@ -1167,6 +1167,25 @@ import { cachePrazo } from '../lib/cachePrazo';
   // Texto em que o Esc fechou a lista; ela volta quando a pessoa mexe no texto.
   let slashDismissed = $state<string | null>(null);
   const slashQuery = $derived(slashToken && inputText !== slashDismissed ? slashToken.query : null);
+
+  // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta
+  // (`/reload-plugins`, configuração do projeto). A guardada fica na tela enquanto a nova chega.
+  let slashWasOpen = false;
+  $effect(() => {
+    const open = slashQuery !== null;
+    if (open && !slashWasOpen) untrack(revalidateCommands);
+    slashWasOpen = open;
+  });
+  function revalidateCommands() {
+    const sn = sessionName;
+    const key = `${provider}|${sn}`;
+    getCommands(sn, sessionServer())
+      .then((c) => {
+        commandCache.set(key, c);
+        if (sn === sessionName) commands = c;
+      })
+      .catch(() => {});   // falhou: a lista guardada continua valendo
+  }
 
   // Completar só troca a palavra pelo nome, com o resto da mensagem intacto e nada enviado.
   async function completeSlashToken(cmd: CommandInfo) {

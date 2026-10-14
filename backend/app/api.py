@@ -36,7 +36,7 @@ from app.send_executor import send_thread as _send_thread
 from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
-from app.commands import comandos_da_cli, list_commands, sem_os_desligados
+from app.commands import comandos_da_cli, list_commands
 from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
@@ -11133,11 +11133,12 @@ def _commands_claude(name: str):
         if not cli:
             cli = comandos_da_cli(meta.get("config_dir"))
         # Sem o `init` ainda, os só-de-TUI conhecidos saem mesmo assim: não rodam sem terminal.
-        return sem_os_desligados(
-            list_commands(meta.get("cwd"), cli, so_tui or frozenset({"color", "doctor", "reload-plugins"}), com_tui=False),
-            _escolha_da_sessao(name, meta))
+        return _sem_os_desligados(
+            name, list_commands(meta.get("cwd"), cli, so_tui or frozenset({"color", "doctor", "reload-plugins"}), com_tui=False),
+            meta.get("cwd"), meta.get("config_dir"), _escolha_da_sessao(name, meta))
     cdir = _session_config_dir(name)
-    cli = comandos_da_cli(str(cdir) if cdir else None)
+    config_dir = str(cdir) if cdir else None
+    cli = comandos_da_cli(config_dir)
     # cwd vem do registry/tmux; se a sessao nao for achada, ainda devolvemos os built-ins
     # + skills globais (lista util mesmo sem cwd casado).
     #
@@ -11157,7 +11158,20 @@ def _commands_claude(name: str):
         # projeto que nao tem nenhuma.
         _log.warning("commands: sem cwd pra '%s' (tmux e registry nao acharam) — lista sem o que "
                      "e do projeto", name)
-    return sem_os_desligados(list_commands(cwd, cli), _escolha_da_sessao(name, None))
+    return _sem_os_desligados(name, list_commands(cwd, cli), cwd, config_dir, _escolha_da_sessao(name, None))
+
+
+def _sem_os_desligados(name: str, comandos: list, cwd: str | None, config_dir: str | None,
+                       escolha: dict | None) -> list:
+    # A sonda e os scans são da conta: quem decide o que a conta, o projeto e a sessão desligaram é o Rust.
+    try:
+        ocultos = claude_customizations.hidden_commands(
+            cwd, tmux.config_dir_de(config_dir), escolha,
+            [c.name for c in comandos if c.source != "builtin"])
+    except claude_customizations.CustomizationsError as exc:
+        _log.warning("commands: filtro de plugins/skills de '%s' indisponível (%s); lista sem filtro", name, exc.code)
+        return comandos
+    return [c for c in comandos if c.name not in ocultos]
 
 
 def _escolha_da_sessao(name: str, meta: dict | None) -> dict | None:
