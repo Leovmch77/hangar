@@ -131,6 +131,8 @@ struct Row {
     glyph: (&'static str, String),
     /// Tipo, login e o resto, separados por " · "; os trechos de aviso levam a cor deles.
     subtitle: (String, Vec<(std::ops::Range<usize>, Tone)>),
+    /// Por que o login não foi conferido: linha própria que quebra, porque no subtítulo de uma linha a causa saía cortada.
+    login_note: Option<String>,
     chips: Vec<String>,
     /// Plano da assinatura ("Max", "Pro"), numa ficha ao lado do nome.
     plan: Option<String>,
@@ -346,6 +348,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     let logged = c.logged_in();
     let muted = |text: String| (text, Tone::Muted);
     let mut subtitle = Vec::new();
+    let mut login_note = None;
     let mut chips = Vec::new();
     let mut codex = None;
     let mut edit = None;
@@ -365,7 +368,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
                 (Some(true), Some(days)) if days <= 0 => subtitle.push((tr("accounts_login_expired"), Tone::Danger)),
                 (Some(true), Some(days)) => subtitle.push((tr("accounts_login_expires").replace("{n}", &days.to_string()),
                     if days <= RENEW_DAYS { Tone::Warn } else { Tone::Muted })),
-                _ => subtitle.extend(login_unchecked(c.login.as_ref()).map(|text| (text, Tone::Warn))),
+                _ => login_note = login_unchecked(c.login.as_ref()),
             }
             if let Some(email) = c.login.as_ref().filter(|_| logged == Some(true)).and_then(|l| l.email.clone()) { subtitle.push(muted(email)); }
             if logged == Some(false) || c.expired() { sign_in = Some(tr("accounts_sign_in")); }
@@ -386,7 +389,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
             } else if logged == Some(false) {
                 subtitle.push(muted(tr("accounts_not_connected")));
             } else {
-                subtitle.extend(login_unchecked(c.login.as_ref()).map(|text| (text, Tone::Warn)));
+                login_note = login_unchecked(c.login.as_ref());
             }
             if !c.active && let Some(sync) = c.codex_sync.as_deref() {
                 subtitle.push(muted(tr(match sync { "ready" => "accounts_codex_inherited", "running" => "accounts_codex_preparing",
@@ -467,7 +470,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     };
     Row {
         id: c.id.clone(), name: c.name.clone(), label: c.natural.clone(), natural: c.natural.clone(), alias: c.alias.clone().unwrap_or_default(),
-        active: c.active, glyph, subtitle, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
+        active: c.active, glyph, subtitle, login_note, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
         sign_out: match c.kind.as_str() {
             "claude" if c.managed != Some(false) && logged == Some(true) && !c.expired() =>
                 Some(vec!["claude-configs".into(), c.natural.clone(), "logout".into()]),
@@ -1013,6 +1016,8 @@ impl Hangar {
             .border_color(theme::border_strong()).font_family(theme::MONO).text_size(px(11.5)).text_color(theme::muted()).child(chip.clone())));
         let identity = div().flex_1().min_w_0().flex().flex_col().gap(px(3.)).child(name_line)
             .when(renaming.is_none() && !compact, |el| el.when(!row.subtitle.0.is_empty(),|el| el.child(subtitle))
+                .children(row.login_note.clone().map(|text| div().min_w_0().text_size(px(12.5)).text_color(theme::warning())
+                    .whitespace_normal().child(text)))
                 .when(!row.chips.is_empty(), |el| el.child(chips)));
         let quota = div().w(px(if wide { columns_width(labels.len()) } else { 206. })).flex_shrink_0().flex().flex_col()
             .gap(px(if compact || wide { 4. } else { 8. }))
@@ -1395,24 +1400,26 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_login_says_why_in_the_subtitle_like_the_web() {
+    fn unchecked_login_says_why_on_its_own_line_like_the_web() {
         use crate::i18n::tr_shared;
         let row = |kind: &str, state: &str, reason: Value| build_row(&credential(json!({"id": format!("{kind}:/h/x"), "tipo": kind, "nome": "x",
             "codex_account": "x", "login": {"estado": state, "loggedIn": null, "motivo": reason}})), &HashMap::new(), false, 0.);
         for (reason, key) in [("prazo", "contas_login_prazo"), ("leitura-falhou", "contas_login_leitura_falhou"),
             ("formato-desconhecido", "contas_login_formato"), ("cli-indisponivel", "contas_login_nao_conferido"), ("causa-nova", "contas_login_nao_conferido")] {
+            assert_ne!(tr_shared(key, &[]), key, "chave sem tradução");
             for kind in ["claude", "codex"] {
-                let (line, marks) = row(kind, "indisponivel", json!(reason)).subtitle;
-                assert!(marks.iter().any(|(range, tone)| *tone == Tone::Warn && line[range.clone()] == tr_shared(key, &[])), "{kind} {reason}: {line}");
+                let built = row(kind, "indisponivel", json!(reason));
+                assert_eq!(built.login_note, Some(tr_shared(key, &[])), "{kind} {reason}");
+                assert!(built.subtitle.1.is_empty(), "{kind} {reason}: a causa não divide o subtítulo cortado");
             }
         }
         // Sem causa (preparo, conta ocupada), login conferido e o Codex sem CLI (frase própria): nada novo.
         for kind in ["claude", "codex"] {
-            assert!(row(kind, "indisponivel", Value::Null).subtitle.1.is_empty());
-            assert!(row(kind, "ok", json!("prazo")).subtitle.1.is_empty());
+            assert_eq!(row(kind, "indisponivel", Value::Null).login_note, None);
+            assert_eq!(row(kind, "ok", json!("prazo")).login_note, None);
         }
-        let (line, marks) = row("codex", "indisponivel", json!("cli-ausente")).subtitle;
-        assert!(marks.is_empty() && line.contains(&tr("accounts_codex_cli_missing")), "{line}");
+        let built = row("codex", "indisponivel", json!("cli-ausente"));
+        assert!(built.login_note.is_none() && built.subtitle.0.contains(&tr("accounts_codex_cli_missing")), "{}", built.subtitle.0);
     }
 
     #[test]
@@ -1420,7 +1427,9 @@ mod tests {
         use crate::i18n::tr_shared;
         let quota = |reason: Value, age: f64| build_row(&credential(json!({"id": "claude:/h/a", "tipo": "claude", "nome": "a",
             "cota": {"estado": "lida", "janelas": [{"rotulo": "5h", "pct": 40}], "idade_s": age, "motivo": reason}})), &HashMap::new(), false, 0.).quota;
-        let cause = |key: &str| tr_shared(key, &[]);
+        // `tr_shared` devolve a própria chave quando ela falta: a comparação abaixo passaria com o texto cru na tela.
+        let cause = |key: &str| { let text = tr_shared(key, &[]); assert_ne!(text, key, "chave sem tradução"); text };
+        assert_ne!(tr_shared("cota_nao_atualizou", &[]), "cota_nao_atualizou");
         let other = cause("cota_causa_outra");
         for (reason, said) in [("sem-resposta", cause("cota_causa_sem_resposta")), ("http-429", cause("cota_causa_limite")),
             ("http-401", cause("cota_causa_recusou")), ("http-403", cause("cota_causa_recusou")),
