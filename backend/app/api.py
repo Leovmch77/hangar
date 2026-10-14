@@ -11021,7 +11021,8 @@ def _sem_os_desligados(name: str, comandos: list, cwd: str | None, config_dir: s
     try:
         ocultos = claude_customizations.hidden_commands(
             cwd, tmux.config_dir_de(config_dir), escolha,
-            [c.name for c in comandos if c.source != "builtin"])
+            [c.name for c in comandos if c.source not in ("builtin", "plugin")],
+            [c.name for c in comandos if c.source == "plugin"])
     except claude_customizations.CustomizationsError as exc:
         _log.warning("commands: filtro de plugins/skills de '%s' indisponível (%s); lista sem filtro", name, exc.code)
         return comandos

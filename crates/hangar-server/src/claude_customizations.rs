@@ -102,8 +102,10 @@ struct Hidden {
     config_dir: PathBuf,
     #[serde(default)]
     settings: Value,
-    /// Só os que não são embutidos do Claude Code: esses nenhuma configuração desliga.
+    /// Só os que não são embutidos do Claude Code nem de plugin: esses nenhuma configuração desliga.
     commands: Vec<String>,
+    /// Os de plugin seguem a regra do catálogo: o plugin desligado e a negação, sem `skillOverrides`.
+    plugins: Vec<String>,
 }
 
 pub async fn private(
@@ -938,29 +940,49 @@ fn settings_result(settings: Value) -> Value {
     json!({"settings":if settings.as_object().is_some_and(|settings| settings.is_empty()) { Value::Null } else { settings }})
 }
 /// O nome do manifesto de cada plugin citado: é o prefixo que o Claude dá aos comandos (o mesmo do
-/// catálogo) e pode diferir do id. Sem registro, nenhum plugin instalado.
-fn manifest_names<'a>(config_dir: &Path, ids: impl Iterator<Item = &'a String>) -> Result<HashMap<String, BTreeSet<String>>> {
-    let invalid = || error(422, "claude_plugins_registry_invalid", "O registro de plugins instalados está inválido.");
+/// catálogo) e pode diferir do id. O que não dá para ler vira aviso e fica só o prefixo do id, para o
+/// resto do filtro continuar valendo.
+fn manifest_names<'a>(config_dir: &Path, ids: impl Iterator<Item = &'a String>) -> HashMap<String, BTreeSet<String>> {
     let mut out = HashMap::new();
-    let mut ids = ids.peekable();
-    if ids.peek().is_none() { return Ok(out); }
-    let Some(source) = read_source(&config_dir.join("plugins/installed_plugins.json")).map_err(|_| invalid())? else { return Ok(out); };
-    let registry: Value = serde_json::from_str(&source).map_err(|_| invalid())?;
-    let plugins = registry.get("plugins").and_then(Value::as_object);
+    let path = config_dir.join("plugins/installed_plugins.json");
+    let registry = match read_source(&path) {
+        Ok(None) => return out,
+        Ok(Some(source)) => serde_json::from_str::<Value>(&source).ok(),
+        Err(_) => None,
+    };
+    let Some(plugins) = registry.as_ref().and_then(|registry| registry.get("plugins")).and_then(Value::as_object) else {
+        tracing::warn!(code = "claude_plugins_registry_invalid", path = %path.display(),
+            "registro de plugins ilegível; comandos de plugin desligado filtrados só pelo id");
+        return out;
+    };
+    let mut seen = HashSet::new();
     for id in ids {
-        let entries = plugins.and_then(|plugins| plugins.get(id)).and_then(Value::as_array);
-        for entry in entries.into_iter().flatten().take(MAX_ITEMS) {
+        let entries: Vec<&Value> = match plugins.get(id) {
+            Some(Value::Array(entries)) => entries.iter().take(MAX_ITEMS).collect(),
+            Some(entry @ Value::Object(_)) => vec![entry],
+            _ => continue,
+        };
+        for entry in entries {
             let Some(root) = entry.get("installPath").and_then(Value::as_str).map(Path::new).filter(|root| root.is_absolute()) else { continue; };
-            // Manifesto ausente ou ilegível: o plugin não carrega com outro nome além do id.
-            let Ok(Some(source)) = read_source(&root.join(".claude-plugin/plugin.json")) else { continue; };
-            let Some(name) = serde_json::from_str::<Manifest>(&source).ok().and_then(|manifest| manifest.name).filter(|name| valid_part(name)) else { continue; };
-            out.entry(id.clone()).or_default().insert(name);
+            if !seen.insert((id.as_str(), root)) { continue; }
+            match read_source(&root.join(".claude-plugin/plugin.json")) {
+                Ok(Some(source)) => match serde_json::from_str::<Manifest>(&source) {
+                    Ok(Manifest { name: Some(name), .. }) if valid_part(&name) => { out.entry(id.clone()).or_default().insert(name); },
+                    Ok(Manifest { name: None, .. }) => {},
+                    _ => tracing::warn!(code = "claude_plugin_manifest_invalid", plugin = %id,
+                        "manifesto de plugin inválido; comandos dele filtrados só pelo id"),
+                },
+                // Sem manifesto, o Claude usa o nome do id.
+                Ok(None) => {},
+                Err(_) => tracing::warn!(code = "claude_plugin_source_unreadable", plugin = %id,
+                    "manifesto de plugin ilegível; comandos dele filtrados só pelo id"),
+            }
         }
     }
-    Ok(out)
+    out
 }
 fn hidden(args: Hidden) -> Result<Value> {
-    if args.commands.len() > MAX_ITEMS { return Err(invalid()); }
+    if args.commands.len() > MAX_ITEMS || args.plugins.len() > MAX_ITEMS { return Err(invalid()); }
     let dirs = match &args.cwd {
         Some(cwd) => { validate_context(cwd, &args.config_dir)?; project_dirs(cwd)? },
         None => Vec::new(),
@@ -971,11 +993,14 @@ fn hidden(args: Hidden) -> Result<Value> {
         restricted_settings(&args.settings)?;
         policy.merge(serde_json::from_value(args.settings).map_err(|_| invalid())?)?;
     }
-    let manifests = manifest_names(&args.config_dir, policy.enabled_plugins.keys())?;
+    let manifests = if policy.enabled_plugins.values().any(|on| !on) {
+        manifest_names(&args.config_dir, policy.enabled_plugins.keys())
+    } else { HashMap::new() };
     let plugins = policy.disabled_plugin_names(&manifests);
     // O plugin desligado vem antes das regras de negação, que podem compilar padrão por nome.
-    let hidden: Vec<&String> = args.commands.iter()
-        .filter(|name| name.split_once(':').is_some_and(|(plugin, _)| plugins.contains(plugin)) || !policy.enabled(name))
+    let hidden: Vec<&String> = args.plugins.iter()
+        .filter(|name| name.split_once(':').is_some_and(|(plugin, _)| plugins.contains(plugin)) || policy.denied(name))
+        .chain(args.commands.iter().filter(|name| !policy.enabled(name)))
         .collect();
     Ok(json!({"hidden": hidden}))
 }
@@ -1208,8 +1233,9 @@ mod tests {
         assert!(result.plugins[0].skills.iter().find(|skill| skill.name == "tools:review").unwrap().enabled);
     }
 
-    fn hidden_names(cwd: Option<&Path>, account: &Path, settings: Value, commands: &[&str]) -> Vec<String> {
-        let args: Hidden = serde_json::from_value(json!({"cwd": cwd, "config_dir": account, "settings": settings, "commands": commands})).unwrap();
+    fn hidden_names(cwd: Option<&Path>, account: &Path, settings: Value, commands: &[&str], plugins: &[&str]) -> Vec<String> {
+        let args: Hidden = serde_json::from_value(json!({"cwd": cwd, "config_dir": account, "settings": settings,
+            "commands": commands, "plugins": plugins})).unwrap();
         serde_json::from_value(hidden(args).unwrap()["hidden"].take()).unwrap()
     }
 
@@ -1222,22 +1248,25 @@ mod tests {
         write(&account.join("settings.json"), r#"{"enabledPlugins":{"superpowers@official":true,"matt@market":true,"tools@market":true}}"#);
         write(&project.join(".claude/settings.json"), r#"{"skillOverrides":{"falar":"off"},"permissions":{"deny":["Skill","Bash(rm *)"]}}"#);
         write(&project.join(".claude/settings.local.json"), r#"{"enabledPlugins":{"superpowers@official":false,"superpowers@other":false,"matt@market":false}}"#);
-        let commands = ["superpowers:brainstorming", "matt:tdd", "tools:deploy", "falar", "superpowers"];
+        let (commands, plugins) = (["falar", "superpowers"], ["superpowers:brainstorming", "matt:tdd", "tools:deploy"]);
         // Do subdiretório também: as camadas vêm de cada pasta até a raiz do git.
-        assert_eq!(hidden_names(Some(&project.join("sub")), &account, Value::Null, &commands),
+        assert_eq!(hidden_names(Some(&project.join("sub")), &account, Value::Null, &commands, &plugins),
             ["superpowers:brainstorming", "matt:tdd", "tools:deploy", "falar", "superpowers"]);
         // A escolha da sessão vale por cima do projeto, como o `--settings` no Claude Code.
         write(&project.join(".claude/settings.json"), r#"{"skillOverrides":{"falar":"off"}}"#);
         let session = json!({"enabledPlugins":{"matt@market":true},"skillOverrides":{"falar":"on"},"permissions":{"deny":["Skill(tools:deploy *)"]}});
-        assert_eq!(hidden_names(Some(&project), &account, session, &commands), ["superpowers:brainstorming", "tools:deploy"]);
+        assert_eq!(hidden_names(Some(&project), &account, session, &commands, &plugins), ["superpowers:brainstorming", "tools:deploy"]);
         // Sem pasta conhecida, só a conta e a sessão.
-        assert!(hidden_names(None, &account, Value::Null, &commands).is_empty());
+        assert!(hidden_names(None, &account, Value::Null, &commands, &plugins).is_empty());
+        // Como no catálogo, o `skillOverrides` desliga skill avulsa, não comando de plugin.
+        let session = json!({"skillOverrides":{"falar":"off","matt:tdd":"off"}});
+        assert_eq!(hidden_names(None, &account, session, &commands, &plugins), ["falar"]);
     }
 
     #[test]
     fn hidden_commands_refuse_bad_session_settings() {
         let dir = tempfile::tempdir().unwrap();
-        let args: Hidden = serde_json::from_value(json!({"config_dir": dir.path(), "settings": {"model": "x"}, "commands": []})).unwrap();
+        let args: Hidden = serde_json::from_value(json!({"config_dir": dir.path(), "settings": {"model": "x"}, "commands": [], "plugins": []})).unwrap();
         assert_eq!(hidden(args).unwrap_err().code, "claude_customizations_invalid");
     }
 
@@ -1252,14 +1281,17 @@ mod tests {
             "kit@other": [{"scope": "user", "installPath": kit}]}});
         write(&account.join("plugins/installed_plugins.json"), &registry.to_string());
         write(&account.join("settings.json"), r#"{"enabledPlugins":{"alias@market":false}}"#);
-        let commands = ["tools:deploy", "alias:deploy", "other:x"];
-        assert_eq!(hidden_names(None, &account, Value::Null, &commands), ["tools:deploy", "alias:deploy"]);
+        let plugins = ["tools:deploy", "alias:deploy", "other:x"];
+        assert_eq!(hidden_names(None, &account, Value::Null, &[], &plugins), ["tools:deploy", "alias:deploy"]);
+        // Comando avulso numa pasta com o nome do plugin não é do plugin.
+        assert!(hidden_names(None, &account, Value::Null, &["tools:local"], &[]).is_empty());
         // Outro plugin ligado com o mesmo nome de manifesto mantém os comandos à vista.
         write(&account.join("settings.json"), r#"{"enabledPlugins":{"alias@market":false,"kit@other":true}}"#);
-        assert_eq!(hidden_names(None, &account, Value::Null, &commands), ["alias:deploy"]);
+        assert_eq!(hidden_names(None, &account, Value::Null, &[], &plugins), ["alias:deploy"]);
+        // Registro ilegível: fica o prefixo do id, e o resto do filtro continua valendo.
         write(&account.join("plugins/installed_plugins.json"), "not json");
-        let args: Hidden = serde_json::from_value(json!({"config_dir": account, "commands": []})).unwrap();
-        assert_eq!(hidden(args).unwrap_err().code, "claude_plugins_registry_invalid");
+        write(&account.join("settings.json"), r#"{"enabledPlugins":{"alias@market":false},"skillOverrides":{"falar":"off"}}"#);
+        assert_eq!(hidden_names(None, &account, Value::Null, &["falar"], &plugins), ["alias:deploy", "falar"]);
     }
 
     #[test]

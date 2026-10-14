@@ -198,10 +198,11 @@ def _commands_of(monkeypatch, tmp_path, hidden):
 def test_commands_route_tira_o_que_o_rust_desligou(monkeypatch, tmp_path):
     names, filtro, proj = _commands_of(monkeypatch, tmp_path, lambda *a: {"falar"})
     assert "falar" not in names and "clear" in names
-    cwd, _config_dir, escolha, enviados = filtro.call_args.args
+    cwd, _config_dir, escolha, enviados, de_plugin = filtro.call_args.args
     assert cwd == str(proj) and escolha is None
     # Os embutidos do Claude Code nenhuma configuração desliga: nem vão ao filtro.
     assert "falar" in enviados and "clear" not in enviados
+    assert "falar" not in de_plugin and "clear" not in de_plugin
 
 
 def test_commands_route_sem_o_filtro_devolve_a_lista_inteira(monkeypatch, tmp_path):
