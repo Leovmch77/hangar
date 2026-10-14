@@ -103,7 +103,6 @@ impl Hangar {
     }
 
     pub(super) fn receive_artifacts(&mut self, request: ArtifactRequest, result: Result<Vec<ArtifactItem>, Failure>, cx: &mut Context<Self>) {
-        if self.artifact_owner().as_ref() != Some(&request.owner) { return; }
         if self.artifacts.accept(&request, result.map_err(|error| Self::fetch_failure(&error))) {
             self.redraw(panes::Area::Bottom, cx);
             cx.notify();
