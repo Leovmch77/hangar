@@ -61,7 +61,9 @@ function nomeComOrdem(vistos, nome) {
 function avisoDeSucesso(texto, marcas = '') {
   if (/success|sucesso|green|emerald/i.test(marcas)) return true;
   return /\b(?:sucesso|gravad[oa]s?|salv[oa]s?|criad[oa]s?|inclu[ií]d[oa]s?|cadastrad[oa]s?|atualizad[oa]s?|registrad[oa]s?)\b/i.test(texto)
-    && !/\b(?:n[aã]o|erro|falh\w*|inv[aá]lid\w*|recusad\w*|imposs[ií]vel)\b/i.test(texto);
+    && !/\b(?:n[aã]o|erro|falh\w*|inv[aá]lid\w*|recusad\w*|imposs[ií]vel|existe|duplic\w*|sem sucesso)\b/i.test(texto)
+    // "Já cadastrado" é a recusa por duplicidade; `\b` não fecha depois do "á".
+    && !/(?:^|[^\p{L}])j[aá](?![\p{L}])/iu.test(texto);
 }
 
 const OPERACOES = {
@@ -986,7 +988,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
     // Texto escrito para um campo vale so na pagina em que foi pedido.
-    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); recusados = {}; urlDosEscritos = url; }
+    // A recusa também: era de outro formulário, e levava os valores dele ao modelo de texto.
+    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); recusados = {}; recusaParaTexto = null; urlDosEscritos = url; }
     // Campo deixado de lado sai dos alvos: oferecido de novo, o Jev voltava a mirar o mesmo filtro.
     const candidatos = parsarSnapshot(snapshot).filter((c) => !((PAPEIS_DE_TEXTO.has(c.papel) || c.papel === 'combobox') && pulados.has(c.nome)));
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
@@ -1005,6 +1008,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     const segredos = new Set(Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v));
     // Por valor (igual ao de --dados) e por nome do campo onde o laço já digitou um segredo: o valor
     // lido vem cortado e a página reformata (cartão "4111 1111 ..."), então só o valor não basta.
+    // O aviso de recusa repete o valor digitado ("Código 123456 inválido") e vai ao Jev e aos modelos.
+    anotacao.avisos = anotacao.avisos.map((a) => [...segredos].reduce((t, v) => t.split(v).join('(oculto)'), a));
     for (const [k, v] of Object.entries(anotacao.valores)) {
       if (segredos.has(v) || camposSecretos.has(normalizar(k))) anotacao.valores[k] = '(oculto)';
     }

@@ -117,6 +117,10 @@ async fn connect(cdp: &url::Url, alvo: Option<&str>, pages: &Rc<Pages>, key: Str
         .map_err(|e| down(&e))?.json().await.map_err(|e| down(&e))?;
     // O WebSocket sai do loopback do --cdp, nunca do host que a lista anuncia.
     let ws = cdp.join(&pick_target(&list, alvo)?).map_err(|e| down(&e))?;
+    // `//outro.host/x` na lista viraria outro host no `join`: só segue se continuar no endereço do --cdp.
+    if ws.host_str() != cdp.host_str() || ws.port_or_known_default() != cdp.port_or_known_default() {
+        return Err(format!("erro: --cdp: a pagina anunciou um WebSocket fora de {cdp}; recusado"));
+    }
     let socket = CdpSocket::open_url(&tokio::runtime::Handle::current(), ws);
     let events = socket.events();
     match tokio::time::timeout(Duration::from_secs(12), events.recv()).await {

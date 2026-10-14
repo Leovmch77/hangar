@@ -81,8 +81,13 @@ for (let i = 0; i < args.length; i++) {
     if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta e2e/roteiros');
   }
   else if (args[i] === '--cwd') flags.cwd = args[++i];
-  else if (args[i] === '--cdp') flags.cdp = args[++i];
-  else if (args[i] === '--alvo') flags.alvo = args[++i];
+  else if (args[i] === '--cdp' || args[i] === '--alvo') {
+    // Sem valor, o comando caía calado no navegador da sessão (ou em qualquer página de fora).
+    const flag = args[i];
+    const valor = args[++i];
+    if (!valor || valor.startsWith('--')) erro(`${flag} precisa de um valor: ${flag === '--cdp' ? '--cdp http://127.0.0.1:9222' : '--alvo /agenda'}`);
+    flags[flag.slice(2)] = valor;
+  }
   else pos.push(args[i]);
 }
 // Página de fora do app: quem conecta e confere o loopback é o app nativo; sessão e sidecar não entram.

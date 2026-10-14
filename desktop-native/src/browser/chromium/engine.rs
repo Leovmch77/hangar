@@ -719,11 +719,11 @@ impl Fit {
             drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
             // Só a janela nova não muda a página no Chromium sem janela, e depois de redimensionar o quadro chegava no
             // tamanho antigo, esticado; em tela 1,25 sem a densidade dela o quadro também era esticado. Com layout pedido
-            // pelo agente o tamanho é dele, e nem se guarda este: aí o painel recebe a tela emulada encaixada, não a sua.
+            // pelo agente o tamanho é dele: o do painel só fica guardado, para o `layout desktop` voltar ao atual.
             let viewport = &session.viewport;
+            let (width, height) = (w.round() as u32, h.round() as u32);
+            viewport.panel.set(Some((width, height, *frame_scale)));
             if !viewport.held.get() {
-                let (width, height) = (w.round() as u32, h.round() as u32);
-                viewport.panel.set(Some((width, height, *frame_scale)));
                 drop(session.call("Emulation.setDeviceMetricsOverride", json!({
                     "width": width, "height": height, "deviceScaleFactor": frame_scale, "mobile": false,
                 })));

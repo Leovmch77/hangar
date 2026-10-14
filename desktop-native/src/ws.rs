@@ -211,8 +211,14 @@ async fn handshake(url: url::Url) -> Result<reqwest::Upgraded, Error> {
     let mut nonce = [0; 16];
     SystemRandom::new().fill(&mut nonce).map_err(|_| Error::Network)?;
     let key = STANDARD.encode(nonce);
-    let client = Client::builder().http1_only().redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10)).build().map_err(|_| Error::Network)?;
+    let mut builder = Client::builder().http1_only().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10));
+    // Loopback nunca passa pelo proxy do ambiente: o CDP de fora (túnel local) iria parar nele.
+    if url.host().is_some_and(|host| match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }) { builder = builder.no_proxy(); }
+    let client = builder.build().map_err(|_| Error::Network)?;
     // Nunca transportar erros do reqwest: eles podem conter a URL autenticada.
     timeout(Duration::from_secs(10), async {
         let response = client.get(url).header(header::UPGRADE, "websocket").header(header::CONNECTION, "Upgrade")
