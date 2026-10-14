@@ -58,7 +58,8 @@ def test_jev_decide_antes_da_regex_e_regex_vale_quando_ele_falha(monkeypatch):
     monkeypatch.setattr(mod, "_jev_precisa", lambda p: False)
     assert mod.precisa_de_navegador("abre a página de login") is False
     monkeypatch.setattr(mod, "_jev_precisa", lambda p: True)
-    assert mod.precisa_de_navegador("faz o commit") is True
+    assert mod.precisa_de_navegador("faz o commit agora") is True
+    assert mod.precisa_de_navegador("faz o commit") is False
     monkeypatch.setattr(mod, "_jev_precisa", lambda p: None)
     assert mod.precisa_de_navegador("abre a página de login") is True
     assert mod.precisa_de_navegador("faz o commit") is False
