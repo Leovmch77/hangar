@@ -41,6 +41,7 @@ def _locked(*names: str):
 
 def _write(name: str, meta: dict) -> None:
     """Chamar com `_locked(name)`."""
+    _dir().mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_dir(), suffix=".tmp", delete=False) as tmp:
         json.dump(meta, tmp)
     try:

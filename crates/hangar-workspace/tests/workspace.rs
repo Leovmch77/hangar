@@ -198,13 +198,15 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
     git(&main, &["worktree", "add", "-q", "-b", "feat", other.to_str().unwrap()]);
 
     let from_main = op(&main, "list_branches", json!({}));
-    assert_eq!(from_main["elsewhere"]["feat"]["path"], json!(other.to_string_lossy()));
+    // No Windows o git devolve `C:/…`: compara como caminho, não como texto.
+    let same_path = |value: &serde_json::Value, path: &std::path::Path| value.as_str().is_some_and(|text| std::path::Path::new(text) == path);
+    assert!(same_path(&from_main["elsewhere"]["feat"]["path"], &other), "{}", from_main["elsewhere"]);
     assert_eq!(from_main["elsewhere"]["feat"]["main"], json!(false));
     assert!(from_main["elsewhere"].get("main").is_none(), "a própria pasta não é outra worktree");
     assert!(from_main["elsewhere"].get("livre").is_none());
 
     let from_other = op(&other, "list_branches", json!({}));
-    assert_eq!(from_other["elsewhere"]["main"]["path"], json!(main.to_string_lossy()));
+    assert!(same_path(&from_other["elsewhere"]["main"]["path"], &main), "{}", from_other["elsewhere"]);
     assert_eq!(from_other["elsewhere"]["main"]["main"], json!(true));
     assert!(from_other["elsewhere"].get("feat").is_none());
 }

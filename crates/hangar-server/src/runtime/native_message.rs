@@ -27,8 +27,8 @@ fn socks_dir() -> Option<PathBuf> {
 
 /// O socket de inbox da sessão Claude cuja conversa é `session_id`, como o `socket_da_sessao` do
 /// Python: o registro do CLI na pasta da conta e no `~/.claude`, processo vivo e socket existente.
+/// O socket existir basta: a pasta `cc-socks` não é conferida à parte.
 pub fn session_socket(session_id:&str,config_dir:Option<&str>) -> Option<PathBuf> {
-    socks_dir()?;
     let mut dirs:Vec<PathBuf> = config_dir.filter(|dir|!dir.is_empty()).map(|dir|Path::new(dir).join("sessions")).into_iter().collect();
     if let Some(home) = std::env::home_dir() { dirs.push(home.join(".claude").join("sessions")); }
     socket_in(&dirs,session_id)
