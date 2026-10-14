@@ -8,12 +8,13 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
 use super::Theme;
 
 const DEADLINE: Duration = Duration::from_secs(8);
+const STOP_WAIT: Duration = Duration::from_secs(10);
 const CONSOLE_MAX: usize = 50;
 const LINE_MAX: usize = 500;
 static SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(2));
@@ -84,11 +85,11 @@ pub async fn render(html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
 
 pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     let bin = bin.ok_or(ChromeError::Absent)?;
-    let _slot = SLOTS.acquire().await.map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
-    run(&bin, html, jobs, own_theme).await
+    let slot = SLOTS.acquire().await.map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
+    run(&bin, html, jobs, own_theme, slot).await
 }
 
-async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
+async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool, slot: SemaphorePermit<'static>) -> Result<Rendered, ChromeError> {
     let profile = tempfile::tempdir().map_err(|_| ChromeError::Failed("perfil temporário"))?;
     let mut child = tokio::process::Command::new(bin)
         .args(["--headless", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
@@ -103,28 +104,38 @@ async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool) -> Result<Re
         let url = ws_url(profile.path(), &mut child).await?;
         drive(&url, html, jobs, own_theme).await
     }).await.unwrap_or(Err(ChromeError::Failed("navegador do servidor passou do prazo")));
-    tokio::spawn(shutdown(child, profile));
+    tokio::spawn(shutdown(child, profile, slot));
     result
 }
 
 /// Encerra a árvore inteira (no Windows os filhos do Chrome sobrevivem ao pai) e só então apaga o perfil,
-/// que fica preso enquanto algum deles vive.
-async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir) {
+/// que fica preso enquanto algum deles vive. A vaga da fila só volta aqui: Chrome que não morre segura a fila
+/// em vez de acumular.
+async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir, _slot: SemaphorePermit<'static>) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
-        let _ = tokio::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])
+        let kill = tokio::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().await;
+            .kill_on_drop(true).status();
+        match tokio::time::timeout(STOP_WAIT, kill).await {
+            // 128 = o processo já não existe.
+            Ok(Ok(status)) if matches!(status.code(), Some(0 | 128)) => {}
+            outcome => tracing::warn!(code = "page_chrome_tree_kill_failed", ?outcome, "árvore do navegador do servidor não encerrada"),
+        }
     }
-    let _ = child.kill().await;
+    let _ = child.start_kill();
+    if tokio::time::timeout(STOP_WAIT, child.wait()).await.is_err() {
+        tracing::warn!(code = "page_chrome_still_alive", "navegador do servidor não morreu");
+    }
+    let mut last = None;
     for _ in 0..10 {
         match tokio::fs::remove_dir_all(profile.path()).await {
             Ok(()) => return,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            Err(e) => { last = Some(e.kind()); tokio::time::sleep(Duration::from_secs(1)).await; }
         }
     }
-    tracing::warn!(code = "page_chrome_profile_left", "perfil temporário do navegador do servidor não foi apagado");
+    tracing::warn!(code = "page_chrome_profile_left", io_kind = ?last, path = %profile.path().display(), "perfil temporário do navegador do servidor não foi apagado");
 }
 
 async fn ws_url(profile: &Path, child: &mut tokio::process::Child) -> Result<String, ChromeError> {
