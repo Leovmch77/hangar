@@ -1,10 +1,10 @@
 //! Cota das fontes que não são Claude nem Codex: cada caso de `golden/quotas_other.json` (gravado
 //! pelos leitores Python reais, urllib incluído) roda aqui pelo leitor Rust contra um servidor que
 //! dá a MESMA resposta HTTP, e a leitura e o pedido têm de sair iguais. A enumeração das fontes
-//! parte dos mesmos arquivos. Casos com `diferenca` seguem a saída nova aprovada (decisoes.md):
-//! D5 (chave/cookie com quebra de linha vira `credencial-invalida`, sem rede) e D6 (redirecionamento
-//! não é seguido: `http-<3xx>`) e D8 (o Kimi recebe `User-Agent: hangar`). A comparação é do JSON
-//! serializado, então a ordem das chaves e o `-0.0` contam. Processo próprio porque troca o TZ.
+//! parte dos mesmos arquivos. Casos com `diferenca` seguem a saída nova aprovada pelo usuário: chave
+//! ou cookie com quebra de linha vira `credencial-invalida` sem rede, redirecionamento não é seguido
+//! (`http-<3xx>`) e o Kimi recebe `User-Agent: hangar`. A comparação é do JSON serializado, então a
+//! ordem das chaves e o `-0.0` contam. Processo próprio porque troca o TZ.
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::accounts::quotas::other::{self, Endpoints, Reader};
 use serde_json::{Value, json};
@@ -136,8 +136,8 @@ async fn readers_match_python() {
             ),
             _ => (case["expected"].clone(), case["requests"].as_array().unwrap().clone()),
         };
-        // R#7 (usuário, 13/10): janela com conta não finita (NaN/inf) some; o Python dava 100% ou
-        // 0%. Nestes dois casos nenhuma janela é finita, então a cota fica sem formato conhecido.
+        // Janela com conta não finita (NaN/inf) some; o Python dava 100% ou 0%. Nestes dois casos
+        // nenhuma janela é finita, então a cota fica sem formato conhecido.
         let expected = if matches!(name, "kimi_nan_e_inf_em_texto" | "kimi_json_com_nan") {
             json!({"estado":"indisponivel","janelas":[],"motivo":"formato-desconhecido"})
         } else {
@@ -149,7 +149,7 @@ async fn readers_match_python() {
         if unreachable != (case["refused"] == true) {
             failures.push(format!("{name}: recusa marcada {unreachable}"));
         }
-        // D8: o Kimi recebia o `Python-urllib/<versão>` do urllib; o Rust se identifica como `hangar`.
+        // O Kimi recebia o `Python-urllib/<versão>` do urllib; o Rust se identifica como `hangar`.
         let requests: Vec<Value> = if case["reader"] == "kimi" {
             requests.into_iter().map(|mut row| { row["user_agent"] = json!("hangar"); row }).collect()
         } else {
@@ -222,16 +222,16 @@ fn sources_match_python() {
                 "aliases": config.aliases,
             });
         let mut want = if expected.get("erro").is_some() { json!({"erro": true}) } else { expected.clone() };
-        // R#12 (revisão Rust, 13/10): motor com `label` que não é texto sai da cota como já saía da
-        // lista de credenciais (D1); o Python o lia e dava `sem-resposta`.
+        // Motor com `label` que não é texto sai da cota como já saía da lista de credenciais; o
+        // Python o lia e dava `sem-resposta`.
         if let Some(rows) = want["sources"].as_array_mut() {
             rows.retain(|row| row["label"].is_string());
         }
-        // D1: o motor que não é objeto sai sozinho; os outros continuam fontes.
+        // O motor que não é objeto sai sozinho; os outros continuam fontes.
         if name == "motor_nao_objeto_derruba" {
             let ids: Vec<&Value> = got["sources"].as_array().into_iter().flatten().map(|s| &s["id"]).collect();
             if ids != [&json!("chave:a")] {
-                failures.push(format!("{name}: D1 esperava só chave:a, rust {got}"));
+                failures.push(format!("{name}: esperava só chave:a, rust {got}"));
             }
             continue;
         }
