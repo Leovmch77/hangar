@@ -7,8 +7,9 @@ import { Sheet } from '../ui/Sheet';
 import { superficie } from '../theme/superficie';
 import * as m from '../paraglide/messages';
 
-// Uma busca por sessão: a lista vale para a folha e para as sugestões em linha, e não muda entre
-// aberturas. No Codex ela não fica guardada, como no PWA.
+// Uma lista por sessão para a folha e as sugestões em linha. Cada abertura a revalida (plugins e
+// skills mudam com a sessão aberta), com a guardada na tela enquanto a nova chega. No Codex ela não
+// fica guardada, como no PWA.
 const cache = new Map<string, CommandInfo[]>();
 
 export function useSessionCommands(name: string, provider: string | null, wanted: boolean) {
@@ -16,21 +17,25 @@ export function useSessionCommands(name: string, provider: string | null, wanted
   const [commands, setCommands] = useState<CommandInfo[] | null>(() => cache.get(key) ?? null);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
+  const shown = useRef(commands !== null);
+  shown.current = commands !== null;
 
   useEffect(() => {
-    if (!wanted || commands) return;
+    if (!wanted) return;
     let alive = true;
-    setError('');
+    // Revalidação que falha não troca a lista que está na tela pelo erro.
+    const revalidating = shown.current;
+    if (!revalidating) setError('');
     getCommands(name)
       .then((c) => {
         if (provider !== 'codex') cache.set(key, c);
         if (alive) setCommands(c);
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
+        if (alive && !revalidating) setError(e instanceof Error ? e.message : String(e));
       });
     return () => { alive = false; };
-  }, [wanted, commands, name, provider, key, attempt]);
+  }, [wanted, name, provider, key, attempt]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
   return { commands, error, retry };

@@ -51,8 +51,10 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
   terminal, Pi, Kimi, omp e orq seguem no Python (provedores não migrados).
 - **Contrato interno versionado à mão.** Mudou rota `/internal`, evento do `side-events` ou variável
   passada ao filho → subir `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL` (Rust) juntos.
-  Atual: **64** (a 64 é a ponte `/__hangar_server/forwarded`, por onde convidado e Connect
-  chegam às rotas de plano e ao catálogo de customizações no Rust); antes, **63** (perguntas, permissões e ciclo de vida da sessão aberta no Rust, branch
+  Atual: **65** (a 65 junta o filtro do `/commands` do Claude no Rust, operação `hidden` da ponte de
+  customizações, com a ponte `/__hangar_server/forwarded`, por onde convidado e Connect chegam às
+  rotas de plano e ao catálogo de customizações no Rust; cada um estava na 64 do seu branch); antes,
+  **63** (perguntas, permissões e ciclo de vida da sessão aberta no Rust, branch
   `Hangar-rust`, que entrou na 52 e subiu com as fusões da `main`); antes, **48** (a 48 junta as contas do #115, que estavam na 47, com o Claude sem terminal da
   parte 5 C1, que estava na 41; a 47 juntava as contas com os grupos da parte 6, que estavam na
   40; a 46 é a leitura rápida de login Codex das contas; a 37 era a parte 5-0; a 35 era a parte 4
