@@ -4,7 +4,7 @@ O Rust grava o sidecar do Claude (`patch_meta`, cano, `/clear`) e o do Codex sob
 `<nome>.lock` e troca o arquivo por tmp+replace. O Python tem de segurar a mesma trava no
 ler-alterar-gravar e, no Windows, esperar a troca terminar em vez de ler "sem sidecar".
 """
-import fcntl
+import contextlib
 import pathlib
 import threading
 
@@ -90,10 +90,11 @@ def test_load_during_a_windows_replace_is_not_a_missing_sidecar(module, claude_d
 
 
 def _hold(lock_path):
+    """A trava do outro escritor (o `hangar-server` usa a mesma), segurada até fechar."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
-    fcntl.flock(handle, fcntl.LOCK_EX)
-    return handle
+    stack = contextlib.ExitStack()
+    stack.enter_context(atomico.locked(lock_path))
+    return stack
 
 
 def test_claude_update_waits_for_the_other_writer(claude_dir):

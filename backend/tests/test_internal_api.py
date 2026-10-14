@@ -1,6 +1,7 @@
 # backend/tests/test_internal_api.py
 import asyncio
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -207,7 +208,7 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
     coordinator = _rust_slot(tmp_path, monkeypatch)
     client = _client()
     for _ in range(2):
-        # Catálogo estrito do sidecar: recusa sem tocar no diário (só `native_message` exige tentativa).
+        # Serviço recusado (o sidecar é do Rust): a recusa não toca no diário.
         response = _policy(client, "session.patch_meta", "op-1:patch", {"campo_inexistente": {}})
         assert response.status_code == 200 and response.json() == {"ok": False, "error_type": "ValueError"}
     assert internal_api._policy_calls == {}
@@ -222,11 +223,16 @@ def test_quota_route_is_gone():
     assert "/internal/accounts/quotas" not in {route.path for route in internal_api.router.routes}
 
 
-def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
+def test_native_message_is_refused_without_reading_the_state_file(tmp_path, monkeypatch):
+    # O recado nativo é escrito pelo Rust: o Python recusa sem abrir o arquivo de estado da fila, que o
+    # Rust troca enquanto isso (no Windows a leitura falharia e travaria a troca).
     coordinator = _rust_slot(tmp_path, monkeypatch)
-    client = TestClient(api_mod.app, client=("127.0.0.1", 50000), raise_server_exceptions=False)
-    response = _policy(client, "native_message", "op-1:native_message:x", {"text": "[de: a] oi"})
-    assert response.status_code == 500
+    opened = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda path: opened.append(path) or real(path))
+    response = _policy(_client(), "native_message", "op-1:native_message:x", {"text": "[de: a] oi", "mode": "bypass"})
+    assert response.status_code == 200 and response.json() == {"ok": False, "error_type": "ValueError"}
+    assert coordinator.slots["key"].binding.state_path not in opened
     coordinator.close_python_leases()
 
 

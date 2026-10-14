@@ -1018,9 +1018,10 @@ async fn a_failed_sidecar_update_still_hands_the_session_over() {
 }
 
 #[tokio::test]
-async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent() {
-    // O recado nativo sai pelo Python; se ele demora até o prazo de 30 s, a entrada pode já ter sido
-    // entregue e não pode voltar para a fila (seria enviada de novo).
+async fn a_native_message_that_fails_is_never_typed_nor_put_back_in_the_queue() {
+    // O recado nativo sai pelo socket do Claude. Falha a partir dali (aqui, sem o registro do servidor
+    // não há classe de modo) é incerta: a entrada não volta para a fila nem cai no teclado (seria
+    // enviada de novo).
     use tokio::io::AsyncReadExt;
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1041,7 +1042,6 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
                     let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
                     let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
                     let data = if kind == "prepare_prompt" { json!({"content":"[de: par] oi","notices":[],"native_candidate":true}) }
-                        else if kind == "native_message" { tokio::time::sleep(std::time::Duration::from_secs(33)).await; json!({"outcome":"written","msg_id":"m"}) }
                         else { json!({}) };
                     let reply = json!({"ok":true,"data":data}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
@@ -1054,13 +1054,14 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
     let handle = claude_actor(dir.path(),cano,policy).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"[de: par] oi","entry_id":"msg"}) };
     let reply = handle.command(input).await.unwrap();
-    assert!(reply.disposition == Disposition::Unknown,"prazo com envio nativo em curso é incerto, nunca adiado");
+    assert!(reply.disposition == Disposition::Unknown,"envio nativo que falha é incerto, nunca adiado");
+    assert_eq!(reply.payload["error_code"],"native_mode_class_missing");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let state:State = queue_state(dir.path());
     assert!(state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == true),"a entrada não volta para a fila");
     assert!(state.operations.get("msg").is_some_and(|op|op.status != Status::Deferred));
     handle.stop().await.unwrap();
-    assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano: o recado foi pelo Python");
+    assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano");
 }
 
 // --- Estado e prévia do Codex sem terminal pelo canal em processo (5B Task 9) ---

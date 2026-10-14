@@ -93,6 +93,8 @@ pub struct RuntimeRegistry {
     terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
     /// Última reabertura por entrega sem prova, por chave: sobrevive à troca do ator que ela mesma faz.
     heal_attempts:std::sync::Mutex<BTreeMap<String,std::time::Instant>>,
+    /// Caixa de entrada dos recibos dos recados nativos que o Rust escreve, com e sem terminal.
+    native:super::native_message::Inbox,
 }
 /// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
 /// não vira laço de processos mortos.
@@ -194,11 +196,15 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
 /// Arquivo da sessão na subida e na religação. O do Codex é gravado aqui (a vida é a chave, a vista
 /// vem do arquivo da fila, como o Python lia), sem passar pelo Python; os outros, pela política dele.
 pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
-    if target.provider == "codex" && matches!(kind,"session.patch_meta" | "session.clear_cano") {
+    if matches!(target.provider.as_str(),"codex" | "claude") && matches!(kind,"session.patch_meta" | "session.clear_cano") {
         let (dir,name,key,state_path,clear) = (sidecar_dir.to_owned(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind == "session.clear_cano");
-        return tokio::task::spawn_blocking(move || if clear { super::codex_sidecar::clear_cano(&dir,&name,&key,&payload) }
-            else { super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved_view(&state_path)?) })
-            .await.map_err(|_|failure("sidecar_job"))?;
+        let claude = target.provider == "claude";
+        return tokio::task::spawn_blocking(move || match (claude,clear) {
+            (true,true)=>super::claude_sidecar::clear_cano(&dir,&name,&key,&payload),
+            (true,false)=>super::claude_sidecar::patch(&dir,&name,&key,&payload,&saved_view(&state_path)?),
+            (false,true)=>super::codex_sidecar::clear_cano(&dir,&name,&key,&payload),
+            (false,false)=>super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved_view(&state_path)?),
+        }).await.map_err(|_|failure("sidecar_job"))?;
     }
     let phase = format!("launch:{}",crate::mods::state::random_hex(8));
     policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
@@ -250,7 +256,7 @@ impl RuntimeRegistry {
         Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
-            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
+            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default() }
     }
     /// Escrita para sessão doente: o coordenador do Python a reabre, como fazia antes de entregar.
     /// Responde na hora; quem escreveu recebe o 503 e tenta de novo.
@@ -380,6 +386,40 @@ impl RuntimeRegistry {
             .collect()
     }
     pub fn bind_lifecycle(self:&Arc<Self>) {let _=self.self_ref.set(Arc::downgrade(self));}
+    /// O `from` dos recados nativos: a caixa do Rust, ligada no primeiro recado. Cada recibo volta à
+    /// sessão que escreveu o recado.
+    pub(crate) fn native_origin(&self) -> String {
+        let registry=self.self_ref.get().cloned();
+        self.native.origin(move |receipt| {
+            match registry.as_ref().and_then(std::sync::Weak::upgrade) {
+                Some(registry)=>{tokio::spawn(async move {registry.native_receipt(receipt).await;});},
+                None=>tracing::warn!(key=%receipt.key,code="native_receipt_unbound","recibo de recado nativo sem o registro do servidor"),
+            }
+        })
+    }
+    pub(crate) fn expect_native(&self,message_id:&str,key:&str,operation:&str) {self.native.expect(message_id,key,operation);}
+    /// O `native_receipt` do coordenador do Python: retido ou recusado encerra a operação do recado com
+    /// esse estado; entregue ou liberado a confirma.
+    async fn native_receipt(&self,receipt:super::native_message::Receipt) {
+        let super::native_message::Receipt {key,operation,state}=receipt;
+        let disposition=match state.as_str() {"delivered"|"released"|""=>"accepted","rejected"|"refused"=>"rejected",_=>"unknown"};
+        let Some(handle)=self.entries.lock().await.get(&key).map(|entry|entry.handle.clone()) else {
+            tracing::warn!(key=%key,state=%state,code="native_receipt_session_gone","recibo de recado nativo de sessão que já não está aberta");
+            return;
+        };
+        let action=serde_json::from_value::<Action>(json!({"kind":"finish","id":operation,"status":disposition,
+            "result":{"operation_id":operation,"disposition":disposition,"payload":{"native_status":state}}}));
+        let applied=match action {
+            Ok(action)=>handle.queue(format!("native-receipt:{key}:{operation}:{state}"),action).await,
+            Err(_)=>Err(failure("native_receipt_action")),
+        };
+        let applied=match applied {Ok(_) if disposition=="accepted"=>handle.confirm().await.map(|_|()),other=>other.map(|_|())};
+        if let Err(error)=applied {
+            tracing::warn!(key=%key,state=%state,code=%error.code,"recibo de recado nativo não aplicado");
+        } else if disposition!="accepted" {
+            tracing::warn!(key=%key,state=%state,code="native_message_not_delivered","recado nativo retido ou recusado pelo receptor");
+        }
+    }
     async fn cancel_lifecycle_name(&self,name:&str) {
         for barrier in self.lifecycle.lock().await.values() {
             if let Ok(operation)=barrier.operation.lock() && let Some((owner,cancel))=operation.as_ref() && owner==name {cancel.store(true,std::sync::atomic::Ordering::Release);}
@@ -487,6 +527,9 @@ impl RuntimeRegistry {
     pub fn with_processes(mut self,processes:Arc<dyn crate::list::procs::ProcessView>)->Self {self.processes=processes;self}
     pub fn with_permissions(mut self,store:Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>)->Self {self.permissions=Some(store);self}
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
+    /// Só testes: a caixa dos recados nativos numa pasta própria, fora do `cc-socks` da máquina.
+    #[doc(hidden)]
+    pub fn with_native_inbox_dir(mut self,dir:std::path::PathBuf) -> Self { self.native=super::native_message::Inbox::in_dir(dir); self }
     /// Só testes: o `codex` falso de cada um vem do PATH deste ambiente, não do processo.
     #[doc(hidden)]
     pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.policy = self.policy.with_codex_environment(env); self }
@@ -1139,7 +1182,7 @@ impl RuntimeRegistry {
         next.metadata=saved["metadata"].clone();next.metadata["lifecycle_pending"]=json!(false);
         // Plugins e skills escolhidos seguem a conversa nova; sem isso, reabri-la viria com tudo ligado.
         let (sid,settings)=(next_sid.to_owned(),next.metadata["claude_settings"].clone());
-        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
+        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings).map_err(|(code,_)|code)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
             tracing::warn!(key=%target.key,session=%target.name,code,"escolhas da conversa não passaram à conversa nova do /clear");
         }
         next.transcript=target.transcript.with_file_name(format!("{next_sid}.jsonl"));
@@ -2465,9 +2508,9 @@ mod tests {
     }
 
     /// O Python desta política não atende (porta fechada, repetição curta): o Codex grava o arquivo da
-    /// sessão e monta o comando sem ele; o Claude continua indo ao Python.
+    /// sessão e monta o comando sem ele; o Claude grava o arquivo da sessão sem ele e só pede o comando.
     #[tokio::test]
-    async fn codex_launch_policies_never_reach_python() {
+    async fn sidecar_launch_policies_never_reach_python() {
         let dir = tempfile::tempdir().unwrap();
         let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into())
             .with_ready_retry(Duration::from_millis(1),Duration::from_millis(5))
@@ -2486,9 +2529,13 @@ mod tests {
         // Sem `codex` no PATH injetado a subida falha no processo, nunca numa política do Python.
         let failed = launch_if_needed(&policy,&mut target,dir.path()).await.err().expect("a subida sem codex precisa falhar");
         assert!(!failed.code.starts_with("policy_"),"{}",failed.code);
-        let claude = RuntimeTarget { provider:"claude".into(),..target };
-        assert!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap_err().code.starts_with("policy_"),
-            "o Claude segue pelo Python");
+        let claude = RuntimeTarget { provider:"claude".into(),name:"cl".into(),..target };
+        std::fs::write(super::super::codex_sidecar::path(dir.path(),"cl"),json!({"name":"cl","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
+        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
+        assert!(launch_policy(&policy,&claude,dir.path(),"launch_env",json!({})).await.unwrap_err().code.starts_with("policy_"),
+            "o comando do Claude segue pelo Python");
     }
 
     #[test]

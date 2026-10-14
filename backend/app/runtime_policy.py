@@ -2,20 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import threading
-import uuid
-from pathlib import Path
 
 from app import diag
 from app.internal_pool import internal_thread
-
-# O sidecar do Codex é gravado pelo Rust (`codex_sidecar.rs`); aqui só o do Claude.
-_PATCH = {
-    "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema", "cano"},
-}
-_unknown_guard = threading.Lock()
-_mutation_locks = {}
 
 
 async def execute(kind: str, payload: dict, metadata: dict) -> dict:
@@ -34,36 +23,7 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
 
 
 class ModeClassMissing(RuntimeError):
-    """O nome da classe é o código que volta ao Rust (`error_type`)."""
-
-
-def native_message(payload, metadata):
-    from app import uds_messaging
-    text = payload.get("text")
-    operation_id = metadata.get("operation_id")
-    if not isinstance(text, str) or not isinstance(operation_id, str) or not operation_id:
-        raise ValueError("recado sem operação registrada")
-    sender, _ = uds_messaging.separar_prefixo(text)
-    if sender is None:
-        return {"outcome": "not_written", "reason": "ordinary_input"}
-    endpoint = uds_messaging.socket_da_sessao(metadata.get("session_id", ""), metadata.get("config_dir"))
-    if not endpoint:
-        return {"outcome": "not_written", "reason": "no_socket"}
-    # A classe vem pronta do Rust, dono da memória de modo: sem ela o recado é recusado com código, nunca
-    # recalculado aqui com o Rust de pé.
-    mode = payload.get("mode")
-    if mode not in ("bypass", "prompting"):
-        raise ModeClassMissing("recado sem a classe de modo do Rust")
-    mid = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + metadata["key"] + ":" + operation_id))
-    validate = metadata.get("validate")
-    if validate is None:
-        raise RuntimeError("recado sem confirmação de posse")
-    validate()
-    try:
-        uds_messaging.enviar(endpoint, text, sender, mode, msg_id=mid)
-    except Exception:
-        return {"outcome": "unknown", "msg_id": mid}
-    return {"outcome": "written", "msg_id": mid}
+    """Recado da reserva do terminal sem a classe de modo; o nome da classe é o código do erro."""
 
 
 def demote_awaiting(sids: list[str]) -> None:
@@ -79,76 +39,17 @@ def _sessions():
     return sessions
 
 
-def clear_cano(payload: dict, metadata: dict) -> dict:
-    """Tira o `cano` do arquivo da sessão só se ele ainda for o processo `pid`; arquivo apagado fica apagado."""
-    pid = payload.get("pid")
-    if type(pid) is not int or set(payload) != {"pid"}:
-        raise ValueError("pid do cano inválido")
-    validate = metadata.get("validate")
-    if validate is None:
-        raise RuntimeError("alteração sem confirmação de posse")
-    sessions = _sessions()
-    with _unknown_guard:
-        lock = _mutation_locks.setdefault(metadata["key"], threading.Lock())
-    with lock:
-        validate()
-        current = sessions.load(metadata["name"])
-        if not current or current.get("key") != metadata["key"] or (current.get("cano") or {}).get("pid") != pid:
-            return {"cleared": False}
-        return {"cleared": sessions.update(metadata["name"], cano=None) is not None}
-
-
 def run(kind: str, payload: dict, metadata: dict) -> dict:
     if not isinstance(payload, dict) or not isinstance(metadata, dict):
         raise ValueError("serviço com dados inválidos")
-    provider = metadata.get("provider")
-    if provider not in _PATCH:
+    # Os sidecars do Claude e do Codex são gravados pelo Rust (`claude_sidecar.rs`, `codex_sidecar.rs`).
+    if metadata.get("provider") != "claude":
         raise ValueError("provedor fora do runtime")
     # Só a reserva Python do terminal (`runtime_terminal._service`, modo `python`) pede estes; o Rust não.
     if kind in {"terminal_facts", "terminal_publish", "terminal_plugin_control"}:
-        if provider != "claude" or not metadata.get("terminal"):
+        if not metadata.get("terminal"):
             raise ValueError("serviço terminal fora do vínculo Claude")
         from app import runtime_terminal
         return {"terminal_facts":runtime_terminal.facts, "terminal_publish":runtime_terminal.publish,
             "terminal_plugin_control":runtime_terminal.plugin_control}[kind](payload, metadata)
-    if kind == "native_message":
-        return native_message(payload, metadata)
-    if kind == "session.clear_cano":
-        return clear_cano(payload, metadata)
-    if kind == "session.patch_meta":
-        if set(payload) - _PATCH[provider]:
-            raise ValueError("campo fora do catálogo do sidecar")
-        validate = metadata.get("validate")
-        if validate is None:
-            raise RuntimeError("alteração sem confirmação de posse")
-        with _unknown_guard:
-            lock = _mutation_locks.setdefault(metadata["key"], threading.Lock())
-        with lock:
-            validate()
-            state_path = metadata.get("state_path")
-            view = (json.loads(Path(state_path).read_bytes())["runtime_state"].get("view") or {}) if state_path else {}
-            for key, value in payload.items():
-                source = "conversation" if key == "session_id" else key
-                if source in view and view[source] != value:
-                    return {"updated": False, "stale": True}
-            sessions = _sessions()
-            current = sessions.load(metadata["name"])
-            if not current or current.get("key") != metadata["key"]:
-                raise RuntimeError("sidecar de outra vida")
-            updated = sessions.update(metadata["name"], **payload)
-            if updated is None:
-                raise RuntimeError("sidecar desapareceu durante a alteração")
-        if provider == "claude" and payload.get("session_id"):
-            from app import claude_customizations
-            try:
-                claude_customizations.remember(payload["session_id"], updated.get("claude_settings"))
-            except claude_customizations.CustomizationsError as exc:
-                diag.registrar("claude.customizations_not_saved", "aviso", codigo=exc.code)
-                with lock:
-                    validate()
-                    current = sessions.load(metadata["name"])
-                    if current and current.get("key") == metadata["key"]:
-                        sessions.update(metadata["name"], problema=[exc.code, exc.detail])
-                return {"updated": True, "customizations_persisted": False, "warning": exc.detail}
-        return {"updated": True}
     raise ValueError("serviço não permitido")

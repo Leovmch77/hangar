@@ -18,16 +18,9 @@ def test_policy_failure_is_visible_and_redacted(monkeypatch):
     assert "private-secret" not in repr(records)
 
 
-def test_metadata_patch_has_a_strict_catalog(monkeypatch):
-    from app.adapters.claude_headless import sessions
-    monkeypatch.setattr(sessions, "update", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("escrita indevida")))
-    with pytest.raises(ValueError):
-        runtime_policy.run("session.patch_meta", {"key":"changed"}, {"provider":"claude", "name":"session"})
-
-
 @pytest.mark.parametrize("kind", ["prepare_prompt", "format_status", "skill_catalog", "answer_body", "quota",
                                   "session.marker", "diag.error", "last_usage", "reload_stamp", "unknown_private",
-                                  "launch_env"])
+                                  "launch_env", "native_message"])
 def test_services_that_moved_to_rust_are_gone(kind):
     # O ator Rust roda estes por conta própria; o Python não responde mais.
     for provider in ("claude", "codex"):
@@ -44,43 +37,15 @@ def test_python_terminal_reserve_still_reaches_its_services(monkeypatch, kind):
     assert runtime_policy.run(kind, {}, {"provider": "claude", "terminal": {"pane": "%1"}}) == kind.removeprefix("terminal_")
 
 
-@pytest.mark.parametrize("kind,payload", [("session.patch_meta", {"cano": {"pid": 5}}), ("session.clear_cano", {"pid": 5})])
-def test_codex_sidecar_is_written_only_by_rust(monkeypatch, kind, payload):
-    # Sidecar e cano do Codex são do Rust (`codex_sidecar.rs`): o Python recusa sem ler nem gravar.
-    from app.adapters.codex import sessions
+@pytest.mark.parametrize("provider,module", [("claude", "claude_headless"), ("codex", "codex")])
+@pytest.mark.parametrize("kind,payload", [("session.patch_meta", {"model": "m"}), ("session.patch_meta", {"cano": {"pid": 5}}),
+                                          ("session.clear_cano", {"pid": 5})])
+def test_sidecars_are_written_only_by_rust(monkeypatch, provider, module, kind, payload):
+    # Sidecar e cano são do Rust (`claude_sidecar.rs`, `codex_sidecar.rs`): o Python recusa sem ler nem gravar.
+    import importlib
+    sessions = importlib.import_module(f"app.adapters.{module}.sessions")
     for attr in ("load", "update"):
         monkeypatch.setattr(sessions, attr, lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sidecar tocado")))
     with pytest.raises(ValueError):
-        runtime_policy.run(kind, payload, {"provider": "codex", "name": "cx", "key": "k", "validate": lambda: None})
-
-
-def test_native_message_has_journal_before_uds(monkeypatch):
-    from app import api, uds_messaging
-    validated = []
-    monkeypatch.setattr(uds_messaging, "socket_da_sessao", lambda *args: "fake.sock")
-    monkeypatch.setattr(api, "_classe_modo", lambda *args: "prompting")
-    def send(*args, **kwargs):
-        assert validated == [True]
-        assert kwargs["msg_id"]
-        raise OSError("write sem prova")
-    monkeypatch.setattr(uds_messaging, "enviar", send)
-    result = runtime_policy.native_message({"text":"[de: source] Olá", "mode":"prompting"}, {"key":"key", "name":"session",
-        "session_id":"sid", "operation_id":"op", "validate":lambda: validated.append(True)})
-    assert result["outcome"] == "unknown"
-
-
-def test_native_message_uses_the_mode_the_rust_sent(monkeypatch):
-    # Decisão do usuário (M6): o Rust manda a classe confirmada junto do recado; o Python não consulta
-    # memória nem volta ao Rust. Sem ela (ou inválida), vale o cálculo de antes.
-    from app import api, uds_messaging
-    sent = []
-    monkeypatch.setattr(uds_messaging, "socket_da_sessao", lambda *args: "fake.sock")
-    monkeypatch.setattr(api, "_classe_modo", lambda *args: "prompting")
-    monkeypatch.setattr(uds_messaging, "enviar", lambda sock, text, sender, mode, **kw: sent.append(mode))
-    meta = {"key":"key", "name":"session", "session_id":"sid", "operation_id":"op", "validate":lambda: None}
-    runtime_policy.native_message({"text":"[de: source] Olá", "mode":"bypass"}, meta)
-    # Sem a classe (ou com uma inválida) recusa com código: o Python não recalcula com o Rust de pé.
-    for payload in ({"text":"[de: source] Olá", "mode":"turbo"}, {"text":"[de: source] Olá"}):
-        with pytest.raises(runtime_policy.ModeClassMissing):
-            runtime_policy.native_message(payload, meta)
-    assert sent == ["bypass"]
+        runtime_policy.run(kind, payload, {"provider": provider, "name": "s", "key": "k", "validate": lambda: None,
+                                           "state_path": "/nao/existe"})

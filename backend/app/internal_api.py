@@ -150,18 +150,6 @@ async def runtime_policy(request: Request):
                     or slot.phase != runtime_coordinator.Phase.Rust
                     or slot.lease is not None and not slot.lease.closed):
                 raise RuntimeError("serviço de outra posse ou geração")
-        if body["kind"] != "native_message":
-            # Os outros serviços não escrevem na sessão (cálculo, sidecar idempotente, log): só a
-            # posse importa, e o diário não registra tentativa deles.
-            return
-        state = json.loads(slot.binding.state_path.read_bytes())
-        operation = state["operations"][body["phase_id"]]
-        if (state["owner_key"] != body["key"] or state["generation"] != body["generation"]
-                or operation["status"] != "dispatching" or operation["payload"].get("kind") != body["kind"]
-                or type(operation["payload"].get("request_id")) is not type(body["request_id"])
-                or operation["payload"].get("request_id") != body["request_id"]
-                or operation["payload"].get("payload") != body["payload"]):
-            raise RuntimeError("serviço sem tentativa registrada")
 
     await internal_thread(validate)
     key = (instance, body["key"], body["generation"], body["phase_id"])
@@ -170,7 +158,6 @@ async def runtime_policy(request: Request):
         metadata.update(provider=slot.binding.provider, name=slot.binding.name, key=slot.binding.key,
                         generation=slot.binding.generation, jsonl=slot.binding.jsonl,
                         descriptor=slot.binding.descriptor(),
-                        state_path=str(slot.binding.state_path),
                         operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
         async def perform():
             await internal_thread(validate)
@@ -183,8 +170,8 @@ async def runtime_policy(request: Request):
                     slot.active -= 1
                 coordinator._signal(slot)
         task = _policy_calls[key] = asyncio.create_task(perform())
-        # Só a chamada em curso fica: a repetida depois do fim é barrada pelo diário (native_message)
-        # ou é inofensiva (as demais), e guardar cada resultado fazia o mapa crescer sem fim.
+        # Só a chamada em curso fica: a repetida depois do fim é inofensiva (nenhum serviço daqui escreve
+        # na sessão), e guardar cada resultado fazia o mapa crescer sem fim.
         task.add_done_callback(lambda _done: _policy_calls.pop(key, None))
     return await asyncio.shield(_policy_calls[key])
 

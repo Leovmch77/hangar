@@ -377,6 +377,9 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     `cc-socks/<pid>.sock` próprio pra receber `peer_message_status` (retido/recusado) e avisa a
     remetente com `[painel: entrega de recado]`. O recado vai com o prefixo `[de: X]` no corpo e o
     parser não o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
+    Desde a #145 os recados da fila das sessões Claude (com e sem terminal) são escritos pelo Rust,
+    com a caixa de entrada dele; a escada acima e a caixa do Python seguem para os recados que
+    nascem no Python (grupo, par, broadcast, MCP).
   - **O `from-mode` do envelope sai do modo real da sessão, nunca do padrão da conta**
     (`_classe_modo`, 05/10/2026). Com `crossSessionInbound` sem valor, o Claude Code 2.1.289 só
     entrega direto quando a classe declarada (`bypass`/`prompting`) é igual à do receptor; se for
@@ -1701,8 +1704,8 @@ descarta as cópias que o Python ainda mandar (`state_python_leak`). `last_usage
   (`transfer_active`/`in_transfer_ms` empurrados) o estado é `dead`.
 - O dono do estado no hub é escolhido pelos eventos e pelo provider: Claude e Codex sem terminal
   publicam os mesmos seis, e a transferência de conversa entre eles (mesmo nome) troca o feed.
-- `native_message` foi para a C3 e `session.patch_meta` fica no Python (a 5B decidiu que o Rust
-  não grava o sidecar).
+- `native_message`, `session.patch_meta` e `session.clear_cano` do Claude passaram ao Rust na #145
+  (ver [O Python fora do arquivo de estado da fila](#o-python-fora-do-arquivo-de-estado-da-fila)).
 
 Limites conhecidos:
 
@@ -2257,14 +2260,16 @@ contratado, também não iniciado.
   continua só para a reserva do modo `python` (`runtime_terminal._service`).
 - `launch_env`, `patch_meta` e `clear_cano` do Codex em `runtime_policy.py` (o Rust monta argv/env
   e grava o sidecar).
+- `patch_meta` e `clear_cano` do Claude e o `native_message` em `runtime_policy.py`, e a conferência
+  do diário no `/internal/runtime/policy` (#145).
 - `hand-over` do relançamento (`open_terminal` no `lifecycle_call`, `python_client_released`).
 - `plugin_bridge.app_remoto` e `_held` nos fatos da lista; `held` segue no contrato como `{}`.
 - Reconciliação da fila do Codex com terminal do Rust pelo Python (`_confirm_codex_queue`).
 
 Os corpos antigos ficam como referência, sem chamador ativo nos modos `rust`/`pending`; a rota
 `/internal/sessions/{name}/plugin` também ficou sem chamador Rust. Seguem no Python, fora deste
-recorte e ainda pedidos pelo Rust: `native_message` (recado `[de: …]` por socket nativo) e os
-fatos de contagem, conta e atividade do Codex em `/internal/list/facts`.
+recorte e ainda pedidos pelo Rust: os fatos de contagem, conta e atividade do Codex em
+`/internal/list/facts`.
 
 ### Saldo de linhas Python por arquivo
 
@@ -2296,3 +2301,47 @@ Nada desta entrega foi compilado nem testado: as regressões foram escritas e re
 execução. O uso real (Task 13, Steps 3 e 4: Claude e clientes reais, Codex com terminal no Linux e
 na DELPHI-02) está pendente, assim como qualquer medida de tempo; não há ganho de velocidade
 declarado.
+
+## O Python fora do arquivo de estado da fila
+
+#145, 14/10/2026. Com o Rust de pé, o Python não lê o arquivo de estado da fila
+(`runtime/<chave>.json`): o Rust o troca por `tmp+replace` em tarefas paralelas do ator, e no
+Windows o `open()` do Python, sem `FILE_SHARE_DELETE`, recebe violação de compartilhamento no meio
+da troca; com o arquivo aberto pelo Python, é a troca do Rust que falha.
+
+Medição da issue, no Windows 11 (build 26200): gravador trocando o arquivo em laço como o
+`atomic_write`, leitores em paralelo, 15 s por modo, duas rodadas:
+
+| Leitor | Troca atual (`MoveFileExW`) | Rename POSIX (`FileRenameInfoEx`) |
+|---|---|---|
+| Python `Path.read_bytes()` | 75 a 91 falhas por leitor | 421 a 1.744 falhas por leitor |
+| Python abrindo com `FILE_SHARE_DELETE` | 0 | 0 |
+| Rust `std::fs::read` | 0 em cerca de 1,3 milhão de leituras | 0 |
+| Gravações que falharam com as novas tentativas | cerca de 21 de 70 | cerca de 80% |
+
+O rename POSIX do lado de quem grava piora os dois lados e fica descartado. O conserto foi tirar o
+Python da leitura, levando ao Rust o que ele atendia:
+
+- **`session.patch_meta` e `session.clear_cano` do Claude** (`runtime/claude_sidecar.rs`), escritos
+  a partir do `runtime_policy.py`: catálogo, recusa como velho do campo que difere da vista salva,
+  sidecar de outra vida é erro, `remember` das customizações na conversa nova. A vista sai da fila
+  em memória.
+- **Sidecar do Claude com dois escritores.** O Python ainda grava o arquivo na abertura, troca de
+  conta, renomear e relançar. Os dois seguram a trava `<nome>.lock` (`atomico.locked` no Python,
+  `codex_sidecar::locked` no Rust, a mesma do Codex) em todo ler-alterar-gravar, e as leituras do
+  Python (`atomico.read`, sidecars do Claude e do Codex) esperam até 50 ms a troca de outro processo
+  no Windows, em vez de responder "sem sidecar". Migrar todos os escritores seria migrar a abertura
+  de sessão.
+- **`native_message` das sessões sem terminal** (`runtime/native_message.rs`): o socket sai do
+  registro do CLI, e o escritor e o envelope são os do caminho com terminal. Diferenças medidas
+  contra o Python: conexão recusada volta `not_written` (o recado segue pelo caminho de sempre),
+  não `unknown`; o resultado leva `native: true`, que o Python nunca mandava, e a rota respondia
+  `native: false` para recado entregue pelo socket.
+- **Recibos.** O Rust liga a própria caixa (`cc-socks/<pid>.sock`, no primeiro recado) e a usa como
+  `from`, com e sem terminal; o recibo acha a operação por um índice em memória (500 recados) e
+  aplica o mesmo `finish` e `confirm` que o Python mandava. Antes, o caminho com terminal mandava
+  `uds:hangar-<pid>`, endereço que não existe, e o recibo de recado retido ou recusado se perdia.
+  O `native_receipt` do coordenador Python vale só no modo `python`.
+
+Ficaram no Python, por fazerem parte da abertura de sessão (#165): a geração lida em
+`runtime_adapter.binding()` e o `_has_pending` da reabertura.

@@ -1049,6 +1049,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     // Codex sem terminal que o Rust sobe: o mesmo, com a vida pela chave.
                     let headless_dir = engine.launch.as_ref().filter(|_|adoption.is_none() && target.provider == "codex"
                         && matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano")).map(|launch|launch.sidecar_dir.clone());
+                    // Claude sem terminal: o mesmo, sob a trava que o Python também segura ao gravar o arquivo.
+                    let claude_dir = (target.provider == "claude" && matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano"))
+                        .then(super::lifecycle::claude_sidecar_dir);
                     // Estes serviços não escrevem na CLI (formatar status, carimbo, sidecar, log): repetir é
                     // inofensivo, então não passam pelo diário. Quatro gravações por chamada, a cada mudança de
                     // estado, eram a maior parte do disco gasto por mensagem.
@@ -1061,6 +1064,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 let life = sidecar.ok_or_else(||RuntimeError::new("codex_sidecar_unknown","sessão adotada sem a pasta do sidecar"))?;
                                 let saved = queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone();
                                 return tokio::task::spawn_blocking(move||super::codex_sidecar::patch(&life,&payload,&saved)).await
+                                    .map_err(|_|failure("sidecar_job"))?;
+                            }
+                            if let Some(dir) = claude_dir {
+                                let (dir,name,key,clear) = (dir?,target.name.clone(),target.key.clone(),kind == "session.clear_cano");
+                                let saved = if clear { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
+                                return tokio::task::spawn_blocking(move || if clear { super::claude_sidecar::clear_cano(&dir,&name,&key,&payload) }
+                                    else { super::claude_sidecar::patch(&dir,&name,&key,&payload,&saved) }).await
                                     .map_err(|_|failure("sidecar_job"))?;
                             }
                             if let Some(dir) = headless_dir {
@@ -1672,22 +1682,23 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Ok(payload) => {
                                 for (key,value) in payload.as_object().cloned().unwrap_or_default() { pending.command.payload[key] = value; }
                                 if target.provider == "claude" && pending.command.payload["native_candidate"] == true {
-                                    // O recado nativo sai pelo Python, fora de `attempts`: a partir daqui ele pode ter
+                                    // O recado nativo sai pelo socket, fora de `attempts`: a partir daqui ele pode ter
                                     // sido escrito, e nem o prazo nem uma falha podem devolvê-lo à fila.
                                     native.insert(id.clone());
-                                    let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone().unwrap();
+                                    let queue = queue.clone(); let target = target.clone();
                                     let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
                                     let lifecycle = engine.lifecycle.clone();
                                     jobs.spawn(async move {
                                         let result = async {
                                             // Uma fase por tentativa: a adiada volta pelo drain e não pode reaproveitar os recibos da anterior.
                                             let phase = format!("{id}:native_message:{}",unique());
-                                            // A classe do recado vai pronta: a memória de modo é do Rust, e o Python não volta a ele.
+                                            // A classe do recado sai da memória de modo do Rust.
                                             let text = command.payload["text"].as_str().unwrap_or("");
                                             let sender = crate::terminal_input::message_prefix(text).map(|(sender,_)|sender).filter(|_|!text.starts_with("[painel:"));
                                             // Leitura que falha sobe com o código; sem registro ligado (só fora do servidor) vai sem
-                                            // classe, e o Python recusa com `ModeClassMissing` em vez de recalcular.
-                                            let class = match lifecycle.as_ref().and_then(std::sync::Weak::upgrade) {
+                                            // classe, e o envio recusa com `native_mode_class_missing` em vez de adivinhar.
+                                            let registry = lifecycle.as_ref().and_then(std::sync::Weak::upgrade);
+                                            let class = match &registry {
                                                 Some(registry)=>Some(registry.message_class(sender,&target.name).await?),
                                                 None=>None,
                                             };
@@ -1698,8 +1709,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                             queue.exec(target.generation,&format!("native-cursor:{phase}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
-                                            let result = policy.run(&target,"native_message",&RequestId::String(id.clone()),payload,&phase).await?;
+                                            let origin = registry.as_ref().map_or_else(||format!("uds:hangar-{}",std::process::id()),|registry|registry.native_origin());
+                                            let result = super::native_message::send(&target.key,&target.metadata,&payload,&id,origin,&crate::terminal_input::ProcessIo::default()).await?;
                                             let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
+                                            if let (Some(registry),Some(message_id)) = (&registry,result["msg_id"].as_str()) { registry.expect_native(message_id,&target.key,&id); }
                                             let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };
                                             queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase.clone(),status,result:result.clone() }).await.map_err(io_failure)?;
                                             if outcome == "not_written" {

@@ -605,6 +605,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   estacionado (linha de status, modo de permissão, `dead` sem sidecar nem troca), tudo no Rust. Só
   o modo `python` volta a produzi-los. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-do-claude-sem-terminal-no-feed-do-runtime).
+- **Com o Rust de pé, o Python não lê o arquivo de estado da fila (`runtime/<chave>.json`).** No
+  Windows a leitura no meio da troca do Rust falha e faz a troca falhar. O que precisava dele é do
+  Rust (`patch_meta`/`clear_cano` do Claude, `native_message`, recibos na caixa do Rust). O sidecar do
+  Claude tem dois escritores, sob a trava `<nome>.lock` nos dois lados; leitura de sidecar no Python
+  passa por `atomico.read`. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#o-python-fora-do-arquivo-de-estado-da-fila).
 
 ## tmux + Claude Code truecolor
 
