@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import hook_state, list_facts, plugin_bridge, registry, runtime_policy, sse
+from app import hook_state, list_facts, plugin_bridge, registry, sse
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +116,8 @@ def test_demote_service_updates_map_and_file(tmp_path, monkeypatch):
     hs.load_existing([tmp_path])
     monkeypatch.setattr(hook_state, "hook_state", hs)
     assert hs.get_state("sid1")[0] == "awaiting_input"
-    runtime_policy.demote_awaiting(["sid1", "ausente"])
+    for sid in ["sid1", "ausente"]:
+        hs.demote_awaiting(sid)
     assert hs.get_state("sid1") == ("idle", 5.0)
     assert json.loads(sidecar.read_text()) == {"state": "idle", "ts": 5.0}
 

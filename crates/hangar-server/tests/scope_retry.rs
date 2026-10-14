@@ -64,8 +64,7 @@ async fn only_the_transient_unit_refusal_is_retried_three_times() {
         .filter(|line| needles.iter().all(|needle| line.contains(needle))).count();
     let sessions = tempfile::tempdir().unwrap();
     let spec = |key: &str| LaunchSpec { provider: Provider::Codex, key: key.into(), cwd: sessions.path().into(),
-        program: vec!["sleep".into(), "30".into()], env: vec![("PATH".into(), "/bin:/usr/bin".into())],
-        cano_extra: Default::default(), sidecar_dir: sessions.path().into() };
+        program: vec!["sleep".into(), "30".into()], env: vec![("PATH".into(), "/bin:/usr/bin".into())], sidecar_dir: sessions.path().into() };
 
     // Sondagem recusada nas 4 tentativas: esta subida segue sem escopo, e "sem escopo" não fica gravado.
     plan(&["unit", "unit", "unit", "unit"]);

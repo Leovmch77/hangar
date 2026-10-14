@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from app import atomico
@@ -28,15 +29,25 @@ def _path(name: str) -> Path:
     return _dir() / f"{sanitize_session_name(name)}.json"
 
 
-def _write(name: str, meta: dict) -> None:
+@contextmanager
+def _locked(*names: str):
+    """O `hangar-server` também grava estes arquivos (`patch_meta`, cano, `/clear`) sob a mesma
+    trava `<nome>.lock`: todo ler-alterar-gravar daqui a segura."""
     _dir().mkdir(parents=True, exist_ok=True)
-    with _write_lock:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_dir(), suffix=".tmp", delete=False) as tmp:
-            json.dump(meta, tmp)
-        try:
-            atomico.substituir(tmp.name, _path(name))
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+    # A trava de arquivo primeiro: esperar o Rust numa sessão não segura as gravações das outras.
+    with atomico.locked(*(_path(name).with_suffix(".lock") for name in names)), _write_lock:
+        yield
+
+
+def _write(name: str, meta: dict) -> None:
+    """Chamar com `_locked(name)`."""
+    _dir().mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_dir(), suffix=".tmp", delete=False) as tmp:
+        json.dump(meta, tmp)
+    try:
+        atomico.substituir(tmp.name, _path(name))
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
 
 
 def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
@@ -76,13 +87,15 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
     if read_only:
         # Estacionada só durante a troca de conta: o terminal reabre dentro do bwrap, nunca sem ele.
         meta["read_only"] = True
-    _write(name, meta)
+    with _locked(name):
+        _write(name, meta)
     return meta
 
 
 def restaurar(meta: dict, *, preserve_process: bool = False) -> None:
     """Regrava o sidecar; preserva o cano apenas quando seu encerramento falhou."""
-    _write(meta["name"], meta if preserve_process else {**meta, "cano": None})
+    with _locked(meta["name"]):
+        _write(meta["name"], meta if preserve_process else {**meta, "cano": None})
 
 
 # Troca terminal ⇄ sem terminal: por alguns segundos nenhum dos dois lados existe, e os monitores
@@ -108,17 +121,18 @@ def em_troca(name: str) -> bool:
 
 
 def update(name: str, **campos) -> dict | None:
-    meta = load(name)
-    if meta is None:
-        return None
-    meta = {**meta, **campos}
-    _write(name, meta)
+    with _locked(name):
+        meta = load(name)
+        if meta is None:
+            return None
+        meta = {**meta, **campos}
+        _write(name, meta)
     return meta
 
 
 def load(name: str) -> dict | None:
     try:
-        return json.loads(_path(name).read_text(encoding="utf-8"))
+        return json.loads(atomico.read(_path(name)))
     except (OSError, ValueError):
         return None
 
@@ -129,20 +143,22 @@ def exists(name: str) -> bool:
 
 def delete(name: str) -> None:
     try:
-        _path(name).unlink(missing_ok=True)
+        if _path(name).exists():
+            with _locked(name):
+                _path(name).unlink(missing_ok=True)
     except OSError:
         pass
 
 
 def rename(old: str, new: str) -> None:
     src, dst = _path(old), _path(new)
-    if not src.exists():
-        return
-    with _write_lock:
+    with _locked(old, new):
+        if not src.exists():
+            return
         atomico.substituir(src, dst)
-    meta = load(new)
-    if meta is not None:
-        _write(new, {**meta, "name": new})
+        meta = load(new)
+        if meta is not None:
+            _write(new, {**meta, "name": new})
 
 
 def list_all() -> list[dict]:
@@ -153,7 +169,7 @@ def list_all() -> list[dict]:
         return out
     for f in files:
         try:
-            meta = json.loads(f.read_text(encoding="utf-8"))
+            meta = json.loads(atomico.read(f))
         except (OSError, ValueError):
             continue
         if isinstance(meta, dict) and meta.get("name") and meta.get("session_id"):

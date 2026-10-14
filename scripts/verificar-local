@@ -37,7 +37,8 @@ VM_WIN='C:/hangar-verificacao'
 # Os mesmos do passo "Contenção e regressões" do server.yml: mudar lá exige mudar aqui.
 RUNTIME_TESTS=(tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py
     tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py
-    tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py)
+    tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py
+    tests/test_sidecar_coordination.py)
 
 PROCESSOS_PADRAO=4
 
