@@ -117,6 +117,20 @@ test('roteiro da pasta antiga (reserva) repete e passa a morar na pasta nova', a
   assert.equal(lerUnico(nova).variantes.length, 1, 'regravado na pasta nova');
 });
 
+test('roteiro antigo ilegivel na reserva nao impede gravar na pasta nova', async () => {
+  const antiga = pastaNova();
+  const s0 = site();
+  await rodarComRoteiro({ pasta: antiga, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s0.executar, perguntar: jevDoSite(s0) });
+  const [quebrado] = fs.readdirSync(antiga);
+  fs.writeFileSync(path.join(antiga, quebrado), '{ quebrado');
+  const nova = pastaNova();
+  const s = site();
+  const r = await rodarComRoteiro({ pasta: nova, reserva: [antiga], objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /gravado em/);
+  assert.equal(lerUnico(nova).variantes.length, 1);
+});
+
 test('entre gemeos, a repeticao escolhe pela ordem gravada', async () => {
   const pasta = pastaNova();
   const s1 = site();

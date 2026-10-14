@@ -418,12 +418,22 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
           // Relido agora: outra corrida pode ter gravado enquanto esta rodava.
           let atuais = [];
           try {
-            atuais = ler()?.variantes ?? [];
+            atuais = carregar(arq)?.variantes ?? null;
           } catch (err) {
             // Versão desconhecida nunca é sobrescrita; JSON quebrado sai do caminho, guardado.
             if (err?.versao !== undefined) throw new Error(`arquivo em versão ${err.versao}`);
             avisos.push(`arquivo ilegível guardado em ${guardarIlegivel(arq)}`);
           }
+          // Sem arquivo na pasta nova, as variantes vêm da reserva; reserva ilegível não impede gravar.
+          for (const a of antigos) {
+            if (atuais) break;
+            try {
+              atuais = carregar(a)?.variantes ?? null;
+            } catch (err) {
+              avisos.push(`roteiro antigo ilegível em ${a}, ignorado (${String(err?.message ?? err).slice(0, 120)})`);
+            }
+          }
+          atuais ??= [];
           // --refazer descarta as variantes antigas.
           salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(refazer ? [] : atuais, variante) });
           avisos.push(`gravado em ${arq}`);
