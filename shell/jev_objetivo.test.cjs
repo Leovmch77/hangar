@@ -885,18 +885,22 @@ test('parada qualquer depois de um envio recusado cita o aviso da pagina', async
   assert.match(r.parou, /Erro ao criar: chave duplicada/);
 });
 
-test('registro de teste: combobox de lista nao recebe valor inventado', async () => {
+test('registro de teste: combobox de lista nao recebe valor inventado, e sim uma busca generica', async () => {
   const pedidos = [];
-  const r = await valorDoCampo({
+  const args = {
     campo: { ref: 'e9', papel: 'combobox', nome: 'Conta do Balancete' },
     escolha: { choice: NENHUM, probabilities: { [NENHUM]: 0.99 } },
     cofre: { texto: 'TESTE AUTO E2E' },
     feito: [],
-    objetivo: 'incluir um novo registro de teste e salvar',
     escreverTexto: async (p) => { pedidos.push(p); return 'SEM_VALOR'; },
-  });
+  };
+  const r = await valorDoCampo({ ...args, objetivo: 'incluir um novo registro de teste e salvar' });
   assert.match(pedidos[0], /Conta do Balancete \(lista de opcoes da pagina/);
-  assert.equal(r.falta, 'Conta do Balancete');
+  // Uma letra lista opções que já existem; o ciclo seguinte escolhe uma delas.
+  assert.deepEqual(r, { valor: 'a', origem: 'busca generica' });
+  // Fora de registro de teste, a lista sem dado continua parando.
+  const real = await valorDoCampo({ ...args, escritos: new Map(), objetivo: 'cadastrar o fornecedor' });
+  assert.equal(real.falta, 'Conta do Balancete');
 });
 
 test('registro de teste: o auxiliar sabe que escolha obrigatoria sem dado leva uma opcao plausivel', async () => {
@@ -915,8 +919,8 @@ test('registro de teste: o auxiliar sabe que escolha obrigatoria sem dado leva u
 test('auxiliar nao escapa da trava de risco trocando a operacao', () => {
   const candidatos = [{ ref: 'e1', papel: 'button', nome: 'Excluir' }, { ref: 'e2', papel: 'textbox', nome: 'Nome' }];
   const respostas = { click_risk: { probabilities: { e1: 0.9, [NENHUM]: 0.1 } } };
-  // SELECT num botão viraria clique sem a trava; o papel não combina com a operação.
-  assert.match(decidirPeloAuxiliar('{"operacao":"SELECT","ref":"e1"}', respostas, candidatos).falhou, /nao combina/);
+  // SELECT num botão vira clique, e o clique passa pela trava.
+  assert.match(decidirPeloAuxiliar('{"operacao":"SELECT","ref":"e1"}', respostas, candidatos).parar, /operacao arriscada/);
   assert.match(decidirPeloAuxiliar('{"operacao":"TYPE_TEXT","ref":"e1"}', respostas, candidatos).falhou, /nao combina/);
   assert.match(decidirPeloAuxiliar('{"operacao":"CLICK","ref":"e1"}', respostas, candidatos).parar, /operacao arriscada/);
   assert.equal(decidirPeloAuxiliar('{"operacao":"TYPE_TEXT","ref":"e2"}', respostas, candidatos).operacao, 'TYPE_TEXT');
@@ -927,4 +931,84 @@ test('pedido ao auxiliar esconde a senha de dados que a pagina reexibe', () => {
     feito: [], cofre: { senha: 'S3gr3do!', nome: 'Ana' }, respostas: {} });
   assert.ok(!pedido.includes('S3gr3do!'), pedido);
   assert.match(pedido, /\(oculto\)/);
+});
+
+// --- varredura: alvos que o laço não via, e campo de busca sem dado em registro de teste ---
+
+test('campo numerico (spinbutton) e alvo de TYPE_TEXT, para o Jev e para o auxiliar', () => {
+  const candidatos = parsarSnapshot(`- RootWebArea "Clinica Web"
+  - dialog "Novo servidor"
+    - spinbutton "Porta TCP" [ref=@e2] [focused]
+    - button "Cadastrar servidor" [ref=@e7]`);
+  assert.deepEqual(candidatos.map((c) => c.ref), ['e2', 'e7']);
+  assert.deepEqual(Object.keys(montarPerguntas(candidatos).type_text_target.criteria), ['e2', NENHUM]);
+  assert.equal(decidirPeloAuxiliar('{"operacao":"TYPE_TEXT","ref":"e2"}', {}, candidatos).operacao, 'TYPE_TEXT');
+});
+
+test('lista fechada sem rotulo entra como alvo pelo valor que mostra; a busca aberta do popover nao', () => {
+  const candidatos = parsarSnapshot(`- RootWebArea "Clinica Web"
+  - combobox [ref=@e3] [collapsed] value="Todas as especialidades"
+  - combobox [ref=@e23] [expanded] [focused] value="a"
+  - button "Novo Serviço" [ref=@e4]`);
+  assert.deepEqual(candidatos.map((c) => c.ref), ['e3', 'e4']);
+  assert.match(candidatos[0].nome, /Todas as especialidades/);
+  assert.ok('e3' in montarPerguntas(candidatos).click_target.criteria);
+});
+
+test('o auxiliar ve os controles desabilitados, para saber que o botao existe e esta bloqueado', async () => {
+  const pedidos = [];
+  await rodar({
+    objetivo: 'incluir um novo registro de teste e salvar',
+    maxPassos: 1,
+    executar: navegador([], `- RootWebArea "Clinica Web"
+  - combobox [ref=@e3] [collapsed] value="Todas as especialidades"
+  - button "Novo Serviço" [ref=@e4] [disabled]
+  - button "Exportar" [ref=@e5]`),
+    perguntar: async () => resposta({ click: NENHUM }),
+    ajudar: async (p) => { pedidos.push(p); return '{"operacao":"NONE","ref":null,"motivo":"x"}'; },
+  });
+  assert.match(pedidos[0], /desabilitad[^\n]*\n?[^\n]*Novo Serviço/i);
+  assert.doesNotMatch(pedidos[0], /e4 \| button/, 'desabilitado nao vira alvo');
+});
+
+test('campo numerico nao recebe texto de dados: o valor vem do modelo de texto', async () => {
+  const r = await valorDoCampo({
+    campo: { ref: 'e2', papel: 'spinbutton', nome: 'Nota' },
+    escolha: { choice: 'texto', probabilities: { texto: 0.9 } },
+    cofre: { texto: 'TESTE AUTO E2E' },
+    feito: [],
+    objetivo: 'incluir um novo registro de teste e salvar',
+    escreverTexto: async () => '7',
+  });
+  assert.deepEqual(r, { valor: '7', origem: 'llm' });
+});
+
+test('SELECT do auxiliar num botao (dia do calendario) vira clique', () => {
+  const candidatos = [{ ref: 'e10', papel: 'button', nome: 'Today, quarta-feira, 14 de outubro de 2026' }];
+  const d = decidirPeloAuxiliar('{"operacao":"SELECT","ref":"e10"}', {}, candidatos);
+  assert.equal(d.operacao, 'CLICK', JSON.stringify(d));
+});
+
+test('registro de teste: campo de busca sem dado e deixado de lado em vez de parar o laco', async () => {
+  const PAGINA = `- RootWebArea "Clinica Web"
+  - searchbox "Filtrar aferições" [ref=@e6]
+  - button "Nova aferição" [ref=@e11]`;
+  const executados = [];
+  const ofertas = [];
+  const r = await rodar({
+    objetivo: 'incluir em escala_mews um novo registro de teste preenchendo os campos obrigatorios e salvar',
+    dados: { texto: 'TESTE AUTO E2E' },
+    maxPassos: 3,
+    executar: navegador(executados, PAGINA),
+    escreverTexto: async () => 'SEM_VALOR',
+    perguntar: async (estado, perguntas) => {
+      ofertas.push(Object.keys(perguntas.type_text_target?.criteria ?? {}));
+      if (executados.includes('click @e11')) return resposta({ op: 'DONE' });
+      return ofertas.length === 1 ? resposta({ op: 'TYPE_TEXT', campo: 'e6' }) : resposta({ op: 'CLICK', click: 'e11' });
+    },
+  });
+  assert.equal(r.falta, undefined, r.parou);
+  assert.ok(executados.includes('click @e11'), executados.join('\n'));
+  assert.ok(!executados.some((l) => l.startsWith('fill')), 'nao digita no filtro');
+  assert.deepEqual(ofertas[1], [], 'o filtro sai dos alvos de TYPE_TEXT');
 });
