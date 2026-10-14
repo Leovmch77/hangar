@@ -816,9 +816,11 @@ impl Hangar {
                 InputEvent::Change => {
                     this.suggest_pick = 0;
                     // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta.
-                    let slash = this.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some());
-                    if slash && !this.slash_open { this.ensure_commands(true); }
-                    this.slash_open = slash;
+                    // Abertas = há `/nome` sob o cursor e o Esc não as fechou neste texto.
+                    let open = this.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some()
+                        && this.suggest_dismissed.as_deref() != Some(text.as_str()));
+                    if open && !this.slash_open { this.ensure_commands(true); }
+                    this.slash_open = open;
                     this.redraw(panes::Area::Bottom, cx);
                 }
                 _ => {}
@@ -4449,7 +4451,11 @@ impl Hangar {
         if self.confirm.is_some() { self.confirm = None; self.confirm_no_ask = false; }
         else if self.cancel_machine_rename() {}
         else if self.mention_is_open(cx) { self.mention.close(); }
-        else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
+        else if !self.visible_suggestions(cx).is_empty() {
+            self.suggest_dismissed = Some(self.composer.read(cx).value().to_string());
+            // Fechadas pelo Esc: reaparecer ao digitar conta como nova abertura e revalida a lista.
+            self.slash_open = false;
+        }
         else if self.close_popups() {}
         else if self.side_menu_escape(cx) {}
         else if self.can_interrupt() {
