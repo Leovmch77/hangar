@@ -22,21 +22,12 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
         return {"ok": False, "error_type": type(exc).__name__}
 
 
-class ModeClassMissing(RuntimeError):
-    """Recado da reserva do terminal sem a classe de modo; o nome da classe é o código do erro."""
-
-
 def demote_awaiting(sids: list[str]) -> None:
     """`hooks.demote_awaiting`: o mapa de marcadores e o registro nativo em memória são do Python
     (a prévia e as transições leem deles), então o Rust pede aqui em vez de regravar o sidecar."""
     from app import hook_state
     for sid in sids:
         hook_state.hook_state.demote_awaiting(sid)
-
-
-def _sessions():
-    from app.adapters.claude_headless import sessions
-    return sessions
 
 
 def run(kind: str, payload: dict, metadata: dict) -> dict:

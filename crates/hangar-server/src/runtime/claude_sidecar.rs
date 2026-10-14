@@ -3,7 +3,7 @@
 //! gravando o mesmo arquivo (abertura, troca de conta, renomear), e os dois seguram a trava
 //! `<nome>.lock` (`codex_sidecar::locked`, a do `sessions._locked`) no ler-alterar-gravar.
 //! Bloqueante: chamar fora do runtime (`spawn_blocking`).
-use super::codex_sidecar::{Meta,load,locked,path,write};
+use super::codex_sidecar::{Meta,catalog_fields_in,update_if};
 use super::protocol::RuntimeError;
 use serde_json::{Value,json};
 use std::io;
@@ -21,32 +21,20 @@ fn owner() -> RuntimeError { RuntimeError::new("session_patch_owner","sidecar de
 /// é erro. Conversa nova leva junto as escolhas de plugins e skills (`remember`); falha nelas grava o
 /// `problema` e volta `customizations_persisted: false`, com o patch já gravado.
 pub fn patch(dir:&Path,name:&str,key:&str,payload:&Value,view:&Value) -> Result<Value,RuntimeError> {
-    let fields = payload.as_object().ok_or_else(||RuntimeError::new("session_patch_field","patch do sidecar não é objeto"))?;
-    if fields.keys().any(|field|!CATALOG.contains(&field.as_str())) {
-        return Err(RuntimeError::new("session_patch_field","campo fora do catálogo do sidecar"));
-    }
+    let fields = catalog_fields_in(payload,CATALOG)?;
     let stale = fields.iter().any(|(field,value)| {
         let source = if field == "session_id" { "conversation" } else { field.as_str() };
         view.get(source).is_some_and(|saved|saved != value)
     });
     if stale { return Ok(json!({"updated":false,"stale":true})); }
-    let updated = locked(dir,name,|file| {
-        let Some(mut current) = load(file).filter(|meta|meta.get("key").and_then(Value::as_str) == Some(key)) else { return Ok(None) };
-        for (field,value) in fields { current.insert(field.clone(),value.clone()); }
-        write(file,&current)?;
-        Ok(Some(current))
-    }).map_err(io_error)?.ok_or_else(owner)?;
+    let life = [("key",json!(key))];
+    let updated = update_if(dir,name,&life,fields).map_err(io_error)?.ok_or_else(owner)?;
     let Some(session_id) = fields.get("session_id").and_then(Value::as_str).filter(|sid|!sid.is_empty()) else { return Ok(json!({"updated":true})) };
     let settings = updated.get("claude_settings").cloned().unwrap_or(Value::Null);
     let Err((code,detail)) = crate::claude_customizations::remember(session_id,&settings) else { return Ok(json!({"updated":true})) };
     tracing::warn!(session=%name,code,"escolhas da conversa não passaram à conversa nova");
-    locked(dir,name,|file| {
-        if let Some(mut current) = load(file).filter(|meta|meta.get("key").and_then(Value::as_str) == Some(key)) {
-            current.insert("problema".into(),json!([code,detail]));
-            write(file,&current)?;
-        }
-        Ok(())
-    }).map_err(io_error)?;
+    let problem:Meta = [("problema".to_owned(),json!([code,detail]))].into_iter().collect();
+    update_if(dir,name,&life,&problem).map_err(io_error)?;
     Ok(json!({"updated":true,"customizations_persisted":false,"warning":detail}))
 }
 
@@ -56,12 +44,10 @@ pub fn clear_cano(dir:&Path,name:&str,key:&str,payload:&Value) -> Result<Value,R
     super::codex_sidecar::clear_cano_with(dir,name,key,payload,io_error)
 }
 
-/// O sidecar lido como o `sessions.load` do Python, para os testes e quem só confere.
-pub fn read(dir:&Path,name:&str) -> Option<Meta> { load(&path(dir,name)) }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::codex_sidecar::{load,path};
 
     fn sidecar(dir:&Path,fields:Value) {
         std::fs::create_dir_all(dir).unwrap();
@@ -71,7 +57,7 @@ mod tests {
         std::fs::write(path(dir,"cl"),meta.to_string()).unwrap();
     }
 
-    fn meta(dir:&Path) -> Value { Value::Object(read(dir,"cl").unwrap()) }
+    fn meta(dir:&Path) -> Value { Value::Object(load(&path(dir,"cl")).unwrap()) }
 
     #[test]
     fn field_outside_the_catalog_is_refused_without_touching_the_file() {

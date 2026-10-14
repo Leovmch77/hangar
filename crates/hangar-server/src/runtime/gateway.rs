@@ -1,4 +1,4 @@
-use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease_within}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Status,Store,acquire_lease_within}};
 use super::codex_terminal::{Adoption,AdoptionCell,CodexTerminalTarget};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
@@ -197,17 +197,24 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
 /// vem do arquivo da fila, como o Python lia), sem passar pelo Python; os outros, pela política dele.
 pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
     if matches!(target.provider.as_str(),"codex" | "claude") && matches!(kind,"session.patch_meta" | "session.clear_cano") {
-        let (dir,name,key,state_path,clear) = (sidecar_dir.to_owned(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind == "session.clear_cano");
-        let claude = target.provider == "claude";
-        return tokio::task::spawn_blocking(move || match (claude,clear) {
-            (true,true)=>super::claude_sidecar::clear_cano(&dir,&name,&key,&payload),
-            (true,false)=>super::claude_sidecar::patch(&dir,&name,&key,&payload,&saved_view(&state_path)?),
-            (false,true)=>super::codex_sidecar::clear_cano(&dir,&name,&key,&payload),
-            (false,false)=>super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved_view(&state_path)?),
+        let (dir,provider,name,key,state_path,kind) = (sidecar_dir.to_owned(),target.provider.clone(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind.to_owned());
+        return tokio::task::spawn_blocking(move || {
+            let saved = if kind == "session.clear_cano" { Value::Null } else { saved_view(&state_path)? };
+            sidecar_service(&provider,&dir,&name,&key,&kind,&payload,&saved)
         }).await.map_err(|_|failure("sidecar_job"))?;
     }
     let phase = format!("launch:{}",crate::mods::state::random_hex(8));
     policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
+}
+/// `session.patch_meta`/`session.clear_cano` de uma sessão sem terminal, gravados no sidecar do provedor.
+/// Bloqueante: chamar fora do runtime.
+pub(super) fn sidecar_service(provider:&str,dir:&std::path::Path,name:&str,key:&str,kind:&str,payload:&Value,view:&Value) -> Result<Value,RuntimeError> {
+    match (provider == "claude",kind == "session.clear_cano") {
+        (true,true)=>super::claude_sidecar::clear_cano(dir,name,key,payload),
+        (true,false)=>super::claude_sidecar::patch(dir,name,key,payload,view),
+        (false,true)=>super::codex_sidecar::clear_cano(dir,name,key,payload),
+        (false,false)=>super::codex_sidecar::patch_headless(dir,name,key,payload,view),
+    }
 }
 /// `runtime_state.view` do arquivo da fila, lido como o `session.patch_meta` do Python lia.
 fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
@@ -386,37 +393,37 @@ impl RuntimeRegistry {
             .collect()
     }
     pub fn bind_lifecycle(self:&Arc<Self>) {let _=self.self_ref.set(Arc::downgrade(self));}
-    /// O `from` dos recados nativos: a caixa do Rust, ligada no primeiro recado. Cada recibo volta à
-    /// sessão que escreveu o recado.
-    pub(crate) fn native_origin(&self) -> String {
+    /// O recado nativo da operação `operation` da sessão `key`: seu id, já à espera de recibo, e o
+    /// `from`, a caixa do Rust (ligada no primeiro recado). Cada recibo volta a essa operação.
+    pub(crate) fn native_route(&self,key:&str,operation:&str) -> (String,String) {
+        let message_id=crate::terminal_facts::message_id(key,operation);
+        self.native.expect(&message_id,key,operation);
         let registry=self.self_ref.get().cloned();
-        self.native.origin(move |receipt| {
+        let origin=self.native.origin(move |receipt| {
             match registry.as_ref().and_then(std::sync::Weak::upgrade) {
                 Some(registry)=>{tokio::spawn(async move {registry.native_receipt(receipt).await;});},
                 None=>tracing::warn!(key=%receipt.key,code="native_receipt_unbound","recibo de recado nativo sem o registro do servidor"),
             }
-        })
+        });
+        (message_id,origin)
     }
-    pub(crate) fn expect_native(&self,message_id:&str,key:&str,operation:&str) {self.native.expect(message_id,key,operation);}
     /// O `native_receipt` do coordenador do Python: retido ou recusado encerra a operação do recado com
     /// esse estado; entregue ou liberado a confirma.
     async fn native_receipt(&self,receipt:super::native_message::Receipt) {
         let super::native_message::Receipt {key,operation,state}=receipt;
-        let disposition=match state.as_str() {"delivered"|"released"|""=>"accepted","rejected"|"refused"=>"rejected",_=>"unknown"};
+        let (status,disposition)=match state.as_str() {
+            "delivered"|"released"|""=>(Status::Accepted,"accepted"),"rejected"|"refused"=>(Status::Rejected,"rejected"),_=>(Status::Unknown,"unknown"),
+        };
         let Some(handle)=self.entries.lock().await.get(&key).map(|entry|entry.handle.clone()) else {
             tracing::warn!(key=%key,state=%state,code="native_receipt_session_gone","recibo de recado nativo de sessão que já não está aberta");
             return;
         };
-        let action=serde_json::from_value::<Action>(json!({"kind":"finish","id":operation,"status":disposition,
-            "result":{"operation_id":operation,"disposition":disposition,"payload":{"native_status":state}}}));
-        let applied=match action {
-            Ok(action)=>handle.queue(format!("native-receipt:{key}:{operation}:{state}"),action).await,
-            Err(_)=>Err(failure("native_receipt_action")),
-        };
-        let applied=match applied {Ok(_) if disposition=="accepted"=>handle.confirm().await.map(|_|()),other=>other.map(|_|())};
+        let result=json!({"operation_id":operation,"disposition":disposition,"payload":{"native_status":state}});
+        let applied=handle.queue(format!("native-receipt:{key}:{operation}:{state}"),Action::Finish {id:operation.clone(),status,result}).await;
+        let applied=match applied {Ok(_) if status==Status::Accepted=>handle.confirm().await.map(|_|()),other=>other.map(|_|())};
         if let Err(error)=applied {
             tracing::warn!(key=%key,state=%state,code=%error.code,"recibo de recado nativo não aplicado");
-        } else if disposition!="accepted" {
+        } else if status!=Status::Accepted {
             tracing::warn!(key=%key,state=%state,code="native_message_not_delivered","recado nativo retido ou recusado pelo receptor");
         }
     }

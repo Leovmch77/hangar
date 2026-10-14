@@ -34,7 +34,8 @@ def _locked(*names: str):
     """O `hangar-server` também grava estes arquivos (`patch_meta`, cano, `/clear`) sob a mesma
     trava `<nome>.lock`: todo ler-alterar-gravar daqui a segura."""
     _dir().mkdir(parents=True, exist_ok=True)
-    with _write_lock, atomico.locked(*(_path(name).with_suffix(".lock") for name in names)):
+    # A trava de arquivo primeiro: esperar o Rust numa sessão não segura as gravações das outras.
+    with atomico.locked(*(_path(name).with_suffix(".lock") for name in names)), _write_lock:
         yield
 
 

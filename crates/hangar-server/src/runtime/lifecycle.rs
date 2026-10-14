@@ -189,14 +189,13 @@ pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
 pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {
     if target.provider!="claude" || target.name.is_empty() || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("lifecycle_sidecar_path"));}
     let dir=claude_sidecar_dir()?;
-    super::codex_sidecar::locked(&dir,&target.name,|_|Ok(delete_locked(&dir.join(format!("{}.json",target.name)),target,conversation))).map_err(|_|failure("lifecycle_sidecar_lock"))?
+    super::codex_sidecar::locked(&dir,&target.name,|path|Ok(delete_locked(path,target,conversation))).map_err(|_|failure("lifecycle_sidecar_lock"))?
 }
 fn delete_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {
     let bytes=match super::queue::read_replaced(path) {Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(failure("lifecycle_sidecar_read"))};
     let value:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;
     if value["key"]!=target.key || value["session_id"]!=conversation || value["name"]!=target.name
         || value["cano"]["pid"].as_u64().is_some_and(|pid|pid!=u64::from(target.binding.pid)) {return Err(failure("lifecycle_sidecar_changed"));}
-    if super::queue::read_replaced(path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Err(failure("lifecycle_sidecar_changed"));}
     std::fs::remove_file(path).map_err(|_|failure("lifecycle_sidecar_delete"))
 }
 
@@ -210,7 +209,7 @@ pub(super) fn sidecar_digest(target:&super::protocol::RuntimeTarget)->Result<Str
 pub fn patch_sidecar(target:&super::protocol::RuntimeTarget,patch:&serde_json::Value)->Result<serde_json::Value,RuntimeError> {
     if target.provider!="claude" || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) || target.name.is_empty() {return Err(failure("lifecycle_sidecar_path"));}
     let dir=claude_sidecar_dir()?;
-    super::codex_sidecar::locked(&dir,&target.name,|_|Ok(patch_locked(&dir.join(format!("{}.json",target.name)),target,patch))).map_err(|_|failure("lifecycle_sidecar_lock"))?
+    super::codex_sidecar::locked(&dir,&target.name,|path|Ok(patch_locked(path,target,patch))).map_err(|_|failure("lifecycle_sidecar_lock"))?
 }
 fn patch_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,patch:&serde_json::Value)->Result<serde_json::Value,RuntimeError> {
     use serde_json::{Value,json};
@@ -222,7 +221,6 @@ fn patch_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,pat
     let fields=patch.as_object().ok_or_else(||failure("lifecycle_sidecar_patch"))?;
     if fields.keys().any(|k|!matches!(k.as_str(),"session_id"|"permission_mode"|"previous_non_plan"|"cano")) {return Err(failure("lifecycle_sidecar_patch"));}
     meta.as_object_mut().ok_or_else(||failure("lifecycle_sidecar_read"))?.extend(fields.clone());
-    if super::queue::read_replaced(path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Ok(json!({"stale":true}));}
     let written=serde_json::to_vec(&meta).map_err(|_|failure("lifecycle_sidecar_write"))?;
     super::queue::atomic_write(path,&written).map_err(|_|failure("lifecycle_sidecar_write"))?;
     Ok(json!({"updated":true,"metadata":meta,"digest":sidecar_hash(&written)}))

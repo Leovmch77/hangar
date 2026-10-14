@@ -47,5 +47,4 @@ def test_sidecars_are_written_only_by_rust(monkeypatch, provider, module, kind, 
     for attr in ("load", "update"):
         monkeypatch.setattr(sessions, attr, lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sidecar tocado")))
     with pytest.raises(ValueError):
-        runtime_policy.run(kind, payload, {"provider": provider, "name": "s", "key": "k", "validate": lambda: None,
-                                           "state_path": "/nao/existe"})
+        runtime_policy.run(kind, payload, {"provider": provider, "name": "s", "key": "k", "validate": lambda: None})

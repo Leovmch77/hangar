@@ -154,9 +154,12 @@ pub fn patch(life:&SidecarLife,payload:&Value,view:&Value) -> Result<Value,Runti
     }).map_err(io_error)?
 }
 
-fn catalog_fields(payload:&Value) -> Result<&Meta,RuntimeError> {
+fn catalog_fields(payload:&Value) -> Result<&Meta,RuntimeError> { catalog_fields_in(payload,CATALOG) }
+
+/// O patch como objeto só com campos de `catalog`; o resto é a recusa `session_patch_field`.
+pub(super) fn catalog_fields_in<'a>(payload:&'a Value,catalog:&[&str]) -> Result<&'a Meta,RuntimeError> {
     let fields = payload.as_object().ok_or_else(||RuntimeError::new("session_patch_field","patch do sidecar não é objeto"))?;
-    if fields.keys().any(|key|!CATALOG.contains(&key.as_str())) {
+    if fields.keys().any(|key|!catalog.contains(&key.as_str())) {
         return Err(RuntimeError::new("session_patch_field","campo fora do catálogo do sidecar"));
     }
     Ok(fields)

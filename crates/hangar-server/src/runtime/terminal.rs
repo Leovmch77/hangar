@@ -174,13 +174,14 @@ impl TerminalServices for Services {
             failure
         })?;
         if let Some(native)=&mut facts.native {
-            let message_id=crate::terminal_facts::message_id(&self.target.key,&self.root);
-            // A caixa do Rust é o endereço de resposta: o recibo de recado retido ou recusado volta a esta entrada.
-            if let Some(registry)=self.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) {
-                native.origin=registry.native_origin();
-                registry.expect_native(&message_id,&self.target.key,&self.root);
-            }
-            native.message_id=Some(message_id);
+            // Recado `[de: …]`: a caixa do Rust é o endereço de resposta, e o recibo de recado retido ou
+            // recusado volta a esta entrada. Fora dele (manutenção, clique de mod) não há recado.
+            let route=crate::terminal_input::message_prefix(&self.text).and(self.lifecycle.as_ref()).and_then(std::sync::Weak::upgrade)
+                .map(|registry|registry.native_route(&self.target.key,&self.root));
+            native.message_id=Some(match route {
+                Some((message_id,origin))=>{native.origin=origin;message_id},
+                None=>crate::terminal_facts::message_id(&self.target.key,&self.root),
+            });
         }
         Ok(facts)
     })}

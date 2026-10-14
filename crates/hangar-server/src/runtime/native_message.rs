@@ -25,14 +25,6 @@ fn socks_dir() -> Option<PathBuf> {
     #[cfg(not(unix))] { None }
 }
 
-#[cfg(unix)]
-fn pid_alive(pid:i64) -> bool {
-    let Ok(pid) = i32::try_from(pid) else { return false };
-    pid > 0 && (unsafe { libc::kill(pid,0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
-}
-#[cfg(not(unix))]
-fn pid_alive(_:i64) -> bool { false }
-
 /// O socket de inbox da sessão Claude cuja conversa é `session_id`, como o `socket_da_sessao` do
 /// Python: o registro do CLI na pasta da conta e no `~/.claude`, processo vivo e socket existente.
 pub fn session_socket(session_id:&str,config_dir:Option<&str>) -> Option<PathBuf> {
@@ -56,7 +48,8 @@ fn socket_in(dirs:&[PathBuf],session_id:&str) -> Option<PathBuf> {
             if record["sessionId"].as_str() != Some(session_id) { continue; }
             let Some(socket) = record["messagingSocketPath"].as_str().filter(|socket|!socket.is_empty()) else { continue };
             let pid = record["pid"].as_i64().or_else(||record["pid"].as_str().and_then(|pid|pid.parse().ok()));
-            if pid.is_some_and(pid_alive) && Path::new(socket).exists() { return Some(socket.into()); }
+            let alive = pid.and_then(|pid|u32::try_from(pid).ok()).is_some_and(|pid|pid > 0 && super::process::probe_alive(pid));
+            if alive && Path::new(socket).exists() { return Some(socket.into()); }
         }
     }
     None
@@ -77,22 +70,22 @@ fn receipts(bytes:&[u8]) -> Vec<(String,String)> {
 type Expected = Mutex<(BTreeMap<String,(String,String)>,VecDeque<String>)>;
 
 /// Caixa de entrada dos recibos e os recados que esperam um. Ligada no primeiro recado.
+#[derive(Default)]
 pub struct Inbox {
     /// Pasta da caixa; sem ela, a do Claude Code (`cc-socks`).
     socks:Option<PathBuf>,
     origin:std::sync::OnceLock<Option<String>>,
     expected:Arc<Expected>,
+    /// Some com a caixa: a tarefa que atende o socket acaba quando a caixa é descartada.
+    stop:std::sync::OnceLock<tokio::sync::watch::Sender<()>>,
 }
 
 /// O que um recibo resolve: a sessão (chave), a operação e o estado devolvido pelo receptor.
 pub struct Receipt { pub key:String, pub operation:String, pub state:String }
 
-impl Default for Inbox { fn default() -> Self { Self::new() } }
-
 impl Inbox {
-    pub fn new() -> Self { Self { socks:None,origin:std::sync::OnceLock::new(),expected:Arc::default() } }
     /// A caixa em outra pasta (testes, para não ligar no `cc-socks` da máquina).
-    pub fn in_dir(dir:PathBuf) -> Self { Self { socks:Some(dir),origin:std::sync::OnceLock::new(),expected:Arc::default() } }
+    pub fn in_dir(dir:PathBuf) -> Self { let mut inbox = Self::default(); inbox.socks = Some(dir); inbox }
 
     /// O `from` dos recados: a caixa ligada em `cc-socks/<pid>.sock`, ou um endereço sem caixa quando ela
     /// não liga (sem `cc-socks`, fora do Unix). Liga uma vez; cada recibo vai a `deliver`.
@@ -118,9 +111,16 @@ impl Inbox {
             }
         };
         let (route,expected) = (Arc::new(deliver),self.expected.clone());
+        let (stop,mut stopped) = tokio::sync::watch::channel(());
+        let _ = self.stop.set(stop);
         tokio::spawn(async move {
             loop {
-                let Ok((mut stream,_)) = listener.accept().await else { continue };
+                let accepted = tokio::select! {
+                    _ = stopped.changed() => return,
+                    accepted = listener.accept() => accepted,
+                };
+                // Falha de recurso (descritores esgotados) não vira laço quente.
+                let Ok((mut stream,_)) = accepted else { tokio::time::sleep(std::time::Duration::from_millis(100)).await; continue };
                 let (route,expected) = (route.clone(),expected.clone());
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
@@ -165,17 +165,17 @@ fn resolve(expected:&Expected,message_id:&str) -> Option<(String,String)> {
 
 /// O `native_message` do Python para o Claude sem terminal: escreve o recado no socket da sessão.
 /// `not_written` devolve o recado ao caminho de sempre; depois de começar a escrita, nenhuma falha
-/// autoriza outro transporte (`unknown`). O `msg_id` é o da operação, o que casa o recibo com ela.
-pub async fn send(key:&str,metadata:&Value,payload:&Value,operation:&str,origin:String,io:&dyn TerminalIo) -> Result<Value,RuntimeError> {
-    let text = payload["text"].as_str().ok_or_else(||RuntimeError::new("native_text","recado sem texto"))?;
+/// autoriza outro transporte (`unknown`). `route` é o id do recado e o `from` (`native_route`); sem o
+/// registro do servidor não há classe nem caixa, e o envio recusa.
+pub async fn send(metadata:&Value,text:&str,mode:Option<&str>,route:Option<(String,String)>,io:&dyn TerminalIo) -> Result<Value,RuntimeError> {
     let Some((sender,_)) = crate::terminal_input::message_prefix(text) else { return Ok(json!({"outcome":"not_written","reason":"ordinary_input"})) };
-    let mode = payload["mode"].as_str().filter(|mode|matches!(*mode,"bypass" | "prompting"))
-        .ok_or_else(||RuntimeError::new("native_mode_class_missing","recado sem a classe de modo"))?;
+    let (Some(mode),Some((message_id,origin))) = (mode.filter(|mode|matches!(*mode,"bypass" | "prompting")),route) else {
+        return Err(RuntimeError::new("native_mode_class_missing","recado sem a classe de modo"));
+    };
     let (session_id,config_dir) = (metadata["session_id"].as_str().unwrap_or("").to_owned(),metadata["config_dir"].as_str().map(str::to_owned));
     let socket = tokio::task::spawn_blocking(move||session_socket(&session_id,config_dir.as_deref())).await
         .map_err(|_|RuntimeError::new("native_socket_lookup","busca do socket da sessão falhou"))?;
     let Some(socket) = socket else { return Ok(json!({"outcome":"not_written","reason":"no_socket"})) };
-    let message_id = crate::terminal_facts::message_id(key,operation);
     let native = NativeMessage { socket,origin,sender:sender.into(),mode:mode.into(),message_id:Some(message_id.clone()) };
     let envelope = crate::terminal_input::native_envelope(&native,text,&message_id);
     Ok(match io.socket(&native,envelope).await.unwrap_or(WriteOutcome::Unknown) {
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn expected_messages_are_bounded_and_survive_a_first_receipt() {
-        let inbox = Inbox::new();
+        let inbox = Inbox::default();
         for n in 0..=EXPECTED_MAX { inbox.expect(&format!("m{n}"),"k","op"); }
         assert_eq!(resolve(&inbox.expected,"m0"),None,"o mais antigo sai");
         assert_eq!(resolve(&inbox.expected,"m1"),Some(("k".into(),"op".into())));
@@ -246,11 +246,13 @@ mod tests {
         // Sem `cc-socks` não há socket: o recado volta ao caminho de sempre.
         let io = Capture(Default::default(),WriteOutcome::Written);
         let meta = json!({"session_id":"sid-inexistente","config_dir":null});
-        let plain = send("k",&meta,&json!({"text":"Olá","mode":"bypass"}),"op","uds:caixa".into(),&io).await.unwrap();
+        let route = ||Some((crate::terminal_facts::message_id("k","op"),"uds:caixa".to_owned()));
+        let plain = send(&meta,"Olá",Some("bypass"),route(),&io).await.unwrap();
         assert_eq!(plain,json!({"outcome":"not_written","reason":"ordinary_input"}));
-        let missing = send("k",&meta,&json!({"text":"[de: a] Olá"}),"op","uds:caixa".into(),&io).await.unwrap_err();
-        assert_eq!(missing.code,"native_mode_class_missing");
-        let socketless = send("k",&meta,&json!({"text":"[de: a] Olá","mode":"bypass"}),"op","uds:caixa".into(),&io).await.unwrap();
+        for (mode,route) in [(None,route()),(Some("turbo"),route()),(Some("bypass"),None)] {
+            assert_eq!(send(&meta,"[de: a] Olá",mode,route,&io).await.unwrap_err().code,"native_mode_class_missing");
+        }
+        let socketless = send(&meta,"[de: a] Olá",Some("bypass"),route(),&io).await.unwrap();
         assert_eq!(socketless,json!({"outcome":"not_written","reason":"no_socket"}));
         assert!(io.0.lock().unwrap().is_empty(),"nada escrito");
         // O envelope é o do caminho com terminal, com o id da operação e a caixa como resposta.
@@ -262,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn a_receipt_reaches_the_session_that_sent_the_message() {
         let tmp = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new();
+        let inbox = Inbox::default();
         let (sender,mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let origin = inbox.bind(&tmp.path().join("caixa.sock"),move|receipt:Receipt|{ let _ = sender.send((receipt.key,receipt.operation,receipt.state)); }).unwrap();
         inbox.expect("m1","k","op");

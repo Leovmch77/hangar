@@ -488,9 +488,9 @@ pub async fn kill(cano: &Cano, key: &str, sidecar_dir: &Path) -> Result<(), Proc
 
 /// Vivo e ainda não zumbi: zumbi já saiu, só falta ser colhido.
 #[cfg(target_os = "linux")]
-fn probe_alive(pid: u32) -> bool { probe(pid).is_some_and(|(argv, _)| !argv.is_empty()) }
+pub(crate) fn probe_alive(pid: u32) -> bool { probe(pid).is_some_and(|(argv, _)| !argv.is_empty()) }
 #[cfg(not(target_os = "linux"))]
-fn probe_alive(pid: u32) -> bool { probe(pid).is_some() }
+pub(crate) fn probe_alive(pid: u32) -> bool { probe(pid).is_some() }
 
 /// Encerra o app-server adotado do Codex com terminal. No Unix só o pid: ele mora no grupo do pane, e
 /// `killpg` levaria a TUI junto. No Windows a árvore, que pega o `cmd.exe` do `codex.cmd`.

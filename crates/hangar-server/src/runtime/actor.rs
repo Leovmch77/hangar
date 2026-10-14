@@ -1046,12 +1046,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     let queue = queue.clone(); let gate = state_gate.clone(); let sample = clock(start);
                     // Codex com terminal adotado: o sidecar é gravado aqui, nunca pela política do Python.
                     let sidecar = adoption.as_ref().filter(|_|kind == "session.patch_meta").map(|adoption|adoption.cell.sidecar().cloned());
-                    // Codex sem terminal que o Rust sobe: o mesmo, com a vida pela chave.
-                    let headless_dir = engine.launch.as_ref().filter(|_|adoption.is_none() && target.provider == "codex"
-                        && matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano")).map(|launch|launch.sidecar_dir.clone());
-                    // Claude sem terminal: o mesmo, sob a trava que o Python também segura ao gravar o arquivo.
-                    let claude_dir = (target.provider == "claude" && matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano"))
-                        .then(super::lifecycle::claude_sidecar_dir);
+                    // Sem terminal (Codex que o Rust sobe, Claude): o mesmo, com a vida pela chave e sob a trava
+                    // que o Python também segura ao gravar o arquivo.
+                    let headless_dir = matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano").then(|| match target.provider.as_str() {
+                        "claude" => Some(super::lifecycle::claude_sidecar_dir()),
+                        _ => engine.launch.as_ref().filter(|_|adoption.is_none()).map(|launch|Ok(launch.sidecar_dir.clone())),
+                    }).flatten();
                     // Estes serviços não escrevem na CLI (formatar status, carimbo, sidecar, log): repetir é
                     // inofensivo, então não passam pelo diário. Quatro gravações por chamada, a cada mudança de
                     // estado, eram a maior parte do disco gasto por mensagem.
@@ -1066,18 +1066,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 return tokio::task::spawn_blocking(move||super::codex_sidecar::patch(&life,&payload,&saved)).await
                                     .map_err(|_|failure("sidecar_job"))?;
                             }
-                            if let Some(dir) = claude_dir {
-                                let (dir,name,key,clear) = (dir?,target.name.clone(),target.key.clone(),kind == "session.clear_cano");
-                                let saved = if clear { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
-                                return tokio::task::spawn_blocking(move || if clear { super::claude_sidecar::clear_cano(&dir,&name,&key,&payload) }
-                                    else { super::claude_sidecar::patch(&dir,&name,&key,&payload,&saved) }).await
-                                    .map_err(|_|failure("sidecar_job"))?;
-                            }
                             if let Some(dir) = headless_dir {
-                                let (name,key,clear) = (target.name.clone(),target.key.clone(),kind == "session.clear_cano");
-                                let saved = if clear { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
-                                return tokio::task::spawn_blocking(move || if clear { super::codex_sidecar::clear_cano(&dir,&name,&key,&payload) }
-                                    else { super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved) }).await
+                                let saved = if kind == "session.clear_cano" { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
+                                let (dir,provider,name,key,service) = (dir?,target.provider.clone(),target.name.clone(),target.key.clone(),kind.clone());
+                                return tokio::task::spawn_blocking(move||super::gateway::sidecar_service(&provider,&dir,&name,&key,&service,&payload,&saved)).await
                                     .map_err(|_|failure("sidecar_job"))?;
                             }
                             if local_policy::is_local(&kind) {
@@ -1709,10 +1701,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                             queue.exec(target.generation,&format!("native-cursor:{phase}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
-                                            let origin = registry.as_ref().map_or_else(||format!("uds:hangar-{}",std::process::id()),|registry|registry.native_origin());
-                                            let result = super::native_message::send(&target.key,&target.metadata,&payload,&id,origin,&crate::terminal_input::ProcessIo::default()).await?;
+                                            let route = registry.as_ref().map(|registry|registry.native_route(&target.key,&id));
+                                            let result = super::native_message::send(&target.metadata,text,class,route,&crate::terminal_input::ProcessIo::default()).await?;
                                             let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
-                                            if let (Some(registry),Some(message_id)) = (&registry,result["msg_id"].as_str()) { registry.expect_native(message_id,&target.key,&id); }
                                             let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };
                                             queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase.clone(),status,result:result.clone() }).await.map_err(io_failure)?;
                                             if outcome == "not_written" {
