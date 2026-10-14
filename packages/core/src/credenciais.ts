@@ -86,6 +86,19 @@ export function codexCliAusente(c: Credencial | CodexAccount): boolean {
   return 'auth' in c && c.auth ? c.auth.reason === 'cli_missing'
     : (c as Credencial).login?.motivo === 'cli-ausente';
 }
+/** Login que o servidor não conseguiu conferir, com a causa que veio na linha. O Codex ausente tem
+ *  frase própria (`codexCliAusente`); sem causa (preparo, conta ocupada) não há o que dizer. */
+export function motivoLoginIndisponivel(c: Credencial): string | null {
+  const motivo = c.login?.estado === 'indisponivel' ? c.login.motivo : null;
+  if (!motivo || motivo === 'cli-ausente') return null;
+  switch (motivo) {
+    case 'prazo': return m.contas_login_prazo();
+    case 'leitura-falhou': return m.contas_login_leitura_falhou();
+    case 'formato-desconhecido': return m.contas_login_formato();
+    case 'cli-indisponivel': return m.contas_login_cli_mudo();
+    default: return m.contas_login_nao_conferido();
+  }
+}
 export function credentialGroup(c: Credencial): 'subscription' | 'claude_engine' | 'api_key' | 'unknown' {
   const auth = credentialAuth(c);
   if (auth === 'oauth') return 'subscription';

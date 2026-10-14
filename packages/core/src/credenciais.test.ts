@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar, codexCliAusente, defaultCodexAccount,
+  motivoLoginIndisponivel,
   type Credencial, type CodexAccount } from './credenciais';
 import { configureApi } from './apiEnv';
 import { configureLocale } from './i18n';
@@ -36,6 +37,24 @@ describe('Codex não instalado', () => {
     expect(codexCliAusente({ tipo: 'codex', login: { estado: 'indisponivel' } } as Credencial)).toBe(false);
     expect(codexCliAusente({ auth: { method: 'unknown', status: 'unavailable', email: null, plan: null, reason: 'cli_missing' } } as CodexAccount)).toBe(true);
     expect(codexCliAusente({ auth: { method: 'none', status: 'disconnected', email: null, plan: null } } as CodexAccount)).toBe(false);
+  });
+});
+
+describe('login que o servidor não conferiu', () => {
+  const linha = (motivo: string | null, estado: 'ok' | 'indisponivel' = 'indisponivel') =>
+    ({ tipo: 'codex', login: { estado, loggedIn: null, motivo } }) as Credencial;
+  it('diz a causa que veio na linha', () => {
+    expect(motivoLoginIndisponivel(linha('prazo'))).toBe(m.contas_login_prazo());
+    expect(motivoLoginIndisponivel(linha('leitura-falhou'))).toBe(m.contas_login_leitura_falhou());
+    expect(motivoLoginIndisponivel(linha('formato-desconhecido'))).toBe(m.contas_login_formato());
+    expect(motivoLoginIndisponivel(linha('cli-indisponivel'))).toBe(m.contas_login_cli_mudo());
+    expect(motivoLoginIndisponivel(linha('causa-nova'))).toBe(m.contas_login_nao_conferido());
+  });
+  it('fica calado sem causa, com login lido ou com o Codex ausente, que tem frase própria', () => {
+    expect(motivoLoginIndisponivel(linha(null))).toBeNull();
+    expect(motivoLoginIndisponivel(linha('prazo', 'ok'))).toBeNull();
+    expect(motivoLoginIndisponivel(linha('cli-ausente'))).toBeNull();
+    expect(motivoLoginIndisponivel({ tipo: 'chave' } as Credencial)).toBeNull();
   });
 });
 

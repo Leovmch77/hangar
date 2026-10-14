@@ -1,3 +1,5 @@
+import * as m from './paraglide/messages';
+
 // Resumo de cota de UMA conta pra caber numa linha de seletor ("5h 42% · 7d 18%"). Shape mínimo
 // do /api/cotas (backend/app/cotas.py, `CotaConta`): o front web tem o tipo completo em
 // lib/contaEstado; o app nativo só precisa disto.
@@ -14,6 +16,25 @@ export interface CotaContaResumo {
   janelas: JanelaCotaResumo[];
   /** Código do backend (`sessao-viva`, `renovacao-falhou`, …), nunca texto de tela. */
   motivo?: string | null;
+}
+
+/** Números da última leitura boa com o `motivo` da falha nova: por que não atualizaram. */
+export function motivoCotaAntiga(c: CotaContaResumo | null | undefined): string | null {
+  const motivo = c?.estado === 'lida' ? c.motivo : null;
+  if (!motivo) return null;
+  return m.cota_nao_atualizou({ causa: causaDaFalha(motivo) });
+}
+
+function causaDaFalha(motivo: string): string {
+  if (motivo === 'sem-resposta') return m.cota_causa_sem_resposta();
+  if (motivo === 'http-429') return m.cota_causa_limite();
+  if (motivo === 'http-401' || motivo === 'http-403') return m.cota_causa_recusou();
+  const status = /^http-(\d{3})$/.exec(motivo)?.[1];
+  if (status) return m.cota_causa_http({ status });
+  if (['formato-desconhecido', 'painel-sem-numeros', 'erro-leitor'].includes(motivo)) return m.cota_causa_formato();
+  if (motivo === 'resposta-grande') return m.cota_causa_grande();
+  if (motivo === 'credencial-invalida' || motivo === 'credencial-ilegivel') return m.cota_causa_credencial();
+  return m.cota_causa_outra();
 }
 
 /** Leitura parou porque a credencial não renovou: resolve abrindo uma sessão na conta. */
