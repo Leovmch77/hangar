@@ -3380,7 +3380,7 @@
   "cota_sessao_viva": "— the open session renews it on its own, the number comes back shortly",
   "cota_sem_cota": "no quota",
   "cota_nao_atualizou": "not updated: {causa}",
-  "cota_causa_sem_resposta": "the source did not answer",
+  "cota_causa_sem_resposta": "no readable answer from the source",
   "cota_causa_limite": "the source's rate limit",
   "cota_causa_recusou": "the source refused the credential",
   "cota_causa_http": "the source answered error {status}",

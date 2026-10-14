@@ -3380,7 +3380,7 @@
   "cota_sessao_viva": "— a sessão aberta renova sozinha, o número volta já",
   "cota_sem_cota": "sem cota",
   "cota_nao_atualizou": "não atualizou: {causa}",
-  "cota_causa_sem_resposta": "a fonte não respondeu",
+  "cota_causa_sem_resposta": "a fonte não deu resposta legível",
   "cota_causa_limite": "limite de consultas da fonte",
   "cota_causa_recusou": "a fonte recusou a credencial",
   "cota_causa_http": "a fonte respondeu erro {status}",
