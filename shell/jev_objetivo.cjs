@@ -11,7 +11,8 @@
 //
 // As funções puras são o que o teste cobre; quem fala com rede, navegador e LLM é injetado.
 
-const PAPEIS_DE_TEXTO = new Set(['textbox', 'searchbox']);
+// `spinbutton` é o <input type=number>: fora daqui, Porta, Ordem e Nota sumiam dos alvos.
+const PAPEIS_DE_TEXTO = new Set(['textbox', 'searchbox', 'spinbutton']);
 // `option` não entra em CLICK: num `<select>` nativo, clicar na opção não muda o valor do select —
 // o próprio `fill` do hangar recusa com "o clique nao deixou um campo de texto com foco". Ela é
 // alvo da operação SELECT, que define o valor e dispara input/change, como o Playwright faz.
@@ -121,8 +122,13 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
   for (const linha of String(texto).split('\n')) {
     const m = linha.match(/^\s*-\s+(\w+)(?:\s+"([\s\S]*?)")?\s+\[ref=@(e\d+)\]((?: \[\w+\])*)/);
     if (!m) continue;
-    const [, papel, nome, ref, marcas] = m;
+    const [, papel, nomeDaArvore, ref, marcas] = m;
     if (!PAPEIS_INTERATIVOS.has(papel)) continue;
+    // Lista fechada sem rótulo (filtro do topo de uma grade) só se identifica pelo que mostra, e
+    // às vezes é ela que destrava o "Novo". A busca aberta do popover vem [expanded] e fica fora.
+    const mostrado = !nomeDaArvore && papel === 'combobox' && /\[collapsed\]/.test(marcas)
+      ? linha.match(/ value="(.+)"\s*$/)?.[1] : '';
+    const nome = mostrado ? `lista sem rotulo mostrando "${mostrado}"` : nomeDaArvore;
     // Elemento sem nome acessível não dá ao Jev nada para julgar, e ocupa uma vaga do choice. Campo de
     // texto é a exceção: editor rich text (Tiptap, ProseMirror) costuma não ter rótulo, e sem ele não
     // havia onde escrever o corpo de uma evolução.
@@ -136,6 +142,12 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     if (achados.length >= max) break;
   }
   return achados;
+}
+
+/** Nomes dos controles desabilitados: não são alvo, mas dizem ao auxiliar que o botão existe e está bloqueado. */
+function desabilitados(texto) {
+  return [...String(texto).matchAll(/^\s*-\s+(\w+)\s+"([^"\n]+)"\s+\[ref=@e\d+\](?: \[\w+\])* \[disabled\]/gm)]
+    .filter(([, papel]) => PAPEIS_INTERATIVOS.has(papel)).map(([, , nome]) => nome.trim()).slice(0, 30);
 }
 
 const rotulo = (c) => `${c.papel} "${c.nome}"${c.estado ? ` ${c.estado}` : ''}`;
@@ -599,7 +611,7 @@ function riscoDoClique(respostas, escolhido, candidatos, gemeos, limiares) {
 const OPERACOES_DO_AUXILIAR = new Set(['CLICK', 'SELECT', 'TYPE_TEXT']);
 
 /** O que o modelo auxiliar recebe quando o Jev não achou alvo: só observação, nunca valor de `dados`. */
-function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '' }) {
+function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '', bloqueados = [] }) {
   // O auxiliar é outro terceiro: senha de `dados` que a página reexibe (revisão, OTP) não sai daqui.
   const segredos = Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v);
   const oculto = (s) => segredos.reduce((t, v) => t.split(v).join('(oculto)'), String(s ?? ''));
@@ -619,6 +631,9 @@ function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respost
     `O que o Jev queria fazer: ${distribuicao(respostas.operacao) || respostas.operacao?.choice || 'sem resposta'}`,
     'Elementos acionaveis (ref | papel | nome):',
     ...candidatos.map((c) => `${c.ref} | ${c.papel} | ${c.nome}${c.estado ? ` | ${c.estado}` : ''}`),
+    // Sem isto o auxiliar via "Novo Serviço" no texto, não achava o elemento e respondia NONE, sem
+    // saber que um filtro da página o habilita.
+    ...(bloqueados.length ? [`Desabilitados agora (nao sao alvo; costumam liberar depois de escolher um filtro ou campo): ${bloqueados.join('; ')}`] : []),
     'Texto da pagina:',
     recortarTexto(texto),
     '---',
@@ -646,15 +661,18 @@ function decidirPeloAuxiliar(bruto, respostas, candidatos, limiares = LIMIARES) 
   if (!OPERACOES_DO_AUXILIAR.has(r.operacao)) return { falhou: `sem passo (${String(r.operacao)}: ${String(r.motivo ?? '').slice(0, 80)})` };
   const escolhido = candidatos.find((c) => c.ref === r.ref);
   if (!escolhido) return { falhou: `escolheu ${String(r.ref)}, que nao esta na pagina` };
-  // O mesmo recorte de alvos que o Jev tem por operação: um SELECT num botão virava clique sem a trava.
-  const cabe = r.operacao === 'SELECT' ? escolhido.papel === PAPEL_DE_OPCAO || escolhido.papel === 'combobox'
-    : r.operacao === 'TYPE_TEXT' ? PAPEIS_DE_TEXTO.has(escolhido.papel) || escolhido.papel === 'combobox' : true;
+  // "Escolher" um botão (dia do calendário) é clicar nele: vira CLICK, e a trava de risco abaixo
+  // vale para qualquer operação. Digitar só cabe em campo.
+  const operacao = r.operacao === 'SELECT' && escolhido.papel !== PAPEL_DE_OPCAO && escolhido.papel !== 'combobox'
+    && !PAPEIS_DE_TEXTO.has(escolhido.papel) ? 'CLICK' : r.operacao;
+  const cabe = operacao === 'SELECT' ? escolhido.papel === PAPEL_DE_OPCAO || escolhido.papel === 'combobox'
+    : operacao === 'TYPE_TEXT' ? PAPEIS_DE_TEXTO.has(escolhido.papel) || escolhido.papel === 'combobox' : true;
   if (!cabe) return { falhou: `${r.operacao} em ${rotulo(escolhido)} nao combina com o papel do elemento` };
   const risco = riscoDoClique(respostas, escolhido, candidatos, false, limiares);
   if (risco) return { parar: risco };
   const arriscado = respostas.arriscado?.noul;
   const ehArriscado = typeof arriscado === 'number' && arriscado >= limiares.arriscado;
-  return { operacao: r.operacao, alvo: escolhido.ref, escolhido, confianca: null, arriscado: ehArriscado ? arriscado : null, via: 'auxiliar' };
+  return { operacao, alvo: escolhido.ref, escolhido, confianca: null, arriscado: ehArriscado ? arriscado : null, via: 'auxiliar' };
 }
 
 // Só botão de envio arma a leitura de recusa: "Mais detalhes" ou uma aba não submetem nada.
@@ -674,6 +692,7 @@ const SEM_VALOR = 'SEM_VALOR';
 const ehRegistroDeTeste = (objetivo) => /\btest(?:e|es|ing)?\b/i.test(String(objetivo ?? ''));
 
 const LISTA_DA_PAGINA = 'lista de opcoes da pagina';
+const BUSCA_GENERICA = 'a';
 
 const regraDeTeste = (sufixo) => 'O objetivo pede um registro de teste: campo de formulario cujo dado o objetivo nao contem '
   + 'leva um valor de teste plausivel e valido para o tipo do campo (numero dentro da faixa normal, nome de cidade real, '
@@ -693,6 +712,9 @@ function pedidoDeTexto(objetivo, campo, feito, tipo = '') {
 }
 
 const ehSegredo = (campo) => CHAVE_SECRETA.test(campo);
+
+// O Jev casava o texto de `dados` com "Nota" numérica; o <input type=number> descarta e o laço redigitava.
+const cabeNoCampo = (c, v) => c.papel !== 'spinbutton' || /^\s*-?\d+(?:[.,]\d+)?\s*$/.test(v);
 
 /**
  * Troca o value= das linhas de campo com nome de segredo por "(oculto)". O value= é sempre o último
@@ -734,7 +756,7 @@ function lerTextos(resposta) {
  */
 async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [], tipos = {} }) {
   const chave = escolha?.choice;
-  if (chave && chave !== NENHUM && forca(escolha) >= limiares.alvo && typeof cofre[chave] === 'string') {
+  if (chave && chave !== NENHUM && forca(escolha) >= limiares.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(campo, cofre[chave])) {
     return { valor: cofre[chave], origem: `dados.${chave}` };
   }
   // Por que `dados` nao serviu: sem isso a parada nao distingue "nenhuma chave casou" de "o Jev
@@ -772,6 +794,13 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
     else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito, tipoDe(campo.nome))));
   }
   const valor = String(escritos.get(campo.nome)).trim();
+  if ((!valor || valor.includes(SEM_VALOR)) && ehRegistroDeTeste(objetivo)) {
+    // Registro de teste não espera dado: a lista com busca recebe uma letra, que lista opções reais
+    // para o ciclo seguinte escolher qualquer uma; busca ou filtro sem dado só fica de lado.
+    // ponytail: uma letra fixa; lista que não acha nada com "a" cai na trava de repetição.
+    if (campo.papel === 'combobox') return { valor: BUSCA_GENERICA, origem: 'busca generica' };
+    return { pular: `"${campo.nome}" e busca ou filtro sem dado num registro de teste; deixei de lado` };
+  }
   if (!valor || valor.includes(SEM_VALOR)) {
     return { parou: `o campo "${campo.nome}" precisa de um dado que nao esta no objetivo: ${porque}`, falta: campo.nome };
   }
@@ -798,6 +827,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let repetidas = 0;
   let esperouCarregar = false;
   const escritos = new Map();
+  const pulados = new Set();
   // Lista+valor ja tentados: valor que nao "pega" nao vira clique na mesma lista a cada passo.
   const listasTentadas = new Set();
   const camposSecretos = new Set();
@@ -827,9 +857,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     for (const [verbo, saida] of [['snapshot', snapshot], ['url', url], ['text', texto]]) {
       if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
-    const candidatos = parsarSnapshot(snapshot);
     // Texto escrito para um campo vale so na pagina em que foi pedido.
-    if (url !== urlDosEscritos) { escritos.clear(); urlDosEscritos = url; }
+    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); urlDosEscritos = url; }
+    // Campo deixado de lado sai dos alvos: oferecido de novo, o Jev voltava a mirar o mesmo filtro.
+    const candidatos = parsarSnapshot(snapshot).filter((c) => !(PAPEIS_DE_TEXTO.has(c.papel) && pulados.has(c.nome)));
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
     if (!candidatos.length && !esperouCarregar) {
       esperouCarregar = true;
@@ -953,7 +984,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (ajudar && decisao.parar && / sem alvo confiavel/.test(decisao.parar)) {
       let ajuda;
       try {
-        const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa: estado.envio_recusado }));
+        const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas,
+          recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot) }));
         ajuda = decidirPeloAuxiliar(bruto, respostas, candidatos);
         if (permitirRisco && ajuda.parar?.startsWith('operacao arriscada')) {
           log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${ajuda.parar}, via auxiliar)`);
@@ -1024,9 +1056,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       } else if (decisao.operacao === 'TYPE_TEXT') {
         const vazio = (c) => !Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
         const vizinhos = candidatos.filter((c) => PAPEIS_DE_TEXTO.has(c.papel) && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis) && vazio(c)
-          && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= LIMIARES.alvo))
+          && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= LIMIARES.alvo
+            && cabeNoCampo(c, String(cofre[respostas[cabecaDoValor(c.ref)].choice]))))
           .map((c) => c.nome);
-        const { valor, origem, parou, falta } = await valorDoCampo({
+        const { valor, origem, parou, falta, pular } = await valorDoCampo({
           escritos,
           vizinhos,
           campo: decisao.escolhido,
@@ -1038,6 +1071,11 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           tipos: anotacao.tipos,
         });
         if (parou) return { feito, sucesso: false, parou, falta };
+        if (pular) {
+          log(`jev-objetivo passo ${passo}: ${pular}`);
+          pulados.add(decisao.escolhido.nome);
+          continue;
+        }
         const secreto = ehSegredo(decisao.escolhido.nome) || (origem.startsWith('dados.') && ehSegredo(origem.slice(6)));
         if (secreto) camposSecretos.add(normalizar(decisao.escolhido.nome));
         const mostrado = secreto ? '(oculto)' : valor.slice(0, 40);
@@ -1074,7 +1112,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           const chave = v?.choice;
           // Sem valor de `dados`, o que o modelo de texto ja escreveu para este campo no pedido unico.
           const escrito = String(escritos.get(c.nome) ?? '').trim();
-          if (!(chave && chave !== NENHUM && forca(v) >= LIMIARES.alvo && typeof cofre[chave] === 'string')) {
+          if (!(chave && chave !== NENHUM && forca(v) >= LIMIARES.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(c, cofre[chave]))) {
             if (!escrito || escrito.includes(SEM_VALOR) || ehSegredo(c.nome) || atual(c)) continue;
             log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${escrito.slice(0, 40)} via llm) (mesmo pedido)`);
             await agir('fill', [`@${c.ref}`, escrito]);
