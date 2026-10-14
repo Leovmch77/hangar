@@ -609,7 +609,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Windows a leitura no meio da troca do Rust falha e faz a troca falhar. O que precisava dele é do
   Rust (`patch_meta`/`clear_cano` do Claude, `native_message`, recibos na caixa do Rust). O sidecar do
   Claude tem dois escritores, sob a trava `<nome>.lock` nos dois lados; leitura de sidecar no Python
-  passa por `atomico.read`. Evidência em
+  passa por `atomico.read`, que no Windows compartilha a exclusão. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#o-python-fora-do-arquivo-de-estado-da-fila).
 
 ## tmux + Claude Code truecolor

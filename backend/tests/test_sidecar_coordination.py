@@ -5,8 +5,10 @@ O Rust grava o sidecar do Claude (`patch_meta`, cano, `/clear`) e o do Codex sob
 ler-alterar-gravar e, no Windows, esperar a troca terminar em vez de ler "sem sidecar".
 """
 import contextlib
+import os
 import pathlib
 import threading
+import time
 
 import pytest
 
@@ -28,19 +30,19 @@ def codex_dir(tmp_path, monkeypatch):
 
 
 def _replace_in_progress(monkeypatch, failures: int):
-    """Abrir para leitura levanta o `PermissionError` do Windows nas primeiras vezes, como um leitor
-    que cai no meio do `replace` de outro processo."""
-    real = pathlib.Path.open
+    """A abertura para leitura levanta o `PermissionError` do Windows nas primeiras vezes, como um
+    leitor que cai no meio do `replace` de outro processo."""
+    real = atomico._open_shared
     calls = {"n": 0}
 
-    def fake(path, mode="r", *args, **kwargs):
-        if "r" in mode and path.suffix == ".json":
+    def fake(path):
+        if pathlib.Path(path).suffix == ".json":
             calls["n"] += 1
             if calls["n"] <= failures:
                 raise PermissionError(32, "O arquivo já está sendo usado por outro processo")
-        return real(path, mode, *args, **kwargs)
+        return real(path)
 
-    monkeypatch.setattr(pathlib.Path, "open", fake)
+    monkeypatch.setattr(atomico, "_open_shared", fake)
     monkeypatch.setattr(atomico.time, "sleep", lambda _s: None)
     return calls
 
@@ -65,9 +67,18 @@ def test_read_gives_up_and_raises(monkeypatch, tmp_path):
 
 def test_read_never_retries_on_posix(monkeypatch, tmp_path):
     monkeypatch.setattr(atomico, "_E_WINDOWS", False)
+    real = pathlib.Path.read_bytes
+    calls = {"n": 0}
+
+    def fake(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "sem permissão")
+        return real(path)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
     target = tmp_path / "a.json"
     target.write_bytes(b"{}")
-    calls = _replace_in_progress(monkeypatch, 1)
     with pytest.raises(PermissionError):
         atomico.read(target)
     assert calls["n"] == 1
@@ -144,3 +155,36 @@ def test_claude_rename_takes_both_locks(claude_dir):
     assert done.wait(5)
     worker.join()
     assert claude_sessions.load("b")["name"] == "b"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="compartilhamento de arquivo do Windows")
+def test_the_reader_shares_deletion_like_the_rust_reader(tmp_path):
+    """O leitor do Python aberto compartilha a exclusão, como o `std::fs::read` do Rust: é o que deixa
+    a troca do `hangar-server` (rename com semântica POSIX) passar por cima dele (a outra metade da #145)."""
+    target = tmp_path / "s.json"
+    target.write_bytes(b"velho")
+    with atomico._open_shared(target) as reader:
+        os.remove(target)
+        assert reader.read() == b"velho"
+    assert not target.exists()
+
+
+def test_the_lock_is_taken_soon_after_the_other_writer_releases(tmp_path):
+    """Quem espera a trava a pega logo que o outro solta (o `LK_LOCK` do Windows tentava a cada 1 s)."""
+    lock = tmp_path / "s.lock"
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with atomico.locked(lock):
+            held.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=holder)
+    worker.start()
+    assert held.wait(5)
+    threading.Timer(0.2, release.set).start()
+    started = time.monotonic()
+    with atomico.locked(lock):
+        waited = time.monotonic() - started
+    worker.join()
+    assert 0.15 <= waited < 0.8, waited

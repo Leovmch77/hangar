@@ -2328,10 +2328,12 @@ Python da leitura, levando ao Rust o que ele atendia:
   em memória.
 - **Sidecar do Claude com dois escritores.** O Python ainda grava o arquivo na abertura, troca de
   conta, renomear e relançar. Os dois seguram a trava `<nome>.lock` (`atomico.locked` no Python,
-  `codex_sidecar::locked` no Rust, a mesma do Codex) em todo ler-alterar-gravar, e as leituras do
-  Python (`atomico.read`, sidecars do Claude e do Codex) esperam até 50 ms a troca de outro processo
-  no Windows, em vez de responder "sem sidecar". Migrar todos os escritores seria migrar a abertura
-  de sessão.
+  `codex_sidecar::locked` no Rust, a mesma do Codex) em todo ler-alterar-gravar. No Windows, a
+  leitura do Python (`atomico.read`, sidecars do Claude e do Codex) abre com compartilhamento total
+  (`CreateFileW`, como o `std::fs::read`), para não fazer falhar a troca do Rust (rename com semântica
+  POSIX), e espera até 50 ms se ainda cair no meio dela; a trava do Python sonda a cada 2 ms (o
+  `LK_LOCK` do msvcrt tentava a cada 1 s e desistia em 10). Migrar todos os escritores seria migrar
+  a abertura de sessão (cerca de 30 gravações e 110 leituras do sidecar no Python).
 - **`native_message` das sessões sem terminal** (`runtime/native_message.rs`): o socket sai do
   registro do CLI, e o escritor e o envelope são os do caminho com terminal. Diferenças medidas
   contra o Python: conexão recusada volta `not_written` (o recado segue pelo caminho de sempre),
@@ -2342,6 +2344,17 @@ Python da leitura, levando ao Rust o que ele atendia:
   aplica o mesmo `finish` e `confirm` que o Python mandava. Antes, o caminho com terminal mandava
   `uds:hangar-<pid>`, endereço que não existe, e o recibo de recado retido ou recusado se perdia.
   O `native_receipt` do coordenador Python vale só no modo `python`.
+
+Prova de dois processos no sidecar do Claude, Windows 11, 15 s: o gravador Rust (`patch`, teste
+ignorado `soak_writer_for_the_python_side`) e, em Python, três leitores e um gravador em laço:
+
+| | Leitor "sem sidecar" | Campo que voltou | Falhas do Rust | Gravador Python |
+|---|---|---|---|---|
+| Antes (`read_text`, sem trava) | ~210 por leitor | ~166 mil por leitor | 8 em 220 | 19 falhas em 79 |
+| Depois | 0 | 0 | 0 em 973 | 4 falhas em 76 |
+
+As falhas que sobram são do `os.replace` do próprio Python (`MoveFileExW`), que não troca arquivo
+aberto mesmo com `FILE_SHARE_DELETE`; só aparecem com leitores Python em laço no mesmo arquivo.
 
 Ficaram no Python, por fazerem parte da abertura de sessão (#165): a geração lida em
 `runtime_adapter.binding()` e o `_has_pending` da reabertura.
