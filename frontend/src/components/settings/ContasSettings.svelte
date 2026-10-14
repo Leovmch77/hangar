@@ -1083,6 +1083,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
 
           <!-- Modo compacto: a cota vira rótulo+% na MESMA linha do nome, sem barra. -->
           {#if compacta && conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length}
+            {@const falha = motivoCotaAntiga(conta.cota)}
             <span class="ct-mini-cotas" class:velha={!leituraFresca(conta)}>
               {#each conta.cota.janelas as j (j.rotulo)}
                 <span class="ct-mini-jan" style:grid-column={rotulos.indexOf(j.rotulo) + 1}>{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
@@ -1091,8 +1092,12 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
               {/each}
               <!-- Dado velho com sinal TEXTUAL também: opacidade sozinha não chega a leitor de
                    tela e some em tela clara (achado da revisão do commit). -->
-              {#if !leituraFresca(conta)}
-                <span class="ct-mini-idade">{m.cota_ultima_leitura({ n: formatarIntervalo(conta.cota.idade_s) })}</span>
+              <!-- Idade e falha num texto só: as duas ocupariam a mesma célula da grade. -->
+              {#if !leituraFresca(conta) || falha}
+                <span class="ct-mini-idade" class:ct-falha={falha}>{[
+                  leituraFresca(conta) ? null : m.cota_ultima_leitura({ n: formatarIntervalo(conta.cota.idade_s) }),
+                  falha,
+                ].filter(Boolean).join(' · ')}</span>
               {/if}
             </span>
           {/if}
@@ -1554,7 +1559,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
   .ct-cota { display: flex; flex-direction: column; gap: 3px; margin-top: var(--space-2); }
   .ct-idade { font-size: 11px; color: var(--text-muted); opacity: 0.9; }
   .ct-cota.velha .ct-idade { opacity: 0.75; }
-  .ct-idade.ct-falha { color: var(--warning); }
+  .ct-idade.ct-falha, .ct-mini-idade.ct-falha { color: var(--warning); }
   .ct-cota.velha { opacity: 0.55; }
   .ct-semleitura { display: block; margin-top: var(--space-1); font-size: var(--text-2xs);
                    color: var(--text-muted); line-height: 1.4; }

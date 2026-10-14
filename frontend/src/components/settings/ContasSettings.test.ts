@@ -436,6 +436,16 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     unmount(t.comp);
   });
 
+  it('no modo compacto a cota antiga também diz por que não atualizou', async () => {
+    localStorage.setItem('cp_contas_compacta', '1');
+    const t = montar([claude({ cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 64 }], ts: 1, idade_s: 5,
+      motivo: 'sem-resposta' } })]);
+    await tick(); await tick();
+    const mini = t.el.querySelector<HTMLElement>('.ct-mini-cotas')!;
+    expect(mini.textContent).toContain(m.cota_nao_atualizou({ causa: m.cota_causa_sem_resposta() }));
+    unmount(t.comp);
+  });
+
   it('conta Codex adicional tem Remover; a padrão (ativa) não', async () => {
     const padrao = chave({ tipo: 'codex', auth_method: 'none', codex_account: 'default', ativa: true,
       id: 'codex:/h/.codex', nome: 'default', nome_natural: 'default', usos: [] });
