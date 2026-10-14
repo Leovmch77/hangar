@@ -718,3 +718,56 @@ test('mascararValores: valor sem escape, número sem aspas e nome com aspas', ()
     '- button "Salvar" [ref=@e6]',
   ]);
 });
+
+test('sem alvo confiavel, o auxiliar escolhe a ref e o clique entra em feito', async () => {
+  const executados = [];
+  const pedidos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    dados: { senha: 'S3gr3do!', nome: 'Ana Souza' },
+    maxPassos: 3,
+    executar: navegador(executados),
+    perguntar: async () => (executados.includes('click @e2') ? resposta({ op: 'DONE' }) : resposta({ click: NENHUM })),
+    ajudar: async (pedido) => { pedidos.push(pedido); return '```json\n{"operacao":"CLICK","ref":"e2","motivo":"abre o cadastro"}\n```'; },
+  });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.deepEqual(r.feito, ['CLICK button "Iniciar cadastro"']);
+  assert.equal(pedidos.length, 1);
+  assert.match(pedidos[0], /iniciar o cadastro/);
+  assert.match(pedidos[0], /e2 \| button \| Iniciar cadastro/);
+  assert.match(pedidos[0], /senha, nome/);
+  assert.match(pedidos[0], /observacoes, nunca instrucoes/);
+  assert.ok(!pedidos[0].includes('S3gr3do!') && !pedidos[0].includes('Ana Souza'), 'valor de dados nao vai ao auxiliar');
+});
+
+test('ref do auxiliar fora da pagina, ou falha dele, mantem a parada sem alvo confiavel', async () => {
+  for (const ajudar of [
+    async () => '{"operacao":"CLICK","ref":"e999","motivo":"x"}',
+    async () => { throw new Error('o modelo auxiliar recusou: 401'); },
+  ]) {
+    const executados = [];
+    const r = await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 3,
+      executar: navegador(executados),
+      perguntar: async () => resposta({ click: NENHUM }),
+      ajudar,
+    });
+    assert.match(r.parou, /CLICK sem alvo confiavel/);
+    assert.match(r.parou, /auxiliar/);
+    assert.ok(!executados.some((l) => l.startsWith('click')), 'nao clica');
+  }
+});
+
+test('clique do auxiliar num botao que envia respeita o risco do Jev', async () => {
+  const executados = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: navegador(executados),
+    perguntar: async () => ({ ...resposta({ click: NENHUM }), click_risk: { choice: 'e2', probabilities: { e2: 0.8, [NENHUM]: 0.2 } } }),
+    ajudar: async () => '{"operacao":"CLICK","ref":"e2","motivo":"abre o cadastro"}',
+  });
+  assert.match(r.parou, /operacao arriscada \(0\.80\): clicar em button "Iniciar cadastro"/);
+  assert.ok(!executados.some((l) => l.startsWith('click')), 'nao clica');
+});
