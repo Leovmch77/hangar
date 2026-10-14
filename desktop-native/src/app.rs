@@ -201,7 +201,7 @@ enum Payload {
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
     UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
-    Commands(String, Result<Vec<CommandInfo>, Failure>),
+    Commands(String, u64, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
     Media(SessionKey, Source, Result<Option<Arc<RenderImage>>, Failure>),
@@ -524,6 +524,9 @@ pub struct Hangar {
     attach_seq: u64,
     uploading: HashMap<SessionKey, Vec<u64>>,
     commands: HashMap<String, Result<Vec<CommandInfo>, String>>,
+    /// Última busca de cada lista: a resposta de uma busca anterior que chega depois é descartada.
+    commands_latest: HashMap<String, u64>,
+    commands_seq: u64,
     suggest_pick: usize,
     /// O campo já mostrava sugestões do `/`: a lista é revalidada só quando elas abrem.
     slash_open: bool,
@@ -908,7 +911,7 @@ impl Hangar {
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
-            attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
+            attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(), commands_latest: HashMap::new(), commands_seq: 0,
             suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
@@ -1736,9 +1739,10 @@ impl Hangar {
                 }
             }
             Payload::History(..) => return,
-            Payload::Commands(cache, result) => {
+            Payload::Commands(cache, seq, result) => {
                 // Revalidação que falha não troca a lista boa que já está na tela pelo erro.
-                if result.is_ok() || !self.commands.get(&cache).is_some_and(Result::is_ok) {
+                if self.commands_latest.get(&cache) == Some(&seq)
+                    && (result.is_ok() || !self.commands.get(&cache).is_some_and(Result::is_ok)) {
                     self.commands.insert(cache, result.map_err(|error| Self::failure(&error)));
                 }
             }
@@ -2355,10 +2359,13 @@ impl Hangar {
     fn ensure_commands(&mut self, force: bool) {
         let (Some(api), Some(session), Some(cache)) = (self.session_api(), self.selected.clone(), self.commands_key()) else { return; };
         if !force && session.provider != "codex" && self.commands.get(&cache).is_some_and(|r| r.is_ok()) { return; }
+        self.commands_seq += 1;
+        let seq = self.commands_seq;
+        self.commands_latest.insert(cache.clone(), seq);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = api.commands(&session.name).await;
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Commands(cache, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Commands(cache, seq, result) }).await;
         });
     }
 

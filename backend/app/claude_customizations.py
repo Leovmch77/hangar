@@ -10,6 +10,8 @@ SESSION_SETTINGS_ENV = "HANGAR_CLAUDE_SETTINGS"
 _config: tuple[str, str] | None = None
 _MAX_RESPONSE = 4 * 1024 * 1024
 _TIMEOUT = 25.0
+# A lista do `/` não espera um Rust travado: sem resposta logo, sai sem filtro.
+_HIDDEN_TIMEOUT = 3.0
 
 
 class CustomizationsError(RuntimeError):
@@ -29,13 +31,13 @@ def configure(address: str | None, secret: str | None) -> None:
     _config = (address, secret)
 
 
-def _request(operation: str, arguments: dict) -> dict:
+def _request(operation: str, arguments: dict, timeout: float = _TIMEOUT) -> dict:
     config = _config
     if config is None:
         raise CustomizationsError(503, "claude_customizations_unavailable",
                                   "A seleção de plugins e skills precisa do servidor Rust disponível.")
     host, port = config[0].rsplit(":", 1)
-    connection = http.client.HTTPConnection(host.strip("[]"), int(port), timeout=_TIMEOUT)
+    connection = http.client.HTTPConnection(host.strip("[]"), int(port), timeout=timeout)
     try:
         connection.request("POST", "/__hangar_server/claude/customizations",
                            body=json.dumps({"op": operation, "args": arguments},
@@ -124,7 +126,8 @@ def resume_settings(session_id: str, current_session_id: str | None, process_set
 
 def hidden_commands(cwd: str | None, config_dir: str, settings: dict | None, commands: list[str]) -> set[str]:
     """Nomes que a conta, o `.claude/settings*.json` do projeto e a escolha da sessão desligaram."""
-    result = _request("hidden", {"cwd": cwd, "config_dir": config_dir, "settings": settings, "commands": commands})
+    result = _request("hidden", {"cwd": cwd, "config_dir": config_dir, "settings": settings, "commands": commands},
+                      timeout=_HIDDEN_TIMEOUT)
     hidden = result.get("hidden")
     if not isinstance(hidden, list) or any(not isinstance(name, str) for name in hidden):
         raise CustomizationsError(503, "claude_customizations_unavailable", "Resposta de customização inválida.")

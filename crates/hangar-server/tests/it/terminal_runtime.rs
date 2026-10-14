@@ -861,8 +861,8 @@ async fn terminal_runtime_clear_without_new_conversation_releases_barrier_withou
     std::fs::write(f.target.transcript.with_file_name("00000000-0000-4000-8000-000000000001.jsonl"),"{\"message\":{\"content\":\"<command-name>/clear</command-name>\"}}\n").unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(h.command(f.command("clear-stuck","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
-    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
-    assert!(h.command(f.command("during-barrier","Olá")).await.is_err());
+    // A trava só vive 200 ms aqui: conferir a recusa no meio dela dependia da velocidade da máquina. O desfecho
+    // `clear_not_applied` abaixo prova que ela subiu; a recusa durante a trava é a do teste seguinte.
     h.queue("producer".into(),Action::Append {text:"Na fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("queued-row".into())}).await.unwrap();
     f.wait_for("trava sai",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
     // A saída grava a trava e depois a recusa: o retrato passa pelo ator e só volta com as duas no diário.
