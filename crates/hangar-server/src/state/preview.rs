@@ -191,6 +191,11 @@ pub fn committed_from_frame(frame: &[u8]) -> Option<String> {
             return None;
         }
     };
+    committed_from_event(ev)
+}
+
+/// A resposta que o evento grava, normalizada como a prévia compara.
+pub fn committed_from_event(ev: ChatEvent) -> Option<String> {
     (ev.kind == ChatKind::AssistantMsg).then_some(ev.text).flatten().filter(|t| !t.is_empty()).map(|t| norm(&t))
 }
 
@@ -209,6 +214,9 @@ pub struct Slot {
     columns: Option<u32>,
     anchor: Option<String>,
     marker: Option<(String, f64)>,
+    /// Último estado publicado: texto em voo com a sessão parada é a bolha fantasma, e vai ao log uma vez.
+    pub state: Option<String>,
+    ghost_logged: bool,
 }
 
 impl Slot {
@@ -300,7 +308,14 @@ pub async fn tick<S: Sources>(src: &S, slot: &mut Slot, frame: Option<&Frame>, e
     if src.epoch() != epoch {
         return true;
     }
+    // Uma linha por resposta: a próxima volta a `working` rearma o registro.
+    if slot.state.as_deref() == Some("working") { slot.ghost_logged = false; }
     match slot.offer(text, md, full, src.committed()) {
+        Some(t) if !t.text.is_empty() && slot.state.as_deref().is_some_and(|s| s != "working") && !std::mem::replace(&mut slot.ghost_logged, true) => {
+            tracing::info!(session = src.name(), state = slot.state.as_deref().unwrap_or(""), md = t.md, full = t.full,
+                chars = t.text.chars().count(), "prévia com texto em sessão parada");
+            src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await
+        }
         Some(t) => src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await,
         None => true,
     }

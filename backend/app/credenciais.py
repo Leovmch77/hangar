@@ -1,207 +1,27 @@
-"""A lista ÚNICA de credenciais do servidor — conta do Claude e chave de API na mesma tabela.
+"""Escritas da tela única de credenciais (contas do Claude e chaves de API na mesma tabela).
 
-Decisão de desenho de 18/08/2026, do usuário: "a tela de contas deveria ser tudo igual, onde ficam
-as contas do Claude e as de API também". Antes eram duas telas com dois vocabulários — Contas
-(login do Claude, pasta no disco) e Motores (base_url + chave) — e a mesma pergunta ("quanto sobrou
-nessa credencial?") só tinha resposta numa delas.
+A lista (`GET /api/credenciais`) é do Rust (`crates/hangar-server/src/accounts/credentials.rs`).
+Aqui ficam o apelido, o cookie do OpenCode, a sincronização nos outros agentes e a remoção do
+provedor que o app gravou no Kimi.
 
-O que esta rota NÃO faz, de propósito: criar, apagar ou editar. Isso já existe e continua onde
-estava — `POST/DELETE /api/claude-configs` pra conta do Claude, `PUT/DELETE /api/engines/{nome}`
-pra chave. Duplicar o caminho de escrita pra "unificar" a tela criaria dois donos do mesmo dado,
-que é exatamente o defeito que a unificação existe pra tirar. A única escrita daqui é o APELIDO,
-que não é de nenhum dos dois lados: é do app.
-
-`usos` é a resposta pra "onde essa chave é usada". Hoje só existe um uso ligado de verdade —
-`claude_code`, que é a presença da chave no engines.json. Pi e Kimi CLI ainda NÃO são gravados por
-aqui, e por isso não aparecem na lista: caixa marcada que não faz nada é mentira, não é promessa.
+Criar, apagar ou editar a conta ou a chave em si NÃO passa por aqui: `POST/DELETE
+/api/claude-configs` pra conta do Claude, `PUT/DELETE /api/engines/{nome}` pra chave. Duplicar o
+caminho de escrita pra "unificar" a tela criaria dois donos do mesmo dado. O APELIDO não é de
+nenhum dos dois lados: é do app.
 """
-import asyncio
 import logging
-from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import agentes_sync, apelidos, cotas, engines, opencode_cota, codex_contas
+from app import agentes_sync, apelidos, engines, opencode_cota
 from app.auth import require_auth
 from app import engine_probe
-from app.config import visible_accounts
 from app.mensagens import erro
-from app.codex_contas_login import UNAVAILABLE_AUTH
-from app.conta_estado import EstadoLogin, logins
-from app.adapters.kimi.sessions import kimi_home
 
 _log = logging.getLogger("hangar.credenciais")
 
 credenciais_router = APIRouter(prefix="/api/credenciais")
-
-Tipo = Literal["claude", "chave", "codex"]
-
-
-class CotaResumo(BaseModel):
-    """A mesma leitura da faixa do rodapé (app/cotas.py) — uma fonte só pros dois lugares."""
-
-    estado: cotas.Estado
-    janelas: list[cotas.JanelaCota] = []
-    ts: float | None = None
-    idade_s: float | None = None
-    motivo: str | None = None
-    # Rótulo que a FONTE deu à credencial. Serve às linhas que só a cota conhece (o provider do
-    # Kimi, o OAuth do Codex): sem ele o nome sai do id, e `codex:/home/u/.codex` viraria um
-    # caminho cru na tela onde a fonte já dizia "Codex".
-    label: str | None = None
-    reset_credits: cotas.ResetCredits | None = None
-
-
-class Credencial(BaseModel):
-    """Uma linha da tela. Os campos exclusivos de um tipo vêm como None no outro — a alternativa
-    (dois modelos numa union) faria o front destrinchar tipo antes de desenhar a linha, e a linha
-    é a MESMA nos dois casos: avatar, nome, subtítulo, cota, menu."""
-
-    id: str
-    tipo: Tipo
-    auth_method: Literal["oauth", "api_key", "none", "unknown"] = "unknown"
-    codex_account: str | None = None
-    # Herança da conta padrão numa conta Codex adicional: `idle` = nunca herdou (o card oferece).
-    codex_sync: Literal["idle", "running", "ready", "partial", "error"] | None = None
-    nome: str                     # o que a tela mostra: apelido, se houver
-    nome_natural: str             # o que o disco diz (pasta / nome do motor)
-    apelido: str | None = None    # só quando a pessoa deu um; a tela usa pra saber se pode limpar
-    ativa: bool = False           # conta-base do app (só faz sentido no tipo claude)
-    # tipo claude
-    path: str | None = None
-    login: EstadoLogin | None = None
-    # tipo chave
-    base_url: str | None = None
-    chave_mascarada: str | None = None
-    usos: list[str] = []
-    cota: CotaResumo | None = None
-    # Só pro OpenCode: ele não tem rota de cota, a leitura é a página do painel com o cookie de
-    # sessão (ver app/opencode_cota.py). A tela precisa saber DUAS coisas diferentes — que esta
-    # credencial aceita cookie, e se já tem um — pra oferecer o campo sem prometer o que não dá.
-    aceita_cookie: bool = False
-    cookie_definido: bool = False
-    # Chave que o app tem como apagar: cadastrada nele (engines.json) ou bloco que ele mesmo gravou
-    # na config de outro agente. O provedor nativo do Kimi é da pessoa — a tela não oferece Apagar.
-    gerenciada: bool = True
-
-
-def _mascarar(chave: str) -> str:
-    """`sk-kimi-…4f2a`. Nunca devolve a chave inteira: esta rota é lida pela tela, e a tela vive
-    num navegador — o valor cru só existe no arquivo 0600 e no processo da sessão."""
-    if len(chave) <= 10:
-        return "•" * len(chave)
-    return f"{chave[:7]}••••{chave[-4:]}"
-
-
-def _cota_por_id(forcar: bool = False) -> dict[str, CotaResumo]:
-    """Cota de todas as credenciais, indexada pelo mesmo id desta lista. Uma chamada só: o
-    `cotas.listar_cotas()` já é cache de 5 min e faz as leituras em paralelo; `forcar` é o
-    botão "atualizar" da tela pedindo leitura nova em vez do cache."""
-    fora = {}
-    # Nomeado, não posicional: a assinatura da rota pode ganhar outro query param e um bool
-    # posicional escorregaria pra ele em silêncio (achado da revisão).
-    for c in cotas.listar_cotas(forcar=forcar):
-        fora[c.id] = CotaResumo(estado=c.estado, janelas=c.janelas, ts=c.ts,
-                                idade_s=c.idade_s, motivo=c.motivo, label=c.label,
-                                reset_credits=c.reset_credits)
-    return fora
-
-
-@credenciais_router.get("", dependencies=[Depends(require_auth)],
-                        response_model=list[Credencial])
-async def listar_endpoint(request: Request, forcar: bool = False) -> list[Credencial]:
-    service = getattr(request.app.state, "codex_contas_login", None)
-    async def snapshot(account):
-        auth = None
-        sync = (await service.preparation_status_async(account)).get("status")
-        if sync != "running":
-            try:
-                async with asyncio.timeout(3):
-                    # Ler de novo sobe o `codex`; fora do botão atualizar vale o último login
-                    # conhecido, que o Rust renova em segundo plano.
-                    auth = await (service.read_auth(account, refresh=True) if forcar
-                                  else service.read_auth_rapido(account))
-            except TimeoutError:
-                _log.warning("leitura de autenticação Codex excedeu o prazo: %s", account.id)
-        return {"id": account.id, "auth": auth or dict(UNAVAILABLE_AUTH),
-                "sync": sync}
-
-    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_visible_accounts())) if service else []
-    return await asyncio.to_thread(listar, forcar, codex_snapshots=snapshots)
-
-
-def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) -> list[Credencial]:
-    """Contas do Claude e chaves de API na mesma lista, com apelido e cota.
-
-    `?forcar=true` re-lê a cota na hora (ignora o cache de 5 min) — é o botão "atualizar"
-    da tela. A listagem em si (contas, chaves, login) nunca é cache."""
-    nomes = apelidos.ler()
-    cota = _cota_por_id(forcar)
-    saida: list[Credencial] = []
-
-    # Contas do Claude: mesmo filtro da aba antiga — conta de verdade (carimbada pelo app) ou a
-    # base do app. Pasta de backup continua fora: a tela não conseguiria apagá-la.
-    cfgs = visible_accounts()
-    for c, login in zip(cfgs, logins(cfgs)):
-        cid = f"claude:{c.path}"
-        saida.append(Credencial(
-            id=cid, tipo="claude", nome=nomes.get(cid) or c.label, nome_natural=c.label,
-            apelido=nomes.get(cid), ativa=bool(c.active), path=c.path,
-            login=login, cota=cota.get(cid), auth_method="oauth",
-        ))
-
-    # Chaves de API: o engines.json é o cadastro que já existe. Cada motor é uma credencial cujo
-    # uso `claude_code` está ligado — é literalmente o que estar nesse arquivo significa.
-    cookies = opencode_cota.ler_configs()
-    for nome, dados in engines.listar().items():
-        cid = f"chave:{nome}"
-        chave = dados.get("api_key")
-        natural = dados.get("label") or nome
-        base = dados.get("base_url") or ""
-        aceita = "opencode.ai" in base
-        saida.append(Credencial(
-            id=cid, tipo="chave", nome=nomes.get(cid) or natural, nome_natural=natural,
-            apelido=nomes.get(cid), base_url=dados.get("base_url"),
-            chave_mascarada=_mascarar(chave) if isinstance(chave, str) and chave else None,
-            usos=["claude_code"], cota=cota.get(cid), auth_method="api_key",
-            aceita_cookie=aceita, cookie_definido=aceita and cid in cookies,
-        ))
-
-    snapshots = {a["id"]: a for a in codex_snapshots}
-    for account in codex_contas.list_visible_accounts():
-        cid = f"codex:{account.home.expanduser().resolve(strict=False)}"
-        auth = snapshots.get(account.id, {}).get("auth", {})
-        status = auth.get("status", "unavailable")
-        saida.append(Credencial(
-            id=cid, tipo="codex", nome=nomes.get(cid) or account.id,
-            nome_natural=account.id, apelido=nomes.get(cid),
-            codex_account=account.id, path=str(account.home), ativa=account.is_default,
-            codex_sync=None if account.is_default else snapshots.get(account.id, {}).get("sync"),
-            auth_method=auth.get("method", "unknown"), usos=["codex_cli"], cota=cota.get(cid),
-            login=EstadoLogin(estado="indisponivel" if status == "unavailable" else "ok",
-                             loggedIn=None if status == "unavailable" else status == "connected",
-                             email=auth.get("email"), plano=auth.get("plan"),
-                             motivo="cli-ausente" if auth.get("reason") == "cli_missing" else None),
-        ))
-
-    # Cota sem cadastro continua visível, mas não comprova autenticação do Codex.
-    usos_por_prefixo = {"kimi:": "kimi_cli", "codex:": "codex_cli"}
-    ja = {c.id for c in saida}
-    for cid, resumo in cota.items():
-        uso = next((u for p, u in usos_por_prefixo.items() if cid.startswith(p)), None)
-        if cid in ja or uso is None:
-            continue
-        natural = resumo.label or cid.split(":", 1)[1]
-        saida.append(Credencial(
-            id=cid, tipo="codex" if uso == "codex_cli" else "chave",
-            auth_method="unknown" if uso == "codex_cli" else "api_key",
-            nome=nomes.get(cid) or natural, nome_natural=natural,
-            apelido=nomes.get(cid), usos=[uso], cota=resumo,
-            gerenciada=uso != "kimi_cli" or agentes_sync.bloco_gerenciado(
-                kimi_home() / "config.toml", cid.split(":", 1)[1]),
-        ))
-    return saida
 
 
 class ApelidoBody(BaseModel):

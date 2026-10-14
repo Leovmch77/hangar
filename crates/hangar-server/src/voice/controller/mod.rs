@@ -30,9 +30,6 @@ const MOVED: &str = "A chamada passou para outro aparelho; tente de novo.";
 const NO_DEVICE: &str = "Nenhum aparelho conectado agora; tente de novo quando a voz voltar.";
 const UNSUPPORTED_TOOL: &str = "Este aparelho não atende essa ferramenta; peça no PC.";
 
-/// De onde e em que ritmo reler a trava do beta: desligar no meio encerra a chamada.
-pub struct GateSource { pub home: PathBuf, pub claude_dir: PathBuf, pub every: Duration }
-
 #[derive(Default)]
 struct DeviceState { owner: Option<mpsc::UnboundedSender<ServerMsg>>, caps: Vec<String>, screen: Option<Screen> }
 
@@ -110,7 +107,9 @@ enum Done {
     Switch { call: CallId, name: String },
     Jev(tools::JevAsked, Result<jev::Decision, String>),
     Failed { code: &'static str, text: String },
-    Gate(bool),
+    /// Etapa e fim do objetivo `run` no computador; os de um objetivo que já não é o atual são largados.
+    ComputerStep { run: u64, step: String },
+    ComputerEnded { run: u64 },
 }
 
 /// O que uma tarefa de rede leva consigo.
@@ -132,10 +131,16 @@ struct Snapshot {
     five_hour: RateWindow, seven_day: RateWindow, backstage: VecDeque<Backstage>, thought: String, action: Option<OrganizerAction>,
     /// Sobe a cada gravação da memória na chamada; o aparelho relê a lista quando ele muda.
     memory: u64,
+    /// Objetivo no computador em curso e a última etapa dele (vazia até a primeira).
+    computer: Option<String>,
 }
 
+/// Roda um objetivo no computador mandando cada etapa ao segundo argumento; os testes trocam o HCC por um falso.
+pub(super) type ComputerRunner = Arc<dyn Fn(String, Box<dyn Fn(String) + Send + Sync>)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+
 pub struct Controller {
-    voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, gate: GateSource, diag: DiagClient,
+    voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, diag: DiagClient,
     done: mpsc::UnboundedSender<Done>, done_rx: Option<mpsc::UnboundedReceiver<Done>>, backoff: watch::Backoff,
     client: String,
     /// Catálogo de ações de tela do nativo, para o Jev.
@@ -167,6 +172,9 @@ pub struct Controller {
     /// Sessão `(máquina, nome)` do plano em curso: o `SendPlan` só traz o nome.
     plan_key: Option<Key>,
     computer: Option<tokio::task::JoinHandle<()>>,
+    computer_runner: ComputerRunner,
+    /// Sobe a cada objetivo: etapa atrasada de um anterior não volta à tela.
+    computer_run: u64,
     /// O dono caiu e nenhum outro assumiu: ferramentas de tela recusam até o próximo `hello`/oferta.
     detached: bool,
     /// Falha do evento anterior: a que vem logo antes do `Closed` foi a que encerrou a chamada.
@@ -185,13 +193,14 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, gate: GateSource, diag: DiagClient) -> Self {
+    pub fn new(voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, diag: DiagClient) -> Self {
         let (done, done_rx) = mpsc::unbounded_channel();
         let target = device.screen();
-        Self { voice, machines, jev, device, gate, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
+        Self { voice, machines, jev, device, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
             actions: Vec::new(), rows: Vec::new(), followed: HashSet::new(), watched: HashSet::new(), talked: HashMap::new(), jev_switched: None,
             close_gate: ConfirmGate::default(), interrupt_gate: ConfirmGate::default(), shortcut_gate: Arc::default(), api_gate: ConfirmGate::default(), closing: false, last_screen: target.clone(), sent_turn: None, pending_question: None,
-            spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None, detached: false, last_failure: None, forwarded: HashMap::new(),
+            spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None,
+            computer_runner: Arc::new(|objective, on_step| Box::pin(super::computer::run(objective, on_step))), computer_run: 0, detached: false, last_failure: None, forwarded: HashMap::new(),
             next_tool: 0, owner_epoch: 0, next_offer: 0, latest_offer: None, snap: Snapshot { phase: "connecting", ..Snapshot::default() }, sent_state: None, sent_at: None, dirty: true }
     }
 
@@ -201,7 +210,6 @@ impl Controller {
         let Some(mut done_rx) = self.done_rx.take() else { return };
         let watcher = tokio::spawn(watch::watcher(self.machines.clone(), self.backoff.clone(), self.done.clone()));
         let mut ask_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut gate_tick = tokio::time::interval_at(tokio::time::Instant::now() + self.gate.every, self.gate.every);
         loop {
             let flush = self.dirty.then(|| self.sent_at.map_or_else(Instant::now, |at| at + STATE_EVERY));
             let go = tokio::select! {
@@ -212,7 +220,6 @@ impl Controller {
                 },
                 Some(done) = done_rx.recv() => self.on_done(done),
                 _ = ask_tick.tick() => { self.ask_expiry(); true }
-                _ = gate_tick.tick() => { self.check_gate(); true }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(flush.unwrap_or_else(Instant::now))), if flush.is_some() => {
                     self.flush_state();
                     true
@@ -222,9 +229,10 @@ impl Controller {
         }
         // Fechado já: o hub não entrega um aparelho novo a esta chamada que está acabando.
         drop(from_device);
+        // Antes do último retrato: a chamada parada não deixa etapa do computador na tela.
+        self.stop_computer();
         self.flush_state();
         watcher.abort();
-        self.stop_computer();
         log("controller end");
     }
 
@@ -391,13 +399,10 @@ impl Controller {
             },
             Done::Jev(asked, result) => self.on_jev(asked, result),
             Done::Failed { code, text } => self.action_failed(code, text),
-            Done::Gate(true) => {}
-            Done::Gate(false) => {
-                log("voice beta turned off: stopping the call");
-                self.device.send(ServerMsg::Error { code: "disabled".into(), detail: None });
-                self.voice.stop();
-                return false;
-            }
+            Done::ComputerStep { run, step } => if run == self.computer_run && self.snap.computer.is_some() {
+                self.snap.computer = Some(sentence(&step));
+            },
+            Done::ComputerEnded { run } => if run == self.computer_run { self.snap.computer = None; },
         }
         self.dirty = true;
         true
@@ -574,17 +579,10 @@ impl Controller {
         self.dirty = true;
     }
 
-    fn check_gate(&self) {
-        let (home, claude_dir, done) = (self.gate.home.clone(), self.gate.claude_dir.clone(), self.done.clone());
-        tokio::spawn(async move {
-            // Leitura que não terminou não derruba a chamada.
-            let enabled = tokio::task::spawn_blocking(move || super::settings::read_gate(&home, &claude_dir, None).enabled).await.unwrap_or(true);
-            let _ = done.send(Done::Gate(enabled));
-        });
-    }
-
     fn stop_computer(&mut self) {
         if let Some(task) = self.computer.take() && !task.is_finished() { log("computer aborted"); task.abort(); }
+        self.snap.computer = None;
+        self.dirty = true;
     }
 
     fn state_json(&self) -> Value {
@@ -595,7 +593,9 @@ impl Controller {
         json!({
             "phase": s.phase,
             "mode": match s.mode { Mode::Direct => "direct", Mode::Plan => "plan" },
-            "activity": match s.activity { Activity::Idle => "idle", Activity::Thinking => "thinking", Activity::Searching => "searching", Activity::Working => "working" },
+            // Enquanto o computador opera, a voz está trabalhando, seja qual for o turno do organizador.
+            "activity": if s.computer.is_some() { "working" } else { match s.activity { Activity::Idle => "idle", Activity::Thinking => "thinking", Activity::Searching => "searching", Activity::Working => "working" } },
+            "progress": s.computer.as_deref().filter(|step| !step.is_empty()),
             "draft": s.draft,
             "error": s.error.as_ref().map(|(code, text)| json!({"code": code, "text": text})),
             "plan": s.plan.as_ref().map(|(path, markdown)| json!({"path": path.display().to_string(), "markdown": markdown})),
@@ -629,6 +629,12 @@ impl Controller {
         self.sent_at = Some(Instant::now());
         self.device.send(ServerMsg::State { state });
     }
+}
+
+/// Etapa do HCC ("lendo a tela") como linha da tela: maiúscula inicial.
+fn sentence(step: &str) -> String {
+    let mut chars = step.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 fn push_thought(thought: &mut String, delta: &str) {

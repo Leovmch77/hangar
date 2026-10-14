@@ -671,6 +671,8 @@ class CodexAdapter:
         A assinatura vai pelo retry de sempre (start_subscription) e nao por um thread/resume aqui:
         a sessao pode estar no turno ZERO, quando o rollout ainda nao existe e o resume e recusado.
         """
+        from app.runtime_coordinator import refuse_python_client
+        refuse_python_client(name, "codex", headless=False)
         if not pid_vivo(meta["app_pid"]):
             _log.info("codex: app-server morto (pid=%s) name=%s — sessao encerrada",
                       meta.get("app_pid"), name)
@@ -921,7 +923,7 @@ class CodexAdapter:
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
         from app.runtime_adapter import assert_legacy, bind_client
         from app.runtime_coordinator import refuse_python_client
-        refuse_python_client(name, "codex", spawn=True)
+        refuse_python_client(name, "codex")
         assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
@@ -1169,6 +1171,11 @@ class CodexAdapter:
         meta = codex_sessions.load_prepared(record.name, record.id)
         thread = await self._verify_imported_runtime(client, meta)
         meta = codex_sessions.publish_prepared(record.name, record.id)
+        from app.runtime_coordinator import rust_owns_codex_terminal
+        if not meta["headless"] and rust_owns_codex_terminal():
+            # Terminal publicado com o Rust dono: o cliente da conferência sai e a vigia adota.
+            self._adoptions.pop(record.name, None)
+            return await client.close()
         self.attach(record.name, client, meta["thread_id"], model=meta["model"], effort=meta.get("effort"),
                     watch_tmux=not meta["headless"], subscribed=True)
         self._sessions[record.name].update(headless=meta["headless"], cano=meta.get("cano"), mode=mode,
@@ -1519,12 +1526,11 @@ class CodexAdapter:
         """Reconecta sidecars Codex em série, sem atrasar a subida do backend."""
         from app import runtime_coordinator
         coordinator = runtime_coordinator.current()
-        # Sem terminal com o Rust de pé ou esperado é dele: o Python não liga cliente nem sobe processo.
-        rust_headless = coordinator is not None and (coordinator.mode == "pending"
-            or coordinator.mode == "rust" and coordinator.rust_owns("codex", True))
+        # O modo que o Rust de pé ou esperado anuncia é dele: o Python não liga cliente nem sobe processo.
+        rust = coordinator is not None and coordinator.mode in {"pending", "rust"}
         for meta in await asyncio.to_thread(codex_sessions.list_all):
             name = meta.get("name")
-            if not name or rust_headless and meta.get("headless"):
+            if not name or rust and coordinator.rust_owns("codex", bool(meta.get("headless"))):
                 continue
             sess = self._sessions.get(name)
             if sess and sess["thread_id"] == meta.get("thread_id") and not sess["client"].closed:
@@ -2330,6 +2336,9 @@ class CodexAdapter:
         return False
 
     async def drain(self, name: str, path: str) -> int:
+        from app.runtime_coordinator import rust_owns_codex_terminal
+        if rust_owns_codex_terminal():
+            return 0    # fila e entrega do Codex com terminal são do Rust: o Python nunca grava nela
         sess = self._sessions.get(name)
         async with self.delivery_lock(name):
             from app.conversation_transfer import transfer_active

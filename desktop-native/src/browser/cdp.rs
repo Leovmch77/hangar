@@ -41,6 +41,25 @@ impl Cdp {
         }
     }
 
+    /// Chamada sem esperar resposta; a falha vai para o log, porque o motor não tem executor para aguardar.
+    pub fn fire(&self, method: &str, params: Value) {
+        let label = method.to_owned();
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, json: String| {
+            if let Err(e) = result {
+                let message = serde_json::from_str::<Value>(&json).ok()
+                    .and_then(|v| v["message"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| e.message().to_string());
+                eprintln!("[nav] {label} falhou: {message}");
+            }
+            Ok(())
+        }));
+        let (name, args) = (CoTaskMemPWSTR::from(method), CoTaskMemPWSTR::from(params.to_string().as_str()));
+        // SAFETY: mesma thread da interface; as strings vivem até o retorno.
+        if let Err(e) = unsafe { self.view.CallDevToolsProtocolMethod(*name.as_ref().as_pcwstr(), *args.as_ref().as_pcwstr(), &handler) } {
+            eprintln!("[nav] {method} nao saiu: {}", e.message());
+        }
+    }
+
     pub fn on(&self, event: &str, mut f: impl FnMut(Value) + 'static) -> Result<(), String> {
         let name = CoTaskMemPWSTR::from(event);
         // SAFETY: mesma thread da interface.

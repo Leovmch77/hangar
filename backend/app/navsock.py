@@ -267,9 +267,11 @@ async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
     # 1400px de largura pra um iPhone é pagar banda por pixel que a tela dele não mostra, e a conta
     # é paga no túnel da VPS. `quality` 45 já é o suficiente pra ler texto nesse tamanho.
     largura = int(estado.get("pedida") or 0) or 1400
+    # Um quadro a cada 5 (12 por segundo a 60 Hz), o ritmo que o laço abaixo envia: o resto o Chromium nem
+    # codificaria, e no app nativo atravessaria o pipe à toa.
     await cdp.cmd("Page.startScreencast", {"format": "jpeg", "quality": 45,
                                            "maxWidth": largura, "maxHeight": largura,
-                                           "everyNthFrame": 1})
+                                           "everyNthFrame": 5})
     ultimo_envio = 0.0
     while True:
         try:

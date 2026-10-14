@@ -534,6 +534,19 @@ async fn accept_whose_redeem_fails_revokes_own_token() {
     assert_eq!(e.live(), 0);
 }
 
+/// Decisão do usuário (B13): o árbitro sozinho num `orq` recusa o convite com código próprio, sem
+/// gastar o código; o grupo dele fica.
+#[tokio::test(flavor = "multi_thread")]
+async fn lone_orq_arbiter_refuses_the_redeem_with_its_own_code() {
+    let e = env().await;
+    e.orq_group("s0", &[]);
+    let code = e.pair_code("s0");
+    let (status, body) = e.redeem(&code, json!({})).await;
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_par_externo_orq")), "{body}");
+    assert!(e.share.store.peek(&code, Kind::Pair).is_ok(), "código não foi gasto");
+    assert_eq!(e.sidecar("s0").unwrap()["peers"], json!([]));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn accept_with_invalid_link_is_400() {
     let e = env().await;

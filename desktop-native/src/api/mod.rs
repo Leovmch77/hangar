@@ -131,7 +131,8 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
-            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("claude_")) {
+            // Pergunta sem identidade, trocada ou ilegível: a frase do web no idioma do app, não o `msg` do servidor.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("claude_") || code.starts_with("erro_interacao_")) {
                 if let Some(message) = crate::i18n::tr_web(code, &std::collections::HashMap::new()) { return Some(message); }
             }
             // Custos e uso no Rust (503 do dono único): a frase do web pelo código, que já traz o código.
@@ -139,6 +140,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                 // `internal_info` é o mesmo código do histórico, com a frase de lá.
                 let key = if code == "internal_info" { "history_internal_info" } else { code };
                 if let Some(message) = crate::i18n::tr_web(key, &std::collections::HashMap::new()) { return Some(message); }
+            }
+            // Mensagem direta ao subagente: a frase pelo código, com o `reason` da recusa do Claude Code dentro.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_subagente_")) {
+                let reason = fields.get("reason").or_else(|| fields.get("params").and_then(|p| p.get("reason"))).and_then(Value::as_str).or(msg).unwrap_or("");
+                let params = std::collections::HashMap::from([("reason".to_owned(), reason.to_owned())]);
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
@@ -873,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn subagent_message_refusals_translate_by_code_with_the_reason() {
+        for code in ["erro_subagente_mensagem_sem_terminal", "erro_subagente_mensagem_sem_plugin", "erro_subagente_inexistente",
+            "erro_subagente_mensagem_sem_resposta"] {
+            let message = failure_detail(Some(json!({"detail": {"code": code}})), 409);
+            assert_eq!(message, crate::i18n::tr_web(code, &Default::default()).unwrap());
+        }
+        let refused = failure_detail(Some(json!({"detail": {"code": "erro_subagente_mensagem_recusada", "reason": "agente ocupado"}})), 409);
+        assert!(refused.contains("agente ocupado") && !refused.contains("{reason}"), "{refused}");
+        let nested = failure_detail(Some(json!({"detail": {"code": "erro_subagente_mensagem_recusada", "params": {"reason": "x1"}}})), 409);
+        assert!(nested.contains("x1"), "{nested}");
+    }
+
+    #[test]
     fn costs_failure_shows_the_translated_reason_with_its_code() {
         let message = failure_detail(Some(json!({"ok": false, "error_code": "costs_no_disk", "message": "índice de custos indisponível",
             "detail": {"code": "costs_no_disk", "params": {"motivo": "índice de custos indisponível"},
@@ -881,6 +901,14 @@ mod tests {
         assert!(message.contains("(costs_no_disk)"), "{message}");
         let info = failure_detail(Some(json!({"detail": {"code": "internal_info", "params": {}, "msg": "x — internal_info"}})), 503);
         assert_eq!(info, crate::i18n::tr_web("history_internal_info", &Default::default()).unwrap());
+    }
+
+    #[test]
+    fn interaction_errors_use_the_shared_phrase_not_the_server_message() {
+        for code in ["erro_interacao_sem_identidade", "erro_interacao_desatualizada", "erro_interacao_indisponivel"] {
+            let message = failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "frase fixa do servidor"}})), 409);
+            assert_eq!(message, crate::i18n::tr_web(code, &Default::default()).unwrap(), "{code}");
+        }
     }
 
     #[test]

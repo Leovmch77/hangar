@@ -1,31 +1,22 @@
-"""Cota por credencial lida NA FONTE do provedor: os leitores que o Rust não tem.
+"""Cota por credencial: o que sobrou no Python depois que o Rust passou a ler todas as fontes.
 
-Contas e cotas Claude/Codex são do Rust (`crates/hangar-server/src/accounts/`), dono do cache
+Contas e cotas de todas as fontes são do Rust (`crates/hangar-server/src/accounts/`), dono do cache
 `cotas-cache.json`, do TTL e da espera após 429. Sem o Rust não há reserva: `listar_cotas` e
 `cotas_claude` devolvem nada. Ficam aqui só:
 
- - os leitores dos outros provedores, que o Rust pede por `/internal/accounts/quotas`
-   (`quota_facts`): Kimi (`<base_url>/usages`, `limit`/`remaining` em STRING), CommandCode
-   (`/alpha/billing/credits`, rota não documentada, `resetAt` em epoch-MILISSEGUNDOS) e OpenCode
-   (página do painel com cookie, ver `opencode_cota.py`);
  - os leitores Codex que a transferência de conversa usa (`conversation_transfer.py`);
  - o mapeamento de provider Kimi/Pi para o id da cota, que a lista de sessões usa.
 """
 import json
 import logging
 import math
-import time
 import tomllib
-import urllib.error
-import urllib.request
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
-from app import apelidos, codex_appserver, codex_contas, engines, opencode_cota
+from app import codex_appserver, codex_contas, engines
 from app.adapters.kimi import sessions as kimi_sessions
 
 _log = logging.getLogger("hangar.cotas")
@@ -87,47 +78,6 @@ class CotaConta(BaseModel):
 _Leitura = tuple[Estado, list[JanelaCota], str | None]
 
 
-@dataclass(frozen=True)
-class _Fonte:
-    chave: str
-    label: str
-    provedor: Provedor
-    ler: Callable[[], _Leitura]
-    ativa: bool = False
-
-
-# ------------------------------------------------------------------------------------ HTTP
-
-
-def _get_json(url: str, headers: dict[str, str]) -> tuple[int, object]:
-    """GET -> (status, json). Status 0 = nem chegou a ter resposta (rede/timeout/DNS).
-
-    Nada aqui levanta: uma conta que não responde não pode derrubar a lista das outras.
-    """
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-            return r.status, json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        return e.code, None
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-        _log.debug("cota: %s falhou: %r", url, e)
-        return 0, None
-
-
-def _iso_ts(v: object) -> float | None:
-    """ISO-8601 do provedor -> epoch. Formato estranho vira None (a janela some, o pct fica)."""
-    if not isinstance(v, str) or not v:
-        return None
-    try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-# ------------------------------------------------------------------------------------ Kimi
-
-
 def _num(v: object) -> float | None:
     """O Kimi manda limite/restante como STRING ("100"). Aceita os dois, recusa o resto."""
     if isinstance(v, bool):
@@ -142,17 +92,6 @@ def _num(v: object) -> float | None:
     return None
 
 
-def _janela_kimi(detalhe: object, rotulo: str) -> JanelaCota | None:
-    """`limit`/`remaining` -> pct USADO. Sem `used` nesta API: usar `limit - remaining`."""
-    if not isinstance(detalhe, dict):
-        return None
-    lim, rest = _num(detalhe.get("limit")), _num(detalhe.get("remaining"))
-    if lim is None or rest is None or lim <= 0:
-        return None
-    pct = max(0.0, min(100.0, (lim - rest) / lim * 100.0))
-    return JanelaCota(rotulo=rotulo, pct=pct, reset_ts=_iso_ts(detalhe.get("resetTime")))
-
-
 def _rotulo_janela(minutos: object) -> str:
     """Duração em minutos -> rótulo curto ("300" -> "5h"). Desconhecida vira "janela"."""
     n = _num(minutos)
@@ -163,88 +102,6 @@ def _rotulo_janela(minutos: object) -> str:
     if n >= 60 and n % 60 == 0:
         return f"{int(n // 60)}h"
     return f"{int(n)}min"
-
-
-def _base_usages_kimi(base: str) -> str:
-    """Base do `api.kimi.com` sem `/v1` ganha o `/v1` — só pra cota, nunca pro motor."""
-    if "api.kimi.com" in base and not base.rstrip("/").endswith("/v1"):
-        return base.rstrip("/") + "/v1"
-    return base
-
-
-def _ler_kimi(api_key: str, base_url: str) -> _Leitura:
-    """Forma do Kimi (`GET <base>/usages`), tentada em qualquer provedor de chave.
-
-    Resposta ruim aqui NUNCA vira `expirada`, e isso é decisão, não descuido: só a rota OAuth do
-    Claude tem semântica de credencial: um 401/403/404 aqui quase sempre quer dizer "esta URL não
-    é essa rota" — medido 18/08 com a chave do OpenCode Zen, que devolve 403 num caminho que não
-    existe. Chamar isso de "chave vencida" mandaria a pessoa refazer um login que está inteiro.
-    Tudo que não for uma leitura boa cai em `indisponivel`, que a tela desenha como "não informa
-    cota", com o código HTTP no motivo pra quem for investigar."""
-    status, j = _get_json(base_url.rstrip("/") + "/usages", {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-    })
-    if not isinstance(j, dict):
-        return "indisponivel", [], (f"http-{status}" if status else "sem-resposta")
-    janelas: list[JanelaCota] = []
-    limites = j.get("limits")
-    for w in limites if isinstance(limites, list) else []:
-        if not isinstance(w, dict):
-            continue
-        janela = w.get("window")
-        rot = _rotulo_janela(janela.get("duration") if isinstance(janela, dict) else None)
-        item = _janela_kimi(w.get("detail"), rot)
-        if item is not None:
-            janelas.append(item)
-    # A janela larga do Kimi não traz duração: é a do plano (7 dias, medido pelo resetTime).
-    longa = _janela_kimi(j.get("usage"), "7d")
-    if longa is not None:
-        janelas.append(longa)
-    if not janelas:
-        return "indisponivel", [], "formato-desconhecido"
-    return "lida", janelas, None
-
-
-# ------------------------------------------------------------------------------ CommandCode
-
-_URL_COMMANDCODE = "https://api.commandcode.ai/alpha/billing/credits"
-# O Cloudflare desta rota devolve 403 (error code 1010) pro User-Agent de lib HTTP — medido
-# 21/08/2026: urllib puro 403, o mesmo GET com UA de navegador 200. O UA não é fingir browser
-# por esporte: sem ele a rota simplesmente não responde.
-_UA_NAVEGADOR = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                 "Chrome/126.0.0.0 Safari/537.36")
-
-
-def _janela_commandcode(o: object, rotulo: str) -> JanelaCota | None:
-    """`used`/`cap` em USD -> pct. `resetAt` vem em epoch-MILISSEGUNDOS; 0 = sem reset marcado."""
-    if not isinstance(o, dict):
-        return None
-    usado, teto = _num(o.get("used")), _num(o.get("cap"))
-    if usado is None or teto is None or teto <= 0:
-        return None
-    reset = _num(o.get("resetAt"))
-    return JanelaCota(rotulo=rotulo, pct=max(0.0, min(100.0, usado / teto * 100.0)),
-                      reset_ts=reset / 1000 if reset else None)
-
-
-def _ler_commandcode(api_key: str) -> _Leitura:
-    """CommandCode (`GET /alpha/billing/credits`). Mesma semântica de erro do `_ler_kimi`: nada
-    aqui vira `expirada` — um 403 nesta rota costuma ser o Cloudflare, não chave vencida."""
-    status, j = _get_json(_URL_COMMANDCODE, {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "User-Agent": _UA_NAVEGADOR,
-    })
-    if not isinstance(j, dict):
-        return "indisponivel", [], (f"http-{status}" if status else "sem-resposta")
-    limites = j.get("windowLimits")
-    limites = limites if isinstance(limites, dict) else {}
-    janelas = [w for w in (_janela_commandcode(limites.get("fiveHour"), "5h"),
-                           _janela_commandcode(limites.get("weekly"), "7d")) if w is not None]
-    if not janelas:
-        return "indisponivel", [], "formato-desconhecido"
-    return "lida", janelas, None
 
 
 # Presença da credencial do Codex, cacheada por raiz e assinatura do `auth.json`.
@@ -405,12 +262,6 @@ def _ler_codex(home: Path | str | None = None) -> _Leitura:
     return "lida", janelas, None
 
 
-def _ler_opencode(cfg: dict[str, str]) -> _Leitura:
-    """Adapta o leitor do painel do OpenCode ao formato de leitura deste módulo."""
-    estado, janelas, motivo = opencode_cota.ler(cfg["workspace_id"], cfg["auth_cookie"])
-    return estado, [JanelaCota(**j) for j in janelas], motivo
-
-
 def _providers_kimi() -> list[tuple[str, str, str]]:
     """(nome, api_key, base_url) de cada provider Kimi com chave. Provider por OAuth fica de fora:
     o arquivo de storage é vazio nesta máquina e adivinhar o formato dele seria inventar."""
@@ -530,78 +381,6 @@ def _mapa_pi() -> dict[str, str]:
 
 def conta_de_provider_pi(provider: str | None) -> str | None:
     return _mapa_pi().get(provider) if provider else None
-
-
-# ------------------------------------------------------------------------- fontes
-
-
-def _other_sources() -> list[_Fonte]:
-    """Fontes fora de Claude/Codex; com o Rust dono das contas, só estas passam pela ponte."""
-    out: list[_Fonte] = []
-    for nome, key, base in _providers_kimi():
-        # CommandCode plugado como provider do Kimi Code: o `<base>/usages` dele é 403 — a rota
-        # de cota é a do CommandCode, escolhida pela base_url, igual ao ramo das chaves abaixo.
-        if "commandcode.ai" in base:
-            out.append(_Fonte(f"kimi:{nome}", nome, "commandcode",
-                              lambda k=key: _ler_commandcode(k)))
-        else:
-            out.append(_Fonte(f"kimi:{nome}", nome, "kimi",
-                              lambda k=key, b=base: _ler_kimi(k, b)))
-    # Chaves cadastradas no app (engines.json). O id casa com o da lista unificada
-    # (`chave:<nome>`) de propósito: é a MESMA credencial nas duas telas, e ids diferentes fariam
-    # a tela mostrar a linha sem cota enquanto a faixa mostra a cota, sem ninguém entender.
-    # Só a forma do Kimi é tentada; provedor que não a responde vira `indisponivel` (que a tela
-    # desenha como "não informa cota"), nunca um número inventado.
-    for nome, dados in engines.listar().items():
-        key, base = dados.get("api_key"), dados.get("base_url")
-        if not (isinstance(key, str) and key and isinstance(base, str) and base):
-            continue
-        cid, rotulo = f"chave:{nome}", dados.get("label") or nome
-        # OpenCode Go não tem rota de cota nenhuma (medido; ver app/opencode_cota.py): a leitura
-        # dele é a página do painel com o cookie de sessão, e só existe se a pessoa colou o cookie.
-        # Sem cookie a credencial continua na lista, sem número — nunca zero.
-        cfg = opencode_cota.config_de(cid) if "opencode.ai" in base else None
-        if cfg is not None:
-            out.append(_Fonte(cid, rotulo, "opencode",
-                              lambda c=cfg: _ler_opencode(c)))
-        elif "commandcode.ai" in base:
-            out.append(_Fonte(cid, rotulo, "commandcode",
-                              lambda k=key: _ler_commandcode(k)))
-        else:
-            # Motor Kimi aponta pro endpoint formato-Anthropic (`/coding`, sem `/v1`) — é o certo
-            # pra RODAR a sessão, mas o `/usages` só existe sob `/v1` (medido 21/08/2026: a mesma
-            # chave lia cota pelo config.toml, que traz `/coding/v1`, e dava 404 pelo motor).
-            out.append(_Fonte(cid, rotulo, "kimi",
-                              lambda k=key, b=_base_usages_kimi(base): _ler_kimi(k, b)))
-    return out
-
-
-def _seguro(f: _Fonte) -> _Leitura:
-    try:
-        return f.ler()
-    except Exception:                                        # noqa: BLE001 - fail-soft por fonte
-        # `exception` e não `debug`: falha de REDE já é tratada dentro do `_get_json` (e lá o debug
-        # é certo, porque é ruído esperado). Chegar aqui significa defeito no leitor — e um defeito
-        # em debug seria relido a cada 5 min, pra sempre, sem ninguém ver.
-        _log.exception("cota: leitor de %s levantou", f.chave)
-        return "indisponivel", [], "erro-leitor"
-
-
-def quota_facts(action: str, ids: list[str]) -> dict:
-    """Fornece leitores dos outros provedores; o cache compartilhado pertence ao Rust."""
-    sources = _other_sources()
-    if action == "sources":
-        return {"sources": [{"id":source.chave, "label":source.label,
-                             "provedor":source.provedor, "ativa":source.ativa}
-                            for source in sources], "aliases":apelidos.ler()}
-    selected = [source for source in sources if source.chave in ids]
-    readings = {}
-    for source in selected:
-        state, windows, reason = _seguro(source)
-        readings[source.chave] = CotaConta(id=source.chave, label=source.label,
-            provedor=source.provedor, ativa=source.ativa, estado=state, janelas=windows,
-            ts=time.time() if state == "lida" else None, motivo=reason).model_dump()
-    return {"readings":readings}
 
 
 def listar_cotas(forcar: bool = False) -> list[CotaConta]:

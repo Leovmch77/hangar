@@ -20,9 +20,16 @@ function markers(text: string): { start: number; end: number; close: boolean }[]
 }
 
 export function planTitle(text: string): string | null {
+  return planHeading(text).title;
+}
+
+// O título do plano e o texto sem ele: quem mostra o título à parte não o repete no corpo.
+export function planHeading(text: string): { title: string | null; body: string } {
+  const lines = text.split(/\r?\n/);
   let fence = '';
   let previous = '';
-  for (const line of text.split(/\r?\n/)) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (delimiter) {
       const value = delimiter[1];
@@ -33,12 +40,15 @@ export function planTitle(text: string): string | null {
     }
     if (fence) continue;
     const heading = line.match(/^ {0,3}#{1,6}[ \t]+(.+?)\s*$/);
-    const title = heading?.[1].replace(/[ \t]+#+[ \t]*$/, '')
-      ?? (previous && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line) ? previous : '');
-    if (title.trim()) return title.trim();
+    const setext = !heading && previous && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line);
+    const title = heading?.[1].replace(/[ \t]+#+[ \t]*$/, '') ?? (setext ? previous : '');
+    if (title.trim()) {
+      const first = setext ? i - 1 : i;
+      return { title: title.trim(), body: [...lines.slice(0, first), ...lines.slice(i + 1)].join('\n') };
+    }
     previous = /^ {0,3}\S/.test(line) && !/^\s*(?:[-*+]>?|>|#{1,6})\s/.test(line) ? line.trim() : '';
   }
-  return null;
+  return { title: null, body: text };
 }
 
 // A citação é metadado, inclusive enquanto o rodapé ainda está sendo escrito.
@@ -105,4 +115,21 @@ export function pendingReplyPlan(events: ChatEvent[], anchorId: string | null = 
     }
   }
   return null;
+}
+
+export type PlanChoiceKey = 'bypass' | 'auto_mode' | 'manual' | 'auto' | 'changes' | 'keep';
+
+/** Abrevia só as escolhas conhecidas do diálogo de plano da TUI (mesma tabela do nativo,
+ *  `plan_choice_key`); o rótulo completo continua no botão para leitor de tela e dica. */
+export function planChoiceKey(option: string): PlanChoiceKey | null {
+  switch (option.trim()) {
+    case 'Yes, and bypass permissions':
+    case 'Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session': return 'bypass';
+    case 'Yes, and use auto mode': return 'auto_mode';
+    case 'Yes, manually approve edits': return 'manual';
+    case 'Yes, and auto-accept edits': return 'auto';
+    case 'Tell Claude what to change': return 'changes';
+    case 'No, keep planning': return 'keep';
+    default: return null;
+  }
 }

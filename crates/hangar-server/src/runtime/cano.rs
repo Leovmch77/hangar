@@ -15,6 +15,7 @@ type Socket = Box<dyn Stream>;
 pub enum IoEvent {
     Line(Value),
     WriteAck { operation_id: String, outcome: WriteOutcome },
+    WriteGuardAck { operation_id: String, outcome: WriteOutcome, error: RuntimeError },
     Stderr(String),
     End { code: Option<i64> },
 }
@@ -29,6 +30,7 @@ pub struct WireFrame {
     /// Pedido `ui_*` que age no mod: depois deste instante o escritor o descarta sem escrever, porque o app
     /// já ouviu que falhou. Quadro da conversa e desenho vão sem prazo.
     pub until: Option<Instant>,
+    pub guard: Option<hangar_codex::client::RawWriteGuard>,
 }
 
 /// Folga do canal dos pedidos `ui_*`. Pequena de propósito: com o cano travado, os desenhos que não
@@ -45,13 +47,14 @@ pub struct IoTasks {
     /// Canal próprio dos pedidos `ui_*`: o escritor sempre tira antes a conversa (`writer`).
     pub ui_writer: mpsc::Sender<WireFrame>,
     pub events: mpsc::Receiver<IoEvent>,
-    stop: watch::Sender<bool>,
-    reader_task: JoinHandle<()>,
-    writer_task: JoinHandle<()>,
+    // Visíveis no runtime: o transporte WebSocket monta as mesmas tarefas.
+    pub(super) stop: watch::Sender<bool>,
+    pub(super) reader_task: JoinHandle<()>,
+    pub(super) writer_task: JoinHandle<()>,
 }
 
 impl IoTasks {
-    pub fn hold_lease(mut self, lease: std::sync::Arc<std::fs::File>) -> Self {
+    pub fn hold_lease(mut self, lease: std::sync::Arc<super::queue::Lease>) -> Self {
         let reader = self.reader_task;
         let writer = self.writer_task;
         let reader_lease = lease.clone();
@@ -142,6 +145,137 @@ async fn open(binding: &CanoBinding) -> Result<BufReader<Socket>, RuntimeError> 
         .map_err(|_| RuntimeError::new("cano_timeout", "cano não respondeu"))?
 }
 
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use std::{pin::Pin,task::{Context,Poll},sync::atomic::{AtomicBool,Ordering}};
+
+    struct DelayedWriter { current:Arc<AtomicBool>, bytes:Arc<Mutex<Vec<u8>>>, waited:bool, partial:bool }
+    impl AsyncWrite for DelayedWriter {
+        fn poll_write(mut self:Pin<&mut Self>,cx:&mut Context<'_>,bytes:&[u8]) -> Poll<std::io::Result<usize>> {
+            if !self.waited {
+                self.waited = true;
+                self.current.store(false,Ordering::Release);
+                if !self.partial { cx.waker().wake_by_ref(); return Poll::Pending; }
+                self.bytes.lock().unwrap().push(bytes[0]);
+                return Poll::Ready(Ok(1));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self:Pin<&mut Self>,_:&mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+        fn poll_shutdown(self:Pin<&mut Self>,_:&mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+    }
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn interaction_is_checked_after_the_reader_releases_the_split_lock() {
+        use std::sync::Condvar;
+        use tokio::io::{AsyncReadExt,ReadBuf};
+        struct ReaderHeld {
+            entered:Option<std::sync::mpsc::Sender<()>>,
+            release:Arc<(Mutex<bool>,Condvar)>,
+            bytes:Arc<Mutex<Vec<u8>>>,
+        }
+        impl AsyncRead for ReaderHeld {
+            fn poll_read(mut self:Pin<&mut Self>,_:&mut Context<'_>,buffer:&mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+                if let Some(entered) = self.entered.take() { entered.send(()).unwrap(); }
+                let (released,condition) = &*self.release;
+                let mut released = released.lock().unwrap();
+                while !*released { released = condition.wait(released).unwrap(); }
+                buffer.put_slice(b"x");
+                Poll::Ready(Ok(()))
+            }
+        }
+        impl AsyncWrite for ReaderHeld {
+            fn poll_write(self:Pin<&mut Self>,_:&mut Context<'_>,bytes:&[u8]) -> Poll<std::io::Result<usize>> {
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Poll::Ready(Ok(bytes.len()))
+            }
+            fn poll_flush(self:Pin<&mut Self>,_:&mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_shutdown(self:Pin<&mut Self>,_:&mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+        }
+        struct Attempt<W> { inner:W, entered:Option<std::sync::mpsc::Sender<()>> }
+        impl<W:AsyncWrite+Unpin> AsyncWrite for Attempt<W> {
+            fn poll_write(mut self:Pin<&mut Self>,cx:&mut Context<'_>,bytes:&[u8]) -> Poll<std::io::Result<usize>> {
+                if let Some(entered) = self.entered.take() { entered.send(()).unwrap(); }
+                Pin::new(&mut self.inner).poll_write(cx,bytes)
+            }
+            fn poll_flush(mut self:Pin<&mut Self>,cx:&mut Context<'_>) -> Poll<std::io::Result<()>> { Pin::new(&mut self.inner).poll_flush(cx) }
+            fn poll_shutdown(mut self:Pin<&mut Self>,cx:&mut Context<'_>) -> Poll<std::io::Result<()>> { Pin::new(&mut self.inner).poll_shutdown(cx) }
+        }
+        struct Release(Arc<(Mutex<bool>,Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) { let (released,condition) = &*self.0; *released.lock().unwrap() = true; condition.notify_all(); }
+        }
+        let release = Arc::new((Mutex::new(false),Condvar::new()));
+        let release_on_drop = Release(release.clone());
+        let bytes = Arc::new(Mutex::new(vec![]));
+        let current = Arc::new(AtomicBool::new(true));
+        let source = current.clone();
+        let guard:hangar_codex::client::RawWriteGuard = Arc::new(move |_| {
+            if source.load(Ordering::Acquire) { Ok(()) } else { Err("erro_interacao_desatualizada".into()) }
+        });
+        let (reader_entered,reader_waiting) = std::sync::mpsc::channel();
+        let (writer_entered,writer_waiting) = std::sync::mpsc::channel();
+        let (mut read,write,state) = guarded_split(ReaderHeld { entered:Some(reader_entered),release,bytes:bytes.clone() });
+        state.lock().unwrap().prepare(Some(guard));
+        let reader = tokio::spawn(async move { read.read_exact(&mut [0u8;1]).await.unwrap(); });
+        reader_waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        let writer = std::thread::spawn(move || runtime.block_on(async {
+            let mut write = Attempt { inner:write,entered:Some(writer_entered) };
+            guarded_bytes(&mut write,b"answer A",&state).await
+        }));
+        writer_waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        current.store(false,Ordering::Release);
+        drop(release_on_drop);
+        let (outcome,error) = writer.join().unwrap().unwrap_err();
+        reader.await.unwrap();
+        assert_eq!(outcome,WriteOutcome::NotWritten);
+        assert_eq!(error.unwrap().code,"erro_interacao_desatualizada");
+        assert!(bytes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interaction_replacement_during_writer_wait_keeps_zero_bytes_and_its_code() {
+        for partial in [false,true] {
+            let current = Arc::new(AtomicBool::new(true));
+            let source = current.clone();
+            let guard:hangar_codex::client::RawWriteGuard = Arc::new(move |_| {
+                if source.load(Ordering::Acquire) { Ok(()) } else { Err("erro_interacao_desatualizada".into()) }
+            });
+            let bytes = Arc::new(Mutex::new(vec![]));
+            let (mut writer,state) = hangar_codex::client::GuardedSocket::new(DelayedWriter { current,bytes:bytes.clone(),waited:false,partial });
+            state.lock().unwrap().prepare(Some(guard));
+            let (outcome,error) = guarded_bytes(&mut writer,b"answer A",&state).await.unwrap_err();
+            assert_eq!(outcome,if partial { WriteOutcome::Unknown } else { WriteOutcome::NotWritten });
+            assert_eq!(error.unwrap().code,"erro_interacao_desatualizada");
+            assert_eq!(bytes.lock().unwrap().len(),usize::from(partial));
+        }
+    }
+
+    #[derive(Clone)] struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self,data:&[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(data); Ok(data.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn a_broken_cano_line_leaves_its_cause_in_the_log() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move||capture.clone()).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (ours,mut theirs) = tokio::io::duplex(4096);
+        let snapshot = CanoSnapshot { kind:"cano_snapshot".into(),versao:2,pid:1,init:None,aberto:true,pendentes:vec![],
+            ultimo_result:None,rate_limit:None,stderr_tail:vec![],saiu:None,inflight:json!({}) };
+        let tasks = CanoConnection { snapshot,stream:BufReader::new(Box::new(ours)) }.start(1,4);
+        theirs.write_all(b"not json\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1),tasks.reader_task).await.unwrap().unwrap();
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("code=frame_json"),"{text}");
+    }
+}
+
 /// Quanto o `open` espera o cano lançado começar a escutar, como o Python antigo antes de matá-lo.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
 
@@ -160,17 +294,48 @@ pub async fn connect(binding: &CanoBinding) -> Result<CanoConnection, RuntimeErr
     Ok(CanoConnection { snapshot, stream })
 }
 
+/// O stream abaixo do split guarda a escrita; este nível só conserva o recibo e a causa.
+async fn guarded_bytes<W: AsyncWrite + Unpin>(write: &mut W, bytes: &[u8], state: &Mutex<hangar_codex::client::RawWriteState>)
+    -> Result<(), (WriteOutcome, Option<RuntimeError>)> {
+    use hangar_codex::client::{ClientError,raw_write_result};
+    let result = async { write.write_all(bytes).await?; write.flush().await }.await
+        .map_err(|error:std::io::Error|ClientError::Io(error.to_string()));
+    raw_write_result(result,state).map_err(|error| match error {
+        ClientError::NotWritten { code } => {
+            let error = crate::interactions::InteractionError::from_code(&code).map(crate::interactions::runtime_error)
+                .unwrap_or_else(||RuntimeError::new(&code,"escrita recusada pela guarda"));
+            (WriteOutcome::NotWritten,Some(error))
+        },
+        ClientError::WriteUnknown { code } => (WriteOutcome::Unknown,Some(RuntimeError::new(&code,"escrita sem confirmação após mudança da interação"))),
+        _ => (WriteOutcome::Unknown,None),
+    })
+}
+
+fn guarded_split<S: AsyncRead + AsyncWrite + Unpin>(stream:S) -> (
+    tokio::io::ReadHalf<hangar_codex::client::GuardedSocket<S>>,
+    tokio::io::WriteHalf<hangar_codex::client::GuardedSocket<S>>,
+    Arc<Mutex<hangar_codex::client::RawWriteState>>,
+) {
+    let (stream,state) = hangar_codex::client::GuardedSocket::new(stream);
+    let (read,write) = tokio::io::split(stream);
+    (read,write,state)
+}
+
 impl CanoConnection {
     pub fn start(self, _generation: u64, capacity: usize) -> IoTasks {
-        let (read, mut write) = tokio::io::split(self.stream);
+        let (read,mut write,write_state) = guarded_split(self.stream);
         let (writer, mut commands) = mpsc::channel::<WireFrame>(capacity.max(1));
         let (ui_writer, mut ui_commands) = mpsc::channel::<WireFrame>(UI_CAPACITY);
         let (events_tx, events) = mpsc::channel(capacity.max(1));
         let (stop, stop_rx) = watch::channel(false);
         let pending = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
+        // Conexão perdida (EOF ou erro de leitura sem `cano_saiu`): o escritor sai junto e o canal de eventos
+        // fecha; o ator vê a queda do transporte (`cano_closed`), não a saída do processo.
+        let lost = Arc::new(tokio::sync::Notify::new());
         let reader_task = {
             let pending = pending.clone();
             let events = events_tx.clone();
+            let lost = lost.clone();
             let mut stop = stop_rx.clone();
             let mut stopping = stop_rx.clone();
             tokio::spawn(async move {
@@ -184,7 +349,11 @@ impl CanoConnection {
                         let value = tokio::select! {
                             result = read_into(&mut read, &mut frame, MAX_ENVELOPE) => match result {
                                 Ok(Some(value)) => Some(value),
-                                _ => { let _ = events.send(IoEvent::End { code: None }).await; return; }
+                                Ok(None) => { tracing::debug!("cano encerrou a conexão (EOF)"); lost.notify_one(); return; }
+                                Err(error) => {
+                                    tracing::warn!(code=%error.code,reason=%error.message,"leitura do cano falhou; conexão dada como perdida");
+                                    lost.notify_one(); return;
+                                }
                             },
                             _ = tokio::time::sleep_until(deadline) => None,
                             _ = stopping.changed() => return,
@@ -270,16 +439,22 @@ impl CanoConnection {
                         continue;
                     }
                     if !ephemeral { pending.lock().unwrap().insert(command.operation_id.clone(), Instant::now() + Duration::from_secs(30)); }
-                    if write.write_all(raw.as_bytes()).await.is_err() || write.flush().await.is_err() {
+                    write_state.lock().unwrap().prepare(command.guard);
+                    if let Err((outcome, error)) = guarded_bytes(&mut write, raw.as_bytes(), &write_state).await {
                         if !ephemeral {
                             pending.lock().unwrap().remove(&command.operation_id);
-                            let _ = events_tx.send(IoEvent::WriteAck { operation_id: command.operation_id, outcome: WriteOutcome::Unknown }).await;
+                            let event = match error {
+                                Some(error) => IoEvent::WriteGuardAck { operation_id: command.operation_id, outcome, error },
+                                None => IoEvent::WriteAck { operation_id: command.operation_id, outcome },
+                            };
+                            let _ = events_tx.send(event).await;
                         }
+                        if outcome == WriteOutcome::NotWritten { continue; }
                         return;
                     }
                 }
             };
-            tokio::select! { _ = work => {}, _ = stop.changed() => {} }
+            tokio::select! { _ = work => {}, _ = stop.changed() => {}, _ = lost.notified() => {} }
             let _ = write.shutdown().await;
         });
         IoTasks { writer, ui_writer, events, stop, reader_task, writer_task }

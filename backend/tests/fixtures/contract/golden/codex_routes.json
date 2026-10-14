@@ -702,7 +702,8 @@
   "method": "POST",
   "route": "question/skip",
   "body": {
-   "request_id": "async:thread-1:i1:0"
+   "request_id": "async:thread-1:i1:0",
+   "interaction_id": "<shown>"
   },
   "rpc": {},
   "session": {
@@ -730,7 +731,8 @@
   "method": "POST",
   "route": "question/skip",
   "body": {
-   "request_id": "async:outra"
+   "request_id": "async:outra",
+   "interaction_id": "<shown>"
   },
   "rpc": {},
   "session": {
@@ -750,9 +752,41 @@
    "status": 409,
    "body": {
     "detail": {
-     "code": "erro_codex_resposta_invalida",
+     "code": "erro_interacao_desatualizada",
      "params": {},
-     "msg": "A pergunta mudou ou n\u00e3o aceita essas respostas. Confira as op\u00e7\u00f5es e tente novamente."
+     "msg": "Essa pergunta mudou ou j\u00e1 foi encerrada. Confira a pergunta atual."
+    }
+   }
+  }
+ },
+ {
+  "name": "skip_without_id",
+  "method": "POST",
+  "route": "question/skip",
+  "body": {
+   "request_id": "async:thread-1:i1:0"
+  },
+  "rpc": {},
+  "session": {
+   "model": "gpt-5",
+   "effort": "high",
+   "service_tier": "default",
+   "mode": "default",
+   "permission_mode": "Full Access",
+   "busy": false,
+   "async": [
+    "async:thread-1:i1:0"
+   ]
+  },
+  "relay": null,
+  "fault": null,
+  "expect": {
+   "status": 409,
+   "body": {
+    "detail": {
+     "code": "erro_interacao_sem_identidade",
+     "params": {},
+     "msg": "Atualize o app ou recarregue a p\u00e1gina antes de responder."
     }
    }
   }

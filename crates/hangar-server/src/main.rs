@@ -6,8 +6,52 @@ fn main() {
     run();
 }
 
+/// No Windows `0.0.0.0` não impede outro programa de abrir a mesma porta em `[::]` dual-stack (Node,
+/// `python -m http.server`), e ele passa a responder no lugar do Hangar. Um segundo socket dual-stack
+/// na mesma porta fecha essa brecha e atende igual.
+#[cfg(windows)]
+fn dual_stack(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    tokio::net::TcpListener::from_std(socket.into())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    fn dual_bind(port: u16) -> std::io::Result<()> {
+        let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None)?;
+        socket.set_only_v6(false)?;
+        socket.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())
+    }
+
+    #[tokio::test]
+    async fn ipv4_plus_dual_stack_hold_the_port_against_both_kinds_of_server() {
+        let public = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = public.local_addr().unwrap().port();
+        assert!(dual_bind(port).is_ok(), "sem o segundo socket, um dual-stack pega a porta");
+        let _guard = super::dual_stack(port).unwrap();
+        assert!(dual_bind(port).is_err());
+        assert!(std::net::TcpListener::bind(("0.0.0.0", port)).is_err());
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok());
+    }
+}
+
 #[tokio::main]
 async fn run() {
+    let args:Vec<_>=std::env::args_os().collect();
+    match hangar_server::runtime::claude_relaunch::helper_args(&args) {
+        // Só o `kind`: a mensagem pode trazer caminho ou ambiente do relançamento.
+        Ok(Some(endpoint))=> match hangar_server::runtime::claude_relaunch::helper(endpoint).await {
+            Ok(code)=>std::process::exit(code),
+            Err(e)=>{ eprintln!("hangar-server: relaunch helper failed: {:?}", e.kind()); std::process::exit(126) },
+        },
+        Err(e)=>{ eprintln!("hangar-server: relaunch helper args invalid: {:?}", e.kind()); std::process::exit(126) },
+        Ok(None)=>{},
+    }
     let cfg = match hangar_server::config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -35,7 +79,16 @@ async fn run() {
     tracing::info!(listen = %cfg.listen, upstream = %cfg.upstream, version = env!("CARGO_PKG_VERSION"), "hangar-server de pé");
     // O Python segura o cano do stdin; fechou = pai morreu. Vale igual em Linux, Windows e macOS.
     let stop = hangar_server::parent_gone(tokio::io::stdin());
-    let state = hangar_server::routes::AppState::new(cfg);
+    #[allow(unused_mut)]
+    let mut state = hangar_server::routes::AppState::new(cfg);
+    #[cfg(windows)]
+    if state.cfg.listen.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) {
+        // Falhar aqui não derruba o servidor: fica como antes, só sem a guarda do IPv6.
+        match dual_stack(state.cfg.listen.port()) {
+            Ok(guard) => state.public_v6 = Some(guard),
+            Err(e) => tracing::warn!(error = %e, "porta pública sem a guarda dual-stack: outro programa pode ocupá-la em IPv6"),
+        }
+    }
     state.costs.schedule_warmup(std::time::Duration::from_secs(30));
     hangar_server::pages::routes::spawn_sweep(state.list.clone(), state.pages.clone());
     // Só aqui, nunca no `serve_until`: os testes sobem servidores contra o tmux de verdade.

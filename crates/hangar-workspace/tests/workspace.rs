@@ -185,3 +185,26 @@ fn diff_summary_of_repository_without_commits_is_empty_not_failed() {
     assert_eq!(hangar_workspace::git::summary(Some(&cwd), true), json!({}));
     assert!(!hangar_workspace::git::summary(Some(&cwd), false).is_null());
 }
+
+#[test]
+fn branches_say_which_ones_are_open_in_another_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c"]);
+    git(&main, &["branch", "livre"]);
+    let other = dir.path().join("outra");
+    git(&main, &["worktree", "add", "-q", "-b", "feat", other.to_str().unwrap()]);
+
+    let from_main = op(&main, "list_branches", json!({}));
+    assert_eq!(from_main["elsewhere"]["feat"]["path"], json!(other.to_string_lossy()));
+    assert_eq!(from_main["elsewhere"]["feat"]["main"], json!(false));
+    assert!(from_main["elsewhere"].get("main").is_none(), "a própria pasta não é outra worktree");
+    assert!(from_main["elsewhere"].get("livre").is_none());
+
+    let from_other = op(&other, "list_branches", json!({}));
+    assert_eq!(from_other["elsewhere"]["main"]["path"], json!(main.to_string_lossy()));
+    assert_eq!(from_other["elsewhere"]["main"]["main"], json!(true));
+    assert!(from_other["elsewhere"].get("feat").is_none());
+}

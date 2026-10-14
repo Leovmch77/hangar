@@ -33,6 +33,11 @@ def home(tmp_path, monkeypatch):
 
 
 def _pedido(home, **extra):
+    """Pedido de cliente antigo, com o modelo igual ao auxiliar da página Jev (que é quem manda)."""
+    from app import runtime_config as rc
+
+    rc.aplicar({"jev_aux_base_url": "http://x/v1", "jev_aux_modelo": "m1", "jev_aux_esforco": "high",
+                "jev_aux_api_key": "chave-do-llm-123"})
     projeto = home / "Projetos" / cc.NAME
     return {"enabled": True, "project_dir": str(projeto), "agent_config": str(projeto / "alvo-agent.json"),
             "llm_url": "http://x/v1/chat/completions", "llm_model": "m1", "llm_effort": "high",
@@ -151,7 +156,7 @@ def test_first_install_without_checkout_creates_package_target(tmp_path, monkeyp
     assert created["mode"] == "package" and created["enabled"] is False
     assert created["agent_config"] == str(target)
     assert json.loads(target.read_text())["agent_path"] == str(cc._package_exe())
-    enabled = cc.save({"enabled": True, "agent_config": str(target), "llm_url": cc.PRESET_URL})
+    enabled = cc.save({"enabled": True, "agent_config": str(target)})
     assert enabled["enabled"] and enabled["mode"] == "package"
     if configure_key:
         assert _entrada(cc._main_file())["env"]["TYPESAFE_API_KEY"] == "windows-secret-1234"
@@ -572,3 +577,77 @@ def test_linux_local_target_runs_the_binary_as_agent(home, monkeypatch):
     cfg = json.loads((projeto / "este-agent.json").read_text())
     assert cfg["command"] == [str(binary), "agent"]
     assert next(t for t in cc.state()["targets"] if t["name"] == "este")["os"] == "linux"
+
+
+def test_put_with_a_different_model_is_refused_and_aux_feeds_the_mcp(home):
+    from app import runtime_config as rc
+
+    cc.save(_pedido(home))
+    with pytest.raises(cc.ComputerControlError) as e:
+        cc.save(_pedido(home, llm_model="outro"))
+    assert e.value.code == "erro_computer_control_llm_movido"
+    rc.aplicar({"jev_aux_modelo": "m2"})
+    env = _entrada(cc._main_file())["env"]
+    assert env["LLM_MODEL"] == "m2" and env["LLM_PROXY_URL"] == "http://x/v1/chat/completions"
+    assert cc.state()["llm_from_jev_aux"] is True
+
+
+@pytest.mark.parametrize("text", [
+    "port: 8317\naccess:\n  api-keys:\n    - \"k1\"\n    - k2\napi-keys:\n  gemini:\n    - name: x\n",
+    "port: 8317\napi-keys:\n- 'k1'\n- k2\nother: 1\n",
+    "api-keys:\n  - name: provider\n    base-url: x\naccess:\n  api-keys:\n    - k1\n    - k2  # comment\n",
+])
+def test_cliproxy_keys_new_and_old_format(home, text):
+    (home / ".cli-proxy-api").mkdir()
+    (home / ".cli-proxy-api" / "config.yaml").write_text(text)
+    assert cc._cliproxy_keys() == ["k1", "k2"]
+
+
+def _mcp_with_llm(home, **llm):
+    data = json.loads((home / ".claude.json").read_text())
+    data["mcpServers"] = {cc.NAME: {"command": "x", "args": [], "env": {"HCC_AGENT_CONFIG": "a", **llm}}}
+    (home / ".claude.json").write_text(json.dumps(data))
+
+
+def test_startup_migration_keeps_the_whole_computer_use_model(home):
+    """Navegador só com o endereço e Computer Use completo: vale o Computer Use inteiro, nada some."""
+    from app import runtime_config as rc
+
+    rc.aplicar({"jev_texto_base_url": "http://127.0.0.1:8317/v1"})
+    _mcp_with_llm(home, LLM_PROXY_URL="http://127.0.0.1:8317/v1/chat/completions", LLM_MODEL="gpt-5",
+                  LLM_EFFORT="high", LLM_PROXY_KEY="proxy-key")
+    rc.migrar_jev_aux()
+    cc.migrate_jev()
+    env = _entrada(home / ".claude.json")["env"]
+    assert (env["LLM_MODEL"], env["LLM_EFFORT"], env["LLM_PROXY_KEY"]) == ("gpt-5", "high", "proxy-key")
+    assert rc.jev_aux()["jev_aux_modelo"] == "gpt-5"
+
+
+def test_same_choice_in_both_merges_and_a_replaced_model_is_kept(home):
+    from app import runtime_config as rc
+
+    rc.aplicar({"jev_texto_base_url": "https://api.anthropic.com/v1", "jev_texto_api_key": "k",
+                "jev_texto_modelo": "claude-haiku-5-5"})
+    _mcp_with_llm(home, LLM_PROXY_URL="https://api.anthropic.com/v1/chat/completions", LLM_MODEL="claude-haiku-5-5",
+                  LLM_EFFORT="low", LLM_PROXY_KEY="k")
+    rc.migrar_jev_aux()
+    assert rc.jev_aux() == {"jev_aux_base_url": "https://api.anthropic.com/v1", "jev_aux_api_key": "k",
+                            "jev_aux_modelo": "claude-haiku-5-5", "jev_aux_esforco": "low"}
+    assert not cc._old_llm_file().exists()   # nada mudou no MCP
+    rc.aplicar({"jev_aux_modelo": "claude-sonnet-5-5"})
+    assert json.loads(cc._old_llm_file().read_text())[str(home / ".claude.json")]["LLM_MODEL"] == "claude-haiku-5-5"
+    assert _entrada(home / ".claude.json")["env"]["LLM_MODEL"] == "claude-sonnet-5-5"
+
+
+def test_base_url_with_query_keeps_the_query_after_the_path():
+    from app import runtime_config as rc
+
+    url = "https://x.openai.azure.com/openai/v1/chat/completions?api-version=2024-02-01"
+    assert rc.sem_chat_completions(url) == "https://x.openai.azure.com/openai/v1?api-version=2024-02-01"
+    assert rc.com_chat_completions(rc.sem_chat_completions(url)) == url
+
+
+def test_cliproxy_keys_quoted_keep_hash_and_spaces(home):
+    (home / ".cli-proxy-api").mkdir()
+    (home / ".cli-proxy-api" / "config.yaml").write_text("access:\n  api-keys:\n    - \"ab#cd\"\n    - 'x y'\n")
+    assert cc._cliproxy_keys() == ["ab#cd", "x y"]

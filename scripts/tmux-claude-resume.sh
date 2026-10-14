@@ -186,6 +186,10 @@ save() {
     if [ "$AGENT_PROV" = codex ]; then cfg=""; engine=""; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$AGENT_PROV" "$id" "$cfg" "$engine" >> "$tmp"
   done < <(tmux list-sessions -F '#{session_name} #{pane_id} #{pane_pid}' 2>/dev/null)
+  # Nenhum agente vivo (restore ainda injetando, boot, todos fechados) não apaga o mapa: sem ele o
+  # restore não tem o que retomar. ponytail: fechar todo agente de propósito deixa o mapa antigo; o
+  # restore só injeta em shell vazio, então o custo é reabrir conversa numa sessão que ficou sem agente.
+  if [ ! -s "$tmp" ] && [ -s "$MAP" ]; then rm -f "$tmp"; return 0; fi
   sync "$tmp"
   mv "$tmp" "$MAP"
   sync "$MAP" "$(readlink -f "$(dirname "$MAP")/last")" 2>/dev/null || true
@@ -271,8 +275,18 @@ restore() {
 
 # Hook `session-closed`: sessão fechada não volta no próximo restore. Sobrou alguma, a foto é refeita
 # sem ela; não sobrou nenhuma (o servidor vai sair), fica a marca que o fix-last consome no start.
+_shutting_down() {
+  local s
+  for s in "$(systemctl is-system-running 2>/dev/null)" "$(systemctl --user is-system-running 2>/dev/null)"; do
+    [ "$s" = stopping ] && return 0
+  done
+  return 1
+}
+
 closed() {
   local dir; dir=$(dirname "$MAP")
+  # Desligar/reiniciar mata as sessões uma a uma: isso é queda, não fechamento, e o boot tem que restaurar.
+  if _shutting_down; then return 0; fi
   if [ -n "$(tmux list-sessions -F x 2>/dev/null)" ]; then
     "$HOME/.tmux/plugins/tmux-resurrect/scripts/save.sh" quiet
   else

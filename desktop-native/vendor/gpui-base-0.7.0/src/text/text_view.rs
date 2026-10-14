@@ -1765,6 +1765,46 @@ mod tests {
         }
     }
 
+    // Modified for Hangar: tabela de prosa cabe na coluna do chat, quebrando o texto, sem rolar.
+    #[gpui::test]
+    fn scroll_table_of_prose_fits_the_frame(cx: &mut TestAppContext) {
+        struct ProseTable;
+
+        impl Render for ProseTable {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let prose = "o texto da celula e longo e quebra em varias linhas ";
+                let cell = prose.repeat(3);
+                let row = format!("| 1 | {cell} | {cell} | `codigo` {cell} |\n");
+                let markdown = format!(
+                    "| # | Problema | Medida | De quem é |\n|---|---|---|---|\n{row}{row}"
+                );
+                let mut table_style = StyleRefinement::default();
+                table_style.overflow.x = Some(Overflow::Scroll);
+                div().w(px(880.)).child(
+                    TextView::markdown("prose-table", markdown)
+                        .style(TextViewStyle::default().with_table(table_style)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| ProseTable);
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let track = cx
+            .debug_bounds("table-track")
+            .expect("table track should be painted");
+        assert!(
+            track.size.width <= px(880.),
+            "the prose table should fit the 880px frame, got {:?}",
+            track.size.width
+        );
+    }
+
     #[test]
     fn plugin_accepts_text_view_plugins_beyond_markdown() {
         let view = TextView::markdown("plugin-test", "").plugin(DummyTextViewPlugin);

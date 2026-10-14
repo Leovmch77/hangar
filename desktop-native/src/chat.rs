@@ -206,8 +206,10 @@ impl Chat {
     }
 
     pub fn update_state(&mut self, state: SessionState) {
-        // Pergunta do Claude fecha quando o pane sai do aguardo; a do Codex só pelo `null`; a do transcript, pelo `tool_result`.
-        if state.state != "awaiting_input" && self.ask.as_ref().is_some_and(|ask| !ask.codex() && ask.tool_use_id.is_none()) { self.ask = None; }
+        // Pergunta do Claude sem identidade fecha quando o pane sai do aguardo; com `interaction_id` e a do Codex,
+        // só pelo `null` do servidor (outra aprovação respondida não fecha esta); a do transcript, pelo `tool_result`.
+        if state.state != "awaiting_input" && self.ask.as_ref().is_some_and(|ask| !ask.codex() && ask.tool_use_id.is_none()
+            && ask.payload.interaction_id.is_none()) { self.ask = None; }
         if state.state != "awaiting_input" { self.ask_seen = false; }
         self.state = state;
     }
@@ -230,7 +232,7 @@ impl Chat {
     pub fn waiting(&self, provider: &str, headless: bool) -> usize {
         let process = provider == "codex" || headless;
         self.events.iter().filter(|e| e.kind == "user_msg" && e.queued() && e.desistiu != Some(true)
-            && !(process && e.queued_delivered == Some(true))).count()
+            && e.queued_consumed != Some(true) && !(process && e.queued_delivered == Some(true))).count()
     }
 
     pub fn retire(&mut self, id: &str) {
@@ -614,6 +616,12 @@ mod tests {
         chat.update_ask(Some(ask(Some("codex"), "c?")));
         chat.update_state(SessionState { state: "working".into(), ..Default::default() });
         assert!(chat.ask.is_some());
+        assert!(chat.update_ask(None));
+        // Formulário B com identidade: a aprovação A respondida tira o pane do aguardo, B fica até o `null`.
+        let raw = serde_json::json!({"provider": "claude", "request_id": 2, "interaction_id": "form-b", "questions": [{"question": "b?"}]});
+        chat.update_ask(Some(Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw)));
+        chat.update_state(SessionState { state: "working".into(), ..Default::default() });
+        assert!(chat.ask.is_some(), "só o servidor fecha a pergunta identificada");
         assert!(chat.update_ask(None));
     }
 

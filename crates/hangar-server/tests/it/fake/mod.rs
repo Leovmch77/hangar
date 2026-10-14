@@ -37,6 +37,8 @@ pub struct Fake {
     side_tx: broadcast::Sender<String>,
     side_conns: AtomicUsize,
     side_apps: Mutex<Vec<String>>,
+    /// O `jsonl` que o Rust mandou em cada conexão interna.
+    side_jsonls: Mutex<Vec<String>>,
     info_calls: AtomicUsize,
     hits: Mutex<Vec<(String, HeaderMap)>>,
     info_status: Mutex<Option<StatusCode>>,
@@ -54,12 +56,9 @@ pub struct Fake {
     last_body: Mutex<Vec<u8>>,
     /// Enquanto ligado, `/input` só responde depois de `release`.
     hold_input: std::sync::atomic::AtomicBool,
-    /// A pergunta que o plugin segura (`/internal/sessions/{name}/plugin`), o status que a faz falhar,
-    /// quantas leituras chegaram e os corpos do aviso de interrupção.
-    plugin_pending: Mutex<Value>,
+    /// A antiga rota da pergunta do plugin (`/internal/sessions/{name}/plugin`), só para provar que o Rust
+    /// não a chama mais: o status que a faz falhar, as leituras e os avisos que chegaram.
     plugin_status: Mutex<Option<StatusCode>>,
-    /// Corpo que substitui `{"pending": …}` na leitura (o Python respondendo outra coisa).
-    plugin_reply: Mutex<Option<Value>>,
     plugin_gets: AtomicUsize,
     plugin_posts: Mutex<Vec<Value>>,
     /// Resposta do `/api/sessions/{n}/input` repassado; `None` = o "from-python" de sempre.
@@ -95,6 +94,9 @@ impl Fake {
     pub fn side_apps(&self) -> Vec<String> {
         self.side_apps.lock().unwrap().clone()
     }
+    pub fn side_jsonls(&self) -> Vec<String> {
+        self.side_jsonls.lock().unwrap().clone()
+    }
     pub fn info_calls(&self) -> usize {
         self.info_calls.load(SeqCst)
     }
@@ -116,15 +118,9 @@ impl Fake {
     pub fn hold_input(&self, on: bool) {
         self.hold_input.store(on, SeqCst);
     }
-    pub fn set_plugin_pending(&self, pending: Value) {
-        *self.plugin_pending.lock().unwrap() = pending;
-    }
     /// A rota interna do plugin responde só este status (o Python caído ou recusando).
     pub fn fail_plugin(&self, s: Option<StatusCode>) {
         *self.plugin_status.lock().unwrap() = s;
-    }
-    pub fn set_plugin_reply(&self, reply: Option<Value>) {
-        *self.plugin_reply.lock().unwrap() = reply;
     }
     pub fn plugin_gets(&self) -> usize {
         self.plugin_gets.load(SeqCst)
@@ -162,6 +158,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         side_tx,
         side_conns: AtomicUsize::new(0),
         side_apps: Mutex::default(),
+        side_jsonls: Mutex::default(),
         info_calls: AtomicUsize::new(0),
         hits: Mutex::default(),
         info_status: Mutex::default(),
@@ -176,9 +173,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         plugin_ui: Mutex::default(),
         last_body: Mutex::default(),
         hold_input: std::sync::atomic::AtomicBool::new(false),
-        plugin_pending: Mutex::new(Value::Null),
         plugin_status: Mutex::default(),
-        plugin_reply: Mutex::default(),
         plugin_gets: AtomicUsize::new(0),
         plugin_posts: Mutex::default(),
         input_reply: Mutex::default(),
@@ -262,8 +257,7 @@ async fn fake_plugin_get(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Resp
     if let Some(s) = *f.plugin_status.lock().unwrap() {
         return status(s);
     }
-    let body = f.plugin_reply.lock().unwrap().clone().unwrap_or_else(|| json!({"pending": f.plugin_pending.lock().unwrap().clone()}));
-    Response::builder().header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
+    Response::builder().header("content-type", "application/json").body(Body::from(r#"{"pending":null}"#)).unwrap()
 }
 
 async fn fake_plugin_post(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -295,16 +289,16 @@ async fn fake_side(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let info = f.info.lock().unwrap().clone();
-    if !internal_ok(&headers) || info.is_null() {
+    if !internal_ok(&headers) {
         return status(StatusCode::NOT_FOUND);
     }
+    // A conversa é a que o Rust escolheu; sem ela o Python recusa.
+    let (Some(_), Some(jsonl)) = (q.get("provider"), q.get("jsonl")) else { return status(StatusCode::BAD_REQUEST) };
+    f.side_jsonls.lock().unwrap().push(jsonl.clone());
     let rx = f.side_tx.subscribe();
     f.side_apps.lock().unwrap().push(q.get("app").cloned().unwrap_or_default());
     f.side_conns.fetch_add(1, SeqCst);
-    let first = futures_util::stream::once(async move {
-        Ok::<_, Infallible>(Bytes::from(format!("event: info\r\ndata: {info}\r\n\r\n")))
-    });
+    let first = futures_util::stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"event: ping\r\ndata: {}\r\n\r\n")) });
     let rest = futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.ok().map(|s| (Ok(Bytes::from(s)), rx))
     });
@@ -380,15 +374,47 @@ pub fn config(upstream: SocketAddr, trusted: &str) -> Config {
     }
 }
 
+/// Descoberta dos testes: a sessão é o que o Python falso tem em `set_info` (`Value::Null` =
+/// inexistente, `fail_info` = descoberta fora do ar), lida pela rota `info` dele, que conta e demora.
+pub struct FakeLocate {
+    pub upstream: SocketAddr,
+    pub http: hangar_server::proxy::HttpClient,
+    pub secret: String,
+}
+
+impl hangar_server::locate::Locate for FakeLocate {
+    fn info<'a>(&'a self, name: &'a str) -> hangar_server::locate::BoxFuture<'a,
+        Result<Option<hangar_server::transcript::InternalInfo>, hangar_server::locate::InfoFailed>> {
+        use hangar_server::locate::InfoFailed;
+        use http_body_util::BodyExt;
+        const FAIL: InfoFailed = InfoFailed("fake_info");
+        Box::pin(async move {
+            let name = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
+            let url = format!("http://{}/internal/sessions/{name}/info", self.upstream);
+            let req = axum::http::Request::get(url).header("x-hangar-internal", &self.secret).body(Body::empty()).map_err(|_| FAIL)?;
+            let resp = self.http.request(req).await.map_err(|_| FAIL)?;
+            match resp.status() {
+                StatusCode::NOT_FOUND => return Ok(None),
+                s if !s.is_success() => return Err(FAIL),
+                _ => {}
+            }
+            let body = resp.into_body().collect().await.map_err(|_| FAIL)?.to_bytes();
+            serde_json::from_slice(&body).map(Some).map_err(|_| FAIL)
+        })
+    }
+}
+
+pub fn fake_locate(upstream: SocketAddr) -> Arc<dyn hangar_server::locate::Locate> {
+    Arc::new(FakeLocate { upstream, http: hangar_server::proxy::client(), secret: SECRET.into() })
+}
+
 pub async fn spawn_server(cfg: Config) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(hangar_server::routes::serve(listener, cfg));
-    addr
+    spawn_state(hangar_server::routes::AppState::new(cfg)).await
 }
 
 /// Servidor com um `AppState` montado pelo teste (para mexer no `Mods` dele por fora).
-pub async fn spawn_state(state: hangar_server::routes::AppState) -> SocketAddr {
+pub async fn spawn_state(mut state: hangar_server::routes::AppState) -> SocketAddr {
+    state.side.locate = fake_locate(state.cfg.upstream);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(hangar_server::routes::serve_with_state(listener, state));
@@ -538,4 +564,12 @@ pub async fn wait_until(cond: impl Fn() -> bool) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("condição não chegou em 5 s");
+}
+
+/// Espera a descoberta ser lida `n` vezes depois de agora (a vigia do hub lê a cada 2 s).
+pub async fn readings(fake: &Fake, n: usize) {
+    for _ in 0..n {
+        let at = fake.info_calls();
+        wait_until(|| fake.info_calls() > at).await;
+    }
 }

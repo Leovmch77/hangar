@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { codexCliAusente, credentialAuth, credentialGroup, deleteCodexAccountForServer, getCodexAccountsForServer,
-  getCredentialsForServer, accountDeletedNotice, type CodexAccount, type Credencial } from '@hangar/core';
+  getCredentialsForServer, accountDeletedNotice, motivoLoginIndisponivel, type CodexAccount, type Credencial } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
 import { PageHeader, Pill, type PageAction } from '../../src/features/config/PageHeader';
 import { SectionCard } from '../../src/features/config/SectionCard';
@@ -76,12 +76,14 @@ export default function Contas() {
     if (credential.tipo !== 'codex') return null;
     return accounts.find((account) => account.id === credential.codex_account || account.credential_id === credential.id) ?? null;
   };
-  const accountStatus = (account: CodexAccount) => {
+  // A conta Codex não traz a causa da falha; a linha da credencial dela traz.
+  const accountStatus = (account: CodexAccount, credential?: Credencial) => {
     const auth = account.auth;
     return auth.status === 'connected'
       ? (auth.email && auth.plan ? m.contas_email_plano({ email: auth.email, max: auth.plan }) : auth.email ?? m.codex_ui_account())
       : auth.status === 'disconnected' ? m.contas_nao_conectada()
-      : codexCliAusente(account) ? m.codex_ui_cli_ausente() : m.codex_ui_unknown();
+      : codexCliAusente(account) ? m.codex_ui_cli_ausente()
+      : (credential && motivoLoginIndisponivel(credential)) || m.codex_ui_unknown();
   };
   const groupForAccount = (account: CodexAccount): CredentialGroup => (
     account.auth.method === 'oauth' ? 'subscription' : account.auth.method === 'api_key' ? 'api_key' : 'unknown'
@@ -89,12 +91,15 @@ export default function Contas() {
   const canSignIn = (account: CodexAccount) => account.auth.status !== 'connected' && !codexCliAusente(account);
   const credentialStatus = (credential: Credencial) => {
     const auth = credentialAuth(credential);
-    if (auth === 'unknown') return codexCliAusente(credential) ? m.codex_ui_cli_ausente() : m.codex_ui_unknown();
+    const naoConferido = motivoLoginIndisponivel(credential);
+    if (auth === 'unknown') return codexCliAusente(credential) ? m.codex_ui_cli_ausente() : naoConferido ?? m.codex_ui_unknown();
     if (auth === 'none' || credential.login?.loggedIn === false) return m.contas_nao_conectada();
     if (auth === 'api_key') return m.contas_tipo_chave();
     const base = credential.login?.email && credential.login.plano
       ? m.contas_email_plano({ email: credential.login.email, max: credential.login.plano })
       : credential.apelido || credential.nome_natural || credential.nome;
+    // Sem a causa, o nome sozinho parece login conferido.
+    if (naoConferido) return `${base} · ${naoConferido}`;
     const exp = credential.login?.refreshExpiresAt;
     if (exp == null) return base;
     const dias = Math.ceil((exp - Date.now() / 1000) / 86400);
@@ -147,7 +152,7 @@ export default function Contas() {
         key: `credential:${credential.id}`,
         group: credentialGroup(credential),
         title: account?.name ?? credential.nome ?? credential.nome_natural,
-        description: account ? accountStatus(account) : credentialStatus(credential),
+        description: account ? accountStatus(account, credential) : credentialStatus(credential),
         account,
       };
     }),

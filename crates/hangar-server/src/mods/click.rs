@@ -416,9 +416,11 @@ async fn in_band(ctx: &Ctx<'_>, t: &Target, label: &str) -> Result<(usize, usize
         s = wait_screen(ctx, t, |s| s.band_state != "collapsed").await?.ok_or_else(no_answer)?;
     }
     // Faixa encolhida (`↓ N more`) ou não desenhada: o mouse não tem onde clicar e o caso não está na reserva.
-    let band = match (&s.band, s.band_state) { (Some(band), "full") => band.clone(), _ => return Err(unreachable_pane()) };
+    // Cortada embaixo, só o que ficou na tela é clicável.
+    let band = match (&s.band, s.band_state) { (Some(band), "full" | "partial") => band.clone(), _ => return Err(unreachable_pane()) };
     match screen::find_in(&s, label, &band).as_slice() {
         [one] => Ok(*one),
+        [] if s.band_state == "partial" => Err(unreachable_pane()),
         [] => Err(not_found(label)),
         _ => Err(ambiguous(label)),
     }

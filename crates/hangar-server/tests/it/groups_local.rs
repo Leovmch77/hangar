@@ -232,6 +232,16 @@ fn external_link_refuses_orq_and_own_machine_groups() {
     assert!(matches!(plan_external_link(&d.read(), "c", "fulano::x", &none(), &outside, &gid("e")), Err(JoinRefusal::Mix)));
 }
 
+/// Decisão do usuário (B13): o árbitro sozinho num `orq` recusa o par externo com código próprio; o grupo fica.
+#[test]
+fn lone_orq_arbiter_refuses_an_external_pair() {
+    let d = Disk::new();
+    let arbiter = Sidecar { peers: vec![], task: Some("t".into()), gid: "o1".into(), harness: none(), orq: true, fed: None };
+    d.apply(&[("arb".to_owned(), arbiter.clone())], &[]);
+    assert!(matches!(plan_external_link(&d.read(), "arb", "fulano::x", &none(), &outside, &gid("e1")), Err(JoinRefusal::Orq)));
+    assert_eq!(d.read()("arb"), Some(arbiter));
+}
+
 // ---- GroupService: disco real num tempdir e orquestração falsa ----
 
 struct FakeOrq { phase: OrqPhase, conflict: Option<String>, promotes: AtomicUsize }

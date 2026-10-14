@@ -10,10 +10,10 @@
   interface Props {
     open: boolean;
     payload: AskQuestionPayload | null;
-    onSubmit: (answers: AnswerItem[]) => Promise<void>;
+    onSubmit: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
     onClose: () => void;
     /** Botão Cancelar do passo a passo; Esc e o fundo só escondem (`onClose`). */
-    onCancel?: () => void;
+    onCancel?: (payload: AskQuestionPayload) => void;
     onFallback: () => void; // abre o espelho TUI se algo falhar (reservado)
   }
   let { open, payload, onSubmit, onClose, onCancel }: Props = $props();

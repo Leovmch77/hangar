@@ -3,12 +3,13 @@
 # dispara quando o pedido casa com a descrição, e "testa o login" não cita preview — sem este
 # aviso a sessão vai de agent-browser sem saber que há um navegador dela na tela do usuário.
 # Electron no ar = pid do ~/.hangar/nav/_srv.json vivo (o arquivo sobrevive a crash, só o pid
-# decide, mesmo teste do CLI). Sem Electron, sem saída. Falha em silêncio.
+# decide, mesmo teste do CLI). Sem Electron, sem saída. Falha sem travar o prompt, com uma linha no log do Hangar.
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.request
 
@@ -98,14 +99,17 @@ def _url_do_navegador(nav_dir: str, nome: str) -> str | None:
 
 
 def texto(url: str | None) -> str:
+    # Com o Jev na sessão, várias ações numa tela desconhecida vão numa chamada só.
+    jev = (" Várias ações numa tela que você não conhece: `browser_goal` (= `hangar-preview objetivo`)."
+           if os.environ.get("HANGAR_JEV") == "on" else "")
     if url:
         return (f"[hangar] Esta sessão tem o navegador embutido do Hangar aberto em {url}. Pra ver, "
                 "ler, clicar, testar ou tirar print dessa página, use as tools `browser`/`browser_batch` "
-                "do MCP hangar (sem elas: `hangar-preview` no shell), não agent-browser nem ver-front.")
+                f"do MCP hangar (sem elas: `hangar-preview` no shell; skill hangar-preview), não "
+                f"agent-browser nem ver-front.{jev}")
     return ("[hangar] Pra ver, testar ou tirar print de uma página, use o navegador embutido do Hangar: "
             "tools `browser_open`/`browser`/`browser_batch` do MCP hangar (sem elas: `hangar-preview "
-            "open <url>` no shell, skill hangar-preview). Não use agent-browser nem ver-front. Abrir "
-            "muda a janela do usuário: avise-o.")
+            f"open <url>` no shell; skill hangar-preview). Não use agent-browser nem ver-front.{jev}")
 
 
 # Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela. Palavra que aparece
@@ -120,6 +124,31 @@ _NAO_E_PEDIDO = ("<task-notification", "[SYSTEM NOTIFICATION")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
+# Depois de uma falha o Jev descansa: chave errada ou endereço fora fariam cada prompt pagar o teto de espera.
+JEV_PAUSA_S = 300
+LOG_MAX = 256 * 1024
+
+
+def _registrar(motivo: str) -> None:
+    """Falha aberta (vale a regex), mas não calada: uma linha no log do Hangar. Se nem logar der, engole."""
+    try:
+        root = (os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "hangar")
+                if os.name == "nt" else os.path.expanduser("~/.hangar"))
+        base = os.path.join(root, "logs", "privado")
+        os.makedirs(base, exist_ok=True, mode=0o700)
+        arquivo = os.path.join(base, "nav_hook-falhas.log")
+        # Falha repetida a cada prompt não pode encher o disco: passou do teto, recomeça.
+        if os.path.exists(arquivo) and os.path.getsize(arquivo) > LOG_MAX:
+            os.replace(arquivo, arquivo + ".1")
+        fd = os.open(arquivo, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {motivo[:300]}\n")
+    except Exception:
+        pass
+
+
+def _pausa_jev() -> str:
+    return os.path.join(_nav_dir(), "_jev_pausa")
 
 
 def _sem_acento(s: str) -> str:
@@ -131,25 +160,40 @@ def _jev_precisa(prompt: str) -> bool | None:
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
         return None
+    try:
+        if time.time() - os.path.getmtime(_pausa_jev()) < JEV_PAUSA_S:
+            return None
+    except OSError:
+        pass
     pergunta = {"precisa": {"type": "noul", "instructions": (
         "Will handling this message require opening, looking at, clicking or testing a web page or "
         "an app screen in a browser?")}}
+    # Endereço e modelo chegam resolvidos pelo backend (`runtime_config.jev_destino_env`).
+    endpoint, modelo = os.environ.get("JEV_ENDPOINT") or "", os.environ.get("JEV_MODEL") or ""
     req = urllib.request.Request(
-        os.environ.get("JEV_ENDPOINT") or JEV_URL,
-        data=json.dumps({"model": os.environ.get("JEV_MODEL") or "jev-latest",
+        endpoint or JEV_URL,
+        data=json.dumps({"model": modelo or "jev-latest",
                          "state": prompt[-4000:], "questions": pergunta}).encode(),
         headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
             return float(json.load(r)["answers"]["precisa"]["noul"]) >= JEV_LIMIAR
-    except Exception:
+    except Exception as e:
+        _registrar(f"jev falhou ({type(e).__name__}: {e}); regex por {JEV_PAUSA_S}s")
+        try:
+            os.makedirs(_nav_dir(), exist_ok=True)
+            with open(_pausa_jev(), "w"):
+                pass
+        except OSError as e2:
+            _registrar(f"pausa do jev nao gravada ({e2}); cada prompt vai tentar de novo")
         return None
 
 
 def precisa_de_navegador(prompt: str) -> bool:
     if not prompt.strip() or any(m in prompt.lstrip()[:400] for m in _NAO_E_PEDIDO):
         return False
-    pelo_jev = _jev_precisa(prompt)
+    # Resposta curta ("A", "sim") fica na regex: o Jev custava ~0,5 s antes de toda mensagem.
+    pelo_jev = _jev_precisa(prompt) if len(prompt.split()) >= 4 else None
     return pelo_jev if pelo_jev is not None else bool(_TELA.search(_sem_acento(prompt)))
 
 
@@ -187,6 +231,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as e:
+        _registrar(f"main falhou ({type(e).__name__}: {e})")
     sys.exit(0)

@@ -219,9 +219,22 @@ export default function ChatScreen() {
     chat.openAsk(payload, q.id);
   }, [events, provider, askOpen, askPiId, askPiDismissed, chat]);
 
+  // A pergunta da lista (fora do quadro ou segurada pelo plugin) abre o passo a passo na hora, com o ID do
+  // formulário: responde pelo `/answer` sem esperar o stream. Uma vez por formulário, para fechar não reabrir.
+  const listForm = currentSession?.ask_form;
+  const listFormOpened = useRef<string | null>(null);
+  useEffect(() => {
+    const id = listForm?.interaction_id;
+    if (!listForm?.questions?.length || !id || listFormOpened.current === id) return;
+    // Visto antes de decidir: o formulário que o stream já abriu (e foi respondido) não reabre pela lista atrasada.
+    listFormOpened.current = id;
+    if (askOpen || askPayload?.interaction_id === id) return;
+    chat.openAsk(listForm);
+  }, [listForm, askOpen, askPayload, chat]);
+
   // quem responde: OptionButtons quando awaiting_input com question/options e sem stepper aberto
   const showOptions = !!(!askOpen && stateEvent?.state === 'awaiting_input' && stateEvent.question && stateEvent.options?.length);
-  const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.question, stateEvent?.options]);
+  const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.interaction_id ?? [stateEvent?.question, stateEvent?.options]]);
   const optionScope = useRef({ key: optionKey, generation: 0 });
   if (optionScope.current.key !== optionKey) {
     optionScope.current = { key: optionKey, generation: optionScope.current.generation + 1 };
@@ -233,7 +246,7 @@ export default function ChatScreen() {
     return JSON.stringify([
       serverId, name, !live.askOpen && live.stateEvent?.state === 'awaiting_input'
         && !!live.stateEvent.question && !!live.stateEvent.options?.length,
-      live.stateEvent?.question, live.stateEvent?.options,
+      live.stateEvent?.interaction_id ?? [live.stateEvent?.question, live.stateEvent?.options],
     ]);
   };
   const optionCurrent = () => optionsMounted.current && optionScope.current === optionRequest && liveOptionKey() === optionKey;
@@ -254,19 +267,19 @@ export default function ChatScreen() {
   };
   // Cada ação copia o servidor da rota no toque: removido vira aviso, nunca cai no ativo.
   const destino = () => useServers.getState().servers.find((s) => s.id === serverId);
-  const handleSelectOption = async (n: number) => {
+  const handleSelectOption = async (n: number, interactionId: string | null | undefined, text?: string) => {
     if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    try { await selectOptionForServer(target, name, n); }
+    try { await selectOptionForServer(target, name, n, interactionId, text); }
     catch (e) { optionError(e); }
   };
   // Escolha múltipla: as marcadas já foram para o terminal, aqui só confirma.
-  const handleSubmitOptions = async () => {
+  const handleSubmitOptions = async (interactionId: string | null | undefined) => {
     if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    try { await submitSelectedForServer(target, name); }
+    try { await submitSelectedForServer(target, name, interactionId); }
     catch (e) { optionError(e); }
   };
   // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
@@ -363,13 +376,17 @@ export default function ChatScreen() {
   const planPending = stateEvent?.claude_plan_pending;
   const optionsSlot = showOptions || planPending || decidablePlan || aviso ? (
     <View style={styles.slot}>
-      {planPending ? <PendingPlan {...planPending} /> : null}
+      {planPending ? (
+        <PendingPlan key={planPending.tool_use_id ?? undefined} {...planPending}
+                     {...(showOptions ? { options: stateEvent!.options!, question: stateEvent!.question!, interactionId: stateEvent!.interaction_id,
+                                          onSelect: handleSelectOption, onCancel: handleCancelOptions } : {})} />
+      ) : null}
       {decidablePlan && !planPending ? (
         <PlanActions key={decidablePlan.id} plan={decidablePlan.plan} onImplement={implementPlan}
                      disabled={stateEvent?.state !== 'idle' || pending.length > 0} />
       ) : null}
-      {showOptions ? (
-        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
+      {showOptions && !planPending ? (
+        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} interactionId={stateEvent!.interaction_id} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
       ) : null}
       {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}
     </View>

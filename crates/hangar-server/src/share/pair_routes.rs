@@ -24,7 +24,7 @@ use super::ShareState;
 use crate::session_write::{detail, json_response};
 use crate::groups::peers::PeerError;
 use crate::groups::local::{JoinRefusal, external_link_refusal, is_remote};
-use crate::groups::routes::{ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, STORM_MAX, STORM_WINDOW, outside_addresses, providers, storm};
+use crate::groups::routes::{ORQ_ARBITER_CODE, ORQ_ARBITER_MSG, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, STORM_MAX, STORM_WINDOW, outside_addresses, providers, storm};
 use crate::groups::service::GroupError;
 use crate::groups::store::file_stem;
 use crate::routes::AppState;
@@ -237,6 +237,7 @@ async fn undo_local(app: &AppState, share: &ShareState, local: &str, address: &s
 fn link_refused(refusal: &JoinRefusal) -> Refusal {
     match refusal {
         JoinRefusal::OrqOutside => fail(StatusCode::CONFLICT, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, json!({})),
+        JoinRefusal::Orq => fail(StatusCode::CONFLICT, ORQ_ARBITER_CODE, ORQ_ARBITER_MSG, json!({})),
         _ => fail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
     }
 }

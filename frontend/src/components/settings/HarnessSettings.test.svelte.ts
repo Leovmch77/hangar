@@ -30,8 +30,8 @@ const harnesses = ['codex', 'claude'].map((id) => ({ id, nome: id, instalado: tr
 const config = (valor: boolean) => ({
   campos: { claude_statusline_update: { valor, definido: true, origem: 'app' } }, somente_leitura: {},
 });
-const opcoesCodex = (contexto = false, voz = false) => ({
-  contexto_estendido: contexto, codex_voice_beta: voz, contexto_configurado: contexto ? 1000000 : null,
+const opcoesCodex = (contexto = false) => ({
+  contexto_estendido: contexto, contexto_configurado: contexto ? 1000000 : null,
   compactacao: null, modelos: [{ model: 'gpt-6-astra', default: 272000, max: 872000 }],
 });
 let ler: (url: string, init?: RequestInit) => Promise<Response>;
@@ -338,7 +338,6 @@ describe('integração do Codex em Harnesses', () => {
 describe('opções dentro do card', () => {
   const claude = () => document.querySelector<HTMLInputElement>('#claude-statusline-update')!;
   const contexto = () => document.querySelector<HTMLInputElement>('#codex-contexto-estendido')!;
-  const voz = () => document.querySelector<HTMLInputElement>('#codex-voice-beta')!;
   const posts = (rota: string) => vi.mocked(fetch).mock.calls
     .filter(([url, init]) => String(url).endsWith(rota) && init?.method === 'POST');
 
@@ -439,10 +438,8 @@ describe('opções dentro do card', () => {
     expect(claude().checked).toBe(true);
   });
 
-  it('contexto estendido e voz beta gravam na hora pelo endpoint do Codex, avisando o chat', async () => {
+  it('contexto estendido grava na hora pelo endpoint do Codex; a voz não tem mais interruptor', async () => {
     let dado = opcoesCodex();
-    const mudou = vi.fn();
-    window.addEventListener('hangar:codex-voice-config', mudou);
     lerOpcoesCodex = async (init) => {
       if (init?.method === 'POST') dado = { ...dado, ...JSON.parse(String(init.body)) };
       return resposta(dado);
@@ -450,21 +447,12 @@ describe('opções dentro do card', () => {
     const { el } = await montar();
     expect(el.textContent).toContain(m.codex_contexto_novas());
     expect(el.textContent).toContain('gpt-6-astra');
-    expect(el.textContent).toContain(m.comum_beta());
+    expect(document.querySelector('#codex-voice-beta')).toBeNull();
     expect(contexto().checked).toBe(false);
 
     contexto().click(); await estabilizar();
-    expect(JSON.parse(String(posts(ROTA_CODEX)[0][1]?.body)))
-      .toEqual({ contexto_estendido: true, codex_voice_beta: false });
+    expect(JSON.parse(String(posts(ROTA_CODEX)[0][1]?.body))).toEqual({ contexto_estendido: true });
     expect(contexto().checked).toBe(true);
-
-    voz().click(); await estabilizar();
-    expect(JSON.parse(String(posts(ROTA_CODEX)[1][1]?.body)))
-      .toEqual({ contexto_estendido: true, codex_voice_beta: true });
-    expect(voz().checked).toBe(true);
-    expect(mudou).toHaveBeenCalledTimes(2);
-    expect((mudou.mock.calls[1][0] as CustomEvent).detail).toEqual({ serverId: B.id, enabled: true });
-    window.removeEventListener('hangar:codex-voice-config', mudou);
   });
 
   it('sem catálogo de modelos, diz isso em vez de uma lista vazia', async () => {
@@ -541,11 +529,10 @@ describe('opções dentro do card', () => {
     const { props } = await montar();
     contexto().click(); await estabilizar();
 
-    lerOpcoesCodex = async () => resposta(opcoesCodex(false, true));
+    lerOpcoesCodex = async () => resposta(opcoesCodex(false));
     props.apiTarget = A; await estabilizar();
     terminar(resposta(opcoesCodex(true))); await estabilizar();
     expect(contexto().checked).toBe(false);
-    expect(voz().checked).toBe(true);
   });
 
   // As três travas de gravação são soltas num `finally`. Sem `if (consulta === ctx)` ali, a resposta

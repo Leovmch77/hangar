@@ -4,13 +4,14 @@
 //   hangar-preview open <url>             abre o navegador desta sessão com a url (só no Electron
 //                                          o painel monta sozinho na tela do usuário)
 //   hangar-preview list                    navegadores vivos (chave, url, vivo/morto)
-//   hangar-preview snapshot                árvore de acessibilidade compacta, com refs @eN
+//   hangar-preview snapshot [--refs] [--max n]  árvore de acessibilidade compacta, com refs @eN
 //   hangar-preview click @eN               clica no elemento da ref
 //   hangar-preview fill @eN <texto>        limpa o campo da ref e digita o texto
 //   hangar-preview type <texto>            digita no elemento com foco
 //   hangar-preview press <tecla>           uma tecla (Enter, Tab, Escape, ...)
 //   hangar-preview hover @eN               passa o mouse sobre a ref
-//   hangar-preview wait <@eN|--url texto|--text texto|--idle|Nms>   espera algo acontecer
+//   hangar-preview wait <@eN|--url texto|--text texto|--idle|Nms> [--timeout ms]   espera algo acontecer
+//   hangar-preview goto <url> | back | reload    navega e espera carregar
 //   hangar-preview eval '<js>'             roda JS na página e imprime o resultado
 //   hangar-preview tema <claro|escuro|sistema>
 //   hangar-preview layout [mobile|desktop|<largura> <altura>]
@@ -18,7 +19,7 @@
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
 //   hangar-preview url                     URL atual do navegador desta sessão
-//   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<epoch ms>.png)
+//   hangar-preview shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
 //   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
 //   hangar-preview tab list                lista as abas (* = ativa)
 //   hangar-preview tab new <url>           abre outra aba com a url e torna ativa
@@ -26,6 +27,8 @@
 //   hangar-preview tab close [id]          fecha a aba (sem id, a ativa; a última fecha o navegador)
 //   hangar-preview <verbo> --aba <id>      age nessa aba SEM trocar a ativa (verbos de página)
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
+//   hangar-preview --cdp <url> [--alvo <trecho da url>] <verbo>   os mesmos verbos numa página FORA do app
+//                                          (CDP só em loopback, ex.: túnel até um WebView2); env HANGAR_PREVIEW_CDP
 //
 // A sessão é resolvida pela chave estável do sidecar no modo sem terminal e pelo tmux no modo com
 // terminal. Para operar o navegador de OUTRA sessão, use --sessao <nome>.
@@ -38,18 +41,23 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
 import jev from '../shell/jev_objetivo.cjs';
+import roteiro from '../shell/jev_roteiro.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
+const PRONTO_MS = 20_000;
+const PAUSADO = 'o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo';
+// Endereço do navegador da sessão, para a frase de reabertura quando o app cai no meio do comando.
+let urlAberta = '';
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close',
+  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close', 'goto', 'back', 'reload', 'login', 'dialog', 'estado',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -66,8 +74,25 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--aba') flags.aba = Number(args[++i]);
   else if (args[i] === '--dados') flags.dados = args[++i];
   else if (args[i] === '--passos') flags.passos = args[++i];
+  else if (args[i] === '--permitir-risco') flags.permitirRisco = true;
+  else if (args[i] === '--refazer') flags.refazer = true;
+  else if (args[i] === '--pasta') {
+    flags.pasta = args[++i];
+    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta e2e/roteiros');
+  }
+  else if (args[i] === '--cwd') flags.cwd = args[++i];
+  else if (args[i] === '--cdp' || args[i] === '--alvo') {
+    // Sem valor, o comando caía calado no navegador da sessão (ou em qualquer página de fora).
+    const flag = args[i];
+    const valor = args[++i];
+    if (!valor || valor.startsWith('--')) erro(`${flag} precisa de um valor: ${flag === '--cdp' ? '--cdp http://127.0.0.1:9222' : '--alvo /agenda'}`);
+    flags[flag.slice(2)] = valor;
+  }
   else pos.push(args[i]);
 }
+// Página de fora do app: quem conecta e confere o loopback é o app nativo; sessão e sidecar não entram.
+const externo = (flags.cdp ?? process.env.HANGAR_PREVIEW_CDP ?? '').trim();
+if (flags.alvo !== undefined && !externo) erro('--alvo só vale com --cdp <url>');
 if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
 const cmd = pos[0];
 if (!cmd || cmd === 'help' || cmd === '--help') {
@@ -77,13 +102,19 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
 
   open <url>              abre o navegador desta sessão com a url
   list                    navegadores vivos (chave, url, vivo/morto)
-  snapshot                árvore de acessibilidade compacta, com refs @eN
+  snapshot [--refs] [--max n]  árvore de acessibilidade com refs @eN e estados ([checked], [disabled]...);
+                          --refs só os acionáveis; corta em 24 mil caracteres com aviso (--max muda)
   click @eN               clica no elemento da ref
   fill @eN <texto>        limpa o campo da ref e digita o texto
   type <texto>            digita no elemento com foco
   press <tecla>           uma tecla (Enter, Tab, Escape, ...)
   hover @eN               passa o mouse sobre a ref
   wait <alvo>             @eN | --url <trecho> | --text <trecho> | --idle | <ms>
+                          (--text ignora maiúsculas; --timeout <ms> troca o teto de 15 s, até 40 s)
+  goto <url>              navega e só volta com a página carregada
+  back                    volta uma página no histórico
+  reload                  recarrega a página
+  dialog accept [texto] | dialog dismiss   responde o alert/confirm/prompt que a página abriu
   eval '<js>'             roda JS na página (expressão ou declarações) e imprime o resultado
   tema <claro|escuro|sistema>
   layout [mobile|desktop|<largura> <altura>]
@@ -92,7 +123,7 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
-  shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<epoch ms>.png)
+  shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
   folha                   junta numa grade (6 por folha) os shots sem nome desde a última folha
   abas (só no Electron; o app nativo tem um navegador por sessão e recusa tab e --aba):
   tab list                lista as abas (* = ativa)
@@ -105,10 +136,20 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   objetivo e confere precisam do Jev ligado na sessão (hangar-send --new ... --jev):
   objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
     --passos <n>          teto de passos (default 15)
+    --refazer             ignora o roteiro gravado do mesmo objetivo (o Jev decide tudo e regrava)
+    --pasta <dir>         onde ficam os roteiros (padrão: e2e/roteiros na raiz do git do cwd, lendo
+                          .hangar/roteiros antigo como reserva; fora de repo, ~/.cache/hangar/roteiros)
+    --permitir-risco      libera, so nesta chamada, o clique que exclui, compra, envia ou publica
+                          (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
                           um com o rótulo da página. Campo não coberto cai no LLM pequeno
-                          (JEV_TEXTO_BASE_URL/_API_KEY/_MODELO, ou JEV_TEXTO_CMD)
+                          (modelo auxiliar do Jev: JEV_AUX_BASE_URL/_API_KEY/_MODELO/_ESFORCO,
+                          ou JEV_TEXTO_CMD)
   confere <estado>        o Jev diz se a tela já mostra o estado (sai 0 = sim); use antes do shot
+  --cdp <url>             os verbos de página (e objetivo/confere) numa página FORA do app, pelo CDP dela;
+                          só loopback (ex.: http://127.0.0.1:9222 de um túnel). Env HANGAR_PREVIEW_CDP.
+                          Precisa do app desktop aberto nesta máquina; open não vale (use goto)
+  --alvo <trecho>         com --cdp, escolhe a página pela URL quando há mais de uma
   JEV_ENDPOINT / JEV_MODEL  onde e com qual modelo o Jev decide (configuração do servidor; vazio = typesafe.ai)
 
 Referência completa: skill hangar-preview.`);
@@ -167,8 +208,9 @@ function nomeSessao() {
   return null;
 }
 
+// A mesma pasta da tool `browser` do MCP: um lugar só de prints por sessão, que o app do celular serve.
 function pastaShots() {
-  return join(tmpdir(), `hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}`);
+  return join(DIR, 'shots', (nomeSessao() || 'nav').replace(/[^\p{L}\p{N}_]+/gu, '-'));
 }
 
 function lerSidecars() {
@@ -194,10 +236,13 @@ function sidecarDa(nome) {
   if (!todos.length) erro('nenhum navegador aberto em nenhuma sessão (abra o seu com: hangar-preview open <url>)');
   if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   const achados = todos.filter((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
-  if (achados.length === 1) return achados[0];
-  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto. Vivos:\n` + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
+  if (achados.length === 1) { urlAberta = achados[0].url; return achados[0]; }
+  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto (abra com: hangar-preview open <url>). Vivos:\n` + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   erro(`"${nome}" existe em mais de um servidor — use a chave completa:\n` + achados.map((s) => `  ${s.chave}`).join('\n'));
 }
+
+// Com --cdp não há chave: a página é escolhida pelo endereço e pelo --alvo.
+const chaveAlvo = () => (externo ? null : sidecarDa(nomeSessao()).chave);
 
 // --- CDP mínimo, só pro liveness check do `list` ---
 async function targets() {
@@ -209,7 +254,9 @@ async function targets() {
 }
 
 // --- cliente do servidor local (Task 5) ---
-const MSG_SHELL_FORA = 'o shell do hangar nao esta no ar (ou e uma versao antiga): abra o app e tente de novo';
+const MSG_SHELL_FORA = externo
+  ? 'erro: --cdp roda dentro do app desktop do Hangar, e ele nao esta aberto nesta maquina (ou esta reiniciando): abra o app e repita'
+  : 'o app desktop do Hangar nao esta aberto nesta maquina (ou esta reiniciando, como na atualizacao): espere ele voltar e reabra o navegador com: hangar-preview open <url>';
 
 // A porta de loopback do sidecar pode ter sido RECICLADA por outro processo depois que o app
 // fechou (o _srv.json não é apagado na saída — só no will-quit do main.cjs, e sinal/crash ainda
@@ -221,26 +268,38 @@ function pidVivo(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err && err.code === 'EPERM'; }
 }
 
-function srv() {
+function srv(sair = erro) {
   let dados;
   try {
     dados = JSON.parse(readFileSync(join(DIR, '_srv.json'), 'utf8'));
   } catch {
-    erro(MSG_SHELL_FORA);
+    return sair(MSG_SHELL_FORA);
   }
-  if (!pidVivo(dados.pid)) erro(MSG_SHELL_FORA);
+  if (!pidVivo(dados.pid)) return sair(MSG_SHELL_FORA);
   return dados;
 }
 
+// Para quem não pode encerrar o processo (as leituras depois do laço): a falha vira exceção.
+const lancar = (msg) => { throw new Error(msg); };
+
 // `aba` explícito (o batch manda por linha) vence o flag global.
-async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
-  const { porta, token } = srv();
-  const r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
-  });
-  const texto = await r.text();
+async function chamar(chave, verbo, cmdArgs, aba = flags.aba, sair = erro) {
+  const { porta, token } = srv(sair);
+  let r, texto;
+  try {
+    r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      // O token vai só ao app local; o CDP de fora quem abre é o app, sem credencial.
+      body: JSON.stringify({ ...(externo ? { cdp: externo, alvo: flags.alvo } : { chave }), verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
+    });
+    texto = await r.text();
+  } catch (err) {
+    // App fechado ou reiniciado (a atualização reinicia) no meio do comando: frase, não a pilha do Node.
+    if (externo) return sair(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e repita`);
+    const reabrir = urlAberta ? `hangar-preview open '${semToken(urlAberta)}'` : 'hangar-preview open <url>';
+    return sair(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
+  }
   // O servidor local responde SEMPRE 200 (é o texto que carrega erro: ...) — r.ok não basta.
   return { texto, codigo: r.ok && !texto.startsWith('erro:') ? 0 : 1 };
 }
@@ -257,6 +316,7 @@ if (cmd === 'open') {
   // (quem posiciona o view é o painel; não existe view invisível). Token do backend/.env ao lado
   // do script, mesmo padrão do hangar-send.
   const url = pos[1];
+  if (externo) erro('open nao vale com --cdp: a pagina ja esta aberta no app de fora; navegue com goto <url>');
   if (!url) erro('open precisa de uma url: hangar-preview open localhost:3000');
   const nome = nomeSessao();
   if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>');
@@ -266,6 +326,9 @@ if (cmd === 'open') {
     token = readFileSync(join(repo, 'backend', '.env'), 'utf8').match(/^CP_AUTH_TOKEN=(.+)$/m)?.[1]?.trim() ?? '';
   } catch { /* sem .env */ }
   if (!token) erro('não achei CP_AUTH_TOKEN no backend/.env do repo');
+  const desde = Date.now();
+  const doNome = (s) => s.chave === nome || s.chave.endsWith(`::${nome}`);
+  const antes = lerSidecars().find(doNome)?.url ?? null;
   const res = await fetch(`http://127.0.0.1:${process.env.PORT || 8765}/api/sessions/${encodeURIComponent(nome)}/nav`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -273,8 +336,39 @@ if (cmd === 'open') {
   });
   if (res.status === 404) erro(`a sessão "${nome}" não existe no backend`);
   if (!res.ok) erro(`o backend recusou: ${res.status} ${await res.text()}`);
-  console.log(`navegador de "${nome}" abrindo com ${semToken(url)} (com o app desktop aberto ele nasce em segundos, mesmo com a sessão fora da tela; o painel aparece quando o usuário abrir ela)`);
-  process.exit(0);
+  // Volta só com o navegador pronto: o verbo seguinte ao `open` falhava com "nenhum navegador aberto".
+  // Pronto = sidecar regravado depois do pedido (o app grava a cada navegação) e `url` respondendo.
+  const prazo = desde + PRONTO_MS;
+  // Já na página pedida: não havia navegador, o endereço mudou, ou a pedida é a mesma de antes. Sem isto, um
+  // evento da página anterior (título de SPA) regravando o sidecar fazia o `open` voltar com a URL antiga.
+  const pedida = url.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const navegou = (atual) => antes === null || atual !== antes || (pedida !== '' && antes.includes(pedida));
+  let ultimo = '';
+  let pausaConferida = false;
+  while (Date.now() < prazo) {
+    const sc = lerSidecars().find(doNome);
+    // Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo. Uma pergunta basta.
+    if (sc && !pausaConferida) {
+      pausaConferida = true;
+      if ((await chamar(sc.chave, 'estado', [])).texto.trim() === 'pausado') erro(PAUSADO);
+    }
+    if (sc && (sc.ts ?? 0) >= desde && navegou(sc.url)) {
+      try {
+        const { texto, codigo } = await chamar(sc.chave, 'url', []);
+        if (codigo === 0) {
+          let pronta = texto.replace(/^ok: /, '');
+          try { pronta = JSON.parse(pronta); } catch { /* já é texto cru */ }
+          console.log(`ok: navegador de "${nome}" pronto em ${semToken(pronta)} (o painel só aparece na tela do usuário quando ele abrir esta sessão)`);
+          process.exit(0);
+        }
+        ultimo = texto;
+      } catch (err) {
+        ultimo = err.message;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  erro(`o navegador de "${nome}" nao ficou pronto em ${PRONTO_MS / 1000}s${ultimo ? ` (${semToken(ultimo)})` : ''}. O app desktop está aberto nesta máquina? Veja com: hangar-preview list`);
 }
 
 if (cmd === 'list') {
@@ -285,21 +379,21 @@ if (cmd === 'list') {
     const vivo = s.pid ? pidVivo(s.pid) : vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
     // Sidecar de shell antigo não tem `abas`: vale como uma aba só, e a saída fica idêntica à de hoje.
     const sufixo = Array.isArray(s.abas) && s.abas.length > 1 ? `  (aba ${s.ativa} de ${s.abas.length})` : '';
-    return `${s.chave}  ${semToken(s.url)}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;
+    return `${s.chave}  ${semToken(s.url)}  ${vivo ? 'vivo' : `MORTO (reabra com: hangar-preview open ${semToken(s.url)})`}${sufixo}`;
   });
   console.log(linhas.length ? linhas.join('\n') : 'nenhum navegador registrado');
   process.exit(0);
 }
 
 if (cmd === 'tab') {
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const { verbo, args: cmdArgs } = fmt.verboDeTab(pos.slice(1));
   process.exit(await comando(chave, verbo, cmdArgs));
 }
 
 if (VERBOS_SERVIDOR.has(cmd)) {
   if (cmd === 'eval' && !pos[1]) erro('eval precisa de um trecho JS: hangar-preview eval \'document.title\'');
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const cmdArgs = pos.slice(1);
   // Sempre absoluto, resolvido contra o cwd do CLI (é o cwd que o agente conhece) — um caminho
   // relativo mandado cru pro shell grava no cwd de onde o ELECTRON subiu, não no do agente, e a
@@ -332,7 +426,7 @@ if (cmd === 'folha') {
 }
 
 if (cmd === 'batch') {
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   const linhas = readFileSync(0, 'utf8'); // stdin inteiro
   const comandos = fmt.parseLote(linhas);
   // Para na PRIMEIRA linha que falhar: seguir depois de um `click` que não achou o alvo faz o
@@ -370,25 +464,62 @@ function semJev() {
 }
 
 // O LLM pequeno que escreve o valor de um campo no `objetivo` — o único ponto do laço em que um
-// modelo de linguagem entra. Endpoint compatível com a OpenAI se JEV_TEXTO_BASE_URL estiver posta;
+// modelo de linguagem entra. Endpoint compatível com a OpenAI se o auxiliar tiver endereço;
 // senão, um comando local que lê o pedido como argumento e imprime só o valor.
 const TEXTO_CMD_PADRAO = 'claude -p --model claude-haiku-4-5-20251001';
 
-function escritorDeTexto() {
-  if (process.env.JEV_TEXTO_BASE_URL && process.env.JEV_TEXTO_API_KEY) {
-    const base = process.env.JEV_TEXTO_BASE_URL.replace(/\/$/, '');
-    const modelo = process.env.JEV_TEXTO_MODELO || 'gpt-4o-mini';
-    return async (pedido) => {
-      const r = await fetch(`${base}/chat/completions`, {
+// Lido igual aqui e na checagem de `problemaDoEscritor`: valor com espaço passava numa e quebrava na outra.
+// O auxiliar da sessão chega em JEV_AUX_*; JEV_TEXTO_* posto no ambiente, mesmo vazio, é ordem de quem
+// chamou (desligar o escritor num teste) e vence.
+const DO_AUX = { JEV_TEXTO_BASE_URL: 'JEV_AUX_BASE_URL', JEV_TEXTO_API_KEY: 'JEV_AUX_API_KEY', JEV_TEXTO_MODELO: 'JEV_AUX_MODELO' };
+const envTexto = (env, k) => String((k in DO_AUX && !(k in env) ? env[DO_AUX[k]] : env[k]) ?? '').trim();
+
+/** Um pedido ao endpoint compatível com a OpenAI; falha vira exceção com a chave mascarada. */
+function chatCompletions({ base, chave, modelo, esforco, quem, maxTokens = 600 }) {
+  // Sem `temperature`: modelos novos (Haiku 5.5 na Anthropic) recusam o pedido inteiro com ele.
+  return async (pedido) => {
+    let r;
+    let corpo;
+    try {
+      r = await fetch(`${base}/chat/completions`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${process.env.JEV_TEXTO_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120, temperature: 0 }),
+        headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: maxTokens,
+          ...(esforco ? { reasoning_effort: esforco } : {}) }),
+        signal: AbortSignal.timeout(60_000),
       });
-      if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
-      return (await r.json()).choices?.[0]?.message?.content ?? '';
+      corpo = await r.text();
+    } catch (err) {
+      throw new Error(err?.name === 'TimeoutError' ? `${quem} não respondeu em 60 s`
+        : `${quem} falhou: ${jev.semChave(String(err?.message), chave).slice(0, 200)}`);
+    }
+    if (!r.ok) throw new Error(`${quem} recusou: ${r.status} ${jev.semChave(corpo, chave).slice(0, 200)}`);
+    try {
+      return JSON.parse(corpo).choices?.[0]?.message?.content ?? '';
+    } catch (err) {
+      throw new Error(`${quem} falhou: ${jev.semChave(String(err?.message), chave).slice(0, 200)}`);
+    }
+  };
+}
+
+function escritorDeTexto(env = process.env) {
+  if (envTexto(env, 'JEV_TEXTO_BASE_URL') && envTexto(env, 'JEV_TEXTO_API_KEY')) {
+    const pedir = chatCompletions({
+      base: envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, ''),
+      chave: envTexto(env, 'JEV_TEXTO_API_KEY'),
+      modelo: envTexto(env, 'JEV_TEXTO_MODELO') || 'gpt-4o-mini',
+      esforco: envTexto(env, 'JEV_AUX_ESFORCO'),
+      quem: 'o modelo de texto',
+    });
+    return async (pedido) => {
+      try {
+        return await pedir(pedido);
+      } catch (err) {
+        erro(err.message);
+      }
     };
   }
-  const cmd = (process.env.JEV_TEXTO_CMD || TEXTO_CMD_PADRAO).split(' ');
+  const cmd = (envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO).split(/\s+/);
   return async (pedido) => {
     try {
       return execFileSync(cmd[0], [...cmd.slice(1), pedido], { encoding: 'utf8', timeout: 60_000 });
@@ -398,23 +529,85 @@ function escritorDeTexto() {
   };
 }
 
+function executavel(nome) {
+  if (!nome) return false;
+  // No Windows o execFileSync só roda .exe/.com: um .cmd passaria aqui e falharia no primeiro campo.
+  const exts = process.platform !== 'win32' || /\.(exe|com)$/i.test(nome) ? [''] : ['.exe', '.com'];
+  const dirs = /[\\/]/.test(nome) ? [''] : (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  return dirs.some((d) => exts.some((x) => {
+    try {
+      const p = d ? join(d, nome + x) : nome + x;
+      accessSync(p, constants.X_OK);
+      return statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  }));
+}
+
+/**
+ * Configuração do escritor que não tem como funcionar, dita pelo nome do campo de Configurações do
+ * servidor. Sem isto o erro só aparecia no primeiro campo a digitar, como ENOENT do valor do campo.
+ */
+function problemaDoEscritor(env = process.env) {
+  const base = envTexto(env, 'JEV_TEXTO_BASE_URL');
+  const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
+  const problemas = [];
+  if (base) {
+    if (base === String(env.JEV_ENDPOINT ?? '').trim() || /\/decisions\/?$|systemone/.test(base)) {
+      problemas.push(`jev_aux_base_url ("${base}") e o endereco de decisoes do Jev; ali vai um endpoint`
+        + ' compativel com a OpenAI, como https://openrouter.ai/api/v1');
+    } else if (!chave) {
+      problemas.push(`jev_aux_base_url esta preenchido e jev_aux_api_key esta vazio: preencha a chave do modelo auxiliar`);
+    } else {
+      return null;
+    }
+  }
+  const comando = envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO;
+  if (!executavel(comando.split(/\s+/)[0])) {
+    problemas.push(`jev_texto_cmd ("${comando}", chave do runtime-config sem campo na tela) nao e um comando instalado; ali vai um comando que`
+      + ` recebe o pedido como argumento e imprime so o valor, como "${TEXTO_CMD_PADRAO}"`);
+  }
+  return problemas.length ? problemas.join('; ') : null;
+}
+
+/**
+ * Quem escolhe o passo quando o Jev fica sem alvo: só o modelo auxiliar configurado, nunca um
+ * modelo fixo no código. Falta de endereço, chave ou modelo devolve o aviso no lugar do callback.
+ */
+function auxiliarDoObjetivo(env = process.env) {
+  const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
+  const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
+  const modelo = envTexto(env, 'JEV_TEXTO_MODELO');
+  if (!base || !chave || !modelo) {
+    return { aviso: 'o objetivo segue sem desempate pelo modelo auxiliar: jev_aux_base_url, jev_aux_api_key e jev_aux_modelo nao estao todos configurados' };
+  }
+  // Endereço do Jev no lugar do auxiliar: o aviso do escritor já diz o que corrigir.
+  if (problemaDoEscritor(env)) return {};
+  // Com raciocínio ligado, 600 tokens acabavam antes da resposta e o JSON vinha vazio.
+  return { ajudar: chatCompletions({ base, chave, modelo, esforco: envTexto(env, 'JEV_AUX_ESFORCO'), quem: 'o modelo auxiliar', maxTokens: 4000 }) };
+}
+
 if (cmd === 'confere') {
   const estado = pos.slice(1).join(' ').trim();
   if (!estado) erro('confere precisa do estado: hangar-preview confere "o dialogo fechou e a lista mostra o item novo"');
   const chaveJev = process.env.TYPESAFE_API_KEY;
   if (!chaveJev) erro(semJev(), 2);
-  const chave = sidecarDa(nomeSessao()).chave;
-  const snap = await chamar(chave, 'snapshot', []);
+  const chave = chaveAlvo();
+  // O corte daqui (cabeça e cauda) é o que vale: o teto do snapshot só corta a cauda, onde a prova
+  // pode estar, então ele recebe a página inteira.
+  const snap = await chamar(chave, 'snapshot', ['--max', '1000000']);
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
   if (snap.codigo !== 0) erro(`o snapshot falhou: ${semToken(snap.texto.slice(0, 200))}`, 2);
   // A árvore vai ao Jev, fora da máquina: sem o token da URL.
-  let arvore = semToken(snap.texto);
+  // value= de campo com nome de segredo ("Chave de API", "PIN") não vai ao Jev.
+  let arvore = jev.mascararValores(semToken(snap.texto));
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
-  const { url, modelo } = jev.destinoDoJev(process.env, 'jev-1.13.0');
+  const { url, modelo } = jev.destinoDoJev(process.env);
   try {
     respostas = await jev.askJev({ url, modelo, chave: chaveJev, estado: arvore, perguntas: jev.perguntaDeConfere(estado) });
   } catch (err) {
@@ -430,7 +623,7 @@ if (cmd === 'objetivo') {
   if (!objetivo) erro('objetivo precisa do texto: hangar-preview objetivo "faz login e abre a agenda"');
   const chaveJev = process.env.TYPESAFE_API_KEY;
   if (!chaveJev) erro(semJev());
-  const chave = sidecarDa(nomeSessao()).chave;
+  const chave = chaveAlvo();
   let dados;
   try {
     dados = flags.dados ? JSON.parse(flags.dados) : undefined;
@@ -438,16 +631,30 @@ if (cmd === 'objetivo') {
     erro('--dados precisa ser um JSON de objeto: --dados \'{"nome":"Jefferson","plano":"Unimed"}\'');
   }
 
-  const resultado = await jev.rodar({
+  // Configuração quebrada não impede o laço: clicar e preencher por --dados seguem funcionando, e o
+  // campo que precisaria do escritor para com falta-dado.
+  const problema = problemaDoEscritor();
+  if (problema) console.error(`hangar-preview: aviso: modelo de texto inutilizavel: ${problema}`);
+  const { ajudar, aviso } = auxiliarDoObjetivo();
+  if (aviso) console.error(`hangar-preview: aviso: ${aviso}`);
+  const inicio = Date.now();
+  const resultado = await roteiro.rodarComRoteiro({
     objetivo,
     dados,
+    refazer: flags.refazer === true,
+    // O MCP roda este script no cwd do backend: ele manda o da sessão em --cwd.
+    // --pasta relativa é relativa ao cwd da sessão, não ao do backend.
+    pasta: flags.pasta ? resolve(flags.cwd || process.cwd(), flags.pasta) : roteiro.pastaDe(flags.cwd || process.cwd()),
+    reserva: flags.pasta ? null : roteiro.reservaDe(flags.cwd || process.cwd()),
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
-    escreverTexto: escritorDeTexto(),
+    permitirRisco: flags.permitirRisco === true,
+    escreverTexto: problema ? undefined : escritorDeTexto(),
+    ajudar,
     log: (linha) => console.log(semToken(linha)),
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     perguntar: async (estado, perguntas) => {
-      const { url, modelo } = jev.destinoDoJev(process.env, 'jev-latest');
+      const { url, modelo } = jev.destinoDoJev(process.env);
       try {
         return await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
       } catch (err) {
@@ -456,10 +663,29 @@ if (cmd === 'objetivo') {
     },
   });
   console.log(`\nparou: ${resultado.parou}`);
+  if (resultado.roteiro) console.log(`roteiro: ${resultado.roteiro}`);
+  console.log(`jev: acoes=${resultado.jev.acoes} verificacao=${resultado.jev.verificacao} tempo=${((Date.now() - inicio) / 1000).toFixed(1)}s`);
+  // Onde a página ficou, para quem chamou não precisar de um `url` e um `text` a mais. Falha aqui
+  // vira rótulo, nunca o código de saída: quem decide é `resultado.sucesso`.
+  const leitura = async (verbo) => {
+    try {
+      const { texto, codigo } = await chamar(chave, verbo, [], flags.aba, lancar);
+      if (codigo !== 0) return `indisponivel (${semToken(texto.slice(0, 120))})`;
+      const t = texto.replace(/^ok:\s*/, '').trim();
+      // Só a url vem como literal JSON; o texto da página pode começar com aspas de verdade.
+      return semToken(verbo === 'url' && t.startsWith('"') ? JSON.parse(t) : t);
+    } catch (err) {
+      return `indisponivel (${String(err?.message).slice(0, 120)})`;
+    }
+  };
   // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
-  // frase acima. A página fica onde parou, então a segunda chamada continua dali.
+  // frase acima. A página fica onde parou, então a segunda chamada continua dali. Sai antes das
+  // leituras finais: se o app cair nelas, o resultado do laço já foi dito.
   if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
   console.log(resultado.feito.length ? `acoes: ${resultado.feito.length}` : 'nenhuma acao executada');
+  console.log(`url: ${await leitura('url')}`);
+  const textoFinal = (await leitura('text')).replace(/\s+/g, ' ').trim();
+  console.log(`texto: ${textoFinal.length > 300 ? `${textoFinal.slice(0, 300)}…` : textoFinal}`);
   // Código de saída é o que um script encadeando este comando lê. Sair 0 numa parada por teto de
   // passos ou por alvo sem confiança faria a automação seguir como se tivesse dado certo. O campo
   // `sucesso` vem do laço de propósito: amarrar isto ao texto de `parou` quebraria calado na
@@ -467,4 +693,4 @@ if (cmd === 'objetivo') {
   process.exit(resultado.sucesso ? 0 : 1);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|goto|back|reload|dialog|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);

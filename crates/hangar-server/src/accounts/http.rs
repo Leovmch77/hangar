@@ -42,7 +42,7 @@ pub(crate) fn journal_scope(path: &str) -> String {
 pub fn matches(method: &Method, path: &str) -> bool {
     if *method == Method::POST && path.strip_prefix("/api/codex-contas/")
         .and_then(|tail|tail.strip_suffix("/rate-limit-reset")).is_some_and(|id|!id.is_empty() && !id.contains('/')) {return true;}
-    if *method == Method::GET && matches!(path, "/api/cotas" | "/api/cotas/sugestao") { return true; }
+    if *method == Method::GET && matches!(path, "/api/cotas" | "/api/cotas/sugestao" | "/api/credenciais") { return true; }
     if device_matches(method, path) { return true; }
     if matches!(*method,Method::GET|Method::POST|Method::DELETE) && path.strip_prefix("/api/codex-contas/")
         .and_then(|tail|tail.strip_suffix("/login")).is_some_and(|id|!id.is_empty() && !id.contains('/')) {return true;}
@@ -95,6 +95,9 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     }
     if matches!(path.as_str(), "/api/cotas" | "/api/cotas/sugestao") {
         return super::quotas::public(state, request).await;
+    }
+    if method == Method::GET && path == "/api/credenciais" {
+        return super::credentials::public(state, request).await;
     }
     if device_matches(&method, &path) {
         let query: std::collections::HashMap<String,String> = form_urlencoded::parse(
@@ -487,7 +490,7 @@ pub async fn private(
             } else {
                 state.accounts.read_codex_auth(&account).await
             };
-            return Json(value).into_response();
+            return Json(super::native::without_busy(value)).into_response();
         }
         return codex_operation(&state,&body.action,&body.account_id,body.attempt_id.as_deref().unwrap_or("")).await;
     }

@@ -134,7 +134,9 @@ struct Cache {
 type CacheSlot = Arc<Mutex<Option<Cache>>>;
 static CACHE: LazyLock<Mutex<HashMap<(PathBuf, bool), CacheSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-fn fingerprint(cwd: &Path) -> Option<Vec<u128>> {
+/// Versão de HEAD, índice e refs da branch (local e remotas), por mtime: muda com commit, push,
+/// fetch e `git add`, não com edição de arquivo. `cwd` já resolvido (`real`).
+pub fn fingerprint(cwd: &Path) -> Option<Vec<u128>> {
     let mut dot = cwd.join(".git");
     if dot.is_file() {
         dot = cwd.join(
@@ -294,8 +296,25 @@ pub fn branches(cwd: &Path) -> Result<Value> {
     let cur = command(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let st = command(cwd, &["status", "--porcelain"])?;
     Ok(
-        json!({"current":if cur.code==0 {Some(cur.stdout.trim())} else {None},"branches":local,"remotes":remote,"dirty":st.code==0&&!st.stdout.trim().is_empty()}),
+        json!({"current":if cur.code==0 {Some(cur.stdout.trim())} else {None},"branches":local,"remotes":remote,"dirty":st.code==0&&!st.stdout.trim().is_empty(),"elsewhere":elsewhere(cwd)?}),
     )
+}
+/// Branches abertas em outra worktree do repositório (`main`: a pasta principal): o `switch` para elas é recusado pelo git.
+fn elsewhere(cwd: &Path) -> Result<serde_json::Map<String, Value>> {
+    let top = command(cwd, &["rev-parse", "--show-toplevel"])?;
+    let here = real(Path::new(top.stdout.trim()));
+    let out = command(cwd, &["worktree", "list", "--porcelain"])?;
+    let mut found = serde_json::Map::new();
+    for (n, block) in out.stdout.split("\n\n").enumerate() {
+        let path = block.lines().find_map(|l| l.strip_prefix("worktree "));
+        let branch = block.lines().find_map(|l| l.strip_prefix("branch refs/heads/"));
+        if let (Some(path), Some(branch)) = (path, branch)
+            && real(Path::new(path)) != here
+        {
+            found.insert(branch.to_owned(), json!({"path": path, "main": n == 0}));
+        }
+    }
+    Ok(found)
 }
 /// `switch` não aceita `--` antes da branch, e um remoto pode anunciar `origin/--detach`.
 fn option_like(branch: &str) -> Result<()> {

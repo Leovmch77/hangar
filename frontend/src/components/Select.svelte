@@ -34,11 +34,19 @@
     values?: string[];
     onchangeMulti?: (v: string[]) => void;
     rotuloMulti?: (v: string[]) => string;
+    // Texto livre: o gatilho é um campo de texto, digitar muda o valor (vale um que não está na
+    // lista) e filtra a lista por trecho. `aoAbrir` deixa quem chama carregar as opções só agora;
+    // `aviso` toma o lugar dos itens (buscando, erro, lista vazia); `vazio` é o "nada com esse nome".
+    livre?: boolean;
+    aoAbrir?: () => void;
+    aviso?: string | null;
+    vazio?: string;
   }
   let {
     value, opcoes, onchange, ariaLabel = undefined, disabled = false,
     filtroAcimaDe = 8, id = undefined, class: klass = '',
     values = undefined, onchangeMulti = undefined, rotuloMulti = undefined,
+    livre = false, aoAbrir = undefined, aviso = null, vazio = undefined,
   }: Props = $props();
   const multi = $derived(values !== undefined && onchangeMulti !== undefined);
   const marcado = (v: string) => (multi ? (v === '' ? (values ?? []).length === 0 : (values ?? []).includes(v)) : v === value);
@@ -46,7 +54,7 @@
   let aberto = $state(false);
   let filtro = $state('');
   let ativo = $state(0);            // índice destacado (teclado)
-  let botao = $state<HTMLButtonElement | null>(null);
+  let botao = $state<HTMLElement | null>(null);
   let listaEl = $state<HTMLElement | null>(null);
   let campoFiltro = $state<HTMLInputElement | null>(null);
   let pos = $state<{ top: number | null; bottom: number | null; left: number; width: number; maxH: number }>(
@@ -60,7 +68,7 @@
   const rotuloAtual = $derived(multi && rotuloMulti
     ? rotuloMulti(values ?? [])
     : (opcoes.find((o) => o.value === value)?.label ?? value ?? ''));
-  const comFiltro = $derived(opcoes.length > filtroAcimaDe);
+  const comFiltro = $derived(!livre && opcoes.length > filtroAcimaDe);
   const visiveis = $derived(
     filtro.trim()
       ? opcoes.filter((o) => [o.label, o.value, o.hint, o.title].join(' ').toLowerCase().includes(filtro.trim().toLowerCase()))
@@ -103,12 +111,14 @@
     };
   }
 
-  async function abrir() {
+  async function abrir(limpar = true) {
     if (disabled) return;
-    filtro = '';
-    ativo = Math.max(0, opcoes.findIndex((o) => o.value === value));
+    if (limpar) filtro = '';
+    // Livre com texto digitado: nada destacado, para o Enter manter o texto em vez de trocar pelo 1º.
+    ativo = filtro ? (livre ? -1 : 0) : Math.max(0, opcoes.findIndex((o) => o.value === value));
     medir();
     aberto = true;
+    aoAbrir?.();
     await tick();
     if (!aberto) return;
     if (comFiltro) campoFiltro?.focus();
@@ -120,6 +130,11 @@
     botao?.focus();
   }
 
+  // Livre não tem o fundo que fecha no clique (ele cobriria o próprio campo): fecha quando o foco sai.
+  function saiu() {
+    if (livre) aberto = false;
+  }
+
   function escolher(v: string) {
     if (multi && onchangeMulti) {
       const atual = values ?? [];
@@ -127,12 +142,14 @@
       return; // fica aberto: marcar várias é o ponto
     }
     onchange(v);
+    filtro = '';
     fechar();
   }
 
   function teclado(e: KeyboardEvent) {
     if (!aberto) {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') { e.preventDefault(); abrir(); }
+      // No campo livre Espaço e Enter são do texto: só a seta abre.
+      if (e.key === 'ArrowDown' || (!livre && (e.key === 'Enter' || e.key === ' '))) { e.preventDefault(); abrir(); }
       return;
     }
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); fechar(); return; }
@@ -143,14 +160,16 @@
     if (e.key === 'Tab') { fechar(); return; } // O Tab nativo continua a partir do gatilho, não do portal.
     if (e.key === 'Enter') {
       e.preventDefault();
-      const o = visiveis[ativo];
+      const o = aviso || ativo < 0 ? undefined : visiveis[ativo];
       if (o) escolher(o.value);
+      else if (livre) fechar();
       return;
     }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (!visiveis.length) return;
-      ativo = (ativo + (e.key === 'ArrowDown' ? 1 : -1) + visiveis.length) % visiveis.length;
+      ativo = ativo < 0 ? (e.key === 'ArrowDown' ? 0 : visiveis.length - 1)
+        : (ativo + (e.key === 'ArrowDown' ? 1 : -1) + visiveis.length) % visiveis.length;
       requestAnimationFrame(() =>
         listaEl?.querySelector<HTMLElement>('[data-ativo="true"]')?.scrollIntoView({ block: 'nearest' }));
     }
@@ -174,6 +193,30 @@
   });
 </script>
 
+{#if livre}
+  <input
+    bind:this={botao}
+    {id}
+    type="text"
+    class="sel-campo sel-livre {klass}"
+    class:aberto
+    {disabled}
+    autocomplete="off"
+    autocapitalize="off"
+    spellcheck={false}
+    aria-label={ariaLabel}
+    role="combobox"
+    aria-autocomplete="list"
+    aria-controls={idLista}
+    aria-expanded={aberto}
+    aria-activedescendant={aberto && !aviso && ativo >= 0 && visiveis.length ? `${idLista}-${ativo}` : undefined}
+    {value}
+    oninput={(e) => { onchange(e.currentTarget.value); filtro = e.currentTarget.value; ativo = -1; if (!aberto) void abrir(false); }}
+    onclick={() => { if (!aberto) void abrir(); }}
+    onblur={saiu}
+    onkeydown={teclado}
+  />
+{:else}
 <button
   bind:this={botao}
   {id}
@@ -193,14 +236,20 @@
   <span class="sel-valor">{rotuloAtual}</span>
   <span class="sel-seta" aria-hidden="true">▾</span>
 </button>
+{/if}
 
 {#if aberto}
   <!-- Backdrop transparente: fecha ao clicar fora sem precisar de listener global no document, que
        nas outras telas já brigou com o click-fantasma do iOS (ver BottomSheet). -->
-  <div class="sel-fora" use:portal onclick={fechar} role="presentation"></div>
+  <!-- Sempre no DOM, mesmo no livre (escondido): um bloco a mais em volta de um nó levado pro <body>
+       desmontava fora de ordem e apagava o que vinha depois na tela de quem usa o Select. -->
+  <div class="sel-fora" class:sel-fora-livre={livre} use:portal onclick={fechar} role="presentation"></div>
+  <!-- Livre: clicar na lista não tira o foco do campo (senão o blur fecharia antes do clique). -->
   <div
     class="sel-lista"
     use:portal
+    onmousedown={livre ? (e) => e.preventDefault() : undefined}
+    role={livre ? 'presentation' : undefined}
     style="top:{pos.top === null ? 'auto' : `${pos.top}px`}; bottom:{pos.bottom === null ? 'auto' : `${pos.bottom}px`}; left:{pos.left}px; width:{pos.width}px; max-height:{pos.maxH}px"
   >
     {#if comFiltro}
@@ -223,6 +272,9 @@
       />
     {/if}
     <div class="sel-itens" id={idLista} role="listbox" aria-label={ariaLabel} bind:this={listaEl}>
+      {#if aviso}
+        <p class="sel-vazio" role="status">{aviso}</p>
+      {:else}
       {#each visiveis as o, i (o.value)}
         <!-- tabindex="-1" + id: padrão ARIA de listbox é UM ponto de foco (o botão/filtro) e o item
              corrente apontado por aria-activedescendant. Sem o -1 cada item virava parada própria do
@@ -246,8 +298,9 @@
           {#if o.hint}<span class="sel-item-hint">{o.hint}</span>{/if}
         </button>
       {:else}
-        <p class="sel-vazio">{m.select_nada_encontrado()}</p>
+        <p class="sel-vazio">{vazio ?? m.select_nada_encontrado()}</p>
       {/each}
+      {/if}
     </div>
   </div>
 {/if}
@@ -269,6 +322,9 @@
   }
   .sel-campo:focus-visible, .sel-campo.aberto { border-color: var(--accent); outline: none; }
   .sel-campo:disabled { opacity: 0.6; cursor: default; }
+  .sel-livre { cursor: text; }
+  /* Livre fecha pelo foco: o fundo cobriria o próprio campo. */
+  .sel-fora-livre { display: none; }
   .sel-valor { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sel-seta { color: var(--text-secondary); font-size: 11px; flex: none; }
 

@@ -76,7 +76,8 @@ export interface ChatState {
 // Só conta onde a fila pode ser mandada agora (Kimi, Codex, Claude), como no PWA.
 export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null, headless = false): number {
   if (provider !== 'kimi' && provider !== 'codex' && provider !== 'claude' && !headless) return 0;
-  return state.pending.length + queuedMessages(state.events, provider, headless).length;
+  // O eco local é o envio em voo, não fila: em idle ele acendia "1 na fila" até o POST voltar.
+  return queuedMessages(state.events, provider, headless).length;
 }
 
 export interface ChatApi {
@@ -528,8 +529,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         }
         if (!Array.isArray(payload.questions) || !payload.questions.length) return;
         const current = useChatStore.getState().askPayload;
-        if (payload.provider === 'codex' && current?.provider === 'codex'
-            && payload.request_id === current.request_id) return;
+        if (current && payload.interaction_id === current.interaction_id
+            && payload.request_id === current.request_id
+            && (payload.interaction_id != null || (payload.provider === 'codex' && current.provider === 'codex'))) return;
         useChatStore.setState({ askPayload: payload, askOpen: true, askPiId: null });
       } catch {
         quadroFalhou('ask_question');
@@ -678,7 +680,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       return submitConversationDraft(serverId, name, trimmed, async () => {
         if (wasUnknown) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.text !== trimmed) }));
         const id = `pending-${pendingSeq++}`;
-        useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed }] }));
+        // Em idle a mensagem é digitada na hora: o eco atenuado parecia mensagem entrando na fila.
+        const solid = useChatStore.getState().stateEvent?.state === 'idle';
+        useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed, solid }] }));
         try {
           await sendInputForServer(target, name, trimmed);
         } catch (err) {

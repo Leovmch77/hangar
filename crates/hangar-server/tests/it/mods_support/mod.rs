@@ -341,7 +341,8 @@ pub async fn wait_request(seen:&Seen,subtype:&str) {
     }).await.unwrap_or_else(|_|panic!("{subtype} esperado no cano"))
 }
 
-pub fn registry(mods:&Mods) -> RuntimeRegistry {
+pub fn registry(mods:&Mods) -> Arc<RuntimeRegistry> {
     // Política num endereço sem ninguém: só serviços cosméticos a usam aqui.
-    RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_mods(mods.clone())
+    // Ligado aos hubs como o servidor monta: fechar a sessão esquece a cota pelo hub.
+    crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_mods(mods.clone()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))))
 }

@@ -75,7 +75,9 @@ function Restart-HangarTask([string]$name, [int]$port, [string]$directory) {
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
         foreach ($listener in $listeners) {
             if ($listener.OwningProcess -notin @($candidates.ProcessId)) {
-                throw "Porta $port ocupada por outro processo; $name nao sera reiniciada"
+                $dono = $rows | Where-Object { [int]$_.ProcessId -eq [int]$listener.OwningProcess } | Select-Object -First 1
+                $quem = if ($dono) { "$($dono.Name) PID $($dono.ProcessId): $($dono.CommandLine)" } else { "PID $($listener.OwningProcess)" }
+                throw "Porta $port ocupada por outro processo ($quem); $name nao sera reiniciada. Se nao for seu, encerre: Stop-Process -Id $($listener.OwningProcess) -Force"
             }
         }
         if ($task.State -eq 'Running' -and -not $candidates.Count) {

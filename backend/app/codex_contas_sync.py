@@ -40,6 +40,7 @@ PREFERENCE_KEYS = frozenset({
     "model_reasoning_effort",
     "model_reasoning_summary",
     "model_verbosity",
+    "service_tier",
     "model_context_window",
     "model_auto_compact_token_limit",
     "model_catalog_json",
@@ -98,7 +99,7 @@ _SENSITIVE_RESOURCE_NAMES = frozenset({
     "archived_sessions", "agent.db", "models.db", "state.sqlite", "config.sqlite",
 })
 _AUTH_ENV = re.compile(
-    r"^(?:OPENAI|CODEX|CHATGPT)_.+(?:(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_FILE)?|ACCOUNT_ID|ORG_ID|PROJECT_ID)$",
+    r"^(?:OPENAI|CODEX|CHATGPT)_.*(?:(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_FILE)?|ACCOUNT_ID|ORG_ID|PROJECT_ID)$",
     re.IGNORECASE,
 )
 _INFORMATIONAL_ISSUES = frozenset({
@@ -270,15 +271,12 @@ def _filter_environment(value):
 
 
 def _mcp_secret_name(name: object) -> bool:
+    # Só a identidade do Codex e as pastas da conta separam as contas; chave de terceiro
+    # (Jev, proxy) é do mesmo usuário na mesma máquina e vai junto.
     if not isinstance(name, str):
         return True
     upper = name.upper()
-    return (
-        _AUTH_ENV.fullmatch(upper) is not None
-        or upper in _PROVIDER_ENV
-        or upper in _RUNTIME_ENV
-        or re.search(r"(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|AUTH(?:ORIZATION)?|SECRET|PASSWORD|PRIVATE[_-]?KEY)$", upper) is not None
-    )
+    return _AUTH_ENV.fullmatch(upper) is not None or upper in _PROVIDER_ENV or upper in _RUNTIME_ENV
 
 
 def _filter_mcp_servers(value, issues: list[dict]):

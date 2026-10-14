@@ -231,7 +231,15 @@ fn menu_block(lines: &[&str]) -> Option<(usize, usize)> {
         let label = P.box_split.split(&lines[cursor][mark.end()..]).next().unwrap_or("");
         if P.embedded.is_match(label) { return None; }
     }
-    let top = (0..cursor).rev().find(|&i| boundary(lines[i]) || tab_bar(lines[i]))
+    // Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
+    // cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da pergunta.
+    // Rascunho não tem rodapé de navegação; com rodapé, segue como menu.
+    if !pi && cursor > 0 && P.rule.is_match(lines[cursor - 1]) && !lines[cursor + 1..].iter().any(|l| P.footer.is_match(l)) {
+        return None;
+    }
+    // A régua de cima do diálogo também fecha o menu: acima dela fica o corpo (o plano do
+    // ExitPlanMode tem passos numerados que virariam opções).
+    let top = (0..cursor).rev().find(|&i| boundary(lines[i]) || tab_bar(lines[i]) || P.rule.is_match(lines[i]))
         .map_or(0, |i| i + 1);
     let bottom = (cursor + 1..lines.len()).find(|&i| P.footer.is_match(lines[i]) || boundary(lines[i]))
         .unwrap_or(lines.len());
@@ -416,6 +424,12 @@ pub fn analyze(pane: &str) -> PaneAnalysis {
         result.state = "working".into(); result.label = Some(trim(&spinner.chars().skip(2).collect::<String>()).into());
     }
     result
+}
+
+/// O diálogo de aprovação do `ExitPlanMode`. Os rótulos das opções mudam com a versão e o modo;
+/// a pergunta é a âncora.
+pub fn plan_dialog(analysis: &PaneAnalysis) -> bool {
+    analysis.state == "awaiting_input" && analysis.question.as_deref().is_some_and(|q| q.contains("Would you like to proceed?"))
 }
 
 fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {

@@ -19,6 +19,8 @@ export interface LiveVoiceState {
   backstage: { kind: 'heard' | 'result' | 'answer'; text: string }[];
   thought: string;
   action: { kind: 'tool' | 'search' | 'command'; text: string } | null;
+  /** Etapa do objetivo em curso no computador; servidor antigo não manda. */
+  progress?: string | null;
   followed: { server: string; name: string }[];
   server: string;
   client: string;

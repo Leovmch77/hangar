@@ -1,7 +1,9 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import OptionButtons from './OptionButtons.svelte';
-  import { selectOption, submitSelected } from '@hangar/core';
+  import AskQuestionCard from './AskQuestionCard.svelte';
+  import { answerQuestions, selectOption, submitSelected } from '@hangar/core';
+  import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
   import { getActiveId, selectServer } from '../lib/auth';
   import { attentionFeed } from '@hangar/core';
   import type { AggSession } from '@hangar/core';
@@ -21,6 +23,10 @@
 
   const feed = $derived(attentionFeed(sessions));
   const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
+  const requestKey = (s: AggSession) => JSON.stringify([keyOf(s), s.interaction_id, s.ask_form?.interaction_id]);
+  // O formulário (AskUserQuestion, também o segurado pelo plugin) responde daqui, pelo `/answer`: o app faz tudo.
+  const respondivel = (s: AggSession) => !!(s.ask_form?.questions?.length || s.options?.length);
+  const current = (s: AggSession) => feed.some((entry) => requestKey(entry) === requestKey(s));
 
   let expandedKey = $state<string | null>(null); // entry com OptionButtons aberto (só um por vez)
   // Recusa do backend ao responder daqui. O `catch {}` de antes dizia "SSE de sessions corrige a
@@ -36,7 +42,7 @@
   let ocupada = $state<string | null>(null);
 
   function toggle(s: AggSession) {
-    if (s.options?.length) {
+    if (respondivel(s)) {
       const k = keyOf(s);
       expandedKey = expandedKey === k ? null : k; // expande/colapsa inline (sem montar chat)
       clearTimeout(erroTimer);
@@ -52,46 +58,72 @@
   // fechar no primeiro toque numa lista que o outro componente desenhava como múltipla.
   const ehMultipla = (s: AggSession) => (s.options ?? []).some((o) => /^\[.?\]\s*/.test(o));
 
-  async function pick(s: AggSession, option: number) {
+  async function pick(s: AggSession, option: number, interactionId: string | null | undefined) {
     const k = keyOf(s);
-    if (ocupada === k) return;
-    ocupada = k;
-    if (!ehMultipla(s)) expandedKey = null;
+    const request = requestKey(s);
+    if (ocupada === request) return;
+    ocupada = request;
+    if (current(s) && expandedKey === k && !ehMultipla(s)) expandedKey = null;
     clearTimeout(erroTimer);
     erro = null;
     const prev = getActiveId(); // salva antes de mirar o server dono (api.ts lê o ativo a cada chamada)
     selectServer(s.serverId);
     try {
-      await selectOption(s.name, option);
+      await selectOption(s.name, option, interactionId);
     } catch (e) {
+      if (!current(s)) return;
       // Reabre as opções: a pergunta continua de pé, e fechar o picker junto com o erro deixaria o
       // usuário sem nada pra tocar depois de ler o aviso.
       expandedKey = k;
       erro = { key: k, msg: e instanceof Error ? e.message : m.comum_falha_envio_opcao() };
       erroTimer = setTimeout(() => (erro = null), 8000);  // aviso, não estado: some sozinho
     } finally {
-      ocupada = null;
+      if (ocupada === request) ocupada = null;
       if (prev && prev !== s.serverId) selectServer(prev); // restaura pra o chat aberto ficar no server dele
     }
   }
 
-  /** Envia o que já está marcado na múltipla escolha. Mesmo vaivém de servidor do `pick`. */
-  async function enviarMarcadas(s: AggSession) {
+  /** Formulário respondido pelo passo a passo inline. Erro sobe ao passo a passo, que o mostra e deixa tentar de novo. */
+  async function responder(s: AggSession, answers: AnswerItem[], form: AskQuestionPayload) {
     const k = keyOf(s);
-    if (ocupada === k) return;
-    ocupada = k;
     clearTimeout(erroTimer);
     erro = null;
     const prev = getActiveId();
     selectServer(s.serverId);
     try {
-      await submitSelected(s.name);
-      expandedKey = null;
+      const r = await answerQuestions(s.name, answers, form.request_id, form.interaction_id);
+      // Sem confirmação o card não some como respondido: o passo a passo mostra e deixa tentar de novo.
+      if (!r?.ok) throw new Error(m.native_action_uncertain());
+      if (current(s) && expandedKey === k) expandedKey = null;
+      // Entregue como texto (o seletor não respondeu): já chegou, repetir duplicaria; fica o aviso visível.
+      if (r.fallback) {
+        erro = { key: k, msg: m.askq_enviada_como_texto() };
+        erroTimer = setTimeout(() => (erro = null), 8000);
+      }
+    } finally {
+      if (prev && prev !== s.serverId) selectServer(prev);
+    }
+  }
+
+  /** Envia o que já está marcado na múltipla escolha. Mesmo vaivém de servidor do `pick`. */
+  async function enviarMarcadas(s: AggSession, interactionId: string | null | undefined) {
+    const k = keyOf(s);
+    const request = requestKey(s);
+    if (ocupada === request) return;
+    ocupada = request;
+    clearTimeout(erroTimer);
+    erro = null;
+    const prev = getActiveId();
+    selectServer(s.serverId);
+    try {
+      await submitSelected(s.name, interactionId);
+      if (current(s) && expandedKey === k) expandedKey = null;
     } catch (e) {
+      if (!current(s)) return;
       erro = { key: k, msg: e instanceof Error ? e.message : m.comum_falha_envio_opcao() };
       erroTimer = setTimeout(() => (erro = null), 8000);
     } finally {
-      ocupada = null;
+      if (ocupada === request) ocupada = null;
       if (prev && prev !== s.serverId) selectServer(prev);
     }
   }
@@ -115,7 +147,7 @@
             </span>
             {#if s.question}<span class="attn-q" title={s.question}>{s.question}</span>{/if}
           </span>
-          {#if s.options?.length}
+          {#if respondivel(s)}
             <span class="attn-caret" class:open aria-hidden="true">▾</span>
           {:else}
             <span class="attn-caret" aria-hidden="true">›</span>
@@ -124,14 +156,23 @@
         {#if erro && erro.key === keyOf(s)}
           <p class="attn-err" role="status">{erro.msg}</p>
         {/if}
-        {#if open && s.options?.length}
-          <OptionButtons
-            question={s.question ?? ''}
-            options={s.options}
-            onSelect={(i) => pick(s, i)}
-            onSubmit={() => enviarMarcadas(s)}
-            onCancel={() => (expandedKey = null)}
-          />
+        {#if open && s.ask_form?.questions?.length}
+          {#each [{ ...s }] as displayed (displayed.ask_form?.interaction_id)}
+            <AskQuestionCard open={true} payload={displayed.ask_form ?? null} escapes={true}
+              onSubmit={(answers, form) => responder(displayed, answers, form)}
+              onClose={() => (expandedKey = null)} />
+          {/each}
+        {:else if open && s.options?.length}
+          {#each [{ ...s }] as displayed (displayed.interaction_id)}
+            <OptionButtons
+              question={s.question ?? ''}
+              options={s.options}
+              interactionId={displayed.interaction_id}
+              onSelect={(i, id) => pick(displayed, i, id)}
+              onSubmit={(id) => enviarMarcadas(displayed, id)}
+              onCancel={() => (expandedKey = null)}
+            />
+          {/each}
         {/if}
       </div>
     {/each}

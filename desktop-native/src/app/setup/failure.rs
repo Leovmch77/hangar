@@ -50,6 +50,8 @@ pub(crate) struct AgentPanel<'a> {
     pub agent: Agent,
     pub phase: &'a AgentPhase,
     pub explanation: Option<&'a str>,
+    /// O que ele está fazendo agora: comandos, arquivos e o texto dele.
+    pub activity: &'a [String],
     /// Depois de desfazer: o teto de tempo, o commit que ele fez e o que não voltou ao original.
     pub notes: Vec<String>,
     /// "Parar" sem identidade do processo: ele segue rodando.
@@ -191,6 +193,12 @@ pub(crate) fn agent_block(view: &PanelView, on_action: OnFailureAction) -> Optio
         .child(div().id("setup-agent-status").role(Role::Status).flex().items_center().gap_2().text_sm().font_weight(FontWeight::MEDIUM)
             .when(busy, |el| el.child(chrome::Spinner::new(SharedString::from("setup-agent-spin"), IconName::LoaderCircle, px(14.), theme::muted())))
             .child(line))
+        .when(busy && !panel.activity.is_empty(), |el| {
+            let tail = &panel.activity[panel.activity.len().saturating_sub(40)..];
+            el.child(div().id("setup-agent-activity").max_h_48().overflow_y_scroll().rounded_md().border_1().border_color(theme::border())
+                .bg(theme::inset()).p_2().font_family(theme::MONO).text_xs().text_color(theme::muted())
+                .children(tail.iter().map(|l| div().whitespace_normal().child(l.clone()))))
+        })
         .children(stop.map(|button| div().flex().child(button)))
         .when(panel.not_stopped, |el| el.child(div().id("setup-agent-not-stopped").role(Role::Alert).text_sm()
             .text_color(theme::warning_text()).whitespace_normal().child(tr("setup_agent_not_stopped"))))

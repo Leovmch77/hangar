@@ -70,7 +70,10 @@ def call(op: str, **args) -> dict:
     config = _config
     if config is None:
         raise GroupsBridgeError("groups_bridge_off")
-    data = json.dumps({"op": op, "args": args}, ensure_ascii=False).encode("utf-8")
+    # Surrogate solto (texto colado) vira o caractere de troca: o Rust só aceita UTF-8 válido, e o
+    # erro de codificação aqui era um 500.
+    text = json.dumps({"op": op, "args": args}, ensure_ascii=False)
+    data = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8")
     req = urllib.request.Request(f"http://{config[0]}/__hangar_server/groups", data=data,
         headers={"content-type": "application/json", "x-hangar-internal": config[1]}, method="POST")
     try:

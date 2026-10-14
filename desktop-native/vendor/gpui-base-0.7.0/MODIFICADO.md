@@ -25,6 +25,13 @@ Mudanças, todas marcadas com "Modified for Hangar":
    trechos que desenha, porque todos passam por `mark_highlight`.
    Motivo: as prévias de Nova sessão mantêm sua tipografia própria.
 
+3. `src/text/node.rs` e `src/scrollable_mask.rs`: tabela com rolagem (`overflow.x = Scroll`) encolhe cada coluna
+   até a maior palavra dela (`measure_table_columns` devolve também essa largura), com teto de 160 px, em vez do
+   piso do kit (metade do conteúdo, de 160 a 480 px); e o `horizontal_scroll_area` ganha a barra horizontal sempre
+   visível quando há o que rolar. Teste: `scroll_table_of_prose_fits_the_frame` (`text_view.rs`).
+   Motivo: tabela de prosa de 4 colunas passava da coluna do chat (880 px) e a última coluna ficava cortada, sem
+   barra que mostrasse que dava para rolar.
+
 Removido na 0.7.0: o conserto de `src/text_selection.rs` (participante de view `.cached` reusada varrido no fim do
 quadro). O kit passou a resolver isso com o `RenderedMarker` guardado no estado do elemento
 (`text_selection.rs:206-245`), então o arquivo voltou ao original.

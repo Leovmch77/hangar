@@ -8,11 +8,16 @@
 import type { ChatEvent } from './types';
 import { donoDaLinha } from './covers';
 
-export function queuedMessages(events: ChatEvent[], provider?: string | null, headless = false): ChatEvent[] {
+/** Bolha da fila durável que ainda espera a vez: é a que vai atenuada e conta no chip "na fila". */
+export function waitsInQueue(e: ChatEvent, provider?: string | null, headless = false): boolean {
   // Codex e Claude sem terminal: a fila é do processo, entregue não conta mais como espera.
   const filaDoProcesso = provider === 'codex' || headless;
-  return events.filter(e => e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu
-    && (!filaDoProcesso || !e.queued_delivered));
+  return e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu && !e.queued_consumed
+    && (!filaDoProcesso || !e.queued_delivered);
+}
+
+export function queuedMessages(events: ChatEvent[], provider?: string | null, headless = false): ChatEvent[] {
+  return events.filter(e => waitsInQueue(e, provider, headless));
 }
 
 /** Historico COMPLETO recem-buscado + a cauda que ja esta na tela -> lista com os eventos

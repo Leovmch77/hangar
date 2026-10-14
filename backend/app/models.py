@@ -75,6 +75,9 @@ class SessionInfo(BaseModel):
     lifecycle_id: Optional[str] = None
     transfer_id: Optional[str] = None
     transfer_phase: Optional[str] = None
+    # ID da pergunta/permissão exibida, que só o Rust publica: está na assinatura da lista (`_list_sig`,
+    # igual à do Rust) e fora do JSON, como o `SessionRow` sem ID.
+    interaction_id: Optional[str] = Field(default=None, exclude=True)
     cwd: Optional[str] = None
     jsonl: Optional[str] = None
     # Qual Adapter dirige esta sessao (app.adapters.get_adapter). "claude" cobre TODA sessao de hoje
@@ -263,6 +266,9 @@ class ChatEvent(BaseModel):
     queued_ts: Optional[float] = None
     # Remove o eco pelo id, mesmo quando a mensagem real saiu da janela do histórico.
     queued_confirmed: Optional[bool] = None
+    # Aceita com a sessão parada (o Rust decide e grava na fila): o turno começou com ela, então
+    # não está na fila interna do Claude. O front a mostra como enviada, não como "na fila".
+    queued_consumed: Optional[bool] = None
     # Nº de imagens base64 anexadas a uma msg do user via TERMINAL (paste na TUI do Claude). O front
     # busca cada uma sob demanda em /transcript-image/{id}/{idx} (lazy; base64 não vai no payload).
     image_count: Optional[int] = None

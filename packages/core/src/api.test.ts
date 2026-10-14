@@ -16,7 +16,8 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
+import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, selectOption, selectOptionForServer, sendInputForServer, showPluginPane, skipQuestion, submitSelected, submitSelectedForServer } from './api';
+import type { AskQuestionPayload, StateEvent } from './types';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { createShare, exportShortcuts } from './api';
@@ -369,9 +370,17 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/plugin/close', body: { site: 'pm-mock-mr' }, run: (s?: Server) => closePluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/input', body: { site: 'vitrine-campos', plugin: 'vitrine', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', CAMPO, 'change', 'oi', s) },
-    { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
-    { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
-    { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
+    // `/select` sai pelo `sessionFetch`: o erro tem a forma do apiFetch (mensagem limpa e `code`), que o cartão lê.
+    { path: '/select', body: { option: 1, interaction_id: 'interaction-a' }, run: (s?: Server) => selectOption('mesma/sessão', 1, 'interaction-a', s), refused: 'recusado' },
+    { path: '/select', body: { option: 2 }, run: (s?: Server) => selectOption('mesma/sessão', 2, undefined, s), refused: 'recusado' },
+    { path: '/select', body: { option: 3, interaction_id: 'plan-a', text: 'troque o passo 2' }, run: (s?: Server) => selectOption('mesma/sessão', 3, 'plan-a', s, 'troque o passo 2'), refused: 'recusado' },
+    { path: '/select/submit', body: { interaction_id: 'interaction-a' }, run: (s?: Server) => submitSelected('mesma/sessão', 'interaction-a', s), refused: 'recusado' },
+    { path: '/select/submit', body: {}, run: (s?: Server) => submitSelected('mesma/sessão', null, s), refused: 'recusado' },
+    { path: '/answer', body: { answers: [], request_id: 0, interaction_id: 'form-a' }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, 'form-a', s) },
+    { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, undefined, s) },
+    { path: '/question/skip', body: { request_id: 'req-b', interaction_id: 'form-a' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', 'form-a', s) },
+    { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', undefined, s) },
+    { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', null, s) },
   ];
 
   it.each(mutations)('$path mantém payload e chamada antiga, mas dirige o destino explícito a B', async ({ path, body, run }) => {
@@ -393,16 +402,55 @@ describe('contratos de conversa com servidor explícito', () => {
     }
   });
 
+  it('aprovação e formulário simultâneos enviam suas próprias identidades', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    const state: StateEvent = { session: 'sessao', state: 'awaiting_input', question: 'Permitir?', options: ['Sim'], interaction_id: 'approval-a' };
+    const form: AskQuestionPayload = { questions: [], request_id: 0, interaction_id: 'form-a' };
+    await selectOptionForServer(target, 'sessao', 1, state.interaction_id);
+    await submitSelectedForServer(target, 'sessao', state.interaction_id);
+    await answerQuestions('sessao', [], form.request_id, form.interaction_id, target);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string))).toEqual([
+      { option: 1, interaction_id: 'approval-a' },
+      { interaction_id: 'approval-a' },
+      { answers: [], request_id: 0, interaction_id: 'form-a' },
+    ]);
+    expect(fetchMock.mock.calls.every(([url]) => String(url).startsWith('https://b.test/'))).toBe(true);
+  });
+
+  it('seletor por servidor leva o texto do pedido de alteração do plano', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    await selectOptionForServer(target, 'sessao', 3, 'plan-a', 'troque o passo 2');
+    await selectOptionForServer(target, 'sessao', 1, 'plan-a');
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string))).toEqual([
+      { option: 3, interaction_id: 'plan-a', text: 'troque o passo 2' },
+      { option: 1, interaction_id: 'plan-a' },
+    ]);
+  });
+
+  it.each([undefined, null])('seletores legados não fabricam identidade (%s)', async (id) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    await selectOptionForServer(target, 'sessao', 1, id);
+    await submitSelectedForServer(target, 'sessao', id);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string))).toEqual([{ option: 1 }, {}]);
+  });
+
+  it.each([409, 503])('erro %s dos seletores explícitos não repete o POST', async (status) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"interaction_stale"}', { status }));
+    await expect(selectOptionForServer(target, 'sessao', 1, 'old')).rejects.toThrow('interaction_stale');
+    await expect(submitSelectedForServer(target, 'sessao', 'old')).rejects.toThrow('interaction_stale');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('resposta textual preserva fallback, respostas e request_id string', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"ok":true,"fallback":true}'));
     const answers = [{ kind: 'text' as const, question_id: 'q-b', value: 'outro caminho', type_index: 1, labels: [] }];
-    expect(await answerQuestions('sessao', answers, 'req-b', target)).toEqual({ ok: true, fallback: true });
+    expect(await answerQuestions('sessao', answers, 'req-b', undefined, target)).toEqual({ ok: true, fallback: true });
     expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ answers, request_id: 'req-b' });
   });
 
-  it.each(mutations)('$path recusado por B não remove a credencial ativa nem repete POST', async ({ run }) => {
+  it.each(mutations)('$path recusado por B não remove a credencial ativa nem repete POST', async ({ run, refused }) => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"recusado"}', { status: 401 }));
-    await expect(run(target)).rejects.toMatchObject({ status: 401, message: '401: recusado' });
+    await expect(run(target)).rejects.toMatchObject({ status: 401, message: refused ?? '401: recusado' });
     expect(onUnauthorizedSpy).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

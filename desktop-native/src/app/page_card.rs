@@ -485,6 +485,7 @@ impl Hangar {
                 _ => {}
             },
             // Endereço atual do site, para a faixa do cartão.
+            crate::browser::Event::UserInput => {}
             crate::browser::Event::State(state) => if let Some(running) = &mut view.running && running.at != state.url {
                 running.at = state.url;
                 self.redraw(panes::Area::Conversation, cx);

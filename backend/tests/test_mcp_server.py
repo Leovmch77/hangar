@@ -52,7 +52,8 @@ async def test_lista_tools_e_quem_sou(identidade):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         nomes = {t.name for t in (await s.list_tools()).tools}
         assert nomes == {"who_am_i", "sessions", "send", "group", "pair", "unpair", "new_session",
-                         "close_session", "browser_open", "browser", "browser_batch", "html_render"}
+                         "close_session", "browser_open", "browser", "browser_batch", "browser_goal", "browser_check",
+                         "html_render"}
         res = await s.call_tool("who_am_i", {})
         assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
 
@@ -210,6 +211,8 @@ async def test_browser_open_completa_pagina_propria_e_recusa_outro_caminho(ident
     monkeypatch.setattr(api, "nav_pendente", lambda name, url: gravados.append((name, url)))
     monkeypatch.setattr(api, "resolve_bind_ip", lambda s: "0.0.0.0")
     monkeypatch.setattr(settings, "port", 8765)
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         # O Rust codifica o nome inteiro (`%65u` é `eu`).
         for url in ("/api/sessions/eu/pages/abc-1", "/api/sessions/%65u/pages/abc-1"):
@@ -365,6 +368,8 @@ async def test_voz_usa_o_mcp_inteiro_e_fecha_so_pelo_sim_falado(voz, monkeypatch
     monkeypatch.setattr(api, "unpair_session", unpair_session)
     monkeypatch.setattr(api, "abrir_nav_sessao", abrir_nav_sessao)
     monkeypatch.setattr(mcp_server.navshell, "verbo", lambda name, v, args=None, aba=None: nav.append((name, v)) or f"ok: {v}")
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
     monkeypatch.setattr(pages_bridge, "publish", lambda payload: chamadas.setdefault("pagina", payload["session"]) and {"ok": True})
     async with sessao_mcp({"X-Hangar-Voice": "ok"}) as s:
         res = await s.call_tool("who_am_i", {})
@@ -388,3 +393,24 @@ async def test_voz_usa_o_mcp_inteiro_e_fecha_so_pelo_sim_falado(voz, monkeypatch
     assert chamadas == {"grupo": ("web", "x"), "parear": ("web", "web"), "desparear": "web",
                         "nav_abrir": ("web", "http://x"), "pagina": "web"}
     assert nav == [("web", "snapshot")]
+
+
+async def test_browser_goal_so_com_o_jev_da_sessao(identidade, monkeypatch):
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("browser_goal", {"objetivo": "abre a agenda"})
+        assert res.is_error and "Jev não chegou ligado" in res.content[0].text
+    from app import runtime_config
+    monkeypatch.setattr(runtime_config, "env_jev", lambda ligado: {"HANGAR_JEV": "on"})
+    async with sessao_mcp({"X-Hangar-Pane": "%3", "X-Hangar-Jev": "on"}) as s:
+        res = await s.call_tool("browser_check", {"estado": "lista com o item"})
+        assert res.is_error and "não está configurado" in res.content[0].text
+
+
+async def test_shot_devolve_a_imagem(identidade, monkeypatch, tmp_path):
+    png = tmp_path / "a.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(mcp_server.navshell, "verbo", lambda name, v, args=None, aba=None: f"ok: shot {png}")
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("browser", {"verbo": "shot"})
+        assert not res.is_error
+        assert [c.type for c in res.content] == ["text", "image"] and res.content[1].mime_type == "image/png"

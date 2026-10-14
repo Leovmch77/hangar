@@ -122,6 +122,7 @@ async fn list_srv(root: &Path, n: usize) -> Srv {
 async fn plain_srv(dir: &Path, tune: impl FnOnce(&mut AppState)) -> Srv {
     let (python, upstream) = spawn_fake().await;
     let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    state.side.locate = fake::fake_locate(upstream);
     tune(&mut state);
     serve(state, python, dir).await
 }
@@ -526,7 +527,8 @@ async fn cano(sink: Arc<Mutex<Vec<Value>>>) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn share_guest_writes_its_session_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()));
+    let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into())
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
     let sink = Arc::new(Mutex::new(Vec::new()));
     let d = dir.path();
     registry.open(RuntimeTarget { key: "k-s".into(), generation: 1, name: "s".into(), provider: "claude".into(),
@@ -540,9 +542,11 @@ async fn share_guest_writes_its_session_and_nothing_else() {
     }).await;
     let t = srv.g.token("s", Kind::Share);
     srv.g.alive("o");
-    assert_eq!(post_json(format!("http://{}/api/sessions/s/interrupt", srv.guest), &t, json!({})).await, (200, json!({"ok": true})));
-    assert!(sink.lock().unwrap().iter().any(|e| e.to_string().contains("interrupt")), "o cano recebeu a interrupção");
-    assert_eq!(post_json(format!("http://{}/api/sessions/o/interrupt", srv.guest), &t, json!({})).await.0, 403);
+    let (status, body) = post_json(format!("http://{}/api/sessions/s/input", srv.guest), &t, json!({"text": "recado-do-convidado"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(sink.lock().unwrap().iter().any(|e| e.to_string().contains("recado-do-convidado")), "o cano recebeu o texto");
+    assert_eq!(post_json(format!("http://{}/api/sessions/o/input", srv.guest), &t, json!({"text": "x"})).await.0, 403);
+    assert_eq!(srv.python.hits_to("/api/sessions/s/input"), 0);
     assert_eq!(srv.python.hits_to("/api/sessions/s/interrupt"), 0);
 }
 
@@ -554,7 +558,8 @@ fn terminal_target(dir: &Path, name: &str) -> TerminalTarget {
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
     TerminalTarget { key: format!("key-{name}"), generation: 1, name: name.into(), binding, lease_path: dir.join("lease"),
-        state_path: dir.join("state"), projection_dir: dir.join("projection"), transcript, created: 0.0, plugin_key: None }
+        state_path: dir.join("state"), projection_dir: dir.join("projection"), transcript, created: 0.0, plugin_key: None,
+        metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }
 }
 
 /// Terminal no Rust sem a interface dos mods dele: o clique do convidado não tem quem atenda (503), e

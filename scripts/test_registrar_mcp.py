@@ -19,7 +19,7 @@ BLOCO = "\n".join([
     f'url = "{URL}"',
     f'http_headers = {{ "Authorization" = "Bearer {TOKEN}" }}',
     'env_http_headers = { "X-Hangar-Key" = "CP_SESSION_KEY", "X-Hangar-Pane" = "TMUX_PANE", '
-    '"X-Hangar-Session" = "CP_SESSION_NAME" }',
+    '"X-Hangar-Session" = "CP_SESSION_NAME", "X-Hangar-Jev" = "HANGAR_JEV" }',
     rm.FIM, ""])
 
 # Como o app desktop do Codex grava o servidor: sem comentários, headers em subtabelas.
@@ -38,6 +38,7 @@ Authorization = "Bearer {TOKEN}"
 X-Hangar-Key = "CP_SESSION_KEY"
 X-Hangar-Pane = "TMUX_PANE"
 X-Hangar-Session = "CP_SESSION_NAME"
+X-Hangar-Jev = "HANGAR_JEV"
 
 [mcp_servers.node_repl]
 args = []

@@ -102,11 +102,21 @@ async fn owned<T: DeserializeOwned>(st: &Arc<AppState>, peer: SocketAddr, req: R
 /// Comparação em tempo constante, como o `secrets.compare_digest` do Python. `name` é o `sessao` do
 /// plugin: o nome com que o token foi cunhado.
 fn token_ok(st: &AppState, name: &str, token: &str) -> bool {
+    session_token_ok(&st.cfg.auth_token, name, token)
+}
+
+pub fn session_token_ok(secret: &str, name: &str, token: &str) -> bool {
     let expected = match token.split_once('.') {
-        Some((key, _)) => mint_keyed(&st.cfg.auth_token, name, key),
-        None => mint(&st.cfg.auth_token, name),
+        Some((key, _)) => mint_keyed(secret, name, key),
+        None => mint(secret, name),
     };
     expected.as_bytes().ct_eq(token.as_bytes()).into()
+}
+
+pub fn machine_key(secret: &str) -> String { hmac_hex(secret, "plugin:machine") }
+
+pub fn machine_key_ok(secret: &str, key: &str) -> bool {
+    machine_key(secret).as_bytes().ct_eq(key.as_bytes()).into()
 }
 
 pub async fn press_start(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
@@ -213,7 +223,7 @@ pub async fn ui(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
     // atual e o token dele: numa sessão renomeada, o cache do Python é pelo nome de agora.
     let copy = json!({"sessao": name, "token": mint(&st.cfg.auth_token, &name), "above": body.above, "columns": body.columns, "panes": body.panes});
     copy_to_python(&st, &copy).await;
-    st.mods.terminal_ui(&name, TerminalView { above: body.above, columns: body.body_columns, panes: body.panes, shown: body.shown, caps: body.caps });
+    st.mods.terminal_ui(&name, TerminalView { above: body.above, columns: body.body_columns, panes: body.panes, shown: body.shown, caps: body.caps, crop_columns: body.columns });
     st.mods.schedule_shown(&name);
     ok()
 }

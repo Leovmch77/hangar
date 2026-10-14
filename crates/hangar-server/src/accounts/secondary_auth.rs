@@ -11,6 +11,24 @@ use std::{
 
 const PROVIDER: &str = "openai-codex";
 const BUSY: Duration = Duration::from_secs(5);
+const BUSY_STEP: Duration = Duration::from_millis(10);
+
+/// Espera o banco ocupado até `BUSY`. Não o `busy_timeout` do SQLite: o `nanosleep` dele volta no
+/// primeiro sinal (o SIGCHLD de qualquer filho do servidor) e a espera acaba antes do prazo.
+/// O prazo é do relógio, não da contagem de passos: cada `sleep` dura mais que o pedido (relógio de
+/// ~16 ms do Windows, máquina carregada) e 500 passos passariam muito de `BUSY`.
+fn wait_busy(connection: &Connection) -> rusqlite::Result<()> {
+    thread_local! { static STARTED: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); }
+    fn step(count: i32) -> bool {
+        // O SQLite chama com 0 a cada nova espera pela trava, na linha que espera.
+        if count == 0 { STARTED.set(std::time::Instant::now()); }
+        let Some(left) = BUSY.checked_sub(STARTED.get().elapsed()).filter(|left| !left.is_zero()) else { return false };
+        // O `sleep` da std retoma depois de um sinal até completar o passo.
+        std::thread::sleep(BUSY_STEP.min(left));
+        true
+    }
+    connection.busy_handler(Some(step))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OmpDirectories {
@@ -218,7 +236,7 @@ fn python_dumps(entries: &[(&str, &Value)]) -> String {
 fn insert_omp(db: &Path, tokens: &Value) -> rusqlite::Result<bool> {
     // Sem CREATE: o banco e o esquema são do omp.
     let mut connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    connection.busy_timeout(BUSY)?;
+    wait_busy(&connection)?;
     if has_oauth(&connection)? {
         return Ok(true);
     }
@@ -268,7 +286,7 @@ pub fn write(env: &AccountEnvironment, tokens: &Value) -> Value {
 fn omp_logged(db: &Path) -> bool {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .and_then(|connection| {
-            connection.busy_timeout(BUSY)?;
+            wait_busy(&connection)?;
             has_oauth(&connection)
         })
         .unwrap_or(false)
@@ -572,6 +590,38 @@ mod tests {
         assert!(elapsed < Duration::from_secs(15), "busy passou do prazo: {elapsed:?}");
         lock.execute_batch("rollback").unwrap();
         assert!(rows(&db).is_empty());
+    }
+
+    /// Sinal no meio da espera (o SIGCHLD de um filho que sai, no servidor): a espera continua até o prazo.
+    #[cfg(unix)]
+    #[test]
+    fn omp_busy_wait_keeps_its_deadline_under_signals() {
+        extern "C" fn ignore(_: libc::c_int) {}
+        let home = tempfile::tempdir().unwrap();
+        let db = omp(home.path());
+        let lock = Connection::open(&db).unwrap();
+        lock.execute_batch("begin exclusive").unwrap();
+        // SAFETY: tratador vazio, instalado antes de a linha que espera receber o sinal.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as *const () as usize;
+            libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
+        }
+        let waiting = unsafe { libc::pthread_self() } as usize;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signals = { let done = done.clone(); std::thread::spawn(move || while !done.load(std::sync::atomic::Ordering::Acquire) {
+            // SAFETY: a linha que espera só termina depois de `done`.
+            unsafe { libc::pthread_kill(waiting as libc::pthread_t, libc::SIGUSR1) };
+            std::thread::sleep(Duration::from_millis(20));
+        }) };
+        let started = Instant::now();
+        let written = write(&env(home.path(), &[]), &tokens("acc"));
+        let elapsed = started.elapsed();
+        done.store(true, std::sync::atomic::Ordering::Release);
+        signals.join().unwrap();
+        assert_eq!(written["omp"], result(false, "sqlite-indisponivel"));
+        assert!(elapsed >= Duration::from_millis(4500), "o sinal encurtou a espera: {elapsed:?}");
+        lock.execute_batch("rollback").unwrap();
     }
 
     #[test]

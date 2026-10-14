@@ -108,6 +108,34 @@ def test_call_sends_envelope_and_maps_errors(monkeypatch):
     assert e.value.code == "groups_bridge_off"
 
 
+def test_lone_surrogate_in_the_task_reaches_the_rust_instead_of_500(monkeypatch):
+    # Parity B13 (`test_set_com_surrogate_solto_na_task_grava_e_le_de_volta`): texto colado com surrogate
+    # solto não pode derrubar a rota; o Rust só aceita UTF-8 válido, então vai o caractere de troca.
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = json.dumps({"ok": True, "result": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="rust"))
+    groups_bridge.configure(f"127.0.0.1:{srv.server_port}", "s3gredo")
+    try:
+        assert groups_bridge.call("group.task", name="a", task="ok \ud800 fim") == {}
+    finally:
+        srv.shutdown()
+        groups_bridge.configure(None, None)
+    assert seen[0]["args"]["task"] == "ok \ufffd fim"
+
+
 def test_call_in_python_mode_refuses(monkeypatch):
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
     with pytest.raises(groups_bridge.GroupsBridgeError) as e:
@@ -257,7 +285,7 @@ def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, cli
     pair.PairLink("a").set(["srv::x"], "", "g1", {})
     _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
-    monkeypatch.setattr(api.registry, "kill", lambda n: registry.SessionRegistry._clear_pair(n))
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: registry.SessionRegistry._clear_pair(n))
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
     monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
 
@@ -392,4 +420,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 57
+    assert rust_server.RUST_SERVER_PROTOCOL == 67

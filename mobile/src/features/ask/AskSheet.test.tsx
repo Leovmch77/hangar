@@ -46,6 +46,7 @@ vi.mock('react-native', async (original) => ({
 }));
 
 import AskSheet from '../../../app/s/[server]/[name]/ask';
+import { AskStepper } from './AskStepper';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -173,6 +174,46 @@ test.each([false, true])('resultado tardio não fecha pergunta sem ID nem mostra
   expect(mocks.replace).not.toHaveBeenCalled();
 });
 
+test.each([false, true])('A e B idênticas usam tokens próprios; retorno atrasado não fecha B: %s', async (fail) => {
+  let finish!: (response: Response) => void;
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }))
+    .mockImplementation(async () => new Response('{"ok":true}')));
+  const first = { ...payload, request_id: 0, interaction_id: 'form-a' };
+  const second = { ...first, interaction_id: 'form-b' };
+  await open(first);
+  chatStore('srv', 'sess').use.setState({ stateEvent: {
+    session: 'sess', state: 'awaiting_input', question: 'Permitir?', options: ['Sim'], interaction_id: 'approval-a',
+  } });
+  await click('Primeira');
+  await click(m.lista_enviar());
+  expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)).toMatchObject({ request_id: 0, interaction_id: 'form-a' });
+  await act(async () => chatStore('srv', 'sess').openAsk(second));
+  expect(first.questions).toEqual(second.questions);
+  expect(container.textContent).not.toContain(m.askq_revisar());
+  await act(async () => finish(new Response(fail ? '{"detail":"erro-antigo"}' : '{"ok":true}', { status: fail ? 409 : 200 })));
+  expect(chatStore('srv', 'sess').use.getState().askPayload).toBe(second);
+  expect(chatStore('srv', 'sess').use.getState().askOpen).toBe(true);
+  expect(container.textContent).not.toContain('erro-antigo');
+  expect(mocks.back).not.toHaveBeenCalled();
+  await click('Primeira');
+  await click(m.lista_enviar());
+  expect(JSON.parse(vi.mocked(fetch).mock.calls[1][1]?.body as string)).toMatchObject({ request_id: 0, interaction_id: 'form-b' });
+  expect(chatStore('srv', 'sess').use.getState().stateEvent?.interaction_id).toBe('approval-a');
+});
+
+test('erro de identidade Claude preserva rascunho e não redireciona nem repete', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"interaction_stale"}', { status: 409 })));
+  await open({ questions: payload.questions, interaction_id: 'form-a' });
+  await click('Primeira');
+  await click(m.lista_enviar());
+  expect(chatStore('srv', 'sess').use.getState().askOpen).toBe(true);
+  expect(container.textContent).toContain('interaction_stale');
+  expect(container.textContent).toContain(m.askq_revisar());
+  expect(mocks.replace).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
 test('fallback é entrega por texto e resposta incerta mantém a pergunta visível', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":false}')));
   await open();
@@ -185,6 +226,62 @@ test('fallback é entrega por texto e resposta incerta mantém a pergunta visív
   expect(mocks.dismissTo).toHaveBeenCalledWith(expect.stringMatching(/^\/s\/srv\/sess\?askFallback=\d+$/));
   expect(mocks.replace).not.toHaveBeenCalled();
   expect(chatStore('srv', 'sess').use.getState().askOpen).toBe(false);
+});
+
+test.each(['review', 'text'])('cancelar Expo guarda o token exibido mesmo com objeto reutilizado: %s', async (step) => {
+  const displayed: AskQuestionPayload = { ...payload, is_async: true,
+    request_id: 'same-native-id', interaction_id: 'form-a',
+    questions: step === 'text' ? [{ ...payload.questions[0], options: [] }] : payload.questions };
+  const onClose = vi.fn();
+  await act(async () => root.render(React.createElement(AskStepper, {
+    payload: displayed, onSubmit: vi.fn(), onClose,
+  })));
+  if (step === 'review') await click('Primeira');
+  displayed.interaction_id = 'form-b';
+  await click(m.comum_cancelar());
+  expect(onClose).toHaveBeenLastCalledWith(expect.objectContaining({
+    request_id: 'same-native-id', interaction_id: 'form-a',
+  }));
+});
+
+test('enviar Expo transmite a pergunta exibida mesmo com objeto reutilizado', async () => {
+  const displayed: AskQuestionPayload = { ...payload, request_id: 'same-native-id', interaction_id: 'form-a' };
+  const onSubmit = vi.fn(async () => {});
+  await act(async () => root.render(React.createElement(AskStepper, { payload: displayed, onSubmit })));
+  await click('Primeira');
+  displayed.interaction_id = 'form-b';
+  await click(m.lista_enviar());
+  expect(onSubmit).toHaveBeenLastCalledWith(
+    [expect.objectContaining({ question_id: 'choice', indices: [0] })],
+    expect.objectContaining({ request_id: 'same-native-id', interaction_id: 'form-a' }),
+  );
+});
+
+test.each(['accepted', 'rejected', 'unknown'])('descarte Expo envia A exibida e preserva B no retorno %s', async (outcome) => {
+  let finish!: (response: Response) => void;
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }))
+    .mockImplementation(async () => new Response('{"ok":true}')));
+  const first = { ...payload, is_async: true, request_id: 'same-native-id', interaction_id: 'form-a' };
+  const second = { ...first, interaction_id: 'form-b' };
+  await open(first);
+  await click('Primeira');
+  await click(m.comum_cancelar());
+  expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)).toEqual({
+    request_id: 'same-native-id', interaction_id: 'form-a',
+  });
+  await act(async () => chatStore('srv', 'sess').openAsk(second));
+  await act(async () => finish(new Response(outcome === 'rejected' ? '{"detail":"erro-antigo"}'
+    : JSON.stringify({ ok: outcome === 'accepted' }), { status: outcome === 'rejected' ? 409 : 200 })));
+  expect(chatStore('srv', 'sess').use.getState().askPayload).toBe(second);
+  expect(chatStore('srv', 'sess').use.getState().askOpen).toBe(true);
+  expect(container.textContent).not.toContain('erro-antigo');
+  expect(mocks.back).not.toHaveBeenCalled();
+  await click('Primeira');
+  await click(m.comum_cancelar());
+  expect(JSON.parse(vi.mocked(fetch).mock.calls[1][1]?.body as string)).toEqual({
+    request_id: 'same-native-id', interaction_id: 'form-b',
+  });
 });
 
 test('ACK de cancelamento antigo não fecha pergunta em outro servidor', async () => {

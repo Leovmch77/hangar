@@ -981,7 +981,10 @@ class ClaudeHeadlessAdapter:
               permitir_bypass: bool = False, claude_settings: dict | None = None) -> list[str]:
         base = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
-                "--setting-sources", "user,project,local"]
+                "--setting-sources", "user,project,local",
+                # Eco de cada mensagem do stdin com o mesmo `uuid`: é a prova de entrega do Rust (o prompt
+                # barrado por hook não ecoa).
+                "--replay-user-messages"]
         base += ["--resume", sid] if resume else ["--session-id", sid]
         from app.adapters.claude import with_session_plugins
         base = with_session_plugins(base)

@@ -1,16 +1,10 @@
-//! Fatos do estado que continuam do Python (`state_facts.py`): o que o plugin anunciou, troca de
-//! conta em curso e operação de permissão controlada. Chegam por empurrão (`state.facts` na ponte
-//! da lista) só para sessões cujo retrato o Rust leu (`GET /internal/sessions/{name}/state-facts`),
-//! o que registra o interesse no Python por 30 s. As validades vêm como idade em ms e são aplicadas
-//! aqui com o relógio do Rust. Também o cliente dos serviços que o `Monitor` pede ao Python.
+//! Fatos do estado: a leitura do plugin no `plugin::Store` do Rust (`plugin_reading`) e a memória dos
+//! fatos que a ponte da lista ainda aceita por empurrão (`state.facts`). Nenhuma chamada ao Python:
+//! o retrato e os serviços que o `Monitor` pedia a ele são do Rust.
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
-use http_body_util::BodyExt;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -22,16 +16,117 @@ pub const PLUGIN_STATE: Duration = Duration::from_secs(90);
 pub const QUESTION: Duration = Duration::from_secs(35);
 /// Releitura do retrato: abaixo dos 30 s em que o interesse vence no Python.
 pub const SNAPSHOT_REFRESH: Duration = Duration::from_secs(25);
-pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
-pub const SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
-/// O drain pode abrir o executor (`prepare_session`) antes de entregar.
-pub const DELIVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// `problema` do estado quando o retrato não veio: fica o último valor, nunca estado inventado.
 pub const UNAVAILABLE: &str = "state_facts_unavailable";
-const MAX_BODY: usize = 1 << 20;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PluginState { pub state: String, pub reason: Option<String>, pub age_ms: u64 }
+
+/// Leitura do Store compartilhado; o vínculo vem do dono, nunca do pedido ou do poll.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PluginFacts {
+    pub plugin_state: Option<PluginState>,
+    pub waiter_open: bool,
+    pub heartbeat_age_ms: Option<u64>,
+    pub question: Option<Value>,
+    pub questions: Vec<Value>,
+    pub suggestion: String,
+}
+
+impl PluginFacts {
+    pub fn alive(&self) -> bool {
+        self.waiter_open || self.heartbeat_age_ms.is_some_and(|age| Duration::from_millis(age) < ALIVE)
+    }
+
+    pub fn state(&self) -> Option<String> {
+        self.plugin_state.as_ref().filter(|state| self.waiter_open || Duration::from_millis(state.age_ms) <= PLUGIN_STATE)
+            .map(|state| state.state.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct PluginReading {
+    pub binding: crate::interactions::InteractionBinding,
+    pub facts: Result<PluginFacts, String>,
+}
+
+pub async fn plugin_reading(registry: &crate::runtime::gateway::RuntimeRegistry, name: &str) -> Result<PluginReading, String> {
+    let binding = registry.interaction_binding_readonly(name).await.map_err(|error| error.code)?;
+    let facts = registry.plugin().map_err(|error| error.code.clone()).and_then(|store| {
+        store.facts(&binding, Instant::now()).map_err(|error| error.0.to_owned())
+    }).and_then(|facts| serde_json::from_value(facts).map_err(|_| "plugin_facts_invalid".into()));
+    let current = registry.interaction_binding_readonly(name).await.map_err(|error| error.code)?;
+    if current != binding { return Err("erro_interacao_desatualizada".into()); }
+    Ok(PluginReading { binding, facts })
+}
+
+pub fn plugin_surfaces(questions: &[Value]) -> Result<(Option<&Value>, Option<&Value>), String> {
+    let (mut selector, mut form) = (None, None);
+    for question in questions {
+        let id = question["id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
+        question["interaction_id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
+        // Permissões seguradas juntas saem uma de cada vez, na ordem estável do Store: respondida a primeira,
+        // a seguinte aparece (o app faz tudo, nada fica para o terminal).
+        if id.starts_with("perm:") {
+            selector.get_or_insert(question);
+            continue;
+        }
+        if question["questions"].as_array().is_none_or(Vec::is_empty) { return Err("plugin_question_invalid".into()); }
+        if form.replace(question).is_some() { return Err("erro_interacao_indisponivel".into()); }
+    }
+    Ok((selector, form))
+}
+
+/// As superfícies são independentes: erro no seletor não retira o formulário confirmado.
+pub fn project_plugin_state(state: &mut hangar_api::state::StateEvent, questions: &[Value]) -> Result<(), String> {
+    let (selectors, forms): (Vec<_>, Vec<_>) = questions.iter().cloned()
+        .partition(|question| question["id"].as_str().is_some_and(|id| id.starts_with("perm:")));
+    let mut error = None;
+    match plugin_surfaces(&forms) {
+        Ok((_, Some(question))) => {
+            if state.codex_question.as_ref().is_some_and(|current| current.get("interaction_id") != question.get("interaction_id")) {
+                error = Some("erro_interacao_indisponivel".to_owned());
+            } else {
+                let mut payload = question.as_object().cloned().ok_or("plugin_question_invalid")?;
+                payload.insert("request_id".into(), question["id"].clone());
+                payload.insert("provider".into(), json!("claude"));
+                state.codex_question = Some(payload);
+                state.state = "awaiting_input".into();
+            }
+        }
+        Err(code) => error = Some(code),
+        _ => {},
+    }
+    match plugin_surfaces(&selectors) {
+        Ok((Some(question), _)) => {
+            let shown = crate::terminal_state::held_question(question).ok_or("plugin_question_invalid")?;
+            if state.interaction_id.as_deref().is_some_and(|id| Some(id) != question["interaction_id"].as_str())
+                || state.question.is_some() && (state.question != shown.question || state.options.as_ref() != Some(&shown.options)) {
+                error = Some("erro_interacao_indisponivel".into());
+            } else {
+                state.state = "awaiting_input".into();
+                state.label = None;
+                state.question = shown.question;
+                state.options = Some(shown.options);
+                state.interaction_id = question["interaction_id"].as_str().map(str::to_owned);
+            }
+        }
+        Err(code) => error = Some(code),
+        _ => {},
+    }
+    error.map_or(Ok(()), Err)
+}
+
+pub fn preserve_cards(state: &mut hangar_api::state::StateEvent, previous: &hangar_api::state::StateEvent) {
+    if state.codex_question.is_none() { state.codex_question = previous.codex_question.clone(); }
+    if state.interaction_id.is_none() && previous.interaction_id.is_some() {
+        state.interaction_id = previous.interaction_id.clone();
+        state.question = previous.question.clone();
+        state.options = previous.options.clone();
+        state.claude_plan_pending = previous.claude_plan_pending.clone();
+    }
+    if state.codex_question.is_some() || state.interaction_id.is_some() { state.state = "awaiting_input".into(); }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Question {
@@ -176,90 +271,9 @@ impl FactsStore {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Dead { Ok, InTransfer }
 
-/// Retrato e serviços pedidos ao Python; `Err` é o código que vai ao diário e ao `problema`,
-/// nunca o corpo nem a mensagem do serde.
-#[derive(Clone)]
-pub struct StateFactsClient { upstream: SocketAddr, secret: String, http: crate::proxy::HttpClient }
-
-impl StateFactsClient {
-    pub fn new(upstream: SocketAddr, secret: String) -> Self {
-        Self { upstream, secret, http: crate::proxy::client() }
-    }
-
-    fn url(&self, name: &str, tail: &str) -> String {
-        format!("http://{}/internal/sessions/{}/{tail}", self.upstream, utf8_percent_encode(name, NON_ALPHANUMERIC))
-    }
-
-    async fn call(&self, req: axum::http::Request<Body>, timeout: Duration, prefix: &str) -> Result<Vec<u8>, String> {
-        let work = async {
-            let resp = self.http.request(req).await
-                .map_err(|e| format!("{prefix}_{}", if e.is_connect() { "connect" } else { "unreachable" }))?;
-            if !resp.status().is_success() {
-                return Err(format!("{prefix}_status:{}", resp.status().as_u16()));
-            }
-            let body = http_body_util::Limited::new(resp.into_body(), MAX_BODY).collect().await
-                .map_err(|_| format!("{prefix}_body"))?;
-            Ok(body.to_bytes().to_vec())
-        };
-        tokio::time::timeout(timeout, work).await.map_err(|_| format!("{prefix}_timeout"))?
-    }
-
-    /// Lê o retrato e renova o interesse da sessão no Python.
-    pub async fn snapshot(&self, name: &str) -> Result<StateFacts, String> {
-        let req = axum::http::Request::get(self.url(name, "state-facts")).header("x-hangar-internal", &self.secret)
-            .body(Body::empty()).map_err(|_| "state_facts_request".to_owned())?;
-        let bytes = self.call(req, SNAPSHOT_TIMEOUT, "state_facts").await?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("state_facts_invalid:{:?}", e.classify()))
-    }
-
-    async fn service(&self, name: &str, kind: &str, payload: Value, timeout: Duration) -> Result<Value, String> {
-        let body = json!({"kind": kind, "payload": payload}).to_string();
-        let req = axum::http::Request::post(self.url(name, "state-service")).header("x-hangar-internal", &self.secret)
-            .header("content-type", "application/json").body(Body::from(body))
-            .map_err(|_| "state_service_request".to_owned())?;
-        let bytes = self.call(req, timeout, "state_service").await?;
-        let v: Value = serde_json::from_slice(&bytes).map_err(|e| format!("state_service_invalid:{:?}", e.classify()))?;
-        match v["ok"].as_bool() {
-            Some(true) => Ok(v["data"].clone()),
-            // O tipo vai ao `problema` e ao diário: só identificador curto, nunca texto livre.
-            Some(false) => Err(format!("state_service_failed:{}", v["error_type"].as_str()
-                .filter(|t| !t.is_empty() && t.len() <= 40 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or("unknown"))),
-            None => Err("state_service_invalid:ok".to_owned()),
-        }
-    }
-
-    /// `permission.observe`: a memória do modo é do Python, por session-id; devolve
-    /// `(modo, previous_non_plan)`.
-    pub async fn observe_permission(&self, name: &str, sid: &str, mode: &str) -> Result<(String, String), String> {
-        let v = self.service(name, "permission.observe", json!({"sid": sid, "mode": mode}), SERVICE_TIMEOUT).await?;
-        match (v["mode"].as_str(), v["previous_non_plan"].as_str()) {
-            (Some(m), Some(p)) => Ok((m.to_owned(), p.to_owned())),
-            _ => Err("state_service_invalid:permission".to_owned()),
-        }
-    }
-
-    /// `session.dead`: o Python confere a troca na hora e só com `Ok` esquece o plugin e o quadro.
-    pub async fn dead(&self, name: &str) -> Result<Dead, String> {
-        let v = self.service(name, "session.dead", json!({}), SERVICE_TIMEOUT).await?;
-        match v["result"].as_str() {
-            Some("ok") => Ok(Dead::Ok),
-            Some("em_troca") => Ok(Dead::InTransfer),
-            _ => Err("state_service_invalid:dead".to_owned()),
-        }
-    }
-
-    /// `session.deliverable`: o `adapter.drain` do Python; devolve quantas saíram.
-    pub async fn deliverable(&self, name: &str) -> Result<u64, String> {
-        let v = self.service(name, "session.deliverable", json!({}), DELIVER_TIMEOUT).await?;
-        v["sent"].as_u64().ok_or_else(|| "state_service_invalid:deliverable".to_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn facts(seq: u64) -> StateFacts {
         StateFacts { seq, plugin_state: Some(PluginState { state: "working".into(), reason: None, age_ms: 80_000 }),
@@ -305,6 +319,32 @@ mod tests {
     }
 
     #[test]
+    fn selector_conflict_does_not_discard_an_independent_form() {
+        let mut state = hangar_api::state::StateEvent { state: "awaiting_input".into(),
+            question: Some("Menu do terminal".into()), ..Default::default() };
+        let questions = vec![json!({"id":"perm:a","interaction_id":"selector-a","questions":[],"tool":"Bash","resumo":"cmd"}),
+            json!({"id":"ask:b","interaction_id":"form-b","questions":[{"question":"Pasta?","options":[]}]})];
+        assert!(project_plugin_state(&mut state, &questions).is_err());
+        assert_eq!(state.codex_question.as_ref().unwrap()["interaction_id"], "form-b");
+        assert!(state.interaction_id.is_none());
+    }
+
+    #[test]
+    fn same_surface_ambiguity_is_not_an_empty_question() {
+        let forms = vec![json!({"id":"ask:a","interaction_id":"a","questions":[{}]}), json!({"id":"ask:b","interaction_id":"b","questions":[{}]})];
+        assert_eq!(plugin_surfaces(&forms).unwrap_err(), "erro_interacao_indisponivel");
+    }
+
+    /// Decisão do usuário (P21): duas permissões seguradas saem uma de cada vez; respondida a primeira,
+    /// a segunda aparece. Nunca o problema no lugar do cartão.
+    #[test]
+    fn held_permissions_come_one_at_a_time() {
+        let both = vec![json!({"id":"perm:a","interaction_id":"a"}), json!({"id":"perm:b","interaction_id":"b"})];
+        assert_eq!(plugin_surfaces(&both).unwrap().0.unwrap()["interaction_id"], "a");
+        assert_eq!(plugin_surfaces(&both[1..]).unwrap().0.unwrap()["interaction_id"], "b");
+    }
+
+    #[test]
     fn late_forget_keeps_the_new_watcher() {
         let store = FactsStore::default();
         let old = store.watch("s");
@@ -324,31 +364,5 @@ mod tests {
         tokio::task::yield_now().await;
         store.push("s", facts(1), Instant::now());
         tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("não acordou").unwrap();
-    }
-
-    /// Python de mentira que responde sempre o mesmo status e corpo.
-    async fn python(status: u16, body: &'static str) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut s, _)) = listener.accept().await {
-                let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
-                let _ = s.write_all(format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
-            }
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn snapshot_failure_is_error() {
-        let down = StateFactsClient::new(python(503, "x").await, "s".into());
-        assert_eq!(down.snapshot("s").await.unwrap_err(), "state_facts_status:503");
-        let partial = StateFactsClient::new(python(200, r#"{"seq":1}"#).await, "s".into());
-        assert!(partial.snapshot("s").await.unwrap_err().starts_with("state_facts_invalid:"), "campo faltando não vira vazio");
-        let refused = StateFactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into());
-        assert!(refused.snapshot("s").await.is_err());
-        let failed = StateFactsClient::new(python(200, r#"{"ok":false,"error_type":"ValueError"}"#).await, "s".into());
-        assert_eq!(failed.dead("s").await.unwrap_err(), "state_service_failed:ValueError");
     }
 }

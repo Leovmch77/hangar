@@ -14,7 +14,7 @@ import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
-import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, htmlPageFromResult, planDisplayText, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
+import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -166,10 +166,11 @@ export function MessageList({
       case 'event': {
         const ev = item.ev;
         if (ev.kind === 'user_msg') {
-          // fila durável (queued-*) aparece translúcida igual ao eco local até o real chegar
+          // fila durável (queued-*): translúcida só enquanto espera a vez, como na PWA; sem terminal,
+          // a já entregue ao processo não está na fila.
           if (ev.id.startsWith('queued-')) {
             return (
-              <View style={styles.pending}>
+              <View style={working && waitsInQueue(ev, session?.provider, session?.headless) ? styles.pending : undefined}>
                 <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} />
               </View>
             );
@@ -198,7 +199,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.

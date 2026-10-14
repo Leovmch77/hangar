@@ -7,7 +7,6 @@ import copy
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -18,7 +17,6 @@ from sse_starlette.sse import EventSourceResponse
 from app import diag
 from app.internal_pool import internal_thread
 from app.mensagens import erro
-from app.models import session_key
 from app.sse import merged_events
 
 _LOOPBACK = {"127.0.0.1", "::1"}
@@ -49,27 +47,6 @@ async def require_internal(request: Request) -> None:
         raise HTTPException(status_code=404)
 
 
-def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
-    """O `InternalInfo` do Rust: a rota `info` e o evento `info` do side-events usam este mesmo."""
-    from app.adapters import chave_de
-    from app.pqueue import PromptQueue
-
-    headless = False
-    if provider == "codex":
-        from app.adapters.codex import sessions as codex_sessions
-        headless = bool((codex_sessions.load(name) or {}).get("headless"))
-    return {
-        # Chave do adapter: o Claude sem terminal vem como "claude-headless".
-        "provider": chave_de(name, provider),
-        "jsonl": jsonl,
-        "session_key": session_key(jsonl) if jsonl else "",
-        # Tudo que o merged_history do Rust precisa além do transcript.
-        "history": {"queue": str(PromptQueue(name).path)},
-        # Codex sem terminal: o hub do Rust liga o feed do estado no lugar do Python.
-        "headless": headless,
-    }
-
-
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
 _policy_calls = {}
 
@@ -95,28 +72,6 @@ async def _instance_body(request: Request, limit: int, *, modes=None):
         if len(raw) > limit:
             raise HTTPException(413)
     return coordinator, instance, raw
-
-
-# O Rust só chama esta rota enquanto responde a um pedido de cota do Python que já ocupa um thread do
-# pool padrão; no pool padrão ela esperaria por ele mesmo e os pedidos se travariam até o prazo do Rust.
-_quota_facts_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="quota-facts")
-
-
-@router.post("/accounts/quotas")
-async def quota_facts(request: Request):
-    from app import cotas
-    _, _, raw = await _instance_body(request, 65536, modes={"rust", "pending"})
-    try:
-        body = json.loads(raw)
-        if (not isinstance(body, dict) or set(body) != {"action", "ids"}
-                or body["action"] not in {"sources", "read"}
-                or not isinstance(body["ids"], list) or len(body["ids"]) > 128
-                or any(not isinstance(item, str) or len(item) > 4096 for item in body["ids"])):
-            raise ValueError
-    except (ValueError, TypeError):
-        raise HTTPException(400) from None
-    return await asyncio.get_running_loop().run_in_executor(
-        _quota_facts_pool, cotas.quota_facts, body["action"], body["ids"])
 
 
 @router.post("/accounts/codex-invalidate")
@@ -361,29 +316,36 @@ async def worktrees_context() -> dict:
     }
 
 
-@router.get("/sessions/{name}/info")
-async def session_info(name: str) -> dict:
-    # Import tardio: api.py importa este módulo no topo.
-    from app import api
-
-    info = await api._cached_info(name)
-    if info is None:
-        raise HTTPException(status_code=404)
+@router.post("/sessions/{name}/reopen")
+async def session_reopen(name: str) -> dict:
+    """Abrir a conversa reabre a sessão em erro. Quem escolhe a conversa é o Rust; o coordenador
+    que reabre ainda é daqui. Responde antes de reabrir; uma por sessão em voo."""
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
-    if coordinator is not None and coordinator.managed_queue(name):
-        import uuid
-        try:
-            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
-        except runtime_coordinator.TransferInProgress:
-            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
-            # deixa rastro de uma passagem que não termina.
-            diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
-        except Exception as exc:
-            from app.runtime_coordinator import failure_reason
-            diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
-            raise HTTPException(503) from None
-    return info_payload(name, info.provider, info.jsonl)
+    if coordinator is not None and coordinator.managed_queue(name) and name not in _projection_tasks:
+        task = asyncio.create_task(_ensure_projection(coordinator, name))
+        _projection_tasks[name] = task
+        task.add_done_callback(lambda _t, n=name: _projection_tasks.pop(n, None))
+    return {"ok": True}
+
+
+_projection_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _ensure_projection(coordinator, name: str) -> None:
+    from app import runtime_coordinator
+    import uuid
+    try:
+        # Sem prazo próprio: cancelar no meio interromperia a reabertura da sessão (até minutos) e deixaria
+        # o processo lançado sem dono; quem limita a espera é o próprio coordenador.
+        await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+    except runtime_coordinator.TransferInProgress:
+        # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
+        # deixa rastro de uma passagem que não termina.
+        diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
+    except Exception as exc:
+        from app.runtime_coordinator import failure_reason
+        diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
 
 
 @router.get("/sessions/{name}/plugin")
@@ -404,35 +366,6 @@ async def plugin_interrupted(name: str, body: _PluginInterrupted) -> dict:
     from app import plugin_bridge
     plugin_bridge.interrompeu(name, body.interrupted)
     return {"ok": True}
-
-
-@router.get("/sessions/{name}/state-facts")
-async def state_facts_snapshot(name: str) -> dict:
-    """Retrato dos fatos do estado (`state_facts`); registra o interesse do Rust nesta sessão."""
-    from app import state_facts
-    return await internal_thread(state_facts.snapshot, name)
-
-
-_STATE_SERVICES = {"permission.observe", "session.dead", "session.deliverable"}
-
-
-@router.post("/sessions/{name}/state-service")
-async def state_service(name: str, request: Request) -> dict:
-    """Serviços do `Monitor` do Rust; falha volta com o tipo, como `runtime_policy.execute`."""
-    from app import runtime_policy
-    raw = await request.body()
-    try:
-        body = json.loads(raw) if len(raw) <= 64 * 1024 else None
-        if (not isinstance(body, dict) or set(body) != {"kind", "payload"}
-                or body["kind"] not in _STATE_SERVICES or not isinstance(body["payload"], dict)):
-            raise ValueError("serviço inválido")
-    except (ValueError, RecursionError):
-        raise HTTPException(400) from None
-    try:
-        return {"ok": True, "data": await runtime_policy.state_service(body["kind"], name, body["payload"])}
-    except Exception as exc:
-        diag.registrar("estado.servico_falhou", "erro", sessao=name, codigo=type(exc).__name__)
-        return {"ok": False, "error_type": type(exc).__name__}
 
 
 @router.get("/migration/status")
@@ -589,15 +522,12 @@ async def costs_scopes() -> dict:
 
 
 @router.get("/sessions/{name}/side-events")
-async def side_events(name: str, app: int = 0):
+async def side_events(name: str, provider: str, jsonl: str, app: int = 0):
     """Uma conexão por sessão para o hangar-server, que reparte estado, prévia, perguntas e fila
-    entre os aparelhos. `app=1`: há ao menos um aparelho do dono no chat (push fica calado)."""
-    from app import api as _api   # api monta este roteador
-    sessions = await asyncio.to_thread(_api.registry.list)
-    info = next((s for s in sessions if s.name == name), None)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente",
-                                             "session or transcript not found"))
+    entre os aparelhos. `provider` e `jsonl` são a conversa que o Rust escolheu; a troca ele faz
+    religando a conexão. `app=1`: há ao menos um aparelho do dono no chat (push fica calado)."""
+    if provider not in ("claude", "claude-headless", "codex") or not Path(jsonl).is_absolute():
+        raise HTTPException(400, detail=erro("erro_conversa_invalida", "provider ou transcript inválido"))
     return EventSourceResponse(
-        merged_events(name, info.jsonl, provider=info.provider, count_app=bool(app), side=True),
+        merged_events(name, jsonl, provider=provider, count_app=bool(app), side=True),
         send_timeout=30)

@@ -59,7 +59,6 @@ import type {
 
 export interface CodexOpcoes {
   contexto_estendido: boolean;
-  codex_voice_beta: boolean;
   contexto_configurado: number | null;
   compactacao: number | null;
   modelos: { model: string; default: number; max: number }[];
@@ -73,7 +72,7 @@ export function liveVoiceUrlForServer(server: Server, origin: string): string {
 export function codexOpcoes(
   alvo: Server | null,
   signal: AbortSignal,
-  mudancas?: boolean | Pick<CodexOpcoes, 'contexto_estendido' | 'codex_voice_beta'>,
+  mudancas?: boolean | Pick<CodexOpcoes, 'contexto_estendido'>,
 ): Promise<CodexOpcoes> {
   const body = typeof mudancas === 'boolean' ? { contexto_estendido: mudancas } : mudancas;
   const init = {
@@ -725,18 +724,21 @@ export async function sendInputForServer(s: Server, name: string, text: string):
 // Responde uma opção do picker (awaiting_input) direto do card. Mesma convenção de índice do
 // selectOption por-servidor-ativo (api.ts): option é 1-BASED (1 = primeira opção) — o backend
 // valida ge=1 e traduz pra (option-1)×Down + Enter no tmux.
-export async function selectOptionForServer(s: Server, name: string, option: number): Promise<void> {
+export async function selectOptionForServer(s: Server, name: string, option: number, interactionId: string | null | undefined, text?: string): Promise<void> {
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option }),
+    body: selectBody(option, interactionId, text),
   }, s);
   // Mesmo tratamento do sendInputForServer: o erro do picker tambem e renderizado no card.
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 
 /** submitSelected no servidor da sessão, com o erro legível como o selectOptionForServer. */
-export async function submitSelectedForServer(s: Server, name: string): Promise<void> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select/submit`, { method: 'POST' }, s);
+export async function submitSelectedForServer(s: Server, name: string, interactionId: string | null | undefined): Promise<void> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select/submit`, {
+    method: 'POST',
+    body: JSON.stringify(interactionId == null ? {} : { interaction_id: interactionId }),
+  }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 
@@ -1327,6 +1329,47 @@ export async function deleteMergedWorktreesForServer(server: Server, repo: strin
     { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;
 }
+export type WorktreeBatchProgress = {
+  total: number;
+  done: number;
+  current: WorktreeStatus | null;
+  removed: WorktreeStatus[];
+  /** `error: null`: o servidor a deixou de fora (mudou depois da confirmação). */
+  failed: { worktree: WorktreeStatus; error: string | null }[];
+  freed: { bytes: number; partial: boolean };
+};
+
+/** Uma por pedido, em fila: o progresso só avança quando o servidor confirma cada uma, e a falha
+ *  de uma não interrompe as outras. O liberado é o tamanho medido das que saíram. */
+export async function runWorktreeBatch(chosen: WorktreeStatus[], removeOne: (w: WorktreeStatus) => Promise<boolean>,
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  const p: WorktreeBatchProgress = { total: chosen.length, done: 0, current: null, removed: [], failed: [],
+                                     freed: { bytes: 0, partial: false } };
+  const report = () => onProgress({ ...p, removed: [...p.removed], failed: [...p.failed] });
+  for (const w of chosen) {
+    p.current = w;
+    report();
+    try {
+      if (await removeOne(w)) p.removed.push(w);
+      else p.failed.push({ worktree: w, error: null });
+    } catch (e) {
+      p.failed.push({ worktree: w, error: e instanceof Error ? e.message : String(e) });
+    }
+    p.done++;
+    p.freed = worktreesSizeTotal(p.removed);
+  }
+  p.current = null;
+  report();
+  return p;
+}
+
+/** O lote pelo servidor: cada pedido leva só uma, com a mesma regra de perda da confirmação. */
+export function deleteWorktreeBatchForServer(server: Server, repo: string, chosen: WorktreeStatus[],
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  return runWorktreeBatch(chosen, async (w) => (await deleteMergedWorktreesForServer(server, repo, [w])).includes(w.path),
+                          onProgress);
+}
+
 /** Nome curto do chip: a pasta da worktree onde o agente está. */
 export function worktreeLabel(s: SessionInfo): string | null {
   const p = s.worktree_path ?? (s.worktree ? s.cwd : null);
@@ -2100,6 +2143,35 @@ export function patchConfigForServer(s: Server, mudancas: Record<string, unknown
   return apiFetchForServer(s, '/api/config', { method: 'POST', body: JSON.stringify(mudancas) });
 }
 
+// Modelo auxiliar do Jev (um só, texto e imagem). `null` = servidor ativo.
+export interface JevAuxCliproxy { preset_url: string; running: boolean; has_keys: boolean }
+
+export function getJevAuxCliproxy(s: Server | null): Promise<JevAuxCliproxy> {
+  const path = '/api/jev/aux/cliproxy';
+  return s ? apiFetchForServer(s, path) : apiFetch(path, { signal: AbortSignal.timeout(8000) });
+}
+
+/** A chave salva só vale para o endereço salvo: pedir com outro endereço volta `erro_jev_aux_chave_outro_endereco`. */
+export function sameJevAuxUrl(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown) => String(v ?? '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '').replace(/\/+$/, '');
+  return norm(a) !== '' && norm(a) === norm(b);
+}
+
+/** Só `base_url` é obrigatório. Sem chave digitada e com outro endereço, vai sem chave (Ollama local). */
+export interface JevAuxModelsRequest { base_url: string; api_key?: string | null; use_saved_key?: boolean; use_cliproxy_key?: boolean }
+
+/** Só o que a página do Jev mostra do Computer Use (o celular não tem a tela dele). */
+export function getComputerControlEnabled(s: Server): Promise<{ enabled: boolean }> {
+  return apiFetchForServer(s, '/api/computer-control');
+}
+
+// O provedor pode demorar a listar: teto maior que o padrão.
+export function listJevAuxModels(s: Server | null, request: JevAuxModelsRequest): Promise<{ models: string[] }> {
+  const path = '/api/jev/aux/models';
+  const init = { method: 'POST', body: JSON.stringify(request) };
+  return s ? apiFetchForServer(s, path, init, 30000) : apiFetch(path, { ...init, signal: AbortSignal.timeout(30000) });
+}
+
 // Detalhe do plano em execução (Task/Step, markdown cru). 404 = sem plano ativo, NÃO é erro — o
 // chamador (PlanPanel) trata null como "nada pra mostrar", não como falha. Por isso um fetch cru
 // em vez de apiFetch/apiFetchForServer: as duas lançam pra qualquer !ok, inclusive 404.
@@ -2454,18 +2526,29 @@ export async function relimparDitado(
   });
 }
 
-export async function selectOption(name: string, option: number, server?: Server | null): Promise<void> {
+// `text` só acompanha a escolha que pede texto (o "o que mudar" do plano); o servidor recusa com 422
+// nas demais, então ele nunca é mandado vazio.
+function selectBody(option: number, interactionId: string | null | undefined, text?: string): string {
+  return JSON.stringify({
+    option,
+    ...(interactionId == null ? {} : { interaction_id: interactionId }),
+    ...(text == null ? {} : { text }),
+  });
+}
+
+export async function selectOption(name: string, option: number, interactionId: string | null | undefined, server?: Server | null, text?: string): Promise<void> {
   await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option }),
+    body: selectBody(option, interactionId, text),
   });
 }
 
 /** Múltipla escolha: envia o que já está marcado. Marcar (selectOption) e enviar são ações
  *  diferentes ali — ver terminal_input.submeter_multipla. */
-export async function submitSelected(name: string, server?: Server | null): Promise<void> {
+export async function submitSelected(name: string, interactionId: string | null | undefined, server?: Server | null): Promise<void> {
   await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/select/submit`, {
     method: 'POST',
+    body: JSON.stringify(interactionId == null ? {} : { interaction_id: interactionId }),
   });
 }
 
@@ -2697,10 +2780,10 @@ export function getSessionPlanPreview(name: string, content = true, server?: Ser
   return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/plan-preview?content=${content}`);
 }
 
-export async function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number, server?: Server): Promise<{ ok: boolean; fallback?: boolean }> {
+export async function answerQuestions(name: string, answers: AnswerItem[], requestId: string | number | undefined, interactionId: string | null | undefined, server?: Server): Promise<{ ok: boolean; fallback?: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/answer`;
   const init = {
-    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}) }),
+    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}), ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   };
   if (!server) return apiFetch(path, init);
   const res = await apiFetchRes(path, init, server);
@@ -2708,10 +2791,10 @@ export async function answerQuestions(name: string, answers: AnswerItem[], reque
   return res.json() as Promise<{ ok: boolean; fallback?: boolean }>;
 }
 
-export async function skipQuestion(name: string, requestId: string, server?: Server): Promise<{ ok: boolean }> {
+export async function skipQuestion(name: string, requestId: string, interactionId: string | null | undefined, server?: Server): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/question/skip`;
   const init = {
-    method: 'POST', body: JSON.stringify({ request_id: requestId }),
+    method: 'POST', body: JSON.stringify({ request_id: requestId, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   };
   if (!server) return apiFetch(path, init);
   const res = await apiFetchRes(path, init, server);

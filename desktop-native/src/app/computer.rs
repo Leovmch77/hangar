@@ -4,7 +4,6 @@ use super::device::Remote;
 use super::server_config::chip;
 use super::settings::{settings_box, Disclosure, Page};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::link::Link;
 use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use serde::Deserialize;
 use std::rc::Rc;
@@ -14,9 +13,6 @@ struct AgentExe { exists: bool }
 
 #[derive(Clone, Deserialize)]
 struct ConfigFile { enabled: bool }
-
-#[derive(Clone, Deserialize)]
-struct Cliproxy { preset_url: String, installed: bool, running: bool, has_keys: bool, key_is_cliproxy: bool }
 
 #[derive(Clone, Deserialize)]
 struct ComputerTarget { name: String, path: String, transport: String, host: String, #[serde(default)] os: String }
@@ -42,14 +38,11 @@ struct ComputerState {
     llm_url: String,
     llm_model: String,
     llm_effort: String,
-    llm_key_set: bool,
-    llm_key_tail: String,
     jev_key_set: bool,
     #[serde(default)]
     jev_endpoint: String,
     #[serde(default)]
     jev_model: String,
-    cliproxy: Cliproxy,
     targets: Vec<ComputerTarget>,
     ssh_hosts: Vec<String>,
     local_available: bool,
@@ -67,9 +60,6 @@ fn parse_state(value: Value) -> Result<ComputerState, String> {
 struct ComputerForm {
     project_dir: Entity<InputState>,
     agent_config: Entity<InputState>,
-    llm_url: Entity<InputState>,
-    llm_key: Entity<InputState>,
-    llm_model: Entity<InputState>,
     target_picker: Option<Entity<SelectState<Vec<ComputerTarget>>>>,
     picker_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -86,11 +76,6 @@ pub(in crate::app) struct Computer {
     note: Option<String>,
     migration_warning: Option<String>,
     target_dialog: Option<Entity<TargetDialog>>,
-    cliproxy: bool,
-    cliproxy_help: bool,
-    effort: String,
-    models: Remote<Vec<String>>,
-    models_scroll: ScrollHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +85,6 @@ pub(super) enum ComputerReply {
     Loaded(u64, bool, Result<Value, Failure>),
     Written(u64, Write, Result<Value, Failure>),
     Target(EntityId, u64, TargetAction, Result<Value, Failure>),
-    Models(u64, Result<Value, Failure>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -335,70 +319,18 @@ impl Hangar {
 
     fn fill_computer(&mut self, state: &ComputerState, window: &mut Window, cx: &mut Context<Self>) {
         self.computer.enabled = state.enabled;
-        self.computer.cliproxy = state.llm_url == state.cliproxy.preset_url;
-        self.computer.cliproxy_help = !state.cliproxy.installed || !state.cliproxy.running;
-        self.computer.effort = state.llm_effort.clone();
-        self.clear_computer_models();
         let form = self.computer.form.get_or_insert_with(|| {
             let project_dir = cx.new(|cx| InputState::new(window, cx));
             let agent_config = cx.new(|cx| InputState::new(window, cx));
-            let llm_url = cx.new(|cx| InputState::new(window, cx).placeholder("https://…/v1/chat/completions"));
-            let llm_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr("computer_control_replace_key")));
-            let llm_model = cx.new(|cx| InputState::new(window, cx));
             let subscriptions = [&project_dir, &agent_config].map(|input| cx.subscribe_in(input, window,
                 |this: &mut Hangar, _, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
                 })).into_iter().collect::<Vec<_>>();
-            let mut subscriptions = subscriptions;
-            subscriptions.push(cx.subscribe_in(&llm_model, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
-            }));
-            for input in [&llm_url, &llm_key] {
-                subscriptions.push(cx.subscribe_in(input, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
-                    if matches!(event, InputEvent::Change) { this.clear_computer_models(); cx.notify(); }
-                }));
-            }
-            ComputerForm { project_dir, agent_config, llm_url, llm_key, llm_model,
-                target_picker: None, picker_subscription: None, _subscriptions: subscriptions }
+            ComputerForm { project_dir, agent_config, target_picker: None, picker_subscription: None, _subscriptions: subscriptions }
         });
         form.project_dir.update(cx, |input, cx| input.set_value(state.project_dir.clone(), window, cx));
         form.agent_config.update(cx, |input, cx| input.set_value(state.agent_config.clone(), window, cx));
-        form.llm_url.update(cx, |input, cx| input.set_value(state.llm_url.clone(), window, cx));
-        form.llm_key.update(cx, |input, cx| input.set_value("", window, cx));
-        form.llm_model.update(cx, |input, cx| input.set_value(state.llm_model.clone(), window, cx));
         Self::computer_picker(form, state, window, cx);
-    }
-
-    fn clear_computer_models(&mut self) {
-        self.computer.models.seq += 1;
-        self.computer.models.loading = false;
-        self.computer.models.value = None;
-    }
-
-    fn computer_preset(&mut self, cliproxy: bool, cx: &mut Context<Self>) {
-        if self.computer.cliproxy != cliproxy {
-            self.computer.cliproxy = cliproxy;
-            self.clear_computer_models();
-            cx.notify();
-        }
-    }
-
-    fn list_computer_models(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(state), Some(form)) = (self.api.clone(), self.computer.state.ok(), self.computer.form.as_ref()) else { return };
-        if self.computer.busy.is_some() || self.computer.models.loading || !self.computer.enabled { return; }
-        let key = form.llm_key.read(cx).value().to_string();
-        let body = if self.computer.cliproxy {
-            json!({"llm_url": state.cliproxy.preset_url, "use_cliproxy_key": true})
-        } else {
-            json!({"llm_url": form.llm_url.read(cx).value().trim(), "llm_key": if key.is_empty() { None } else { Some(key.as_str()) },
-                "use_saved_key": key.is_empty()})
-        };
-        let seq = self.computer.models.start();
-        let done = self.computer_send_later();
-        self.runtime.spawn(async move { done(ComputerReply::Models(seq,
-            api.server_send(reqwest::Method::POST, &["computer-control", "models"], Some(body), 15).await)).await });
-        cx.notify();
     }
 
     fn computer_picker(form: &mut ComputerForm, state: &ComputerState, window: &mut Window, cx: &mut Context<Self>) {
@@ -470,10 +402,6 @@ impl Hangar {
             "enabled": self.computer.enabled, "mode": state.mode,
             "project_dir": form.project_dir.read(cx).value().trim(),
             "agent_config": form.agent_config.read(cx).value().trim(),
-            "llm_url": if self.computer.cliproxy { state.cliproxy.preset_url.clone() } else { form.llm_url.read(cx).value().trim().to_owned() },
-            "llm_model": form.llm_model.read(cx).value().trim(), "llm_effort": self.computer.effort.as_str(),
-            "llm_key": if self.computer.cliproxy { None } else { Some(form.llm_key.read(cx).value().to_string()).filter(|key| !key.is_empty()) },
-            "use_cliproxy_key": self.computer.cliproxy,
         });
         self.write_computer(Write::Save, api, Some(body), cx);
     }
@@ -589,94 +517,25 @@ impl Hangar {
                     }
                 }
             }
-            ComputerReply::Models(seq, result) => {
-                let models = result.map_err(|error| Self::fetch_failure(&error)).and_then(|value| {
-                    value.get("models").and_then(Value::as_array).ok_or_else(|| tr("invalid_response"))?
-                        .iter().map(|model| model.as_str().map(str::to_owned).ok_or_else(|| tr("invalid_response"))).collect()
-                });
-                self.computer.models.finish(seq, models);
-            }
         }
         cx.notify();
     }
 
-    fn render_computer_llm(&self, state: &ComputerState, form: &ComputerForm, cx: &mut Context<Self>) -> Div {
-        let disabled = self.computer.busy.is_some() || !self.computer.enabled;
-        let mut section = div().flex().flex_col().gap_3();
-        let presets = [tr("computer_control_preset_cliproxy"), tr("computer_control_preset_custom")];
-        section = section.child(super::settings::segments("computer-preset", &presets, usize::from(!self.computer.cliproxy),
-            if disabled { 0 } else { 2 }, disabled,
-            String::new(), |this, n, _, cx| this.computer_preset(n == 0, cx), cx));
-        if self.computer.cliproxy {
-            let status = if !state.cliproxy.installed { "computer_control_cliproxy_not_installed" }
-                else if !state.cliproxy.running { "computer_control_cliproxy_stopped" }
-                else if state.cliproxy.has_keys { "computer_control_cliproxy_key_ok" }
-                else { "computer_control_cliproxy_no_key" };
-            let open = self.computer.cliproxy_help;
-            let owner = cx.entity().downgrade();
-            section = section.child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr(status)))
-                .child(Disclosure::new("computer-cliproxy-help", open, tr("computer_control_cliproxy_how"), false)
-                    .on_change(move |open, cx| { let _ = owner.update(cx, |this, cx| {
-                        this.computer.cliproxy_help = open; cx.notify();
-                    }); }));
-            if open {
-                section = section.child(settings_box().p_3().gap_2()
-                    .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
-                        .child(format!("1. {} ", tr("computer_control_cliproxy_step_install")))
-                        .child(Link::new("computer-cliproxy-release").href("https://github.com/router-for-me/CLIProxyAPI/releases")
-                            .child("github.com/router-for-me/CLIProxyAPI/releases")))
-                    .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
-                        .child(format!("2. {}", tr("computer_control_cliproxy_step_service"))))
-                    .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
-                        .child(format!("3. {} ", tr("computer_control_cliproxy_step_panel")))
-                        .child(Link::new("computer-cliproxy-panel").href("http://127.0.0.1:8317/management.html")
-                            .child("http://127.0.0.1:8317/management.html")))
-                    .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
-                        .child(format!("4. {}", tr("computer_control_cliproxy_step_key")))));
-            }
-        } else {
-            section = section.child(input_row("computer_control_url", &form.llm_url, disabled))
-                .child(div().flex().flex_col().gap_1()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_llm_key")))
-                    .when(state.llm_key_set && !state.cliproxy.key_is_cliproxy, |el| el.child(div().text_xs()
-                        .text_color(theme::muted()).child(tr("computer_control_key_saved").replace("{tail}", &state.llm_key_tail))))
-                    .child(Input::new(&form.llm_key).disabled(disabled).aria_label(tr("computer_control_llm_key"))));
-        }
-        section = section.child(div().flex().flex_col().gap_1()
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_model")))
+    /// O passo 4: o modelo que lê a tela é o auxiliar da página do Jev, aqui só a situação dele.
+    fn render_computer_llm(&self, state: &ComputerState, cx: &mut Context<Self>) -> Div {
+        let set = !state.llm_url.trim().is_empty() && !state.llm_model.trim().is_empty();
+        let text = if set {
+            let effort = if state.llm_effort.is_empty() { String::new() } else { format!(" · {}", state.llm_effort) };
+            let url = state.llm_url.trim_end_matches('/').trim_end_matches("/chat/completions");
+            tr("computer_control_llm_from_jev").replace("{model}", &format!("{}{effort}", state.llm_model)).replace("{url}", url)
+        } else { tr("computer_control_llm_from_jev_missing") };
+        div().flex().flex_col().gap_2()
+            .child(div().id("computer-llm-summary").text_sm().text_color(theme::muted()).whitespace_normal().child(text))
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().min_w_0().child(Input::new(&form.llm_model).disabled(disabled)
-                    .aria_label(tr("computer_control_model"))))
-                .child(Button::new("computer-list-models").outline().small()
-                    .label(tr(if self.computer.models.loading { "computer_control_listing" } else { "computer_control_list_models" }))
-                    .loading(self.computer.models.loading).disabled(disabled || self.computer.models.loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.list_computer_models(cx))))));
-        match &self.computer.models.value {
-            Some(Ok(models)) if models.is_empty() => section = section.child(div().id("computer-models-empty").role(Role::Alert)
-                .text_sm().text_color(theme::danger()).whitespace_normal().child(tr("computer_control_models_empty"))),
-            Some(Ok(models)) => {
-                section = section.child(div().id("computer-models-found").role(Role::Status).text_xs().text_color(theme::muted())
-                    .child(tr("computer_control_models_found").replace("{n}", &models.len().to_string())))
-                    .child(scrolled("computer-models-list", &self.computer.models_scroll, 160.,
-                        settings_box().children(models.iter().map(|model| {
-                            let chosen = model.clone();
-                            Button::new(SharedString::from(format!("computer-model-{model}"))).ghost().small().w_full().label(model.clone())
-                                .disabled(disabled)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if let Some(form) = &this.computer.form { form.llm_model.update(cx, |input, cx| input.set_value(chosen.clone(), window, cx)); }
-                                }))
-                        }))));
-            }
-            Some(Err(error)) => section = section.child(div().id("computer-models-error").role(Role::Alert)
-                .text_sm().text_color(theme::danger()).whitespace_normal().child(error.clone())),
-            None => {},
-        }
-        let efforts = [tr("computer_control_effort_default"), "low".into(), "medium".into(), "high".into()];
-        let selected = ["", "low", "medium", "high"].iter().position(|value| *value == self.computer.effort).unwrap_or(0);
-        section.child(div().flex().flex_col().gap_1()
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_effort")))
-            .child(super::settings::segments("computer-effort", &efforts, selected, if disabled { 0 } else { 4 }, disabled, String::new(),
-                |this, n, _, cx| { this.computer.effort = ["", "low", "medium", "high"][n].into(); cx.notify(); }, cx)))
+                .when(!set, |el| el.child(chip(tr("computer_control_llm_missing"), theme::warning(), theme::raised())))
+                .child(Button::new("computer-llm-settings").ghost().xsmall().label(tr("computer_control_jev_change")).icon(IconName::ArrowRight)
+                    .disabled(self.computer.busy.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Jev, window, cx)))))
     }
 
     /// O passo 3: o Jev do Computer Use é a configuração única da página Jev, aqui só a situação dela.
@@ -769,7 +628,7 @@ impl Hangar {
                     } }) }));
         let vision = div().flex().flex_col().gap_3()
             .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_llm_hint")))
-            .child(self.render_computer_llm(state, form, cx));
+            .child(self.render_computer_llm(state, cx));
         let enable = div().flex().flex_col().gap_1()
             .child(Checkbox::new("computer-enable").checked(self.computer.enabled).disabled(busy || (!self.computer.enabled && (!installed || target_missing)))
                 .label(tr("computer_control_enabled"))

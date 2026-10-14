@@ -234,9 +234,10 @@
 
         {#if vs.error}<p class="lv-detail">{vs.error.text}</p>{/if}
 
-        {#if busy && (vs.action || thought.length)}
+        {#if busy && (vs.action || vs.progress || thought.length)}
           <section class="lv-block lv-now" aria-live="polite">
             {#if vs.action}<p class="lv-action">{vs.action.text}</p>{/if}
+            {#if vs.progress}<p class="lv-progress">{vs.progress}</p>{/if}
             {#each thought as line, i (i)}<p class="lv-thought">{line}</p>{/each}
           </section>
         {/if}
@@ -292,10 +293,10 @@
           <button type="button" class="lv-btn" onclick={() => target && liveVoiceStore.loadSettings(target, true)}>{m.sync_retry()}</button>
         {/if}
       </div>
-    {:else if !reply.enabled}
-      <p class="lv-error">{m.live_voice_error_disabled()}</p>
     {:else if !reply.codex}
       <p class="lv-error">{m.live_voice_error_codex_missing()}</p>
+    {:else if !reply.enabled}
+      <p class="lv-error">{m.live_voice_error_no_account()}</p>
     {:else if target}
       <button type="button" class="lv-primary" onclick={() => target && liveVoiceStore.start(target)}>{m.live_voice_start()}</button>
     {/if}
@@ -395,6 +396,7 @@
   @keyframes lv-pulse { 50% { opacity: 0.3; } }
   .lv-now { gap: 4px; }
   .lv-action { font-size: var(--text-sm); color: var(--warning); }
+  .lv-progress { font-size: var(--text-sm); color: var(--text-primary); overflow-wrap: anywhere; }
   .lv-thought { font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; }
   @media (prefers-reduced-motion: reduce) { .lv-dot { animation: none !important; } }
   .lv-server, .lv-muted { font-size: var(--text-sm); color: var(--text-muted); }

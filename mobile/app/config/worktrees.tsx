@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { basename, fetchWorktreesForServer, getWorktreesForServer, mergedWorktreeBatch, relativeTime,
          WORKTREE_STALE_DAYS, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreesSizeTotal, worktreeState,
@@ -15,7 +15,6 @@ import { putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
 import { displayTitle, SessionChips, sizeLabel, sizeSumLabel, STATE_TONE, stateLabel, useStateColor } from '../../src/features/worktrees/worktreeUi';
 import { Chip } from '../../src/ui/Chip';
 import { Icon } from '../../src/ui/Icon';
-import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import { useSessions } from '../../src/stores/sessions';
 import * as m from '../../src/paraglide/messages';
@@ -50,7 +49,7 @@ export default function Worktrees() {
   const [erro, setErro] = useState('');
   const [avisoFetch, setAvisoFetch] = useState<string[]>([]);
   const [demorando, setDemorando] = useState(false);
-  const [atualizando, setAtualizando] = useState(false);
+  const [remoto, setRemoto] = useState<{ feitos: number; total: number } | null>(null);
   const [aberta, setAberta] = useState<string | null>(null);
   const [filtro, setFiltro] = useState<Filter>('todas');
   const [agentesAbertos, setAgentesAbertos] = useState<Record<string, boolean>>({});
@@ -96,17 +95,18 @@ export default function Worktrees() {
     const g = ++geracao.current;
     tentativas.current = 0;
     if (releitura.current) clearTimeout(releitura.current);
-    setRepos(null); setErro(''); setAvisoFetch([]); setDemorando(false); setAberta(null); setLote(null); setAtualizando(false);
+    setRepos(null); setErro(''); setAvisoFetch([]); setDemorando(false); setAberta(null); setLote(null); setRemoto(null);
     const alvo = serverRef.current;
     if (!alvo) return;
     void (async () => {
       // Mostra o que já está no disco e só então busca o remoto, que pode demorar.
       const lidos = await carregar();
       if (!lidos || g !== geracao.current) return;
-      setAtualizando(true);
-      const res = await Promise.allSettled(lidos.map((r) => fetchWorktreesForServer(alvo, r.repo)));
+      setRemoto(lidos.length ? { feitos: 0, total: lidos.length } : null);
+      const contar = () => { if (g === geracao.current) setRemoto((x) => x && { ...x, feitos: x.feitos + 1 }); };
+      const res = await Promise.allSettled(lidos.map((r) => fetchWorktreesForServer(alvo, r.repo).finally(contar)));
       if (g !== geracao.current) return;
-      setAtualizando(false);
+      setRemoto(null);
       setAvisoFetch(res.flatMap((x, i) => {
         if (x.status !== 'rejected') return [];
         console.warn('worktrees: fetch falhou', lidos[i].repo, x.reason);
@@ -126,10 +126,6 @@ export default function Worktrees() {
   }, [serverId, iniciar]);
 
   const recarregar = () => { tentativas.current = 0; void carregar(); };
-  const loteApagado = (ficaram: string[]) => {
-    if (ficaram.length) toast.erro(m.worktree_lote_nao_apagou({ nomes: ficaram.join(', ') }));
-    recarregar();
-  };
 
   const todas = useMemo(() => repos?.flatMap((r) => r.worktrees) ?? [], [repos]);
   const conta = (f: Filter) => todas.filter(MATCH[f]).length;
@@ -156,9 +152,14 @@ export default function Worktrees() {
 
   return (
     <Pagina>
-      <PageHeader title={m.worktrees_titulo()} subtitle={atualizando ? m.worktrees_atualizando() : undefined} />
+      <PageHeader title={m.worktrees_titulo()} subtitle={remoto ? m.worktrees_remoto_progresso(remoto) : undefined} />
       {!server ? <InfoNotice text={m.maquinas_vazio()} /> : null}
-      {server && repos === null && !erro ? <Text style={styles.muted}>{m.comum_carregando()}</Text> : null}
+      {server && repos === null && !erro ? (
+        <View style={styles.lendo} accessible accessibilityRole="progressbar" accessibilityLabel={m.worktrees_lendo()}>
+          <ActivityIndicator color={c.muted} />
+          <Text style={styles.muted}>{m.worktrees_lendo()}</Text>
+        </View>
+      ) : null}
       {erro ? (
         <View style={styles.erroBloco}>
           <Text accessibilityRole="alert" style={styles.erro}>{m.worktrees_erro({ motivo: erro })}</Text>
@@ -252,7 +253,7 @@ export default function Worktrees() {
         </>
       ) : null}
       <WorktreeSheet server={server} path={aberta} onClose={() => setAberta(null)} onDeleted={recarregar} />
-      <WorktreeBatchSheet server={server} batch={lote} onClose={() => setLote(null)} onDeleted={loteApagado} />
+      <WorktreeBatchSheet server={server} batch={lote} onClose={() => setLote(null)} onDeleted={recarregar} />
     </Pagina>
   );
 }
@@ -296,6 +297,8 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
   const cor = useStateColor();
   const medidas = todas.filter((w) => (w.size ?? 0) > 0).sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
   const pendente = todas.some((w) => w.size_pending);
+  const existentes = todas.filter((w) => w.exists);
+  const medidasN = existentes.filter((w) => !w.size_pending).length;
   const prontas = todas.filter(worktreeReady);
   const maior = medidas[0]?.size ?? 1;
   const topo = medidas.slice(0, DISK_TOP);
@@ -311,7 +314,8 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
     <SectionCard icon="HardDrive" title={m.worktrees_disco_titulo()}
       subtitle={[m.worktrees_disco_resumo({ total: sizeSumLabel(todas), n: medidas.length }),
         ...(worktreesSizeTotal(prontas).bytes ? [m.worktrees_disco_libera({ tamanho: sizeSumLabel(prontas) })] : []),
-        ...(pendente ? [demorando ? m.worktrees_disco_demorando() : m.worktrees_disco_calculando()] : [])].join(' · ')}>
+        ...(pendente ? [demorando ? m.worktrees_disco_demorando()
+          : m.worktrees_disco_progresso({ feitas: medidasN, total: existentes.length })] : [])].join(' · ')}>
       <View style={[styles.disco, { borderTopColor: c.border }]}>
         {pendente && demorando ? (
           <View style={styles.erroBloco}><Pill icon="RotateCw" label={m.busca_tentar_de_novo()} onPress={onRetry} /></View>
@@ -360,6 +364,7 @@ const styles = StyleSheet.create((theme) => ({
   muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: 4 },
   erro: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: 4 },
   erroBloco: { gap: 8, alignItems: 'flex-start' },
+  lendo: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   aviso: { fontSize: theme.base.text.xs, color: theme.tokens.status.warning, paddingHorizontal: 4 },
   flex: { flex: 1, minWidth: 0 },
   grade: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },

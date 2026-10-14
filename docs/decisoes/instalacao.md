@@ -73,6 +73,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
   recusa escopo transiente derrubava toda criação de sessão.
+- **Atualização cujo motor morreu no próprio reinício é concluída pelo backend novo.** Sem escopo
+  transiente, o motor nasce no cgroup do backend e o `systemctl restart` o mata antes de gravar
+  "pronto". Na etapa `reiniciar`, backend com outro pid e disco no `commit_para` = sucesso; fora
+  disso, falha.
 - **`scripts/verificar-local` é exigido ao abrir PR e ao subir para a `main` ou para branch com PR
   aberto; branch sem PR sobe livre.** O hook PreToolUse do `gh pr create` (`.claude/settings.json`)
   confere o PR inteiro, desde o ponto em que a ponta saiu da base; a trava `pre-push` confere cada

@@ -21,7 +21,7 @@ serde_json = { workspace = true, features = ["float_roundtrip", "alloc"] }
 indexmap.workspace = true
 hangar-api.workspace = true
 hangar-codex.workspace = true
-toml = { version = "=1.1.7", default-features = false, features = ["parse", "std", "serde"] }
+toml = { version = "=1.1.7", default-features = false, features = ["parse", "std", "serde", "preserve_order"] }
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
 # Largura em células para cortar o pane na coluna da conversa (`plugin_screen.cell_width`).
@@ -74,7 +74,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.
@@ -100,6 +100,18 @@ path = "tests/terminal_diagnostics.rs"
 [[test]]
 name = "contract_local_policy"   # troca HOME, USERPROFILE e TZ
 path = "tests/contract_local_policy.rs"
+
+[[test]]
+name = "contract_quotas_other"   # troca TZ
+path = "tests/contract_quotas_other.rs"
+
+[[test]]
+name = "contract_credenciais"   # fixa HANGAR_RUNTIME_INSTANCE
+path = "tests/contract_credenciais.rs"
+
+[[test]]
+name = "scope_retry"   # troca o PATH e o logger global
+path = "tests/scope_retry.rs"
 
 [[test]]
 name = "costs_hook"   # gancho de pânico global (install_panic_hook)

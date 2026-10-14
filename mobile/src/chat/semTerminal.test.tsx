@@ -267,11 +267,12 @@ it.each([0, 1])('opção %s e cancelar compartilham trava, mantendo índice 1-ba
   const onSelect = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
   const onCancel = vi.fn(async () => {});
   const { container, root } = await render(createElement(OptionButtons, {
-    question: 'permission', options: ['Yes', 'No'], onSelect, onCancel,
+    question: 'permission', options: ['Yes', 'No'], interactionId: 'perm:1', onSelect, onCancel,
   }));
   const buttons = container.querySelectorAll<HTMLButtonElement>('button');
   act(() => { buttons[selected].click(); buttons[1 - selected].click(); buttons[2].click(); });
-  expect(onSelect).toHaveBeenCalledExactlyOnceWith(selected + 1);
+  // A escolha leva o ID do cartão em que a pessoa agiu.
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(selected + 1, 'perm:1');
   expect(onCancel).not.toHaveBeenCalled();
   expect([...buttons].every((b) => b.disabled)).toBe(true);
   await act(async () => fail(new Error('recusado')));

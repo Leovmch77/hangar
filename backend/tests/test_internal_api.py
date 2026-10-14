@@ -12,7 +12,7 @@ from app import internal_api, pqueue
 from app.models import SessionInfo
 
 SECRET = "ab" * 32
-ROUTE = "/internal/sessions/s1/info"
+ROUTE = "/internal/ping"
 
 
 @pytest.fixture(autouse=True)
@@ -31,37 +31,52 @@ def _info(**kw):
     return SessionInfo(**{"name": "s1", "cwd": "/p", "jsonl": "/p/abc-123.jsonl", "provider": "claude", **kw})
 
 
-def _get(client, headers=None, info=None):
-    with patch("app.api._cached_info", AsyncMock(return_value=info or _info())):
-        return client.get(ROUTE, headers=headers if headers is not None else {"X-Hangar-Internal": SECRET})
+def _get(client, headers=None):
+    return client.get(ROUTE, headers=headers if headers is not None else {"X-Hangar-Internal": SECRET})
 
 
-def test_info_has_what_hangar_server_needs(tmp_path):
-    with patch("app.adapters.chave_de", lambda name, provider: "claude-headless"):
-        r = _get(_client())
-    assert r.status_code == 200
-    assert r.json() == {"provider": "claude-headless", "jsonl": "/p/abc-123.jsonl", "session_key": "abc-123",
-                        "history": {"queue": str(tmp_path / "s1.jsonl")}, "headless": False}
+def test_reopen_answers_without_waiting_for_the_projection():
+    calls = []
+
+    async def slow_op(name, command, operation_id):
+        calls.append((name, command["kind"]))
+        await asyncio.sleep(0.5)
+
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=slow_op)
+
+    async def scenario():
+        started = time.monotonic()
+        first = await internal_api.session_reopen("s1")
+        second = await internal_api.session_reopen("s1")
+        assert time.monotonic() - started < 0.4
+        assert first == second == {"ok": True}
+        await asyncio.sleep(0.05)
+        # Uma reabertura em voo por sessão: a segunda tela não empilha outra.
+        assert calls == [("s1", "ensure_projection")]
+        await asyncio.sleep(0.6)
+        await internal_api.session_reopen("s1")
+        await asyncio.sleep(0.05)
+        assert calls == [("s1", "ensure_projection")] * 2
+        await asyncio.gather(*internal_api._projection_tasks.values())
+
+    with patch("app.runtime_coordinator.current", return_value=coordinator):
+        asyncio.run(scenario())
 
 
-def test_codex_session_key_is_the_rollout_id():
-    info = _info(provider="codex",
-                 jsonl="/c/rollout-2026-09-02T14-00-00-019f0000-0000-7000-8000-000000000001.jsonl")
-    r = _get(_client(), info=info)
-    assert r.json()["provider"] == "codex"
-    assert r.json()["session_key"] == "019f0000-0000-7000-8000-000000000001"
+def test_projection_failure_goes_to_the_diary_without_failing_the_reopen():
+    async def broken(name, command, operation_id):
+        raise RuntimeError("ator ausente")
 
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=broken)
 
-def test_session_without_transcript_yet():
-    r = _get(_client(), info=_info(jsonl=None))
-    assert r.status_code == 200
-    assert (r.json()["jsonl"], r.json()["session_key"]) == (None, "")
+    async def scenario():
+        assert await internal_api.session_reopen("s1") == {"ok": True}
+        await asyncio.gather(*internal_api._projection_tasks.values())
 
-
-def test_unknown_session_404():
-    with patch("app.api._cached_info", AsyncMock(return_value=None)):
-        r = _client().get(ROUTE, headers={"X-Hangar-Internal": SECRET})
-    assert r.status_code == 404
+    with patch("app.runtime_coordinator.current", return_value=coordinator), \
+            patch.object(internal_api.diag, "registrar") as registrar:
+        asyncio.run(scenario())
+    assert registrar.call_args.args[:2] == ("runtime.history_failed", "erro")
 
 
 def test_workspace_context_contains_only_registry_metadata(tmp_path):
@@ -156,21 +171,6 @@ def test_secret_never_goes_to_environ(monkeypatch):
     assert _get(_client()).status_code == 200
 
 
-def test_info_payload_is_what_the_route_returns(tmp_path):
-    with patch("app.adapters.chave_de", lambda name, provider: "claude-headless"):
-        assert internal_api.info_payload("s1", "claude", "/p/abc-123.jsonl") == _get(_client()).json()
-
-
-@pytest.mark.parametrize("provider,sidecar,headless", [
-    ("codex", {"headless": True}, True), ("codex", {"headless": False}, False), ("codex", None, False),
-    ("claude", {"headless": True}, False)])
-def test_info_payload_headless_comes_from_the_codex_sidecar(monkeypatch, provider, sidecar, headless):
-    # O hub do Rust liga o feed do estado só para Codex sem terminal; o resto leva `false`.
-    from app.adapters.codex import sessions as codex_sessions
-    monkeypatch.setattr(codex_sessions, "load", lambda name: sidecar)
-    assert internal_api.info_payload("s1", provider, "/p/abc-123.jsonl")["headless"] is headless
-
-
 def test_outside_loopback_404_even_with_secret():
     assert _get(_client("10.0.0.7")).status_code == 404
 
@@ -217,6 +217,9 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
 def test_quota_route_is_gone():
     # A linha de status lê a cota no módulo de contas do Rust; aqui não sobra rota.
     assert _client().get("/internal/quota", headers={"X-Hangar-Internal": SECRET}).status_code == 404
+    # As fontes de cota de fora (Kimi, CommandCode, OpenCode) também são lidas no Rust: o Rust não
+    # volta ao Python dentro de um pedido de cota que o Python fez.
+    assert "/internal/accounts/quotas" not in {route.path for route in internal_api.router.routes}
 
 
 def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
@@ -315,22 +318,6 @@ def test_internal_term_origin_same_rules(monkeypatch):
         assert r.status_code == 400
     r = client.post("/internal/term/origin", json={"origin": "x", "host": None}, headers={"X-Hangar-Internal": "errado"})
     assert r.status_code == 404
-
-
-def test_quota_facts_runs_outside_the_default_pool():
-    # O Rust chama esta rota enquanto um pedido de cota do Python ocupa o pool padrão: lá dentro ela se trava.
-    import json
-    import threading
-    seen = []
-    def facts(action, ids):
-        seen.append(threading.current_thread().name)
-        return {"sources": []}
-    raw = json.dumps({"action": "sources", "ids": []}).encode()
-    with patch("app.internal_api._instance_body", AsyncMock(return_value=(None, None, raw))), \
-            patch("app.cotas.quota_facts", facts):
-        r = _client().post("/internal/accounts/quotas", headers={"X-Hangar-Internal": SECRET})
-    assert r.status_code == 200 and r.json() == {"sources": []}
-    assert seen and seen[0].startswith("quota-facts")
 
 
 def test_busy_pool_threads_sees_uvloop_default_executor_threads():

@@ -14,8 +14,13 @@ pub fn fastapi_bool(value: &str) -> Option<bool> {
 
 /// Ausente é `false`; inválido devolve o mesmo 422 `bool_parsing` do FastAPI.
 pub fn bool_param(query: &HashMap<String, String>, name: &str) -> Result<bool, Box<Response>> {
+    bool_param_or(query, name, false)
+}
+
+/// Como `bool_param`, com o padrão do parâmetro quando ele não vem.
+pub fn bool_param_or(query: &HashMap<String, String>, name: &str, default: bool) -> Result<bool, Box<Response>> {
     let Some(value) = query.get(name) else {
-        return Ok(false);
+        return Ok(default);
     };
     fastapi_bool(value).ok_or_else(|| {
         Box::new(crate::session_write::json_response(

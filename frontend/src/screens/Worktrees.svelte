@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, getWorktreesForServer,
+  import { onMount, untrack } from 'svelte';
+  import { basename, deleteWorktreeBatchForServer, fetchWorktreesForServer, getWorktreesForServer,
            mergedWorktreeBatch, relativeTime, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreeState,
-           worktreeTitle, WORKTREE_STALE_DAYS, type WorktreeRepo, type WorktreeState, type WorktreeStatus } from '@hangar/core';
+           worktreeTitle, WORKTREE_STALE_DAYS, type WorktreeBatchProgress, type WorktreeRepo, type WorktreeState,
+           type WorktreeStatus } from '@hangar/core';
   import BottomSheet from '../components/BottomSheet.svelte';
   import Spinner from '../components/Spinner.svelte';
   import WorktreeSheet from '../components/WorktreeSheet.svelte';
@@ -17,7 +18,9 @@
   let servidores = $state<Server[]>(listOwnServers());
   $effect(() => onServersChanged(() => { servidores = listOwnServers(); }));
   // Estado vivo das sessões nas fichas: o mesmo stream da lista, nunca um pedido por linha.
-  $effect(() => {
+  // `onMount`, não `$effect`: o retain lê e grava estado do store, e dentro de um efeito isso vira laço
+  // que aborta a tela antes da primeira leitura.
+  onMount(() => {
     sessionsStore.retain();
     return () => sessionsStore.release();
   });
@@ -47,11 +50,18 @@
   // Primeiro mostra o que o disco já sabe; o fetch dos remotos (lento) vem depois e relê.
   // Por `serverId::repo`: o fetch do remoto que falhou deixa mesclada/atrasada velhas, e isso aparece.
   let erroRemoto = $state<Record<string, true>>({});
+  let remoto = $state({ feitos: 0, total: 0 });
+  let geracaoRemoto = 0;
   async function atualizar() {
+    // Só a busca mais nova conta e encerra o aviso: uma antiga que termina depois não mexe no da nova.
+    const meu = ++geracaoRemoto;
     releituras = 0;
     atualizando = true;
     const alvos = blocos.flatMap((b) => b.repos.map((r) => ({ b, repo: r.repo })));
-    const res = await Promise.allSettled(alvos.map(({ b, repo }) => fetchWorktreesForServer(b.servidor, repo)));
+    remoto = { feitos: 0, total: alvos.length };
+    const res = await Promise.allSettled(alvos.map(({ b, repo }) =>
+      fetchWorktreesForServer(b.servidor, repo).finally(() => { if (meu === geracaoRemoto) remoto.feitos++; })));
+    if (meu !== geracaoRemoto) return;
     const falhas: Record<string, true> = {};
     res.forEach((x, i) => { if (x.status === 'rejected') falhas[chaveLote(alvos[i].b, alvos[i].repo)] = true; });
     erroRemoto = falhas;
@@ -62,6 +72,8 @@
   // O backend mede o tamanho em segundo plano, uma pasta por vez: relê a cada 5 s enquanto houver
   // medida pendente, com teto para não ficar lendo para sempre se a medição travar.
   const medindo = $derived(blocos.some((b) => b.repos.some((r) => r.worktrees.some((w) => w.size_pending))));
+  const existentes = $derived(blocos.flatMap((b) => b.repos.flatMap((r) => r.worktrees.filter((w) => w.exists))));
+  const medidas = $derived(existentes.filter((w) => !w.size_pending).length);
   const MAX_RELEITURAS = 12;
   let releituras = $state(0);
   const demorando = $derived(medindo && releituras >= MAX_RELEITURAS);
@@ -98,25 +110,37 @@
                     comArquivos: deletable.filter((w) => !worktreeReady(w)), blocked };
   }
 
+  // O lote em andamento fica na folha, que só fecha no fim: o progresso é a confirmação de cada uma.
+  let execucao = $state<{ k: string; p: WorktreeBatchProgress; fim: boolean } | null>(null);
+  const pct = $derived(execucao && execucao.p.total ? Math.round((execucao.p.done / execucao.p.total) * 100) : 0);
+
   async function apagarMescladas() {
-    if (!confirmando || !selecionadas.length) return;
+    if (!confirmando || !selecionadas.length || execucao) return;
     const { bloco: b, repo } = confirmando;
-    const deletable = selecionadas;
+    const deletable = [...selecionadas];
     const k = chaveLote(b, repo);
-    confirmando = null;
     loteAndando = k;
     delete erroLote[k];
+    execucao = { k, fim: false, p: { total: deletable.length, done: 0, current: null, removed: [], failed: [],
+                                  freed: { bytes: 0, partial: false } } };
     try {
-      const removidas = await deleteMergedWorktreesForServer(b.servidor, repo, deletable);
-      for (const p of removidas) worktreeStatus.drop(b.servidor.id, p);
-      const ficaram = deletable.filter((w) => !removidas.includes(w.path));
-      if (ficaram.length) erroLote[k] = m.worktree_lote_nao_apagou({ nomes: ficaram.map((w) => basename(w.path)).join(', ') });
+      await deleteWorktreeBatchForServer(b.servidor, repo, deletable, (p) => {
+        for (const w of p.removed) worktreeStatus.drop(b.servidor.id, w.path);
+        execucao = { k, fim: false, p };
+      });
     } catch (e) {
       erroLote[k] = e instanceof Error ? e.message : String(e);
     } finally {
       loteAndando = null;
+      if (execucao) execucao = { ...execucao, fim: true };
     }
     await carregar();
+  }
+
+  function fecharLote() {
+    if (execucao && !execucao.fim) return;
+    execucao = null;
+    confirmando = null;
   }
 
   // Mesma chave do Orq: lista recarregada com os mesmos servidores não refaz a leitura nem zera a tela.
@@ -225,10 +249,10 @@
   <header class="topo">
     {#if onBack}<button class="voltar" onclick={onBack} aria-label={m.orq_voltar()}>←</button>{/if}
     <h1>{m.worktrees_titulo()}</h1>
-    {#if atualizando}<span class="muted">{m.worktrees_atualizando()}</span>{/if}
+    {#if atualizando}<span class="muted" role="status">{m.worktrees_remoto_progresso(remoto)}</span>{/if}
   </header>
   {#if carregando}
-    <div class="centro"><Spinner /></div>
+    <div class="centro" role="status"><Spinner /><span class="muted">{m.worktrees_lendo()}</span></div>
   {:else if vazio}
     <p class="vazio">{m.worktrees_vazio()}</p>
   {:else}
@@ -253,7 +277,7 @@
         {#if demorando}
           <p class="aviso">{m.worktrees_disco_demorando()}
             <button type="button" class="tentar" onclick={tentarMedirDeNovo}>{m.busca_tentar_de_novo()}</button></p>
-        {:else if medindo}<p class="muted">{m.worktrees_disco_calculando()}</p>{/if}
+        {:else if medindo}<p class="muted" role="status">{m.worktrees_disco_progresso({ feitas: medidas, total: existentes.length })}</p>{/if}
         {#if porTamanho.length}
           <p class="muted">{m.worktrees_disco_resumo({ total: discoTotal, n: porTamanho.length })}
             {#if liberaProntas} · <span class="libera">{m.worktrees_disco_libera({ tamanho: worktreesSizeSum(prontas) })}</span>{/if}</p>
@@ -353,7 +377,33 @@
 {/if}
 {#if confirmando}
   {@const libera = somaTamanho(selecionadas)}
-  <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: selecionadas.length })}>
+  <BottomSheet open={true} onClose={fecharLote} ariaLabel={m.worktree_lote_titulo({ n: selecionadas.length })}>
+    {#if execucao}
+      {@const p = execucao.p}
+      <div class="sheet">
+        <h2 class="title">{execucao.fim ? m.worktree_lote_fim_titulo() : m.worktree_lote_apagando_titulo()}</h2>
+        <div class="progresso" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}
+             aria-label={m.worktree_lote_apagando_titulo()}><span style:width="{pct}%"></span></div>
+        <p class="muted" aria-live="polite">{m.worktree_lote_progresso({ feitas: p.removed.length, total: p.total,
+          tamanho: worktreesSizeSum(p.removed) })}</p>
+        {#if p.current}<p class="muted">{m.worktree_lote_apagando({ nome: basename(p.current.path) })}</p>{/if}
+        {#if p.failed.length}
+          <div class="falhas" role="alert">
+            <p class="erro">{m.worktree_lote_falhas({ n: p.failed.length })}</p>
+            <ul class="perde">
+              {#each p.failed as f (f.worktree.path)}
+                <li>{f.error === null ? m.worktree_lote_mudou({ nome: basename(f.worktree.path) })
+                                      : m.worktree_lote_erro_item({ nome: basename(f.worktree.path), motivo: f.error })}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+        {#if erroLote[execucao.k]}<p class="erro" role="alert">{erroLote[execucao.k]}</p>{/if}
+        {#if execucao.fim}
+          <div class="acoes"><button type="button" class="cancelar" onclick={fecharLote}>{m.worktree_lote_fechar()}</button></div>
+        {/if}
+      </div>
+    {:else}
     <div class="sheet">
       <h2 class="title">{m.worktree_lote_titulo({ n: selecionadas.length })}</h2>
       {#if libera}<p class="libera">{m.worktree_libera({ tamanho: worktreesSizeSum(selecionadas) })}</p>{/if}
@@ -402,6 +452,7 @@
         <button type="button" class="apagar" disabled={!selecionadas.length} onclick={apagarMescladas}>{m.worktree_lote_apagar_n({ n: selecionadas.length })}</button>
       </div>
     </div>
+    {/if}
   </BottomSheet>
 {/if}
 
@@ -417,7 +468,7 @@
   .libera { color: var(--success-text); }
   .erro { color: var(--error); margin: 0; }
   .vazio { color: var(--text-muted); text-align: center; padding: 32px 0; margin: 0; }
-  .centro { display: flex; justify-content: center; padding: 32px; }
+  .centro { display: flex; justify-content: center; align-items: center; gap: 10px; padding: 32px; }
   .ponto { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-muted); display: inline-block; }
   .ponto--vivo { background: var(--success); }
   .ponto--espera { background: var(--warning); }
@@ -497,4 +548,7 @@
   .apagar { padding: 0 16px; border-radius: 8px; background: var(--error); color: #fff; font-weight: 600; }
   .apagar:disabled { opacity: 0.5; }
   .marca-lote { display: flex; align-items: center; gap: 8px; }
+  .progresso { height: 8px; border-radius: 4px; overflow: hidden; background: var(--surface-inset); }
+  .progresso > span { display: block; height: 100%; background: var(--error); transition: width 0.2s; }
+  .sheet > .muted, .falhas > .erro { margin: 0; }
 </style>

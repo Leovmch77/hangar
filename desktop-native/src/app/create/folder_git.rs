@@ -30,7 +30,9 @@ impl GitAction {
 
 /// O que a última ação deixou: a recusa, com o texto montado do estado relido, ou o aviso do que mudou.
 #[derive(Clone, Debug)]
-enum GitNote { Refused(&'static str), Failed(String), Done(String) }
+enum GitNote { Refused(&'static str), Failed(String), Done(String),
+    /// A troca pedida é para uma branch aberta em outra worktree: branch, pasta dela e se é a principal.
+    Elsewhere(String, String, bool) }
 
 #[derive(Default)]
 pub(super) struct GitPanel {
@@ -140,9 +142,31 @@ impl NewSession {
     pub(super) fn git_switch(&mut self, action: GitAction, branch: String, cx: &mut Context<Self>) {
         let Some(git) = self.git.status.ok() else { return };
         let switching = action == GitAction::Switch || self.git.checkout;
-        if switching && git.dirty > 0 { self.git.note = Some(GitNote::Refused("dirty")); }
+        let held = self.checkout.ok().and_then(Option::as_ref).and_then(|c| c.elsewhere.get(&branch)).cloned();
+        if let Some(at) = held.filter(|_| action == GitAction::Switch) { (self.git.note, self.git.confirm) = (Some(GitNote::Elsewhere(branch, at.path, at.main)), None); }
+        else if switching && git.dirty > 0 { self.git.note = Some(GitNote::Refused("dirty")); }
         else if switching && !git.sessions.is_empty() { (self.git.confirm, self.git.note) = (Some((action, branch)), None); }
         else { return self.git_act(action, branch, false, cx); }
+        cx.notify();
+    }
+
+    /// Fecha a outra worktree (o servidor recusa se ela tem sessão ou alteração não commitada) e então troca a pasta para a branch.
+    fn close_elsewhere(&mut self, branch: String, path: String, cx: &mut Context<Self>) {
+        if self.git.busy.is_some() || self.creating { return; }
+        if self.git.status.ok().is_some_and(|g| g.dirty > 0) { self.git.note = Some(GitNote::Refused("dirty")); cx.notify(); return; }
+        let (Some(root), Some(folder)) = (self.root.as_ref().map(|r| r.path.clone()), self.picked.clone()) else { return };
+        (self.git.busy, self.git.note) = (Some(GitAction::Switch), None);
+        let name = basename(&path).to_owned();
+        self.request(cx, move |api, send| Box::pin(async move {
+            let closed = api.server_send(reqwest::Method::POST, &["worktrees", "delete"],
+                Some(json!({"repo": &path, "path": &path, "confirm": false, "keep_branch": true})), 150).await;
+            if let Err(error) = closed {
+                return send(CreateReply::GitElsewhere(crate::app::git::elsewhere_refusal(&error, &name))).await;
+            }
+            let body = json!({"root": root, "path": folder, "branch": &branch, "confirm_sessions": false});
+            let result = api.server_send(reqwest::Method::POST, &["fs", "git", "switch"], Some(body), 150).await;
+            send(CreateReply::GitDone(GitAction::Switch, branch, result)).await
+        }));
         cx.notify();
     }
 
@@ -178,6 +202,8 @@ impl NewSession {
                         }
                         // A branch e as remotas mudaram: a pílula de branch e a lista releem, sem esvaziar o menu aberto.
                         self.refresh_branches(cx);
+                        // A troca pode ter vindo de fechar outra worktree: a lista das existentes também muda.
+                        if action == GitAction::Switch { self.load_folder_worktrees(cx); }
                         self.git.note = Some(GitNote::Done(done));
                     }
                     Ok(Err(_)) => self.git.note = Some(GitNote::Failed(tr("invalid_response"))),
@@ -195,12 +221,22 @@ impl NewSession {
                     }
                 }
             }
+            CreateReply::GitElsewhere(text) => {
+                (self.git.busy, self.git.note) = (None, Some(GitNote::Failed(text)));
+                self.refresh_branches(cx);
+            }
             _ => {}
         }
     }
 
     /// A pílula do Git ao lado da de branch: some fora de repositório; lendo, fica parada com o nome.
     pub(super) fn render_git_pill(&self, open: bool, cx: &mut Context<Self>) -> Option<Div> {
+        let (label, waiting) = self.git_label()?;
+        Some(quiet_pill(Menu::Git, open, IconName::RefreshCw, label, tr("folder_git_title"), waiting, cx))
+    }
+
+    /// O resumo do Git da pasta e se ainda é a primeira leitura; `None` fora de repositório.
+    pub(super) fn git_label(&self) -> Option<(String, bool)> {
         let label = match (&self.git.status.value, self.git.status.ok()) {
             (_, Some(git)) if !git.repo => return None,
             (_, Some(git)) => summary(git),
@@ -208,8 +244,7 @@ impl NewSession {
             (None, _) if self.git.status.loading => tr("folder_git_label"),
             _ => return None,
         };
-        let waiting = self.git.status.loading && self.git.status.value.is_none();
-        Some(quiet_pill(Menu::Git, open, IconName::RefreshCw, label, tr("folder_git_title"), waiting, cx))
+        Some((label, self.git.status.loading && self.git.status.value.is_none()))
     }
 
     /// `room`: a altura livre abaixo da pílula; o painel rola dentro dela.
@@ -266,6 +301,7 @@ impl NewSession {
             (Some(GitNote::Refused(code)), _) => Some((refusal_text(code, Some(&git)), theme::warning())),
             (Some(GitNote::Failed(text)), _) => Some((text.clone(), theme::danger())),
             (Some(GitNote::Done(text)), None) => Some((text.clone(), theme::success())),
+            (Some(GitNote::Elsewhere(..)), _) => None,
             (_, Some(code)) => Some((refusal_text(code, Some(&git)), theme::warning())),
             (None, None) => None,
         };
@@ -287,7 +323,31 @@ impl NewSession {
                         .on_click(cx.listener(|this, _, _, cx| { this.git.confirm = None; cx.notify(); }))))
                 .into_any_element()
         });
-        note.into_iter().chain(changes).chain(confirm).collect()
+        let elsewhere = match &self.git.note { Some(GitNote::Elsewhere(branch, path, main)) => Some((branch.clone(), path.clone(), *main)), _ => None };
+        let elsewhere = elsewhere.map(|(branch, path, main)| {
+            let (use_path, close) = (path.clone(), (branch.clone(), path.clone()));
+            let help = if main { tr("git_elsewhere_main") } else { tr("git_elsewhere_close_help").replace("{branch}", &branch) };
+            div().id("new-chat-git-elsewhere").role(Role::Alert).mx(px(8.)).p(px(8.)).rounded(px(6.)).border_1().border_color(theme::warning())
+                .flex().flex_col().gap_2().text_xs().whitespace_normal()
+                .child(div().text_color(theme::text()).child(tr("git_elsewhere_body").replace("{branch}", &branch)))
+                .child(div().font_family(theme::MONO).text_color(theme::text()).child(path))
+                .child(div().text_color(theme::muted()).child(help))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("new-chat-git-elsewhere-use").small().outline().label(tr("git_elsewhere_use")).disabled(locked)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            (this.new_branch, this.existing, this.git.note) = (false, Some(use_path.clone()), None);
+                            this.branch.clear();
+                            this.menu.set(None);
+                            cx.notify();
+                        })))
+                    .when(!main, |el| el.child(Button::new("new-chat-git-elsewhere-close").small().primary().label(tr("git_elsewhere_close"))
+                        .loading(self.git.busy == Some(GitAction::Switch)).disabled(locked)
+                        .on_click(cx.listener(move |this, _, _, cx| this.close_elsewhere(close.0.clone(), close.1.clone(), cx)))))
+                    .child(Button::new("new-chat-git-elsewhere-cancel").small().ghost().label(tr("cancel"))
+                        .on_click(cx.listener(|this, _, _, cx| { this.git.note = None; cx.notify(); }))))
+                .into_any_element()
+        });
+        note.into_iter().chain(changes).chain(confirm).chain(elsewhere).collect()
     }
 
     /// O gerenciador de git da sessão aberta, para a pasta escolhida; só com o servidor nesta máquina, onde o git roda no disco.
@@ -318,7 +378,8 @@ impl NewSession {
             .filter(|(b, is_remote)| wanted(&query, b, if *is_remote { &remote } else { "" }))
             .map(|(b, is_remote)| {
                 let on = if chosen.is_empty() { *b == current } else { b == chosen };
-                let hint = if *b == current { tr("folder_git_current") } else if is_remote { remote.clone() } else { String::new() };
+                let hint = if *b == current { tr("folder_git_current") } else if is_remote { remote.clone() }
+                    else { elsewhere_hint(checkout, b).unwrap_or_default() };
                 let name = b.clone();
                 menu_row(SharedString::from(format!("new-chat-git-branch-{b}")), on, b.clone(), hint).disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| { pick(this, name.clone(), cx); cx.notify(); }))

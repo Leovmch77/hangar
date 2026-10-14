@@ -76,12 +76,20 @@ struct Shared {
     underruns: AtomicU32,
     // Das esvaziadas, as que cortaram áudio audível (o bloco anterior tinha voz); as outras são o fim de uma fala.
     speech_underruns: AtomicU32,
+    // Reserva atual em amostras; cresce com os cortes audíveis (`grown_prime`).
+    prime: AtomicU32,
     // Fluxo da reprodução no diário: amostras que entraram, que tocaram, descartadas pelo teto e quadros pedidos pela saída.
     flow: [AtomicU32; 4],
 }
 
 // Reserva antes de tocar: o áudio chega em rajadas pela rede, e tocar no ato esvazia a fila a cada atraso.
 const PRIME_SAMPLES: usize = RATE as usize * 240 / 1000;
+// Rede que atrasa mais que a reserva corta a fala: cada corte audível aumenta a reserva até o teto, pelo resto da chamada.
+// Quem tem rede boa fica nos 240 ms; só quem engasgou paga a espera maior.
+const PRIME_STEP: usize = RATE as usize * 80 / 1000;
+const PRIME_MAX: usize = RATE as usize * 400 / 1000;
+
+fn grown_prime(prime: usize) -> usize { (prime + PRIME_STEP).min(PRIME_MAX) }
 // RMS do bloco anterior acima do qual a esvaziada cortou voz audível, não o fim de uma fala.
 const SPEECH_LEVEL: f32 = 0.01;
 
@@ -123,7 +131,7 @@ impl Audio {
         let shared = Arc::new(Shared {
             capture_cap: in_rate as usize / 5,
             capture: Default::default(), render: Default::default(), playback: Default::default(),
-            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), raw_peak: AtomicU32::new(0), failed: AtomicU8::new(0), underruns: AtomicU32::new(0), speech_underruns: AtomicU32::new(0), flow: Default::default(),
+            input_level: AtomicU32::new(0), output_level: AtomicU32::new(0), raw_peak: AtomicU32::new(0), failed: AtomicU8::new(0), underruns: AtomicU32::new(0), speech_underruns: AtomicU32::new(0), prime: AtomicU32::new(PRIME_SAMPLES as u32), flow: Default::default(),
         });
         crate::voice::log(format!("audio in rate={in_rate} ch={in_channels} fmt={:?} out rate={out_rate} ch={out_channels} fmt={:?}",
             in_config.sample_format(), out_config.sample_format()));
@@ -209,6 +217,7 @@ impl Audio {
 
     pub fn take_underruns(&self) -> u32 { self.shared.underruns.swap(0, Ordering::Relaxed) }
     pub fn take_speech_underruns(&self) -> u32 { self.shared.speech_underruns.swap(0, Ordering::Relaxed) }
+    pub fn prime_ms(&self) -> u32 { self.shared.prime.load(Ordering::Relaxed) * 1000 / RATE }
 
     pub fn failed(&self) -> Option<AudioError> {
         match self.shared.failed.load(Ordering::Relaxed) { 1 => Some(AudioError::Microphone), 2 => Some(AudioError::Speaker), _ => None }
@@ -229,7 +238,7 @@ fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], chann
     let OutputState { resampler, carry, priming } = state;
     if *priming {
         let queued = shared.playback.lock().unwrap().len();
-        if queued >= PRIME_SAMPLES { *priming = false; }
+        if queued >= shared.prime.load(Ordering::Relaxed) as usize { *priming = false; }
     }
     while !*priming && carry.len() < frames {
         let chunk: Vec<f32> = {
@@ -247,7 +256,11 @@ fn on_output<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], chann
     if !*priming && carry.len() < frames {
         *priming = true;
         shared.underruns.fetch_add(1, Ordering::Relaxed);
-        if f32::from_bits(shared.output_level.load(Ordering::Relaxed)) >= SPEECH_LEVEL { shared.speech_underruns.fetch_add(1, Ordering::Relaxed); }
+        if f32::from_bits(shared.output_level.load(Ordering::Relaxed)) >= SPEECH_LEVEL {
+            shared.speech_underruns.fetch_add(1, Ordering::Relaxed);
+            let prime = shared.prime.load(Ordering::Relaxed) as usize;
+            shared.prime.store(grown_prime(prime) as u32, Ordering::Relaxed);
+        }
     }
     let mono: Vec<f32> = (0..frames).map(|_| carry.pop_front().unwrap_or(0.0)).collect();
     shared.output_level.store(rms(&mono).to_bits(), Ordering::Relaxed);
@@ -326,6 +339,14 @@ mod tests {
         let mut live = [0.7f32; FRAME];
         apply_mute(&mut live, false);
         assert!(live.iter().all(|s| *s == 0.7));
+    }
+
+    #[test]
+    fn reserve_grows_80_ms_per_cut_up_to_400_ms() {
+        let ms = |samples: usize| samples * 1000 / RATE as usize;
+        assert_eq!(ms(PRIME_SAMPLES), 240);
+        let steps: Vec<usize> = std::iter::successors(Some(PRIME_SAMPLES), |p| Some(grown_prime(*p))).take(5).map(ms).collect();
+        assert_eq!(steps, [240, 320, 400, 400, 400]);
     }
 
     #[test]

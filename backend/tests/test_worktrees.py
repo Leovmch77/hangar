@@ -43,6 +43,40 @@ def test_claude_cwd_reads_last_line_with_cwd(tmp_path):
     assert worktrees.claude_cwd(str(f)) == "/b"
 
 
+def test_claude_tail_reads_only_appended_bytes(tmp_path, monkeypatch):
+    f = tmp_path / "d0000008-0000-4000-8000-000000000000.jsonl"
+    f.write_text(_claude_line("/a", ("Bash", {"command": "cd /x && ls"})) + "\n")
+    assert worktrees._claude_tail(str(f)) == ("/a", [("/x", True, "/a")])
+    # Daqui em diante, reler o arquivo inteiro é erro: só o trecho novo pode ser lido.
+    monkeypatch.setattr(worktrees, "reversed_lines", lambda p: (_ for _ in ()).throw(AssertionError("releu tudo")))
+    with f.open("a") as fh:
+        fh.write(json.dumps({"type": "summary"}) + "\n" + _claude_line("/b", ("Bash", {"command": "cd /y"})))
+    # Linha ainda sem `\n`: fica para a próxima leitura.
+    assert worktrees._claude_tail(str(f)) == ("/a", [("/x", True, "/a")])
+    with f.open("a") as fh:
+        fh.write("\n")
+    assert worktrees._claude_tail(str(f)) == ("/b", [("/y", True, "/b"), ("/x", True, "/a")])
+
+
+def test_claude_tail_rewritten_in_place_rereads(tmp_path):
+    f = tmp_path / "d0000008-0000-4000-8000-000000000000.jsonl"
+    f.write_text(json.dumps({"cwd": "/a"}) + "\n")
+    assert worktrees.claude_cwd(str(f)) == "/a"
+    # Regravado no mesmo inode e maior (o `--resume` do Claude): o trecho já lido mudou.
+    f.write_text(json.dumps({"cwd": "/c"}) + "\n" + json.dumps({"type": "summary", "pad": "z" * 40}) + "\n")
+    assert worktrees.claude_cwd(str(f)) == "/c"
+
+
+def test_worktree_caches_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktrees, "_CACHE_MAX", 2)
+    for i in range(4):
+        f = tmp_path / f"{i}.jsonl"
+        f.write_text(json.dumps({"cwd": f"/{i}"}) + "\n")
+        worktrees.claude_cwd(str(f))
+    assert list(worktrees._tails)[-2:] == [str(tmp_path / "2.jsonl"), str(tmp_path / "3.jsonl")]
+    assert len(worktrees._tails) == 2
+
+
 def test_claude_cwd_without_cwd_is_none(tmp_path):
     f = tmp_path / "d0000008-0000-4000-8000-000000000000.jsonl"
     f.write_text(json.dumps({"type": "summary"}) + "\n")
@@ -602,6 +636,15 @@ def test_delete_clean_merged_moves_conversations_and_branch(tmp_path, monkeypatc
     assert worktrees.removed()[wt] == main
     assert worktrees.redirect(wt) == main
     assert "x" not in git_ops.list_branches(main)["branches"]
+
+
+def test_delete_keep_branch_leaves_merged_branch(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "repo-x", "x")
+    out = worktrees.delete(main, wt, [], keep_branch=True)
+    assert out["branch_deleted"] is False
+    assert not (tmp_path / "repo-x").exists()
+    assert "x" in git_ops.list_branches(main)["branches"]
 
 
 def test_delete_refuses_open_session_and_main(tmp_path):

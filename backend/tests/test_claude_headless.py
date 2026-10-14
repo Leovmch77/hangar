@@ -547,6 +547,12 @@ def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monke
     assert "--thinking-display" not in adapter._argv("sid", resume=False)
 
 
+def test_mensagem_do_stdin_volta_como_eco_para_provar_a_entrega(adapter):
+    """O eco (`isReplay`, mesmo `uuid`) é a prova de entrega que o Rust usa; prompt barrado por hook não ecoa."""
+    for resume in (True, False):
+        assert "--replay-user-messages" in adapter._argv("sid", resume=resume)
+
+
 def test_plano_com_base_bypass_sobe_podendo_voltar_ao_bypass(adapter):
     """Sem a flag, a CLI que nasceu no plano recusa `set_permission_mode bypassPermissions` pelo
     resto do processo: aprovar o plano ficava pedindo cada edição."""
@@ -1659,7 +1665,8 @@ def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancad
 
 
 @pytest.mark.parametrize("var", ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS",
-                                 "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_API_KEY"])
+                                 "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_API_KEY",
+                                 "JEV_AUX_API_KEY"])
 def test_processo_nao_herda_do_backend_variavel_da_sessao(sidecar, monkeypatch, lancador_cano, var):
     """Sessão sem subagente, sem Jev e com o portão de hooks desligado: o valor que o backend herdou
     de outra sessão não chega ao filho."""

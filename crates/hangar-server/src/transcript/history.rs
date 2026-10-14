@@ -42,7 +42,7 @@ pub(crate) fn peer_bodies(text: &str) -> Vec<&str> {
     PEER_BODY.captures_iter(t).filter_map(|c| c.get(1)).map(|m| strip(m.as_str())).filter(|b| !b.is_empty()).collect()
 }
 
-/// O que o Python devolve em `GET /internal/sessions/{name}/info`.
+/// A sessão como a descoberta do Rust a vê (`locate::info_of`).
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct InternalInfo {
     pub provider: String,
@@ -56,6 +56,8 @@ pub struct InternalInfo {
     /// Codex sem terminal (sidecar `headless`): o estado ao vivo dele é do feed do hub.
     #[serde(default)]
     pub headless: bool,
+    #[serde(default)]
+    pub lifecycle_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,16 +104,25 @@ pub(crate) fn merged_history_capped(req: &HistoryRequest, max_window: u64) -> io
     let mut parsed = match req.limit {
         Some(limit) => {
             let mut window = req.tail_window.max(1).min(max_window);
+            let mut start_ts = None;
             loop {
                 let off = tail_offset(&req.jsonl, window);
-                let parsed = parse_from(req, off)?;
+                let start = if off > 0 { *start_ts.get_or_insert_with(|| transcript_start_ts(&req.jsonl)) } else { 0.0 };
+                let parsed = parse_from(req, off, start)?;
                 if off == 0 || parsed.items.len() >= limit || window >= max_window {
                     break parsed;
                 }
-                window = window.saturating_mul(4).min(max_window);
+                // Cada volta relê a janela inteira: o ×4 cego chegava a ler mais que o arquivo. Da
+                // segunda volta em diante a densidade da janela lida estima quanto falta (folga de
+                // 1,5×, teto ×8). A primeira continua ×4: a cauda curta costuma ser só tool_result,
+                // e a estimativa por ela erra para cima justo onde 1 MiB já bastava.
+                let found = parsed.items.len().max(1) as u64;
+                let guess = window.saturating_mul(limit as u64).saturating_mul(3) / found.saturating_mul(2);
+                let grow = if window <= req.tail_window { 4 } else { 8 };
+                window = guess.clamp(window.saturating_mul(4), window.saturating_mul(grow)).min(max_window);
             }
         }
-        None => parse_from(req, 0)?,
+        None => parse_from(req, 0, 0.0)?,
     };
     if let Some(queue) = &req.queue {
         merge_queue(queue, &mut parsed)?;
@@ -176,13 +187,9 @@ fn transcript_start_ts(path: &Path) -> f64 {
 }
 
 /// `_parse_from` (pqueue.py:1021).
-fn parse_from(req: &HistoryRequest, offset: u64) -> io::Result<Parsed> {
-    let mut p = Parsed {
-        items: Vec::new(),
-        committed: HashMap::new(),
-        prev_ts: 0.0,
-        start_ts: if offset > 0 { transcript_start_ts(&req.jsonl) } else { 0.0 },
-    };
+/// `start_ts`: relógio da primeira linha do arquivo quando `offset > 0` (0.0 quando lê do início).
+fn parse_from(req: &HistoryRequest, offset: u64, start_ts: f64) -> io::Result<Parsed> {
+    let mut p = Parsed { items: Vec::new(), committed: HashMap::new(), prev_ts: 0.0, start_ts };
     // Só a ausência é histórico vazio: um 200 vazio com ETag faria o aparelho apagar a conversa.
     let file = match File::open(&req.jsonl) {
         Ok(f) => f,
@@ -204,10 +211,12 @@ fn parse_from(req: &HistoryRequest, offset: u64) -> io::Result<Parsed> {
         let idx = i;
         i += 1;
         // O Python lê em modo texto: "\r\n" chega como "\n".
-        let mut line = String::from_utf8_lossy(&raw).into_owned();
+        // Linha UTF-8 válida é emprestada do buffer, sem cópia; só a inválida ou com "\r\n" aloca.
+        let mut line = String::from_utf8_lossy(&raw);
         if line.ends_with("\r\n") {
-            line.truncate(line.len() - 2);
-            line.push('\n');
+            let fixed = line.to_mut();
+            fixed.truncate(fixed.len() - 2);
+            fixed.push('\n');
         }
         let silent = rewrite.as_ref().and_then(|_| claude::silent_attachment_timestamp(&line));
         let (line_ts, evs) = match silent {
@@ -341,6 +350,7 @@ fn entry_event(entry: &Map<String, Value>) -> ChatEvent {
             text,
             queued_delivered: entry.get("delivered").and_then(Value::as_bool),
             desistiu: py::truthy(entry.get("desistiu")).then_some(true),
+            queued_consumed: (entry.get("consumed") == Some(&Value::Bool(true))).then_some(true),
             queued_ts: entry.get("ts").and_then(py::number),
             ..event(ChatKind::UserMsg, format!("queued-{id}"))
         }

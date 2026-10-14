@@ -6,6 +6,7 @@ por subprocess, e um mock de `subprocess.run` testaria o mock, não o comportame
 """
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -20,6 +21,18 @@ def _git(repo, *args):
                                "GIT_CONFIG_SYSTEM": "/dev/null", "PATH": "/usr/bin:/bin",
                                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+def _pid_morto() -> int:
+    """Pid de um processo que já terminou. Número fixo não serve: com pid_max alto, 999999 pode ser
+    um processo vivo da máquina (já foi uma thread do kded6)."""
+    # No Windows o pid volta a ser usado logo: confere que ainda está livre antes de devolver.
+    for _ in range(20):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        if not atualizar._vivo(p.pid):
+            return p.pid
+    pytest.fail("nenhum pid livre depois de 20 processos")
 
 
 @pytest.fixture
@@ -325,7 +338,7 @@ def test_pid_morto_nao_bloqueia(repo, monkeypatch):
     """Máquina que desligou no meio de uma atualização não pode ficar travada para sempre."""
     trava = atualizar._base() / "rodando.lock"
     trava.parent.mkdir(parents=True, exist_ok=True)
-    trava.write_text("999999", encoding="utf-8")
+    trava.write_text(str(_pid_morto()), encoding="utf-8")
     lancou = []
     class P:
         pid = 4242
@@ -401,7 +414,7 @@ def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
     return [" ".join(c) for c in chamadas]
 
 
-def test_renovar_chromium_so_com_o_baixado_e_sem_derrubar(tmp_path, monkeypatch):
+def test_renovar_chromium_onde_o_script_ja_rodou_mesmo_com_download_falho(tmp_path, monkeypatch):
     chamadas = []
     class P:
         returncode = 1
@@ -412,7 +425,9 @@ def test_renovar_chromium_so_com_o_baixado_e_sem_derrubar(tmp_path, monkeypatch)
     monkeypatch.setattr(atualizar.Path, "home", lambda: tmp_path)
     atualizar._renovar_chromium()
     assert chamadas == []
-    (tmp_path / ".hangar" / "native" / "chromium").mkdir(parents=True)
+    # Download que falhou sem shell anterior: a pasta não nasceu, mas a marca sim, e a próxima atualização tenta de novo.
+    (tmp_path / ".hangar" / "native").mkdir(parents=True)
+    (tmp_path / ".hangar" / "native" / "chromium-ok").write_text("sistema: /usr/bin/google-chrome (baixar falhou: x)\n")
     atualizar._renovar_chromium()
     assert len(chamadas) == 1 and chamadas[0][0].endswith("install-chromium.sh")
 
@@ -591,7 +606,7 @@ def test_dono_morto_vira_falha_na_tela(repo):
     Acontece de verdade: no Windows, o `install.ps1 -Update` chegou a matar o processo da própria
     atualização (ele casa o filtro de "instância anterior"), deixando a tela presa pra sempre.
     """
-    atualizar._escrever(fase="rodando", passo=4, total=5, pid=999999)
+    atualizar._escrever(fase="rodando", passo=4, total=5, pid=_pid_morto())
     d = atualizar.estado_para_tela()
     assert d["fase"] == "pronto" and d["ok"] is False
     assert "interrompida" in d["erro"]
@@ -866,7 +881,7 @@ def test_rollback_que_nao_sobe_nao_diz_que_esta_no_ar(repo, monkeypatch):
 def test_lock_de_processo_morto_nao_trava_a_maquina(repo):
     trava = atualizar._base() / "rodando.lock"
     trava.parent.mkdir(parents=True, exist_ok=True)
-    trava.write_text("999999", encoding="utf-8")     # pid que não existe
+    trava.write_text(str(_pid_morto()), encoding="utf-8")
     assert atualizar._tomar_a_vez() is True
 
 
@@ -1524,3 +1539,44 @@ def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
     final = atualizar.executar()
     assert _rev(repo, "HEAD") == rust["topo"] and final["avisos"]
 
+
+
+def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo):
+    """Sem escopo próprio do systemd (o gerenciador do usuário recusa unidade transiente), o motor
+    nasce no cgroup do backend e o restart que ele dispara o mata antes de gravar "pronto". Quem
+    responde depois é o backend novo, com o disco no commit da atualização: isso é sucesso."""
+    import os as _os
+    head = atualizar._git("rev-parse", "HEAD").stdout.strip()
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
+                        backend_pid=_os.getpid() + 1, commit_para=head)
+    d = atualizar.estado_para_tela()
+    assert (d["fase"], d["ok"]) == ("pronto", True)
+
+
+def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo):
+    import os as _os
+    head = atualizar._git("rev-parse", "HEAD").stdout.strip()
+    # O backend que responde é o mesmo de antes: o restart não aconteceu.
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
+                        backend_pid=_os.getpid(), commit_para=head)
+    assert atualizar.estado_para_tela()["ok"] is False
+    # Servidor novo, mas o disco não está no commit da atualização.
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
+                        backend_pid=_os.getpid() + 1, commit_para="0" * 40, ok=None, erro=None)
+    assert atualizar.estado_para_tela()["ok"] is False
+
+
+def test_reinicio_pede_o_frontend_antes_do_backend(monkeypatch):
+    # O reinício do backend leva junto o motor e o `systemctl`: o frontend tem de ter sido pedido antes.
+    pedidos = []
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: pedidos.append(args)
+                        or subprocess.CompletedProcess(args, 0, "", ""))
+    atualizar._reiniciar("systemd")
+    assert pedidos[-1][-2:] == ["hangar-frontend.service", "hangar-backend.service"]
+
+
+def test_motor_rodado_a_mao_nao_herda_o_backend_de_outra_rodada(monkeypatch):
+    monkeypatch.delenv(atualizar._BACKEND_PID_ENV, raising=False)
+    assert atualizar._launching_backend() is None
+    monkeypatch.setenv(atualizar._BACKEND_PID_ENV, "4321")
+    assert atualizar._launching_backend() == 4321

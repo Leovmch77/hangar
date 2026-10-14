@@ -145,8 +145,15 @@ async fn facts_down_marks_rows_not_list() {
     let ok: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
     assert_eq!(ok[0]["problema"], Value::Null);
     *srv.python.list_facts.lock().unwrap() = (json!({"quebrado": true}), Duration::ZERO);
-    let marked: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
-    assert_eq!(marked[0]["problema"], "list_facts_unavailable");
+    // Uma rodada que buscou os fatos antes da quebra ainda pode publicar: o que vale é a marca chegar
+    // sem a lista sumir no caminho.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
+            assert_eq!(names(&rows), ["s0"], "a lista continua servida");
+            if rows[0]["problema"] == "list_facts_unavailable" { break; }
+        }
+    }).await.expect("a linha não foi marcada com os fatos fora");
 }
 
 struct Runtime(BTreeMap<String, Value>);
@@ -303,4 +310,19 @@ async fn rows_carry_every_outside_pair_with_level_and_pending() {
     let again: Value = tokio::time::timeout(Duration::from_millis(3500), next_named(&mut es, "sessions")).await
         .map(|ev| serde_json::from_str(&ev.data).unwrap()).expect("o Liberar não reemitiu a lista");
     assert_eq!(again[1]["pair_externals"][0], outside("ana", "X", "full", false));
+}
+
+/// O histórico sai da descoberta do Rust, sem perguntar ao Python qual é a conversa, e abrir a
+/// conversa pede a reabertura da sessão em erro ao coordenador dele.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_comes_from_the_rust_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 1).await;
+    let r = client().get(format!("http://{}/api/sessions/s0/history", srv.addr)).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let evs: Vec<Value> = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(evs.iter().map(|e| e["text"].as_str().unwrap_or_default()).collect::<Vec<_>>(), ["linha 0"]);
+    let python = srv.python.clone();
+    fake::wait_until(move || python.hits_to("/internal/sessions/s0/reopen") == 1).await;
+    assert_eq!(srv.python.info_calls(), 0);
 }

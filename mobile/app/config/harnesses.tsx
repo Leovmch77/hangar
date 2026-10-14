@@ -172,13 +172,13 @@ export default function Harnesses() {
     });
   };
 
-  const toggleCodexOption = (key: 'contexto_estendido' | 'codex_voice_beta', on: boolean) => {
+  const toggleCodexOption = (key: 'contexto_estendido', on: boolean) => {
     const current = codexOptionsRef.current;
     if (!server || !current || codexOptionsToggling) return;
     const s = server, e = epoch.current, n = next('codexOptions');
     setCodexOptionsToggling(true);
     setCodexOptionsError('');
-    const body = { contexto_estendido: current.contexto_estendido, codex_voice_beta: current.codex_voice_beta, [key]: on };
+    const body = { [key]: on };
     codexOpcoes(s, controller.current.signal, body).then((value) => {
       if (e !== epoch.current) return;
       if (n === seq.current.codexOptions) { codexOptionsRef.current = value; setCodexOptions(value); } else readCodexOptions(s, true);
@@ -654,8 +654,6 @@ export default function Harnesses() {
         <>
           {switchRow('contexto_estendido', m.codex_contexto_titulo(), m.codex_contexto_ajuda(), codexOptions.contexto_estendido,
             codexOptionsToggling, (v) => toggleCodexOption('contexto_estendido', v))}
-          {switchRow('codex_voice_beta', `${m.codex_voice_config_title()} · ${m.comum_beta()}`, m.codex_voice_config_help(),
-            codexOptions.codex_voice_beta, codexOptionsToggling, (v) => toggleCodexOption('codex_voice_beta', v))}
           <View style={styles.gap4}>
             {line(m.codex_contexto_novas())}
             {line(codexOptions.modelos.length ? m.codex_contexto_limites() : m.codex_contexto_sem_catalogo())}

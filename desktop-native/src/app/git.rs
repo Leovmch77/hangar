@@ -87,7 +87,9 @@ impl Sync {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Repo { files: Vec<(String, String)>, current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
+struct Repo { files: Vec<(String, String)>, current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool,
+    /// Branch aberta em outra worktree → (pasta dela, se é a pasta principal do repositório).
+    elsewhere: HashMap<String, (String, bool)> }
 
 fn strings(value: &Value, key: &str) -> Vec<String> {
     value.get(key).and_then(Value::as_array).map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
@@ -102,6 +104,9 @@ fn repo(branches: &Value, files: &Value) -> Repo {
         branches: strings(branches, "branches"),
         remotes: strings(branches, "remotes"),
         dirty: branches.get("dirty").and_then(Value::as_bool).unwrap_or(false),
+        elsewhere: branches.get("elsewhere").and_then(Value::as_object).map(|map| map.iter().filter_map(|(branch, at)| Some((
+            branch.clone(), (at.get("path")?.as_str()?.to_owned(), at.get("main").and_then(Value::as_bool).unwrap_or(false)),
+        ))).collect()).unwrap_or_default(),
     }
 }
 
@@ -262,6 +267,18 @@ fn without_hints(text: &str) -> String {
     text.lines().filter(|line| !line.starts_with("hint:")).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
 
+/// A recusa do servidor ao fechar a outra worktree, dita pelo que a pessoa faz a seguir.
+pub(in crate::app) fn elsewhere_refusal(error: &Failure, folder: &str) -> String {
+    let detail = error.detail.as_str();
+    if let Some(names) = detail.strip_prefix("sessão aberta dentro: ") {
+        tr("git_elsewhere_busy").replace("{pasta}", folder).replace("{nomes}", names)
+    } else if detail.starts_with("há arquivos que serão perdidos") {
+        tr("git_elsewhere_dirty").replace("{pasta}", folder)
+    } else {
+        tr("git_elsewhere_failed").replace("{pasta}", folder).replace("{motivo}", &Hangar::fetch_failure(error))
+    }
+}
+
 // ── Histórico ──
 
 #[derive(Clone, Debug)]
@@ -334,6 +351,8 @@ pub(super) struct GitPanel {
     branch_error: Option<String>,
     /// Na aba Git do painel direito: lista estreita, e o diff e o histórico abrem no diálogo por aqui.
     expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// Painel de sessão: o servidor (que fecha worktree) e a página de worktrees aberta numa pasta.
+    others: Option<(Api, Rc<dyn Fn(String, &mut Window, &mut App)>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -355,7 +374,7 @@ impl GitPanel {
         Self {
             source, runtime, name, title, pane: Pane::default(), repo: Remote::default(), work: Review::new(), round: 0, chosen: HashSet::new(),
             seen: HashSet::new(), message, amend: false, busy: None, error: None, output: None, log: Remote::default(), log_limit: LOG_PAGE,
-            ahead_behind: (None, None), opened: None, picker: false, branch_query, branch_error: None, expand, _subscriptions: subscriptions,
+            ahead_behind: (None, None), opened: None, picker: false, branch_query, branch_error: None, expand, others: None, _subscriptions: subscriptions,
         }
     }
 
@@ -634,6 +653,7 @@ impl GitPanel {
         let Some(repo) = self.repo.ok() else { return };
         if repo.current.as_deref() == Some(branch.as_str()) || self.busy.is_some() { return; }
         self.picker = false;
+        if let Some((path, main)) = repo.elsewhere.get(&branch).cloned() { return self.ask_elsewhere(branch, path, main, window, cx); }
         if !repo.dirty { self.switch(branch, false, window, cx); return; }
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -658,6 +678,62 @@ impl GitPanel {
                     .child(run("git-dirty-stash", tr("sidebar_stash_and_switch"), true)))
                 .on_ok(super::machines::enter_to_focused)
         });
+    }
+
+    /// O git recusa trocar para branch aberta em outra worktree: em vez do erro cru, ir até ela ou fechá-la e trazer a branch.
+    fn ask_elsewhere(&mut self, branch: String, path: String, main: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let others = self.others.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let open = others.as_ref().map(|(_, open)| {
+                let (open, path) = (open.clone(), path.clone());
+                Button::new("git-elsewhere-open").label(tr("git_elsewhere_open")).when(main, |b| b.primary())
+                    .on_click(move |_, window, cx| { window.close_all_dialogs(cx); open(path.clone(), window, cx); })
+            });
+            let close = others.as_ref().filter(|_| !main).map(|_| {
+                let (weak, branch, path) = (weak.clone(), branch.clone(), path.clone());
+                Button::new("git-elsewhere-close").primary().label(tr("git_elsewhere_close")).on_click(move |_, window, cx| {
+                    window.close_dialog(cx);
+                    let _ = weak.update(cx, |this, cx| this.close_elsewhere(branch.clone(), path.clone(), window, cx));
+                })
+            });
+            let help = if main { tr("git_elsewhere_main") } else { tr("git_elsewhere_close_help").replace("{branch}", &branch) };
+            popup::dialog(dialog).w(px(480.)).title(tr("git_elsewhere_title").replace("{branch}", &branch))
+                .child(div().flex().flex_col().gap(px(10.)).text_sm()
+                    .child(div().child(tr("git_elsewhere_body").replace("{branch}", &branch)))
+                    .child(div().font_family(theme::MONO).text_size(px(12.)).whitespace_normal().child(path.clone()))
+                    .child(div().text_color(theme::muted()).whitespace_normal().child(help)))
+                .footer(div().flex().justify_end().gap_2()
+                    .child(Button::new("git-elsewhere-cancel").label(tr("cancel")).on_click(|_, window, cx| window.close_dialog(cx)))
+                    .children(open).children(close))
+                .on_ok(super::machines::enter_to_focused)
+        });
+    }
+
+    /// Fecha a outra worktree pela rota do servidor (que recusa sessão aberta e alteração não commitada) e só então troca.
+    fn close_elsewhere(&mut self, branch: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((api, _)) = self.others.clone() else { return };
+        let folder = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&path).to_owned();
+        let waiting = tr("git_elsewhere_closing").replace("{pasta}", &folder);
+        if !self.start(waiting.clone()) { return; }
+        window.push_notification(git_note(&self.name, NotificationType::Info, waiting), cx);
+        let body = json!({"repo": &path, "path": &path, "confirm": false, "keep_branch": true});
+        self.spawn(async move { api.server_send(reqwest::Method::POST, &["worktrees", "delete"], Some(body), 150).await }, window, cx,
+            move |this, result, window, cx| {
+                this.busy = None;
+                match result {
+                    Ok(_) => {
+                        if let Some(repo) = this.repo.value.as_mut().and_then(|r| r.as_mut().ok()) { repo.elsewhere.remove(&branch); }
+                        this.pick_branch(branch, window, cx);
+                    }
+                    Err(error) => {
+                        let text = elsewhere_refusal(&error, &folder);
+                        window.push_notification(git_note(&this.name, NotificationType::Error, text), cx);
+                        this.load(window, cx);
+                    }
+                }
+            });
+        cx.notify();
     }
 
     /// O `git_result` da barra lateral pela fonte do painel: mesmas frases, mesma notificação por sessão; depois relê.
@@ -745,7 +821,10 @@ impl GitPanel {
         };
         let mut list = div().id("git-branch-list").max_h(px(300.)).overflow_y_scroll().flex().flex_col().gap(px(1.));
         for branch in &locals {
-            let tag = (repo.current.as_deref() == Some(branch.as_str())).then(|| tr("git_current"));
+            let tag = if repo.current.as_deref() == Some(branch.as_str()) { Some(tr("git_current")) } else {
+                repo.elsewhere.get(*branch).map(|(path, _)| tr("git_elsewhere_tag")
+                    .replace("{pasta}", path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)))
+            };
             list = list.child(row(branch, tag, cx));
         }
         if !remotes.is_empty() {
@@ -1178,9 +1257,14 @@ impl Hangar {
         let runtime = self.runtime.clone();
         // Servidor nesta máquina e a pasta existe aqui: o git roda direto no disco, pela pasta real da sessão.
         let here = dir.filter(|_| api.is_loopback()).and_then(|dir| self.local_dirs.get(dir).cloned().flatten());
+        let server = api.clone();
         let source = match here { Some(cwd) => Source::Local(Arc::new(cwd)), None => Source::Remote(api, session.name.clone()) };
+        let weak = cx.entity().downgrade();
+        let open: Rc<dyn Fn(String, &mut Window, &mut App)> =
+            Rc::new(move |path, window, cx| { let _ = weak.update(cx, |this, cx| this.open_worktree(path, window, cx)); });
+        // ponytail: a página de worktrees é a do servidor ativo; sessão de outra máquina abre a página dele quando fizer falta.
         let panel = cx.new(|cx| GitPanel::new(source, runtime, session.name.clone(), title, expand, window, cx));
-        panel.update(cx, |panel, cx| panel.load(window, cx));
+        panel.update(cx, |panel, cx| { panel.others = Some((server, open)); panel.load(window, cx) });
         Some(panel)
     }
 

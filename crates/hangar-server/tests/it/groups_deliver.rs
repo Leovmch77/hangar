@@ -78,7 +78,7 @@ async fn policy() -> std::net::SocketAddr {
 }
 
 async fn registry() -> Arc<RuntimeRegistry> {
-    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
+    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))))
 }
 
 async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) {
@@ -119,7 +119,7 @@ async fn codex_cano(methods: Arc<std::sync::Mutex<Vec<String>>>) -> String {
     format!("tcp:{address}")
 }
 
-async fn open_codex_headless(registry: &RuntimeRegistry, dir: &Path, name: &str, methods: Arc<std::sync::Mutex<Vec<String>>>) {
+pub(crate) async fn open_codex_headless(registry: &RuntimeRegistry, dir: &Path, name: &str, methods: Arc<std::sync::Mutex<Vec<String>>>) {
     registry.open(RuntimeTarget { key: format!("k-{name}"), generation: 1, name: name.into(), provider: "codex".into(),
         metadata: json!({"name": name, "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true}),
         binding: CanoBinding { pid: 42, escuta: codex_cano(methods).await, token: "secret-test".into(), versao: 2 },
@@ -140,7 +140,8 @@ async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
     registry.open_terminal(TerminalTarget { key: format!("k-{name}"), generation: 1, name: name.into(), binding,
-        lease_path: dir.join(format!("{name}.lease")), state_path, projection_dir, transcript, created: 0.0, plugin_key: None }).await.unwrap();
+        lease_path: dir.join(format!("{name}.lease")), state_path, projection_dir, transcript, created: 0.0, plugin_key: None,
+        metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }).await.unwrap();
     let target = registry.writable(name).await.unwrap();
     assert!(target.terminal && target.healthy, "entrada de terminal saudável");
 }
@@ -171,7 +172,7 @@ async fn notice_to_a_claude_terminal_session_goes_through_rust() {
     assert_eq!(deliver_text(&st, "t", "aviso").await, Ok(()));
     assert_eq!(python.input_calls(), 0);
     // Sem pane de verdade o ator deixa o recado na fila dele: a prova de que foi o Rust que recebeu.
-    let queued = std::fs::read_to_string(dir.path().join("t.projection").join("t.jsonl")).unwrap();
+    let queued = hangar_server::runtime::queue::read_replaced_to_string(&dir.path().join("t.projection").join("t.jsonl")).unwrap();
     assert!(queued.contains("\"aviso\""), "{queued}");
 }
 
@@ -186,25 +187,18 @@ async fn notice_to_a_headless_codex_session_goes_through_rust() {
     assert!(methods.lock().unwrap().iter().any(|m| m == "turn/start"), "{:?}", methods.lock().unwrap());
 }
 
-/// O `/compact` do Codex é controle do Python, como no handler: vai ao `/input` dele sem o passe na mão.
+/// O `/compact` do Codex sem terminal é controle do motor, como com terminal: nunca vai ao Python.
 #[tokio::test]
-async fn codex_compact_notice_goes_to_python_without_the_pass() {
+async fn codex_compact_notice_is_an_engine_control_in_rust() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     let methods = Arc::new(std::sync::Mutex::new(Vec::new()));
     open_codex_headless(&registry, dir.path(), "c", methods.clone()).await;
     let (python, st) = state(Some(registry.clone()), Duration::from_secs(5)).await;
-    python.set_input_reply(Some((StatusCode::OK, json!({"ok": true}))));
-    python.hold_input(true);
-    let st = Arc::new(st);
-    let sending = tokio::spawn({ let st = st.clone(); async move { deliver_text(&st, "c", "/compact").await } });
-    for _ in 0..100 { if python.hits_to("/api/sessions/c/input") == 1 { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
-    assert_eq!(python.hits_to("/api/sessions/c/input"), 1, "o aviso chegou ao Python");
-    assert!(registry.ingress().close("c", Duration::from_millis(300)).await.is_ok(), "passe na mão durante o repasse");
-    registry.ingress().open("c");
-    python.hold_input(false);
-    python.release.notify_one();
-    assert_eq!(sending.await.unwrap(), Ok(()));
-    assert!(!methods.lock().unwrap().iter().any(|m| m == "turn/start"), "{:?}", methods.lock().unwrap());
+    assert_eq!(deliver_text(&st, "c", "/compact").await, Ok(()));
+    assert_eq!(python.input_calls(), 0, "o aviso não passa pelo Python");
+    let seen = methods.lock().unwrap().clone();
+    assert!(seen.iter().any(|m| m == "thread/compact/start") && !seen.iter().any(|m| m == "turn/start"), "{seen:?}");
+    assert!(registry.ingress().enter("c", Duration::ZERO).await.is_ok(), "o passe foi solto");
 }
 
 #[tokio::test]

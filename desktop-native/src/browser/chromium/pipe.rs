@@ -1,7 +1,7 @@
 //! Um Chromium por processo do app, compartilhado pelos navegadores das sessões, e as sessões CDP sobre o pipe dele.
 //! Respostas voltam direto da thread de leitura; eventos são entregues na thread da interface, como no WebView2.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     future::Future,
     io::{BufRead, BufReader, Write},
@@ -9,9 +9,8 @@ use std::{
     process::Child,
     rc::{Rc, Weak},
     sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -26,6 +25,8 @@ type Reply = Result<Value, String>;
 type Handler = Rc<RefCell<dyn FnMut(Value)>>;
 /// Consome um evento na própria thread de leitura (o quadro do painel, entregue sem passar pela interface).
 pub type Sink = Box<dyn Fn(Value) + Send>;
+/// Confirma ao Chromium o quadro de screencast com este número, de qualquer thread.
+pub type Acker = Box<dyn Fn(Value) + Send + Sync>;
 type Ready = Shared<LocalBoxFuture<'static, Result<(), String>>>;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 
@@ -35,12 +36,53 @@ struct Wire {
     next: AtomicU64,
     /// id → (sessão, quem espera).
     pending: Mutex<HashMap<u64, (Option<String>, Box<dyn FnOnce(Reply) + Send>)>>,
+    /// Sessões cuja página caiu: o Chromium aceita o comando e nunca responde, então ele falha já.
+    /// ponytail: só cresce; uma entrada por página caída.
+    fallen: Mutex<HashSet<String>>,
     /// Quadro de screencast por sessão, tratado antes de chegar à interface.
     sinks: Mutex<HashMap<String, Sink>>,
+    /// Clientes CDP de fora (`/cdp/browser`): cada um recebe os eventos das sessões dele, e só deles.
+    taps: Mutex<HashMap<u64, Tapped>>,
+    /// O processo; quem o fecha (o `Drop`, o `retire`) ou a thread de leitura, quando ele sai sozinho, o recolhe.
+    child: Mutex<Option<Child>>,
+    /// Por que este Chromium não serve mais. Gravado pela thread de leitura assim que o pipe fecha (sem esperar a
+    /// interface): quem chama depois recebe isto na hora, e o próximo pedido sobe outro processo.
+    gone: OnceLock<String>,
+    /// O app pediu o fim (fechar, refazer): a saída não é queda e não vai ao diário.
+    asked: AtomicBool,
+}
+
+struct Tapped {
+    /// Sessões que o cliente abriu e as filhas delas (iframe, worker), que o auto-attach dele traz.
+    scope: HashSet<String>,
+    out: async_channel::Sender<String>,
 }
 
 impl Wire {
+    fn new(writer: std::io::PipeWriter, child: Option<Child>) -> Arc<Wire> {
+        Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), fallen: Mutex::default(), sinks: Mutex::default(),
+            taps: Mutex::default(), child: Mutex::new(child), gone: OnceLock::new(), asked: AtomicBool::new(false) })
+    }
+
+    fn alive(&self) -> bool { self.gone.get().is_none() }
+
+    /// Marca o fim pedido pelo app; `false` quando o processo já tinha saído sozinho, e aí a queda segue ao diário.
+    fn retire(&self, reason: &str) -> bool {
+        if self.gone.set(format!("{RETIRED}: {reason}")).is_err() { return false; }
+        self.asked.store(true, Ordering::SeqCst);
+        true
+    }
+
     fn send(&self, session: Option<&str>, method: &str, params: Value, done: Option<Box<dyn FnOnce(Reply) + Send>>) {
+        // Processo que já saiu: a escrita poderia até passar (pipe ainda aberto por um instante) e ninguém responderia.
+        if let Some(gone) = self.gone.get() {
+            if let Some(done) = done { done(Err(gone.clone())); }
+            return;
+        }
+        if session.is_some_and(|s| lock(&self.fallen).contains(s)) {
+            if let Some(done) = done { done(Err("a pagina fechou".into())); }
+            return;
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut message = json!({"id": id, "method": method, "params": params});
         if let Some(session) = session { message["sessionId"] = session.into(); }
@@ -49,7 +91,7 @@ impl Wire {
         bytes.push(0);
         if let Err(e) = lock(&self.writer).write_all(&bytes) {
             // Sem o pipe não haverá resposta: quem espera recebe o erro agora.
-            if let Some((_, done)) = lock(&self.pending).remove(&id) { done(Err(format!("o Chromium fechou: {e}"))); }
+            if let Some((_, done)) = lock(&self.pending).remove(&id) { done(Err(format!("{EXITED}: o Chromium fechou: {e}"))); }
         }
     }
 
@@ -72,7 +114,6 @@ fn reply_of(message: &Value) -> Reply {
 
 pub struct Browser {
     wire: Arc<Wire>,
-    child: RefCell<Child>,
     /// (sessão, evento) → ouvintes.
     handlers: RefCell<HashMap<(String, String), Vec<Handler>>>,
     /// Evento do navegador (`Target.*`, `CLOSED`) → (sessão dona, ouvinte); sai junto com a sessão dona.
@@ -81,7 +122,9 @@ pub struct Browser {
     initial: RefCell<Vec<String>>,
     /// Páginas que os navegadores do app abriram; qualquer outra é janela que a página abriu.
     owned: RefCell<HashSet<String>>,
-    alive: std::cell::Cell<bool>,
+    /// Páginas que caíram. Sem renderer a página cai antes do `createTarget` responder, quando ninguém a ouve ainda.
+    /// ponytail: só cresce; queda é rara e o processo doente é trocado.
+    crashed: RefCell<HashSet<String>>,
     /// Aperto de mão do processo que nasceu sem travar a interface; `None` quando já respondeu.
     ready: RefCell<Option<Ready>>,
     _drain: RefCell<Option<Task<()>>>,
@@ -92,22 +135,22 @@ thread_local! {
 }
 
 impl Browser {
-    /// O Chromium em uso, ou um novo. Nasce com a escala da janela que abriu o primeiro navegador.
-    pub fn shared(executor: &ForegroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
+    /// O Chromium em uso, ou um novo, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o
+    /// espera. Para a interface não congelar enquanto o Chromium nasce.
+    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::launch(bin, &Self::profile()?, scale, executor)?;
-        SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
-        Ok(browser)
-    }
-
-    /// Como `shared`, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o espera. Para a
-    /// interface não congelar enquanto o Chromium nasce.
-    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
-        if let Some(browser) = Self::current() { return Ok(browser); }
-        let bin = launch::find()?;
-        let browser = Self::spawn(bin, &Self::profile()?, scale, executor)?;
+        let profile = Self::profile()?;
+        let carry = super::carry::prepare(&profile);
+        let browser = Self::spawn(bin, &profile, executor)?;
         let handshake = browser.handshake(bin, background).boxed_local().shared();
+        if let Some(copy) = carry {
+            let (ready, weak, background) = (handshake.clone(), Rc::downgrade(&browser), background.clone());
+            executor.spawn(async move {
+                if ready.await.is_err() { return; }
+                if let Some(browser) = weak.upgrade() { super::carry::run(browser, profile, copy, background).await; }
+            }).detach();
+        }
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
         *browser.ready.borrow_mut() = Some(handshake);
@@ -121,7 +164,7 @@ impl Browser {
         async move { match pending { Some(ready) => ready.await, None => Ok(()) } }
     }
 
-    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive.get()) }
+    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive()) }
 
     fn profile() -> Result<std::path::PathBuf, String> {
         crate::appearance::dir().map(|d| d.join("chromium")).ok_or_else(|| "sem pasta de configuracao do app".into())
@@ -133,60 +176,44 @@ impl Browser {
         let version = self.call(None, "Browser.getVersion", json!({}));
         let discover = self.call(None, "Target.setDiscoverTargets", json!({"discover": true}));
         let targets = self.call(None, "Target.getTargets", json!({}));
+        // Sem a negação o download cai na pasta do usuário sem ninguém pedir: faz parte do aperto de mão, com o mesmo prazo.
+        let deny = self.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"}));
         let (weak, timer, bin) = (Rc::downgrade(self), background.timer(LAUNCH_WAIT), bin.display().to_string());
         async move {
-            let answers = async { Ok::<_, String>((version.await?, discover.await?, targets.await?)) };
+            let answers = async { Ok::<_, String>((version.await?, discover.await?, targets.await?, deny.await?)) };
             let answers = match futures::future::select(std::pin::pin!(answers), std::pin::pin!(timer)).await {
                 futures::future::Either::Left((answers, _)) => answers,
                 futures::future::Either::Right(_) => Err("tempo esgotado".into()),
             };
             let Some(browser) = weak.upgrade() else { return Err("o Chromium fechou".into()) };
             match answers {
-                Ok((_, _, targets)) => {
+                Ok((_, _, targets, _)) => {
                     *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
                         .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-                    drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
                     Ok(())
                 }
                 Err(e) => {
                     // Processo mudo não fica como o compartilhado: o próximo pedido sobe outro.
-                    browser.alive.set(false);
-                    Err(format!("o Chromium ({bin}) nao respondeu: {e}"))
+                    let e = format!("o Chromium ({bin}) nao respondeu: {e}");
+                    browser.retire(&e);
+                    Err(e)
                 }
             }
         }
     }
 
-    fn launch(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let browser = Self::spawn(bin, profile, scale, executor)?;
-        browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
-            .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
-        // Títulos e endereços das páginas, e janelas abertas por `window.open`.
-        browser.call_blocking(None, "Target.setDiscoverTargets", json!({"discover": true}), Duration::from_secs(5))?;
-        let targets = browser.call_blocking(None, "Target.getTargets", json!({}), Duration::from_secs(5))?;
-        *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
-            .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-        drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
-        Ok(browser)
-    }
-
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
-    fn spawn(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let launched = launch::spawn(bin, profile, scale).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
-        let wire = Arc::new(Wire {
-            writer: Mutex::new(launched.writer),
-            next: AtomicU64::new(1),
-            pending: Mutex::default(),
-            sinks: Mutex::default(),
-        });
+    fn spawn(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let launched = launch::spawn(bin, profile).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
+        let wire = Wire::new(launched.writer, Some(launched.child));
         let (events, received) = async_channel::unbounded::<Value>();
         let reading = wire.clone();
         std::thread::Builder::new().name("chromium-pipe".into())
             .spawn(move || read(launched.reader, &reading, &events))
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
-            wire, child: RefCell::new(launched.child), handlers: RefCell::default(), watchers: RefCell::default(),
-            initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), ready: RefCell::new(None),
+            wire, handlers: RefCell::default(), watchers: RefCell::default(),
+            initial: RefCell::default(), owned: RefCell::default(), crashed: RefCell::default(), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
         let weak = Rc::downgrade(&browser);
@@ -200,7 +227,27 @@ impl Browser {
         Ok(browser)
     }
 
-    pub fn alive(&self) -> bool { self.alive.get() }
+    pub fn alive(&self) -> bool { self.wire.alive() }
+
+    /// Este Chromium não serve mais (morreu no meio de uma abertura, não consegue criar página): sai já de cena, para o
+    /// próximo pedido subir outro no mesmo perfil sem dois processos nele.
+    /// ponytail: SIGKILL sem `Browser.close`; o que o processo doente ainda não gravou do perfil se perde.
+    pub fn retire(&self, reason: &str) {
+        if !self.wire.retire(reason) { return; }
+        // Descarte também derruba as páginas de todas as sessões: vai ao diário, como a queda.
+        let line = format!("[nav] Chromium descartado: {reason}");
+        eprintln!("{line}");
+        crate::log_line(&line);
+        if let Some(mut child) = lock(&self.wire.child).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pid(&self) -> Option<u32> { lock(&self.wire.child).as_ref().map(Child::id) }
+
+    pub fn port(&self) -> Port { Port(self.wire.clone()) }
 
     pub fn own(&self, target: &str, owned: bool) {
         if owned { self.owned.borrow_mut().insert(target.to_owned()); } else { self.owned.borrow_mut().remove(target); }
@@ -208,15 +255,14 @@ impl Browser {
 
     pub fn owns(&self, target: &str) -> bool { self.owned.borrow().contains(target) }
 
+    pub fn crashed(&self, target: &str) -> bool { self.crashed.borrow().contains(target) }
+
     /// Fecha as abas que nasceram com o processo, depois que já existe outra (sem nenhuma o Chromium sairia).
     pub fn close_initial(&self) {
         for target in self.initial.take() { drop(self.call(None, "Target.closeTarget", json!({"targetId": target}))); }
     }
 
-    fn closed(&self) {
-        self.alive.set(false);
-        self.notify(CLOSED, Value::Null);
-    }
+    fn closed(&self) { self.notify(CLOSED, Value::Null); }
 
     fn notify(&self, method: &str, params: Value) {
         // Clonados antes de chamar: o ouvinte pode registrar outro sem o mapa estar emprestado.
@@ -227,6 +273,7 @@ impl Browser {
     fn dispatch(&self, message: Value) {
         let Some(method) = message["method"].as_str() else { return };
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        if method == "Target.targetCrashed" && let Some(id) = params["targetId"].as_str() { self.crashed.borrow_mut().insert(id.to_owned()); }
         let Some(session) = message["sessionId"].as_str() else { return self.notify(method, params) };
         let handlers = self.handlers.borrow().get(&(session.to_owned(), method.to_owned())).cloned().unwrap_or_default();
         for handler in handlers { (handler.borrow_mut())(params.clone()); }
@@ -237,14 +284,6 @@ impl Browser {
         let (tx, rx) = futures::channel::oneshot::channel();
         self.wire.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
         async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
-    }
-
-    /// Para o nascimento do navegador, que acontece numa chamada síncrona da interface. A resposta vem da thread de
-    /// leitura, então esperar aqui não trava nada além desta chamada.
-    pub fn call_blocking(&self, session: Option<&str>, method: &str, params: Value, timeout: Duration) -> Reply {
-        let (tx, rx) = mpsc::channel();
-        self.wire.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
-        rx.recv_timeout(timeout).map_err(|_| format!("{method}: o Chromium nao respondeu"))?
     }
 
     pub fn on(&self, session: &str, event: &str, f: impl FnMut(Value) + 'static) {
@@ -258,7 +297,13 @@ impl Browser {
         self.watchers.borrow_mut().entry(event.to_owned()).or_default().push((owner.to_owned(), handler));
     }
 
+    /// Quadros desta sessão vão ao `sink`, sem confirmação: quem os desenha confirma com o `acker`.
     pub fn sink(&self, session: &str, sink: Sink) { lock(&self.wire.sinks).insert(session.to_owned(), sink); }
+
+    pub fn acker(&self, session: &str) -> Acker {
+        let (wire, session) = (self.wire.clone(), session.to_owned());
+        Box::new(move |id| wire.send(Some(&session), "Page.screencastFrameAck", json!({"sessionId": id}), None))
+    }
 
     fn forget(&self, session: &str) {
         self.handlers.borrow_mut().retain(|(s, _), _| s != session);
@@ -269,18 +314,26 @@ impl Browser {
 
 /// Evento sintético entregue a quem ouve o navegador quando o pipe fecha.
 pub const CLOSED: &str = "Hangar.closed";
+/// Início do erro de toda chamada a um Chromium que saiu sozinho (queda) ou que o app descartou.
+pub const EXITED: &str = "chromium_exited";
+pub const RETIRED: &str = "chromium_retired";
 
 impl Drop for Browser {
     fn drop(&mut self) {
         // Saída limpa primeiro: o perfil é persistente, e o SIGKILL perde cookies e localStorage ainda não gravados.
+        self.wire.asked.store(true, Ordering::SeqCst);
         self.wire.send(None, "Browser.close", json!({}), None);
-        let mut child = self.child.borrow_mut();
-        for _ in 0..40 {
-            if !matches!(child.try_wait(), Ok(None)) { return; }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+        let Some(mut child) = lock(&self.wire.child).take() else { return };
+        // A espera (até 2 s) fora da thread da tela, que fechava o painel congelada.
+        let waited = std::thread::Builder::new().name("chromium-exit".into()).spawn(move || {
+            for _ in 0..40 {
+                if !matches!(child.try_wait(), Ok(None)) { return; }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        if let Err(e) = waited { eprintln!("[nav] sem thread para fechar o Chromium: {e}"); }
     }
 }
 
@@ -298,8 +351,48 @@ fn read(reader: std::io::PipeReader, wire: &Wire, events: &async_channel::Sender
         let Ok(message) = serde_json::from_slice::<Value>(&buffer) else { continue };
         route(message, wire, events);
     }
-    for (_, (_, done)) in lock(&wire.pending).drain() { done(Err("o Chromium fechou".into())); }
+    // Antes de soltar quem espera: o erro deles já diz como o processo saiu.
+    let _ = wire.gone.set(exited(wire));
+    let gone = wire.gone.get().cloned().unwrap_or_default();
+    for (_, (_, done)) in lock(&wire.pending).drain() { done(Err(gone.clone())); }
+    // O socket de cada cliente de fora fecha depois de entregar o que já estava na fila.
+    for (_, tap) in lock(&wire.taps).drain() { tap.out.close(); }
     events.close();
+}
+
+/// Recolhe o processo que fechou o pipe e diz como ele saiu; queda que o app não pediu vai ao diário com o fim do
+/// `chromium.log`.
+fn exited(wire: &Wire) -> String {
+    let child = lock(&wire.child).take();
+    let status = child.and_then(|mut child| {
+        // O pipe fecha na saída do processo: a espera é de instantes. Pipe fechado com o processo ainda de pé (travado)
+        // não segura a thread; ele é morto.
+        for _ in 0..40 {
+            if let Ok(Some(status)) = child.try_wait() { return Some(status); }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        child.wait().ok()
+    });
+    let how = status.map_or_else(|| "saida desconhecida".to_owned(), |s| {
+        use std::os::unix::process::ExitStatusExt;
+        s.signal().map_or_else(|| format!("codigo {}", s.code().unwrap_or(-1)), |n| format!("sinal {n}"))
+    });
+    let reason = format!("{EXITED}: o Chromium fechou ({how})");
+    if !wire.asked.load(Ordering::SeqCst) {
+        let tail = std::fs::read_to_string(launch::log_path().unwrap_or_default()).map(|log| crash_tail(&log)).unwrap_or_default();
+        let line = format!("[nav] {reason}; fim do chromium.log: {tail}");
+        eprintln!("{line}");
+        crate::log_line(&line);
+    }
+    reason
+}
+
+/// As últimas linhas de texto do `chromium.log`, sem os quadros da pilha e os registradores que o Chromium despeja na
+/// queda: o que sobra diz o sinal e o que vinha acontecendo.
+fn crash_tail(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(' ')).collect();
+    lines[lines.len().saturating_sub(6)..].iter().map(|l| l.chars().take(200).collect::<String>()).collect::<Vec<_>>().join(" | ")
 }
 
 fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>) {
@@ -307,55 +400,145 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         if let Some((_, done)) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
         return;
     }
+    if tapped(&message, wire) { return; }
     if message["method"] == "Page.screencastFrame"
         && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
         && lock(&wire.sinks).contains_key(&session)
     {
-        // Os parâmetros vão inteiros ao dono, sem copiar o quadro.
-        let params = message["params"].take();
-        let ack = json!({"sessionId": params["sessionId"]});
-        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(params); }
-        // Sem o ack o Chromium para de mandar quadros.
-        wire.send(Some(&session), "Page.screencastFrameAck", ack, None);
+        // Os parâmetros vão inteiros ao dono, sem copiar o quadro; ele confirma depois de desenhar.
+        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(message["params"].take()); }
         return;
     }
     let _ = events.try_send(message);
+}
+
+/// Evento de sessão de um cliente de fora vai só a ele. O fim de uma sessão dele no nível do navegador
+/// (`Target.detachedFromTarget`) vai a ele e segue também para a interface, que confere se era dela.
+fn tapped(message: &Value, wire: &Wire) -> bool {
+    let mut taps = lock(&wire.taps);
+    if taps.is_empty() { return false; }
+    let (method, child) = (message["method"].as_str().unwrap_or(""), message["params"]["sessionId"].as_str());
+    let Some(session) = message["sessionId"].as_str() else {
+        if method == "Target.detachedFromTarget" && let Some(child) = child
+            && let Some(tap) = taps.values_mut().find(|t| t.scope.contains(child)) {
+            tap.scope.remove(child);
+            let _ = tap.out.try_send(message.to_string());
+            drop(taps);
+            wire.fail(child);
+        }
+        return false;
+    };
+    let Some(tap) = taps.values_mut().find(|t| t.scope.contains(session)) else { return false };
+    let _ = tap.out.try_send(message.to_string());
+    match (method, child) {
+        ("Target.attachedToTarget", Some(child)) => { tap.scope.insert(child.to_owned()); }
+        ("Target.detachedFromTarget", Some(child)) => {
+            tap.scope.remove(child);
+            drop(taps);
+            // O que o cliente ainda esperava dessa sessão não vai ser respondido.
+            wire.fail(child);
+        }
+        _ => {}
+    }
+    true
+}
+
+/// O pipe visto de qualquer thread, para o cliente CDP de fora: cada comando ganha um id novo do `Wire` (nunca
+/// colide com os do app) e os eventos chegam filtrados pelas sessões do cliente.
+#[derive(Clone)]
+pub struct Port(Arc<Wire>);
+
+impl Port {
+    pub fn call(&self, session: Option<&str>, method: &str, params: Value) -> impl Future<Output = Reply> + Send + use<> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.0.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
+        async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
+    }
+
+    /// Registra um cliente; `out` é fechado (para todos os remetentes) quando o Chromium cai.
+    pub fn tap(&self, out: async_channel::Sender<String>) -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        lock(&self.0.taps).insert(id, Tapped { scope: HashSet::new(), out });
+        id
+    }
+
+    pub fn adopt(&self, tap: u64, session: &str) {
+        if let Some(t) = lock(&self.0.taps).get_mut(&tap) { t.scope.insert(session.to_owned()); }
+    }
+
+    pub fn owns(&self, tap: u64, session: &str) -> bool { lock(&self.0.taps).get(&tap).is_some_and(|t| t.scope.contains(session)) }
+
+    /// Tira o cliente e devolve as sessões que ainda eram dele, para quem sai soltá-las.
+    pub fn untap(&self, tap: u64) -> Vec<String> { lock(&self.0.taps).remove(&tap).map(|t| t.scope.into_iter().collect()).unwrap_or_default() }
+
+    #[cfg(test)]
+    pub(in crate::browser) fn test() -> (Port, std::io::PipeReader) {
+        let (wire, reader) = tests::wire();
+        (Port(wire), reader)
+    }
+
+    /// Chromium de verdade num perfil descartável, sem a interface: os eventos dela são descartados.
+    #[cfg(test)]
+    pub(in crate::browser) fn launch(profile: &Path) -> (Port, Child) {
+        let launched = launch::spawn(launch::find().unwrap(), profile).unwrap();
+        let wire = Wire::new(launched.writer, None);
+        // O processo fica com o teste; o fim dele não vai ao diário de quem roda.
+        wire.asked.store(true, Ordering::SeqCst);
+        let (events, received) = async_channel::unbounded();
+        std::mem::forget(received);
+        let reading = wire.clone();
+        std::thread::spawn(move || read(launched.reader, &reading, &events));
+        (Port(wire), launched.child)
+    }
+
+    /// Mensagem como se viesse do Chromium; devolve o que seguiria para a interface.
+    #[cfg(test)]
+    pub(in crate::browser) fn inject(&self, message: Value) -> Option<Value> {
+        let (events, received) = async_channel::unbounded();
+        route(message, &self.0, &events);
+        received.try_recv().ok()
+    }
 }
 
 /// Uma sessão CDP num alvo, com a mesma forma do `cdp::Cdp` do WebView2. Cair a sessão a desliga do alvo.
 pub struct Session {
     browser: Rc<Browser>,
     id: String,
+    /// O motor do painel e o controlador do hangar-preview dividem esta sessão: aqui um sabe o tamanho que o outro pôs.
+    pub viewport: Viewport,
+}
+
+/// Um dono por vez para o tamanho da página: o painel, ou o layout pedido pelo agente enquanto ele valer.
+#[derive(Default)]
+pub struct Viewport {
+    /// Largura, altura e densidade que o painel aplicou por último.
+    pub panel: Cell<Option<(u32, u32, f32)>>,
+    /// Layout pedido (`mobile`, `<l> <a>`) em vigor: o painel não aplica o dele.
+    pub held: Cell<bool>,
 }
 
 impl Session {
-    pub fn attach(browser: &Rc<Browser>, target: &str) -> Result<Session, String> {
-        let attached = browser.call_blocking(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), Duration::from_secs(5))?;
-        let id = attached["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
-        Ok(Session { browser: browser.clone(), id })
-    }
-
-    /// `attach` sem travar a interface.
+    /// Liga uma sessão CDP ao alvo, sem travar a interface.
     pub fn attach_async(browser: &Rc<Browser>, target: &str) -> impl Future<Output = Result<Session, String>> + use<> {
         let (call, browser) = (browser.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})), browser.clone());
         async move {
             let id = call.await?["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
-            Ok(Session { browser, id })
+            Ok(Session { browser, id, viewport: Viewport::default() })
         }
     }
 
     pub fn id(&self) -> &str { &self.id }
     pub fn browser(&self) -> &Rc<Browser> { &self.browser }
 
-    /// O alvo caiu ou a sessão se soltou: as chamadas em curso recebem erro em vez de esperar para sempre.
-    pub fn fail_pending(&self) { self.browser.wire.fail(&self.id); }
+    /// O alvo caiu ou a sessão se soltou: as chamadas em curso e as seguintes recebem erro em vez de esperar para sempre.
+    pub fn fail_pending(&self) {
+        lock(&self.browser.wire.fallen).insert(self.id.clone());
+        self.browser.wire.fail(&self.id);
+    }
 
     pub fn call(&self, method: &str, params: Value) -> impl Future<Output = Reply> + use<> {
         self.browser.call(Some(&self.id), method, params)
-    }
-
-    pub fn call_blocking(&self, method: &str, params: Value) -> Reply {
-        self.browser.call_blocking(Some(&self.id), method, params, Duration::from_secs(5))
     }
 
     pub fn on(&self, event: &str, f: impl FnMut(Value) + 'static) -> Result<(), String> {
@@ -377,10 +560,23 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
-    fn wire() -> (Arc<Wire>, std::io::PipeReader) {
+    pub(super) fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
-        (Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() }), reader)
+        (Wire::new(writer, None), reader)
+    }
+
+    #[test]
+    fn retire_after_a_real_death_leaves_it_for_the_diary() {
+        let (dead, _r) = wire();
+        let _ = dead.gone.set("morreu sozinho".into());
+        assert!(!dead.retire("doente"));
+        assert!(!dead.asked.load(Ordering::SeqCst), "a queda de verdade ainda vai ao diário");
+        let (alive, _r) = wire();
+        assert!(alive.retire("doente"));
+        assert!(alive.asked.load(Ordering::SeqCst));
+        assert!(alive.gone.get().unwrap().ends_with("doente"));
     }
 
     #[test]
@@ -426,14 +622,52 @@ mod tests {
         assert_eq!(lock(&wire.pending).len(), 2);
     }
 
+    #[test]
+    fn a_dead_chromium_fails_the_waiters_and_every_later_call_with_how_it_exited() {
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let (_theirs, writer) = std::io::pipe().unwrap();
+        let wire = Wire::new(writer, Some(child));
+        // Sem ir ao diário de verdade de quem roda o teste.
+        wire.asked.store(true, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let waiting = tx.clone();
+        wire.send(None, "Runtime.evaluate", json!({}), Some(Box::new(move |r| waiting.send(r).unwrap())));
+        // O fd 4 do "Chromium": fecha quando ele morre.
+        let (from_chromium, chromium_end) = std::io::pipe().unwrap();
+        let (reading, (events, _received)) = (wire.clone(), async_channel::unbounded());
+        let reader = std::thread::spawn(move || read(from_chromium, &reading, &events));
+        assert!(wire.alive());
+        // SAFETY: sinal para o filho que este teste criou.
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        drop(chromium_end);
+        let reply = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err();
+        assert_eq!(reply, format!("{EXITED}: o Chromium fechou (sinal 9)"));
+        reader.join().unwrap();
+        assert!(!wire.alive());
+        assert!(lock(&wire.child).is_none(), "recolhido, sem zumbi");
+        let started = std::time::Instant::now();
+        wire.send(None, "Browser.getVersion", json!({}), Some(Box::new(move |r| tx.send(r).unwrap())));
+        assert_eq!(rx.try_recv().unwrap(), Err(reply), "na hora, sem escrever no pipe");
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(lock(&wire.pending).is_empty());
+    }
+
+    #[test]
+    fn the_crash_tail_keeps_the_signal_line_and_drops_frames_and_registers() {
+        let log = "[1013/152052:INFO:CONSOLE:782] \"[HMR] connected\"\nReceived signal 11 SEGV_MAPERR 000000000000\n#0 0x55 (x+0x4)\n#1 0x56 (x+0x5)\n  r8: 00 r9: 40\n[end of stack trace]\n";
+        assert_eq!(crash_tail(log), "[1013/152052:INFO:CONSOLE:782] \"[HMR] connected\" | Received signal 11 SEGV_MAPERR 000000000000 | [end of stack trace]");
+    }
+
     /// Prova do modo página: fundo transparente chega ao quadro PNG do screencast com alfa 0.
     #[test]
     #[ignore = "sobe o Chromium da máquina"]
     fn page_mode_png_frames_keep_the_transparent_background() {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
-        let launched = launch::spawn(bin, &profile, 1.0).unwrap();
-        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
+        let launched = launch::spawn(bin, &profile).unwrap();
+        let wire = Wire::new(launched.writer, None);
+        wire.asked.store(true, Ordering::SeqCst);
         let (events, _received) = async_channel::unbounded();
         let reading = wire.clone();
         std::thread::spawn(move || read(launched.reader, &reading, &events));
@@ -474,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_with_an_owner_skip_the_interface_and_are_acked() {
+    fn frames_with_an_owner_skip_the_interface_and_wait_for_the_owner_to_ack() {
         let (wire, reader) = wire();
         let (events, received) = async_channel::unbounded();
         let (tx, rx) = mpsc::channel();
@@ -487,7 +721,6 @@ mod tests {
         drop(wire);
         let mut all = Vec::new();
         std::io::Read::read_to_end(&mut { reader }, &mut all).unwrap();
-        let ack: Value = serde_json::from_slice(all.split(|b| *b == 0).next().unwrap()).unwrap();
-        assert_eq!((ack["method"].as_str(), ack["sessionId"].as_str(), ack["params"]["sessionId"].as_i64()), (Some("Page.screencastFrameAck"), Some("P"), Some(9)));
+        assert!(all.is_empty(), "a confirmação é de quem desenha, não do pipe");
     }
 }

@@ -18,6 +18,13 @@ const DETAIL_EVERY: Duration = Duration::from_millis(2500);
 /// Falhas seguidas que param a consulta; o 404 para na primeira.
 const DETAIL_FAILS: u32 = 3;
 const TAB_CROSS: IconName = IconName::Close;
+/// Eventos do subagente por página: o servidor devolve os últimos N.
+const DETAIL_PAGE: usize = 200;
+
+/// Página cheia: pode haver eventos antes dela.
+fn has_older(returned: usize, limit: usize) -> bool { returned >= limit }
+
+fn next_limit(limit: usize) -> usize { limit + DETAIL_PAGE }
 
 pub(super) enum ActivityReply {
     /// Quantos subagentes a sessão tem no disco, amarrado à sessão e ao pedido.
@@ -27,6 +34,8 @@ pub(super) enum ActivityReply {
     /// O subagente aberto (`…/subagents/{id}?events=200`), com o número do pedido.
     Detail(u64, Result<Value, Failure>),
     TabDetail(u64, u64, Result<Value, Failure>),
+    /// Resposta do envio de mensagem ao subagente: a aba (nenhuma = o detalhe da lista) e o número do envio.
+    Sent(Option<u64>, u64, Result<Value, Failure>),
 }
 
 /// Um subagente do disco (`GET …/subagents`), só com o que a lista mostra e casa.
@@ -38,11 +47,34 @@ pub(super) struct SubRun {
     failed: bool,
     /// Primeira linha do registro (`startedAt`), em segundos desde a época; vazio ou ilegível, nada.
     started: Option<f64>,
+    /// `running`, `finished` ou `failed`, quando o servidor sabe; vale acima do que se deduz do Agent do pai.
+    state: Option<String>,
+    /// `endedAt` e `updatedAt`, em segundos desde a época.
+    ended: Option<f64>,
+    updated: Option<f64>,
+    /// O servidor aceita mensagem direta a este subagente; senão, o código do motivo.
+    can_message: bool,
+    message_blocked: Option<String>,
+    /// O servidor não conseguiu ler o estado (`problema`): `state` nulo aqui é desconhecido, não "sem sinal".
+    problem: Option<String>,
+}
+
+/// Sem `state` nem Agent do pai, um registro parado há tanto tempo fica "sem notícia": não é prova de fim.
+const STALE_SECS: f64 = 600.;
+
+fn wall_seconds(at: &str) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(at).ok().map(|at| at.timestamp_millis() as f64 / 1000.)
 }
 
 fn parse_sub(item: &Value) -> Option<SubRun> {
     let text = |item: &Value, key: &str| item.get(key).and_then(Value::as_str).map(str::to_owned);
     Some(SubRun {
+        state: text(item, "state").filter(|s| !s.is_empty()),
+        ended: text(item, "endedAt").as_deref().and_then(wall_seconds),
+        updated: text(item, "updatedAt").as_deref().and_then(wall_seconds).or_else(|| item.get("mtime").and_then(Value::as_f64)),
+        can_message: item.get("canMessage").and_then(Value::as_bool).unwrap_or(false),
+        message_blocked: text(item, "messageBlocked").filter(|s| !s.is_empty()),
+        problem: text(item, "problema").filter(|s| !s.is_empty()),
         agent_id: text(item, "agentId")?,
         agent_type: text(item, "agentType").filter(|t| !t.is_empty()),
         prompt: text(item, "prompt"),
@@ -53,9 +85,31 @@ fn parse_sub(item: &Value) -> Option<SubRun> {
         tools: item.get("tools").and_then(Value::as_array).map(|tools| tools.iter()
             .filter_map(|t| Some((text(t, "name")?, t.get("count").and_then(Value::as_u64).unwrap_or(0)))).collect()).unwrap_or_default(),
         failed: item.get("failed").and_then(Value::as_bool).unwrap_or(false),
-        started: text(item, "startedAt").and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
-            .map(|at| at.timestamp_millis() as f64 / 1000.),
+        started: text(item, "startedAt").as_deref().and_then(wall_seconds),
     })
+}
+
+/// O corpo do `POST …/subagents/{id}/message`.
+fn message_body(text: &str) -> Value { serde_json::json!({"text": text.trim()}) }
+
+/// O motivo do compositor desligado, no idioma da tela; código sem frase cai na genérica.
+fn blocked_text(code: Option<&str>) -> String {
+    code.and_then(|code| crate::i18n::tr_web(code, &HashMap::new())).unwrap_or_else(|| tr("subagent_message_unavailable"))
+}
+
+/// Terminou antes de `midnight` (hoje 00:00): vai para "Mais antigos". Sem a meia-noite local, ninguém vai.
+fn older(at: Option<f64>, midnight: Option<f64>) -> bool { at.zip(midnight).is_some_and(|(at, midnight)| at < midnight) }
+
+/// Hoje 00:00 no fuso local, em segundos desde a época; meia-noite inexistente no fuso (horário de verão), nada.
+fn today_start() -> Option<f64> {
+    use chrono::{Local, TimeZone};
+    let now = Local::now();
+    now.date_naive().and_hms_opt(0, 0, 0).and_then(|t| Local.from_local_datetime(&t).earliest()).map(|t| t.timestamp() as f64)
+}
+
+/// HH:MM local de um horário de parede; fora do alcance do relógio, nada (a linha fica sem horário).
+fn clock(at: f64) -> Option<String> {
+    chrono::DateTime::from_timestamp(at as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
 }
 
 /// O instante local de um horário de parede (segundos desde a época); no futuro, agora.
@@ -101,7 +155,42 @@ fn match_sub<'a>(subs: &'a [SubRun], prompt: Option<&str>) -> Option<&'a SubRun>
 /// `finished`. O Agent é achado pelo `agentId` do resultado; sem ele, pelo prompt, e só quando um Agent e um subagente
 /// casam um com o outro e mais ninguém: ambíguo não afirma o fim.
 fn sub_done(agents: &[AgentRun], subs: &[SubRun], run: &SubRun) -> bool {
-    if run.finished || run.failed { return true; }
+    matches!(sub_status(agents, subs, run, now_seconds()), SubStatus::Finished(_) | SubStatus::Failed(_))
+}
+
+/// Sem sinal de vida nem de fim: não é "Pensando" nem "terminou".
+fn sub_silent(agents: &[AgentRun], subs: &[SubRun], run: &SubRun) -> bool {
+    matches!(sub_status(agents, subs, run, now_seconds()), SubStatus::Silent(_))
+}
+
+/// Rodando, terminado ou falho, com o horário do fim (o `endedAt`, senão a última escrita); ou sem notícia desde a
+/// última escrita.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SubStatus { Running, Finished(Option<f64>), Failed(Option<f64>), Silent(f64) }
+
+/// O `state` do servidor decide; sem ele, o fim do backend ou do Agent do pai, e o registro sem Agent do pai parado há
+/// mais de 10 min fica sem notícia desde a última escrita (subagente de outra conversa não fica "Pensando" para sempre,
+/// e o silêncio não prova o fim).
+fn sub_status(agents: &[AgentRun], subs: &[SubRun], run: &SubRun, now: f64) -> SubStatus {
+    let at = run.ended.or(run.updated);
+    match run.state.as_deref() {
+        Some("running") => return SubStatus::Running,
+        Some("finished") => return SubStatus::Finished(at),
+        Some("failed") => return SubStatus::Failed(at),
+        _ => {}
+    }
+    if run.failed { return SubStatus::Failed(at); }
+    if ended_by_parent(agents, subs, run) { return SubStatus::Finished(at); }
+    let parent = agents.iter().any(|a| match &a.agent_id {
+        Some(id) => id == &run.agent_id,
+        None => match_sub(std::slice::from_ref(run), a.prompt.as_deref()).is_some(),
+    });
+    if let Some(updated) = run.updated.filter(|updated| !parent && now - updated > STALE_SECS) { return SubStatus::Silent(updated); }
+    SubStatus::Running
+}
+
+fn ended_by_parent(agents: &[AgentRun], subs: &[SubRun], run: &SubRun) -> bool {
+    if run.finished { return true; }
     if let Some(agent) = agents.iter().find(|a| a.agent_id.as_deref() == Some(run.agent_id.as_str())) { return !agent.running; }
     let subs_of = |prompt: Option<&str>| subs.iter().filter(|s| match_sub(std::slice::from_ref(*s), prompt).is_some()).count();
     let mut by_prompt = agents.iter().filter(|a| a.agent_id.is_none() && match_sub(std::slice::from_ref(run), a.prompt.as_deref()).is_some());
@@ -155,14 +244,23 @@ struct TaskLine { mark: &'static str, text: String, status: TaskStatus }
 
 /// O que a lista mostra, preparado quando um dado muda; o desenho só lê.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Lines { agents: Vec<AgentLine>, orphans: Vec<OrphanLine>, shells: Vec<ShellLine>, processes: Vec<ShellLine>, tasks: Vec<TaskLine>, timed: bool }
+struct Lines {
+    agents: Vec<AgentLine>,
+    /// Subagentes do disco: rodando (fora das linhas de Agent), terminados hoje e os de antes de hoje.
+    running: Vec<OrphanLine>, finished: Vec<OrphanLine>, older: Vec<OrphanLine>,
+    shells: Vec<ShellLine>, processes: Vec<ShellLine>, tasks: Vec<TaskLine>, timed: bool,
+}
 
 #[derive(Clone)]
 pub(super) struct Link { pub api: Api, pub runtime: Arc<Runtime>, pub tx: async_channel::Sender<Envelope>, pub connection: u64 }
 
 /// O subagente aberto no detalhe: o que a lista sabia dele até a primeira resposta, depois o que a consulta traz.
 /// `done` é o fim mostrado: o do backend ou o do Agent que o lançou.
-struct Opened { run: SubRun, title: String, raw: Option<Value>, loaded: bool, has_events: bool, fails: u32, busy: bool, done: bool }
+struct Opened {
+    run: SubRun, title: String, raw: Option<Value>, loaded: bool, has_events: bool, fails: u32, busy: bool, done: bool,
+    /// Quantos eventos pedir: cresce no "Carregar anteriores", e a consulta periódica segue com ele.
+    limit: usize, has_older: bool, loading_older: bool,
+}
 
 pub(super) struct ActivityPanel {
     link: Option<Link>,
@@ -190,6 +288,16 @@ pub(super) struct ActivityPanel {
     /// Lugares da marca desta view, que é guardada dentro do painel: ela limpa os seus a cada desenho.
     marks: super::panes::MarkPlaces,
     tab_id: Option<u64>,
+    /// "Mais antigos" aberto.
+    older_open: bool,
+    /// O compositor do subagente: nasce no primeiro desenho do detalhe (o campo pede a janela).
+    input: Option<(Entity<TextareaState>, Subscription)>,
+    sending: bool,
+    send_seq: u64,
+    send_error: Option<String>,
+    /// Envio aceito: o campo esvazia no próximo desenho, que tem a janela.
+    clear_input: bool,
+    placeholder: String,
 }
 
 impl ActivityPanel {
@@ -197,7 +305,8 @@ impl ActivityPanel {
         Self { link: None, key: None, shown: false, activity: Activity::default(), processes: Vec::new(), subs: Vec::new(), seq: 0,
             loading: false, failed: false, lines: Lines::default(), clock: None, scroll: ScrollHandle::new(), opened: None, detail_seq: 0,
             poll: None, notice: None, pending: None, conversation: cx.new(|_| SubConversation::new()), back_focus: cx.focus_handle().tab_stop(true),
-            marks: Default::default(), tab_id: None }
+            marks: Default::default(), tab_id: None, older_open: false, input: None, sending: false, send_seq: 0, send_error: None,
+            clear_input: false, placeholder: String::new() }
     }
 
     /// Refaz as linhas; `true` quando mudou algo que aparece.
@@ -211,15 +320,37 @@ impl ActivityPanel {
             if let Some(m) = &a.model { tags.push((m.clone(), true)); }
             AgentLine { key: a.id.clone(), description: a.description.clone(), tags, now: sub.map(calls_line), sub: sub.map(|s| s.agent_id.clone()) }
         }).collect();
-        let listed: HashSet<&str> = self.activity.agents.iter()
-            .filter_map(|a| match_sub(&self.subs, a.prompt.as_deref())).map(|s| s.agent_id.as_str()).collect();
-        let orphans = self.subs.iter().filter(|s| !listed.contains(s.agent_id.as_str())).map(|s| OrphanLine {
-            key: s.agent_id.clone(), title: sub_title(&self.subs, s), tag: s.agent_type.clone(), done: s.finished || s.failed, failed: s.failed,
+        // Quem já está na linha de um Agent rodando não se repete entre os subagentes rodando.
+        let shown: HashSet<String> = self.activity.running_agents()
+            .filter_map(|a| match_sub(&self.subs, a.prompt.as_deref())).map(|s| s.agent_id.clone()).collect();
+        let midnight = today_start();
+        let (mut running, mut finished, mut older_lines) = (Vec::new(), Vec::new(), Vec::new());
+        for s in &self.subs {
+            let status = sub_status(&self.activity.agents, &self.subs, s, now);
+            let (ended, failed) = match status { SubStatus::Running | SubStatus::Silent(_) => (None, false), SubStatus::Finished(at) => (Some(at), false), SubStatus::Failed(at) => (Some(at), true) };
+            let silent = match status { SubStatus::Silent(at) => Some(at), _ => None };
             // Ilegível não diz "0 chamadas": os campos vêm zerados porque o registro não foi lido.
-            now: if s.unreadable { web("atividade_sub_ilegivel") }
-                else if s.failed { format!("{} · {}", tr("tool_failed"), calls_line(s)) }
-                else if s.finished { format!("{} · {}", web("atividade_sub_concluido"), calls_line(s)) } else { calls_line(s) },
-        }).collect();
+            let calls = if s.unreadable { web("atividade_sub_ilegivel") } else { calls_line(s) };
+            let line = OrphanLine { key: s.agent_id.clone(), title: sub_title(&self.subs, s), tag: s.agent_type.clone(), done: ended.is_some() || silent.is_some(), failed,
+                now: match (ended, silent) {
+                    (None, Some(at)) => format!("{} · {calls}", web_with("atividade_sem_noticia", "t", interval(now - at))),
+                    (None, None) => calls,
+                    (Some(at), _) => {
+                        let mark = match at.and_then(clock) {
+                            Some(h) => web_with(if failed { "atividade_parou" } else { "atividade_terminou" }, "h", h),
+                            None => if failed { tr("tool_failed") } else { web("atividade_sub_concluido") },
+                        };
+                        format!("{mark} · {calls}")
+                    }
+                },
+            };
+            match ended {
+                None if shown.contains(&s.agent_id) => {}
+                None => running.push(line),
+                Some(at) if older(at, midnight) => older_lines.push(line),
+                Some(_) => finished.push(line),
+            }
+        }
         let shells = self.activity.running_shells().map(|s| {
             let mut now_text = s.description.clone().unwrap_or_default();
             if let Some(ts) = s.ts {
@@ -242,7 +373,9 @@ impl ActivityPanel {
             text: match (&t.status, &t.active_form) { (TaskStatus::InProgress, Some(form)) => form.clone(), _ => t.title.clone() },
             status: t.status.clone(),
         }).collect();
-        let lines = Lines { agents, orphans, shells, processes, tasks, timed };
+        // O subagente parado vira terminado com o tempo: o relógio da aba relê.
+        timed |= !running.is_empty();
+        let lines = Lines { agents, running, finished, older: older_lines, shells, processes, tasks, timed };
         if lines == self.lines { return false; }
         self.lines = lines;
         true
@@ -341,17 +474,55 @@ impl ActivityPanel {
         self.close_detail(cx);
         self.notice = None;
         let done = self.done(&run);
-        self.opened = Some(Opened { run, title, raw: None, loaded: false, has_events: false, fails: 0, busy: false, done });
+        self.opened = Some(Opened { run, title, raw: None, loaded: false, has_events: false, fails: 0, busy: false, done,
+            limit: DETAIL_PAGE, has_older: false, loading_older: false });
+        self.start_poll(cx);
+        cx.notify();
+    }
+
+    fn start_poll(&mut self, cx: &mut Context<Self>) {
         self.poll = Some(cx.spawn(async move |this, cx| loop {
             if this.update(cx, |this, _| this.fetch_detail()).is_err() { break; }
             cx.background_executor().timer(DETAIL_EVERY).await;
         }));
+    }
+
+    /// Enter ou o botão: o texto vai ao subagente aberto; o campo só esvazia quando o servidor aceita.
+    fn send_message(&mut self, cx: &mut Context<Self>) {
+        let (Some(link), Some(key), Some(input)) = (self.link.clone(), self.key.clone(), self.input.as_ref().map(|(i, _)| i.clone())) else { return };
+        let Some(id) = self.opened.as_ref().filter(|o| o.run.can_message).map(|o| o.run.agent_id.clone()) else { return };
+        let text = input.read(cx).value().to_string();
+        if self.sending || text.trim().is_empty() { return; }
+        (self.sending, self.send_error) = (true, None);
+        self.send_seq += 1;
+        let (seq, tab) = (self.send_seq, self.tab_id);
+        link.runtime.spawn(async move {
+            let result = link.api.act(&key.name, &["subagents", &id, "message"], Some(message_body(&text)), false, 40).await;
+            let _ = link.tx.send(Envelope { connection: link.connection, selection: None, payload: Payload::Activity(ActivityReply::Sent(tab, seq, result)) }).await;
+        });
+        cx.notify();
+    }
+
+    fn receive_sent(&mut self, seq: u64, result: Result<Value, Failure>, cx: &mut Context<Self>) {
+        if seq != self.send_seq { return; }
+        self.sending = false;
+        match result {
+            Ok(_) => {
+                self.clear_input = true;
+                // O agente que já tinha terminado volta a rodar com a mensagem: a consulta, parada no fim, recomeça.
+                if self.poll.is_none() && self.opened.is_some() { self.start_poll(cx); } else { self.fetch_detail(); }
+            }
+            // Sem resposta do servidor, o `detail` é a chave da frase; com resposta, já é a frase traduzida.
+            Err(failure) => self.send_error = Some(if failure.status.is_none() { tr(&failure.detail) } else { failure.detail }),
+        }
         cx.notify();
     }
 
     /// Volta para a lista e esquece o subagente: resposta dele que ainda chegar é descartada.
     fn close_detail(&mut self, cx: &mut Context<Self>) {
         self.detail_seq += 1;
+        self.send_seq += 1;
+        (self.sending, self.send_error) = (false, None);
         self.poll = None;
         if self.opened.take().is_some() { self.conversation.update(cx, |view, _| view.clear()); }
     }
@@ -366,18 +537,29 @@ impl ActivityPanel {
         let (Some(link), Some(key)) = (self.link.clone(), self.key.clone()) else { return };
         let Some(opened) = self.opened.as_mut().filter(|o| !o.busy) else { return };
         opened.busy = true;
-        let (seq, id, tab) = (self.detail_seq, opened.run.agent_id.clone(), self.tab_id);
+        let (seq, id, tab, limit) = (self.detail_seq, opened.run.agent_id.clone(), self.tab_id, opened.limit.to_string());
         link.runtime.spawn(async move {
-            let result = link.api.read(&key.name, &["subagents", &id], &[("events", "200")], 15).await;
+            let result = link.api.read(&key.name, &["subagents", &id], &[("events", limit.as_str())], 15).await;
             let reply = match tab { Some(tab) => ActivityReply::TabDetail(tab, seq, result), None => ActivityReply::Detail(seq, result) };
             let _ = link.tx.send(Envelope { connection: link.connection, selection: None, payload: Payload::Activity(reply) }).await;
         });
+    }
+
+    /// Mais uma página para trás, como o `load_older` da conversa: a resposta em voo, com o limite velho, é descartada.
+    fn load_older(&mut self, cx: &mut Context<Self>) {
+        let Some(opened) = self.opened.as_mut().filter(|o| o.has_older && !o.loading_older) else { return };
+        (opened.limit, opened.busy, opened.loading_older) = (next_limit(opened.limit), false, true);
+        self.detail_seq += 1;
+        self.fetch_detail();
+        cx.notify();
     }
 
     fn receive_detail(&mut self, seq: u64, result: Result<Value, Failure>, cx: &mut Context<Self>) {
         if seq != self.detail_seq { return; }
         let Some(opened) = self.opened.as_mut() else { return };
         opened.busy = false;
+        let older_done = std::mem::take(&mut opened.loading_older);
+        if older_done { cx.notify(); }
         match result {
             Ok(value) => {
                 let run = parse_sub(&value).unwrap_or_else(|| opened.run.clone());
@@ -389,6 +571,9 @@ impl ActivityPanel {
                 let first = !opened.loaded;
                 opened.loaded = true;
                 let cleared = self.notice.take().is_some();
+                let returned = value.get("events").and_then(Value::as_array).map_or(0, Vec::len);
+                let older = has_older(returned, opened.limit);
+                if opened.has_older != older { opened.has_older = older; cx.notify(); }
                 // Resposta igual à anterior não pede quadro.
                 if opened.raw.as_ref() == Some(&value) && opened.done == done { if first || cleared { cx.notify(); } return; }
                 let events: Vec<ChatEvent> = value.get("events").cloned().and_then(|e| serde_json::from_value(e).ok()).unwrap_or_default();
@@ -462,8 +647,17 @@ impl Render for ActivityPanel {
             body = body.child(warning_line(web("atividade_erro_subagentes")));
         }
         if let Some(notice) = &self.notice { body = body.child(warning_line(notice.clone())); }
-        if !lines.agents.is_empty() {
-            let rows: Vec<AnyElement> = lines.agents.iter().map(|a| {
+        if let Some(code) = self.subs.iter().find_map(|s| s.problem.as_deref()) { body = body.child(warning_line(web(code))); }
+        let sub_row = |s: &OrphanLine, window: &mut Window, cx: &mut Context<Self>| {
+            let content = div().flex().flex_col().gap(px(3.)).when(s.done && !s.failed, |el| el.opacity(0.6))
+                .child(div().flex().items_center().gap_1().min_w_0()
+                    .child(div().min_w_0().truncate().text_sm().text_color(theme::text()).child(s.title.clone()))
+                    .when_some(s.tag.clone(), |el, t| el.child(tag(t, false))))
+                .child(if s.failed { warning_text(s.now.clone()) } else { now_text(s.now.clone()) });
+            openable(format!("act-orphan-{}", s.key), s.key.clone(), s.title.clone(), content, window, cx)
+        };
+        if !lines.agents.is_empty() || !lines.running.is_empty() {
+            let mut rows: Vec<AnyElement> = lines.agents.iter().map(|a| {
                 let content = div().flex().items_start().gap_2().child(spinning(format!("act-agent-spin-{}", a.key)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
                         .child(div().flex().items_center().gap_1().min_w_0()
@@ -476,18 +670,26 @@ impl Render for ActivityPanel {
                     None => content.into_any_element(),
                 }
             }).collect();
-            body = body.child(section(web("atividade_rodando_agora"), None).children(rows));
+            rows.extend(lines.running.iter().map(|s| sub_row(s, window, cx)));
+            // Os sem notícia (`done` na seção Rodando) aparecem aqui, mas não contam como rodando.
+            let count = (lines.agents.len() + lines.running.iter().filter(|s| !s.done).count()).to_string();
+            body = body.child(section(web_with("atividade_grupo_rodando", "n", count), None).children(rows));
         }
-        if !lines.orphans.is_empty() {
-            let rows: Vec<AnyElement> = lines.orphans.iter().map(|s| {
-                let content = div().flex().flex_col().gap(px(3.)).when(s.done && !s.failed, |el| el.opacity(0.6))
-                    .child(div().flex().items_center().gap_1().min_w_0()
-                        .child(div().min_w_0().truncate().text_sm().text_color(theme::text()).child(s.title.clone()))
-                        .when_some(s.tag.clone(), |el, t| el.child(tag(t, false))))
-                    .child(if s.failed { warning_text(s.now.clone()) } else { now_text(s.now.clone()) });
-                openable(format!("act-orphan-{}", s.key), s.key.clone(), s.title.clone(), content, window, cx)
-            }).collect();
-            body = body.child(section(web("atividade_subagentes"), None).children(rows));
+        if !lines.finished.is_empty() || !lines.older.is_empty() {
+            let rows: Vec<AnyElement> = lines.finished.iter().map(|s| sub_row(s, window, cx)).collect();
+            let count = (lines.finished.len() + lines.older.len()).to_string();
+            let mut group = section(web_with("atividade_grupo_terminados", "n", count), None).children(rows);
+            if !lines.older.is_empty() {
+                let open = self.older_open;
+                let label = web_with("atividade_grupo_antigos", "n", lines.older.len().to_string());
+                group = group.child(div().id("act-older").flex().items_center().gap_1().mx(px(-8.)).px(px(8.)).py(px(4.)).rounded(px(8.))
+                    .cursor_pointer().hover(|el| el.bg(theme::hover())).role(Role::Button).aria_label(label.clone())
+                    .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 14., theme::faint()))
+                    .child(chrome::section_label(label))
+                    .on_click(cx.listener(|this, _, _, cx| { this.older_open = !this.older_open; cx.notify(); })));
+                if open { group = group.children(lines.older.iter().map(|s| sub_row(s, window, cx))); }
+            }
+            body = body.child(group);
         }
         if !lines.shells.is_empty() {
             body = body.child(section(web("atividade_shells"), Some(lines.shells.len()))
@@ -509,7 +711,7 @@ impl Render for ActivityPanel {
                     .child(div().text_sm().text_color(text).when(t.status == TaskStatus::Completed, |el| el.line_through()).child(t.text.clone()))
             })));
         }
-        let empty = lines.agents.is_empty() && lines.orphans.is_empty() && lines.shells.is_empty() && lines.processes.is_empty() && lines.tasks.is_empty();
+        let empty = lines.agents.is_empty() && lines.running.is_empty() && lines.finished.is_empty() && lines.older.is_empty() && lines.shells.is_empty() && lines.processes.is_empty() && lines.tasks.is_empty();
         if empty {
             // Antes da primeira resposta não se afirma que não há nada.
             let text = if self.loading && self.subs.is_empty() && !self.failed { tr("activity_loading") } else { web("atividade_vazio") };
@@ -552,33 +754,65 @@ impl ActivityPanel {
         if let Some(run) = self.subs.iter().find(|s| s.agent_id == agent_id).cloned() { self.open_sub(run, title, cx); }
     }
 
-    /// Detalhe: ‹ e o título, o estado dele, a conversa (só ela rola), as ferramentas e o rodapé de só leitura.
-    fn render_detail(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// O campo do compositor do subagente, criado uma vez: Enter envia, como o da conversa.
+    fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
+        if let Some((input, _)) = &self.input { return input.clone(); }
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true));
+        let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| match event {
+            InputEvent::PressEnter { secondary: false, shift: false } => this.send_message(cx),
+            InputEvent::Change => { this.send_error = None; cx.notify(); }
+            _ => {}
+        });
+        self.input = Some((input.clone(), subscription));
+        input
+    }
+
+    /// O compositor da conversa, dirigido ao subagente: o mesmo cartão e o mesmo Enviar; desligado, diz por quê.
+    fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let input = self.ensure_input(window, cx);
+        if std::mem::take(&mut self.clear_input) { input.update(cx, |input, cx| input.set_value("", window, cx)); }
+        let Some(run) = self.opened.as_ref().map(|o| o.run.clone()) else { return div().into_any_element() };
+        let agent = run.agent_type.clone().unwrap_or_else(|| web("atividade_subagente"));
+        let placeholder = tr("subagent_composer").replace("{agent}", &format!("@{agent}"));
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder.clone();
+            input.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        }
+        let mut focused = input.read(cx).focus_handle(cx).is_focused(window);
+        // Sem envio possível o campo não guarda o foco: sem cursor piscando num compositor que não manda nada.
+        if focused && !run.can_message { window.blur(cx); focused = false; }
+        let has_text = !input.read(cx).value().trim().is_empty();
+        let label = tr(if self.sending { "sending" } else { "send" });
+        let send = super::send_button("subagent-send", run.can_message && has_text && !self.sending, label, cx)
+            .on_click(cx.listener(|this, _, _, cx| this.send_message(cx)));
+        let note = if run.can_message { self.send_error.clone().map(|e| (e, true)) } else { Some((blocked_text(run.message_blocked.as_deref()), false)) };
+        let card = super::composer_card(focused).when(!run.can_message, |el| el.opacity(0.5).cursor_not_allowed())
+            .child(div().text_base().child(Textarea::new(&input).appearance(false).disabled(!run.can_message)))
+            .child(div().flex().items_center().child(div().flex_1()).child(send));
+        div().flex_shrink_0().px(px(12.)).pb(px(10.)).flex().flex_col().gap_1()
+            .when_some(note, |el, (note, error)| el.child(div().px_1().text_xs().text_color(if error { theme::warning() } else { theme::muted() }).child(note)))
+            .child(chrome::glass_panel(card, px(18.)))
+            .into_any_element()
+    }
+
+    /// Detalhe: ‹ e o título, a conversa (só ela rola) e o compositor dirigido ao subagente, como a conversa principal.
+    fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.opened.is_none() { return div().into_any_element() }
+        let composer = self.render_composer(window, cx);
         let Some(opened) = &self.opened else { return div().into_any_element() };
         let run = &opened.run;
-        let small = |text: String, color: Hsla| div().child(text).text_color(color).into_any_element();
-        let meta: Vec<AnyElement> = if run.unreadable { vec![small(web("atividade_sub_ilegivel"), theme::muted())] } else {
-            let mut meta = vec![
-                if run.failed { small(format!("✕ {}", tr("tool_failed")), theme::warning()) }
-                else if opened.done { small(format!("✓ {}", web("atividade_sub_concluido")), theme::success()) }
-                else {
-                    div().flex().items_center().gap_1()
-                        .child(super::panes::mark_slot(&self.marks, super::panes::Area::Side, "act-detail-mark", 12., theme::accent()))
-                        .child(div().text_color(theme::accent()).child(web("atividade_rodando"))).into_any_element()
-                },
-                small(web_with("atividade_chamadas", "n", run.calls.to_string()), theme::muted()),
-            ];
-            if let Some(t) = &run.agent_type { meta.push(small(t.clone(), theme::muted())); }
-            if let Some(t) = &run.last_tool { meta.push(div().font_family(theme::MONO).text_color(theme::faint()).child(t.clone()).into_any_element()); }
-            meta
-        };
         let empty = |text: String| div().px_4().py_4().text_center().text_sm().text_color(theme::faint()).child(text).into_any_element();
-        let running = !opened.done && !run.failed && !run.unreadable;
+        let running = !opened.done && !run.failed && !run.unreadable && !sub_silent(&self.activity.agents, &self.subs, run);
         let body = if !opened.loaded { empty(tr("subagent_loading")) }
             else if opened.has_events {
                 let conversation = super::panes::cached_selectable(self.conversation.clone().into(), StyleRefinement::default().size_full());
                 // Como o `Spinner` que o web põe sob a conversa do subagente enquanto ele roda.
-                div().size_full().flex().flex_col().child(div().flex_1().min_h_0().child(conversation))
+                // O "Carregar anteriores" da conversa principal, no mesmo lugar: acima da lista.
+                let older = opened.has_older.then(|| div().flex_shrink_0().px_4().py_2().flex().gap_2().items_center()
+                    .child(Button::new("sub-older").small().outline().label(tr("older")).disabled(opened.loading_older)
+                        .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))))
+                    .when(opened.loading_older, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("loading")))));
+                div().size_full().flex().flex_col().children(older).child(div().flex_1().min_h_0().child(conversation))
                     .when(running, |el| el.child(div().flex_shrink_0().px_4().h(px(38.)).flex().items_center().gap(px(8.))
                         .child(super::panes::mark_slot(&self.marks, super::panes::Area::Side, "act-sub-working", 14., theme::accent()))
                         .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(web("pensamento_vivo")))
@@ -592,10 +826,10 @@ impl ActivityPanel {
             else { empty(web("atividade_pensando")) };
         let title = if opened.title.trim().is_empty() { web("atividade_subagente") } else { opened.title.clone() };
         let back = web("comum_voltar");
-        let session = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
+        // Na aba, o título já está nela: sobra a conversa e o compositor.
         div().size_full().flex().flex_col()
-            .child(div().flex_shrink_0().px(px(10.)).pt(px(10.)).pb(px(4.)).flex().items_center().gap_1()
-                .when(self.tab_id.is_none(), |el| el.child(div().id("act-back").track_focus(&self.back_focus).size(px(28.)).flex_shrink_0().rounded(px(6.))
+            .when(self.tab_id.is_none(), |el| el.child(div().flex_shrink_0().px(px(10.)).pt(px(10.)).pb(px(4.)).flex().items_center().gap_1()
+                .child(div().id("act-back").track_focus(&self.back_focus).size(px(28.)).flex_shrink_0().rounded(px(6.))
                     .flex().items_center().justify_center().cursor_pointer().hover(|el| el.bg(theme::hover()))
                     .when(self.back_focus.is_focused(window), |el| el.focus_ring_style(window, cx))
                     .role(Role::Button).aria_label(back.clone())
@@ -604,17 +838,11 @@ impl ActivityPanel {
                     .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") { this.back(cx); cx.stop_propagation(); }
-                    }))))
-                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title)))
-            .when_some(self.notice.clone(), |el, notice| el.child(div().flex_shrink_0().px_4().pb_2().child(warning_line(notice))))
-            .child(div().flex_shrink_0().px_4().pb(px(10.)).flex().flex_wrap().gap_x(px(10.)).gap_y(px(2.)).text_xs().children(meta))
-            .child(div().flex_1().min_h_0().border_t_1().border_color(theme::border()).child(body))
-            .when(!run.tools.is_empty(), |el| el.child(div().flex_shrink_0().px_4().py(px(10.)).border_t_1().border_color(theme::border())
-                .flex().flex_col().gap_2()
-                .child(chrome::section_label(web_with("atividade_ferramentas_chamadas", "n", run.calls.to_string())))
-                .child(div().flex().flex_wrap().gap_1().children(run.tools.iter().map(|(name, n)| tag(format!("{name} ×{n}"), false))))))
-            .child(div().flex_shrink_0().px_4().py(px(8.)).border_t_1().border_color(theme::border()).text_xs().text_color(theme::faint())
-                .child(web_with("atividade_conversa_so_leitura", "nome", session)))
+                    })))
+                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))))
+            .when_some(self.notice.clone(), |el, notice| el.child(div().flex_shrink_0().px_4().py_2().child(warning_line(notice))))
+            .child(div().flex_1().min_h_0().child(body))
+            .child(composer)
             .into_any_element()
     }
 }
@@ -783,10 +1011,14 @@ impl Hangar {
             }
             ActivityReply::List(seq, result) => self.act.view.update(cx, |view, cx| view.receive(seq, result, cx)),
             ActivityReply::Detail(seq, result) => self.act.view.update(cx, |view, cx| view.receive_detail(seq, result, cx)),
+            ActivityReply::Sent(None, seq, result) => self.act.view.update(cx, |view, cx| view.receive_sent(seq, result, cx)),
+            ActivityReply::Sent(Some(id), seq, result) => {
+                if let Some(tab) = self.act.tabs.iter().find(|t| t.id == id) { tab.view.update(cx, |view, cx| view.receive_sent(seq, result, cx)); }
+            }
             ActivityReply::TabDetail(id, seq, result) => {
                 if let Some(tab) = self.act.tabs.iter().find(|t| t.id == id) {
                     let changed = tab.view.update(cx, |view, cx| {
-                        let status = |v: &ActivityPanel| (v.opened.as_ref().map(|o| (o.done, o.run.failed, o.run.unreadable)), v.notice.is_some());
+                        let status = |v: &ActivityPanel| (v.opened.as_ref().map(|o| (o.done, o.run.failed, o.run.unreadable, o.has_older, o.loading_older)), v.notice.is_some());
                         let before = status(view);
                         view.receive_detail(seq, result, cx);
                         before != status(view)
@@ -892,9 +1124,11 @@ impl Hangar {
             let view = tab.view.read(cx);
             let opened = view.opened.as_ref();
             let unavailable = view.notice.is_some() || opened.is_some_and(|o| o.run.unreadable);
-            let running = !unavailable && opened.is_some_and(|o| !o.done);
+            let silent = opened.is_some_and(|o| sub_silent(&view.activity.agents, &view.subs, &o.run));
+            let running = !unavailable && !silent && opened.is_some_and(|o| !o.done);
             let failed = opened.is_some_and(|o| o.run.failed);
             let icon = if running { self.working_mark_slot(super::panes::Area::Side, format!("subagent-tab-{id}"), 12., theme::accent()) }
+                else if silent && !unavailable && !failed { chrome::small_icon(IconName::Info, 12., theme::muted()).into_any_element() }
                 else { chrome::small_icon(if unavailable { IconName::Info } else if failed { TAB_CROSS } else { IconName::Check }, 12.,
                     if failed || unavailable { theme::warning() } else { theme::success() }).into_any_element() };
             Tab::new().label(tab.title.clone()).prefix(icon)
@@ -984,10 +1218,21 @@ impl Hangar {
         div().id("side-tabs").role(Role::TabList).aria_label(tr("side_tabs")).flex_1().h_full().min_w_0().flex().gap(px(2.)).overflow_hidden()
             .child(tab("side-tab-context", if orq { tr_shared("orq_tab_title", &[]) } else { tr("side_context") }, SideTab::Context, None, cx))
             .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, None, cx)))
-            .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, None, cx)))
+            .when(self.has_activity(), |el| el.child(tab("side-tab-activity", self.background_label(), SideTab::Activity, None, cx)))
             .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, None, cx)))
             .when_some(browser, |el, close| el.child(tab("side-tab-browser", tr("browser"), SideTab::Browser, Some(close), cx)))
             .into_any_element()
+    }
+
+    /// "Em segundo plano · N": N = agentes e subagentes rodando, contados como a seção Rodando da aba.
+    fn background_label(&self) -> String {
+        let activity = &self.conversation.activity;
+        let subs = &self.act.subs;
+        let now = now_seconds();
+        let shown: HashSet<&str> = activity.running_agents().filter_map(|a| match_sub(subs, a.prompt.as_deref())).map(|s| s.agent_id.as_str()).collect();
+        let running = activity.running_agents().count()
+            + subs.iter().filter(|s| !shown.contains(s.agent_id.as_str()) && sub_status(&activity.agents, subs, s, now) == SubStatus::Running).count();
+        if running == 0 { tr("activity_background") } else { format!("{} · {running}", tr("activity_background")) }
     }
 
     /// O botão Atividade do cabeçalho: só com atividade e com o painel fora de vista (à vista, a entrada é a aba, como o
@@ -997,7 +1242,7 @@ impl Hangar {
         if !self.has_activity() || self.side_shown(window) { return None; }
         let running = self.conversation.running_agents().next().is_some();
         let badge = self.conversation.activity_badge();
-        let label = web("ctx_atividade");
+        let label = tr("activity_background");
         let color = if running { theme::accent() } else { theme::muted() };
         let icon: AnyElement = if running { chrome::Breathing::new("activity-breath", IconName::ListChecks, px(16.), color).into_any_element() }
             else { Icon::new(IconName::ListChecks).size(px(16.)).text_color(color).into_any_element() };
@@ -1016,7 +1261,16 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentRun, SubRun, agent_failed, base_title, interval, match_sub, sub_done, sub_title};
+    use super::{AgentRun, SubRun, agent_failed, base_title, has_older, interval, match_sub, next_limit, sub_done, sub_title, DETAIL_PAGE};
+
+    #[test]
+    fn a_full_page_may_have_older_events_and_the_next_asks_one_page_more() {
+        assert!(has_older(DETAIL_PAGE, DETAIL_PAGE));
+        assert!(!has_older(DETAIL_PAGE - 1, DETAIL_PAGE));
+        assert!(!has_older(0, DETAIL_PAGE));
+        assert_eq!(next_limit(DETAIL_PAGE), 2 * DETAIL_PAGE);
+        assert!(has_older(next_limit(DETAIL_PAGE), next_limit(DETAIL_PAGE)));
+    }
 
     #[test]
     fn tab_status_and_close_icons_are_embedded() {
@@ -1079,7 +1333,57 @@ mod tests {
     }
 
     fn sub(id: &str, prompt: &str) -> SubRun {
-        SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false, started: None }
+        SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false, started: None,
+            state: None, ended: None, updated: None, can_message: false, message_blocked: None, problem: None }
+    }
+
+    #[test]
+    fn server_state_wins_and_a_stale_orphan_without_state_is_silent_not_finished() {
+        use super::{SubStatus, sub_status};
+        let now = 10_000.;
+        let with = |state: Option<&str>, ended: Option<f64>, updated: Option<f64>| SubRun {
+            state: state.map(Into::into), ended, updated, ..sub("a", "tarefa um") };
+        let running_parent = [parent("t1", "tarefa um", Some("a"), true)];
+        // `state` do servidor decide, mesmo contra o Agent do pai.
+        assert_eq!(sub_status(&running_parent, &[], &with(Some("finished"), Some(9_000.), Some(9_500.)), now), SubStatus::Finished(Some(9_000.)));
+        assert_eq!(sub_status(&running_parent, &[], &with(Some("failed"), None, Some(9_500.)), now), SubStatus::Failed(Some(9_500.)));
+        assert_eq!(sub_status(&[parent("t1", "tarefa um", Some("a"), false)], &[], &with(Some("running"), None, Some(1.)), now), SubStatus::Running);
+        // Sem `state`, sem Agent do pai e parado há mais de 10 min: sem notícia desde a última escrita, sem afirmar fim.
+        assert_eq!(sub_status(&[], &[], &with(None, None, Some(now - 601.)), now), SubStatus::Silent(now - 601.));
+        assert_eq!(sub_status(&[], &[], &with(None, None, Some(now - 60.)), now), SubStatus::Running);
+        assert_eq!(sub_status(&[], &[], &with(None, None, None), now), SubStatus::Running);
+        // Com o Agent do pai rodando, o registro parado não vira fim.
+        assert_eq!(sub_status(&running_parent, &[], &with(None, None, Some(now - 601.)), now), SubStatus::Running);
+        assert_eq!(sub_status(&[parent("t1", "tarefa um", None, true)], &[with(None, None, Some(1.))], &with(None, None, Some(1.)), now), SubStatus::Running);
+    }
+
+    #[test]
+    fn finished_before_today_go_under_older() {
+        use super::older;
+        assert!(older(Some(99.), Some(100.)));
+        assert!(!older(Some(100.), Some(100.)) && !older(None, Some(100.)));
+        // Sem a meia-noite local, nada vai para "Mais antigos".
+        assert!(!older(Some(99.), None));
+    }
+
+    #[test]
+    fn the_message_goes_as_trimmed_text_and_the_parse_reads_the_new_fields() {
+        use super::{message_body, parse_sub};
+        assert_eq!(message_body("  oi\n"), serde_json::json!({"text": "oi"}));
+        let run = parse_sub(&serde_json::json!({"agentId": "a", "state": "failed", "endedAt": "2026-10-13T10:00:00Z",
+            "updatedAt": "2026-10-13T09:00:00Z", "canMessage": false, "messageBlocked": "erro_subagente_mensagem_sem_terminal"})).unwrap();
+        assert_eq!((run.state.as_deref(), run.can_message, run.message_blocked.as_deref()), (Some("failed"), false, Some("erro_subagente_mensagem_sem_terminal")));
+        assert_eq!((run.ended, run.updated), (Some(1_791_885_600.), Some(1_791_882_000.)));
+        assert!(parse_sub(&serde_json::json!({"agentId": "b", "canMessage": true})).unwrap().can_message);
+    }
+
+    #[test]
+    fn a_blocked_composer_explains_itself_in_the_screen_language() {
+        use super::blocked_text;
+        assert_eq!(blocked_text(Some("erro_subagente_mensagem_sem_terminal")),
+            crate::i18n::tr_web("erro_subagente_mensagem_sem_terminal", &Default::default()).unwrap());
+        assert_eq!(blocked_text(None), crate::i18n::tr("subagent_message_unavailable"));
+        assert_eq!(blocked_text(Some("codigo_novo")), crate::i18n::tr("subagent_message_unavailable"));
     }
 
     #[test]

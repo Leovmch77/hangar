@@ -4,14 +4,13 @@ use hangar_api::state::StateEvent;
 
 /// O que o ator de entrada terminal publica: `error` é o código do canal `problem` ou do retrato,
 /// `message` a frase dele, `input_stalled` o código do escritor parado.
-#[derive(Clone, Debug, Default)]
-pub struct RuntimeView { pub error: Option<String>, pub message: Option<String>, pub input_stalled: Option<String> }
+pub use crate::runtime::terminal_status::TerminalStatus as RuntimeView;
 
 /// `runtime_adapter.runtime_problem`: `(código, detalhe)` do runtime para o `problema` do estado.
 pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
-    // A entrega incerta tem frase própria (o que fazer), não o erro genérico do runtime.
-    let unproved = view.input_stalled.as_deref() == Some("delivery_unproved");
-    if let Some(code) = view.error.as_deref().filter(|c| !c.is_empty() && !(unproved && *c == "terminal_delivery_unknown")) {
+    // A entrega incerta e a sessão sem prova da conversa têm frase própria (o que fazer), não o erro
+    // genérico que elas mesmas causam no runtime.
+    if let Some(code) = view.error.as_deref().filter(|c| !c.is_empty() && !explained(view.input_stalled.as_deref(), c)) {
         let text = match view.message.as_deref().filter(|m| !m.is_empty()) {
             Some(message) => format!("{code}: {message}"),
             None => code.to_owned(),
@@ -24,9 +23,19 @@ pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
         "composer_unreadable" => "terminal_input_composer_unreadable",
         "capture_failed" | "capture_utf8" => "terminal_input_capture_failed",
         "delivery_unproved" => "terminal_input_delivery_unproved",
+        "no_safe_delivery" => "terminal_input_no_safe_delivery",
         _ => "terminal_input_stalled",
     };
     Some((code.into(), stalled.chars().take(60).collect()))
+}
+
+/// O erro do runtime é consequência do motivo de entrada parada que já sai com frase própria.
+pub(crate) fn explained(stalled: Option<&str>, error: &str) -> bool {
+    match stalled {
+        Some("delivery_unproved") => error == "terminal_delivery_unknown",
+        Some("no_safe_delivery") => matches!(error, "terminal_facts" | "terminal_delivery_unknown"),
+        _ => false,
+    }
 }
 
 /// Problema que veio do runtime, e não da observação nem dos fatos.
@@ -77,5 +86,9 @@ mod tests {
         assert_eq!(runtime_problem(&v(None, None, Some("x".repeat(80).as_str()))).unwrap(),
             ("terminal_input_stalled".into(), "x".repeat(60)));
         assert!(is_runtime_problem("terminal_input_stalled") && !is_runtime_problem("terminal_observacao_falhou"));
+        // Sem prova da conversa, os fatos falham na fila: a frase é a da causa, não o erro genérico.
+        assert_eq!(runtime_problem(&v(Some("terminal_facts"), None, Some("no_safe_delivery"))),
+            Some(("terminal_input_no_safe_delivery".into(), "no_safe_delivery".into())));
+        assert_eq!(runtime_problem(&v(Some("queue_io"), None, Some("no_safe_delivery"))).unwrap().0, "runtime_falhou", "outro erro continua vencendo");
     }
 }

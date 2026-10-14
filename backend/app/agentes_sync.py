@@ -504,18 +504,6 @@ _FUNCOES = {"pi": gravar_pi, "kimi": gravar_kimi, "codex": gravar_codex}
 
 # ---------------------------------------------------------------- remoção
 
-def bloco_gerenciado(cfg: Path, nome: str) -> bool:
-    """O TOML tem um bloco NOSSO pra esse provedor? É o que separa o que o app pode apagar do que é
-    do usuário (o `[providers.apikey]` nativo do Kimi, por exemplo)."""
-    try:
-        raw = cfg.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-    ini, fim = _sentinelas(nome)
-    i = raw.find(ini)
-    return i >= 0 and raw.find(fim, i) >= 0
-
-
 def _remover_bloco_toml(cfg: Path, nome: str, tabelas: dict[str, list[str]]) -> tuple[bool, str]:
     """Tira só o nosso bloco; o que outro programa apendou dentro dele fica (mesma regra do gravar)."""
     if not cfg.exists():

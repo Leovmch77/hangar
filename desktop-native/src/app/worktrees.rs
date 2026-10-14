@@ -4,6 +4,7 @@ use super::*;
 use super::costs::{card_plain, dec, empty_state, error_state, loading_state, note_box, page_frame, stack_bar, swatch};
 use super::device::Remote;
 use super::sidebar::Target;
+use gpui_kit::component::progress::Progress;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -263,6 +264,30 @@ impl Batch {
     }
 }
 
+/// Um pedido por worktree, com a semântica do lote: perde arquivos só a que a confirmação mostrou perdendo.
+fn one_path_body(repo: &str, w: &WorktreeStatus) -> Value {
+    json!({"repo": repo, "confirm": true, "paths": [&w.path], "lossy": if loses(w) { vec![&w.path] } else { vec![] }})
+}
+
+/// O lote em andamento: uma worktree por pedido, para o progresso ser o que o servidor confirmou.
+#[derive(Debug, Default)]
+pub(super) struct BatchRun { id: u64, total: usize, done: usize, current: Option<String>, removed: Vec<WorktreeStatus>, failed: Vec<(String, Option<String>)> }
+
+impl BatchRun {
+    fn new(total: usize) -> Self { Self { total, ..Default::default() } }
+    fn finished(&self) -> bool { self.done >= self.total }
+    /// `removed` sem ela é o servidor deixando de fora (mudou depois da confirmação); erro nunca conta como apagada.
+    fn record(&mut self, w: WorktreeStatus, outcome: Result<Vec<String>, String>) -> bool {
+        self.done += 1;
+        self.current = None;
+        match outcome {
+            Ok(removed) if removed.contains(&w.path) => { self.removed.push(w); true }
+            Ok(_) => { self.failed.push((base_name(&w.path), None)); false }
+            Err(error) => { self.failed.push((base_name(&w.path), Some(error))); false }
+        }
+    }
+}
+
 /// O diálogo "Nova worktree" de um repositório.
 pub(super) struct NewWorktree {
     repo: String,
@@ -309,18 +334,19 @@ pub(super) struct Worktrees {
     pub(super) detail: Remote<WorktreeStatus>,
     pub(super) delete_branch: bool,
     pub(super) deleting: bool,
-    pub(super) refreshing: bool,
+    /// Busca dos remotos: o pedido e quantos repositórios já terminaram, de quantos.
+    fetch: Remote<()>,
+    fetch_progress: (usize, usize),
     /// Falha de apagar: fica fora do `detail` para o painel continuar mostrando a worktree.
     pub(super) delete_error: Option<String>,
-    /// Falha ou sobra do lote de mescladas: é do repositório, mostrada na lista e nunca no painel de uma worktree.
-    pub(super) batch_error: Option<String>,
     filter: Filter,
     search: Option<Entity<InputState>>,
     _search_events: Option<Subscription>,
     agents_open: HashSet<String>,
     dialog: Option<WtDialog>,
     batch: Option<Batch>,
-    batch_dialog_error: Option<String>,
+    batch_run: Option<BatchRun>,
+    batch_seq: u64,
     create: Option<NewWorktree>,
     /// Releitura marcada enquanto o backend mede o espaço de alguma.
     size_poll: bool,
@@ -436,20 +462,36 @@ impl Hangar {
 
     fn fetch_worktrees(&mut self, repos: Vec<String>, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
-        self.worktrees.refreshing = true;
+        let seq = self.worktrees.fetch.start();
+        self.worktrees.fetch_progress = (0, repos.len());
         self.worktrees.fetch_failed.clear();
-        let task = self.runtime.spawn(async move {
+        // Todos ao mesmo tempo: cada fetch é um repositório diferente, e o progresso conta o que já voltou.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // A que não responder (tarefa que caiu sem mandar nada) entra como falha, nunca some da conta.
+        let mut pending: HashSet<String> = repos.iter().cloned().collect();
+        for repo in repos {
+            let (api, tx) = (api.clone(), tx.clone());
+            self.runtime.spawn(async move {
+                let ok = api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo})), 150).await.is_ok();
+                let _ = tx.send((repo, ok));
+            });
+        }
+        drop(tx);
+        cx.spawn(async move |this, cx| {
             // Fetch que falha deixa a base como estava: a lista relida vale, com o aviso de que pode estar desatualizada.
             let mut failed = Vec::new();
-            for repo in repos {
-                if api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo})), 150).await.is_err() { failed.push(repo); }
+            while let Some((repo, ok)) = rx.recv().await {
+                pending.remove(&repo);
+                if !ok { failed.push(repo); }
+                let current = this.update(cx, |this, cx| {
+                    let current = this.worktrees.fetch.seq == seq;
+                    if current { this.worktrees.fetch_progress.0 += 1; cx.notify(); }
+                    current
+                });
+                if !matches!(current, Ok(true)) { return; }
             }
-            failed
-        });
-        cx.spawn(async move |this, cx| {
-            let failed = task.await.unwrap_or_default();
-            let _ = this.update(cx, |this, cx| {
-                this.worktrees.refreshing = false;
+            failed.extend(pending);
+            let _ = this.update(cx, |this, cx| if this.worktrees.fetch.finish(seq, Ok(())) {
                 this.worktrees.fetch_failed = failed;
                 this.load_worktrees(false, cx);
             });
@@ -513,6 +555,7 @@ impl Hangar {
                 .on_close(move |_, _, cx| { let _ = close.update(cx, |this, cx| {
                     this.worktrees.dialog = None;
                     this.worktrees.batch = None;
+                    this.worktrees.batch_run = None;
                     this.worktrees.create = None;
                     cx.notify();
                 }); })
@@ -531,7 +574,7 @@ impl Hangar {
     /// Cancelar: o fechar pelo programa não passa pelo `on_close`, então o estado do diálogo sai aqui.
     fn cancel_wt_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.worktrees.busy() { return; }
-        (self.worktrees.batch, self.worktrees.create) = (None, None);
+        (self.worktrees.batch, self.worktrees.batch_run, self.worktrees.create) = (None, None, None);
         if let Some(kind) = self.worktrees.dialog.clone() { self.finish_wt_dialog(&kind, window, cx); }
         cx.notify();
     }
@@ -577,43 +620,54 @@ impl Hangar {
         if deletable.is_empty() { return; }
         let (ready_ones, with_changes) = deletable.into_iter().partition(ready);
         self.worktrees.batch = Some(Batch { repo: repo.repo.clone(), ready: ready_ones, with_changes, picked: HashSet::new(), blocked });
-        self.worktrees.batch_dialog_error = None;
+        self.worktrees.batch_run = None;
         self.open_wt_dialog(WtDialog::Batch, 520., Hangar::render_batch_dialog, window, cx);
     }
 
-    /// Manda só as que a confirmação mostrou; perde arquivos só a que ela mostrou perdendo.
-    fn delete_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Manda só as que a confirmação mostrou, uma por pedido e em ordem: o progresso é real e um lote longo não estoura o prazo.
+    fn delete_batch(&mut self, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let Some(batch) = self.worktrees.batch.as_ref() else { return };
         if self.worktrees.deleting { return; }
-        let chosen = batch.chosen();
-        if chosen.is_empty() { return; }
-        let shown: Vec<(String, String)> = chosen.iter().map(|w| (w.path.clone(), base_name(&w.path))).collect();
-        let body = json!({"repo": &batch.repo, "confirm": true,
-            "paths": chosen.iter().map(|w| &w.path).collect::<Vec<_>>(),
-            "lossy": chosen.iter().filter(|w| loses(w)).map(|w| &w.path).collect::<Vec<_>>()});
+        let queue: Vec<WorktreeStatus> = batch.chosen().into_iter().cloned().collect();
+        if queue.is_empty() { return; }
+        let repo = batch.repo.clone();
+        let runtime = self.runtime.clone();
         self.worktrees.deleting = true;
-        self.worktrees.batch_dialog_error = None;
-        self.worktrees.batch_error = None;
-        let task = self.runtime.spawn(async move { api.server_send(reqwest::Method::POST, &["worktrees", "delete-merged"], Some(body), 150).await });
-        cx.spawn_in(window, async move |this, cx| {
-            let joined = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.worktrees.deleting = false;
-                match joined {
-                    Ok(Ok(v)) => {
-                        let removed: Vec<String> = v.get("removed").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default();
-                        for p in &removed { this.worktrees.cache.remove(p); }
-                        let left: Vec<String> = shown.iter().filter(|(p, _)| !removed.contains(p)).map(|(_, n)| n.clone()).collect();
-                        if !left.is_empty() { this.worktrees.batch_error = Some(tr_shared("worktree_lote_nao_apagou", &[("nomes", &left.join(", "))])); }
-                        if this.worktrees.open.as_ref().is_some_and(|p| removed.contains(p)) { this.close_worktree_panel(cx); }
-                        this.worktrees.batch = None;
-                        this.finish_wt_dialog(&WtDialog::Batch, window, cx);
+        self.worktrees.batch_seq += 1;
+        let id = self.worktrees.batch_seq;
+        self.worktrees.batch_run = Some(BatchRun { id, ..BatchRun::new(queue.len()) });
+        cx.spawn(async move |this, cx| {
+            for w in queue {
+                // Sem este lote (conexão trocada zerou a página, ou outro tomou o lugar), para: o resto não tem onde aparecer.
+                let go = this.update(cx, |this, cx| {
+                    let Some(run) = this.worktrees.batch_run.as_mut().filter(|r| r.id == id) else { return false };
+                    run.current = Some(base_name(&w.path));
+                    cx.notify();
+                    true
+                });
+                if !matches!(go, Ok(true)) { break; }
+                let (api, body) = (api.clone(), one_path_body(&repo, &w));
+                let joined = runtime.spawn(async move { api.server_send(reqwest::Method::POST, &["worktrees", "delete-merged"], Some(body), 150).await }).await;
+                let outcome = match joined {
+                    Ok(Ok(v)) => v.get("removed").and_then(|r| serde_json::from_value::<Vec<String>>(r.clone()).ok()).ok_or_else(|| tr("invalid_response")),
+                    Ok(Err(e)) => Err(Self::failure(&e)),
+                    Err(_) => Err(tr("delivery_uncertain")),
+                };
+                let _ = this.update(cx, |this, cx| {
+                    let path = w.path.clone();
+                    let Some(run) = this.worktrees.batch_run.as_mut().filter(|r| r.id == id) else { return };
+                    if run.record(w, outcome) {
+                        this.worktrees.cache.remove(&path);
+                        if this.worktrees.open.as_deref() == Some(path.as_str()) { this.close_worktree_panel(cx); }
                     }
-                    Ok(Err(e)) => this.worktrees.batch_dialog_error = Some(Self::failure(&e)),
-                    Err(_) => this.worktrees.batch_dialog_error = Some(tr("delivery_uncertain")),
-                }
-                // Mesmo com falha parte pode ter saído: a lista relida mostra o que sobrou.
+                    cx.notify();
+                });
+            }
+            // Mesmo com falha parte pode ter saído: a lista relida mostra o que sobrou.
+            // Também na saída antecipada: `deleting` preso deixaria o diálogo sem Cancelar nem Apagar.
+            let _ = this.update(cx, |this, cx| {
+                if this.worktrees.batch_run.as_ref().is_none_or(|r| r.id == id) { this.worktrees.deleting = false; }
                 this.load_worktrees(false, cx);
                 cx.notify();
             });
@@ -726,12 +780,13 @@ impl Hangar {
 
     pub(super) fn render_worktrees(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let loading = self.worktrees.repos.loading;
-        let refreshing = self.worktrees.refreshing;
+        let refreshing = self.worktrees.fetch.loading;
+        let (fetched, fetch_total) = self.worktrees.fetch_progress;
         let search = self.worktrees.search.clone().map(|input| Input::new(&input).small().w(px(240.)).cleanable(true)
             .aria_label(tr_shared("worktrees_buscar", &[])).prefix(chrome::small_icon(IconName::Search, 13., theme::faint())).into_any_element());
         let header = self.costs_header(tr_shared("worktrees_titulo", &[]), |this, window, cx| this.close_worktrees(window, cx),
             search.into_iter().chain([
-                div().when(refreshing, |el| el.text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_atualizando", &[])))
+                div().when(refreshing, |el| el.text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_remoto_progresso", &[("feitos", &fetched.to_string()), ("total", &fetch_total.to_string())])))
                     .into_any_element(),
                 Button::new("worktrees-refresh").outline().small().label(tr_shared("custos_atualizar", &[])).loading(loading || refreshing)
                     .disabled(loading || refreshing).on_click(cx.listener(|this, _, _, cx| this.load_worktrees(true, cx))).into_any_element(),
@@ -751,10 +806,10 @@ impl Hangar {
 
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
-            .when_some(self.worktrees.batch_error.clone(), |el, error| el.child(note_box(error, theme::danger())))
             .children(self.worktrees.fetch_failed.iter().map(|repo| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", &base_name(repo))]), theme::warning())));
         let repos = match &self.worktrees.repos.value {
-            None => return page.child(loading_state()),
+            None => return page.child(div().py(px(40.)).flex().items_center().justify_center().gap(px(10.)).text_color(theme::muted())
+                .child(chrome::Spinner::new("worktrees-loading", IconName::LoaderCircle, px(16.), theme::muted())).child(tr_shared("worktrees_lendo", &[]))),
             Some(Err(error)) => return page.child(error_state(tr_shared("worktrees_erro", &[("motivo", error.as_str())]),
                 cx.listener(|this, _, _, cx| this.load_worktrees(false, cx)))),
             Some(Ok(repos)) => repos,
@@ -813,6 +868,8 @@ impl Hangar {
     fn render_disk(&self, all: &[&WorktreeStatus], cx: &mut Context<Self>) -> Option<Div> {
         let mut sized: Vec<&WorktreeStatus> = all.iter().copied().filter(|w| w.size.is_some_and(|s| s > 0)).collect();
         let pending = all.iter().any(|w| w.size_pending);
+        let existing = all.iter().filter(|w| w.exists).count();
+        let measured = all.iter().filter(|w| w.exists && !w.size_pending).count();
         if sized.is_empty() && !pending { return None; }
         sized.sort_by_key(|w| std::cmp::Reverse(w.size.unwrap_or(0)));
         // Sobre todas, como no web: as ainda sem medida tornam o total um mínimo.
@@ -846,7 +903,7 @@ impl Hangar {
                 .child(div().text_size(px(12.5)).text_color(theme::muted())
                     .child(tr_shared("worktrees_disco_resumo", &[("total", &total), ("n", &sized.len().to_string())])))
                 .child(div().flex_1())
-                .when(pending && !slow, |el| el.child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_disco_calculando", &[]))))
+                .when(pending && !slow, |el| el.child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_disco_progresso", &[("feitas", &measured.to_string()), ("total", &existing.to_string())]))))
                 .when(slow, |el| el.child(div().text_size(px(12.5)).text_color(theme::warning_text()).child(tr_shared("worktrees_disco_demorando", &[])))
                     .child(Button::new("worktrees-sizes-retry").outline().xsmall().label(tr_shared("busca_tentar_de_novo", &[]))
                         .on_click(cx.listener(|this, _, _, cx| { this.worktrees.size_tries = 0; this.load_worktrees(false, cx); }))))
@@ -1159,6 +1216,7 @@ impl Hangar {
 
     /// O lote de mescladas: cada uma com o que perde, e as que ficam de fora com o motivo.
     fn render_batch_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if let Some(run) = self.worktrees.batch_run.as_ref() { return Self::render_batch_run(run, cx); }
         let Some(batch) = self.worktrees.batch.as_ref() else { return div() };
         let deleting = self.worktrees.deleting;
         let n = batch.chosen().len().to_string();
@@ -1188,14 +1246,36 @@ impl Hangar {
                         .child(div().font_weight(FontWeight::MEDIUM).child(title(w)))
                         .child(muted(if w.sessions.is_empty() { tr_shared("worktree_lote_leitura_falhou", &[]) }
                             else { tr_shared("worktree_sessao_aberta", &[("nomes", &w.sessions.join(", "))]) }))))))
-            .when_some(self.worktrees.batch_dialog_error.clone(), |el, error| el.child(div().id("worktree-batch-error").role(Role::Alert)
-                .text_color(theme::danger()).child(error)))
             .child(div().flex().justify_end().gap_2()
                 .child(Button::new("worktree-batch-cancel").outline().label(tr_shared("worktree_nova_cancelar", &[])).disabled(deleting)
                     .on_click(cx.listener(|this, _, window, cx| this.cancel_wt_dialog(window, cx))))
                 .child(Button::new("worktree-batch-confirm").danger().label(tr_shared("worktree_lote_apagar_n", &[("n", &n)])).loading(deleting)
                     .disabled(deleting || n == "0")
-                    .on_click(cx.listener(|this, _, window, cx| this.delete_batch(window, cx)))))
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_batch(cx)))))
+    }
+
+    /// O lote rodando ou terminado: a barra conta as que já voltaram; as que ficaram dizem por quê.
+    fn render_batch_run(run: &BatchRun, cx: &mut Context<Self>) -> Div {
+        let finished = run.finished();
+        let summary = tr_shared("worktree_lote_progresso", &[("feitas", &run.removed.len().to_string()), ("total", &run.total.to_string()),
+            ("tamanho", &sum_label(&run.removed))]);
+        let value = if run.total == 0 { 100. } else { run.done as f32 * 100. / run.total as f32 };
+        div().flex().flex_col().gap(px(12.)).text_size(px(13.)).whitespace_normal()
+            .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD)
+                .child(tr_shared(if finished { "worktree_lote_fim_titulo" } else { "worktree_lote_apagando_titulo" }, &[])))
+            .child(Progress::new("worktree-batch-progress").value(value).accessibility_label(summary.clone()))
+            .child(muted(summary))
+            .when_some(run.current.as_ref().filter(|_| !finished), |el, name| el.child(muted(tr_shared("worktree_lote_apagando", &[("nome", name)]))))
+            .when(!run.failed.is_empty(), |el| el.child(div().id("worktree-batch-failed").role(Role::Alert).flex().flex_col().gap(px(2.))
+                .text_color(theme::danger())
+                .child(tr_shared("worktree_lote_falhas", &[("n", &run.failed.len().to_string())]))
+                .children(run.failed.iter().map(|(name, error)| div().pl(px(10.)).child(match error {
+                    None => tr_shared("worktree_lote_mudou", &[("nome", name)]),
+                    Some(motivo) => tr_shared("worktree_lote_erro_item", &[("nome", name), ("motivo", motivo)]),
+                })))))
+            .when(finished, |el| el.child(div().flex().justify_end()
+                .child(Button::new("worktree-batch-close").primary().label(tr_shared("worktree_lote_fechar", &[]))
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel_wt_dialog(window, cx))))))
     }
 
     /// "Nova worktree": começar algo novo (branch e pasta saem da descrição) ou continuar uma branch que não está aberta.
@@ -1350,7 +1430,7 @@ const COL_SIZE: f32 = 76.;
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_size, lost_files, merged_batch, ready, slug, state_of, sum_label, title, tr_shared, is_agent, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
+    use super::{fmt_size, lost_files, merged_batch, one_path_body, ready, slug, state_of, sum_label, title, tr_shared, is_agent, BatchRun, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
     use serde_json::json;
 
     fn st(v: serde_json::Value) -> WorktreeStatus { serde_json::from_value(v).unwrap() }
@@ -1442,6 +1522,31 @@ mod tests {
         let mut sized = base("/r/b"); sized["size"] = json!(2048);
         let list = [st(pending), st(sized)];
         assert_eq!(sum_label(&list), tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(2048))]));
+    }
+
+    #[test]
+    fn one_path_body_marks_lossy_only_when_it_loses_files() {
+        let clean = st(base("/r/a"));
+        assert_eq!(one_path_body("/r", &clean), json!({"repo": "/r", "confirm": true, "paths": ["/r/a"], "lossy": []}));
+        let mut ignored = base("/r/b"); ignored["ignored"] = json!([".env"]);
+        assert_eq!(one_path_body("/r", &st(ignored)), json!({"repo": "/r", "confirm": true, "paths": ["/r/b"], "lossy": ["/r/b"]}));
+    }
+
+    #[test]
+    fn batch_run_counts_removed_left_out_and_errors() {
+        let mut run = BatchRun::new(4);
+        let mut a = base("/r/a"); a["size"] = json!(2048);
+        let mut d = base("/r/d"); d["size_pending"] = json!(true);
+        assert!(run.record(st(a), Ok(vec!["/r/a".into()])));
+        // Resposta que não traz esta pasta: o servidor a deixou de fora.
+        assert!(!run.record(st(base("/r/b")), Ok(vec!["/r/x".into()])));
+        assert!(!run.record(st(base("/r/c")), Err("boom".into())));
+        assert!(!run.finished());
+        assert!(run.record(st(d), Ok(vec!["/r/d".into()])));
+        assert!(run.finished());
+        assert_eq!(run.removed.iter().map(|w| w.path.as_str()).collect::<Vec<_>>(), ["/r/a", "/r/d"]);
+        assert_eq!(run.failed, [("b".to_owned(), None), ("c".to_owned(), Some("boom".to_owned()))]);
+        assert_eq!(sum_label(&run.removed), tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(2048))]));
     }
 
     #[test]

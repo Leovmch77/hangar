@@ -19,7 +19,7 @@ export interface LiveVoiceSettings {
   codex_account: string;
   organizer: { direct: ModePair; plan: ModePair };
 }
-/** `GET /api/voice/settings`: a trava do beta, o Codex no servidor e as escolhas gravadas. */
+/** `GET /api/voice/settings`: `enabled` = Codex instalado e conta Codex no servidor; e as escolhas gravadas. */
 export interface LiveVoiceSettingsReply {
   enabled: boolean;
   codex: boolean;
@@ -222,18 +222,6 @@ async function loadSettings(server: Server, force = false) {
     console.warn('live voice: settings unreadable', e);
     settings[server.id] = { reply: current?.reply ?? null, error: e instanceof Error ? e.message : 'failed', loading: false };
   }
-}
-
-// A trava da voz muda nas opções do Codex; sem isto o botão só reflete a troca depois de reler os ajustes.
-if (typeof window !== 'undefined') {
-  window.addEventListener('hangar:codex-voice-config', (event) => {
-    const detail = (event as CustomEvent<{ serverId: string | null; enabled: boolean } | undefined>).detail;
-    if (!detail) return;
-    const id = detail.serverId ?? activeServer?.id;
-    if (!id) return;
-    const entry = settings[id];
-    if (entry?.reply) settings[id] = { ...entry, reply: { ...entry.reply, enabled: detail.enabled === true } };
-  });
 }
 
 /** Grava o objeto inteiro; o erro sobe com o `error_code` do servidor. */

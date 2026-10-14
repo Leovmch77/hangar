@@ -1586,6 +1586,45 @@ def test_do_notify_awaiting_sem_terminal_usa_o_estado_da_lista(monkeypatch):
     assert len(calls) == 1
 
 
+def test_do_notify_awaiting_sem_terminal_no_rust_le_o_estado_do_runtime(monkeypatch):
+    # Com o Rust de pé o adapter Python não tem a sessão (snapshot None); o estado é o que o Rust publicou.
+    from app import runtime_coordinator
+    from app.adapters import CLAUDE_HEADLESS, get_adapter
+    calls = []
+    info = SimpleNamespace(name="hl", jsonl="/x/uuid1.jsonl", cwd="/x", headless=True, state="idle", question=None)
+    view = {"view": {"public_state": {"state": "awaiting_input", "question": "Permitir Bash? ls"}}}
+    fake = SimpleNamespace(managed_runtime=lambda name: name == "hl", slot=lambda name: SimpleNamespace(view=view))
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: fake)
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
+    monkeypatch.setattr(get_adapter(CLAUDE_HEADLESS), "snapshot", lambda name: None)
+    monkeypatch.setattr(api_mod, "read_pending_askq", lambda jsonl: None)
+    monkeypatch.setattr(api_mod, "_pane_wants_input", lambda name: pytest.fail("raspou pane inexistente"))
+    monkeypatch.setattr(api_mod, "_AWAITING_PUSH_RETRY_S", 0)
+    monkeypatch.setattr(api_mod.push, "notify_awaiting", lambda name, body: calls.append((name, body)))
+    api_mod._do_notify_awaiting("uuid1")
+    assert calls == [("hl", "Permitir Bash? ls")]
+    view["view"]["public_state"]["state"] = "idle"
+    api_mod._do_notify_awaiting("uuid1")
+    assert len(calls) == 1
+
+
+def test_do_notify_awaiting_sem_vista_do_rust_avisa_no_log(monkeypatch, caplog):
+    # Sem a vista do Rust o push não sai, e isso aparece no log com o nome da sessão (sem reserva Python).
+    import logging
+    from app import runtime_coordinator
+    calls = []
+    info = SimpleNamespace(name="hl", jsonl="/x/uuid1.jsonl", cwd="/x", headless=True, state="idle", question=None)
+    fake = SimpleNamespace(managed_runtime=lambda name: True, slot=lambda name: SimpleNamespace(view={}))
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: fake)
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
+    monkeypatch.setattr(api_mod, "_AWAITING_PUSH_RETRY_S", 0)
+    monkeypatch.setattr(api_mod.push, "notify_awaiting", lambda name, body: calls.append((name, body)))
+    with caplog.at_level(logging.WARNING):
+        api_mod._do_notify_awaiting("uuid1")
+    assert calls == []
+    assert any("hl" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), caplog.text
+
+
 def test_do_notify_awaiting_skips_idle_notification(monkeypatch):
     # Notification de "idle 60s" (state_hook mapeia pra awaiting): sem askq pendente e sem menu no
     # pane (nas 2 checagens) -> NENHUM push. Era o push falso "Aguardando sua resposta" em toda
@@ -2993,36 +3032,6 @@ def test_kimi_model_set_com_sessao_trabalhando_vira_409(api_client):
     drive.assert_not_called()
 
 
-def test_plan_pin_rejeita_stem_com_travessia(api_client, tmp_path):
-    # Sem a guarda de separador, o proprio os.path.isfile do endpoint responde se existe um .md
-    # FORA da pasta de planos (404 vs 200) — e o stem com barra ainda ia parar no arquivo de pin,
-    # onde o read_pin depois descarta calado.
-    fora = tmp_path / "segredo.md"
-    fora.write_text("x", encoding="utf-8")
-    planos = tmp_path / "docs" / "superpowers" / "plans"
-    planos.mkdir(parents=True)
-    with patch("app.api._session_cwd", return_value=str(tmp_path)), \
-         patch("app.api._plans_dir", return_value=str(planos)), \
-         patch("app.api.write_pin") as wp:
-        r = api_client.post("/api/sessions/cc/plan-pin", headers=_h(),
-                            json={"stem": "../../../segredo"})
-    assert r.status_code == 400
-    wp.assert_not_called()
-
-
-def test_plan_pin_aceita_plano_da_propria_raiz(api_client, tmp_path):
-    planos = tmp_path / "docs" / "superpowers" / "plans"
-    planos.mkdir(parents=True)
-    (planos / "2026-07-30-x.md").write_text("# x", encoding="utf-8")
-    with patch("app.api._session_cwd", return_value=str(tmp_path)), \
-         patch("app.api._plans_dir", return_value=str(planos)), \
-         patch("app.api.write_pin") as wp:
-        r = api_client.post("/api/sessions/cc/plan-pin", headers=_h(),
-                            json={"stem": "2026-07-30-x"})
-    assert r.status_code == 200
-    wp.assert_called_once_with(str(planos), "2026-07-30-x")
-
-
 # ---------------------------------------------------------------------------
 # Catalogo de modelos da sessao Claude — GET /model/options, POST /engine/model
 # ---------------------------------------------------------------------------
@@ -3810,7 +3819,7 @@ def test_kill_nao_avisa_companheiros_que_ficaram(api_client):
          patch("app.api._deliver", side_effect=fake_deliver):
         r = api_client.delete("/api/sessions/a", headers=_h())
     assert r.status_code == 200 and r.json() == {"ok": True, "warning": None}
-    kill.assert_called_once_with("a")
+    kill.assert_called_once_with("a", closed_by_rust=False)
     assert entregues == {}
 
 

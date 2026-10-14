@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fake::*;
+use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};
 use hangar_server::routes::AppState;
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeTarget};
@@ -57,7 +58,8 @@ async fn cano(rpc: Value, busy: bool) -> String {
     format!("tcp:{address}")
 }
 
-/// Python falso da política: `ok` a tudo (o `session.patch_meta` do pular e do modo de permissão).
+/// Python falso da política: `ok` a tudo, com o `{"updated": true}` do `session.patch_meta` gravado (o
+/// pular só responde depois dele).
 async fn policy() -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -76,7 +78,7 @@ async fn policy() -> std::net::SocketAddr {
                     }
                     let mut body = vec![0; length];
                     reader.read_exact(&mut body).await.unwrap();
-                    let reply = json!({"ok":true,"data":{}}).to_string();
+                    let reply = json!({"ok":true,"data":{"updated":true}}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}", reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }
@@ -117,18 +119,54 @@ async fn call(server: std::net::SocketAddr, case: &Value, token: &str) -> (u16, 
     (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
+/// ID que a pergunta assíncrona da sessão recebe ao ser exibida (o `<shown>` do golden).
+fn show(store: &InteractionStore, case: &Value) -> Value {
+    let request = &case["session"]["async"][0];
+    let binding = InteractionBinding { key: "k".into(), conversation: "thread-1".into(), generation: 1 };
+    let shown = json!({"request_id": request, "questions": [{"question": "?"}]});
+    json!(store.observe(&binding, &native_target(InteractionKind::Question, "thread-1", request), Some(shown)).unwrap().unwrap())
+}
+
 #[tokio::test]
 async fn headless_codex_routes_match_the_python_golden() {
     for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null()) {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+        let store = Arc::new(InteractionStore::default());
+        let registry = RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into());
+        let registry = Arc::new(if case["route"] == "question/skip" { registry.with_interactions(store.clone()) } else { registry });
         open(&registry, dir.path(), case).await;
         let (python, server) = serve(registry.clone()).await;
-        let (status, body) = call(server, case, OWNER).await;
+        let mut sent = case.clone();
+        if sent["body"]["interaction_id"] == "<shown>" { sent["body"]["interaction_id"] = show(&store, case); }
+        let (status, body) = call(server, &sent, OWNER).await;
         assert_eq!(python.hits_to(&format!("/api/sessions/s/{}", case["route"].as_str().unwrap())), 0, "{}: foi ao Python", case["name"]);
         assert_eq!((status, &body), (case["expect"]["status"].as_u64().unwrap() as u16, &case["expect"]["body"]), "{}", case["name"]);
         registry.close("k", 1).await.unwrap();
     }
+}
+
+/// Dispensar pergunta assíncrona pela rota de verdade: o corpo dos clientes (`request_id` +
+/// `interaction_id`) é aceito e o ID chega ao motor; sem ele, 409 com o código de identidade.
+#[tokio::test]
+async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
+    let case = golden().into_iter().find(|c| c["name"] == "skip_async").unwrap();
+    let request = case["body"]["request_id"].as_str().unwrap().to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(InteractionStore::default());
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_interactions(store.clone()));
+    open(&registry, dir.path(), &case).await;
+    let (python, server) = serve(registry).await;
+    let mut bare = case.clone();
+    bare["body"] = json!({"request_id": request});
+    let missing = call(server, &bare, OWNER).await;
+    assert_eq!((missing.0, missing.1["detail"]["code"].as_str()), (409, Some("erro_interacao_sem_identidade")));
+    let binding = InteractionBinding { key: "k".into(), conversation: "thread-1".into(), generation: 1 };
+    let shown = json!({"request_id": request, "questions": [{"question": "?"}]});
+    let token = store.observe(&binding, &native_target(InteractionKind::Question, "thread-1", &json!(request)), Some(shown)).unwrap().unwrap();
+    let mut identified = case.clone();
+    identified["body"] = json!({"request_id": request, "interaction_id": token});
+    assert_eq!(call(server, &identified, OWNER).await, (200, json!({"ok": true})));
+    assert_eq!(python.hits_to("/api/sessions/s/question/skip"), 0);
 }
 
 #[tokio::test]
@@ -143,20 +181,20 @@ async fn sessions_the_rust_does_not_own_reach_python_intact() {
 }
 
 #[tokio::test]
-async fn guest_and_bodies_fastapi_refuses_reach_python() {
+async fn guest_reaches_python_and_bodies_the_route_refuses_are_a_rust_422() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
     let case = golden().into_iter().find(|c| c["name"] == "model_ok").unwrap();
     open(&registry, dir.path(), &case).await;
     let (python, server) = serve(registry).await;
     assert_eq!(call(server, &case, "token-errado").await.1, Value::String("from-python".into()), "convidado segue ao Python");
-    for body in [json!({"model": "gpt-5", "x": 1}), json!({"model": 5}), json!({"effort": "low"})] {
-        let refused = json!({"name": "corpo", "method": "POST", "route": "model", "body": body});
-        assert_eq!(call(server, &refused, OWNER).await.1, Value::String("from-python".into()), "{body}");
-        assert_eq!(python.last_body(), body.to_string().as_bytes());
+    let tier = json!({"service_tier": "turbo"});
+    for (route, body) in [("model", json!({"model": "gpt-5", "x": 1})), ("model", json!({"model": 5})), ("model", json!({"effort": "low"})), ("service-tier", tier)] {
+        let refused = json!({"name": "corpo", "method": "POST", "route": route, "body": body});
+        let (status, reply) = call(server, &refused, OWNER).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
-    let tier = json!({"name": "tier", "method": "POST", "route": "service-tier", "body": {"service_tier": "turbo"}});
-    assert_eq!(call(server, &tier, OWNER).await.1, Value::String("from-python".into()));
+    assert_eq!(python.hits_to("/api/sessions/s/model") + python.hits_to("/api/sessions/s/service-tier"), 1, "só o convidado foi ao Python");
 }
 
 /// Falhas do ator que o cano falso não produz: a função de resposta com o erro do caso dá o mesmo corpo.
@@ -200,7 +238,8 @@ async fn terminal_entry_goes_to_python() {
     std::fs::write(&transcript, "").unwrap();
     registry.open_terminal(TerminalTarget { key: "k-s".into(), generation: 1, name: "s".into(), binding,
         lease_path: dir.path().join("s.lease"), state_path: dir.path().join("s.state"), projection_dir: dir.path().join("s.projection"),
-        transcript, created: 0.0, plugin_key: None }).await.unwrap();
+        transcript, created: 0.0, plugin_key: None,
+        metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.path().into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }).await.unwrap();
     assert!(registry.writable("s").await.unwrap().terminal);
     // A porta fechada prova que o desvio vem antes dela: o Python responde sem esperar.
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
@@ -209,4 +248,69 @@ async fn terminal_entry_goes_to_python() {
         assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
         assert_eq!(python.last_hit().0, format!("/api/sessions/s/{}", case["route"].as_str().unwrap()));
     }
+}
+
+#[test]
+fn skip_that_was_not_saved_is_a_send_failure_and_a_bad_answer_is_invalid() {
+    use hangar_server::runtime::protocol::{Disposition, RuntimeReply};
+    // O Python gravava antes de esconder: falha de gravação é 503 e a pergunta continua.
+    let unsaved = Ok(RuntimeReply { operation_id: "op".into(), disposition: Disposition::Rejected, payload: json!({"skip_not_saved": true}) });
+    let (status, body) = skip_answer(&unsaved);
+    assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (503, Some("erro_codex_resposta_envio")));
+    let invalid = Err(RuntimeError::new(hangar_server::runtime::codex::INVALID_ANSWER, "a pergunta já está sendo pulada"));
+    let (status, body) = skip_answer(&invalid);
+    assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (409, Some("erro_codex_resposta_invalida")));
+}
+
+/// Cano que cai logo depois de abrir e não volta (sem quem o religue): a entrada fica doente.
+async fn dying_cano() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else { return };
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new();
+        if reader.read_line(&mut header).await.is_err() { return; }
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = reader.get_mut().write_all(format!("{}\n", json!({"type":"cano_saiu","rc":1})).as_bytes()).await;
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).await.unwrap_or(0) > 0 { rest.clear(); }
+    });
+    format!("tcp:{address}")
+}
+
+#[tokio::test]
+async fn permissions_of_a_dead_headless_codex_answer_from_the_session_file_not_503() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let metadata = json!({"name": "s", "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true, "cwd": "/tmp/projeto",
+        "permission_mode": "Ask for approval"});
+    registry.open(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
+        binding: CanoBinding { pid: 42, escuta: dying_cano().await, token: "secret-test".into(), versao: 2 },
+        lease_path: dir.path().join("k.lock"), state_path: dir.path().join("k.queue-state.json"), projection_dir: dir.path().join("k-projection"),
+        transcript: dir.path().join("k.jsonl"), created: 0.0 }).await.unwrap();
+    let handle = registry.handle("k", 1).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async { while handle.view().await.unwrap()["alive"] != false { tokio::time::sleep(Duration::from_millis(20)).await; } })
+        .await.expect("o cano caiu");
+    let (python, server) = serve(registry.clone()).await;
+    let get = |server| async move { client().get(format!("http://{server}/api/sessions/s/codex-permissions"))
+        .header("authorization", format!("Bearer {OWNER}")).send().await.unwrap() };
+    let post = |server, mode: &'static str| async move { client().post(format!("http://{server}/api/sessions/s/codex-permissions"))
+        .header("authorization", format!("Bearer {OWNER}")).header("content-type", "application/json")
+        .body(json!({"mode": mode}).to_string()).send().await.unwrap() };
+    let read = get(server).await;
+    assert_eq!(read.status().as_u16(), 200);
+    assert_eq!(serde_json::from_str::<Value>(&read.text().await.unwrap()).unwrap()["current"], "Ask for approval");
+    let written = post(server, "Approve for me").await;
+    assert_eq!((written.status().as_u16(), written.text().await.unwrap()), (200, json!({"current": "Approve for me"}).to_string()));
+    assert_eq!(serde_json::from_str::<Value>(&get(server).await.text().await.unwrap()).unwrap()["current"], "Approve for me");
+    let unknown = post(server, "Read Only").await;
+    assert_eq!(unknown.status().as_u16(), 400, "modo desconhecido continua recusado");
+    assert_eq!(python.hits_to("/api/sessions/s/codex-permissions"), 0);
+    // Outra rota da mesma sessão doente continua 503 com o código.
+    let models = client().get(format!("http://{server}/api/sessions/s/models")).header("authorization", format!("Bearer {OWNER}")).send().await.unwrap();
+    assert_eq!(models.status().as_u16(), 503);
 }

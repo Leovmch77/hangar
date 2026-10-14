@@ -119,6 +119,12 @@ Python desse caminho em vez de portar os quatro serviços soltos.
 
 ### C2 Plugin do Claude no Rust
 
+> Recorte atualizado em 11/10/2026: C2, os fatos e serviços de estado da C3 e o modo de permissão
+> da C4 foram feitos pelo desenho
+> [`2026-10-10-conversation-permissions-rust-design.md`](../../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md);
+> o restante da C3/C4 segue como escrito abaixo. Fronteira em
+> [plataforma.md](../../decisoes/plataforma.md#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
+
 - Todas as rotas `/api/plugin/*` que faltam (`whoami`, `pull`, `suggest`, `ask`, `ask-fim`,
   `filled`, `submitted`, `state`, `rate`) e a memória delas no Rust, com o mesmo token
   (`mods/bridge.rs:57`) e os mesmos prazos (25 s, 5 s, 30 s, 35 s, 90 s).
@@ -151,6 +157,16 @@ Python desse caminho em vez de portar os quatro serviços soltos.
   entre eles).
 - O empréstimo de teclado sai dos dois lados (`rt:427-473`, `terminal.rs:253-290`). Some junto o
   defeito provável do `/btw` estourando o prazo do empréstimo.
+- `GET /commands` do Claude (leitura). Já no Rust: o que a conta, o `.claude/settings*.json` do
+  projeto e a escolha da sessão desligaram (operação `hidden` da ponte de customizações,
+  contrato 64). Falta portar a montagem da lista, que segue no `commands.py`: a sonda da CLI
+  (`control_request initialize`, em fundo, com cache por binário e datas da conta), os embutidos
+  com descrição em português, as varreduras de skills, comandos e plugins pelo frontmatter, a lista
+  que a sessão sem terminal informou e os comandos só de TUI. O vínculo do terminal no Rust precisa
+  passar a ter o `cwd` e a escolha da sessão (`HANGAR_CLAUDE_SETTINGS` do agente), que hoje só o
+  Python lê. Limites até lá: no modo `python` a lista sai sem filtro nenhum; e o filtro decide
+  "plugin ligado" pelas camadas de `settings*.json`, sem as configurações gerenciadas nem os
+  plugins passados por flag, que o catálogo vê pelo `claude plugin list`.
 
 ### C5 Ciclo de vida
 

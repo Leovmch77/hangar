@@ -94,7 +94,18 @@ pub fn initialize_params() -> Value {
     json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hangar-native-voice", "version": "1"}})
 }
 
-pub fn objective_params(objective: &str) -> Value { json!({"name": "objetivo", "arguments": {"texto": objective}}) }
+const PROGRESS_TOKEN: &str = "voice-computer";
+
+/// Com o token o HCC manda cada etapa em `notifications/progress`; sem ele, nada.
+pub fn objective_params(objective: &str) -> Value {
+    json!({"name": "objetivo", "arguments": {"texto": objective}, "_meta": {"progressToken": PROGRESS_TOKEN}})
+}
+
+/// A etapa legível (`message`) de uma notificação de progresso deste objetivo.
+fn progress_step(method: &str, params: &Value) -> Option<String> {
+    (method == "notifications/progress" && params["progressToken"] == PROGRESS_TOKEN)
+        .then(|| params["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)).flatten()
+}
 
 /// Texto do `tools/call`; `isError` ou resposta vazia vira `Err`.
 pub fn call_text(result: &Value) -> Result<String, String> {
@@ -130,10 +141,41 @@ async fn session(launch: &Launch) -> Result<(Rpc, async_channel::Receiver<super:
 }
 
 /// Um processo por objetivo: largar o future (parar a chamada) derruba o servidor e o agente dele (grupo/árvore no Drop do Rpc).
-pub async fn run_objective(launch: Launch, objective: &str) -> Result<String, String> {
-    let (rpc, _incoming) = session(&launch).await?;
-    let result = rpc.request_within("tools/call", objective_params(objective), OBJECTIVE_DEADLINE).await.map_err(|e| rpc_text("o objetivo", e))?;
-    call_text(&result)
+pub async fn run_objective(launch: Launch, objective: &str, on_step: &(dyn Fn(String) + Send + Sync)) -> Result<String, String> {
+    let (rpc, incoming) = session(&launch).await?;
+    drive_objective(&rpc, &incoming, objective, on_step).await
+}
+
+/// Prepara e roda o objetivo; bloqueia só fora da thread do laço.
+pub async fn run(objective: String, on_step: Box<dyn Fn(String) + Send + Sync>) -> Result<String, String> {
+    match tokio::task::spawn_blocking(launch).await {
+        Ok(Ok(launch)) => run_objective(launch, &objective, &*on_step).await,
+        Ok(Err(text)) => Err(text),
+        Err(e) => { super::log(format!("computer launch join failed: {e}")); Err("Não consegui preparar o hangar-computer-control.".into()) }
+    }
+}
+
+/// Cada etapa sai por `on_step` antes do resultado; a que chega depois de o resultado ser lido nunca sai (o canal é
+/// largado junto). Quem publica limpa a etapa depois do retorno, então nem a da mesma leitura do resultado fica na tela.
+pub async fn drive_objective(rpc: &Rpc, incoming: &async_channel::Receiver<super::rpc::Incoming>, objective: &str,
+    on_step: &(dyn Fn(String) + Send + Sync)) -> Result<String, String> {
+    let call = rpc.request_within("tools/call", objective_params(objective), OBJECTIVE_DEADLINE);
+    tokio::pin!(call);
+    let mut open = true;
+    let result = loop {
+        tokio::select! {
+            // Etapa já na fila vem antes do resultado que chegou junto.
+            biased;
+            item = incoming.recv(), if open => match item {
+                Ok(super::rpc::Incoming::Notification { method, params }) => if let Some(step) = progress_step(&method, &params) { on_step(step) },
+                Ok(super::rpc::Incoming::Request { method, .. }) => super::log(format!("computer request unanswered method={method}")),
+                Ok(super::rpc::Incoming::Exited) => {}
+                Err(_) => open = false,
+            },
+            result = &mut call => break result,
+        }
+    };
+    call_text(&result.map_err(|e| rpc_text("o objetivo", e))?)
 }
 
 pub async fn list_tools(launch: Launch) -> Result<Vec<String>, String> {
@@ -283,7 +325,54 @@ mod tests {
         let init = initialize_params();
         assert_eq!(init["protocolVersion"], json!("2025-06-18"));
         assert!(init["capabilities"].is_object() && init["clientInfo"]["name"].is_string());
-        assert_eq!(objective_params("abrir o Bloco de Notas"), json!({"name": "objetivo", "arguments": {"texto": "abrir o Bloco de Notas"}}));
+        assert_eq!(objective_params("abrir o Bloco de Notas"), json!({"name": "objetivo", "arguments": {"texto": "abrir o Bloco de Notas"},
+            "_meta": {"progressToken": PROGRESS_TOKEN}}));
+    }
+
+    fn progress(token: &str, n: u32, message: &str) -> Value {
+        json!({"method": "notifications/progress", "params": {"progressToken": token, "progress": n, "message": message}})
+    }
+
+    /// MCP falso: ao `tools/call`, escreve `before`, depois a resposta (ou fecha sem ela) e então `after`.
+    fn fake_hcc(before: Vec<Value>, result: Option<Value>, after: Vec<Value>) -> (Rpc, async_channel::Receiver<super::super::rpc::Incoming>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(theirs);
+            let mut lines = BufReader::new(read).lines();
+            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["params"]["_meta"]["progressToken"], PROGRESS_TOKEN);
+            for line in before { write.write_all(format!("{line}\n").as_bytes()).await.unwrap(); }
+            let Some(result) = result else { return };
+            write.write_all(format!("{}\n", json!({"id": req["id"], "result": result})).as_bytes()).await.unwrap();
+            // Depois de o resultado ser lido: na mesma leitura, a etapa ainda entraria antes dele.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            for line in after { let _ = write.write_all(format!("{line}\n").as_bytes()).await; }
+            let _ = lines.next_line().await;
+        });
+        let (r, w) = tokio::io::split(ours);
+        Rpc::over_lines(r, w)
+    }
+
+    #[tokio::test]
+    async fn steps_arrive_in_order_before_the_result_and_late_ones_never() {
+        let before = vec![progress(PROGRESS_TOKEN, 1, "lendo a tela"), progress("outro", 1, "de outra chamada"),
+            progress(PROGRESS_TOKEN, 2, "pedindo ajuda visual"), progress(PROGRESS_TOKEN, 3, " clicar em Salvar ")];
+        let (rpc, incoming) = fake_hcc(before, Some(json!({"content": [{"type": "text", "text": "concluído: salvo"}]})),
+            vec![progress(PROGRESS_TOKEN, 4, "tarde demais")]);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let result = drive_objective(&rpc, &incoming, "salvar", &|s| steps.lock().unwrap().push(s)).await;
+        assert_eq!(result, Ok("concluído: salvo".into()));
+        assert_eq!(*steps.lock().unwrap(), ["lendo a tela", "pedindo ajuda visual", "clicar em Salvar"]);
+    }
+
+    #[tokio::test]
+    async fn closed_transport_ends_in_failure_after_the_steps_it_sent() {
+        let (rpc, incoming) = fake_hcc(vec![progress(PROGRESS_TOKEN, 1, "lendo a tela")], None, vec![]);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let result = drive_objective(&rpc, &incoming, "salvar", &|s| steps.lock().unwrap().push(s)).await;
+        assert_eq!(result, Err("O hangar-computer-control fechou durante o objetivo.".into()));
+        assert_eq!(*steps.lock().unwrap(), ["lendo a tela"]);
     }
 
     #[test]

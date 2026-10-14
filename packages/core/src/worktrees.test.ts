@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { worktreeLabel, worktreesSizeTotal } from './api';
+import { runWorktreeBatch, worktreeLabel, worktreesSizeTotal } from './api';
 
 describe('worktreeLabel', () => {
   it('usa a pasta da worktree onde o agente está', () => {
@@ -23,5 +23,35 @@ describe('worktreesSizeTotal', () => {
   });
   it('nada medido soma zero', () => {
     expect(worktreesSizeTotal([w({ size_pending: true })]).bytes).toBe(0);
+  });
+});
+
+describe('runWorktreeBatch', () => {
+  const w = (path: string, size: number | null, o: object = {}) =>
+    ({ path, size, size_pending: false, size_error: false, size_partial: false, ...o }) as never;
+
+  it('avança uma por vez, soma o espaço das que saíram e não conta falha como apagada', async () => {
+    const vistos: string[] = [];
+    const fim = await runWorktreeBatch(
+      [w('/r/a', 1024 ** 3), w('/r/b', 512), w('/r/c', 2048)],
+      async (x: { path: string }) => {
+        if (x.path === '/r/b') throw new Error('409: trancada');
+        return x.path === '/r/a';
+      },
+      (p) => vistos.push(`${p.done}/${p.total} ${p.current?.path ?? '-'} ${p.freed.bytes} ${p.removed.length}`),
+    );
+    expect(vistos).toEqual([
+      '0/3 /r/a 0 0',
+      `1/3 /r/b ${1024 ** 3} 1`,
+      `2/3 /r/c ${1024 ** 3} 1`,
+      `3/3 - ${1024 ** 3} 1`,
+    ]);
+    expect(fim.removed.map((x) => x.path)).toEqual(['/r/a']);
+    expect(fim.failed.map((f) => [f.worktree.path, f.error])).toEqual([['/r/b', '409: trancada'], ['/r/c', null]]);
+  });
+
+  it('tamanho sem medida deixa o liberado como mínimo', async () => {
+    const fim = await runWorktreeBatch([w('/r/a', null, { size_pending: true }), w('/r/b', 10)], async () => true, () => {});
+    expect(fim.freed).toEqual({ bytes: 10, partial: true });
   });
 });

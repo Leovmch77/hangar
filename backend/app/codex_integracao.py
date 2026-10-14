@@ -170,6 +170,41 @@ def _plugins_desejados(settings: dict) -> set[str]:
     return {k for k, v in enabled.items() if v}
 
 
+_NOME_AGENTE = re.compile(r"^name:[ \t]*['\"]?([^'\"\s][^'\"\n]*?)['\"]?[ \t]*$", re.MULTILINE)
+
+
+def _pastas_agentes_plugins(home: Path, settings: dict) -> list[tuple[str, Path]]:
+    """`agents/` da instalação de usuário que o Claude carrega, por plugin ligado. Agente que o
+    usuário desliga vai para `agents-disabled/` e fica de fora como no Claude."""
+    instalados = json_obj(home / ".claude/plugins/installed_plugins.json").get("plugins", {})
+    pastas = []
+    for id_ in sorted(_plugins_desejados(settings)):
+        for item in instalados.get(id_, []) if isinstance(instalados, dict) else []:
+            if isinstance(item, dict) and item.get("scope") == "user" and isinstance(item.get("installPath"), str):
+                pastas.append((id_.rsplit("@", 1)[0], Path(item["installPath"]) / "agents"))
+    return pastas
+
+
+def _agentes_de_plugins(home: Path, settings: dict) -> tuple[dict[str, str], list[Path]]:
+    """Nome no Codex (`<plugin>_<agente>`) -> markdown com o `name:` já trocado por ele, e os
+    arquivos que não deu para ler (um arquivo ruim não derruba a importação do resto)."""
+    agentes, ilegiveis = {}, []
+    for plugin, pasta in _pastas_agentes_plugins(home, settings):
+        for md in sorted(pasta.glob("*.md")):
+            try:
+                texto = md.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+            except (OSError, UnicodeDecodeError):
+                ilegiveis.append(md)
+                continue
+            fim = texto.find("\n---", 4) if texto.startswith("---\n") else -1
+            achado = _NOME_AGENTE.search(texto, 4, fim) if fim > 0 else None
+            if achado is None:
+                continue  # AGENTS.md/README sem cabeçalho não é agente
+            nome = re.sub(r"[^A-Za-z0-9_]", "_", f"{plugin}_{achado[1]}")
+            agentes[nome] = texto[:achado.start(1)] + nome + texto[achado.end(1):]
+    return agentes, ilegiveis
+
+
 def _origem_marketplace(data: dict, *, claude: bool = False) -> tuple[str, str] | None:
     source = data.get("source", {}) if claude else data
     if not isinstance(source, dict):
@@ -846,6 +881,16 @@ class IntegracaoCodex:
                 origem = self.home / ".claude" / nome
                 if origem.is_dir():
                     shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+            importados = registro.get("artefatos", {})
+            (cc / "agents").mkdir(exist_ok=True)
+            agentes_plugins, ilegiveis = _agentes_de_plugins(self.home, settings)
+            self._estado["avisos"].extend(msg("aviso_agente_plugin_ilegivel", path=md) for md in ilegiveis)
+            for nome, texto in agentes_plugins.items():
+                alvo = self.codex_home / "agents" / f"{nome}.toml"
+                # Plugin que já registra o próprio agente no Codex fica com o dele.
+                if (alvo.exists() and str(alvo) not in importados) or (cc / "agents" / f"{nome}.md").exists():
+                    continue
+                (cc / "agents" / f"{nome}.md").write_text(texto, encoding="utf-8")
             if memoria:
                 projetos = self.home / ".claude" / "projects"
                 if not projetos.is_dir():
@@ -995,7 +1040,7 @@ class IntegracaoCodex:
             'plugins': {'enabled': sorted(_plugins_desejados(settings))},
             'fragments': {'hooks': settings.get('hooks', {}), 'env': settings.get('env', {}),
                           'mcp': json_obj(self.home / '.claude.json').get('mcpServers', {}),
-                          'memory': memoria_ligada()},
+                          'memory': memoria_ligada(), 'plugins': sorted(_plugins_desejados(settings))},
             'skills': {},
         }
         instruction_sources = {self.home / '.claude' / name for name in ('CLAUDE.md', 'CLAUDE.MD')}
@@ -1020,7 +1065,8 @@ class IntegracaoCodex:
         paths['plugins'].update(self.home / '.claude/plugins' / name
                                 for name in ('installed_plugins.json', 'known_marketplaces.json'))
         trees = {
-            'fragments': {self.home / '.claude' / name for name in ('commands', 'agents', 'hooks')},
+            'fragments': {self.home / '.claude' / name for name in ('commands', 'agents', 'hooks')} |
+                         {pasta for _, pasta in _pastas_agentes_plugins(self.home, settings)},
             'skills': {self.home / '.claude/skills', self.home / '.agents/skills', _REPO / 'skills'},
         }
         if only in (None, 'skills'):

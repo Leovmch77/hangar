@@ -6,6 +6,7 @@
 // dizendo isso.
 import { describe, it, expect, vi } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
+import { createClassComponent } from 'svelte/legacy';
 import AskQuestionStepper from './AskQuestionStepper.svelte';
 import AskQuestionCard from './AskQuestionCard.svelte';
 import type { AskQuestionPayload } from '@hangar/core';
@@ -33,6 +34,81 @@ function montar(escapes: boolean) {
 }
 
 describe('AskQuestionStepper: saídas de texto', () => {
+  it.each(['review', 'text'])('cancelar devolve A exibida antes do render de B: %s', async (step) => {
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const first: AskQuestionPayload = { ...payload, provider: 'codex', is_async: true,
+      request_id: 'same-native-id', interaction_id: 'form-a',
+      questions: step === 'text' ? [{ ...payload.questions[0], options: [] }] : payload.questions };
+    const second = { ...first, interaction_id: 'form-b' };
+    const onClose = vi.fn();
+    const comp = createClassComponent({ component: AskQuestionStepper, target: el, props: {
+      open: true, payload: first, onSubmit: vi.fn(), onClose,
+    } });
+    await tick();
+    if (step === 'review') { el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick(); }
+    const cancel = el.querySelector<HTMLButtonElement>(step === 'text' ? '.text-actions .ghost-btn' : '.review-list ~ .ghost-btn')!;
+    expect(cancel).not.toBeNull();
+    comp.$set({ payload: second });
+    cancel.click();
+    expect(onClose).toHaveBeenLastCalledWith(expect.objectContaining({ interaction_id: 'form-a', request_id: 'same-native-id' }));
+    await tick(); await tick();
+    if (step === 'review') { el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick(); }
+    el.querySelector<HTMLButtonElement>(step === 'text' ? '.text-actions .ghost-btn' : '.review-list ~ .ghost-btn')!.click();
+    expect(onClose).toHaveBeenLastCalledWith(expect.objectContaining({ interaction_id: 'form-b' }));
+    comp.$destroy(); el.remove();
+  });
+
+  it('troca A na revisão por B com menos opções sem quebrar a tela', async () => {
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const first = { ...payload, request_id: 'same-native-id', interaction_id: 'interaction-a' };
+    const second = { ...first, interaction_id: 'interaction-b',
+      questions: [{ ...payload.questions[0], options: [{ label: 'Única', description: '' }] }] };
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const comp = createClassComponent({ component: AskQuestionStepper, target: el, props: {
+      open: true, payload: first, onSubmit, onClose: vi.fn(),
+    } });
+    await tick();
+    el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click(); await tick();
+    expect(el.querySelector('.review-list')).not.toBeNull();
+    comp.$set({ payload: second }); await tick(); await tick();
+    expect(el.querySelector('.review-list')).toBeNull();
+    expect(el.querySelectorAll('.option-btn')).toHaveLength(1);
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick();
+    el.querySelector<HTMLButtonElement>('.primary-btn')!.click(); await tick();
+    expect(onSubmit).toHaveBeenLastCalledWith([expect.objectContaining({ indices: [0], labels: ['Única'] })], second);
+    comp.$destroy(); el.remove();
+  });
+
+  it('troca A por B idêntica e ignora erro e liberação tardios de A', async () => {
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const first = { ...payload, request_id: 'same-native-id', interaction_id: 'interaction-a' };
+    const second = { ...first, interaction_id: 'interaction-b' };
+    let rejectFirst!: (error: Error) => void;
+    let finishSecond!: () => void;
+    const onSubmit = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectFirst = reject; }))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finishSecond = resolve; }));
+    const comp = createClassComponent({ component: AskQuestionStepper, target: el, props: {
+      open: true, payload: first, onSubmit, onClose: vi.fn(),
+    } });
+    await tick();
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick();
+    el.querySelector<HTMLButtonElement>('.primary-btn')!.click(); await tick();
+    expect(onSubmit).toHaveBeenLastCalledWith(expect.any(Array), first);
+    comp.$set({ payload: second }); await tick(); await tick();
+    expect(first.questions).toEqual(second.questions);
+    expect(el.querySelector('.review-list')).toBeNull();
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick();
+    el.querySelector<HTMLButtonElement>('.primary-btn')!.click(); await tick();
+    rejectFirst(new Error('erro-antigo')); await tick(); await tick();
+    expect(el.textContent).not.toContain('erro-antigo');
+    expect(el.querySelector<HTMLButtonElement>('.primary-btn')!.disabled).toBe(true);
+    expect(onSubmit).toHaveBeenLastCalledWith(expect.any(Array), second);
+    finishSecond(); await tick(); await tick();
+    expect(el.querySelector<HTMLButtonElement>('.primary-btn')!.disabled).toBe(false);
+    comp.$destroy(); el.remove();
+  });
+
   it('responde várias perguntas do Codex pelos ids e mantém o erro para tentar de novo', async () => {
     const el = document.createElement('div');
     document.body.appendChild(el);
@@ -60,7 +136,7 @@ describe('AskQuestionStepper: saídas de texto', () => {
     expect(onSubmit).toHaveBeenCalledWith([
       expect.objectContaining({ question_id: 'cor', kind: 'option', labels: ['Azul'] }),
       expect.objectContaining({ question_id: 'nome', kind: 'text', value: 'João' }),
-    ]);
+    ], expect.objectContaining({ request_id: 0 }));
     await vi.waitFor(() => expect(el.textContent).toContain('Conexão interrompida'));
     expect(el.textContent).toContain('João');
     el.querySelector<HTMLButtonElement>('.primary-btn')!.click();
@@ -104,7 +180,7 @@ describe('AskQuestionStepper: saídas de texto', () => {
     await tick();
     el.querySelector<HTMLButtonElement>('.primary-btn')!.click();
     await tick();
-    expect(onSubmit).toHaveBeenCalledWith([expect.objectContaining({ labels: ['Revisar'] })]);
+    expect(onSubmit).toHaveBeenCalledWith([expect.objectContaining({ labels: ['Revisar'] })], payload);
     await unmount(comp);
     el.remove();
   });

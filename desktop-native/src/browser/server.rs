@@ -12,6 +12,8 @@ const HEAD_MAX: usize = 16 * 1024;
 const BODY_MAX: usize = 128 * 1024;
 /// O verbo mais lento (wait, eval, shot) tem teto de 15 s; este cobre a fila de dois deles.
 const REPLY_SECS: u64 = 45;
+/// Abaixo dos 120 s em que o Bash do Claude Code mata um comando.
+const LOGIN_SECS: u64 = 110;
 
 pub enum Request {
     /// Verbo do `/cmd`, o do hangar-preview.
@@ -22,15 +24,26 @@ pub enum Request {
     Watch { key: String, viewer: super::relay::Viewer, reply: oneshot::Sender<Result<(), String>> },
     /// O espectador `id` saiu; não vale se outro já o substituiu.
     Unwatch { key: String, id: u64 },
+    /// Pipe do Chromium e página visível da sessão, para o cliente CDP de fora (`/cdp/browser`).
+    #[cfg(target_os = "linux")]
+    Pipe { key: String, reply: oneshot::Sender<Result<(super::chromium::pipe::Port, String), String>> },
+    /// Sessão `name` do servidor desta máquina para o `/cdp/browser/<nome>` sem token: abre o navegador dela se ainda
+    /// não houver e devolve a chave; `(status, texto)` quando não dá.
+    #[cfg(target_os = "linux")]
+    Open { name: String, reply: oneshot::Sender<Result<String, (u16, String)>> },
 }
 
 #[derive(Debug)]
-struct Head { method: String, path: String, auth: Option<String>, length: usize, upgrade: Option<String>, ws_key: Option<String> }
+struct Head {
+    method: String, path: String, auth: Option<String>, length: usize, upgrade: Option<String>, ws_key: Option<String>,
+    origin: Option<String>, host: Option<String>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
-enum Route { Cmd, Cdp(String) }
+enum Route { Cmd, Cdp(String), Browser(String), Local(String) }
 
-struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64> }
+/// `cdp`: a página é de fora do app (`hangar-preview --cdp`), e `alvo` escolhe qual; aí a chave de sessão não entra.
+struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64>, cdp: Option<String>, alvo: Option<String> }
 
 fn nav_dir() -> Option<PathBuf> { std::env::home_dir().map(|h| h.join(".hangar").join("nav")) }
 
@@ -59,8 +72,25 @@ fn now_ms() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNI
 pub fn write_sidecar(key: &str, url: &str, title: &str) {
     let url = &without_token(url);
     let tab = json!({"id": 1, "url": url, "titulo": title, "targetId": null});
-    let value = json!({"chave": key, "url": url, "targetId": null, "ts": now_ms(), "ativa": 1, "abas": [tab], "pid": std::process::id()});
+    let mut value = json!({"chave": key, "url": url, "targetId": null, "ts": now_ms(), "ativa": 1, "abas": [tab], "pid": std::process::id()});
+    // Endereço do CDP de navegador inteiro desta sessão, sem o token: ele vai no `Authorization`, lido do `_srv.json`.
+    if cfg!(target_os = "linux") && let Some(port) = PORT.get() {
+        value["cdp"] = browser_endpoint(*port, key).into();
+        value["cdp_local"] = local_endpoint(*port, key.rsplit("::").next().unwrap_or(key)).into();
+    }
     if let Err(e) = write_json(&sidecar_name(key), &value) { eprintln!("[nav] sidecar de {key} nao gravado: {e}"); }
+}
+
+static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+fn browser_endpoint(port: u16, key: &str) -> String {
+    format!("ws://127.0.0.1:{port}/cdp/browser?{}", url::form_urlencoded::Serializer::new(String::new()).append_pair("chave", key).finish())
+}
+
+/// O mesmo CDP sem token, por nome de sessão do servidor desta máquina: para quem só recebe uma URL.
+fn local_endpoint(port: u16, name: &str) -> String {
+    let encoded = url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>().replace('+', "%20");
+    format!("ws://127.0.0.1:{port}/cdp/browser/{encoded}")
 }
 
 /// A casca das páginas nasce com `?token=` e só o tira depois de carregar; o sidecar é lido pelo
@@ -113,13 +143,15 @@ fn parse_head(text: &str) -> Result<Head, (u16, String)> {
     let mut lines = text.split("\r\n");
     let mut first = lines.next().unwrap_or("").split(' ');
     let (method, path) = (first.next().unwrap_or("").to_owned(), first.next().unwrap_or("").to_owned());
-    let mut head = Head { method, path, auth: None, length: 0, upgrade: None, ws_key: None };
+    let mut head = Head { method, path, auth: None, length: 0, upgrade: None, ws_key: None, origin: None, host: None };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         match name.trim().to_ascii_lowercase().as_str() {
             "authorization" => head.auth = Some(value.trim().to_owned()),
             "upgrade" => head.upgrade = Some(value.trim().to_owned()),
             "sec-websocket-key" => head.ws_key = Some(value.trim().to_owned()),
+            "origin" => head.origin = Some(value.trim().to_owned()),
+            "host" => head.host = Some(value.trim().to_owned()),
             "content-length" => head.length = value.trim().parse().map_err(|_| (400, "erro: corpo invalido".to_string()))?,
             _ => {}
         }
@@ -128,35 +160,60 @@ fn parse_head(text: &str) -> Result<Head, (u16, String)> {
     Ok(head)
 }
 
-fn check(head: &Head, token: &str) -> Result<Route, (u16, String)> {
+fn check(head: &Head, token: &str, port: u16) -> Result<Route, (u16, String)> {
     let (path, query) = head.path.split_once('?').unwrap_or((&head.path, ""));
+    if head.method == "GET" && let Some(name) = path.strip_prefix("/cdp/browser/") { return check_local(head, name, port); }
+    let key = || url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| (name == "chave").then(|| value.into_owned())).unwrap_or_default();
     let route = match (head.method.as_str(), path) {
         ("POST", "/cmd") => Route::Cmd,
-        ("GET", "/cdp") => Route::Cdp(url::form_urlencoded::parse(query.as_bytes())
-            .find_map(|(name, value)| (name == "chave").then(|| value.into_owned())).unwrap_or_default()),
+        ("GET", "/cdp") => Route::Cdp(key()),
+        ("GET", "/cdp/browser") => Route::Browser(key()),
         _ => return Err((404, "erro: rota desconhecida".into())),
     };
     if !same(head.auth.as_deref().unwrap_or("").as_bytes(), format!("Bearer {token}").as_bytes()) { return Err((401, "erro: token invalido".into())); }
-    if let Route::Cdp(key) = &route {
-        if key.is_empty() { return Err((400, "erro: /cdp precisa de ?chave=".into())); }
+    if let Route::Cdp(key) | Route::Browser(key) = &route {
+        if key.is_empty() { return Err((400, format!("erro: {path} precisa de ?chave="))); }
         if !head.upgrade.as_deref().is_some_and(|u| u.eq_ignore_ascii_case("websocket")) || head.ws_key.is_none() {
-            return Err((400, "erro: /cdp so aceita WebSocket".into()));
+            return Err((400, format!("erro: {path} so aceita WebSocket")));
         }
     }
     Ok(route)
 }
 
+/// Sem token: só serve quem não é página web (navegador sempre manda `Origin`; o Playwright não) e chegou pelo
+/// próprio loopback (`Host` de outro nome é rebinding de DNS).
+fn check_local(head: &Head, name: &str, port: u16) -> Result<Route, (u16, String)> {
+    if head.origin.is_some() { return Err((403, "erro: origin_refused: o CDP sem token recusa pedido com Origin".into())); }
+    let host = head.host.as_deref().unwrap_or("");
+    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
+        return Err((403, "erro: host_refused: o CDP sem token so atende 127.0.0.1 ou localhost nesta porta".into()));
+    }
+    let name = url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
+    if name.is_empty() || name.contains('/') { return Err((404, "erro: session_not_found: falta o nome da sessao em /cdp/browser/<nome>".into())); }
+    if !head.upgrade.as_deref().is_some_and(|u| u.eq_ignore_ascii_case("websocket")) || head.ws_key.is_none() {
+        return Err((400, "erro: websocket_required: /cdp/browser/<nome> so aceita WebSocket".into()));
+    }
+    Ok(Route::Local(name))
+}
+
 fn parse_body(bytes: &[u8]) -> Result<Body, String> {
     let invalid = || "erro: corpo invalido".to_string();
     let v: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    let key = v["chave"].as_str().ok_or_else(invalid)?.to_owned();
+    let cdp = v["cdp"].as_str().map(str::to_owned);
+    let key = match v["chave"].as_str() { Some(k) => k.to_owned(), None if cdp.is_some() => String::new(), None => return Err(invalid()) };
     let verb = v["verbo"].as_str().ok_or_else(invalid)?.to_owned();
     let args = v["args"].as_array().into_iter().flatten().map(|a| a.as_str().map_or_else(|| a.to_string(), str::to_owned)).collect();
-    Ok(Body { key, verb, args, tab: v["aba"].as_i64() })
+    Ok(Body { key, verb, args, tab: v["aba"].as_i64(), cdp, alvo: v["alvo"].as_str().map(str::to_owned) })
 }
 
 pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std::io::Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    // A porta da execução anterior primeiro: o `/cdp/browser/<nome>` que alguém guardou continua valendo.
+    let previous = nav_dir().and_then(|d| std::fs::read(d.join("_srv.json")).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["porta"].as_u64()).and_then(|p| u16::try_from(p).ok());
+    let listener = match previous.and_then(|p| std::net::TcpListener::bind(("127.0.0.1", p)).ok()) {
+        Some(listener) => listener,
+        None => std::net::TcpListener::bind(("127.0.0.1", 0))?,
+    };
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = new_token()?;
@@ -164,6 +221,7 @@ pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std
     let listener = { let _guard = runtime.enter(); tokio::net::TcpListener::from_std(listener)? };
     drop_stale_sidecars();
     write_json("_srv", &json!({"porta": port, "token": token, "pid": std::process::id(), "ts": now_ms()}))?;
+    let _ = PORT.set(port);
     let token: Arc<str> = token.into();
     runtime.spawn(async move {
         loop {
@@ -181,16 +239,57 @@ async fn serve(mut stream: TcpStream, token: Arc<str>, requests: async_channel::
     let (status, text) = match tokio::time::timeout(Duration::from_secs(10), read_request(&mut stream)).await {
         Err(_) => return,
         Ok(Err(fail)) => fail,
-        Ok(Ok((head, body))) => match check(&head, &token) {
+        Ok(Ok((head, body))) => match check(&head, &token, stream.local_addr().map_or(0, |a| a.port())) {
             Err(fail) => fail,
             Ok(Route::Cmd) => (200, answer(&body, &requests).await),
             Ok(Route::Cdp(key)) => {
                 let ws_key = head.ws_key.unwrap_or_default();
                 return super::relay::serve(stream, &ws_key, key, requests).await;
             }
+            #[cfg(target_os = "linux")]
+            Ok(Route::Browser(key)) => {
+                let ws_key = head.ws_key.unwrap_or_default();
+                return super::chromium::proxy::serve(stream, &ws_key, key, requests).await;
+            }
+            #[cfg(not(target_os = "linux"))]
+            Ok(Route::Browser(_)) => (501, "erro: /cdp/browser so existe no app nativo do Linux".into()),
+            #[cfg(target_os = "linux")]
+            Ok(Route::Local(name)) => match open_local(name, &requests).await {
+                Ok(key) => return super::chromium::proxy::serve(stream, &head.ws_key.unwrap_or_default(), key, requests).await,
+                Err(fail) => fail,
+            },
+            #[cfg(not(target_os = "linux"))]
+            Ok(Route::Local(_)) => (501, "erro: /cdp/browser so existe no app nativo do Linux".into()),
         },
     };
     respond(&mut stream, status, &text).await;
+}
+
+/// Prazo para o navegador que o pedido abriu ficar pronto (o Chromium pode estar subindo).
+#[cfg(target_os = "linux")]
+const OPEN_SECS: u64 = 20;
+
+/// Abre (se preciso) o navegador da sessão e espera o motor dela: a resposta é o 101 do proxy ou um erro, nunca um
+/// socket aceito e parado.
+#[cfg(target_os = "linux")]
+async fn open_local(name: String, requests: &async_channel::Sender<Request>) -> Result<String, (u16, String)> {
+    let closing = || (503, "erro: app_closing: o app nativo esta fechando".to_string());
+    let (tx, rx) = oneshot::channel();
+    requests.send(Request::Open { name: name.clone(), reply: tx }).await.map_err(|_| closing())?;
+    let key = match tokio::time::timeout(Duration::from_secs(10), rx).await {
+        Ok(Ok(found)) => found?,
+        _ => return Err((503, "erro: app_not_responding: o app nao respondeu".into())),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(OPEN_SECS);
+    loop {
+        let (tx, rx) = oneshot::channel();
+        requests.send(Request::Pipe { key: key.clone(), reply: tx }).await.map_err(|_| closing())?;
+        if let Ok(Ok(Ok(_))) = tokio::time::timeout(Duration::from_secs(10), rx).await { return Ok(key); }
+        if tokio::time::Instant::now() >= deadline {
+            return Err((503, format!("erro: browser_not_ready: o navegador de {name} nao ficou pronto em {OPEN_SECS}s")));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// Resposta HTTP de texto, uma por conexão, como o servidor do Electron.
@@ -199,8 +298,11 @@ pub(super) async fn respond(stream: &mut TcpStream, status: u16, text: &str) {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
         431 => "Request Header Fields Too Large",
         _ => "Internal Server Error",
     };
@@ -234,12 +336,22 @@ async fn answer(bytes: &[u8], requests: &async_channel::Sender<Request>) -> Stri
     let body = match parse_body(bytes) { Ok(b) => b, Err(e) => return e };
     let path = (body.verb == "shot").then(|| body.args.first().cloned()).flatten();
     if body.verb == "shot" && path.is_none() { return "erro: shot precisa de um caminho de arquivo".into(); }
-    let (tx, rx) = oneshot::channel();
-    if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
-        return "erro: o app nativo esta fechando".into();
-    }
-    match tokio::time::timeout(Duration::from_secs(REPLY_SECS), rx).await {
-        Err(_) => format!("erro: o app nao respondeu em {REPLY_SECS}s"),
+    let verb_is_login = body.verb == "login";
+    let rx = if let Some(cdp) = body.cdp {
+        if body.tab.is_some() { return "erro: --cdp nao tem abas: escolha a pagina com --alvo <trecho da url>".into(); }
+        match super::external::submit(&cdp, body.alvo, body.verb, body.args) { Ok(rx) => rx, Err(e) => return e }
+    } else {
+        let (tx, rx) = oneshot::channel();
+        if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
+            return "erro: o app nativo esta fechando".into();
+        }
+        rx
+    };
+    // `login` espera a pessoa aprovar no painel e, às vezes, escolher o perfil.
+    let secs = if verb_is_login { LOGIN_SECS } else { REPLY_SECS };
+    match tokio::time::timeout(Duration::from_secs(secs), rx).await {
+        Err(_) if verb_is_login => format!("erro: o login nao terminou no painel em {secs}s (aprovacao ou escolha de perfil pendente)"),
+        Err(_) => format!("erro: o app nao respondeu em {secs}s"),
         Ok(Err(_)) => "erro: o navegador fechou no meio do comando".into(),
         Ok(Ok(Reply::Text(text))) => text,
         Ok(Ok(Reply::Png(png))) => {
@@ -262,10 +374,10 @@ mod tests {
     fn head_is_parsed_and_checked_in_electron_order() {
         let head = parse_head("POST /cmd HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12").unwrap();
         assert_eq!((head.length, head.auth.as_deref()), (12, Some("Bearer abc")));
-        assert_eq!(check(&head, "abc"), Ok(Route::Cmd));
-        assert_eq!(check(&head, "zzz"), Err((401, "erro: token invalido".into())));
+        assert_eq!(check(&head, "abc", 1), Ok(Route::Cmd));
+        assert_eq!(check(&head, "zzz", 1), Err((401, "erro: token invalido".into())));
         let other = parse_head("GET /cmd HTTP/1.1").unwrap();
-        assert_eq!(check(&other, "abc"), Err((404, "erro: rota desconhecida".into())));
+        assert_eq!(check(&other, "abc", 1), Err((404, "erro: rota desconhecida".into())));
         assert_eq!(parse_head("POST /cmd HTTP/1.1\r\nContent-Length: 999999").err(), Some((413, "erro: corpo grande demais".into())));
     }
 
@@ -273,14 +385,94 @@ mod tests {
     fn cdp_route_needs_token_key_and_websocket() {
         let upgrade = "\r\nAuthorization: Bearer abc\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
         let head = parse_head(&format!("GET /cdp?chave=srv%3A%3Anav-teste HTTP/1.1{upgrade}")).unwrap();
-        assert_eq!(check(&head, "abc"), Ok(Route::Cdp("srv::nav-teste".into())));
-        assert_eq!(check(&head, "zzz"), Err((401, "erro: token invalido".into())));
+        assert_eq!(check(&head, "abc", 1), Ok(Route::Cdp("srv::nav-teste".into())));
+        assert_eq!(check(&head, "zzz", 1), Err((401, "erro: token invalido".into())));
         let plain = parse_head("GET /cdp?chave=s%3A%3Aa HTTP/1.1\r\nAuthorization: Bearer abc").unwrap();
-        assert_eq!(check(&plain, "abc"), Err((400, "erro: /cdp so aceita WebSocket".into())));
+        assert_eq!(check(&plain, "abc", 1), Err((400, "erro: /cdp so aceita WebSocket".into())));
         let keyless = parse_head(&format!("GET /cdp HTTP/1.1{upgrade}")).unwrap();
-        assert_eq!(check(&keyless, "abc"), Err((400, "erro: /cdp precisa de ?chave=".into())));
+        assert_eq!(check(&keyless, "abc", 1), Err((400, "erro: /cdp precisa de ?chave=".into())));
         let post = parse_head(&format!("POST /cdp?chave=a HTTP/1.1{upgrade}")).unwrap();
-        assert_eq!(check(&post, "abc"), Err((404, "erro: rota desconhecida".into())));
+        assert_eq!(check(&post, "abc", 1), Err((404, "erro: rota desconhecida".into())));
+    }
+
+    #[test]
+    fn browser_cdp_route_has_the_same_checks_and_a_tokenless_endpoint() {
+        let upgrade = "\r\nAuthorization: Bearer abc\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+        let url = browser_endpoint(4321, "srv::nav teste");
+        assert_eq!(url, "ws://127.0.0.1:4321/cdp/browser?chave=srv%3A%3Anav+teste");
+        let head = parse_head(&format!("GET {} HTTP/1.1{upgrade}", url.trim_start_matches("ws://127.0.0.1:4321"))).unwrap();
+        assert_eq!(check(&head, "abc", 1), Ok(Route::Browser("srv::nav teste".into())));
+        assert_eq!(check(&head, "zzz", 1), Err((401, "erro: token invalido".into())));
+        let plain = parse_head("GET /cdp/browser?chave=a HTTP/1.1\r\nAuthorization: Bearer abc").unwrap();
+        assert_eq!(check(&plain, "abc", 1), Err((400, "erro: /cdp/browser so aceita WebSocket".into())));
+    }
+
+    #[test]
+    fn tokenless_route_refuses_origin_and_foreign_host() {
+        let url = local_endpoint(4000, "nav teste");
+        assert_eq!(url, "ws://127.0.0.1:4000/cdp/browser/nav%20teste");
+        let path = url.trim_start_matches("ws://127.0.0.1:4000");
+        let ws = "\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+        let head = |extra: &str| parse_head(&format!("GET {path} HTTP/1.1{ws}{extra}")).unwrap();
+        let code = |r: Result<Route, (u16, String)>| r.map_err(|(s, t)| (s, t.split(':').nth(1).unwrap_or("").trim().to_owned()));
+        assert_eq!(check(&head("\r\nHost: 127.0.0.1:4000"), "abc", 4000), Ok(Route::Local("nav teste".into())), "sem token");
+        assert_eq!(check(&head("\r\nHost: localhost:4000"), "abc", 4000), Ok(Route::Local("nav teste".into())));
+        assert_eq!(code(check(&head("\r\nHost: 127.0.0.1:4000\r\nOrigin: https://evil.example"), "abc", 4000)), Err((403, "origin_refused".into())));
+        assert_eq!(code(check(&head("\r\nHost: 127.0.0.1:4000\r\nOrigin: null"), "abc", 4000)), Err((403, "origin_refused".into())));
+        assert_eq!(code(check(&head("\r\nHost: evil.example:4000"), "abc", 4000)), Err((403, "host_refused".into())));
+        assert_eq!(code(check(&head("\r\nHost: 127.0.0.1:4001"), "abc", 4000)), Err((403, "host_refused".into())));
+        assert_eq!(code(check(&head(""), "abc", 4000)), Err((403, "host_refused".into())));
+        let plain = parse_head(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:4000")).unwrap();
+        assert_eq!(code(check(&plain, "abc", 4000)), Err((400, "websocket_required".into())));
+        let nameless = parse_head(&format!("GET /cdp/browser/ HTTP/1.1{ws}\r\nHost: 127.0.0.1:4000")).unwrap();
+        assert_eq!(code(check(&nameless, "abc", 4000)), Err((404, "session_not_found".into())));
+    }
+
+    /// Chromium de verdade atrás do servidor real (rota, token, proxy), sem o app: o comando em `HANGAR_CDP_PROOF`
+    /// (shell) recebe `HANGAR_CDP_URL` e `HANGAR_CDP_TOKEN` e precisa sair com 0. Depois dele, a sessão do "app" na
+    /// mesma página continua respondendo e vê a página que o cliente deixou.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "sobe o Chromium da máquina e roda o cliente de HANGAR_CDP_PROOF"]
+    async fn real_chromium_serves_an_outside_cdp_client() {
+        use super::super::chromium::pipe::Port;
+        let proof = std::env::var("HANGAR_CDP_PROOF").expect("HANGAR_CDP_PROOF");
+        let profile = std::env::temp_dir().join(format!("hangar-cdp-proof-{}", std::process::id()));
+        let (port, mut child) = Port::launch(&profile);
+        let created = port.call(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true})).await.unwrap();
+        let target = created["targetId"].as_str().unwrap().to_owned();
+        let app = port.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})).await.unwrap()["sessionId"]
+            .as_str().unwrap().to_owned();
+        port.call(Some(&app), "Page.enable", json!({})).await.unwrap();
+
+        let (requests, ui) = async_channel::unbounded();
+        let (pipe, visible) = (port.clone(), target.clone());
+        tokio::spawn(async move {
+            while let Ok(request) = ui.recv().await {
+                match request {
+                    Request::Pipe { reply, .. } => { let _ = reply.send(Ok((pipe.clone(), visible.clone()))); }
+                    Request::Open { name, reply } => {
+                        let _ = reply.send(if name == "proof" { Ok("srv::proof".into()) } else { Err((404, format!("erro: session_not_found: {name}"))) });
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token: Arc<str> = "t0k".into();
+        tokio::spawn(async move { loop { let (s, _) = listener.accept().await.unwrap(); tokio::spawn(serve(s, token.clone(), requests.clone())); } });
+
+        let status = tokio::process::Command::new("sh").arg("-c").arg(&proof)
+            .env("HANGAR_CDP_URL", browser_endpoint(address.port(), "srv::proof")).env("HANGAR_CDP_TOKEN", "t0k")
+            .env("HANGAR_CDP_LOCAL_URL", local_endpoint(address.port(), "proof"))
+            .status().await.unwrap();
+        let href = port.call(Some(&app), "Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await;
+        drop(port.call(None, "Browser.close", json!({})));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&profile);
+        assert!(status.success(), "cliente falhou: {status}");
+        eprintln!("titulo visto pela sessao do app depois do cliente: {:?}", href.unwrap()["result"]["value"]);
     }
 
     #[test]
@@ -300,6 +492,16 @@ mod tests {
         assert_eq!(parse_body(br#"{"verbo":"snapshot"}"#).err(), Some("erro: corpo invalido".into()));
         let with_tab = parse_body(br#"{"chave":"k","verbo":"url","aba":2}"#).unwrap();
         assert_eq!((with_tab.tab, with_tab.args.len()), (Some(2), 0));
+        let external = parse_body(br#"{"cdp":"http://127.0.0.1:9222","alvo":"/agenda","verbo":"url"}"#).unwrap();
+        assert_eq!((external.key.as_str(), external.cdp.as_deref(), external.alvo.as_deref()), ("", Some("http://127.0.0.1:9222"), Some("/agenda")));
+    }
+
+    #[tokio::test]
+    async fn external_cdp_outside_loopback_is_refused_before_any_connection() {
+        let (requests, ui) = async_channel::unbounded();
+        let text = answer(br#"{"cdp":"http://192.168.77.142:9222","verbo":"snapshot"}"#, &requests).await;
+        assert!(text.starts_with("erro: --cdp so aceita"), "{text}");
+        assert!(ui.is_empty(), "nada vai ao navegador da sessao");
     }
 
     #[test]

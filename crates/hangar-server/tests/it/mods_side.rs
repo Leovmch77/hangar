@@ -77,8 +77,9 @@ async fn rebind_keeps_the_rust_band() {
     append_lines(&other, 0..1);
     let info = info_json("claude-headless", &other);
     python.set_info(info.clone());
-    python.push_side("info", &info.to_string());
+    readings(&python, 2).await;
     next_named(&mut events, "reset").await;
+    wait_until(|| python.side_conns() == 2).await;
     assert_eq!(next_named(&mut events, "plugin_ui").await.data, band("rust").to_string(), "a faixa volta com o reset");
     python.push_side("stats", "{}");
     loop {

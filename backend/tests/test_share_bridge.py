@@ -98,7 +98,7 @@ def _kill_stubs(monkeypatch):
     from app import groups_bridge
     monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
-    monkeypatch.setattr(api.registry, "kill", lambda n: [])
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
     monkeypatch.setattr(api, "_jsonl_of_session", lambda n: None)
 

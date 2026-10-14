@@ -26,7 +26,7 @@ def initial():
     return {"accounts": "ok", "prepare": "ok", "options": "ok", "save": "ok",
             "accounts_delay": 0.0, "prepare_delay": 0.0, "options_delay": 0.0, "save_delay": 0.0,
             "preparations": {}, "last_forcar": None,
-            "contexto_estendido": False, "codex_voice_beta": False}
+            "contexto_estendido": False}
 
 
 STATE = initial()
@@ -76,7 +76,7 @@ def accounts():
 
 def options():
     extended = STATE["contexto_estendido"]
-    return {"contexto_estendido": extended, "codex_voice_beta": STATE["codex_voice_beta"],
+    return {"contexto_estendido": extended,
             "contexto_configurado": 1_000_000 if extended else None,
             "compactacao": 900_000 if extended else None,
             "modelos": [{"model": "gpt-sintetico-6", "default": 272_000, "max": 1_000_000}]}
@@ -158,8 +158,6 @@ class Handler(T40["Handler"]):
             mode, delay = STATE["save"], STATE["save_delay"]
             if mode in ("ok", "drop"):
                 STATE["contexto_estendido"] = body["contexto_estendido"]
-                if body.get("codex_voice_beta") is not None:
-                    STATE["codex_voice_beta"] = body["codex_voice_beta"]
             result = options()
         time.sleep(delay)
         if mode == "409":

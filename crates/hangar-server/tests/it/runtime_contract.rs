@@ -22,6 +22,13 @@ fn golden_preserves_public_fields() {
     }
 }
 
+/// O `interaction_id` do cartão é aleatório e posterior ao oráculo Python: a comparação é do resto.
+fn without_ids(mut state:Value) -> Value {
+    if let Some(state) = state.as_object_mut() { state.remove("interaction_id"); }
+    if let Some(form) = state["codex_question"].as_object_mut() { form.remove("interaction_id"); }
+    state
+}
+
 #[test]
 fn claude_public_events_match_the_python_oracle() {
     use hangar_server::runtime::{claude::ClaudeEngine,protocol::*};
@@ -41,6 +48,8 @@ fn claude_public_events_match_the_python_oracle() {
         let mut metadata = scenario["metadata"].clone();
         metadata["status_line"] = oracle["initial_state"]["status_line"].clone();
         let mut engine = ClaudeEngine::new(metadata,1,clock);
+        // Como em produção: com o store o cartão ganha o ID que o oráculo Python (anterior aos IDs) não tem.
+        engine.set_interactions("key-oracle".into(),std::sync::Arc::default()).unwrap();
         let mut publications = Vec::new();
         for (index,step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
             if step.get("clock").is_some() { clock = serde_json::from_value(step["clock"].clone()).unwrap(); }
@@ -60,7 +69,7 @@ fn claude_public_events_match_the_python_oracle() {
                     _ => {},
                 }
             }
-            assert_eq!(engine.view()["public_state"],states[index],"{}: etapa {index}",scenario["name"]);
+            assert_eq!(without_ids(engine.view()["public_state"].clone()),states[index],"{}: etapa {index}",scenario["name"]);
         }
         assert_eq!(publications,expected_publications,"{}",scenario["name"]);
         compared += 1;
@@ -84,6 +93,7 @@ fn codex_public_events_match_the_python_oracle() {
         let mut metadata = scenario["metadata"].clone(); metadata["initialized"] = json!(true); metadata["ready"] = json!(true);
         metadata["status_line"] = oracle["initial_state"]["status_line"].clone();
         let mut engine = Engine::new(metadata,1,clock);
+        engine.set_interactions("key-oracle".into(),std::sync::Arc::default()).unwrap();
         let mut state_index = 0;
         let expected_notices:Vec<_> = oracle["outputs"].as_array().unwrap().iter()
             .filter(|output|output["channel"] == "local" || output["channel"] == "response").cloned().collect();
@@ -109,11 +119,11 @@ fn codex_public_events_match_the_python_oracle() {
                 }
             }
             if changed {
-                assert_eq!(engine.view(),states[state_index],"{}: estado {state_index}",scenario["name"]);
+                assert_eq!(without_ids(engine.view()),states[state_index],"{}: estado {state_index}",scenario["name"]);
                 state_index += 1;
             }
         }
-        assert_eq!(engine.view(),*states.last().unwrap(),"{}: estado final",scenario["name"]);
+        assert_eq!(without_ids(engine.view()),*states.last().unwrap(),"{}: estado final",scenario["name"]);
         assert_eq!(notices,expected_notices,"{}: recusa e aviso local",scenario["name"]);
         compared += 1;
     }

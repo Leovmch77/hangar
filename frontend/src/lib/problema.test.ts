@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { textoProblema } from './problema';
 
 // Códigos que o estado do Rust publica sem passar pelo Python.
-const NOVOS = ['state_facts_unavailable', 'permission_observe_failed'];
+const NOVOS = ['state_facts_unavailable', 'permission_observe_failed', 'interacao_indisponivel'];
 
 describe('textoProblema', () => {
   it('traduz os códigos do estado do Rust', () => {

@@ -25,6 +25,19 @@ pub struct Models {
     codex_endpoint: Option<String>,
 }
 
+const CODEX_CATALOG_KEYS: [&str; 10] = [
+    "model_catalog_json",
+    "profile",
+    "profiles",
+    "model_provider",
+    "model_providers",
+    "cli_auth_credentials_store",
+    "chatgpt_base_url",
+    "forced_login_method",
+    "forced_chatgpt_workspace_id",
+    "features",
+];
+
 /// Identidade da conta, não o arquivo inteiro: a renovação de token reescreve `auth.json` e
 /// `.credentials.json` durante a consulta e não pode passar por troca de conta.
 fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
@@ -37,7 +50,12 @@ fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
     ]
     .iter()
     .map(|file| {
-        let bytes = std::fs::read(home.join(file)).ok()?;
+        let bytes = match std::fs::read(home.join(file)) {
+            Ok(bytes) => bytes,
+            // Ausente vale como vazio, como em `codex_configuration`.
+            Err(error) if *file == "config.toml" && error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return None,
+        };
         let identity = match *file {
             "auth.json" => serde_json::from_slice::<Value>(&bytes).ok().map(|mut value| {
                 if let Some(tokens) = value.get_mut("tokens").and_then(Value::as_object_mut) {
@@ -61,6 +79,17 @@ fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
                 }
                 value.to_string().into_bytes()
             }),
+            // O Codex reescreve plugins, projetos e avisos ao abrir; só conta, endpoint e Fast mudam o catálogo.
+            "config.toml" => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+                .and_then(|table| {
+                    let kept: Vec<_> = table
+                        .iter()
+                        .filter(|(key, _)| CODEX_CATALOG_KEYS.contains(&key.as_str()))
+                        .collect();
+                    serde_json::to_vec(&kept).ok()
+                }),
             // Reescrito a todo momento pelo CLI; só a conta logada importa.
             // JSON inválido conta pelo arquivo inteiro: dois corrompidos não viram a mesma conta.
             ".claude.json" => serde_json::from_slice::<Value>(&bytes)
@@ -1009,6 +1038,56 @@ mod concurrency_tests {
                 .unwrap()
                 .0[0]["id"],
             "new-model"
+        );
+    }
+
+    async fn codex_catalog_while_config_changes(before: Option<&str>, after: &str) -> Result<Vec<Value>, &'static str> {
+        use base64::Engine;
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(service(root.path()));
+        let context = account(&service, root.path(), "codex", "codex");
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"exp":4102444800}"#);
+        std::fs::write(context.home.join("auth.json"), json!({"tokens":{"access_token":format!("fixture.{payload}.signature"),"account_id":"fixture-account"}}).to_string()).unwrap();
+        if let Some(before) = before {
+            std::fs::write(context.home.join("config.toml"), before).unwrap();
+        }
+        let (url, seen, release) = endpoint(200, json!({"models":[{"slug":"gpt-fixture","display_name":"Fixture","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]})).await;
+        let models = Arc::new(Models { codex_endpoint: Some(url), ..Models::default() });
+        let pending = tokio::spawn({
+            let (models, service, context) = (models.clone(), service.clone(), context.clone());
+            async move { models.get_context(&service, &tokio::sync::Semaphore::new(4), &context, false).await }
+        });
+        seen.await.unwrap();
+        std::fs::write(context.home.join("config.toml"), after).unwrap();
+        release.send(()).unwrap();
+        pending.await.unwrap().map(|(models, _)| models)
+    }
+
+    #[tokio::test]
+    async fn codex_bookkeeping_in_config_during_the_request_keeps_the_catalog() {
+        let models = codex_catalog_while_config_changes(
+            Some("model = \"gpt-fixture\"\n[marketplaces.m]\nlast_updated = \"2026-10-13T10:00:00Z\"\n"),
+            "model = \"gpt-fixture\"\n[marketplaces.m]\nlast_updated = \"2026-10-14T15:03:50Z\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n[notice]\nhide_full_access_warning = true\n",
+        )
+        .await
+        .expect("o Codex reescreve marketplaces, projects e notice ao abrir; isso não é troca de conta");
+        assert_eq!(models[0]["id"], "gpt-fixture");
+    }
+
+    #[tokio::test]
+    async fn codex_config_created_during_the_request_keeps_the_catalog() {
+        let models = codex_catalog_while_config_changes(None, "[projects.\"/w\"]\ntrust_level = \"trusted\"\n")
+            .await
+            .expect("config.toml ausente vale como vazio, como em codex_configuration");
+        assert_eq!(models[0]["id"], "gpt-fixture");
+    }
+
+    #[tokio::test]
+    async fn codex_profile_change_during_the_request_still_refuses_the_catalog() {
+        assert_eq!(
+            codex_catalog_while_config_changes(Some("profile = \"a\"\n[profiles.a]\n[profiles.b]\n"), "profile = \"b\"\n[profiles.a]\n[profiles.b]\n").await,
+            Err("dictation_target_changed")
         );
     }
 }

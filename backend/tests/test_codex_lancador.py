@@ -261,6 +261,8 @@ def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     assert meta["thread_id"] == "thread-falso"
     assert meta["rollout_path"] == env["FAKE_ROLLOUT"]
     assert meta["cwd"] == str(cwd)
+    # Quem esta sessao criar herda o modo dela; sem o campo, a nova caia no padrao da conta.
+    assert meta["permission_mode"] == "Full Access"
     # O par que existe por causa deste ticket: endereco E dono. Porta de loopback e reciclada, entao
     # o endpoint sozinho nao prova que o servidor do outro lado ainda e o desta sessao.
     assert meta["endpoint"].startswith("ws://127.0.0.1:")
@@ -719,6 +721,49 @@ def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_over
 
 
 @pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("permission_mode", ["Ask for approval", None])
+def test_relaunch_of_own_session_completes_from_the_sidecar_and_refuses_unknown_mode(tmp_path, permission_mode):
+    # O relançamento pelo Rust passa só --cwd/--resume e a chave da sessão.
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    env["FAKE_SEM_THREAD"] = "1"
+    env["CP_SESSION_KEY"] = "same-key"
+    thread_id = "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
+    home = tmp_path / "codex-work"
+    rollout = home / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"name": "sess", "thread_id": thread_id, "rollout_path": env["FAKE_ROLLOUT"], "cwd": str(cwd),
+            "codex_home": str(home), "codex_account": "work", "key": "same-key", "headless": False,
+            "tool_output_token_limit": 144000, "model": "native-model", "effort": "high",
+            "service_tier": "priority", "permission_mode": permission_mode}
+    sidecar.write_text(json.dumps(meta))
+    argv = [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd), "--resume", thread_id]
+    if permission_mode is None:
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode != 0 and "modo de permissão da sessão desconhecido" in result.stderr
+        assert not Path(env["FAKE_SERVER_OUT"]).exists(), "nunca cai no Full Access do padrão"
+        return
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("tui_pid"))
+        saved = json.loads(sidecar.read_text())
+        assert (saved["model"], saved["effort"], saved["service_tier"]) == ("native-model", "high", "priority")
+        assert (saved["codex_home"], saved["codex_account"]) == (str(home), "work")
+        server_args = json.loads((tmp_path / "server-argv.json").read_text())
+        assert "tool_output_token_limit=144000" in server_args
+        assert 'approval_policy="on-request"' in server_args and 'sandbox_mode="read-only"' in server_args
+        assert any("project_doc_max_bytes" in arg for arg in server_args), "não herda os pulos da importação"
+    finally:
+        proc.wait(timeout=20)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
 @pytest.mark.parametrize("field,value", [("key", None), ("permission_mode", "unknown"), ("codex_home", "relative")])
 def test_imported_resume_rejects_invalid_metadata_before_opening_server(tmp_path, field, value):
     cwd = tmp_path / "project"
@@ -908,10 +953,158 @@ def test_falha_do_install_mostra_so_a_classe(monkeypatch, tmp_path, capsys, stde
 
 def test_instalacao_fora_do_npm_avisa_uma_vez_por_hora(monkeypatch, tmp_path, capsys):
     atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, instalado="/usr/local/bin/codex")
+    monkeypatch.setitem(atualizar.__globals__, "_latest_standalone_version",
+                        lambda: pytest.fail("instalação de fora não é standalone"))
     atualizar()
     atualizar()
     assert capsys.readouterr().err.count("atualização automática do Codex indisponível") == 1
     assert ["view", "@openai/codex", "version"] not in chamadas
+
+
+def _standalone(monkeypatch, tmp_path, publicada="0.161.0", update_rc=0, troca=True, corpo="",
+                pelo_current=False):
+    """Árvore standalone falsa (layout do instalador oficial) com um `codex` falso de verdade.
+
+    O `update` falso grava o ambiente que recebeu; com `troca`, o `--version` passa a responder a
+    versão nova depois dele.
+    """
+    home = tmp_path / ".codex"
+    release = home / "packages" / "standalone" / "releases" / "0.159.3-x86_64-unknown-linux-musl"
+    (release / "bin").mkdir(parents=True)
+    falso = release / "bin" / "codex"
+    nova = '[ -e "$FAKE_UPDATE_OUT" ] && { echo "codex-cli 0.161.0"; exit 0; }; ' if troca else ""
+    falso.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then {nova}echo "codex-cli 0.159.3"; exit 0; fi\n'
+                     '[ "$1" = update ] || exit 9\n'
+                     'printf "%s\\n" "$CODEX_HOME" "$CODEX_RELEASE" "$CODEX_INSTALL_DIR" > "$FAKE_UPDATE_OUT"\n'
+                     f'{corpo}\nexit {update_rc}\n')
+    falso.chmod(0o755)
+    current = home / "packages" / "standalone" / "current"
+    current.symlink_to(release)
+    visivel = tmp_path / ".local" / "bin" / "codex"
+    visivel.parent.mkdir(parents=True)
+    visivel.symlink_to(current / "bin" / "codex")
+    achado = current / "bin" / "codex" if pelo_current else visivel
+    saida = tmp_path / "update.out"
+    monkeypatch.setenv("FAKE_UPDATE_OUT", str(saida))
+    # Valores da conta do Hangar, que não podem chegar ao instalador.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "conta"))
+    monkeypatch.setenv("CODEX_INSTALL_DIR", str(tmp_path / "conta" / "bin"))
+    monkeypatch.setenv("CODEX_RELEASE", "0.1.0")
+
+    atualizar = runpy.run_path(str(_LANCADOR))["_atualizar_codex"]
+    globais = atualizar.__globals__
+    consultas = []
+    monkeypatch.setattr(globais["shutil"], "which", lambda nome: str(achado) if nome == "codex" else None)
+    monkeypatch.setattr(globais["Path"], "home", lambda: tmp_path)
+    monkeypatch.setitem(globais, "_latest_standalone_version",
+                        lambda: consultas.append(1) or publicada)
+    return atualizar, saida, consultas, home
+
+
+def _proxima_em(tmp_path) -> float:
+    return json.loads((tmp_path / ".hangar" / "codex-atualizacao.json").read_text())["proxima_em"] - time.time()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_standalone_desatualizado_chama_o_atualizador_oficial(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, home = _standalone(monkeypatch, tmp_path)
+    atualizar()
+    assert saida.read_text().splitlines() == [str(home), "0.161.0", str(tmp_path / ".local" / "bin")]
+    err = capsys.readouterr().err
+    assert "atualizando o Codex 0.159.3 → 0.161.0" in err and "Codex atualizado para 0.161.0" in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_standalone_na_versao_publicada_nao_chama_o_atualizador(monkeypatch, tmp_path, capsys):
+    atualizar, saida, consultas, _ = _standalone(monkeypatch, tmp_path, publicada="0.159.3")
+    atualizar()
+    atualizar()
+    assert not saida.exists() and len(consultas) == 1
+    assert "indisponível" not in capsys.readouterr().err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_falha_do_atualizador_standalone_abre_e_tenta_em_1_h(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path, update_rc=3)
+    atualizar()
+    assert saida.exists()
+    err = capsys.readouterr().err
+    assert "atualizador oficial saiu com código 3" in err
+    assert "a sessão abre na 0.159.3 e tenta de novo em 1 h" in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_atualizador_que_sai_com_0_sem_trocar_a_versao_nao_e_sucesso(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path, troca=False)
+    atualizar()
+    assert saida.exists()
+    err = capsys.readouterr().err
+    assert "Codex responde 0.159.3 em vez de 0.161.0" in err and "tenta de novo em 1 h" in err
+    assert "Codex atualizado" not in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_codex_achado_dentro_do_standalone_nao_leva_pasta_de_link(monkeypatch, tmp_path):
+    atualizar, saida, _, home = _standalone(monkeypatch, tmp_path, pelo_current=True)
+    atualizar()
+    # Sem pasta de link a conta não vaza: o instalador fica no padrão dele.
+    assert saida.read_text().splitlines() == [str(home), "0.161.0", ""]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_prazo_estourado_mata_o_instalador_neto(monkeypatch, tmp_path, capsys):
+    neto = tmp_path / "neto.pid"
+    atualizar, _, _, _ = _standalone(monkeypatch, tmp_path,
+                                     corpo=f'sleep 60 & echo $! > "{neto}"; wait')
+    monkeypatch.setitem(atualizar.__globals__, "_UPDATE_TIMEOUT_S", 1)
+    atualizar()
+    assert "passou de 10 min e foi interrompida" in capsys.readouterr().err
+    pid = int(neto.read_text())
+
+    def morto():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+        except OSError:
+            return True
+    assert _espera(morto, 5)
+
+
+def test_npm_em_pasta_packages_standalone_de_monorepo_nao_e_standalone():
+    standalone_home = runpy.run_path(str(_LANCADOR))["_standalone_home"]
+    assert standalone_home("/w/mono/packages/standalone/node_modules/@openai/codex/bin/codex.js") is None
+    assert standalone_home("/h/.codex/packages/standalone/releases/0.1.0-x/bin/codex") == Path("/h/.codex")
+
+
+def test_canal_standalone_le_a_tag_com_user_agent_proprio(monkeypatch):
+    import io
+    versao = runpy.run_path(str(_LANCADOR))["_latest_standalone_version"]
+    pedidos = []
+
+    def urlopen(pedido, timeout):
+        pedidos.append(pedido)
+        return io.BytesIO(b'{"tag_name": "rust-v0.161.0", "assets": []}')
+    monkeypatch.setattr(versao.__globals__["urllib"].request, "urlopen", urlopen)
+    assert versao() == "0.161.0"
+    # Com o User-Agent padrão do urllib o canal responde 403.
+    assert pedidos[0].get_header("User-agent") == "hangar-codex-tui"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_falha_ao_consultar_o_canal_standalone_tenta_em_5_min(monkeypatch, tmp_path, capsys):
+    import urllib.error
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path)
+
+    def sem_rede():
+        raise urllib.error.URLError("offline")
+    monkeypatch.setitem(atualizar.__globals__, "_latest_standalone_version", sem_rede)
+    atualizar()
+    assert not saida.exists()
+    assert "tenta de novo em 5 min" in capsys.readouterr().err
+    assert 0 < _proxima_em(tmp_path) <= 300
 
 
 def _hooks_server(respostas_batch):
@@ -1015,3 +1208,30 @@ def test_versao_publicada_malformada_nao_e_instalada(monkeypatch, tmp_path, caps
     assert not any(c[0] == "install" for c in chamadas)
     err = capsys.readouterr().err
     assert "tenta de novo em 5 min" in err and "\x1b" not in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_retomada_com_par_fora_dos_modos_conserva_o_modo_gravado(tmp_path):
+    # Aprovação e sandbox que não formam um modo do app: não há o que gravar, e o modo que já estava
+    # (de quem a sessão criadora herda) não pode virar nulo.
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    thread_id = "same-thread"
+    rollout = Path(env["CODEX_HOME"]) / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({"name": "sess", "thread_id": thread_id, "key": "durable-key", "cwd": str(cwd),
+                                   "rollout_path": str(rollout), "permission_mode": "Ask for approval"}))
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--resume", thread_id,
+                             "--approval-policy", "never", "--sandbox", "read-only"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        # `app_pid` só chega pela gravação da retomada (a TUI grava `tui_pid` antes).
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("app_pid"))
+        assert json.loads(sidecar.read_text())["permission_mode"] == "Ask for approval"
+    finally:
+        proc.wait(timeout=20)

@@ -1,4 +1,5 @@
-use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease_within}};
+use super::codex_terminal::{Adoption,AdoptionCell,CodexTerminalTarget};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
 use serde::Deserialize;
@@ -12,20 +13,28 @@ use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast,Mutex};
 
+/// `Headless`: ator sem terminal (cano). `Terminal`: entrada terminal do Claude. `CodexTerminal`: o mesmo
+/// ator do Codex, sobre o WebSocket do app-server adotado, com a TUI no pane.
 #[derive(Clone)]
-pub(crate) enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
-impl EntryHandle {
-    pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
-    /// Só o ator sem terminal tem motor próprio; o de terminal não é sessão Codex.
-    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
-    pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
-    pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
-    pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
-    pub(crate) async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
-    pub(crate) async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
-    pub(crate) async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+pub(crate) enum EntryHandle {
+    Headless(RuntimeHandle),
+    Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle},
+    CodexTerminal {target:Box<CodexTerminalTarget>,handle:RuntimeHandle,cell:AdoptionCell},
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String,account_key:Option<crate::accounts::AccountKey> }
+impl EntryHandle {
+    pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    /// Só o ator do Codex/sem terminal tem motor próprio; o de terminal do Claude não é sessão Codex.
+    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
+    pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
+    pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
+    pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
+    pub(crate) async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
+    pub(crate) async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
+    pub(crate) async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+    /// Pane presente: entrada terminal do Claude ou Codex com TUI.
+    pub(crate) fn has_terminal(&self) -> bool { !matches!(self,Self::Headless(_)) }
+}
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String,account_key:Option<crate::accounts::AccountKey>,relaunch:Option<Arc<super::claude_relaunch::Recipe>>,settings_owner:Option<Arc<super::claude_relaunch::Recipe>>,mode_source:crate::terminal_facts::ModeSource,live:LiveSender,runtime_target:Option<RuntimeTarget>,cano_birth:Option<f64>,auto_respawn:Option<Duration>,respawn_inflight:bool }
 
 async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate::accounts::AccountGuard, RuntimeError> {
     use crate::accounts::{AccountKey, AccountLocks, GuardMode, Provider};
@@ -49,40 +58,62 @@ pub struct WriteTarget { pub key:String,pub generation:u64,pub provider:String,p
 /// Prazo do fechamento da porta: abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.
 const INGRESS_CLOSE_WAIT:Duration = Duration::from_secs(60);
 pub struct RuntimeRegistry {
-    entries:Mutex<BTreeMap<String,Entry>>,
+    interactions:Option<Arc<crate::interactions::InteractionStore>>,
+    entries:Arc<Mutex<BTreeMap<String,Entry>>>,
+    terminal_states:Option<Arc<crate::state::published::Published>>,
+    terms:Option<Arc<crate::term::Terms>>,
     events:broadcast::Sender<RuntimeEvent>,
     policy:PolicyClient,
     instance:String,
-    lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
+    lifecycle:Mutex<BTreeMap<String,Arc<super::lifecycle::Barrier>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
     mods:Option<crate::mods::state::Mods>,
+    plugin:Option<Arc<crate::plugin::Store>>,
     ingress:super::ingress::IngressGates,
     /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
     respawn_base:Duration,
+    permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,
+    processes:Arc<dyn crate::list::procs::ProcessView>,
     /// Último valor da sessão sem terminal por nome, para o feed do hub (`live`).
     live:std::sync::Mutex<BTreeMap<String,LiveSender>>,
+    /// Nome → (chave, geração) do ator do Codex com terminal aberto aqui: o estado deles é do Rust.
+    codex_owned:std::sync::Mutex<BTreeMap<String,(String,u64)>>,
+    /// Hubs do chat, avisados quando essa posse muda.
+    hubs:std::sync::OnceLock<crate::side::WeakHubs>,
+    self_ref:std::sync::OnceLock<std::sync::Weak<RuntimeRegistry>>,
+    /// Vigia do Codex com terminal; só existe quando a tabela entrega essas sessões ao Rust.
+    watcher:std::sync::OnceLock<Arc<super::codex_terminal::Watcher>>,
+    /// Acorda a vigia quando um ator adotado perde o app-server.
+    codex_wake:Arc<tokio::sync::Notify>,
+    /// Destino do pedido de reabertura ao coordenador do Python (porta e segredo internos).
+    reopen_to:(SocketAddr,String,crate::proxy::HttpClient,crate::diag::DiagClient),
+    /// Problema do último retrato de cada ator com terminal (chave → geração, código), para a lista
+    /// quando o `Monitor` não está vivo.
+    terminal_problems:std::sync::Mutex<BTreeMap<String,(u64,String)>>,
+    terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
+    /// Última reabertura por entrega sem prova, por chave: sobrevive à troca do ator que ela mesma faz.
+    heal_attempts:std::sync::Mutex<BTreeMap<String,std::time::Instant>>,
 }
+/// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
+/// não vira laço de processos mortos.
+pub(super) const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum Reopen {Bypass,Heal}
 
-/// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
-/// Rust que acabou de cair no Windows. Espera até 3 s por ela.
-/// Só "trava ocupada" espera; outro erro (pasta sem permissão, disco cheio) responde na hora.
-async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeError> {
-    for attempt in 0..60 {
-        if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
-        let path = path.to_owned();
-        match tokio::task::spawn_blocking(move ||acquire_lease(&path)).await.map_err(|_|failure("queue_job"))? {
-            Ok(lease)=>return Ok(lease),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>{},
-            Err(error)=>return Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
-        }
+/// Espera até 3 s pela trava; outro erro (pasta sem permissão, disco cheio) responde na hora.
+async fn wait_lease(path:&std::path::Path) -> Result<Arc<super::queue::Lease>,RuntimeError> {
+    let path = path.to_owned();
+    match tokio::task::spawn_blocking(move ||acquire_lease_within(&path,Duration::from_secs(3))).await.map_err(|_|failure("queue_job"))? {
+        Ok(lease)=>Ok(lease),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s")),
+        Err(error)=>Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
     }
-    Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s"))
 }
 
 /// Abre a fila sob a trava e roda `Recover`: entrada que estava em despacho quando o dono anterior
 /// parou vira incerta antes de o ator olhar para ela.
 async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,key:&str,generation:u64,name:&str,
-    lease:Arc<std::fs::File>) -> Result<Store,RuntimeError> {
+    lease:Arc<super::queue::Lease>) -> Result<Store,RuntimeError> {
     let (state_path,projection_dir) = (state_path.to_owned(),projection_dir.to_owned());
     let initial = QueueState::new(key,generation,name,Vec::new());
     static OPENS:AtomicU64 = AtomicU64::new(0);
@@ -112,20 +143,30 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa ou ausente, sobe outro com o ambiente que o Python calcula agora (nunca guardado).
+/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado): o do Codex aqui
+/// mesmo (`codex_launch`), o dos outros pelo Python.
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
     if recorded != 0 {
         let key = target.key.clone();
         let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
         if state == process::Liveness::Ours { return Ok(None); }
+        if target.provider=="claude" {return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));}
     }
-    let env = launch_policy(policy,target,"launch_env",json!({})).await?;
-    if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
-    let shape = ||failure("launch_env_shape");
-    let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
-    let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
-    let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
+    let (program,vars,cano_extra) = if target.provider == "codex" {
+        let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
+        if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
+        let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
+        (launch.program,launch.env,Default::default())
+    } else {
+        let env = launch_policy(policy,target,sidecar_dir,"launch_env",json!({})).await?;
+        if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
+        let shape = ||failure("launch_env_shape");
+        let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
+        let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
+        let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
+        (program,vars,cano_extra)
+    };
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
         key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
@@ -133,13 +174,13 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
-            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,recorded).await; }
+            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,sidecar_dir,recorded).await; }
             let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
-    if let Err(error) = launch_policy(policy,target,"session.patch_meta",json!({"cano":value})).await {
+    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
         if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
             tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
@@ -150,12 +191,25 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     target.metadata["cano"] = value;
     Ok(Some(cano))
 }
-pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+/// Arquivo da sessão na subida e na religação. O do Codex é gravado aqui (a vida é a chave, a vista
+/// vem do arquivo da fila, como o Python lia), sem passar pelo Python; os outros, pela política dele.
+pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+    if target.provider == "codex" && matches!(kind,"session.patch_meta" | "session.clear_cano") {
+        let (dir,name,key,state_path,clear) = (sidecar_dir.to_owned(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind == "session.clear_cano");
+        return tokio::task::spawn_blocking(move || if clear { super::codex_sidecar::clear_cano(&dir,&name,&key,&payload) }
+            else { super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved_view(&state_path)?) })
+            .await.map_err(|_|failure("sidecar_job"))?;
+    }
     let phase = format!("launch:{}",crate::mods::state::random_hex(8));
     policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
 }
-async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,pid:u32) {
-    if let Err(error) = launch_policy(policy,target,"session.clear_cano",json!({"pid":pid})).await {
+/// `runtime_state.view` do arquivo da fila, lido como o `session.patch_meta` do Python lia.
+fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
+    let state:Value = super::queue::read_replaced(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
+    Ok(match &state["runtime_state"]["view"] { Value::Null=>json!({}),view=>view.clone() })
+}
+async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
+    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.clear_cano",json!({"pid":pid})).await {
         tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
     }
 }
@@ -165,7 +219,7 @@ pub(super) async fn discard(policy:&PolicyClient,target:&RuntimeTarget,cano:&pro
         tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
         return;
     }
-    clear_cano(policy,target,cano.pid).await;
+    clear_cano(policy,target,sidecar_dir,cano.pid).await;
 }
 
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
@@ -192,19 +246,426 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
-        Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
-            respawn_base:Duration::from_secs(5),live:Default::default() }
+        let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
+        Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
+            respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
+            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
     }
+    /// Escrita para sessão doente: o coordenador do Python a reabre, como fazia antes de entregar.
+    /// Responde na hora; quem escreveu recebe o 503 e tenta de novo.
+    pub fn request_reopen(&self,name:&str) {
+        let (upstream,secret,http,diag)=&self.reopen_to;
+        crate::locate::request_reopen(http,*upstream,secret,diag,name);
+    }
+    /// Liga a vigia do Codex com terminal: escrita sem ator adota na hora e encerrar passa por ela.
+    pub fn bind_watcher(&self,watcher:Arc<super::codex_terminal::Watcher>) { let _ = self.watcher.set(watcher); }
+    pub fn codex_wake(&self) -> Arc<tokio::sync::Notify> { self.codex_wake.clone() }
+    /// Escrita para uma sessão sem ator: com a vigia ligada, o Codex com terminal é adotado agora.
+    /// `None` = não é Codex com terminal do Rust.
+    pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        let watcher = self.watcher.get()?.clone();
+        watcher.adopt_now(self,name).await
+    }
+    /// `DELETE` que entra pelo Python: `None` = não é Codex com terminal do Rust.
+    pub async fn kill_codex_terminal(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
+        let watcher = self.watcher.get()?.clone();
+        watcher.kill_by_name(self,name).await
+    }
+    /// Troca terminal ↔ sem terminal do Codex do Rust, pela vigia. `None` = não é do Rust (o Python troca).
+    pub async fn relaunch_codex(&self,name:&str,terminal:bool,panels:Option<Arc<crate::term::Terms>>) -> Option<Result<Value,RuntimeError>> {
+        let watcher = self.watcher.get()?.clone();
+        watcher.switch_mode(self,name,terminal,super::codex_relaunch::PermissionRead::Pane(panels)).await
+    }
+    /// Reiniciar o Codex do Rust. `None` = não é do Rust ou há transferência a recuperar (o Python atende).
+    pub async fn restart_codex(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
+        let watcher = self.watcher.get()?.clone();
+        watcher.restart(self,name).await
+    }
+    /// Entrada sem terminal do Codex aberta aqui para `name`: chave, geração e ator.
+    pub(crate) async fn codex_headless(&self,name:&str) -> Option<(String,u64,RuntimeHandle)> {
+        self.entries.lock().await.iter().find_map(|(key,entry)|match &entry.handle {
+            EntryHandle::Headless(handle) if entry.name == name && entry.provider == "codex"=>Some((key.clone(),entry.generation,handle.clone())),
+            _=>None,
+        })
+    }
+    /// A ponte do Codex atende também o sem terminal do Rust: escrita do convidado não passa pelo slot Python.
+    pub async fn owns_codex_headless(&self,name:&str) -> bool { self.codex_headless(name).await.is_some() }
+    /// Ambiente-base do Codex (o de teste, se injetado), para a troca de modo montar lançador e conta.
+    pub(crate) fn codex_environment(&self) -> crate::accounts::environment::AccountEnvironment { self.policy.codex_environment() }
+    /// Alvos dos atores do Codex com terminal abertos aqui, para a vigia.
+    pub async fn codex_terminals(&self) -> Vec<CodexTerminalTarget> {
+        self.entries.lock().await.values().filter_map(|entry|match &entry.handle {
+            EntryHandle::CodexTerminal { target,.. } if target.generation == entry.generation=>Some((**target).clone()),
+            _=>None,
+        }).collect()
+    }
+    /// Alguma entrada aberta com esta chave ou este nome, de qualquer provedor.
+    pub async fn has_entry(&self,key:Option<&str>,name:&str) -> bool {
+        self.entries.lock().await.iter().any(|(k,entry)|Some(k.as_str()) == key || entry.name == name)
+    }
+    /// Sessão sem entrada aqui que nunca foi do Rust (o `claude` aberto à mão, que só entra no primeiro envio
+    /// pelo app). A que o Rust não abriu (erro no canal da sessão) ou fechou com o processo ainda vivo não é:
+    /// essa segue com o código (`runtime_lost`).
+    pub async fn hand_opened(&self,name:&str) -> bool {
+        !self.has_entry(None,name).await && self.runtime_lost(name).await.is_none()
+    }
+    /// Código da sessão do Rust que ficou sem entrada: a abertura que falhou, ou a vida fechada aqui cujo
+    /// processo continua de pé.
+    pub async fn runtime_lost(&self,name:&str) -> Option<String> {
+        let failed=self.live.lock().unwrap_or_else(|e|e.into_inner()).get(name)
+            .and_then(|sender|sender.borrow().as_ref().and_then(|state|state.error.as_ref().map(|error|error.0.clone())));
+        if failed.is_some() {return failed;}
+        let barriers:Vec<_>=self.lifecycle.lock().await.values().cloned().collect();
+        let procs=crate::list::procs::SystemProcs::default();
+        barriers.iter().filter_map(|barrier|barrier.closed.lock().ok().and_then(|closed|closed.clone()))
+            .find(|closed|closed.name==name && !super::lifecycle::process_absent(&procs,closed.pid,closed.birth).unwrap_or(false))
+            .map(|_|"runtime_binding".to_owned())
+    }
+    /// Liga os hubs do chat: abrir e fechar o ator do Codex com terminal troca o dono do estado neles.
+    pub fn bind_hubs(self:&Arc<Self>,hubs:crate::side::WeakHubs) {
+        if self.hubs.set(hubs).is_err() {return;}
+        let weak=Arc::downgrade(self);let mut events=self.events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let event=match events.recv().await {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>{tracing::warn!(code="lifecycle_event_lagged","ligação de conversa perdeu eventos");continue;},Err(_)=>break};
+                let Some(registry)=weak.upgrade() else {break};
+                if event.channel=="snapshot" && event.data["view"]["terminal"]==true {registry.note_terminal_problem(&event);continue;}
+                // `claude_wake`: mensagem nova para um processo morto; depois do teto, abre outra rodada.
+                if event.channel=="claude_exit" || event.channel=="claude_wake" {
+                    registry.schedule_claude_respawn(&event.key,event.generation).await;
+                    continue;
+                }
+                if event.channel!="reset" {continue;}
+                let name=registry.entries.lock().await.get(&event.key).filter(|e|e.generation==event.generation && e.provider=="claude" && matches!(e.handle,EntryHandle::Headless(_))).map(|e|e.name.clone());
+                let Some(name)=name else {continue;};
+                let current=match registry.interaction_binding_readonly(&name).await {Ok(current)=>current,Err(error)=>{
+                    // Sem o vínculo a conversa nova não é religada: o chat fica na antiga e isso tem de aparecer.
+                    tracing::warn!(session=%name,code=%error.code,reason=%error.message,"vínculo ilegível no reset; conversa não religada");
+                    // Erro já na tela (o próprio motivo da leitura falhar) fica: não troca pela consequência.
+                    let live=registry.live_sender(&name);
+                    if live.borrow().as_ref().is_none_or(|state|state.error.is_none()) {super::actor::mark_live_error(&live,&error.code,&error.message);}
+                    continue;
+                }};
+                if current.key!=event.key || current.generation!=event.generation || event.data["conversation"]!=current.conversation {continue;}
+                if let (Some(hubs),Some(info))=(registry.hubs.get().and_then(crate::side::WeakHubs::upgrade),registry.claude_info(&name).await) {
+                    if let Err(error)=hubs.rebind_claude_info(&name,info) {super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);}
+                }
+            }
+        });
+    }
+    /// Os mesmos códigos do `runtime_problem` do Python: erro do ator, ou a entrada parada e o motivo.
+    fn note_terminal_problem(&self,event:&RuntimeEvent) {
+        let stalled=|code:&str| match code {
+            "composer_busy"=>"terminal_input_composer_busy","composer_unreadable"=>"terminal_input_composer_unreadable",
+            "capture_failed"|"capture_utf8"=>"terminal_input_capture_failed","clear_not_applied"=>"terminal_clear_not_applied",
+            "no_safe_delivery"=>"terminal_input_no_safe_delivery",
+            _=>"terminal_input_stalled",
+        };
+        let input=event.data["view"]["input_stalled"].as_str().filter(|code|!code.is_empty());
+        // Sem prova da conversa, a lista mostra a causa, não o erro que ela mesma causa na fila.
+        let explained=input==Some("no_safe_delivery") && event.data["error"].as_str().is_some_and(|error|crate::state::edges::explained(input,error));
+        let problem=if event.data["error"].is_string() && !explained {Some("runtime_falhou")} else {input.map(stalled)};
+        let mut map=self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner());
+        match problem {
+            Some(code)=>{map.insert(event.key.clone(),(event.generation,code.into()));},
+            None=>{map.remove(&event.key);},
+        }
+    }
+    /// Nome → problema dos atores com terminal abertos aqui, do último retrato publicado.
+    pub async fn terminal_problems(&self)->BTreeMap<String,String> {
+        let problems=self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        self.entries.lock().await.iter().filter(|(_,entry)|matches!(entry.handle,EntryHandle::Terminal {..}))
+            .filter_map(|(key,entry)|problems.get(key).filter(|(generation,_)|*generation==entry.generation).map(|(_,code)|(entry.name.clone(),code.clone())))
+            .collect()
+    }
+    pub fn bind_lifecycle(self:&Arc<Self>) {let _=self.self_ref.set(Arc::downgrade(self));}
+    async fn cancel_lifecycle_name(&self,name:&str) {
+        for barrier in self.lifecycle.lock().await.values() {
+            if let Ok(operation)=barrier.operation.lock() && let Some((owner,cancel))=operation.as_ref() && owner==name {cancel.store(true,std::sync::atomic::Ordering::Release);}
+        }
+    }
+    async fn schedule_claude_respawn(self:&Arc<Self>,key:&str,generation:u64) {
+        let handle=self.entries.lock().await.get(key).filter(|entry|entry.generation==generation && entry.provider=="claude").map(|entry|entry.handle.clone());
+        let Some(handle)=handle else {return};
+        let view=match handle.view().await {Ok(view)=>view,Err(error)=>{tracing::warn!(key,code=%error.code,"contexto da reabertura automática indisponível");return;}};
+        let admitted={
+            let mut entries=self.entries.lock().await;
+            let Some(entry)=entries.get_mut(key).filter(|e|e.generation==generation && e.provider=="claude") else {return};
+            if entry.respawn_inflight {return;}
+            let Some(base)=entry.auto_respawn else {return};
+            let (Some(target),Some(recipe),Some(birth))=(entry.runtime_target.clone(),entry.relaunch.clone(),entry.cano_birth) else {return};
+            let Some(live)=entry.live.borrow().clone() else {return};
+            let Some(binding)=live.binding.clone().filter(|b|b.key==key && b.generation==generation) else {return};
+            entry.respawn_inflight=true;
+            let cancelled=Arc::new(std::sync::atomic::AtomicBool::new(false));
+            Some((entry.name.clone(),base,Arc::new(super::lifecycle::HeadlessOperation {target,binding,recipe,view,birth,auto:Some(base),cancelled})))
+        };
+        let Some((name,base,context))=admitted else {return};
+        let barrier=self.barrier(key).await;
+        if let Ok(mut op)=barrier.operation.lock() {*op=Some((name.clone(),context.cancelled.clone()));}
+        let (registry,key)=(self.clone(),key.to_owned());
+        tokio::spawn(async move {
+            let id=format!("auto-restart:{key}:{generation}");
+            let mut gave_up=false;
+            for attempt in 0..3 {
+                tokio::time::sleep(base * (1u32<<attempt)).await;
+                if context.cancelled.load(std::sync::atomic::Ordering::Acquire) {break;}
+                let result=async {
+                    let _ingress=super::lifecycle::ClosedIngress::acquire(&registry.ingress,&name).await?;
+                    let _guard=barrier.lock().await;
+                    registry.reopen_headless_locked(&name,&key,generation,&id,None,true,Some(context.clone()),attempt).await
+                }.await;
+                match result {
+                    Ok(_)=>break,
+                    Err(error)=> {
+                        super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);
+                        tracing::warn!(key,session=name,attempt,code=%error.code,"reabertura automática não confirmada");
+                        if matches!(error.code.as_str(),"lifecycle_cancelled"|"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
+                        gave_up=attempt==2;
+                    },
+                }
+            }
+            // Teto de subidas: o que esperava na fila vira "não chegou" em vez de sair horas depois, calado.
+            if gave_up && !context.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                let handle=registry.entries.lock().await.get(&key).filter(|e|e.generation==generation).and_then(|e|match &e.handle {EntryHandle::Headless(h)=>Some(h.clone()),_=>None});
+                if let Some(handle)=handle && let Err(error)=super::actor::abandon_queued(&handle).await {
+                    tracing::warn!(key,session=name,code=%error.code,"fila não marcada como não chegou depois do teto de subidas");
+                }
+            }
+            if let Ok(mut operation)=barrier.operation.lock() && operation.as_ref().is_some_and(|(_,current)|Arc::ptr_eq(current,&context.cancelled)) {*operation=None;}
+            if let Some(entry)=registry.entries.lock().await.get_mut(&key).filter(|e|e.generation==generation) {entry.respawn_inflight=false;}
+        });
+    }
+    /// O ator do Codex com terminal desta sessão está aberto aqui: o Rust publica o estado dela.
+    pub fn owns_codex_terminal(&self,name:&str) -> bool { self.codex_owned.lock().unwrap_or_else(|e|e.into_inner()).contains_key(name) }
+    /// Posse pela entrada (chave e geração), não só pelo nome: fechar uma vida antiga não desmarca a viva de mesmo nome.
+    fn mark_codex_owner(&self,name:&str,key:&str,generation:u64,owned:bool) {
+        let changed = {
+            let mut map = self.codex_owned.lock().unwrap_or_else(|e|e.into_inner());
+            let life = (key.to_owned(),generation);
+            if owned { map.insert(name.to_owned(),life); true }
+            else if map.get(name) == Some(&life) { map.remove(name); true }
+            else { false }
+        };
+        if !changed { return; }
+        if let Some(hubs) = self.hubs.get().and_then(crate::side::WeakHubs::upgrade) { hubs.set_runtime_owned(name,owned); }
+    }
+    pub fn with_interactions(mut self,store:Arc<crate::interactions::InteractionStore>) -> Self { self.interactions = Some(store); self }
+
+    pub async fn interaction_binding(&self,name:&str) -> Result<crate::interactions::InteractionBinding,RuntimeError> {
+        use crate::interactions::{InteractionBinding,InteractionError,runtime_error};
+        let unavailable = ||runtime_error(InteractionError::Unavailable);
+        let (key,generation,handle) = {
+            let entries = self.entries.lock().await;
+            let mut matches = entries.iter().filter(|(_,entry)|entry.name == name);
+            let (key,entry) = matches.next().ok_or_else(unavailable)?;
+            if matches.next().is_some() { return Err(unavailable()); }
+            if let EntryHandle::Terminal { target,.. } = &entry.handle {
+                if target.key != *key || target.generation != entry.generation || target.binding.conversation.is_empty() { return Err(unavailable()); }
+                return Ok(InteractionBinding { key:key.clone(),conversation:target.binding.conversation.clone(),generation:entry.generation });
+            }
+            (key.clone(),entry.generation,entry.handle.clone())
+        };
+        let snapshot = handle.snapshot().await.map_err(|_|unavailable())?;
+        let entries = self.entries.lock().await;
+        if entries.iter().any(|(other,entry)|other != &key && entry.name == name) { return Err(unavailable()); }
+        let entry = entries.get(&key).filter(|entry|entry.name == name && entry.generation == generation).ok_or_else(unavailable)?;
+        if matches!(entry.handle,EntryHandle::Terminal {..}) || snapshot["key"] != key || snapshot["generation"] != generation || !snapshot["error"].is_null() { return Err(unavailable()); }
+        // Logo depois de abrir a vista durável ainda não tem a conversa; o canal ao vivo, semeado pelo ator
+        // antes da primeira resposta, tem o vínculo da mesma vida.
+        let conversation = match snapshot["view"]["conversation"].as_str().filter(|s|!s.is_empty()) {
+            Some(conversation) => conversation.to_owned(),
+            None => entry.live.borrow().clone().and_then(|live|live.binding.clone())
+                .filter(|binding|binding.key == key && binding.generation == generation && !binding.conversation.is_empty())
+                .map(|binding|binding.conversation).ok_or_else(unavailable)?,
+        };
+        Ok(InteractionBinding { key,conversation,generation })
+    }
+
+    #[doc(hidden)]
+    pub fn with_processes(mut self,processes:Arc<dyn crate::list::procs::ProcessView>)->Self {self.processes=processes;self}
+    pub fn with_permissions(mut self,store:Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>)->Self {self.permissions=Some(store);self}
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
+    /// Só testes: o `codex` falso de cada um vem do PATH deste ambiente, não do processo.
+    #[doc(hidden)]
+    pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.policy = self.policy.with_codex_environment(env); self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     /// A linha de status do ator lê a cota direto do módulo de contas.
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.policy = self.policy.with_accounts(accounts); self }
+    pub fn with_plugin(mut self, plugin:Arc<crate::plugin::Store>) -> Self { self.plugin = Some(plugin); self }
+    pub fn with_terminal_states(mut self, states:Arc<crate::state::published::Published>) -> Self { self.terminal_states=Some(states);self }
+    pub fn with_terms(mut self, terms:Arc<crate::term::Terms>) -> Self {self.terms=Some(terms);self}
+    fn terminal_mode_reader(&self) -> crate::terminal_facts::ModeReader {
+        let (entries,published,permissions)=(Arc::downgrade(&self.entries),self.terminal_states.clone(),self.permissions.clone());
+        Arc::new(move |name| {
+            let (entries,published,permissions)=(entries.clone(),published.clone(),permissions.clone());
+            Box::pin(async move {
+                let entries=entries.upgrade().ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                let (mut source,terminal,live)={
+                    let entries=entries.lock().await;
+                    let mut matches=entries.iter().filter(|(_,entry)|entry.name==name && entry.provider=="claude");
+                    let Some((key,entry))=matches.next() else {return Ok(None)};
+                    if matches.next().is_some() {return Err(crate::terminal_input::ServiceError("terminal_mode_ambiguous"));}
+                    if entry.mode_source.binding.key!=*key || entry.mode_source.binding.generation!=entry.generation || entry.mode_source.binding.conversation.is_empty() {
+                        return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));
+                    }
+                    (entry.mode_source.clone(),matches!(&entry.handle,EntryHandle::Terminal {..}),entry.live.clone())
+                };
+                let declared=source.clone();
+                if !terminal {
+                    let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                    let binding=current.binding.clone().filter(|binding|binding.key==source.binding.key && binding.generation==source.binding.generation && !binding.conversation.is_empty()).ok_or(crate::terminal_input::ServiceError("terminal_mode_binding_changed"))?;
+                    source.transcript=source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
+                    source.binding=binding;
+                }
+                let confirmed=match &permissions {
+                    Some(memory)=>memory.lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                        .confirmed(&source.binding.conversation).map_err(crate::terminal_input::ServiceError)?,
+                    None=>return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable")),
+                };
+                // Base suposta (primeira leitura já em `plan`) não decide: vale o transcript ou o modo de abertura,
+                // como o `session_non_plan_mode` do Python.
+                let known=match &permissions {Some(memory)=>memory.lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?.base_known(&source.binding.conversation),None=>true};
+                match confirmed.clone() {
+                    Some(mode) if mode.current=="plan" && !known=>{},
+                    Some(mode)=>source.confirmed=Some(if mode.current=="plan" {mode.previous_non_plan} else {mode.current}),
+                    None if terminal=>if let Some(state)=published.as_ref().and_then(|published|published.get(&name,Some(&source.binding.conversation))) {
+                        if state.problema.is_some() {return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable"));}
+                        source.confirmed=state.claude_permission_mode.clone().filter(|mode|!mode.is_empty() && mode!="plan")
+                            .or_else(||state.claude_previous_non_plan.clone().filter(|mode|!mode.is_empty() && mode!="plan"));
+                    },
+                    None=>{
+                        let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                        let binding=current.binding.as_ref().filter(|binding|binding.key==source.binding.key && binding.generation==source.binding.generation && !binding.conversation.is_empty()).ok_or(crate::terminal_input::ServiceError("terminal_mode_binding_changed"))?;
+                        if binding.conversation!=source.binding.conversation {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                        source.confirmed=current.public_state["claude_permission_mode"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan")
+                            .or_else(||current.public_state["claude_previous_non_plan"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan"))
+                            .map(str::to_owned).or(source.confirmed);
+                    },
+                }
+                let entries=entries.lock().await;
+                if !entries.get(&source.binding.key).is_some_and(|entry|entry.name==name && entry.generation==source.binding.generation && entry.mode_source.binding==declared.binding && entry.mode_source.transcript==declared.transcript) {
+                    return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));
+                }
+                if !terminal && live.borrow().as_ref().and_then(|state|state.binding.as_ref())!=Some(&source.binding) {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                let fresh=permissions.as_ref().ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                    .lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                    .confirmed(&source.binding.conversation).map_err(crate::terminal_input::ServiceError)?;
+                if fresh!=confirmed {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                Ok(Some(source))
+            })
+        })
+    }
+    /// Classe do recado (`bypass`/`prompting`) para o Python, que não guarda mais a memória de modo: a do
+    /// remetente quando é sessão aberta aqui, senão a do alvo. `None`: nenhum modo confirmado; o Python cai
+    /// no transcript e na conta, como antes.
+    pub(crate) async fn message_class(&self,sender:Option<&str>,target:&str) -> Result<&'static str,RuntimeError> {
+        let read=self.terminal_mode_reader();
+        let class=|mode:&str| if mode.to_ascii_lowercase().contains("bypass") {"bypass"} else {"prompting"};
+        // Leitura que falha é erro com código, nunca o Python recalculando com o Rust de pé.
+        if let Some(sender)=sender && let Some(source)=read(sender.to_owned()).await.map_err(|e|failure(e.0))?
+            && let Some(mode)=source.confirmed {return Ok(class(&mode));}
+        let source=read(target.to_owned()).await.map_err(|e|failure(e.0))?.ok_or_else(||failure("runtime_binding"))?;
+        if let Some(mode)=source.confirmed {return Ok(class(&mode));}
+        let config=self.config_dir_of(target).await.ok_or_else(||failure("terminal_account_mode_unavailable"))?;
+        let transcript=source.transcript.clone();
+        let mode=tokio::task::spawn_blocking(move||crate::terminal_facts::unconfirmed_mode(&transcript,&config)).await
+            .map_err(|_|failure("terminal_mode_unavailable"))?.map_err(|e|failure(e.0))?;
+        Ok(class(&mode))
+    }
+    /// Pasta da conta da sessão aberta aqui (sem a gravada, a padrão do Claude).
+    async fn config_dir_of(&self,name:&str) -> Option<std::path::PathBuf> {
+        let entries=self.entries.lock().await;
+        let entry=entries.values().find(|entry|entry.name==name)?;
+        match &entry.handle {
+            EntryHandle::Terminal {target,..}=>Some(target.metadata.config_dir.clone()),
+            EntryHandle::Headless(_)=>entry.runtime_target.as_ref().and_then(|target|target.metadata["config_dir"].as_str().map(std::path::PathBuf::from))
+                .or_else(||std::env::home_dir().map(|home|home.join(".claude"))),
+            EntryHandle::CodexTerminal {..}=>None,
+        }
+    }
+    /// Vínculo e metadados do terminal, sem enviar um pedido ao ator ocupado.
+    pub async fn terminal_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let Some((key,entry))=matches.next() else {return Ok(None)};
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        match &entry.handle {
+            EntryHandle::Terminal {target,..} if target.key==*key && target.generation==entry.generation && target.binding.generation==entry.generation && target.binding.name==name=>Ok(Some(target.clone())),
+            EntryHandle::Terminal {..}=>Err(failure("runtime_binding")),_=>Ok(None),
+        }
+    }
+    pub async fn interaction_binding_readonly(&self,name:&str)->Result<crate::interactions::InteractionBinding,RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let (key,entry)=matches.next().ok_or_else(||failure("runtime_binding"))?;
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        if let EntryHandle::Terminal {target,..}=&entry.handle {
+            if target.key!=*key || target.generation!=entry.generation || target.binding.generation!=entry.generation || target.binding.name!=name || target.binding.conversation.is_empty() {return Err(failure("runtime_binding"));}
+            return Ok(crate::terminal_facts::LocalTerminalFacts::binding(target));
+        }
+        let live=entry.live.borrow().clone().filter(|state|state.error.is_none()).ok_or_else(||failure("runtime_binding"))?;
+        let binding=live.binding.clone().filter(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty()).ok_or_else(||failure("runtime_binding"))?;
+        Ok(binding)
+    }
+    /// Transcript da conversa vigente do Claude, conferido sob a mesma trava do vínculo: a medida de
+    /// contexto do plugin nunca cai no arquivo de outra vida nem no metadado do boot.
+    pub async fn context_transcript(&self,name:&str)->Result<(crate::interactions::InteractionBinding,std::path::PathBuf),RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let (key,entry)=matches.next().ok_or_else(||failure("runtime_binding"))?;
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        if entry.provider!="claude" {return Err(failure("runtime_provider"));}
+        match &entry.handle {
+            EntryHandle::Terminal {target,..}=> {
+                if target.key!=*key || target.generation!=entry.generation || target.binding.generation!=entry.generation || target.binding.name!=name || target.binding.conversation.is_empty() {return Err(failure("runtime_binding"));}
+                Ok((crate::terminal_facts::LocalTerminalFacts::binding(target),target.transcript.clone()))
+            },
+            EntryHandle::Headless(_)=> {
+                let live=entry.live.borrow().clone().filter(|state|state.error.is_none()).ok_or_else(||failure("runtime_binding"))?;
+                let binding=live.binding.clone().filter(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty() && entry.mode_source.binding.key==*key).ok_or_else(||failure("runtime_binding"))?;
+                let transcript=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
+                Ok((binding,transcript))
+            },
+            EntryHandle::CodexTerminal {..}=>Err(failure("runtime_provider")),
+        }
+    }
+    pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
+        let handle={
+            let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name);
+            let entry=matches.next().ok_or_else(||failure("runtime_binding"))?;
+            if matches.next().is_some() {return Err(failure("runtime_binding"));}entry.handle.clone()
+        };handle.drain().await
+    }
+    pub fn plugin(&self) -> Result<&Arc<crate::plugin::Store>,RuntimeError> {
+        self.plugin.as_ref().ok_or_else(||failure("plugin_store_unavailable"))
+    }
+    async fn bind_plugin(&self,name:&str) -> Result<(),RuntimeError> {
+        if let Some(plugin) = &self.plugin {
+            let binding = self.interaction_binding(name).await?;
+            plugin.bind(&binding).map_err(|error|failure(error.0))?;
+        }
+        Ok(())
+    }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
-    pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    pub fn live(&self,name:&str) -> LiveReceiver {
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.sender_count() > 1 || sender.borrow().is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).subscribe()
+    }
+    /// Estado do envio terminal, sem receber eventos das outras sessões.
+    pub fn terminal_status(&self,name:&str) -> super::terminal_status::StatusReceiver {
+        // Assinar sob a trava evita que a limpeza confunda o leitor com um publicador novo.
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).subscribe()
+    }
+    pub(crate) fn terminal_status_sender(&self,name:&str) -> super::terminal_status::StatusSender {
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).clone()
+    }
     /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
     /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto. Canal
     /// que um ator já segura (cópia fora do mapa) fica, mesmo vazio: o ator só escreve no primeiro passo.
@@ -214,7 +675,7 @@ impl RuntimeRegistry {
         map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).clone()
     }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
-        match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
+        match self.entry(key,generation).await? {EntryHandle::Headless(handle) | EntryHandle::CodexTerminal {handle,..}=>Ok(handle),_=>Err(failure("runtime_provider"))}
     }
     async fn entry(&self,key:&str,generation:u64)->Result<EntryHandle,RuntimeError> {
         self.entries.lock().await.get(key).filter(|entry|entry.generation==generation)
@@ -242,10 +703,13 @@ impl RuntimeRegistry {
         }
         result
     }
-    async fn open_attempt(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
-        let launch = managed.as_ref().filter(|_|spawn);
-        let barrier = self.barrier(&target.key).await;
-        let _guard = barrier.lock().await;
+    async fn open_attempt(&self,target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
+        self.cancel_lifecycle_name(&target.name).await;
+        let barrier=self.barrier(&target.key).await;barrier.cancel();let _guard=barrier.lock().await;
+        self.open_headless_locked(target,managed,spawn).await
+    }
+    async fn open_headless_locked(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool)->Result<Value,RuntimeError> {
+        let launch=managed.as_ref().filter(|_|spawn);
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
         let handle = if let Some((generation,handle)) = existing {
             if generation != target.generation { return Err(failure("runtime_generation")); }
@@ -260,6 +724,10 @@ impl RuntimeRegistry {
             if fields.get("conversation").is_some_and(|conversation|conversation == &metadata[if target.provider == "claude" { "session_id" } else { "thread_id" }]) {
                 for (key,value) in fields { if key != "public_state" { metadata[key] = value.clone(); } }
             }
+        }
+        if target.provider=="claude" && spawn && target.binding.pid==0
+            && (!store.state().runtime_state["claude_lifecycle_intent"].is_null() || store.state().runtime_state["view"].is_object()) {
+            return Err(RuntimeError::new("relaunch_recipe_missing","a conversa já teve uma vida e está sem receita comprovada em memória; não reconstruí o processo pelo Python"));
         }
         let queue = QueueActor::start(store,lease);
         // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
@@ -287,10 +755,23 @@ impl RuntimeRegistry {
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+        if let Some(store) = &self.interactions { engine = engine.with_interactions(target.key.clone(),store.clone())?; }
         engine.set_fresh_process(fresh);
-        if let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
+        let claude_recipe=if target.provider=="claude" {
+            let procs=self.processes.clone();
+            let sid=target.metadata["session_id"].as_str().ok_or_else(||failure("lifecycle_conversation"))?;
+            let (pid,birth)=super::lifecycle::launched_agent(procs.as_ref(),i64::from(target.binding.pid),sid)?;
+            let process=procs.recipe(pid).map_err(|_|failure("lifecycle_process_read"))?;
+            let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&process)?;
+            if argv_sid!=sid && !connection.snapshot.init.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).is_some_and(|event|event["session_id"]==sid) {return Err(failure("relaunch_conversation"));}
+            let mut recipe=super::claude_relaunch::Recipe::capture(procs.as_ref(),i64::from(target.binding.pid),pid,birth,&argv_sid,false)?;
+            recipe.preserve_settings(target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?)?;
+            Some(Arc::new(recipe))
+        } else {None};
+        let adopted_birth=claude_recipe.as_ref().map(|recipe|recipe.root_identity().map(|(_,birth)|birth)).transpose()?;
+        if target.provider=="codex" && let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
-        engine = engine.with_live(self.live_sender(&target.name));
+        engine = engine.with_live(self.live_sender(&target.name)).with_lifecycle(self.self_ref.get().cloned());
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
@@ -302,7 +783,10 @@ impl RuntimeRegistry {
             }
         });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
-            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()) });
+            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()),relaunch:claude_recipe,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding:crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:target.metadata[if target.provider=="claude" {"session_id"} else {"thread_id"}].as_str().unwrap_or("").into()},transcript:target.transcript.clone(),confirmed:target.metadata["permission_mode"].as_str().filter(|mode|*mode!="plan").map(str::to_owned)},
+            live:self.live_sender(&target.name),runtime_target:(target.provider=="claude").then(||target.clone()),
+            cano_birth:adopted_birth,auto_respawn:managed.as_ref().filter(|_|target.provider=="claude").map(|_|self.respawn_base),respawn_inflight:false });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -319,14 +803,96 @@ impl RuntimeRegistry {
                 return Err(error);
             }
         };
+        if target.provider == "claude" { self.bind_plugin(&target.name).await?; }
+        Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
+    }
+    /// Adota o app-server do Codex com terminal: confere endereço local, conversa e pid, abre a fila sob a
+    /// trava e liga o ator ao WebSocket. Quem chama é a vigia (`codex_terminal::Watcher`); nada sobe aqui.
+    pub async fn open_codex_terminal(&self,target:CodexTerminalTarget) -> Result<Value,RuntimeError> {
+        let name = target.name.clone();
+        let result = self.open_codex_terminal_attempt(target).await;
+        if let Err(error) = &result && !["runtime_generation","runtime_provider"].contains(&error.code.as_str()) {
+            super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+        }
+        result
+    }
+    async fn open_codex_terminal_attempt(&self,target:CodexTerminalTarget) -> Result<Value,RuntimeError> {
+        let barrier = self.barrier(&target.key).await;
+        let _guard = barrier.lock().await;
+        let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
+        let handle = match existing {
+            Some((generation,EntryHandle::CodexTerminal { target:old,handle,.. })) if generation == target.generation && old.same_life(&target)=>{
+                // Mesma vida, mas o app-server pode ter morrido: responder `opened` com um ator desconectado para
+                // sempre esconderia isso. Quem fecha e adota a vida nova é a vigia.
+                super::codex_terminal::verify(&target).await?;
+                handle
+            },
+            Some(_)=>return Err(failure("runtime_generation")),
+            None=>{
+                super::codex_terminal::verify(&target).await?;
+                let account_guard = runtime_account_guard("codex",&target.metadata).await?;
+                let lease = wait_lease(&target.lease_path).await?;
+                let store = open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
+                let runtime = target.runtime_target();
+                let mut metadata = runtime.metadata.clone();
+                if let Some(fields) = store.state().runtime_state["view"].as_object() {
+                    if fields.get("conversation").is_some_and(|conversation|conversation == &metadata["thread_id"]) {
+                        for (key,value) in fields { if key != "public_state" && key != "headless" { metadata[key] = value.clone(); } }
+                    }
+                }
+                let queue = QueueActor::start(store,lease);
+                let connection = match super::websocket::WebSocketConnection::connect(&target.endpoint).await {
+                    Ok(connection)=>connection,
+                    Err(error)=>{
+                        if let Err(stop) = queue.shutdown().await {
+                            tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no app-server");
+                        }
+                        return Err(error);
+                    }
+                };
+                let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
+                let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
+                let mut engine = RuntimeEngine::new("codex",metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
+                    .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+                if let Some(store) = &self.interactions { engine = engine.with_interactions(target.key.clone(),store.clone())?; }
+                engine = engine.with_live(self.live_sender(&target.name));
+                let cell = AdoptionCell::new(&target.endpoint,target.app_pid).with_lifecycle(self.codex_wake.clone(),target.sidecar_life());
+                let adoption = Adoption { endpoint:target.endpoint.clone(),app_pid:target.app_pid,cell:cell.clone() };
+                let handle = RuntimeActor::spawn_adopted(runtime,queue,connection,engine,adoption);
+                self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,
+                    handle:EntryHandle::CodexTerminal { target:Box::new(target.clone()),handle:handle.clone(),cell },
+                    lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:0,provider:"codex".into(),account_key:Some(account_guard.key.clone()),relaunch:None,settings_owner:None,
+                    mode_source:crate::terminal_facts::ModeSource {binding:crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:target.thread_id.clone()},transcript:target.transcript.clone().unwrap_or_default(),confirmed:None},
+                    live:self.live_sender(&target.name),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false });
+                // O estado passa a sair do feed do runtime; o pane segue presente.
+                self.mark_codex_owner(&target.name,&target.key,target.generation,true);
+                handle
+            }
+        };
+        let snapshot = match handle.snapshot().await {
+            Ok(snapshot) if snapshot["error"].is_null()=>snapshot,
+            result=>{
+                let error = match result {
+                    Err(error)=>error,
+                    Ok(snapshot)=>snapshot["error"].as_str().map_or_else(||failure("runtime_closed"),|code|RuntimeError::new(code,"ator do runtime terminou ao abrir")),
+                };
+                if let Err(close) = self.close_locked(&target.key,target.generation,false).await {
+                    tracing::warn!(key=%target.key,code=%close.code,"sessão não fechou depois de abrir com erro");
+                }
+                return Err(error);
+            }
+        };
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
+        self.open_terminal_locked(target).await
+    }
+    async fn open_terminal_locked(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone(),e.mods_life));
         let handle=match existing {
             Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
-                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
+                && old.metadata==target.metadata && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
                 // Reabertura da mesma vida: se o nome saiu do `Mods`, a sessão volta a ser ligada, na vida da
                 // entrada, que é a que o `close` esquece. Nome com outra vida fica com ela: é uma sessão mais
                 // nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento.
@@ -340,8 +906,12 @@ impl RuntimeRegistry {
                 let lease=wait_lease(&target.lease_path).await?;
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
+                if let Some(interactions) = &self.interactions {
+                    interactions.bind(&crate::interactions::InteractionBinding { key:target.key.clone(),conversation:target.binding.conversation.clone(),generation:target.generation })
+                        .map_err(crate::interactions::runtime_error)?;
+                }
                 // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
-                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let options=super::terminal::TerminalOptions {lifecycle:self.self_ref.get().cloned(),permissions:self.permissions.clone(),interactions:self.interactions.clone(),plugin:self.plugin.clone(),mode_facts:Some(self.terminal_mode_reader()),terms:self.terms.clone(),anchor:super::terminal::ModsAnchor::default(),status:Some(self.terminal_status_sender(&target.name)),..Default::default()};
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
                 // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
@@ -352,34 +922,108 @@ impl RuntimeRegistry {
                     },
                     None=>0,
                 };
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:"claude".into(),account_key:None});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+                    mode_source:crate::terminal_facts::ModeSource {binding:crate::terminal_facts::LocalTerminalFacts::binding(&target),transcript:target.transcript.clone(),confirmed:None},live:self.live_sender(&target.name),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});handle
             }
         };
         let snapshot=handle.snapshot().await?;
+        self.bind_plugin(&target.name).await?;
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     /// Fecha a sessão no Rust: o ator para e solta a trava; o cano segue vivo.
     pub async fn close(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
+        barrier.cancel();
         let _guard = barrier.lock().await;
         self.close_locked(key,generation,false).await
     }
     /// Encerrar a sessão: o ator para e o processo dela morre, com os arquivos do cano. Sem a sessão
     /// aberta aqui não há o que matar (`killed: false`): quem pediu decide.
     pub async fn close_with_kill(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        let codex = match self.entries.lock().await.get(key) {
+            Some(Entry { generation:open,handle:EntryHandle::CodexTerminal { target,.. },.. }) if *open == generation=>Some((**target).clone()),
+            _=>None,
+        };
+        if let Some(target) = codex {
+            // Codex com terminal: pane, app-server, sidecar e fila desta vida, pela vigia. Sem ela, nada encerra.
+            let watcher = self.watcher.get().cloned().ok_or_else(||failure("close_kill"))?;
+            return watcher.kill(self,&target).await;
+        }
+        self.barrier(key).await.cancel();
+        let name=self.entries.lock().await.get(key).filter(|e|e.generation==generation).map(|e|e.name.clone());
+        let _ingress=match &name {Some(name)=>Some(super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?),None=>None};
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
-        self.close_locked(key,generation,true).await
+        let result=self.close_locked(key,generation,true).await;
+        if let (Err(error),Some(name))=(&result,&name) {super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);}
+        result
     }
     async fn close_locked(&self,key:&str,generation:u64,kill:bool) -> Result<Value,RuntimeError> {
-        let (handle,lease_path,name,life) = match self.entries.lock().await.get(key) {
+        let (handle,lease_path,name,life,runtime_target,cano_birth,recipe,_settings_owner) = match self.entries.lock().await.get(key) {
             None=>return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) }),
-            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
+            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life,entry.runtime_target.clone(),entry.cano_birth,entry.relaunch.clone(),entry.settings_owner.clone()),
             _=>return Err(failure("runtime_generation")),
         };
+        let closed_life=match &handle {
+            EntryHandle::Terminal {target,..}=>Some(super::lifecycle::ClosedLife {name:name.clone(),binding:crate::terminal_facts::LocalTerminalFacts::binding(target),pid:i64::from(target.metadata.agent_pid),birth:target.metadata.agent_birth,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()}),
+            EntryHandle::Headless(_) if runtime_target.as_ref().is_some_and(|target|target.provider=="claude")=> {
+                let target=runtime_target.as_ref().unwrap();
+                let binding=self.entries.lock().await.get(key).and_then(|entry|entry.live.borrow().as_ref().and_then(|live|live.binding.clone())).ok_or_else(||failure("lifecycle_binding_unavailable"))?;
+                Some(super::lifecycle::ClosedLife {name:name.clone(),binding,pid:i64::from(target.binding.pid),birth:cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()})
+            },
+            _=>None,
+        };
+        if let Some(plugin) = &self.plugin { plugin.forget(key).map_err(|error|failure(error.0))?; }
+        // Processo que o Rust não comprova ser desta vida: o ator para e a sessão sai daqui, mas nada é
+        // morto (`killed: false`); quem pediu decide.
+        let mut foreign = false;
         let stopped = match (&handle,kill) {
+            (EntryHandle::Headless(handle),true) if runtime_target.as_ref().is_some_and(|target|target.provider=="claude")=> {
+                let target=runtime_target.as_ref().unwrap();
+                let born=cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?;
+                let procs=self.processes.clone();
+                let ours=super::lifecycle::process_absent(procs.as_ref(),i64::from(target.binding.pid),born).map(|absent|absent
+                    || crate::terminal_facts::agent_birth(target.binding.pid)==Some(born) && process::liveness(target.binding.pid,key)==process::Liveness::Ours);
+                if !matches!(ours,Ok(true)) {
+                    foreign = true;
+                    if let Err(error) = handle.stop().await { tracing::warn!(key,code=%error.code,"ator parou com erro ao soltar processo alheio"); }
+                    Err(ours.err().unwrap_or_else(||failure("lifecycle_process_changed")))
+                } else {
+                let stopped=handle.stop().await;
+                if let Err(error)=&stopped && wait_lease(&target.lease_path).await.is_err() {return Err(error.clone());}
+                let mut cano=process::Cano {pid:target.binding.pid,escuta:target.binding.escuta.clone(),token:target.binding.token.clone(),ts:0.0,versao:target.binding.versao,extra:Default::default()};
+                cano.extra.insert("process_birth".into(),json!(born));
+                let dir=super::lifecycle::claude_sidecar_dir()?;
+                process::kill(&cano,key,&dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano da sessão não foi encerrado"))?;
+                if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();if !super::lifecycle::process_absent(procs.as_ref(),pid,birth)? {return Err(failure("lifecycle_agent_still_alive"));}}
+                Ok(())
+                }
+            },
             (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
-            (EntryHandle::Terminal {..},true)=>return Err(failure("close_kill")),
+            (EntryHandle::Terminal {target,handle},true)=> {
+                let procs=crate::list::procs::SystemProcs::default();
+                let before=super::lifecycle::pane(&crate::terminal_input::ProcessIo::default(),&target.binding).await?;
+                use crate::list::procs::ProcessView;
+                if before.dead || procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?.birth!=target.metadata.agent_birth {return Err(failure("lifecycle_process_changed"));}
+                handle.stop().await?;
+                // Como o Python, antes de matar: a pergunta aberta desta vida não reabre o stepper numa
+                // sessão futura com a mesma conversa. Sem conseguir apagar, só o diário: o fechamento segue.
+                if let Some(path)=crate::state::ask::sidecar_path(&target.transcript)
+                    && let Err(error)=std::fs::remove_file(&path) && error.kind()!=std::io::ErrorKind::NotFound {
+                    tracing::warn!(key,session=%name,kind=?error.kind(),"pergunta aberta não foi apagada ao fechar");
+                }
+                let killed=super::lifecycle::kill_terminal(&crate::terminal_input::ProcessIo::default(),&procs,&target.binding,
+                    i64::from(target.metadata.agent_pid),target.metadata.agent_birth).await;
+                if let Err(error)=&killed {super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);}
+                killed
+            },
+            // Encerrar o Codex com terminal é da vigia (`close_with_kill`).
+            (EntryHandle::CodexTerminal {..},true)=>return Err(failure("close_kill")),
+            (EntryHandle::CodexTerminal { cell,handle,.. },false)=>{
+                // A reconexão em voo para antes de a posse sair daqui.
+                cell.revoke();
+                handle.stop().await
+            },
             _=>handle.stop().await,
         };
         if let Err(error) = stopped {
@@ -390,10 +1034,19 @@ impl RuntimeRegistry {
                 tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
                 return Err(error);
             }
+            if kill && closed_life.is_some() && !foreign {
+                if let Some(store)=&self.interactions {store.forget(key).map_err(crate::interactions::runtime_error)?;}
+                self.entries.lock().await.remove(key);
+                if let Some(mods)=&self.mods {mods.forget(&name,life);}
+                if let Some(closed)=closed_life.clone() {*self.barrier(key).await.closed.lock().map_err(|_|failure("lifecycle_closed_record"))?=Some(closed);}
+                super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+                return Err(error);
+            }
             if kill {
                 // O ator parou e soltou a trava: a sessão saiu daqui, só o processo não morreu. Responder
                 // erro deixava o Python achando que ela seguia aqui; `killed: false` e quem pediu decide.
                 tracing::warn!(key,code=%error.code,"sessão fechada sem encerrar o processo");
+                if let Some(store) = &self.interactions { store.forget(key).map_err(crate::interactions::runtime_error)?; }
                 self.entries.lock().await.remove(key);
                 self.clear_live(&name).await;
                 if let Some(mods) = &self.mods { mods.forget(&name,life); }
@@ -401,19 +1054,628 @@ impl RuntimeRegistry {
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
+        if let Some(closed)=&closed_life {
+            if let Some(store)=&self.interactions {store.forget_binding(&closed.binding).map_err(crate::interactions::runtime_error)?;}
+            self.forget_claude_rate(&closed.binding)?;
+            *self.barrier(key).await.closed.lock().map_err(|_|failure("lifecycle_closed_record"))?=Some(closed.clone());
+            if kill {
+                let lease=wait_lease(&closed.lease_path).await?;
+                let mut store=Store::open(&closed.state_path,&closed.projection,QueueState::new(key,generation,&closed.name,vec![])).map_err(|_|failure("queue_io"))?;
+                if store.state().owner_key!=key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
+                let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+                store.exec(generation,&format!("close-clear:{key}:{generation}"),clock,Action::Clear).map_err(|_|failure("queue_io"))?;
+                store.exec(generation,&format!("close-record:{key}:{generation}"),clock,Action::AdvanceLifecycle {generation,state:json!({"terminal_lifecycle":{"closed":true,"conversation":closed.binding.conversation},"view":{"alive":false,"conversation":closed.binding.conversation}})}).map_err(|_|failure("queue_io"))?;
+                if let Some(target)=&runtime_target {super::lifecycle::delete_sidecar(target,&closed.binding.conversation)?;}
+                drop(store);drop(lease);
+            }
+        } else if let Some(store) = &self.interactions { store.forget(key).map_err(crate::interactions::runtime_error)?; }
         self.entries.lock().await.remove(key);
+        self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner()).remove(key);
+        // Codex com terminal fora do Rust: o hub devolve o estado à observação do Python.
+        if matches!(handle,EntryHandle::CodexTerminal {..}) { self.mark_codex_owner(&name,key,generation,false); }
         self.clear_live(&name).await;
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
     }
+    /// Ciclo dos subagentes da sessão Claude sem terminal aberta aqui, por agentId:
+    /// `{"<agentId>":{"state":"running|completed|failed|stopped","run_id":"…","end_time":<ms>|null}}`.
+    /// `None` = não há sessão Claude sem terminal com esse nome neste servidor.
+    pub async fn claude_subagents(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
+        let handle={
+            let entries=self.entries.lock().await;
+            let mut matches=entries.values().filter(|entry|entry.name==name && entry.provider=="claude");
+            let entry=matches.next()?;if matches.next().is_some() {return None;}
+            match &entry.handle {EntryHandle::Headless(handle)=>handle.clone(),_=>return None}
+        };
+        Some(handle.view().await.map(|view|view["subagents"].clone()))
+    }
+    /// `session_key` é a conversa, como na descoberta: o hub a compara com o `conversation` do vínculo.
+    pub async fn claude_info(&self,name:&str)->Option<crate::transcript::InternalInfo> {
+        let entries=self.entries.lock().await;
+        let mut matches=entries.values().filter(|entry|entry.name==name && entry.provider=="claude");
+        let entry=matches.next()?;if matches.next().is_some() {return None;}
+        match &entry.handle {
+            EntryHandle::Terminal {target,..}=>Some(crate::transcript::InternalInfo {provider:"claude".into(),jsonl:Some(target.transcript.clone()),session_key:target.binding.conversation.clone(),
+                history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false,lifecycle_id:None}),
+            EntryHandle::Headless(_)=> {
+                let live=entry.live.borrow().clone()?;
+                let binding=live.binding.as_ref().filter(|binding|binding.key==entry.mode_source.binding.key && binding.generation==entry.generation && !binding.conversation.is_empty())?;
+                let jsonl=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
+                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.conversation.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None})
+            },
+            _=>None,
+        }
+    }
+    fn forget_claude_rate(&self,binding:&crate::interactions::InteractionBinding)->Result<(),RuntimeError> {
+        let weak=self.hubs.get().ok_or_else(||failure("lifecycle_hubs_unbound"))?;
+        // Hubs já derrubados (encerramento do servidor) levaram as taxas junto: nada a esquecer.
+        if let Some(hubs)=weak.upgrade() {hubs.plugin_rates().forget_binding(binding);}
+        Ok(())
+    }
+    fn rebind_claude_hub(&self,target:&super::terminal::TerminalTarget)->Result<(),RuntimeError> {
+        let hubs=self.hubs.get().and_then(crate::side::WeakHubs::upgrade).ok_or_else(||failure("lifecycle_hubs_unbound"))?;
+        hubs.rebind_claude(&target.name,&target.binding.conversation,target.transcript.clone(),target.projection_dir.join(format!("{}.jsonl",target.name)))
+    }
+    /// Chamado pelo ator serial: não para nem consulta o próprio ator e não espera reabridor HTTP.
+    pub(super) async fn commit_claude_sid(&self,target:&RuntimeTarget,queue:&QueueActor,patch:&Value)->Result<RuntimeTarget,RuntimeError> {
+        let barrier=self.barrier(&target.key).await;
+        let _guard=barrier.try_lock().map_err(|_|failure("lifecycle_sid_in_transfer"))?;
+        let mut entries=self.entries.lock().await;
+        let entry=entries.get_mut(&target.key).filter(|entry|entry.generation==target.generation && entry.name==target.name && entry.provider=="claude").ok_or_else(||failure("runtime_binding"))?;
+        let EntryHandle::Headless(handle)=&entry.handle else {return Err(failure("lifecycle_provider"));};
+        if !entry.runtime_target.as_ref().is_some_and(|current|current.binding==target.binding && current.metadata["session_id"]==target.metadata["session_id"]) {return Err(failure("runtime_binding"));}
+        let next_sid=patch["session_id"].as_str().filter(|sid|!sid.is_empty()).ok_or_else(||failure("lifecycle_conversation"))?;
+        let previous=target.metadata["session_id"].as_str().ok_or_else(||failure("lifecycle_conversation"))?;
+        let state=queue.snapshot().await.map_err(|_|failure("queue_io"))?;
+        if state.owner_key!=target.key || state.generation!=target.generation {return Err(failure("runtime_generation"));}
+        let mut captured=target.clone();
+        if let Some(meta)=state.runtime_state.get("metadata").filter(|meta|meta["key"]==target.key && meta["cano"]["pid"]==target.binding.pid) {captured.metadata=meta.clone();}
+        let lease=queue.lease();let values=patch.clone();let original=captured.clone();
+        let saved=tokio::task::spawn_blocking(move || {let _lease=lease;super::lifecycle::patch_sidecar(&original,&values)}).await.map_err(|_|failure("lifecycle_worker"))??;
+        if saved["updated"]!=true {return Err(failure("lifecycle_sidecar_stale"));}
+        let mut next=target.clone();next.generation=target.generation.checked_add(1).ok_or_else(||failure("runtime_generation"))?;
+        next.metadata=saved["metadata"].clone();next.metadata["lifecycle_pending"]=json!(false);
+        // Plugins e skills escolhidos seguem a conversa nova; sem isso, reabri-la viria com tudo ligado.
+        let (sid,settings)=(next_sid.to_owned(),next.metadata["claude_settings"].clone());
+        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
+            tracing::warn!(key=%target.key,session=%target.name,code,"escolhas da conversa não passaram à conversa nova do /clear");
+        }
+        next.transcript=target.transcript.with_file_name(format!("{next_sid}.jsonl"));
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+        queue.exec(target.generation,&format!("sid-commit:{}:{}:{next_sid}",target.key,target.generation),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"conversation_reset":{"previous":previous,"next":next_sid},"metadata":next.metadata})}).await.map_err(|_|failure("queue_io"))?;
+        entry.handle=EntryHandle::Headless(handle.clone().with_generation(next.generation));
+        entry.generation=next.generation;entry.runtime_target=Some(next.clone());
+        entry.mode_source.binding=crate::interactions::InteractionBinding {key:next.key.clone(),conversation:next_sid.into(),generation:next.generation};entry.mode_source.transcript=next.transcript.clone();
+        self.forget_claude_rate(&crate::interactions::InteractionBinding {key:target.key.clone(),conversation:previous.into(),generation:target.generation})?;
+        Ok(next)
+    }
+    /// Native SID novo, incluindo `/clear` digitado diretamente na TUI; sem tecla nem política Python.
+    pub async fn reconcile_claude(&self,name:&str,key:&str,conversation:&str,generation:u64)->Result<Value,RuntimeError> {
+        let target=match self.entries.lock().await.get(key).filter(|entry|entry.name==name && entry.generation==generation).map(|entry|entry.handle.clone()) {
+            Some(EntryHandle::Terminal {target,..}) if target.binding.conversation==conversation=>target,
+            _=>return Ok(json!({"in_transfer":true})),
+        };
+        // A troca vem do próprio Claude Code: o plugin passa a informar a conversa nova no `/pull` (o `/clear`
+        // encerra a antiga com `session.end`). Sem ele, vale o registro nativo do processo.
+        let binding=crate::terminal_facts::LocalTerminalFacts::binding(&target);
+        let (reported,proved)=match &self.plugin {
+            Some(plugin)=>match (plugin.reported_conversation(&binding),plugin.conversation_proved(&binding)) {
+                (Ok(reported),proved)=>(reported,proved.unwrap_or(false)),
+                (Err(error),_)=>{
+                    if crate::warn_limit::allow(Some(key),error.0) {tracing::warn!(key,session=name,code=error.0,"troca de conversa: sinal do plugin ilegível; vale o registro nativo");}
+                    (None,false)
+                },
+            },
+            None=>(None,false),
+        };
+        // O plugin prova a conversa atual (`/pull` aberto com ela, sem `session.end` depois): nada a reler.
+        if reported.is_none() && proved {return Ok(json!({"changed":false}));}
+        let sid=match &reported {
+            Some(sid)=>sid.clone(),
+            None=>match super::lifecycle::read_native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid)) {
+                Ok(sid)=>sid,
+                // Registro que este Claude Code não grava, ou lido no meio da escrita: o próximo tique relê. Sem o
+                // plugin, é o único sinal de `/clear`: a falha vai ao log, uma vez por sessão e código.
+                Err(error) if error.code=="lifecycle_native_read"=> {
+                    if crate::warn_limit::allow(Some(key),&error.code) {tracing::warn!(key,session=name,code=%error.code,"troca de conversa: registro nativo ilegível e sem prova do plugin");}
+                    return Ok(json!({"changed":false}));
+                },
+                Err(error)=>return Err(error),
+            },
+        };
+        if sid==conversation {return Ok(json!({"changed":false}));}
+        let _ingress=super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?;
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        let current=self.interaction_binding_readonly(name).await?;
+        if !super::lifecycle::matches_life(&current,key,conversation,generation) {return Ok(json!({"in_transfer":true}));}
+        let procs=crate::list::procs::SystemProcs::default();
+        if reported.is_some() {
+            // O plugin é o do processo da sessão: basta ele seguir vivo, com o mesmo nascimento.
+            use crate::list::procs::ProcessView;
+            if procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?.birth!=target.metadata.agent_birth {return Err(failure("lifecycle_process_changed"));}
+        } else {
+            let confirmed=super::lifecycle::native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid),target.metadata.agent_birth,&procs)?;
+            if confirmed!=sid {return Err(failure("lifecycle_native_changed"));}
+        }
+        let pane=super::lifecycle::pane(&crate::terminal_input::ProcessIo::default(),&target.binding).await?;
+        if pane.dead {return Err(failure("lifecycle_native_dead"));}
+        let retained=self.entries.lock().await.get(key).and_then(|entry|entry.relaunch.clone());
+        self.close_locked(key,generation,false).await?;
+        let lease=wait_lease(&target.lease_path).await?;
+        let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,generation,name,vec![])).map_err(|_|failure("queue_io"))?;
+        if store.state().owner_key!=key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
+        let mut next=target.clone();next.generation=generation.checked_add(1).ok_or_else(||failure("runtime_generation"))?;
+        next.binding.generation=next.generation;next.binding.conversation=sid.clone();
+        next.transcript=target.transcript.parent().ok_or_else(||failure("lifecycle_transcript"))?.join(format!("{sid}.jsonl"));
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+        let phase=format!("claude-sid:{key}:{generation}:{sid}");
+        store.exec(generation,&format!("{phase}:prepare"),clock,Action::Prepare {id:phase.clone(),payload:json!({"kind":"claude_sid","conversation":sid,"previous":conversation,"generation":generation}),entry_id:None}).map_err(|_|failure("queue_io"))?;
+        store.exec(generation,&format!("{phase}:clear"),clock,Action::Clear).map_err(|_|failure("queue_io"))?;
+        store.exec(generation,&format!("{phase}:advance"),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"terminal_lifecycle":{"target":super::lifecycle::target_value(&next),"conversation":sid}})}).map_err(|_|failure("queue_io"))?;
+        drop(store);drop(lease);
+        self.open_terminal_locked(next.clone()).await?;
+        if let Some(entry)=self.entries.lock().await.get_mut(key) {entry.relaunch=retained;}
+        self.rebind_claude_hub(&next)?;
+        let _=self.events.send(RuntimeEvent {key:key.into(),generation:next.generation,revision:0,channel:"reset".into(),data:json!({"conversation":sid,"generation":next.generation})});
+        Ok(json!({"changed":true,"conversation":sid,"generation":next.generation}))
+    }
+
+    /// Admitida: a tarefa continua mesmo que o cliente HTTP deixe de esperar.
+    pub async fn reopen_claude(self:Arc<Self>,name:String,key:String,generation:u64,operation_id:String)->Result<Value,RuntimeError> {
+        tokio::spawn(async move {self.reopen_claude_inner(&name,&key,generation,&operation_id,Reopen::Bypass).await}).await.map_err(|_|failure("lifecycle_panic"))?
+    }
+    /// Claude com terminal sem prova da conversa (registro nativo do agente sumiu e o plugin não
+    /// responde): reabre na mesma conversa e no mesmo modo, parado e com mensagem esperando, e a vida
+    /// nova regrava o registro. No máximo uma por `HEAL_BACKOFF` por sessão; cada tentativa vai ao diário.
+    pub async fn heal_claude(self:Arc<Self>,name:String,key:String,generation:u64)->Result<Value,RuntimeError> {
+        {
+            let mut attempts=self.heal_attempts.lock().unwrap_or_else(|e|e.into_inner());
+            let now=std::time::Instant::now();
+            if attempts.get(&key).is_some_and(|at|now.duration_since(*at)<HEAL_BACKOFF) {return Err(failure("heal_backoff"));}
+            attempts.insert(key.clone(),now);
+        }
+        let diag=self.reopen_to.3.clone();
+        tracing::warn!(key,session=%name,code="terminal_heal_started","sessão sem entrega segura: o Claude é reaberto na mesma conversa e modo");
+        diag.report("rust.terminal_heal",&name,"started","sessão sem entrega segura: reabertura na mesma conversa e modo");
+        let id=format!("heal:{key}:{generation}:{}",crate::mods::state::random_hex(8));
+        let (session,owner)=(name.clone(),key.clone());
+        let result=tokio::spawn(async move {self.reopen_claude_inner(&session,&owner,generation,&id,Reopen::Heal).await}).await.map_err(|_|failure("lifecycle_panic")).and_then(|r|r);
+        match &result {
+            Ok(_)=>{
+                tracing::info!(key,session=%name,code="terminal_heal_done","Claude reaberto na mesma conversa; a fila segue na vida nova");
+                diag.report("rust.terminal_heal",&name,"relaunched","Claude reaberto na mesma conversa e modo");
+            },
+            Err(error)=>{
+                tracing::warn!(key,session=%name,code=%error.code,reason=%error.message,"reabertura por entrega sem prova falhou");
+                diag.report("rust.terminal_heal",&name,&error.code,"reabertura por entrega sem prova falhou");
+            },
+        }
+        result
+    }
+    async fn reopen_claude_inner(&self,name:&str,key:&str,generation:u64,id:&str,reopen:Reopen)->Result<Value,RuntimeError> {
+        use crate::list::procs::ProcessView;
+        let _ingress=super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?;
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        let entry={
+            let entries=self.entries.lock().await;
+            entries.get(key).filter(|entry|entry.name==name).map(|entry|entry.handle.clone()).ok_or_else(||failure("runtime_binding"))?
+        };
+        let heal=reopen==Reopen::Heal;
+        let (target,handle)=match entry {
+            EntryHandle::Terminal {target,handle}=>(target,handle),
+            EntryHandle::Headless(_) if !heal=>return self.reopen_headless_locked(name,key,generation,id,Some("bypassPermissions"),false,None,0).await,
+            _=>return Err(failure("lifecycle_provider")),
+        };
+        if target.generation!=generation {
+            if heal || generation.checked_add(1)!=Some(target.generation) {return Err(failure("runtime_generation"));}
+            let previous=handle.control(id.into(),"set_permission_mode".into(),json!({"mode":"bypassPermissions"})).await?;
+            if previous.disposition==Disposition::Accepted && previous.payload["reopened"]==true {return Ok(previous.payload);}
+            return Err(failure("runtime_generation"));
+        }
+        let next_generation=generation.checked_add(1).ok_or_else(||failure("runtime_generation"))?;
+        let (phase,kind,guard)=if heal {(format!("claude-heal:{id}"),"claude_heal","heal_guard")} else {(format!("claude-reopen:{id}"),"claude_reopen","lifecycle_guard")};
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+        handle.lifecycle(format!("{phase}:prepare"),Action::Prepare {id:phase.clone(),payload:json!({"logical_id":id,"kind":kind,"conversation":target.binding.conversation,"generation":generation}),entry_id:None}).await?;
+        handle.control(format!("guard:{id}"),guard.into(),json!({})).await?;
+        let io=crate::terminal_input::ProcessIo::default();
+        let procs=crate::list::procs::SystemProcs::default();
+        let pane=super::lifecycle::pane(&io,&target.binding).await?;
+        if pane.dead || pane.copy {return Err(failure("lifecycle_busy"));}
+        // A cura conserva o modo que o rodapé mostra; rodapé ilegível não reabre num modo inventado.
+        let mode=if heal {super::lifecycle::permission_mode(&io,&target.binding).await?} else {"bypassPermissions".to_owned()};
+        let actual=procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?;
+        let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&actual)?;
+        let mut recipe=super::claude_relaunch::Recipe::capture(&procs,pane.pid,i64::from(target.metadata.agent_pid),target.metadata.agent_birth,&argv_sid,false)?;
+        let directory=target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?;
+        if mode=="bypassPermissions" {recipe.policy_preflight(&target.metadata.config_dir)?;}
+        recipe.preserve_settings(directory)?;
+        let mut launch=recipe.launch(&target.binding.conversation,&mode)?;
+        let choices=super::lifecycle::terminal_choices(&target)?;
+        if let Some(choices)=&choices {recipe.apply_choices(&mut launch,choices.model.as_deref(),choices.effort.as_deref())?;}
+        else {tracing::warn!(key,session=name,code="relaunch_choices_unpublished","modelo/esforço sem sidecar comprovado; conservada a receita viva sem padrão inventado");}
+        let handoff=super::claude_relaunch::Handoff::prepare().map_err(|_|failure("relaunch_ipc"))?;
+        let endpoint=handoff.endpoint().to_owned();
+        let (staged,pid)=super::lifecycle::stage(&io,&target.binding,&endpoint).await?;
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(5);
+        let helper=loop {
+            match procs.recipe(pid) {
+                Ok(recipe) if recipe.executable==std::env::current_exe().map_err(|_|failure("relaunch_binary"))? && recipe.argv.get(1).is_some_and(|a|a==super::claude_relaunch::RELAUNCH_FLAG)=>break recipe,
+                _ if tokio::time::Instant::now()<deadline=>tokio::time::sleep(Duration::from_millis(20)).await,
+                _=>return Err(failure("relaunch_helper_identity")),
+            }
+        };
+        let recipe=Arc::new(recipe);
+        if launch.cgroup.is_some() && helper.cgroup!=launch.cgroup {return Err(failure("relaunch_scope_changed"));}
+        let consumed=handoff.consume(&helper,&procs,&super::claude_relaunch::LaunchRecipe::from(&launch)).await.map_err(|_|failure("relaunch_ipc_consumption"))?;
+        // Ainda sem parar a origem: reconfere ociosidade e toda a receita após criar o destino.
+        handle.control(format!("guard-final:{id}"),guard.into(),json!({})).await?;
+        recipe.verify(&procs)?;
+        if super::lifecycle::terminal_choices(&target)?!=choices {return Err(failure("lifecycle_choices_changed"));}
+        handle.lifecycle(format!("{phase}:dispatch"),Action::BeginDispatch {id:phase.clone(),wire_id:phase.clone(),staged:false}).await?;
+        let original=procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?;
+        self.close_locked(key,generation,false).await?;
+        let lease=wait_lease(&target.lease_path).await?;
+        let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,generation,name,vec![])).map_err(|_|failure("queue_io"))?;
+        if store.state().owner_key!=key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
+        // O Claude novo já subiu no destino: a origem morreu antes, então a limpeza não pode matá-lo.
+        let started=std::sync::atomic::AtomicBool::new(false);
+        let result=async {
+            super::lifecycle::kill_pane(&io,&target.binding,&original,&procs).await?;
+            consumed.start().await.map_err(|_|failure("relaunch_start_unknown"))?;
+            let mut next=target.clone();next.generation=next_generation;
+            next.binding.generation=next.generation;next.binding.pane=staged.clone();
+            // `--resume` de conversa longa demora a mostrar o prompt.
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(60);
+            let local=crate::terminal_facts::LocalTerminalFacts::new(Arc::new(io.clone()),self.plugin.clone(),Some(self.terminal_mode_reader()));
+            let (agent,birth)=loop {
+                if let Ok((agent,birth))=super::lifecycle::launched_agent(&procs,pid,&target.binding.conversation) {
+                    started.store(true,std::sync::atomic::Ordering::Relaxed);
+                    next.metadata.agent_pid=u32::try_from(agent).map_err(|_|failure("lifecycle_process_read"))?;
+                    next.metadata.agent_birth=birth;
+                    if local.check(&next,&next.binding).await.is_ok()
+                        && super::lifecycle::permission_mode(&io,&next.binding).await.is_ok_and(|shown|shown==mode) {break (agent,birth);}
+                }
+                if tokio::time::Instant::now()>=deadline {return Err(failure("relaunch_confirmation"));}
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            next.metadata.agent_pid=u32::try_from(agent).map_err(|_|failure("lifecycle_process_read"))?;next.metadata.agent_birth=birth;
+            recipe.pin_settings(agent,birth)?;
+            next.metadata.legacy_import_after=Some(birth);
+                store.exec(generation,&format!("{phase}:advance"),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"terminal_lifecycle":{"target":super::lifecycle::target_value(&next),"conversation":next.binding.conversation,"permission_mode":mode}})}).map_err(|_|failure("queue_io"))?;
+            let value=if heal {json!({"mode":mode,"reopened":true,"healed":true})}
+                else {json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true})};
+            let reply=RuntimeReply {operation_id:id.into(),disposition:Disposition::Accepted,payload:value.clone()};
+            drop(store);drop(lease);
+            self.open_terminal_locked(next.clone()).await?;
+            self.rebind_claude_hub(&next)?;
+            if let Some(entry)=self.entries.lock().await.get_mut(key) {entry.relaunch=Some(recipe.clone());}
+            let EntryHandle::Terminal {handle,..}=self.entry(key,next.generation).await? else {return Err(failure("lifecycle_provider"));};
+            // A cura não tem pedido do app para fechar: só a fase dela.
+            if !heal {handle.lifecycle(format!("{phase}:finish-root"),Action::Finish {id:id.into(),status:super::queue::Status::Accepted,result:serde_json::to_value(reply).unwrap()}).await?;}
+            handle.lifecycle(format!("{phase}:finish"),Action::Finish {id:phase.clone(),status:super::queue::Status::Accepted,result:value.clone()}).await?;
+            if let Some(memory)=&self.permissions {memory.lock().map_err(|_|failure("permission_store_poisoned"))?.observe(&target.binding.conversation,&mode);}
+            let _=self.events.send(RuntimeEvent {key:key.into(),generation:next.generation,revision:0,channel:"reset".into(),data:json!({"conversation":next.binding.conversation,"generation":next.generation})});
+            Ok(value)
+        }.await;
+        if let Err(error)=&result {
+            // A vida antiga já não está aberta aqui; a falha nunca confirma modo original nem bypass.
+            // Destino com o Claude já de pé fica vivo: é a conversa do usuário e a origem já morreu.
+            let alive=started.load(std::sync::atomic::Ordering::Relaxed);
+            let message=if alive {format!("{} O Claude novo subiu no terminal e ficou aberto, sem dono aqui: confira a sessão.",error.message)} else {error.message.clone()};
+            super::actor::mark_live_error(&self.live_sender(name),&error.code,&message);
+            let mut staged_binding=target.binding.clone();staged_binding.pane=staged;
+            let kept=if alive {
+                tracing::warn!(key,session=name,code=%error.code,reason="destino iniciado mantido vivo; settings privados ficam até a saída do helper","ciclo de vida Claude");
+                true
+            } else if let Err(cleanup)=super::lifecycle::kill_pane(&io,&staged_binding,&helper,&procs).await {
+                tracing::warn!(key,session=name,code=%cleanup.code,reason="destino não confirmado não foi encerrado; settings privados ficam até a saída do helper","ciclo de vida Claude");
+                true
+            } else {false};
+            if kept {
+                let retained=recipe.clone();let helper=helper.clone();
+                tokio::spawn(async move {
+                    let procs=crate::list::procs::SystemProcs::default();
+                    loop {
+                        match super::lifecycle::process_absent(&procs,helper.pid,helper.birth) {
+                            Ok(true)=>break,
+                            Ok(false)=>{},
+                            Err(error)=>if crate::warn_limit::allow(None,&error.code) {tracing::warn!(code=%error.code,"não consegui conferir a saída do auxiliar da reabertura");},
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    drop(retained);
+                });
+            }
+            tracing::warn!(key,session=name,code=%error.code,reason="reabertura não confirmada; nenhum rollback declarado","ciclo de vida Claude");
+        }
+        result
+    }
+
+    async fn reopen_headless_locked(&self,name:&str,key:&str,generation:u64,id:&str,requested:Option<&str>,from_exit:bool,context:Option<Arc<super::lifecycle::HeadlessOperation>>,attempt:u32)->Result<Value,RuntimeError> {
+        use crate::list::procs::ProcessView;
+        if context.as_ref().is_some_and(|ctx|ctx.cancelled.load(std::sync::atomic::Ordering::Acquire)) {return Err(failure("lifecycle_cancelled"));}
+        let (mut target,handle,saved_recipe,recorded_birth,auto_respawn)= {
+            let entries=self.entries.lock().await;
+            if entries.iter().any(|(other,e)|other!=key && e.name==name) {return Err(failure("runtime_binding"));}
+            match entries.get(key) {
+                Some(entry) if entry.name==name && entry.provider=="claude"=> {
+                    let EntryHandle::Headless(handle)=&entry.handle else {return Err(failure("lifecycle_provider"));};
+                    if context.as_ref().is_some_and(|ctx|entry.generation!=ctx.binding.generation || entry.live.borrow().as_ref().and_then(|s|s.binding.as_ref())!=Some(&ctx.binding) || entry.cano_birth!=Some(ctx.birth)) {return Err(failure("runtime_generation"));}
+                    (entry.runtime_target.clone().ok_or_else(||failure("lifecycle_target_unavailable"))?,Some(handle.clone()),entry.relaunch.clone(),entry.cano_birth,entry.auto_respawn)
+                },
+                None=> {
+                    let ctx=context.as_ref().ok_or_else(||failure("runtime_binding"))?;
+                    (ctx.target.clone(),None,Some(ctx.recipe.clone()),Some(ctx.birth),ctx.auto)
+                },
+                _=>return Err(failure("runtime_binding")),
+            }
+        };
+        if target.generation!=generation {
+            if generation.checked_add(1)!=Some(target.generation) {return Err(failure("runtime_generation"));}
+            let reply=handle.as_ref().ok_or_else(||failure("runtime_binding"))?.command(RuntimeCommand {operation_id:id.into(),kind:OperationKind::SetPermissionMode,payload:json!({"mode":"bypassPermissions"})}).await?;
+            return if reply.disposition==Disposition::Accepted && reply.payload["reopened"]==true {Ok(reply.payload)} else {Err(failure("runtime_generation"))};
+        }
+        let view=match &context {Some(ctx)=>ctx.view.clone(),None=>handle.as_ref().ok_or_else(||failure("runtime_binding"))?.view().await?};
+        let selected=requested.or_else(||view["permission_mode"].as_str()).ok_or_else(||failure("permission_mode_unknown"))?.to_owned();
+        if (!from_exit && view["alive"]!=true) || view["in_progress"]==true || !view["question"].is_null() || view["pending"].as_array().is_none_or(|v|!v.is_empty()) {return Err(failure("lifecycle_busy"));}
+        let binding=if let Some(ctx)=&context {ctx.binding.clone()} else {self.interaction_binding_readonly(name).await?};
+        if binding.key!=key || binding.generation!=generation {return Err(failure("runtime_binding"));}
+        let procs=crate::list::procs::SystemProcs::default();
+        let original_birth=recorded_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?;
+        let process=match procs.recipe(i64::from(target.binding.pid)) {
+            Ok(process) if process.birth==original_birth && process::liveness(target.binding.pid,key)==process::Liveness::Ours=>Some(process),
+            Err(error) if from_exit && error.kind()==std::io::ErrorKind::NotFound && super::lifecycle::process_absent(&procs,i64::from(target.binding.pid),original_birth)?=>None,
+            _=>return Err(failure("lifecycle_process_binding")),
+        };
+        if from_exit && process.is_some() && saved_recipe.as_ref().is_some_and(|recipe| {
+            let (pid,birth)=recipe.agent_identity();
+            super::lifecycle::process_absent(&procs,pid,birth).is_ok_and(|gone|!gone)
+        }) {
+            // Caiu a conexão, não a CLI: religa ao mesmo cano em vez de matar o turno vivo.
+            self.close_locked(key,generation,false).await?;
+            target.metadata["session_id"]=json!(binding.conversation);
+            self.open_headless_locked(target.clone(),None,false).await?;
+            if let Some(entry)=self.entries.lock().await.get_mut(key) {
+                entry.auto_respawn=auto_respawn;
+                entry.settings_owner=context.as_ref().map(|ctx|ctx.recipe.clone());
+            }
+            return Ok(json!({"reconnected":true,"generation":generation}));
+        }
+        let original_sid=target.metadata["session_id"].as_str().ok_or_else(||failure("lifecycle_conversation"))?.to_owned();
+        let recipe=if from_exit {saved_recipe.ok_or_else(||failure("relaunch_recipe_missing"))?} else {
+            let (agent,birth)=super::lifecycle::launched_agent(&procs,i64::from(target.binding.pid),&original_sid)?;
+            let mut recipe=super::claude_relaunch::Recipe::capture(&procs,i64::from(target.binding.pid),agent,birth,&original_sid,false)?;
+            if requested==Some("bypassPermissions") && recipe.bypass_enabled()? {return Err(failure("relaunch_bypass_already_enabled"));}
+            let config=recipe.config_dir()?;
+            if target.metadata["config_dir"].as_str().is_some_and(|p|std::path::Path::new(p)!=config) {return Err(failure("lifecycle_config_changed"));}
+            target.metadata["config_dir"]=json!(config);
+            if requested==Some("bypassPermissions") {recipe.policy_preflight(&config)?;}
+            recipe.preserve_settings(target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?)?;
+            Arc::new(recipe)
+        };
+        let mut launch=recipe.launch(&binding.conversation,&selected)?;
+        recipe.apply_choices(&mut launch,view["model"].as_str(),view["effort"].as_str())?;
+        let sidecar_dir=super::lifecycle::claude_sidecar_dir()?;
+        let extra=target.metadata["cano"].as_object().map(|meta|meta.iter().filter(|(k,_)|!matches!(k.as_str(),"pid"|"escuta"|"token"|"ts"|"versao")).map(|(k,v)|(k.clone(),v.clone())).collect()).unwrap_or_default();
+        let prepared={let (key,dir)=(key.to_owned(),sidecar_dir.clone());
+            tokio::task::spawn_blocking(move||process::prepare_recipe(&launch,&key,&dir,extra)).await.map_err(|_|failure("relaunch_recipe"))?}
+            .map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
+        if !from_exit {recipe.verify(&procs)?;}
+        let latest=match &context {Some(ctx)=>ctx.view.clone(),None=>handle.as_ref().ok_or_else(||failure("runtime_binding"))?.view().await?};
+        if (!from_exit && latest["alive"]!=true) || latest["in_progress"]==true || !latest["question"].is_null() || latest["pending"].as_array().is_none_or(|v|!v.is_empty())
+            || latest["conversation"]!=binding.conversation {return Err(failure("lifecycle_busy"));}
+        let phase=format!("claude-reopen:{id}");
+        if let Some(handle)=&handle {
+            if from_exit {handle.queue(format!("restart-root:{id}"),Action::Prepare {id:id.into(),payload:json!({"operation_id":id,"kind":"restart","payload":{}}),entry_id:None}).await?;}
+            handle.queue(format!("{phase}:prepare"),Action::Prepare {id:phase.clone(),payload:json!({"logical_id":id,"kind":"claude_reopen","conversation":binding.conversation,"generation":generation}),entry_id:None}).await?;
+            self.close_locked(key,generation,false).await?;
+        }
+        let lease=wait_lease(&target.lease_path).await?;
+        let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,generation,name,vec![])).map_err(|_|failure("queue_io"))?;
+        let cancelled=context.as_ref().is_some_and(|ctx|ctx.cancelled.load(std::sync::atomic::Ordering::Acquire));
+        let (current_generation,next_generation)=super::lifecycle::retry_fence(&binding,store.state(),id,attempt,cancelled,None)?;
+        let intent=json!({"operation_id":id,"key":key,"conversation":binding.conversation,"from_generation":generation,"target_generation":next_generation});
+        store.exec(current_generation,&format!("{phase}:intent:{attempt}"),ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())},Action::AdvanceLifecycle {generation:current_generation,state:json!({"claude_lifecycle_intent":intent})}).map_err(|_|failure("queue_io"))?;
+        if let Some(meta)=store.state().runtime_state.get("metadata").filter(|meta|meta["key"]==key) {target.metadata=meta.clone();}
+        if target.metadata["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
+        let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
+        let persisted:Value=serde_json::from_slice(&super::queue::read_replaced(&sidecar).map_err(|_|failure("lifecycle_sidecar_read"))?).map_err(|_|failure("lifecycle_sidecar_read"))?;
+        if persisted["key"]!=key || persisted["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
+        let sidecar_expected_pid=if persisted["cano"].is_null() {0} else {persisted["cano"]["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("lifecycle_sidecar_read"))?};
+        if attempt>0 && persisted["cano"]["pid"].as_u64().and_then(|p|u32::try_from(p).ok()).is_some_and(|pid|process::liveness(pid,key)==process::Liveness::Ours) {return Err(failure("relaunch_previous_still_alive"));}
+        let step=format!("{phase}:attempt:{attempt}");
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+        store.exec(current_generation,&format!("{step}:prepare"),clock,Action::Prepare {id:step.clone(),payload:json!({"logical_id":id,"kind":"claude_spawn_attempt","attempt":attempt}),entry_id:None}).map_err(|_|failure("queue_io"))?;
+        store.exec(current_generation,&format!("{step}:dispatch"),clock,Action::BeginDispatch {id:step.clone(),wire_id:step.clone(),staged:false}).map_err(|_|failure("queue_io"))?;
+        if let Some(process)=&process && procs.recipe(process.pid).map_err(|_|failure("lifecycle_process_read"))?!=*process {return Err(failure("lifecycle_process_changed"));}
+        let original=process::Cano {pid:target.binding.pid,escuta:target.binding.escuta.clone(),token:target.binding.token.clone(),ts:original_birth,versao:target.binding.versao,extra:Default::default()};
+        process::kill(&original,key,&sidecar_dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano original não foi encerrado"))?;
+        if context.as_ref().is_some_and(|ctx|ctx.cancelled.load(std::sync::atomic::Ordering::Acquire)) {return Err(failure("lifecycle_cancelled"));}
+        let started=process::spawn_recipe(prepared).await;
+        let cano=match started {
+            Ok(cano)=>cano,
+            Err(error)=> {
+                let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+                let mut failed_target=target.clone();failed_target.binding.pid=sidecar_expected_pid;
+                if super::lifecycle::patch_sidecar(&failed_target,&json!({"cano":null}))?["updated"]!=true {return Err(failure("lifecycle_sidecar_changed"));}
+                store.exec(current_generation,&format!("{step}:failed"),clock,Action::Finish {id:step.clone(),status:super::queue::Status::Unknown,result:json!({"error_code":error.code(),"alive":false})}).map_err(|_|failure("queue_io"))?;
+                let error=RuntimeError::new(error.code(),"a sessão não reabriu e ficou sem processo; nenhum modo foi confirmado");
+                super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);return Err(error);
+            },
+        };
+        recipe.pin_settings(i64::from(cano.pid),cano.extra["process_birth"].as_f64().ok_or_else(||failure("lifecycle_process_birth_missing"))?)?;
+        let mut launched_guard=process::RelaunchGuard::new(&cano,key,&sidecar_dir,recipe.clone());
+        if context.as_ref().is_some_and(|ctx|ctx.cancelled.load(std::sync::atomic::Ordering::Acquire)) {return Err(failure("lifecycle_cancelled"));}
+        if self.entries.lock().await.iter().any(|(other,entry)|entry.name==name && other!=key) {return Err(failure("runtime_binding"));}
+        target.metadata["cano"]=serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
+        target.metadata["permission_mode"]=Value::Null;
+        target.metadata["lifecycle_pending"]=json!(true);
+        target.metadata["initialized"]=json!(false);
+        target.metadata["runtime_counter"]=json!(view["runtime_counter"].as_u64().unwrap_or(0).max(store.state().runtime_state["view"]["runtime_counter"].as_u64().unwrap_or(0)));
+        target.metadata["previous_non_plan"]=view["previous_non_plan"].clone();
+        target.metadata["session_id"]=json!(binding.conversation);
+        target.generation=next_generation;
+        target.binding=CanoBinding {pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao};
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+        store.exec(current_generation,&format!("{step}:advance"),clock,Action::AdvanceLifecycle {generation:target.generation,state:json!({"metadata":target.metadata})}).map_err(|_|failure("queue_io"))?;
+        let mut original_target=target.clone();original_target.generation=generation;original_target.metadata["cano"]=serde_json::to_value(&original).unwrap();
+        original_target.binding=CanoBinding {pid:sidecar_expected_pid,escuta:original.escuta.clone(),token:original.token.clone(),versao:original.versao};
+        if super::lifecycle::patch_sidecar(&original_target,&json!({"cano":serde_json::to_value(&cano).unwrap()}))?["updated"]!=true {return Err(failure("lifecycle_sidecar_changed"));}
+        drop(store);drop(lease);
+        let result=async {
+            self.open_headless_locked(target.clone(),None,false).await?;
+            if let Some(entry)=self.entries.lock().await.get_mut(key) {
+                let fresh=entry.relaunch.as_ref().ok_or_else(||failure("relaunch_recipe_missing"))?;
+                let (pid,birth)=fresh.agent_identity();recipe.pin_settings(pid,birth)?;
+                entry.settings_owner=Some(recipe.clone());entry.auto_respawn=auto_respawn;
+            }
+            let handle=self.entry(key,target.generation).await?;
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
+            loop {
+                let snapshot=handle.snapshot().await?;
+                if !snapshot["error"].is_null() || snapshot["view"]["alive"]==false {return Err(failure("relaunch_initialize"));}
+                if snapshot["view"]["initialized"]==true && snapshot["view"]["conversation"]==binding.conversation {break;}
+                if tokio::time::Instant::now()>=deadline {return Err(failure("relaunch_initialize_timeout"));}
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let confirmed=handle.command(RuntimeCommand {operation_id:format!("boot-confirm:{id}:{attempt}"),kind:OperationKind::SetPermissionMode,payload:json!({"mode":selected})}).await?;
+            if confirmed.disposition!=Disposition::Accepted {return Err(failure("relaunch_permission_unconfirmed"));}
+            let view=handle.view().await?;
+            if view["permission_mode"]!=selected || view["conversation"]!=binding.conversation {return Err(failure("relaunch_permission_unconfirmed"));}
+            let EntryHandle::Headless(actor)=&handle else {return Err(failure("lifecycle_provider"));};
+            actor.lifecycle_ready(crate::interactions::InteractionBinding {key:key.into(),conversation:binding.conversation.clone(),generation:target.generation},format!("boot-confirm:{id}:{attempt}"),selected.clone()).await?;
+            let payload=json!({"mode":selected,"current":selected,"previous_non_plan":view["previous_non_plan"],"reopened":true});
+            handle.queue(format!("{phase}:root-finish"),Action::Finish {id:id.into(),status:super::queue::Status::Accepted,result:serde_json::to_value(RuntimeReply {operation_id:id.into(),disposition:Disposition::Accepted,payload:payload.clone()}).unwrap()}).await?;
+            handle.queue(format!("{phase}:finish"),Action::Finish {id:phase.clone(),status:super::queue::Status::Accepted,result:payload.clone()}).await?;
+            launched_guard.disarm();
+            Ok(payload)
+        }.await;
+        if let Err(error)=&result {
+            let stopped=self.close_locked(key,target.generation,false).await;
+            if let Err(stop)=stopped {tracing::warn!(key,code=%stop.code,"ator do relançamento não foi encerrado");}
+            if let Err(stop)=process::kill(&cano,key,&sidecar_dir).await {tracing::warn!(key,code=stop.code(),"cano não confirmado não foi encerrado");}
+            super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);
+            // Como o Python: o bypass pedido que não pegou (a CLI recusa o `initialize`) volta a conversa ao
+            // modo de antes num processo novo, em vez de deixá-la parada até alguém reabrir à mão.
+            if requested==Some("bypassPermissions") && !from_exit && let Some(previous)=view["permission_mode"].as_str().filter(|mode|*mode!="bypassPermissions") {
+                let context=Arc::new(super::lifecycle::HeadlessOperation {target:target.clone(),
+                    binding:crate::interactions::InteractionBinding {key:key.into(),conversation:binding.conversation.clone(),generation:target.generation},
+                    recipe:recipe.clone(),view:view.clone(),birth:cano.extra["process_birth"].as_f64().unwrap_or(0.0),auto:auto_respawn,
+                    cancelled:Arc::new(std::sync::atomic::AtomicBool::new(false))});
+                let restored=Box::pin(self.reopen_headless_locked(name,key,target.generation,&format!("{id}:restore"),Some(previous),true,Some(context),0)).await;
+                return Err(match restored {
+                    Ok(_)=>RuntimeError::new("erro_permissao_reabrir",&format!("a sessão não reabriu em bypass ({}) e voltou ao modo de antes",error.code)),
+                    Err(restore)=>RuntimeError::new(&error.code,&format!("a sessão não reabriu em bypass e não voltou ao modo de antes ({}); ela ficou sem processo",restore.code)),
+                });
+            }
+        }
+        result
+    }
+
+    /// Callback do Monitor: a ausência só encerra o vínculo que ele estava observando.
+    pub async fn dead(&self,name:&str,key:&str,conversation:&str,generation:u64)->Result<crate::state::facts::Dead,RuntimeError> {
+        use crate::{state::facts::Dead,list::procs::ProcessView};
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        let (terminal,headless,closed)={
+            let entries=self.entries.lock().await;
+            if entries.iter().any(|(other,entry)|entry.name==name && (other!=key || entry.generation!=generation)) {return Ok(Dead::InTransfer);}
+            match entries.get(key) {
+                Some(entry) if entry.name==name && entry.generation==generation=>match &entry.handle {
+                    EntryHandle::Terminal {target,..} if target.binding.conversation==conversation=>(Some(target.clone()),None,None),
+                    EntryHandle::Headless(_) if entry.provider=="claude"=> {
+                        let actual=entry.live.borrow().as_ref().and_then(|state|state.binding.clone()).ok_or_else(||failure("lifecycle_binding_unavailable"))?;
+                        if !super::lifecycle::matches_life(&actual,key,conversation,generation) {return Ok(Dead::InTransfer);}
+                        let target=entry.runtime_target.clone().ok_or_else(||failure("lifecycle_target_unavailable"))?;
+                        let closed=super::lifecycle::ClosedLife {name:name.into(),binding:actual,pid:i64::from(target.binding.pid),birth:entry.cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()};
+                        (None,Some(target),Some(closed))
+                    },
+                    _=>return Ok(Dead::InTransfer),
+                },
+                None=>(None,None,barrier.closed.lock().map_err(|_|failure("lifecycle_closed_record"))?.clone()),
+                _=>return Ok(Dead::InTransfer),
+            }
+        };
+        let _ingress=super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?;
+        let procs=crate::list::procs::SystemProcs::default();
+        if terminal.is_none() {
+            let closed=closed.ok_or_else(||failure("state_lifecycle_binding_missing"))?;
+            if closed.name!=name || !super::lifecycle::matches_life(&closed.binding,key,conversation,generation) {return Ok(Dead::InTransfer);}
+            if !super::lifecycle::process_absent(&procs,closed.pid,closed.birth)? {return Ok(Dead::InTransfer);}
+            let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
+            match super::queue::read_replaced(&sidecar) {
+                Ok(bytes)=> {let _:Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;return Ok(Dead::InTransfer);},
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(_)=>return Err(failure("lifecycle_sidecar_read")),
+            }
+            if headless.is_some() {self.close_locked(key,generation,false).await?;}
+            let lease=wait_lease(&closed.lease_path).await?;
+            let mut store=Store::open(&closed.state_path,&closed.projection,QueueState::new(key,generation,name,vec![])).map_err(|_|failure("queue_io"))?;
+            if store.state().owner_key!=key || store.state().generation!=generation {return Ok(Dead::InTransfer);}
+            let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+            store.exec(generation,&format!("dead-clear:{key}:{generation}"),clock,Action::Clear).map_err(|_|failure("queue_io"))?;
+            if let Some(interactions)=&self.interactions {interactions.forget_binding(&closed.binding).map_err(crate::interactions::runtime_error)?;}
+            self.forget_claude_rate(&closed.binding)?;
+            if let Some(plugin)=&self.plugin {plugin.forget(key).map_err(|error|failure(error.0))?;}
+            drop(store);drop(lease);
+            return Ok(Dead::Ok);
+        }
+        let target=terminal.unwrap();
+        // Tabela lida com sucesso e pid original ausente: erro de captura não equivale a morte.
+        if !super::lifecycle::process_absent(&procs,i64::from(target.metadata.agent_pid),target.metadata.agent_birth)? {return Ok(Dead::InTransfer);}
+        let io=crate::terminal_input::ProcessIo::default();
+        // Pane morto com a sessão do multiplexador de pé (`remain-on-exit`): a fila fica para depois do
+        // `/resume`, como no Python; só a sessão que sumiu leva a fila junto.
+        let gone=match super::lifecycle::pane(&io,&target.binding).await {
+            Ok(pane) if !pane.dead=>return Ok(Dead::InTransfer),
+            Ok(_)=>false,
+            Err(error)=> {
+                // Se a sessão sumiu, a lista do multiplexador deve provar isso; silêncio não prova.
+                use crate::terminal_input::{TerminalIo,CommandRequest};
+                let (program,prefix)=target.binding.mux_argv.split_first().ok_or_else(||failure("lifecycle_mux"))?;
+                let mut args=prefix.to_vec();args.extend(["list-sessions".into(),"-F".into(),"#{session_name}".into()]);
+                let list=io.command(CommandRequest {program:program.clone(),args,stdin:vec![]}).await.map_err(|_|failure("lifecycle_mux"))?;
+                if !list.success {return Err(error);}
+                let text=std::str::from_utf8(&list.stdout).map_err(|_|failure("lifecycle_capture"))?;
+                if text.lines().any(|n|n==name) {return Err(error);}
+                true
+            },
+        };
+        // A chave/geração ficou presa pela barreira; callbacks de A nunca chegam ao Store de B.
+        self.close_locked(key,generation,false).await?;
+        let lease=wait_lease(&target.lease_path).await?;
+        let target=target.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lease=lease;
+            let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(&target.key,target.generation,&target.name,vec![])).map_err(|_|failure("queue_io"))?;
+            if store.state().owner_key!=target.key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
+            let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+            if gone {store.exec(generation,&format!("dead-clear:{key}:{generation}",key=target.key),clock,Action::Clear).map_err(|_|failure("queue_io"))?;}
+            store.exec(generation,&format!("dead-state:{key}:{generation}",key=target.key),clock,Action::AdvanceLifecycle {generation,state:json!({"terminal_lifecycle":{"closed":true,"conversation":target.binding.conversation}})}).map_err(|_|failure("queue_io"))?;
+            Ok::<_,RuntimeError>(())
+        }).await.map_err(|_|failure("lifecycle_worker"))??;
+        Ok(Dead::Ok)
+    }
+
     /// Sessão fora do Rust: o feed mostra a parada (`None`), e o canal sem receptor sai do mapa.
     async fn clear_live(&self,name:&str) {
         // Outra vida com o mesmo nome (reaberta antes deste fechamento) segue dona do canal.
         if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
+        {
+            let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+            // Cópia fora do mapa é o ator de outra vida com o mesmo nome, que nasce antes de entrar em
+            // `entries`: zerar ou tirar o canal dele deixaria o monitor sem status.
+            if let Some(sender)=map.get(name) && sender.sender_count()==1 {
+                let failed=sender.borrow().error.is_some();
+                if !failed {
+                    sender.send_replace(Default::default());
+                    if sender.receiver_count()==0 { map.remove(name); }
+                }
+            }
+        }
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(sender) = map.get(name) {
+        if let Some(sender) = map.get(name) && sender.sender_count() == 1 {
             // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
             // ponytail: o canal com erro de sessão apagada fica no mapa; um por nome, sem crescer.
             if sender.borrow().as_ref().is_some_and(|state|state.error.is_some()) { return; }
@@ -421,8 +1683,8 @@ impl RuntimeRegistry {
             if sender.receiver_count() == 0 { map.remove(name); }
         }
     }
-    async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
-        self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
+    async fn barrier(&self,key:&str) -> Arc<super::lifecycle::Barrier> {
+        self.lifecycle.lock().await.entry(key.into()).or_default().clone()
     }
     /// Chave do ator de entrada terminal da sessão `name` e o retrato dele; `None` sem ator aberto.
     pub async fn terminal_view(&self,name:&str) -> Option<(String,Value)> {
@@ -444,7 +1706,7 @@ impl RuntimeRegistry {
         // Nome repetido é defeito de quem abriu a entrada; a escrita vai para a geração mais nova.
         let (key,generation,provider,handle) = self.entries.lock().await.iter().filter(|(_,e)|e.name==name).max_by_key(|(_,e)|e.generation)
             .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
-        let terminal = matches!(&handle,EntryHandle::Terminal {..});
+        let terminal = handle.has_terminal();
         let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
             Ok(Ok(view))=>healthy(terminal,&view),
             _=>false,
@@ -454,11 +1716,7 @@ impl RuntimeRegistry {
     /// A entrada mais nova do nome é de terminal? Sem retrato: serve a decisão que vem antes da porta.
     pub async fn is_terminal(&self,name:&str) -> bool {
         self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
-            .is_some_and(|e|matches!(e.handle,EntryHandle::Terminal {..}))
-    }
-    /// Sessão do ator de entrada terminal de chave `key`.
-    pub async fn terminal_name(&self,key:&str) -> Option<String> {
-        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), EntryHandle::Headless(_)=>None }
+            .is_some_and(|e|e.handle.has_terminal())
     }
     /// Leitura pura: quem exclui já pode segurar exclusividade.
     pub async fn account_usage(&self, key: &crate::accounts::AccountKey) -> crate::accounts::UsageFacts {
@@ -493,6 +1751,27 @@ impl RuntimeRegistry {
             (key,data)
         });
         futures_util::future::join_all(asks).await.into_iter().collect()
+    }
+    pub async fn list_snapshots_readonly(&self) -> BTreeMap<String,Value> {
+        let entries=self.entries.lock().await;
+        entries.iter().map(|(key,entry)| {
+            let unavailable=||json!({"key":key,"generation":entry.generation,"error":"runtime_live_unavailable"});
+            let data=match &entry.handle {
+                EntryHandle::Terminal {target,..} if target.key==*key && target.generation==entry.generation=>{
+                    match self.terminal_states.as_ref().and_then(|states|states.get(&entry.name,Some(&target.binding.conversation))) {
+                        Some(state)=>json!({"key":key,"generation":entry.generation,"error":state.problema,"view":{"alive":state.state!="dead","conversation":target.binding.conversation,"headless":false,"public_state":&*state}}),
+                        None=>unavailable(),
+                    }
+                },
+                EntryHandle::Terminal {..}=>unavailable(),
+                _=>match entry.live.borrow().clone() {
+                    Some(live) if live.binding.as_ref().is_some_and(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty()) && live.public_state["state"].is_string()=>{
+                        json!({"key":key,"generation":entry.generation,"error":live.error.as_ref().map(|error|&error.0),"view":{"alive":live.public_state["state"]!="dead","conversation":live.binding.as_ref().map(|binding|&binding.conversation),"headless":matches!(entry.handle,EntryHandle::Headless(_)),"public_state":live.public_state}})
+                    },
+                    _=>unavailable(),
+                },
+            };(key.clone(),data)
+        }).collect()
     }
     pub async fn shutdown(&self) -> Result<(),RuntimeError> {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation)).collect();
@@ -588,6 +1867,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         // `held`: fechamento da troca de conversa; a reabertura correspondente leva o mesmo `held`.
         let held = match &command["held"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("ingress_payload"))? };
         let gates = registry.ingress();
+        if closed {registry.cancel_lifecycle_name(name).await;}
         match (closed,held) {
             (true,false)=>gates.close(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
             (true,true)=>gates.hold(name,INGRESS_CLOSE_WAIT).await.map_err(|_|failure("ingress_busy"))?,
@@ -599,17 +1879,28 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     if kind == "open" {
         // `launch`: quem abre pode subir o processo (só sem terminal, e só se o gravado não for nosso).
         let launch = match &command["launch"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("open_launch"))? };
-        return match descriptor(&command["descriptor"],launch)? {
+        let mut value=command["descriptor"].clone();
+        if value["provider"]=="claude" && value["headless"]==false {
+            let parsed:Descriptor=serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
+            let binding=terminal_binding(&parsed)?;
+            let metadata=crate::terminal_facts::TerminalMetadata::resolve(&parsed.meta,&binding,std::path::Path::new(&parsed.jsonl)).await.map_err(|error|failure(error.0))?;
+            value["meta"]["config_dir"]=json!(metadata.config_dir);value["meta"]["agent_pid"]=json!(metadata.agent_pid);
+            value["meta"]["agent_birth"]=json!(metadata.agent_birth);value["meta"]["fingerprint"]=json!(metadata.fingerprint);value["meta"]["message_origin"]=json!(metadata.origin);
+        }
+        return match descriptor(&value,launch)? {
             Target::Headless(target,sidecar_dir) if launch=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
                 registry.open_with_launch(target,sidecar_dir).await
             },
-            // Codex sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora.
-            Target::Headless(target,Some(sidecar_dir)) if target.provider == "codex" && !sidecar_dir.as_os_str().is_empty()=>{
+            // Sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora (o
+            // Claude que cai é religado aqui).
+            Target::Headless(target,Some(sidecar_dir)) if !sidecar_dir.as_os_str().is_empty()=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_managed(target,sidecar_dir).await
             },
+            // Codex sem a pasta do sidecar gravaria o arquivo da sessão pelo Python: recusa.
+            Target::Headless(target,_) if target.provider == "codex"=>Err(failure("launch_sidecar_dir")),
             Target::Headless(target,_)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open(target).await
@@ -632,7 +1923,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
             crate::migration_status::count_private(if matches!(&handle,EntryHandle::Terminal {..}) {"send_terminal"} else {"send_headless"});
             if matches!(&handle,EntryHandle::Terminal {..}) && (command.get("steer").is_some_and(|value|!value.is_boolean())
                 || command.get("pre_transcript").is_some_and(|value|!value.is_boolean())) {return Err(failure("terminal_payload"));}
-            let kind = if command["steer"] == true && matches!(&handle,EntryHandle::Headless(_)) { OperationKind::Steer } else { OperationKind::Input };
+            let kind = if command["steer"] == true && !matches!(&handle,EntryHandle::Terminal {..}) { OperationKind::Steer } else { OperationKind::Input };
             let reply = handle.command(RuntimeCommand { operation_id:envelope.operation_id.clone(),kind,
                 payload:json!({"text":command["text"],"pre_transcript":command["pre_transcript"].as_bool().unwrap_or(false)}) }).await?;
             serde_json::to_value(reply).map_err(|_|failure("reply_json"))
@@ -665,19 +1956,30 @@ struct Descriptor {
     #[serde(default)] sidecar_dir:Option<std::path::PathBuf>,
 }
 
-/// Sem terminal leva a pasta do arquivo da sessão (`sidecar_dir`), que só o `open` com `launch` usa.
+/// Sem terminal leva a pasta do arquivo da sessão (`sidecar_dir`), que só o `open` com `launch` usa. O
+/// Codex com terminal não abre por aqui: quem o adota é a vigia do Rust.
 enum Target {Headless(RuntimeTarget,Option<std::path::PathBuf>),Terminal(super::terminal::TerminalTarget)}
+
+/// Vínculo do pane do Claude com terminal.
+fn terminal_binding(descriptor:&Descriptor) -> Result<crate::terminal_input::TerminalBinding,RuntimeError> {
+    let binding:crate::terminal_input::TerminalBinding=serde_json::from_value(descriptor.meta["terminal"].clone()).map_err(|_|failure("terminal_binding"))?;
+    if binding.generation!=descriptor.generation || binding.name!=descriptor.name || binding.conversation.is_empty() || binding.mux_argv.is_empty()
+        || binding.mux_argv.iter().any(|v|v.contains('\0'))
+        || (!binding.windows && (!binding.pane.starts_with('%') || binding.pane[1..].parse::<u64>().is_err()))
+        || (binding.windows && !binding.pane.starts_with(&format!("={}:",binding.name))) {return Err(failure("terminal_binding"));}
+    Ok(binding)
+}
+
 fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
     if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
     if !descriptor.headless {
-        if descriptor.provider!="claude" || descriptor.meta.get("cano").is_some(){return Err(failure("descriptor_provider"));}
-        let binding:crate::terminal_input::TerminalBinding=serde_json::from_value(descriptor.meta["terminal"].clone()).map_err(|_|failure("terminal_binding"))?;
-        if binding.generation!=descriptor.generation || binding.name!=descriptor.name || binding.conversation.is_empty() || binding.mux_argv.is_empty()
-            || binding.mux_argv.iter().any(|v|v.contains('\0')) || descriptor.jsonl.is_empty()
-            || (!binding.windows && (!binding.pane.starts_with('%') || binding.pane[1..].parse::<u64>().is_err()))
-            || (binding.windows && !binding.pane.starts_with(&format!("={}:",binding.name))) {return Err(failure("terminal_binding"));}
-        return Ok(Target::Terminal(super::terminal::TerminalTarget {key:descriptor.key,generation:descriptor.generation,name:descriptor.name,
+        if descriptor.meta.get("cano").is_some(){return Err(failure("descriptor_provider"));}
+        if descriptor.provider!="claude" {return Err(failure("descriptor_provider"));}
+        let binding = terminal_binding(&descriptor)?;
+        if descriptor.jsonl.is_empty() {return Err(failure("terminal_binding"));}
+        let metadata=crate::terminal_facts::TerminalMetadata::from_descriptor(&descriptor.meta).map_err(|error|failure(error.0))?;
+        return Ok(Target::Terminal(super::terminal::TerminalTarget {metadata,key:descriptor.key,generation:descriptor.generation,name:descriptor.name,
             created:descriptor.meta["created"].as_f64().unwrap_or(binding.created as f64),binding,
             plugin_key:descriptor.meta["plugin_key"].as_str().filter(|key|!key.is_empty()).map(str::to_owned),
             lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into()}));
@@ -720,6 +2022,388 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::queue::acquire_lease;
+
+    /// Executor disputado, como no servidor carregado: cada volta da espera atrasa além dos 50 ms.
+    #[tokio::test]
+    async fn busy_lease_is_refused_after_three_seconds_of_clock_even_on_a_busy_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.lock");
+        let _held = acquire_lease(&path).unwrap();
+        let hog = tokio::spawn(async { loop { std::thread::sleep(Duration::from_millis(50)); tokio::task::yield_now().await; } });
+        let started = std::time::Instant::now();
+        let refused = wait_lease(&path).await;
+        let elapsed = started.elapsed();
+        hog.abort();
+        assert_eq!(refused.unwrap_err().code,"runtime_lease");
+        assert!(elapsed >= Duration::from_secs(3),"recusou antes dos 3 s: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(4500),"a espera passou dos 3 s prometidos: {elapsed:?}");
+    }
+
+    struct SidRecipeProcesses {dir:std::path::PathBuf}
+    impl crate::list::procs::ProcessView for SidRecipeProcesses {
+        fn children(&self,_:Duration)->std::io::Result<Arc<crate::list::procs::ChildrenMap>> {Ok(Arc::new(std::collections::HashMap::from([(42,vec![43])]))) }
+        fn argv(&self,_:i64)->Vec<String> {vec![]}
+        fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(self.dir.clone())}
+        fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+        fn start_time(&self,_:i64)->Option<f64> {Some(1000.0)}
+        fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
+            let argv=match pid {42=>vec!["hangar-cano".into()],43=>vec!["claude".into(),"--session-id".into(),"a".into()],_=>return Err(std::io::ErrorKind::NotFound.into())};
+            Ok(crate::list::procs::ProcessRecipe {pid,birth:1000.0,executable:if pid==42 {"/fixture/hangar-cano".into()} else {"/fixture/claude".into()},cwd:self.dir.clone(),argv,environ:vec![format!("CLAUDE_CONFIG_DIR={}",self.dir.display()).into()],cgroup:None})
+        }
+    }
+    struct OwnSidecar(std::path::PathBuf);
+    impl Drop for OwnSidecar {fn drop(&mut self) {let _=std::fs::remove_file(&self.0);}}
+    /// Parity A3: Claude sem terminal aberto pelo Python com a pasta do sidecar fica administrado: o processo
+    /// que cai é religado pelo Rust (`auto_respawn`), como o adapter antigo fazia.
+    #[tokio::test]
+    async fn claude_headless_opened_with_sidecar_dir_is_managed() {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let dir=tempfile::tempdir().unwrap();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}}
+        });
+        let meta=json!({"key":"key","name":"cl","session_id":"a","headless":true,"initialized":true,"config_dir":dir.path(),"permission_mode":"manual",
+            "cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}});
+        let descriptor=json!({"name":"cl","key":"key","provider":"claude","headless":true,"meta":meta,"jsonl":dir.path().join("a.jsonl"),
+            "projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1,"sidecar_dir":dir.path()});
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})));
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        let envelope=Envelope {protocol:0,instance:"instance".into(),key:"key".into(),generation:1,operation_id:"op".into(),clock:ClockSample {monotonic_s:0.0,epoch_s:0.0},
+            command:json!({"kind":"open","descriptor":descriptor})};
+        dispatch(&registry,&envelope).await.unwrap();
+        assert!(registry.entries.lock().await.get("key").unwrap().auto_respawn.is_some(),"processo que cai fica sem dono");
+        registry.close("key",1).await.unwrap();server.abort();
+    }
+    #[tokio::test]
+    async fn opening_barrier_busy_sid_commit_retries_after_snapshot_and_release() {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        use std::sync::atomic::AtomicUsize;
+        let dir=tempfile::tempdir().unwrap();let name=format!("cx-sid-busy-{}",crate::mods::state::random_hex(8));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();let users=Arc::new(AtomicUsize::new(0));let counted=users.clone();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":json!({"type":"system","subtype":"init","session_id":"b"}).to_string(),"aberto":true,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}
+                let envelope:Value=serde_json::from_str(&line).unwrap();let frame:Value=serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();if frame["type"]=="user" {counted.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+                let ack=json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});socket.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();}
+        });
+        let meta=json!({"key":"key","name":name,"session_id":"a","headless":true,"initialized":true,"config_dir":dir.path(),"permission_mode":"manual","previous_non_plan":"manual","cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}});
+        let sidecar_path=crate::runtime::lifecycle::claude_sidecar_dir().unwrap().join(format!("{name}.json"));std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();assert!(!sidecar_path.exists());std::fs::write(&sidecar_path,serde_json::to_vec(&meta).unwrap()).unwrap();let _sidecar=OwnSidecar(sidecar_path);
+        let target=RuntimeTarget {key:"key".into(),generation:1,name:name.clone(),provider:"claude".into(),metadata:meta,binding:CanoBinding {pid:42,escuta:format!("tcp:{address}"),token:"fixture".into(),versao:2},lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript:dir.path().join("a.jsonl"),created:0.0};std::fs::write(&target.transcript,b"").unwrap();
+        let held_lease=acquire_lease(&target.lease_path).unwrap();let mut initial=QueueState::new("key",1,&name,vec![json!({"id":"a-row","text":"only-a","ts":1.0,"delivered":false})]);initial.runtime_state["view"]=json!({"conversation":"a","initialized":true});Store::open(&target.state_path,&target.projection_dir,initial).unwrap();drop(held_lease);
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})).with_interactions(Arc::default()));let hubs=crate::side::Hubs::default();registry.bind_lifecycle();registry.bind_hubs(hubs.downgrade());
+        let barrier=registry.barrier("key").await;let open_guard=barrier.lock().await;
+        let opened=registry.open_headless_locked(target.clone(),None,false).await.unwrap();assert_eq!(opened["opened"],true);
+        tokio::time::sleep(Duration::from_millis(100)).await;let pending=registry.handle("key",1).await.unwrap().snapshot().await.unwrap();assert!(pending["error"].is_null());assert_eq!(pending["view"]["lifecycle_pending"],true);assert_eq!(users.load(std::sync::atomic::Ordering::Relaxed),0);
+        drop(open_guard);
+        tokio::time::timeout(Duration::from_secs(2),async {loop {if registry.interaction_binding_readonly(&name).await.is_ok_and(|binding|binding.generation==2 && binding.conversation=="b") {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+        // Sem terminal, a medida segue o vínculo avançado (b, geração 2), não o metadado do boot (a).
+        let (now,transcript)=registry.context_transcript(&name).await.unwrap();assert_eq!((now.generation,now.conversation.as_str()),(2,"b"));assert_eq!(transcript,dir.path().join("b.jsonl"));
+        let measure=||crate::plugin::routes::MeasuredContext {used:7,window:200};
+        let stale=crate::interactions::InteractionBinding {key:"key".into(),conversation:"a".into(),generation:1};
+        assert_eq!(crate::plugin::sources::publish_context(&registry,&name,&stale,measure(),||panic!("vida antiga não invalida")).await.unwrap_err().0,"plugin_conversation_mismatch");
+        crate::plugin::sources::publish_context(&registry,&name,&now,measure(),||{}).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.context.json")).unwrap(),r#"{"used":7,"window":200}"#);assert!(!dir.path().join("a.context.json").exists());
+        let current=registry.handle("key",2).await.unwrap();let snapshot=current.snapshot().await.unwrap();assert!(snapshot["error"].is_null());assert_eq!(current.queue("load-b".into(),Action::Load).await.unwrap(),json!([]));assert_eq!(users.load(std::sync::atomic::Ordering::Relaxed),0);
+        registry.close("key",2).await.unwrap();server.abort();
+    }
+
+    struct NoExternalIo;
+    impl crate::terminal_input::TerminalIo for NoExternalIo {
+        fn command<'a>(&'a self,_:crate::terminal_input::CommandRequest)->crate::terminal_input::IoFuture<'a,crate::terminal_input::CommandOutput> {
+            Box::pin(async {Err(crate::terminal_input::IoFailure {code:"fixture_no_external_io",may_have_written:false})})
+        }
+        fn socket<'a>(&'a self,_:&'a crate::terminal_input::NativeMessage,_:Vec<u8>)->crate::terminal_input::IoFuture<'a,crate::terminal_input::WriteOutcome> {
+            Box::pin(async {panic!("callback antigo não escreve no processo")})
+        }
+    }
+    #[tokio::test]
+    async fn dead_callback_a_keeps_b_actor_queue_and_interactions() {
+        use crate::interactions::{InteractionBinding,InteractionStore};
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let interactions=Arc::new(InteractionStore::default());
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()).with_interactions(interactions.clone());
+        let binding=InteractionBinding {key:"B".into(),conversation:"new-sid".into(),generation:7};interactions.bind(&binding).unwrap();
+        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
+            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+        std::fs::write(&target.transcript,b"").unwrap();
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let row=json!({"id":"row-b","text":"only-b","ts":1000.0,"delivered":false,"confirmed":false});
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![row.clone()])).unwrap();
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding:binding.clone(),transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        assert_eq!(registry.dead("same","A","old-sid",1).await.unwrap(),crate::state::facts::Dead::InTransfer);
+        assert!(registry.entries.lock().await.contains_key("B"));
+        assert_eq!(handle.queue("fixture-load".into(),Action::Load).await.unwrap(),json!([row]));
+        assert_eq!(registry.interaction_binding_readonly("same").await.unwrap(),binding);
+        // Medida de contexto: a de A (SID e geração antigos) não toca B; falha de gravação aparece e não invalida a lista.
+        let measure=||crate::plugin::routes::MeasuredContext {used:10,window:100};
+        let invalidated=std::sync::atomic::AtomicUsize::new(0);let count=||{invalidated.fetch_add(1,std::sync::atomic::Ordering::Relaxed);};
+        let old=InteractionBinding {key:"B".into(),conversation:"old-sid".into(),generation:1};
+        assert_eq!(crate::plugin::sources::publish_context(&registry,"same",&old,measure(),count).await.unwrap_err().0,"plugin_conversation_mismatch");
+        let blocked=dir.path().join("new-sid.context.json");std::fs::create_dir_all(blocked.join("keep")).unwrap();
+        assert_eq!(crate::plugin::sources::publish_context(&registry,"same",&binding,measure(),count).await.unwrap_err().0,"plugin_context_write_failed");
+        assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),0);
+        std::fs::remove_dir_all(&blocked).unwrap();
+        crate::plugin::sources::publish_context(&registry,"same",&binding,measure(),count).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&blocked).unwrap(),r#"{"used":10,"window":100}"#);
+        assert!(!dir.path().join("old-sid.context.json").exists());
+        assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),1);
+        // Parity A5: o problema do ator chega à lista pelo último retrato, só o da vida aberta.
+        let snapshot=|generation:u64,data:Value|RuntimeEvent {key:"B".into(),generation,revision:1,channel:"snapshot".into(),data};
+        registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true,"input_stalled":"composer_busy"}})));
+        assert_eq!(registry.terminal_problems().await,BTreeMap::from([("same".to_owned(),"terminal_input_composer_busy".to_owned())]));
+        registry.note_terminal_problem(&snapshot(7,json!({"error":"terminal_delivery_unknown","view":{"terminal":true}})));
+        assert_eq!(registry.terminal_problems().await["same"],"runtime_falhou");
+        registry.note_terminal_problem(&snapshot(7,json!({"error":"terminal_facts","view":{"terminal":true,"input_stalled":"no_safe_delivery"}})));
+        assert_eq!(registry.terminal_problems().await["same"],"terminal_input_no_safe_delivery","a causa, não o erro que ela causa");
+        registry.note_terminal_problem(&snapshot(6,json!({"error":"x","view":{"terminal":true}})));
+        assert!(registry.terminal_problems().await.is_empty(),"retrato de outra vida não vale");
+        registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true}})));
+        assert!(registry.terminal_problems().await.is_empty());
+        handle.stop().await.unwrap();
+    }
+
+    /// Pane parado com o composer vazio; o pane e o agente são este processo. O multiplexador da
+    /// reabertura (`ProcessIo` real com um programa que não existe) falha antes de qualquer efeito.
+    struct IdlePane {working:Arc<std::sync::atomic::AtomicBool>}
+    impl crate::terminal_input::TerminalIo for IdlePane {
+        fn command<'a>(&'a self,r:crate::terminal_input::CommandRequest)->crate::terminal_input::IoFuture<'a,crate::terminal_input::CommandOutput> {
+            Box::pin(async move {
+                let spinner=if self.working.load(std::sync::atomic::Ordering::Acquire) {"✻ Sketching… (3s · esc to interrupt)\n"} else {""};
+                let stdout=match r.args[0].as_str() {
+                    "display-message" if r.args.last().is_some_and(|a|a.starts_with("#{pane_pid}"))=>format!("{}\theal\t%9\t1\n",std::process::id()).into_bytes(),
+                    "display-message"=>b"heal\t%9\t1\n".to_vec(),
+                    "capture-pane"=>format!("{spinner}────────────────────────────────\n❯ \n────────────────────────────────\n").into_bytes(),
+                    _=>vec![],
+                };
+                Ok(crate::terminal_input::CommandOutput {success:true,stdout})
+            })
+        }
+        fn socket<'a>(&'a self,_:&'a crate::terminal_input::NativeMessage,_:Vec<u8>)->crate::terminal_input::IoFuture<'a,crate::terminal_input::WriteOutcome> {
+            Box::pin(async {panic!("a cura não escreve no socket")})
+        }
+    }
+    /// Sem registro nativo e sem plugin, parada e com mensagem esperando: o ator pede a reabertura uma
+    /// vez, e o registro recusa outra antes do intervalo, mesmo que a primeira tenha falhado.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn unproved_idle_session_with_queued_message_asks_one_heal() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));registry.bind_lifecycle();
+        let pid=std::process::id();
+        let target=super::super::terminal::TerminalTarget {key:"H".into(),generation:3,name:"heal".into(),
+            binding:TerminalBinding {name:"heal".into(),pane:"%9".into(),conversation:"sid".into(),generation:3,created:1,mux_argv:vec!["hangar-fixture-no-such-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:pid,agent_birth:crate::terminal_facts::agent_birth(pid).unwrap(),legacy_import_after:Some(1.0),fingerprint:"fixture-heal".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("H.json"),lease_path:dir.path().join("H.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("projects/p/sid.jsonl"),created:1.0,plugin_key:None};
+        std::fs::create_dir_all(target.transcript.parent().unwrap()).unwrap();std::fs::write(&target.transcript,b"").unwrap();
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let row=json!({"id":"row-h","text":"a","ts":1000.0,"delivered":false,"confirmed":false});
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("H",3,"heal",vec![row])).unwrap();
+        let working=Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(IdlePane {working:working.clone()}),tick:Duration::from_millis(10),stall_notice:Duration::from_millis(20),
+            lifecycle:Some(Arc::downgrade(&registry)),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        let binding=InteractionBinding {key:"H".into(),conversation:"sid".into(),generation:3};
+        registry.entries.lock().await.insert("H".into(),Entry {generation:3,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"heal".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("heal"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        // Trabalhando: o aviso sai, a reabertura espera.
+        tokio::time::timeout(Duration::from_secs(10),async {loop {
+            if handle.snapshot().await.unwrap()["view"]["input_stalled"]=="no_safe_delivery" {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("sem prova da conversa, o aviso aparece");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(registry.heal_attempts.lock().unwrap().is_empty(),"nunca com o Claude trabalhando");
+        working.store(false,std::sync::atomic::Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(10),async {loop {
+            if registry.heal_attempts.lock().unwrap().contains_key("H") {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("a sessão parada e sem prova pede a reabertura");
+        assert_eq!(handle.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
+        assert_eq!(registry.clone().heal_claude("heal".into(),"H".into(),3).await.unwrap_err().code,"heal_backoff");
+        handle.stop().await.unwrap();
+    }
+
+    /// Sem entrada aqui, só o `claude` aberto à mão é tratado como "nunca foi do Rust": a abertura que falhou
+    /// e a vida fechada com o processo vivo seguem com o código, sem parecer saudáveis.
+    #[tokio::test]
+    async fn failed_or_closed_rust_session_is_not_hand_opened() {
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        assert!(registry.hand_opened("solta").await);
+        super::super::actor::mark_live_error(&registry.live_sender("falhou"),"cano_exited","o cano caiu ao abrir");
+        assert!(!registry.hand_opened("falhou").await);
+        assert_eq!(registry.runtime_lost("falhou").await.as_deref(),Some("cano_exited"));
+        let dir=tempfile::tempdir().unwrap();
+        let me=i64::from(std::process::id());
+        let birth=crate::terminal_facts::agent_birth(std::process::id()).unwrap();
+        let closed=super::super::lifecycle::ClosedLife {name:"fechada".into(),binding:crate::interactions::InteractionBinding {key:"K".into(),conversation:"c".into(),generation:1},
+            pid:me,birth,state_path:dir.path().join("s"),lease_path:dir.path().join("l"),projection:dir.path().into()};
+        *registry.barrier("K").await.closed.lock().unwrap()=Some(closed.clone());
+        assert_eq!(registry.runtime_lost("fechada").await.as_deref(),Some("runtime_binding"),"processo ainda vivo");
+        *registry.barrier("K").await.closed.lock().unwrap()=Some(super::super::lifecycle::ClosedLife {pid:i64::from(u32::MAX),..closed});
+        assert!(registry.hand_opened("fechada").await,"vida antiga já acabou: o nome volta a ser de quem abrir");
+    }
+
+    /// Parity M7: o Claude Code que não grava `sessions/<pid>.json` (ou o arquivo lido no meio da escrita)
+    /// não deixa a sessão em erro a cada tique: sem sinal de troca, a conversa segue a mesma.
+    #[tokio::test]
+    async fn missing_native_record_is_no_conversation_change() {
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
+            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding:crate::terminal_facts::LocalTerminalFacts::binding(&target),transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        assert_eq!(registry.reconcile_claude("same","B","new-sid",7).await.unwrap(),json!({"changed":false}));
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join("sessions/77.json"),br#"{"pid":77,"sessio"#).unwrap();
+        assert_eq!(registry.reconcile_claude("same","B","new-sid",7).await.unwrap(),json!({"changed":false}),"lido no meio da escrita");
+        handle.stop().await.unwrap();
+    }
+
+    /// Parity M5: a primeira leitura já em `plan` não inventa `manual` como base dos recados; sem a base
+    /// lida, decide o transcript ou o modo de abertura (`session_non_plan_mode`).
+    #[tokio::test]
+    async fn guessed_plan_base_does_not_decide_the_message_class() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let memory=Arc::new(std::sync::Mutex::new(crate::state::permission::PermissionMemory::default()));
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()).with_permissions(memory.clone());
+        let binding=InteractionBinding {key:"B".into(),conversation:"new-sid".into(),generation:7};
+        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
+            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        let read=registry.terminal_mode_reader();
+        memory.lock().unwrap().observe("new-sid","plan");
+        assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed,None,"base suposta não vira `manual`");
+        memory.lock().unwrap().observe("new-sid","bypassPermissions");
+        memory.lock().unwrap().observe("new-sid","plan");
+        assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed.as_deref(),Some("bypassPermissions"));
+        // Decisão M6: a classe do recado sai daqui para o Python; remetente desconhecido cai no alvo.
+        assert_eq!(registry.message_class(Some("ninguem"),"same").await.unwrap(),"bypass");
+        // Alvo sem entrada é erro com código (o Python não recalcula com o Rust de pé).
+        assert_eq!(registry.message_class(None,"fora").await.unwrap_err().code,"runtime_binding");
+        // Sem modo confirmado, o Rust mesmo cai no transcript e na conta, como o Python fazia.
+        *memory.lock().unwrap()=crate::state::permission::PermissionMemory::default();
+        std::fs::write(dir.path().join("settings.json"),r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#).unwrap();
+        assert_eq!(registry.message_class(None,"same").await.unwrap(),"bypass");
+        handle.stop().await.unwrap();
+    }
+
+    /// No encerramento do servidor os hubs caem antes do registro: `shutdown` fecha TODAS as sessões
+    /// Claude mesmo assim. Hubs nunca ligados continuam erro.
+    #[tokio::test]
+    async fn shutdown_after_hubs_dropped_closes_every_claude_entry() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));
+        for (key,name) in [("A","a"),("B","b")] {
+            let binding=InteractionBinding {key:key.into(),conversation:format!("{name}-sid"),generation:1};
+            let target=super::super::terminal::TerminalTarget {key:key.into(),generation:1,name:name.into(),
+                binding:TerminalBinding {name:name.into(),pane:"%1".into(),conversation:binding.conversation.clone(),generation:1,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+                metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:format!("fixture-{name}"),origin:"uds:fixture".into()},
+                state_path:dir.path().join(format!("{key}.json")),lease_path:dir.path().join(format!("{key}.lock")),projection_dir:dir.path().into(),transcript:dir.path().join(format!("{name}.jsonl")),created:1.0,plugin_key:None};
+            std::fs::write(&target.transcript,b"").unwrap();
+            let lease=acquire_lease(&target.lease_path).unwrap();
+            let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,1,name,vec![])).unwrap();
+            let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+            let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+            registry.entries.lock().await.insert(key.into(),Entry {generation:1,handle:EntryHandle::Terminal {target:target.clone(),handle},lease_path:target.lease_path.clone(),name:name.into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+                mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender(name),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        }
+        let never=crate::interactions::InteractionBinding {key:"X".into(),conversation:"x".into(),generation:1};
+        assert_eq!(registry.forget_claude_rate(&never).unwrap_err().code,"lifecycle_hubs_unbound");
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());drop(hubs);
+        registry.shutdown().await.unwrap();
+        assert!(registry.entries.lock().await.is_empty(),"nenhuma sessão ficou sem fechar");
+    }
+
+    #[tokio::test]
+    async fn terminal_status_is_independent_from_global_events_and_cleans_healthy_names() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        let _other = registry.terminal_status("b");
+        let mut receiver = registry.terminal_status("a");
+        let mut global = registry.subscribe();
+        assert_eq!(registry.events.receiver_count(), 1, "o canal por sessão não assina o global");
+        for i in 0..10 {
+            assert!(registry.events.send(RuntimeEvent { key: format!("other-{i}"), generation:1, revision:1, channel:"snapshot".into(), data:json!({"view":{"text":"large unrelated state"}}) }).is_ok());
+        }
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(global.recv().await.unwrap().key, "other-0", "o consumidor Python continua recebendo os eventos");
+        sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("composer_busy".into()), ..Default::default() });
+        assert_eq!(receiver.borrow_and_update().input_stalled.as_deref(), Some("composer_busy"));
+        drop(sender);
+        registry.clear_live("a").await;
+        assert_eq!(*receiver.borrow(), Default::default());
+        drop(receiver);
+        let _new = registry.terminal_status("c");
+        assert!(!registry.terminal_status.lock().unwrap().contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn terminal_status_failed_close_keeps_error_detail_for_reconnection() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        super::super::terminal_status::publish_problem(&sender, "queue_io", "fila indisponível");
+        registry.clear_live("a").await;
+        let receiver = registry.terminal_status("a");
+        assert_eq!(receiver.borrow().error.as_deref(), Some("queue_io"));
+        assert_eq!(receiver.borrow().message.as_deref(), Some("fila indisponível"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_status_concurrent_updates_stay_with_their_ten_sessions() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let barrier = Arc::new(tokio::sync::Barrier::new(10));
+        let mut receivers = Vec::new();
+        let mut publishers = tokio::task::JoinSet::new();
+        for i in 0..10 {
+            let name = format!("session-{i}");
+            let sender = registry.terminal_status_sender(&name);
+            receivers.push((name.clone(), registry.terminal_status(&name)));
+            let barrier = barrier.clone();
+            publishers.spawn(async move {
+                barrier.wait().await;
+                sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some(name), ..Default::default() });
+            });
+        }
+        while let Some(result) = publishers.join_next().await { result.unwrap(); }
+        for (name, mut receiver) in receivers {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert_eq!(receiver.borrow().input_stalled.as_deref(), Some(name.as_str()));
+        }
+        assert_eq!(registry.events.receiver_count(), 0);
+    }
 
     #[test]
     fn healthy_follows_python_rust_failed() {
@@ -745,6 +2429,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_terminal_never_opens_over_the_gateway() {
+        // Quem adota o Codex com terminal é a vigia do Rust: o descritor do Python é recusado, com ou sem `cano`.
+        let value = json!({"name":"cx-proof","key":"codex-key","provider":"codex","headless":false,
+            "meta":{"key":"codex-key","thread_id":"thread-1","endpoint":"ws://127.0.0.1:43210","app_pid":12345,"cano":null,
+                "terminal":{"name":"cx-proof","pane":"%7","conversation":"thread-1","generation":1,"created":1,"mux_argv":["tmux"],"windows":false,"clipboard_lock_path":null}},
+            "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1});
+        for launch in [false,true] { assert_eq!(descriptor(&value,launch).err().map(|e|e.code).as_deref(),Some("descriptor_provider")); }
+        let mut without = value;
+        without["meta"].as_object_mut().unwrap().remove("cano");
+        assert_eq!(descriptor(&without,false).err().map(|e|e.code).as_deref(),Some("descriptor_provider"));
+    }
+
+    #[test]
+    fn closing_an_old_life_does_not_unmark_the_live_owner_of_the_same_name() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        registry.mark_codex_owner("cx","old-key",1,true);
+        registry.mark_codex_owner("cx","new-key",1,true);
+        registry.mark_codex_owner("cx","old-key",1,false);
+        assert!(registry.owns_codex_terminal("cx"),"a vida nova segue dona do estado");
+        registry.mark_codex_owner("cx","new-key",2,false);
+        assert!(registry.owns_codex_terminal("cx"),"outra geração da mesma chave também não desmarca");
+        registry.mark_codex_owner("cx","new-key",1,false);
+        assert!(!registry.owns_codex_terminal("cx"));
+    }
+
+    #[test]
     fn launch_accepts_a_session_without_cano() {
         let value = json!({"name":"session","key":"key","provider":"codex","headless":true,"meta":{"key":"key","cano":null},
             "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1,"sidecar_dir":"dir"});
@@ -752,6 +2462,33 @@ mod tests {
         let Ok(Target::Headless(target,sidecar_dir)) = descriptor(&value,true) else { panic!("subida sem cano gravado") };
         assert_eq!((target.binding.pid,target.binding.versao),(0,2));
         assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
+    }
+
+    /// O Python desta política não atende (porta fechada, repetição curta): o Codex grava o arquivo da
+    /// sessão e monta o comando sem ele; o Claude continua indo ao Python.
+    #[tokio::test]
+    async fn codex_launch_policies_never_reach_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into())
+            .with_ready_retry(Duration::from_millis(1),Duration::from_millis(5))
+            .with_codex_environment(crate::accounts::environment::AccountEnvironment::from_map(
+                [("HOME".to_owned(),dir.path().to_string_lossy().into_owned()),("PATH".to_owned(),dir.path().join("bin").to_string_lossy().into_owned())].into()));
+        std::fs::write(super::super::codex_sidecar::path(dir.path(),"cx"),json!({"name":"cx","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
+        std::fs::write(dir.path().join("q.json"),json!({"runtime_state":{"view":{"model":"m"}}}).to_string()).unwrap();
+        let mut target = RuntimeTarget { key:"k".into(),generation:1,name:"cx".into(),provider:"codex".into(),
+            metadata:json!({"name":"cx","key":"k","headless":true,"cwd":dir.path()}),
+            binding:CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 },
+            lease_path:dir.path().join("q.lock"),state_path:dir.path().join("q.json"),projection_dir:dir.path().join("projection"),
+            transcript:dir.path().join("rollout.jsonl"),created:0.0 };
+        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
+        // Sem `codex` no PATH injetado a subida falha no processo, nunca numa política do Python.
+        let failed = launch_if_needed(&policy,&mut target,dir.path()).await.err().expect("a subida sem codex precisa falhar");
+        assert!(!failed.code.starts_with("policy_"),"{}",failed.code);
+        let claude = RuntimeTarget { provider:"claude".into(),..target };
+        assert!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap_err().code.starts_with("policy_"),
+            "o Claude segue pelo Python");
     }
 
     #[test]
@@ -799,6 +2536,43 @@ mod tests {
         registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
         registry.clear_live("a").await;
         assert!(rx.borrow().is_none(),"vida que acabou bem: o canal esvazia");
+    }
+
+    #[tokio::test]
+    async fn close_leaves_the_channels_of_a_new_life_with_the_same_name() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        // A vida nova já pegou os canais e escreveu, mas ainda não entrou em `entries`.
+        let status = registry.terminal_status_sender("a");
+        status.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("delivery_unproved".into()),..Default::default() });
+        let live = registry.live_sender("a");
+        live.send_replace(Some(Arc::new(LiveState::default())));
+        registry.clear_live("a").await;
+        assert_eq!(registry.terminal_status("a").borrow().input_stalled.as_deref(),Some("delivery_unproved"));
+        assert!(registry.live("a").borrow().is_some(),"o canal da vida nova segue com o valor dela");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribing_readers_do_not_prevent_closed_channels_from_clearing() {
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));
+        let status = registry.terminal_status("a");
+        let live = registry.live("a");
+        let reader_registry = registry.clone();
+        let readers = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let _status = reader_registry.terminal_status("a");
+                let _live = reader_registry.live("a");
+            }
+        });
+        for _ in 0..1_000 {
+            registry.terminal_status_sender("a").send_replace(super::super::terminal_status::TerminalStatus {
+                input_stalled:Some("composer_busy".into()),..Default::default()
+            });
+            registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
+            registry.clear_live("a").await;
+            assert_eq!(*status.borrow(), Default::default(),"assinar não conserva o bloqueio encerrado");
+            assert!(live.borrow().is_none(),"assinar não conserva a vida encerrada");
+        }
+        readers.join().unwrap();
     }
 
     #[tokio::test]

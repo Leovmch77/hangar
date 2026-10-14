@@ -124,8 +124,8 @@ impl Process {
         self.child.take();
         self.tree.take();
         self.stderr.abort();
-        self.directory.take();
         self.account_guard.take();
+        release(self.directory.take());
         status
     }
 }
@@ -141,8 +141,8 @@ impl Drop for Process {
                 runtime.spawn(async move {
                     crate::terminal_process::finish(&mut tree).await;
                     let _ = child.wait().await;
-                    drop(directory);
                     drop(account_guard);
+                    release(directory);
                 });
             }
         }
@@ -174,5 +174,63 @@ pub async fn limited_output_guarded(
         // Saída vazia com sucesso não é resposta; nenhum chamador tem o que interpretar.
         Ok(bytes) if bytes.is_empty() => Err("dictation_organization_failed"),
         outcome => outcome,
+    }
+}
+/// No Windows o Job zera antes de quem saiu fechar seus handles, a pasta corrente entre eles; o
+/// `TempDir` desiste calado na primeira recusa e largava a pasta para trás. Roda à parte: a resposta
+/// e a guarda da conta não esperam a pasta sair.
+fn release(directory: Option<tempfile::TempDir>) {
+    let Some(directory) = directory else { return };
+    let path = directory.keep();
+    let remove = move || {
+        let started = std::time::Instant::now();
+        loop {
+            let error = match std::fs::remove_dir_all(&path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => error,
+            };
+            if started.elapsed() >= Duration::from_secs(5) {
+                if crate::warn_limit::allow(None, "dictation_directory_kept") {
+                    tracing::warn!(code = "dictation_directory_kept", io_kind = ?error.kind(), os_error = ?error.raw_os_error(),
+                        reason = "pasta temporária do ditado ainda em uso; ficou para trás");
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+        Err(_) => remove(),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::os::windows::fs::OpenOptionsExt;
+    #[tokio::test]
+    async fn directory_still_held_by_an_exiting_process_is_removed_once_released() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_owned();
+        // Handle sem FILE_SHARE_DELETE, como a pasta corrente de um descendente que ainda encerra.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .custom_flags(0x0200_0000)
+            .open(&path)
+            .unwrap();
+        let (released, wait) = tokio::sync::oneshot::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _ = wait.blocking_recv();
+            drop(held);
+        });
+        super::release(Some(directory));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        released.send(()).unwrap();
+        holder.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while path.exists() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.expect("a pasta ficou para trás depois de liberada");
     }
 }

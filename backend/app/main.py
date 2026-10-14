@@ -171,6 +171,13 @@ def main():
     migracao_sidecars.migrar(_state_dirs)
     orq_politica.migrar()
     # Uma configuração do Jev: a chave antiga do Computer Use vira a dela e o MCP recebe endereço e modelo.
+    # Modelo auxiliar único ANTES do repasse ao MCP: o `sync_jev` reescreve o `LLM_*` com o auxiliar, e
+    # o legado precisa ter sido lido do MCP antes disso.
+    try:
+        from app import runtime_config
+        runtime_config.migrar_jev_aux()
+    except Exception as e:                            # noqa: BLE001 — nunca derruba a subida
+        print(f"[hangar] AVISO: o modelo auxiliar antigo não virou o do Jev ({e})")
     try:
         from app import computer_control
         computer_control.migrate_jev()

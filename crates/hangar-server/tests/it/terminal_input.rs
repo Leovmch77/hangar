@@ -3,10 +3,11 @@ use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
 fn screen(s: &str) -> String { format!("history\n{}\n❯ {s}\n{}\n⏵⏵ bypass permissions\n\n", "─".repeat(30), "─".repeat(30)) }
 fn binding() -> TerminalBinding { TerminalBinding { name: "test".into(), pane: "%7".into(), conversation: "uuid".into(), generation: 1, created: 17, mux_argv: vec!["fake".into(), "-L".into(), "isolated".into()], windows: false, clipboard_lock_path: None } }
 struct Services { facts: Mutex<InputFacts>, reply: Mutex<PluginReply>, published: Mutex<Vec<PluginRequest>> }
-impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding: binding(), ready: true, idle: true, open_question: false, plugin_live: false, plugin_user: false,clipboard_available:true, native: None }), reply: Mutex::new(PluginReply::Unavailable), published: Mutex::new(vec![]) } } }
+impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding: binding(), ready: true, idle: true, open_question: false, plugin_live: false, plugin_user: false,clipboard_available:true, native: None, screen: None }), reply: Mutex::new(PluginReply::Unavailable), published: Mutex::new(vec![]) } } }
 impl TerminalServices for Services {
  fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Ok(self.facts.lock().unwrap().clone()) }) }
  fn publish<'a>(&'a self, _: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { self.published.lock().unwrap().push(r); Ok(self.reply.lock().unwrap().clone()) }) }
+ fn permission_guard<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
 struct FakeIo { screens: Mutex<VecDeque<String>>, calls: Mutex<Vec<CommandRequest>>, socket: Mutex<WriteOutcome>, envelope: Mutex<Vec<u8>>, fail: Mutex<Option<String>>, formats: Mutex<String>, clients: Mutex<String>, attached: Mutex<String> }
 impl FakeIo {
@@ -102,6 +103,36 @@ async fn terminal_input_partial_cleanup_only_owned_without_internal_retry() {
  let io=Arc::new(FakeIo::new(vec![screen(""),screen("foreign message")]));*io.fail.lock().unwrap()=Some("long original message".into());
  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);
 }
+/// Fatos da conversa que somem depois da escrita (o `/pull` do plugin trocando, o transcript fechado):
+/// o texto é nosso e o pane é o mesmo, então ele sai do composer e a entrega adia, sem Enter nem trava.
+struct LostFacts { inner: Services, io: Arc<FakeIo>, allowed: usize, seen: Mutex<usize> }
+impl TerminalServices for LostFacts {
+ fn facts<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async move {
+  if self.io.writes().iter().any(|w| w.args.contains(&"-l".into())) {
+   let mut seen = self.seen.lock().unwrap(); *seen += 1;
+   if *seen > self.allowed { return Err(ServiceError("terminal_conversation_unavailable")); }
+  }
+  self.inner.facts(b).await
+ }) }
+ fn publish<'a>(&'a self, b: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { self.inner.publish(b, r) }
+ fn permission_guard<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, ()> { self.inner.permission_guard(b) }
+ fn life_check<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+}
+#[tokio::test]
+async fn terminal_input_facts_lost_after_write_clean_own_text_and_defer() {
+ // 0: a prova da tela já não tem fatos; 1: a prova passa e o Enter não tem.
+ for allowed in [0, 1] {
+  // Uma tela por captura: antes, a prova (só com fatos), a limpeza e depois do C-u.
+  let mut screens=vec![screen(""),screen("long original message")];if allowed==1 {screens.push(screen("long original message"));}screens.push(screen(""));
+  let io=Arc::new(FakeIo::new(screens));
+  let s=Arc::new(LostFacts {inner:Services::new(),io:io.clone(),allowed,seen:Mutex::new(0)});
+  let limits=InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3};
+  let r=TerminalDriver::new(binding(),s,io.clone(),limits).prompt("long original message","id").await;
+  assert_eq!((r.disposition,r.cleanup),(Disposition::Deferred,Cleanup::Proved),"allowed={allowed}: {r:?}");
+  assert_eq!(io.writes().last().unwrap().args.last().unwrap(),"C-u","allowed={allowed}");
+  assert!(io.writes().iter().all(|w|w.args.last().is_none_or(|a|a!="\r")),"sem fatos o Enter não sai");
+ }
+}
 #[tokio::test]
 async fn terminal_input_socket_partial_never_falls_back() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().native=Some(NativeMessage {socket:"/private/socket".into(),origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())});*io.socket.lock().unwrap()=WriteOutcome::Unknown;
@@ -113,7 +144,7 @@ async fn terminal_input_socket_partial_never_falls_back() {
 #[tokio::test]
 async fn terminal_input_allowlists_explicit_steer() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let d=driver(io.clone(),Arc::new(Services::new()));
- assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);assert_eq!(d.steer().await.disposition,Disposition::Deferred);assert_eq!(io.writes().len(),2);
+ assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);let steer=d.steer().await;assert_eq!((steer.disposition,steer.code.as_str()),(Disposition::Deferred,"no_queued_input"),"sem a marca não há prova de consumo");assert_eq!(io.writes().len(),2);
 }
 #[tokio::test]
 async fn terminal_input_select_closed_loop() {
@@ -164,6 +195,114 @@ fn terminal_input_review_matches_per_question_not_cross_question_substrings() {
  let a=vec![option_answer(0,"first"),option_answer(1,"second")];
  assert!(review_matches("Review\n→ first\n→ second",&a));assert!(!review_matches("Review\n→ second\n→ first",&a));assert!(!review_matches("Review\n→ firstly\n→ second",&a));
 }
+#[test]
+fn terminal_input_review_ignores_free_text_and_arrows_in_the_history() {
+ // Como o Python: só os rótulos de opção se conferem; texto livre com vírgula ou quebra não segura o envio.
+ let text=QuestionAnswer {kind:AnswerKind::Text,question_id:None,indices:vec![],labels:vec![],multi:false,value:Some("sim, pode".into()),type_index:Some(2),chat_index:None};
+ let a=vec![option_answer(0,"first"),text];
+ assert!(review_matches("Review\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
+ assert!(review_matches("● passo → feito\nReview\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
+ assert!(!review_matches("Review\n→ outra\n→ sim, pode\n❯ 1. Submit answers",&a));
+ // O texto livre é conferido pelo começo que a linha mostra: outro texto não passa.
+ assert!(!review_matches("Review\n→ first\n→ não\n❯ 1. Submit answers",&a));
+ let long=QuestionAnswer {kind:AnswerKind::Text,question_id:None,indices:vec![],labels:vec![],multi:false,value:Some("uma resposta que quebra em duas linhas".into()),type_index:Some(2),chat_index:None};
+ assert!(review_matches("Review\n→ first\n→ uma resposta que quebra\n  em duas linhas\n❯ 1. Submit answers",&[option_answer(0,"first"),long]));
+}
+#[tokio::test]
+async fn terminal_input_answer_reaches_a_picker_whose_footer_the_task_list_pushed_up() {
+ let pane=include_str!("../../../../backend/tests/fixtures/pane_askuserquestion.txt").to_string();
+ let io=Arc::new(FakeIo::new(vec![pane,screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(0,"Opção Alpha")]).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"answered"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["\r"]);
+}
+#[tokio::test]
+async fn terminal_input_owner_controls_only_check_the_pane() {
+ // Claude caído e o pane de volta ao shell: os fatos da sessão falham, mas Parar e o espelho digitam.
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().binding.conversation="other".into();
+ assert_ne!(driver(io.clone(),s.clone()).key("Escape",false).await.disposition,Disposition::Accepted,"a entrega comum segue a guarda inteira");
+ let d=driver(io.clone(),s).controls();
+ assert_eq!(d.key("Escape",false).await.disposition,Disposition::Accepted);
+ assert_eq!(d.text("claude -c").await.disposition,Disposition::Accepted);
+ assert_eq!(d.interrupt(false).await.disposition,Disposition::Accepted);
+}
+/// Telas reais do Claude Code 2.1.296 com um subagente vendo o composer (`Message @general-purpose…`).
+const SUB_COMPOSER: &str = include_str!("../fixtures/subagent/sub_composer.ansi");
+#[tokio::test]
+async fn terminal_input_composer_of_a_subagent_goes_back_to_main_before_typing() {
+ let at=|name:&str|std::fs::read_to_string(format!("{}/tests/fixtures/subagent/{name}.ansi",env!("CARGO_MANIFEST_DIR"))).unwrap();
+ let io=Arc::new(FakeIo::new(vec![at("sub_composer"),at("sub_composer"),at("sub_pill"),at("sub_main_cursor"),at("main_view_focus"),at("main_composer2"),screen("hello"),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["Down","Down","\r","Escape","hello","\r"]);
+ // O foco já voltou ao composer depois do Enter no `main`: sem Esc, que ali interromperia o turno.
+ let io=Arc::new(FakeIo::new(vec![at("sub_composer"),at("sub_composer"),at("sub_pill"),at("sub_main_cursor"),at("main_composer2"),at("main_composer2"),screen("hello"),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ assert_eq!(keys(&io),["Down","Down","\r","hello","\r"]);
+}
+#[tokio::test]
+async fn terminal_input_subagent_composer_with_a_draft_defers_without_typing() {
+ let draft=SUB_COMPOSER.replace("\u{1b}[2mMessage @general-purpose…\u{1b}[0m","rascunho do dono");
+ assert!(draft.contains("rascunho do dono"));
+ let io=Arc::new(FakeIo::new(vec![draft]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Deferred,"composer_targets_subagent"));
+ assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_multiline_term_input_is_pasted_as_a_block_without_enter() {
+ // Decisão do dono: várias linhas no espelho vão coladas em bloco; nada roda até ele apertar Enter.
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).controls().text("ls\necho fim").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"text_written"));
+ let calls=io.calls.lock().unwrap();
+ assert_eq!(calls.iter().find(|c|c.args.contains(&"load-buffer".into())).unwrap().stdin,b"ls\necho fim");
+ assert!(calls.iter().any(|c|c.args.contains(&"paste-buffer".into()) && c.args.contains(&"-p".into())));
+ assert!(!calls.iter().any(|c|c.args.contains(&"send-keys".into())),"nenhuma tecla, nem Enter");
+}
+#[tokio::test]
+async fn terminal_input_plugin_question_by_keys_checks_every_step() {
+ use hangar_server::interactions::{ExpectedInteraction,InteractionBinding,InteractionKind,plugin_target};
+ let questions=serde_json::json!([{"question":"Cor?","header":"C","options":[{"label":"Azul"},{"label":"Verde"}]},{"question":"Pasta?","header":"P","options":[{"label":"A"},{"label":"B"}]}]);
+ let expected=ExpectedInteraction {binding:InteractionBinding {key:"k".into(),conversation:"uuid".into(),generation:1},target:plugin_target(InteractionKind::Question,"ask:x"),
+  interaction_id:"id".into(),semantic:serde_json::json!({"questions":questions}),source_revision:None};
+ let step=|q:&str,a:&str,b:&str|format!("{q}\n❯ 1. {a}\n  2. {b}\n  3. Type something.\nEnter to select · ↑/↓ to navigate · Esc to cancel");
+ // A etapa 2 que aparece é de outra pergunta: nenhuma tecla vai para ela.
+ let io=Arc::new(FakeIo::new(vec![step("Cor?","Azul","Verde"),step("Cor?","Azul","Verde"),step("Outra?","X","Y")]));
+ let answers=vec![option_answer(0,"Azul"),option_answer(0,"A")];
+ let r=driver(io.clone(),Arc::new(Services::new())).plugin_ask_keys(&expected,&answers).await;
+ assert_eq!(r.code,"erro_interacao_desatualizada");assert_eq!(keys(&io),["\r"]);
+ // Rótulo que não é o da opção do plugin: recusa antes da tecla.
+ let io=Arc::new(FakeIo::new(vec![step("Cor?","Azul","Verde")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).plugin_ask_keys(&expected,&[option_answer(0,"Verde"),option_answer(0,"A")]).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_desatualizada"));assert!(keys(&io).is_empty());
+}
+#[tokio::test]
+async fn terminal_input_select_outcomes_follow_the_python() {
+ let p=|row:usize|format!("Question\n{}\nEsc to cancel · to navigate",if row==1{"❯ 1. first\n  2. second"}else{"  1. first\n❯ 2. second"});
+ // Cursor que não chega: só setas saíram, a opção não foi enviada (recusa, não incerta).
+ let io=Arc::new(FakeIo::new(vec![p(1)]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(2,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"cursor_drift"));assert!(!keys(&io).contains(&"\r".to_string()));
+ // TUI lenta: a primeira leitura depois do Enter ainda mostra o picker, a seguinte não.
+ let io=Arc::new(FakeIo::new(vec![p(1),p(1),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selected"));
+ // Múltipla escolha cuja marca não mudou depois das releituras: incerta com o código, nunca sucesso.
+ let multi="Quais?\n❯ 1. [ ] A\n  2. [ ] B\nEsc to cancel · to navigate".to_string();
+ let io=Arc::new(FakeIo::new(vec![multi]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"selection_unchanged"));assert_eq!(keys(&io),["Space"]);
+}
+#[tokio::test]
+async fn terminal_input_checkbox_in_the_history_is_not_a_multiple_choice() {
+ let p=|row:usize|format!("● Plano\n  - [ ] tarefa um\n  - [x] tarefa dois\nPermitir?\n{}\nEsc to cancel · to navigate",if row==1{"❯ 1. Yes\n  2. No"}else{"  1. Yes\n❯ 2. No"});
+ let io=Arc::new(FakeIo::new(vec![p(1),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selected"));
+ assert_eq!(io.writes()[0].args.last().unwrap(),"\r");
+}
 #[tokio::test]
 async fn terminal_input_answer_single_and_review_mismatch_never_extra_enter() {
  let io=Arc::new(FakeIo::new(vec![picker(),screen("")]));
@@ -175,7 +314,8 @@ async fn terminal_input_answer_single_and_review_mismatch_never_extra_enter() {
 async fn terminal_input_submit_selected_needs_submit_tab() {
  let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
  let io=Arc::new(FakeIo::new(vec![multi.into(),multi.into()]));
- assert_eq!(driver(io.clone(),Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Right");
+ // Sem a aba de envio o Enter não sai: só o `Right` foi, nada enviado (recusa, como o Python).
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Rejected);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Right");
 }
 #[tokio::test]
 async fn terminal_input_interrupt_clear_checks_nonempty_to_avoid_rewind() {
@@ -190,10 +330,15 @@ async fn terminal_input_stale_after_wait_prevents_late_effect() {
  assert_eq!(task.await.unwrap().disposition,Disposition::Deferred);assert!(io.writes().is_empty());
 }
 #[tokio::test]
-async fn terminal_input_no_second_enter_for_plain_slash_residual() {
+async fn terminal_input_parked_slash_command_gets_one_more_enter() {
+ // Como o Python: o mesmo comando parado no composer ganha outro Enter, com ou sem dica de menu.
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("/clear"),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await.disposition,Disposition::Accepted);
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["/clear","\r","\r"]);
+ // Nunca um terceiro: comando que segue parado fica incerto.
  let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("/clear")]));
  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await.disposition,Disposition::Unknown);
- assert_eq!(io.writes().len(),2);
+ assert_eq!(io.writes().len(),3);
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -290,6 +435,40 @@ async fn terminal_input_submit_selected_requires_final_proof() {
  assert_eq!(driver(io,Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);
 }
 #[tokio::test]
+async fn terminal_input_guarded_submit_of_menu_without_sidecar_concludes_and_stale_menu_is_refused() {
+ use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, InteractionTarget};
+ let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
+ let other="Outra\n❯ 1. [ ] x\n  2. [ ] y\nEsc to cancel · to navigate";
+ let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
+ let tmp=tempfile::tempdir().unwrap();let jsonl=tmp.path().join("projects/p/uuid.jsonl");
+ let menu=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
+ // Identidade como o `observe_menu` publica: sem sidecar, sem revisão.
+ let observed=|generation:u64,pane:&str| {
+  let store=Arc::new(InteractionStore::default());let life=InteractionBinding {key:"k".into(),conversation:"uuid".into(),generation};
+  store.bind(&life).unwrap();let id=store.observe(&life,&menu,Some(interaction_semantic(pane,None).unwrap())).unwrap().unwrap();
+  let expected=store.expected(&life,Some(&id)).unwrap();(store,expected)
+ };
+ let run=|store:Arc<InteractionStore>,screens:Vec<String>| {let io=Arc::new(FakeIo::new(screens));(io.clone(),driver(io,Arc::new(Services::new())).with_interactions(store).with_interaction_source(jsonl.clone()))};
+ let (store,expected)=observed(1,multi);
+ // A conferência final de cada tecla relê a tela: o menu antes do `Right`, a aba de envio antes do Enter.
+ let (io,d)=run(store,vec![multi.into(),multi.into(),multi.into(),review.into(),review.into(),screen("")]);
+ let r=d.guarded_submit_selected(&expected).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"control_submitted"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().as_str()).collect::<Vec<_>>(),["Right","\r"]);
+ // Menu que mudou e vida antiga continuam recusados, sem tecla nenhuma.
+ for (generation,pane) in [(1,other),(2,multi)] {
+  let (store,expected)=observed(generation,pane);
+  let (io,d)=run(store,vec![multi.into()]);
+  let r=d.guarded_submit_selected(&expected).await;
+  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_desatualizada"));assert!(io.writes().is_empty());
+ }
+ // Pergunta com sidecar não usa o envio do menu.
+ let (store,mut expected)=observed(1,multi);expected.target.kind=InteractionKind::Question;expected.source_revision=Some("r".into());
+ let (io,d)=run(store,vec![multi.into()]);
+ let r=d.guarded_submit_selected(&expected).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_indisponivel"));assert!(io.writes().is_empty());
+}
+#[tokio::test]
 async fn terminal_input_answer_review_enter_requires_final_proof() {
  let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
  let io=Arc::new(FakeIo::new(vec![picker(),review.into(),review.into()]));
@@ -302,6 +481,16 @@ async fn terminal_input_clipboard_unavailable_preserves_literal_and_blocks_clipb
  assert_eq!(d.prompt(text,"id").await.disposition,if text.contains('\n'){Disposition::Deferred}else{Disposition::Accepted});assert!(!io.calls.lock().unwrap().iter().any(|r|r.program=="powershell.exe"));}
 }
 
+#[tokio::test]
+async fn terminal_input_windows_dash_placeholder_left_behind_fails_with_its_code() {
+ // O `x` provisório que o pane não apagou mudaria o texto: falha com o código, nunca entregue.
+ let mut b=binding();b.windows=true;b.pane="=test:0.0".into();
+ let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let io=Arc::new(FakeIo::new(vec![screen("x-abc")]));
+ let r=TerminalDriver::new(b,s,io.clone(),instant_limits()).text("-abc").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"placeholder_unremoved"));
+ assert_eq!(keys(&io),["x-abc","Home","DC"]);
+}
 fn instant_limits() -> InputLimits { InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3 } }
 #[tokio::test]
 async fn terminal_input_interleaved_interactive_pastes_keep_each_pane_bytes() {
@@ -330,6 +519,7 @@ async fn terminal_input_plugin_no_write_rechecks_all_guards_without_erasing_new_
  impl TerminalServices for Gate {
   fn facts<'a>(&'a self,b:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{self.inner.facts(b)}
   fn publish<'a>(&'a self,b:&'a TerminalBinding,r:PluginRequest)->ServiceFuture<'a,PluginReply>{Box::pin(async move{self.entered.notify_one();self.resume.notified().await;self.inner.publish(b,r).await})}
+  fn permission_guard<'a>(&'a self,b:&'a TerminalBinding)->ServiceFuture<'a,()>{self.inner.permission_guard(b)}
  }
  for reply in [PluginReply::Unavailable,PluginReply::NotWritten] {for change in ["question","ready","overlay","draft"] {
   let s=Arc::new(Gate {inner:Services::new(),entered:tokio::sync::Notify::new(),resume:tokio::sync::Notify::new()});s.inner.facts.lock().unwrap().plugin_live=true;*s.inner.reply.lock().unwrap()=reply.clone();
@@ -351,17 +541,18 @@ async fn terminal_input_clipboard_wait_rechecks_all_guards_without_erasing_new_d
 #[tokio::test]
 async fn terminal_input_answer_first_arrow_uncertain_never_defers_or_submits() {
  let io=Arc::new(FakeIo::new(vec![picker()]));*io.fail.lock().unwrap()=Some("Down".into());let r=driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(1,"second")]).await;
- assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");
+ // Só a seta pode ter saído, sem Enter: recusa com o código (nada respondido), como no `/select`.
+ assert_eq!(r.disposition,Disposition::Rejected);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");
 }
 #[tokio::test]
-async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_unknown() {
+async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_refused_without_enter() {
  struct CaptureFailure(FakeIo);
  impl TerminalIo for CaptureFailure {
   fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move{let navigated=!self.0.writes().is_empty();if navigated && r.args.contains(&"capture-pane".into()){return Err(IoFailure {code:"capture_failed",may_have_written:false});}self.0.command(r).await})}
   fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.0.socket(d,e)}
  }
  let io=Arc::new(CaptureFailure(FakeIo::new(vec![picker()])));let d=TerminalDriver::new(binding(),Arc::new(Services::new()),io.clone(),instant_limits());let r=d.answer(&[option_answer(1,"second")]).await;
- assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
+ assert_eq!(r.disposition,Disposition::Rejected);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
 }
 
 #[test]

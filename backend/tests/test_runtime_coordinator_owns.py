@@ -41,9 +41,22 @@ def test_no_transport_is_never_born_in_rust(tmp_path):
     assert not coordinator(WITH_CODEX, transport=None)._born_in_rust(binding(tmp_path, "codex"))
 
 
-def test_default_before_the_handshake_is_claude():
+def test_default_before_the_handshake_is_claude_and_codex():
     owner = coordinator(None)
-    assert owner.rust_owns("claude", True) and not owner.rust_owns("codex", True)
+    assert all(owner.rust_owns(provider, headless) for provider in ("claude", "codex") for headless in (True, False))
+
+
+def test_codex_terminal_client_is_refused_only_where_the_rust_announces_it(monkeypatch):
+    from app import runtime_coordinator
+    owner = coordinator(WITH_CODEX)
+    owner.mode = "rust"
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    runtime_coordinator.refuse_python_client("ct", "codex", headless=False)
+    owner._owns.add(("codex", False))
+    with pytest.raises(RuntimeError, match="cliente Python bloqueado"):
+        runtime_coordinator.refuse_python_client("ct", "codex", headless=False)
+    owner.mode = "python"
+    runtime_coordinator.refuse_python_client("ct", "codex", headless=False)
 
 
 def test_configure_transport_stores_the_advertised_owns():

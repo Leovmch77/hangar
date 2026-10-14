@@ -177,6 +177,9 @@ pub(crate) fn outside_addresses(st: &AppState) -> HashSet<String> {
 
 pub(crate) const ORQ_OUTSIDE_CODE: &str = "erro_grupo_orq_par_externo";
 pub(crate) const ORQ_OUTSIDE_MSG: &str = "grupo de orquestração não aceita sessão de fora: os executores entram e saem o tempo todo";
+/// Árbitro sozinho no `orq`: recusa com aviso próprio, e o grupo dele fica.
+pub(crate) const ORQ_ARBITER_CODE: &str = "erro_par_externo_orq";
+pub(crate) const ORQ_ARBITER_MSG: &str = "a sessão é árbitra de uma orquestração e não pareia com outra máquina";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

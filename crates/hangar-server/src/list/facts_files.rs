@@ -21,6 +21,8 @@ const STATUS_DIR: &str = ".hangar-status";
 const STATUS_MAX_AGE: f64 = 86_400.0;
 /// Rabo do transcript lido para achar a resposta da pergunta.
 const ANSWER_SPAN: u64 = 256 * 1024;
+/// Prazo para a chamada da pergunta aparecer no transcript depois do sidecar.
+pub(crate) const ASK_GRACE: f64 = 5.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Marker {
@@ -275,6 +277,11 @@ impl HookStates {
                         changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
                         return;
                     };
+                    // Marcador rasgado (lido no meio da escrita): vale o último bom, como o `hook_state` do Python.
+                    let parsed = match (parsed, &before) {
+                        (Parsed::Marker(None), Some((_, last @ Parsed::Marker(Some(_))))) => last.clone(),
+                        (parsed, _) => parsed,
+                    };
                     // Reler o mesmo conteúdo (escrita recente, dentro da janela do mtime) não é mudança.
                     if before.as_ref().is_none_or(|(_, b)| *b != parsed) {
                         changed.extend(before.and_then(|(_, b)| parsed_sid(&path, &b)));
@@ -411,7 +418,7 @@ fn first_question(data: &Value) -> Result<OpenQuestion, &'static str> {
 /// A pergunta já foi respondida depois de `since` (mtime do sidecar)? Sem como provar que não,
 /// responde sim: ficar do outro lado prenderia a sessão em `awaiting_input` para sempre.
 /// `(respondida, a leitura valeu)`: leitura que falhou não pode ser guardada.
-fn answered_after(session: &str, jsonl: &str, since: f64) -> (bool, bool) {
+fn answered_after(session: &str, jsonl: &str, since: f64, call: Option<&str>) -> (bool, bool) {
     #[cfg(test)]
     ANSWER_READS.with(|n| n.set(n.get() + 1));
     let read = || -> std::io::Result<(u64, Vec<u8>)> {
@@ -469,17 +476,30 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> (bool, bool) {
     let out_of_reach = start > 0 && oldest.is_none_or(|o| o > since);
     if out_of_reach {
         tracing::debug!(session, "askq: janela do transcript não alcança a pergunta; trata como respondida");
-        // Uma vez por versão do sidecar: o transcript cresce a cada tique e a conta se refaz.
-        let mut noted = OUT_OF_REACH.lock().unwrap_or_else(|e| e.into_inner());
-        if noted.peek(session) != Some(&since) {
-            noted.insert(session.to_owned(), since);
-            warn_file(session, "list_askq_out_of_reach", "transcript_path");
-        }
+        note_once(session, since, "list_askq_out_of_reach", "transcript_path");
+        return (true, true);
     }
-    (out_of_reach, true)
+    // Pergunta aberta já tem a chamada no transcript (gravada junto com o sidecar). Sem ela, o
+    // sidecar ficou para trás e prenderia a sessão num cartão que nenhuma resposta alcança.
+    if let Some(call) = call && !ids.iter().any(|id| id.as_str() == Some(call)) {
+        let age = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) - since;
+        if age < ASK_GRACE { return (false, false); }
+        note_once(session, since, "list_askq_orphan", "tool_use_id");
+        return (true, true);
+    }
+    (false, true)
 }
 
-static OUT_OF_REACH: LazyLock<Mutex<Capped<String, f64>>> = LazyLock::new(Default::default);
+/// Uma vez por versão do sidecar: o transcript cresce a cada tique e a conta se refaz.
+fn note_once(session: &str, since: f64, code: &'static str, field: &str) {
+    let mut noted = NOTED.lock().unwrap_or_else(|e| e.into_inner());
+    if noted.peek(session) != Some(&since) {
+        noted.insert(session.to_owned(), since);
+        warn_file(session, code, field);
+    }
+}
+
+static NOTED: LazyLock<Mutex<Capped<String, f64>>> = LazyLock::new(Default::default);
 
 #[cfg(test)]
 thread_local! {
@@ -490,16 +510,16 @@ thread_local! {
 /// 256 KB só é relido quando um dos dois muda.
 static ANSWERED: LazyLock<Mutex<Capped<String, ((FileKey, f64), bool)>>> = LazyLock::new(Default::default);
 
-fn answered_cached(session: &str, jsonl: &str, since: f64) -> bool {
+fn answered_cached(session: &str, jsonl: &str, since: f64, call: Option<&str>) -> bool {
     let Some(key) = std::fs::metadata(jsonl).ok().as_ref().and_then(file_key).map(|k| (k, since)) else {
-        return answered_after(session, jsonl, since).0;
+        return answered_after(session, jsonl, since, call).0;
     };
     if let Some((k, answered)) = ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl)
         && *k == key
     {
         return *answered;
     }
-    let (answered, read) = answered_after(session, jsonl, since);
+    let (answered, read) = answered_after(session, jsonl, since, call);
     if read {
         ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_owned(), (key, answered));
     }
@@ -531,7 +551,9 @@ pub fn open_question(stem: Option<&str>, dirs: &[PathBuf]) -> Option<OpenQuestio
             continue;
         };
         let since = mtime.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-        if answered_cached(stem, tp, since) {
+        // O fim da chamada (ou da vida) visto pelo plugin vale antes da leitura do transcript.
+        if crate::state::ask::ended_by_plugin(stem, data.get("tool_use_id").and_then(Value::as_str), since) { continue; }
+        if answered_cached(stem, tp, since, data.get("tool_use_id").and_then(Value::as_str)) {
             continue;
         }
         match first_question(&data) {
@@ -659,6 +681,21 @@ mod tests {
     }
 
     #[test]
+    /// Parity estado B3: o marcador lido no meio da escrita não derruba o estado; vale o último bom.
+    fn torn_marker_keeps_the_last_good_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        let marker = cfg.join(".hangar-state/torn.json");
+        write(&marker, r#"{"state": "working", "ts": 1}"#);
+        let mut hs = HookStates::default();
+        let dirs = vec![cfg];
+        hs.refresh(&dirs);
+        write(&marker, r#"{"state": "wor"#);
+        hs.refresh(&dirs);
+        assert_eq!(hs.get_state(Some("torn"), |_| false).map(|m| m.state).as_deref(), Some("working"));
+    }
+
+    #[test]
     fn broken_marker_and_unreachable_question_reach_the_diary() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join(".claude");
@@ -672,8 +709,8 @@ mod tests {
         let jsonl = tmp.path().join("longo.jsonl");
         let line = format!("{{\"timestamp\": \"2099-01-01T00:00:00Z\", \"pad\": \"{}\"}}\n", "x".repeat(1000));
         write(&jsonl, &line.repeat(300));
-        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0), (true, true));
-        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0), (true, true));
+        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0, None), (true, true));
+        assert_eq!(answered_after("ff-longe", jsonl.to_str().unwrap(), 10.0, None), (true, true));
         assert_eq!(notes("ff-longe"), ["list_askq_out_of_reach:transcript_path"], "uma vez por versão do sidecar");
     }
 
@@ -733,5 +770,19 @@ mod tests {
         // Transcript sumido: não há como provar que segue aberta.
         std::fs::remove_file(&jsonl).unwrap();
         assert_eq!(open_question(Some("s"), &dirs), None);
+    }
+
+    #[test]
+    fn question_without_its_call_in_the_transcript_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("t.jsonl");
+        let ask = r#"{"timestamp": "2026-01-01T00:00:00Z", "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion", "id": "toolu_viva"}]}}"#;
+        write(&jsonl, &format!("{ask}\n"));
+        let path = jsonl.to_str().unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        assert_eq!(answered_after("ff-viva", path, 10.0, Some("toolu_viva")), (false, true), "chamada no transcript: aberta");
+        assert_eq!(answered_after("ff-orfa", path, now, Some("toolu_outra")), (false, false), "na carência: aberta, sem guardar");
+        assert_eq!(answered_after("ff-orfa", path, 10.0, Some("toolu_outra")), (true, true), "sem a chamada depois da carência: descartada");
+        assert_eq!(super::super::facts::notes_for("ff-orfa"), ["list_askq_orphan:tool_use_id"]);
     }
 }

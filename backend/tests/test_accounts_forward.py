@@ -95,3 +95,52 @@ def test_python_mode_answers_unavailable_without_the_owner(rust, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "accounts_need_rust_server"
     assert _Rust.seen == []
+
+
+def test_jev_aux_goes_to_the_rust_owner_and_needs_it(rust, monkeypatch):
+    response = TestClient(app).post("/api/jev/aux/models", headers=AUTH, json={"base_url": "http://x/v1"})
+    assert response.status_code == _Rust.reply[0]
+    [seen] = _Rust.seen
+    assert (seen["path"], seen["account_path"]) == ("/__hangar_server/jev/aux", "/api/jev/aux/models")
+    assert TestClient(app).get("/api/jev/aux/cliproxy").status_code == 401
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: SimpleNamespace(mode="python"))
+    response = TestClient(app).get("/api/jev/aux/cliproxy", headers=AUTH)
+    assert (response.status_code, response.json()["detail"]["code"]) == (503, "erro_jev_aux_precisa_rust")
+    assert len(_Rust.seen) == 1
+
+
+def test_plan_routes_and_catalog_go_to_the_rust_owner(rust):
+    _Rust.reply = (200, {"plans": [], "pinned": None})
+    response = TestClient(app).get("/api/sessions/s1/plans?x=1", headers=AUTH)
+    assert (response.status_code, response.json()) == (200, {"plans": [], "pinned": None})
+    response = TestClient(app).post("/api/sessions/s1/plan-step", headers=AUTH,
+                                    json={"stem": "p", "idx": 0, "done": True})
+    assert response.status_code == 200
+    TestClient(app).get("/api/claude/customizations?cwd=/tmp", headers=AUTH)
+    seen = [(s["method"], s["path"], s["account_path"]) for s in _Rust.seen]
+    assert seen == [("GET", "/__hangar_server/forwarded?x=1", "/api/sessions/s1/plans"),
+                    ("POST", "/__hangar_server/forwarded", "/api/sessions/s1/plan-step"),
+                    ("GET", "/__hangar_server/forwarded?cwd=/tmp", "/api/claude/customizations")]
+    assert json.loads(_Rust.seen[1]["body"]) == {"stem": "p", "idx": 0, "done": True}
+
+
+def test_plan_routes_need_rust_and_never_reach_it_unauthenticated(rust, monkeypatch):
+    assert TestClient(app).get("/api/sessions/s1/plan").status_code == 401
+    assert _Rust.seen == []
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: SimpleNamespace(mode="python"))
+    response = TestClient(app).get("/api/sessions/s1/plan-preview", headers=AUTH)
+    assert (response.status_code, response.json()["detail"]["code"]) == (503, "erro_planos_precisa_rust")
+    response = TestClient(app).get("/api/claude/customizations?cwd=/tmp", headers=AUTH)
+    assert (response.status_code, response.json()["detail"]["code"]) == (503, "claude_customizations_unavailable")
+    assert _Rust.seen == []
+
+
+def test_guest_never_gets_the_owners_catalog(rust, monkeypatch):
+    from app import guest_users
+    token = guest_users.current.set(object())
+    try:
+        response = TestClient(app).get("/api/claude/customizations?cwd=/tmp", headers=AUTH)
+    finally:
+        guest_users.current.reset(token)
+    assert (response.status_code, response.json()["detail"]["code"]) == (403, "erro_fora_da_pasta")
+    assert _Rust.seen == []

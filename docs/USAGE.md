@@ -301,13 +301,13 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   reutiliza a referência capturada na primeira organização.
 - **Voz ao vivo (Beta):** uma conversa falada com um assistente que lê e acompanha as sessões,
   troca de sessão pela fala, manda pedidos a elas e, no modo **Planejar**, monta um plano antes de
-  mandar. Nasce desligada: ative em **Configurações → Harnesses → Codex → Opções → Conversa por
-  voz**, em cada servidor onde quiser usar. Precisa do `codex` instalado e logado nesse servidor; a
-  conversa gasta a conta Codex dele.
+  mandar. Aparece sozinha em todo servidor com o `codex` instalado e ao menos uma conta Codex; não
+  há nada para ativar. O microfone só abre quando você liga a conversa, e ela gasta a conta Codex
+  desse servidor.
   - **No PC (app nativo):** a pílula da voz fica na barra de cima. Ela atende também os pedidos de
     tela (trocar de sessão, ler a tela, clicar, abrir telas do Hangar).
   - **No celular (PWA):** o botão de microfone **Voz ao vivo** aparece no topo da lista de sessões e
-    da conversa quando o servidor ativo tem a voz ligada. Um toque começa a conversa nesse servidor;
+    da conversa quando o servidor ativo tem a voz disponível. Um toque começa a conversa nesse servidor;
     com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
     **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
     ficam para o PC.
@@ -676,6 +676,69 @@ mesmo lugar que o clique do agente, e arrastar rola a página.
 **Abas (só no Electron antigo):** quem ainda usa o Electron tem a faixa de abas, até 8 por sessão.
 A aba ativa é uma só, sua e do agente ao mesmo tempo; quando ele precisa mexer numa página sem
 tirar da sua frente a que você está olhando, usa uma aba escondida.
+
+#### Usar seu login no navegador embutido
+
+O navegador embutido começa sem login em nada. Para não precisar entrar de novo em cada site, ele
+copia do seu Chrome os **cookies** (só eles: senhas, histórico e favoritos ficam no Chrome).
+
+**Como fazer (Linux e Windows):**
+
+1. Abra o site no navegador embutido (por exemplo `github.com`).
+2. Clique em **Trazer meu login**, à direita da barra de endereço. Se a página pedir senha,
+   aparece também uma linha "Esta página pede login…" com o botão **Usar meu login**: é o mesmo
+   caminho.
+3. No diálogo **Usar meu login em github.com**, clique em **Trazer login**. A página
+   recarrega já logada, e a linha embaixo da barra diz quantos cookies vieram.
+
+**Linux:** o Hangar lê o perfil do Chrome direto do disco, sem diálogo no Chrome e com ele aberto
+ou fechado. Vale para Chrome (também Beta, Dev, Flatpak), Chromium (também Snap e Flatpak), Brave e
+Firefox. Com mais de um perfil, aparece um botão por perfil ("Chrome — Pessoal") para você escolher.
+Precisa do programa `sqlite3` (no Arch: `sudo pacman -S sqlite`) e do chaveiro desbloqueado (o
+GNOME Keyring ou a KWallet abre junto com a sua sessão). Sem eles, a linha embaixo da barra diz
+o que falta.
+
+**Windows:** o Windows não deixa outro programa ler os cookies do Chrome no disco, então o Hangar os
+pede ao próprio Chrome (ou Edge) pela depuração remota. Na primeira vez:
+
+1. Deixe o Chrome (ou o Edge) aberto e clique em **Trazer meu login** → **Trazer login**.
+2. O Hangar abre o navegador que você usou por último (Chrome ou Edge) e copia o endereço da página
+   que liga a depuração (`chrome://inspect/#remote-debugging`; no Edge,
+   `edge://inspect/#remote-debugging`). O navegador não abre essa página sozinho: nele, **Ctrl+L**,
+   **Ctrl+V**, **Enter**.
+3. Marque **Allow remote debugging for this browser instance** (a opção aparece em inglês, mesmo no
+   Chrome em português). Isso fica ligado; não precisa repetir.
+4. Volte ao Hangar e clique de novo em **Trazer meu login** → **Trazer login**.
+5. O Chrome pergunta **Permitir a depuração remota?**: clique em **Permitir** em até 60 segundos.
+   Recusou ou passou do tempo, o Hangar não insiste; é só clicar de novo.
+
+O mesmo vale no Linux quando não há perfil legível no disco.
+
+**Um site ou todos.** O normal é trazer só o site aberto: entram os cookies dele e dos domínios
+acima (em `gist.github.com`, também os de `.github.com`). Marcando **Todos os sites**, entram os de
+todos — prático, mas **os agentes que usam o navegador embutido ficam logados em tudo em que você
+está logado**.
+
+**O agente pode pedir.** O agente da sessão pode chamar `hangar-preview login github.com` quando
+precisar entrar como você. Aparece no painel **"O agente pede o seu login do navegador em github.com"**
+com **Permitir** e **Recusar**; só um clique seu, no app, aprova (nem o agente nem o celular
+alcançam esses botões). O agente fica sabendo só quantos cookies vieram, nunca o valor deles.
+
+**Segurança.** O navegador embutido é **um só para todas as sessões** desta máquina: um login
+trazido vale no navegador de qualquer sessão e para qualquer agente que o use. Traga só o site de
+que o trabalho precisa.
+
+**O que não funciona.** O **Google** (Gmail, Drive, YouTube logado) recusa o navegador embutido:
+digitando a senha aparece "Esse navegador ou app pode não ser seguro", e os cookies trazidos não
+abrem a conta. Para esses, use o Chrome normal.
+
+**Desfazer.**
+
+- Um site: saia da conta nele, no próprio navegador embutido.
+- Tudo: feche o app e apague a pasta do perfil do navegador embutido — no Linux
+  `~/.config/hangar-native/chromium`, no Windows `%APPDATA%\hangar-native\browser`. Ela volta vazia
+  na próxima abertura. Não há botão para isso no app.
+- A depuração remota do Chrome (Windows): desmarque a opção na mesma página `chrome://inspect`.
 
 ### Checkpoints de código (Pi e OMP)
 

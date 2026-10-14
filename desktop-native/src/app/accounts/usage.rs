@@ -243,9 +243,10 @@ fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView) ->
         .when(in_use, |el| el.child(div().text_color(theme::faint()).child("·")))
         .when(in_use, |el| el.child(div().text_color(theme::accent()).child(tr("usage_card_in_use"))));
     let meters = match quota {
-        QuotaView::Bars { bars, stale } => div().flex().flex_col().gap(px(4.)).when(stale.is_some(), |el| el.opacity(0.6))
+        QuotaView::Bars { bars, stale, cause } => div().flex().flex_col().gap(px(4.)).when(stale.is_some(), |el| el.opacity(0.6))
             .children(bars.iter().take(2).map(meter))
-            .children(stale.map(|text| div().text_size(px(11.)).text_color(theme::faint()).child(text))),
+            .children(stale.map(|text| div().text_size(px(11.)).text_color(theme::faint()).child(text)))
+            .children(cause.map(|text| div().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))),
         QuotaView::Note(text) => div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(text),
         QuotaView::Nothing => div(),
     };

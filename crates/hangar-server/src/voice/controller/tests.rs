@@ -120,12 +120,24 @@ async fn launch_with(caps: &[&str], peers: Option<Value>, audio_grace: Duration)
 
 /// `memory`: conteúdo do `memoria.json`, gravado antes de a chamada abrir.
 async fn launch_seeded(caps: &[&str], peers: Option<Value>, audio_grace: Duration, memory: Option<&str>) -> Rig {
+    launch_full(caps, peers, audio_grace, memory, None).await
+}
+
+/// Chamada viva como `rig`, com o HCC trocado por `computer`.
+async fn rig_computer(computer: ComputerRunner) -> Rig {
+    let mut rig = launch_full(&[], None, Duration::from_secs(600), None, Some(computer)).await;
+    rig.to_ctl.send(ToController::Device(ClientMsg::Offer { sdp: "v=0 offer".into() })).unwrap();
+    loop { if let ServerMsg::Answer { .. } = rig.device.recv().await.unwrap() { break; } }
+    rig.to_ctl.send(ToController::Device(ClientMsg::Live)).unwrap();
+    rig
+}
+
+async fn launch_full(caps: &[&str], peers: Option<Value>, audio_grace: Duration, memory: Option<&str>, computer: Option<ComputerRunner>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     if let Some(body) = memory {
         std::fs::create_dir_all(dir.path().join("voz")).unwrap();
         std::fs::write(dir.path().join("voz").join("memoria.json"), body).unwrap();
     }
-    std::fs::write(dir.path().join("runtime-config.json"), r#"{"codex_voice_beta": true}"#).unwrap();
     let peers_path = peers.map(|p| { let path = dir.path().join("peers.json"); std::fs::write(&path, p.to_string()).unwrap(); path });
     let api: Shared = Arc::new(Mutex::new(Api {
         sessions: json!([{"name": "hangar", "provider": "claude", "state": "idle"}, {"name": "web", "provider": "codex", "state": "working"}]),
@@ -143,11 +155,12 @@ async fn launch_seeded(caps: &[&str], peers: Option<Value>, audio_grace: Duratio
         command_limit: crate::voice::call::COMMAND_LIMIT };
     let voice = Voice::start(options, spawn, tx);
     let (link, device) = DeviceLink::channel(caps, Some(Screen { server: String::new(), name: "hangar".into() }));
-    let gate = GateSource { home: dir.path().to_path_buf(), claude_dir: dir.path().to_path_buf(), every: Duration::from_secs(5) };
     let diag = DiagClient::new("127.0.0.1:9".parse().unwrap(), "x".into());
     let (to_ctl, from_device) = mpsc::unbounded_channel();
     let jev = jev::Config { key: "k".into(), url: format!("http://{addr}/jev"), model: "jev-test".into() };
-    tokio::spawn(Controller::new(voice, machines, Some(jev), link.clone(), gate, diag).run(events, from_device));
+    let mut controller = Controller::new(voice, machines, Some(jev), link.clone(), diag);
+    if let Some(computer) = computer { controller.computer_runner = computer; }
+    tokio::spawn(controller.run(events, from_device));
     Rig { seen, log: Vec::new(), push, to_ctl, device, api, link, _dir: dir }
 }
 
@@ -1155,4 +1168,88 @@ async fn hangar_api_runs_routes_and_asks_before_destroying() {
     let done = rig.reply("a5").await;
     assert_eq!(done["success"], true, "{done}");
     assert_eq!(rig.api.lock().unwrap().deleted, vec!["web".to_owned()]);
+}
+
+/// HCC falso: cada etapa espera um `go` do teste; depois das três, o resultado e uma etapa atrasada.
+fn fake_computer(go: mpsc::UnboundedReceiver<()>) -> ComputerRunner {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let go = Arc::new(Mutex::new(Some(go)));
+    Arc::new(move |objective, on_step| {
+        let mut go = go.lock().unwrap().take().expect("um objetivo só");
+        Box::pin(async move {
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(theirs);
+                let mut lines = BufReader::new(read).lines();
+                let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let token = req["params"]["_meta"]["progressToken"].clone();
+                let progress = |n: u32, message: &str| json!({"method": "notifications/progress", "params": {"progressToken": token, "progress": n, "message": message}});
+                for (n, step) in ["lendo a tela", "pedindo ajuda visual", "clicar em Salvar"].into_iter().enumerate() {
+                    write.write_all(format!("{}\n", progress(n as u32 + 1, step)).as_bytes()).await.unwrap();
+                    go.recv().await.unwrap();
+                }
+                write.write_all(format!("{}\n", json!({"id": req["id"], "result": {"content": [{"type": "text", "text": "concluído: salvo"}]}})).as_bytes()).await.unwrap();
+                let _ = write.write_all(format!("{}\n", progress(4, "tarde demais")).as_bytes()).await;
+                let _ = lines.next_line().await;
+            });
+            let (r, w) = tokio::io::split(ours);
+            let (rpc, incoming) = crate::voice::rpc::Rpc::over_lines(r, w);
+            crate::voice::computer::drive_objective(&rpc, &incoming, &objective, &*on_step).await
+        })
+    })
+}
+
+#[tokio::test]
+async fn computer_steps_are_published_in_order_then_cleared_by_the_result() {
+    let (go, gone) = mpsc::unbounded_channel();
+    let mut rig = rig_computer(fake_computer(gone)).await;
+    push_speech(&rig.push, "turn-1", "salva o documento no editor");
+    push_tool(&rig.push, "c1", "computer", json!({"objective": "salvar o documento"}), "turn-1");
+    for step in ["Lendo a tela", "Pedindo ajuda visual", "Clicar em Salvar"] {
+        let state = rig.state(step, |s| s["progress"] == step).await;
+        assert_eq!(state["activity"], "working", "{state}");
+        go.send(()).unwrap();
+    }
+    let reply = rig.reply("c1").await;
+    assert_eq!((reply["success"].clone(), text(&reply)), (json!(true), "concluído: salvo"));
+    rig.state("etapa limpa", |s| s["progress"].is_null()).await;
+    // A etapa que o HCC mandou depois do resultado não reaparece (dois intervalos do retrato).
+    let quiet = tokio::time::Instant::now() + STATE_EVERY * 3;
+    while let Ok(Some(msg)) = tokio::time::timeout_at(quiet, rig.device.recv()).await {
+        if let ServerMsg::State { state } = msg { assert!(state["progress"].is_null(), "etapa atrasada voltou: {state}"); }
+    }
+}
+
+#[tokio::test]
+async fn computer_failure_and_call_end_clear_the_step() {
+    let failing: ComputerRunner = Arc::new(|_, on_step| Box::pin(async move { on_step("lendo a tela".into()); Err("alvo desconhecido".into()) }));
+    let mut rig = rig_computer(failing).await;
+    push_speech(&rig.push, "turn-1", "abre o bloco de notas");
+    push_tool(&rig.push, "c1", "computer", json!({"objective": "abrir o Bloco de Notas"}), "turn-1");
+    assert_eq!(rig.reply("c1").await["success"], false);
+    let state = rig.state("falha sem etapa", |s| s["error"]["code"] == "computer").await;
+    assert!(state["progress"].is_null() && state["activity"] != "working", "{state}");
+
+    let (go, gone) = mpsc::unbounded_channel::<()>();
+    let gone = Arc::new(Mutex::new(Some(gone)));
+    let panics: ComputerRunner = Arc::new(move |_, on_step| {
+        let mut gone = gone.lock().unwrap().take().unwrap();
+        Box::pin(async move { on_step("lendo a tela".into()); gone.recv().await; panic!("hcc quebrou") })
+    });
+    let mut rig = rig_computer(panics).await;
+    push_speech(&rig.push, "turn-1", "abre o bloco de notas");
+    push_tool(&rig.push, "c1", "computer", json!({"objective": "abrir o Bloco de Notas"}), "turn-1");
+    rig.state("etapa", |s| s["progress"] == "Lendo a tela").await;
+    go.send(()).unwrap();
+    let state = rig.state("pânico limpa a etapa", |s| s["progress"].is_null()).await;
+    assert_ne!(state["activity"], "working", "{state}");
+
+    let stuck: ComputerRunner =Arc::new(|_, on_step| Box::pin(async move { on_step("lendo a tela".into()); std::future::pending().await }));
+    let mut rig = rig_computer(stuck).await;
+    push_speech(&rig.push, "turn-1", "abre o bloco de notas");
+    push_tool(&rig.push, "c1", "computer", json!({"objective": "abrir o Bloco de Notas"}), "turn-1");
+    rig.state("etapa", |s| s["progress"] == "Lendo a tela").await;
+    rig.to_ctl.send(ToController::Device(ClientMsg::Stop)).unwrap();
+    let state = rig.state("encerrada sem etapa", |s| s["progress"].is_null()).await;
+    assert_ne!(state["activity"], "working", "{state}");
 }

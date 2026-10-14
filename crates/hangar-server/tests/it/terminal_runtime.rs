@@ -1,21 +1,49 @@
 use hangar_server::runtime::{actor::PolicyClient,protocol::{RuntimeCommand,OperationKind,ClockSample},queue::{self,QueueActor,Store,Action},terminal::{TerminalActor,TerminalTarget,TerminalOptions}};
 use hangar_server::terminal_input::*;
 use hangar_server::mods::click::{PaneOp,PaneReply};
+use hangar_server::runtime::terminal_status::{StatusSender, TerminalStatus};
 use serde_json::{Value,json};
 use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default() } } }
+struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>>, projection_at_facts:Mutex<Option<(std::path::PathBuf,Vec<String>)>> }
+impl Io { fn new()->Self { Self { projection_at_facts:Mutex::new(None),native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None) } } }
+impl Io {
+    fn refresh_record(&self) {
+        if let Some((path,pid,socket))=&*self.native_record.lock().unwrap() {
+            let sid=if self.generation.load(std::sync::atomic::Ordering::Acquire)!=self.binding_generation.load(std::sync::atomic::Ordering::Acquire) {"changed-sid".to_owned()} else {self.conversation.lock().unwrap().clone()};
+            std::fs::write(path,serde_json::to_vec(&json!({"pid":pid,"sessionId":sid,"status":if self.idle.load(std::sync::atomic::Ordering::Acquire){"idle"}else{"busy"},
+                "messagingSocketPath":if self.native.load(std::sync::atomic::Ordering::Acquire){Some(socket)}else{None}})).unwrap()).unwrap();
+        }
+    }
+}
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
-        self.calls.lock().unwrap().push(r.clone());
+        let (count,written)={let mut calls=self.calls.lock().unwrap();let written=calls.iter().any(|c|c.args.contains(&"-l".into()));calls.push(r.clone());(calls.len(),written)};
+        // Os fatos são lidos pela tela: a vista que existia em cada captura antes da primeira escrita.
+        if cmd=="capture-pane" && !written && let Some((path,seen))=&mut *self.projection_at_facts.lock().unwrap() {
+            seen.push(std::fs::read_to_string(path).unwrap_or_default());
+        }
+        // `switch_at`: na chamada N, a vida (conversa) ou o pane trocam, e ficam trocados.
+        match *self.switch_at.lock().unwrap() {
+            Some((at,"life")) if at==count=>{self.generation.fetch_add(1,std::sync::atomic::Ordering::AcqRel);},
+            Some((at,"pane")) if at==count=>{self.created.store(2,std::sync::atomic::Ordering::Release);},
+            _=>{},
+        }
+        self.refresh_record();
+        let created=self.created.load(std::sync::atomic::Ordering::Acquire);
         let stdout=match cmd.as_str() {
+            "display-message" if r.args.last().is_some_and(|a|a=="#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}")=>format!("{}\tsession\t%1\t{created}\n",std::process::id()).into_bytes(),
             "display-message" if r.args.last().is_some_and(|a|a==MODS_FORMATS)=>b"1|0|0|80|12\n".to_vec(),
-            "display-message"=>b"session\t%1\t1\n".to_vec(),
-            "capture-pane" if self.hold_capture.load(std::sync::atomic::Ordering::Acquire)=>std::future::pending().await,
+            "display-message"=>format!("session\t%1\t{created}\n").into_bytes(),
+            // `panes`: telas em sequência, uma por captura; a última fica.
+            "capture-pane" if !self.panes.lock().unwrap().is_empty()=>{let mut panes=self.panes.lock().unwrap();(if panes.len()>1 {panes.remove(0)} else {panes[0].clone()}).into_bytes()},
+            "capture-pane" if self.capture_error.load(std::sync::atomic::Ordering::Acquire)=>return Err(IoFailure {code:"capture_failed",may_have_written:false}),
+            "capture-pane" if !self.ready.load(std::sync::atomic::Ordering::Acquire)=>b"loading\n".to_vec(),
+            // `hold_skip`: capturas que passam antes de segurar (a leitura dos fatos vem antes do despacho).
+            "capture-pane" if self.hold_capture.load(std::sync::atomic::Ordering::Acquire) && self.hold_skip.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_err()=>std::future::pending().await,
             // A tela dos mods (só a parte visível, sem `-S`), quando o teste a define.
             "capture-pane" if !r.args.contains(&"-S".into()) && self.mods_screen.lock().unwrap().is_some()=>self.mods_screen.lock().unwrap().clone().unwrap().into_bytes(),
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
@@ -31,6 +59,7 @@ impl TerminalIo for Io {
             },
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
+                self.refresh_record();
                 let text=r.args.last().unwrap();
                 if text=="\r" || text=="C-u" { self.text.lock().unwrap().clear(); if text=="\r" && self.rotate_enter.load(std::sync::atomic::Ordering::Acquire){*self.conversation.lock().unwrap()="new-sid".into();} if text=="\r" && self.fail_enter.load(std::sync::atomic::Ordering::Acquire){return Err(IoFailure {code:"enter_uncertain",may_have_written:true});} }
                 // `swallow`: o texto vai para onde está o foco (o painel de agentes), não para o composer.
@@ -42,6 +71,7 @@ impl TerminalIo for Io {
                 vec![]
             }, _=>vec![]
         };
+        self.refresh_record();
         Ok(CommandOutput {success:true,stdout})
     }) }
     fn socket<'a>(&'a self,_:&'a NativeMessage,envelope:Vec<u8>)->IoFuture<'a,WriteOutcome> { Box::pin(async move {self.socket_calls.lock().unwrap().push(envelope);Ok(WriteOutcome::Unknown)}) }
@@ -50,44 +80,61 @@ const WAIT:Duration=Duration::from_secs(10);
 /// Processo do teste que morre junto com ele, inclusive quando uma asserção falha antes do fim.
 struct KillOnDrop(std::process::Child);
 impl Drop for KillOnDrop {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, mux:Arc<Mutex<Vec<String>>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
+fn plugin_instance()->String {
+    let mut stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let mut instance=String::new();while stamp>0 {instance.insert(0,char::from_digit((stamp%36) as u32,36).unwrap());stamp/=36;}instance.push_str("-fixture");instance
+}
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, fill_plugin:Arc<std::sync::atomic::AtomicBool>, repull_ms:Arc<AtomicU64>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>, calls:Arc<Mutex<Vec<Value>>>,status:StatusSender,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
-        let dir=tempfile::tempdir().unwrap(); let io=Arc::new(Io::new()); let conversation=io.conversation.clone();
+        let dir=tempfile::tempdir().unwrap();let io=Arc::new(Io::new());let config=dir.path().join("config");
+        let transcript=config.join("projects/project/sid.jsonl");std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();std::fs::create_dir_all(config.join("sessions")).unwrap();
+        let pid=std::process::id();let metadata=hangar_server::terminal_facts::TerminalMetadata {config_dir:config.clone(),agent_pid:pid,agent_birth:hangar_server::terminal_facts::agent_birth(pid).unwrap(),legacy_import_after:Some(1.0),fingerprint:"fixture-life".into(),origin:"uds:fixture-inbox".into()};
         let binding=TerminalBinding {name:"session".into(),pane:"%1".into(),conversation:"sid".into(),generation:1,created:1,mux_argv:vec!["fake".into()],windows:false,clipboard_lock_path:None};
-        let mux=Arc::new(Mutex::new(binding.mux_argv.clone()));let server_mux=mux.clone();
-        let target=TerminalTarget {key:"key".into(),generation:1,name:"session".into(),binding:binding.clone(),lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript:dir.path().join("chat.jsonl"),created:1.0,plugin_key:None};
-        std::fs::write(&target.transcript,"").unwrap();
-        let native=Arc::new(std::sync::atomic::AtomicBool::new(false)); let generation=Arc::new(AtomicU64::new(1)); let control=Arc::new(Mutex::new(json!({"disposition":"unavailable"})));
-        let idle=Arc::new(std::sync::atomic::AtomicBool::new(true)); let ready=Arc::new(std::sync::atomic::AtomicBool::new(true)); let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false)); let focus_plugin=Arc::new(std::sync::atomic::AtomicBool::new(false)); let calls=Arc::new(Mutex::new(vec![]));
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap(); let t0=std::time::Instant::now();
-        let state_path=target.state_path.clone();
-        let (i,r,u,c,g,control_reply,n)=(idle.clone(),ready.clone(),unknown.clone(),calls.clone(),generation.clone(),control.clone(),native.clone());
-        let (focus_reply,focus_io)=(focus_plugin.clone(),io.clone());
-        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation,mux)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone(),server_mux.clone()); let (focus_reply,focus_io)=(focus_reply.clone(),focus_io.clone()); async move {
-            let v:Value=serde_json::from_str(&body).unwrap();
-            let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            let phase=&state["operations"][v["phase_id"].as_str().unwrap()];
-            // Leitura de fatos não tem efeito: não regrava o diário. As demais políticas, sim.
-            if v["kind"]=="terminal_facts" {assert!(phase.is_null(),"leitura de fatos passou pelo diário");}
-            else {
-                assert_eq!(phase["status"],"dispatching");
-                assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
-            }
-            let mut seen=v.clone(); seen["_ms"]=json!(t0.elapsed().as_millis() as u64); c.lock().unwrap().push(seen);
-            b.generation=g.load(std::sync::atomic::Ordering::Acquire); b.conversation=conversation.lock().unwrap().clone();b.mux_argv=mux.lock().unwrap().clone();
-            let data=match v["kind"].as_str().unwrap() {
-                "terminal_facts"=>json!({"binding":b,"ready":r.load(std::sync::atomic::Ordering::Acquire),"idle":i.load(std::sync::atomic::Ordering::Acquire),"open_question":false,"plugin_live":u.load(std::sync::atomic::Ordering::Acquire),"plugin_user":true,"native":if n.load(std::sync::atomic::Ordering::Acquire){Some(NativeMessage {socket:"fake".into(),origin:"peer".into(),sender:"peer".into(),mode:"message".into(),message_id:Some(format!("native:{}",v["payload"]["operation_id"].as_str().unwrap()))})}else{None}}),
-                // O pedido `focus` ao plugin: com `focus_plugin`, ele devolve o foco ao prompt; sem, é o plugin
-                // que não conhece o pedido.
-                "terminal_publish" if v["payload"]["publication"]["mode"]=="focus"=>if focus_reply.load(std::sync::atomic::Ordering::Acquire) {
-                    *focus_io.mods_screen.lock().unwrap()=None; json!("filled")} else {json!("not_written")},
-                "terminal_publish"=>json!("unknown"),
-                "terminal_plugin_control"=>control_reply.lock().unwrap().clone(), _=>panic!("unexpected policy")};
-            ([("content-type","application/json")],json!({"ok":true,"data":data}).to_string())
+        let target=TerminalTarget {key:"key".into(),generation:1,name:"session".into(),binding,lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript,created:1.0,plugin_key:None,metadata};
+        std::fs::write(&target.transcript,"").unwrap();let socket=config.join("fixture.sock");std::fs::write(&socket,"").unwrap();
+        *io.native_record.lock().unwrap()=Some((config.join("sessions").join(format!("{pid}.json")),pid,socket));io.refresh_record();
+        let (idle,ready,generation,native)=(io.idle.clone(),io.ready.clone(),io.generation.clone(),io.native.clone());
+        let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false));let focus_plugin=Arc::new(std::sync::atomic::AtomicBool::new(false));let calls=Arc::new(Mutex::new(vec![]));
+        let (fill_plugin,repull_ms)=(Arc::new(std::sync::atomic::AtomicBool::new(false)),Arc::new(AtomicU64::new(0)));
+        let plugin=Arc::new(hangar_server::plugin::Store::new(Arc::new(hangar_server::interactions::InteractionStore::default())));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();let c=calls.clone();
+        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let c=c.clone();async move {
+            c.lock().unwrap().push(serde_json::from_str::<Value>(&body).unwrap());
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE,[("content-type","application/json")],json!({"ok":false,"error_code":"retired_policy"}).to_string())
         }}));
         let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,mux,idle,ready,generation,native,control,unknown,focus_plugin,calls,server}
+        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,unknown,focus_plugin,fill_plugin,repull_ms,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),calls,status:tokio::sync::watch::channel(TerminalStatus::default()).0,server}
+    }
+    fn owner(&self,receipt:bool) {
+        let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&self.target);
+        let mut modes=vec!["fill".into()];if receipt {modes.push("receipt_v2".into());}
+        drop(self.plugin.begin_pull(&binding,hangar_server::plugin::Pull {instance:self.instance.clone(),modos:modes,estado:Some("idle".into()),session_id:Some(binding.conversation.clone())},std::time::Instant::now()).unwrap());
+    }
+    fn start_plugin(&self) {
+        use hangar_server::plugin::{Pull,Receipt};
+        let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&self.target);
+        if let Some(task)=self.plugin_task.lock().unwrap().take() {task.abort();}
+        self.plugin.interactions().bind(&binding).unwrap();self.plugin.bind(&binding).unwrap();
+        self.io.binding_generation.store(self.target.generation,std::sync::atomic::Ordering::Release);self.io.refresh_record();
+        if !self.unknown.load(std::sync::atomic::Ordering::Acquire) && !self.focus_plugin.load(std::sync::atomic::Ordering::Acquire) && !self.fill_plugin.load(std::sync::atomic::Ordering::Acquire) {return;}
+        let (plugin,unknown,focus,io,requests,path)=(self.plugin.clone(),self.unknown.clone(),self.focus_plugin.clone(),self.io.clone(),self.plugin_requests.clone(),self.target.state_path.clone());
+        let (fill,repull)=(self.fill_plugin.clone(),self.repull_ms.clone());
+        let instance=self.instance.clone();let task=tokio::spawn(async move {
+            while unknown.load(std::sync::atomic::Ordering::Acquire) || focus.load(std::sync::atomic::Ordering::Acquire) || fill.load(std::sync::atomic::Ordering::Acquire) {
+                let mut modes=vec!["fill".into(),"user".into(),"receipt_v2".into()];if focus.load(std::sync::atomic::Ordering::Acquire) {modes.push("focus".into());}
+                let payload=plugin.begin_pull(&binding,Pull {instance:instance.clone(),modos:modes,estado:Some("idle".into()),session_id:Some(binding.conversation.clone())},std::time::Instant::now()).unwrap().wait().await;
+                if !payload["publication_id"].is_string() {continue;}
+                let state:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();let publication=payload["publication_id"].as_str().unwrap();let operation=publication.strip_prefix("key:1:").unwrap_or(publication);
+                let mut recorded=payload.clone();recorded["_writing"]=state["operations"][operation]["wire_attempts"][format!("terminal:{}:{operation}",binding.generation)]["status"].clone();requests.lock().unwrap().push(recorded);
+                let receipt=Receipt {publication_id:publication.into(),generation:payload["generation"].as_u64().unwrap(),session_id:payload["session_id"].as_str().unwrap().into()};
+                let mode:PluginMode=serde_json::from_value(payload["modo"].clone()).unwrap();let ok=!unknown.load(std::sync::atomic::Ordering::Acquire) || mode==PluginMode::Focus;
+                if mode==PluginMode::Focus {*io.mods_screen.lock().unwrap()=None;}else if ok && mode==PluginMode::Fill {*io.text.lock().unwrap()=payload["text"].as_str().unwrap().into();}
+                plugin.acknowledge(&binding,Some(&receipt),if mode==PluginMode::Focus {PluginMode::Fill}else{mode},ok).unwrap();
+                // O plugin real leva um tempo entre o aviso e o `/pull` seguinte.
+                tokio::time::sleep(Duration::from_millis(repull.load(std::sync::atomic::Ordering::Acquire))).await;
+            }
+        });*self.plugin_task.lock().unwrap()=Some(task);
     }
     fn start(&self)->hangar_server::runtime::terminal::TerminalHandle {
         self.start_with_events(broadcast::channel(128).0)
@@ -105,23 +152,22 @@ impl Fixture {
         self.start_options(broadcast::channel(128).0,Duration::from_secs(30),TerminalOptions::default().focus_return,clear_wait)
     }
     fn start_options(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration,focus_return:Duration,clear_wait:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_plugin();
         let lease=crate::lease_when_free(&self.target.lease_path);
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,..TerminalOptions::default()};
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,status:Some(self.status.clone()),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
+    fn start_give_up(&self,give_up_after:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_plugin();
+        let lease=crate::lease_when_free(&self.target.lease_path);
+        let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,..TerminalOptions::default()};
+        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
+    }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
-    /// Lê o estado que o ator grava por troca atômica. No Windows quem abre o arquivo no instante da troca
-    /// recebe NotFound ou acesso negado; a leitura seguinte já vê o arquivo novo.
     fn state(&self)->Value {
-        let deadline=std::time::Instant::now()+Duration::from_secs(1);
-        loop {
-            match std::fs::read(&self.target.state_path) {
-                Ok(bytes) => return serde_json::from_slice(&bytes).unwrap(),
-                Err(error) if cfg!(windows) && matches!(error.kind(),std::io::ErrorKind::NotFound|std::io::ErrorKind::PermissionDenied) && std::time::Instant::now()<deadline => std::thread::yield_now(),
-                Err(error) => panic!("estado ilegível: {error}"),
-            }
-        }
+        serde_json::from_slice(&queue::read_replaced(&self.target.state_path).unwrap_or_else(|error|panic!("estado ilegível: {error}"))).unwrap()
     }
     /// Espera com prazo; no estouro mostra onde a operação parou (política, multiplexador e diário).
     /// O teto cobre o runner Windows, onde cada leitura de fatos grava o diário durável em ~0,1–0,3 s.
@@ -148,13 +194,16 @@ impl Fixture {
         }
     }
 }
-impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
+impl Drop for Fixture {fn drop(&mut self){self.server.abort();if let Some(task)=self.plugin_task.lock().unwrap().take() {task.abort();}}}
 
 #[tokio::test]
 async fn real_process_timeout_ends_grandchild_before_detach_and_new_lease() {
     let mut f=Fixture::new().await;let script=f._dir.path().join("fake_mux.py");let late=f._dir.path().join("late-write");
     let code=format!(r#"import os,sys,time,subprocess
 path={}
+# O pane é o próprio teste (o agente da sessão): no Windows o `python` do venv é um lançador, e o pai
+# do script não seria o teste.
+agent={}
 mode=sys.argv[1]
 if mode in ('--child','--grand'):
  open(path+mode+'.pid','w').write(str(os.getpid()))
@@ -162,7 +211,7 @@ if mode in ('--child','--grand'):
  else:time.sleep(2.5);open(path,'w').write('late')
  time.sleep(10)
 elif mode=='--other':time.sleep(60)
-elif mode=='display-message':print('session\t%1\t1')
+elif mode=='display-message':print(str(agent)+'\tsession\t%1\t1' if sys.argv[-1].startswith('#{{pane_pid}}') else 'session\t%1\t1')
 elif mode=='capture-pane':print('─'*32+'\n❯ \n'+'─'*32)
 elif mode=='send-keys' and '-l' in sys.argv:
  subprocess.Popen([sys.executable,__file__,'--child'])
@@ -170,16 +219,18 @@ elif mode=='send-keys' and '-l' in sys.argv:
  deadline=time.monotonic()+10
  while not os.path.exists(path+'--grand.pid') and time.monotonic()<deadline:time.sleep(.005)
  time.sleep(10)
-"#,json!(late.to_str().unwrap()));
+"#,json!(late.to_str().unwrap()),std::process::id());
     std::fs::write(&script,code).unwrap();
     let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|if cfg!(windows){"python".into()}else{"python3".into()});
     let mut other=KillOnDrop(std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap());let other_born=std::time::Instant::now();
-    f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
+    f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];
     let lease=crate::lease_when_free(&f.target.lease_path);let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
         limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
-    let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
+    // Teto só contra travamento: o fluxo parte o multiplexador falso umas 16 vezes, e cada partida do
+    // Python demora muito mais com a máquina carregada.
+    let result=tokio::time::timeout(Duration::from_secs(30),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
     h.stop().await.unwrap();let python_lease=crate::lease_when_free(&f.target.lease_path);
     let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
@@ -196,6 +247,107 @@ elif mode=='send-keys' and '-l' in sys.argv:
     assert!(grandchild_born,"timeout fired before the grandchild existed; nothing was proved");
     // Saída 0 é o `sleep` do processo alheio que acabou sozinho; outro código é morte por terceiro.
     assert!(unrelated_alive,"processo alheio saiu: {other_exit:?} depois de {other_age:?}");assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
+}
+
+/// Teto de chamadas ao multiplexador numa entrega de texto até a primeira tecla, pelo desenho: a vida
+/// (pane e agente) é provada uma vez no começo da entrega (1); cada leitura de fatos relê a tela e
+/// reconfere a vida (2), e são cinco: admissão do executor, prontidão do `prompt`, o composer, a do
+/// `deliver` e a conferência final; o composer captura também a tela dele (1); a guarda de foco dos mods
+/// confere o pane e lê o tamanho e a tela visível (3). 1 + 5×2 + 1 + 3 = 15.
+const PROMPT_MUX_CEILING:usize=15;
+#[tokio::test]
+async fn terminal_runtime_prompt_reads_the_mux_once_per_stage_and_checks_life_last() {
+    let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();
+    assert_eq!(h.command(f.command("count","fixture-input")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let calls=f.io.calls.lock().unwrap().clone();
+    let key=calls.iter().position(|c|c.args[0]=="send-keys").expect("a entrega não escreveu");
+    let seen:Vec<String>=calls[..key].iter().map(|c|format!("{} {}",c.args[0],c.args.last().unwrap())).collect();
+    assert!(key<=PROMPT_MUX_CEILING,"{key} chamadas antes da tecla: {seen:?}");
+    // A conferência final relê a tela e só depois prova a vida, logo antes da tecla.
+    assert_eq!(calls[key-2].args[0],"capture-pane","{seen:?}");
+    assert_eq!(calls[key-1].args.last().unwrap(),"#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}","{seen:?}");
+    h.stop().await.unwrap();
+}
+fn menu(title:&str,options:&[&str])->String {
+    let lines:Vec<String>=options.iter().enumerate().map(|(i,o)|format!("{} {}. {o}",if i==0 {"❯"} else {" "},i+1)).collect();
+    format!("{title}\n{}\nEsc to cancel · to navigate\n",lines.join("\n"))
+}
+/// Responde pelo ator ao menu `shown`, registrado como o monitor o publica, com `panes` na tela (uma por
+/// captura, a última fica). Devolve a resposta e as teclas que saíram.
+async fn answer_menu(kind:&str,option:u64,shown:&str,panes:Vec<String>)->(hangar_server::runtime::protocol::RuntimeReply,Vec<String>) {
+    use hangar_server::interactions::{InteractionKind,InteractionTarget};
+    let f=Fixture::new().await;let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    *f.io.panes.lock().unwrap()=panes;
+    let target=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
+    let id=f.plugin.interactions().observe_revision(&binding,&target,Some(interaction_semantic(shown,None).unwrap()),None).unwrap().unwrap();
+    f.io.calls.lock().unwrap().clear();
+    let mut payload=json!({"interaction_id":id});if kind=="select" {payload["option"]=json!(option);}
+    let reply=h.control(format!("{kind}-answer"),kind.into(),payload).await.unwrap();h.stop().await.unwrap();
+    let keys=f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="send-keys").map(|c|c.args.last().unwrap().clone()).collect();
+    (reply,keys)
+}
+/// Menu A respondido e a tela passa a B em qualquer captura até a da conferência final da tecla (a 7ª: duas
+/// por `check_interaction`, três vezes, e a do `verify` da tecla), depois de a vida já provada: recusa, sem tecla.
+#[tokio::test]
+async fn terminal_runtime_select_refuses_b_shown_at_any_capture_up_to_the_key() {
+    let (a,b)=(menu("Question A",&["first","second"]),menu("Question B",&["first","second"]));
+    for shown in 0..=6 {
+        let mut panes=vec![a.clone();shown];panes.push(b.clone());
+        let (reply,keys)=answer_menu("select",1,&a,panes).await;
+        assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Rejected,"B na captura {}: {reply:?}",shown+1);
+        assert_eq!(reply.payload["code"],"erro_interacao_desatualizada","{reply:?}");
+        assert!(keys.is_empty(),"tecla com B na tela (captura {}): {keys:?}",shown+1);
+    }
+}
+/// A navegação até a opção: B na conferência final da primeira seta não deixa tecla nenhuma sair; B na da
+/// segunda deixa só a primeira: só setas saíram, sem Enter, então é recusa e não incerteza.
+#[tokio::test]
+async fn terminal_runtime_select_navigation_refuses_b_at_each_arrow() {
+    let (a,b)=(menu("Question A",&["first","second","third"]),menu("Question B",&["first","second","third"]));
+    // Capturas 1-4: os dois `check_interaction`; a 5ª é a da primeira seta, a 6ª a da segunda.
+    let (reply,keys)=answer_menu("select",3,&a,[vec![a.clone();4],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert!(keys.is_empty(),"{keys:?}");
+    let (reply,keys)=answer_menu("select",3,&a,[vec![a.clone();5],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert_eq!(keys,["Down"]);
+}
+/// Envio do menu de múltipla escolha: o `Right` só com o menu na conferência final; o Enter só com a mesma
+/// aba de envio que o `Right` abriu.
+#[tokio::test]
+async fn terminal_runtime_submit_selected_refuses_changed_menu_or_review_before_each_key() {
+    let (a,b)=(menu("Question A",&["[✔] first","[ ] second"]),menu("Question B",&["[✔] first","[ ] second"]));
+    let review=|answer:&str|format!("Review your answers\n → {answer}\n\n ❯ 1. Submit answers\n   2. Cancel\n");
+    // Capturas 1-4: `check_interaction` e a leitura do envio; a 5ª é a do `Right`.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();4],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert!(keys.is_empty(),"{keys:?}");
+    // Depois do `Right`, a 6ª e a 7ª mostram a aba de envio; a 8ª, a do Enter, outra.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();5],vec![review("first");2],vec![review("second")]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Unknown,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert_eq!(keys,["Right"]);
+    // Sem troca, o Enter sai para a mesma aba.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();5],vec![review("first");3],vec!["❯ \n".into()]].concat()).await;
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{reply:?}");
+    assert_eq!(keys,["Right","\r"]);
+}
+/// A conversa (vida) ou o pane trocam em qualquer chamada até a última antes da tecla: a entrega não escreve.
+#[tokio::test]
+async fn terminal_runtime_prompt_refuses_life_or_pane_switch_at_any_call_before_the_key() {
+    let clean={
+        let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();
+        assert_eq!(h.command(f.command("clean","fixture-input")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+        let key=f.io.calls.lock().unwrap().iter().position(|c|c.args[0]=="send-keys").unwrap();h.stop().await.unwrap();key
+    };
+    for kind in ["life","pane"] {
+        for at in 1..=clean {
+            let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();*f.io.switch_at.lock().unwrap()=Some((at,kind));
+            let reply=h.command(f.command("switched","fixture-input")).await.unwrap();
+            assert_ne!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{kind} trocado na chamada {at}");
+            h.stop().await.unwrap();
+            assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"{kind} trocado na chamada {at}: tecla escrita");
+        }
+    }
 }
 
 #[cfg(target_os="linux")]
@@ -269,8 +421,11 @@ async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_gene
     f.unknown.store(false,std::sync::atomic::Ordering::Release);
     let lease=crate::lease_when_free(&f.target.lease_path);
     let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",2,"session",vec![])).unwrap();
-    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30),status:Some(f.status.clone()),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"], "delivery_unproved");
+    let late=f.status.subscribe();
+    assert_eq!(late.borrow().input_stalled.as_deref(), Some("delivery_unproved"), "a reabertura publica o bloqueio antes de atender o monitor");
     assert_eq!(h.drain().await.unwrap()["drained"],0);
     assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(f.io.calls.lock().unwrap().len(),effects);assert_eq!(f.calls.lock().unwrap().len(),publications);
@@ -300,6 +455,8 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"receipt_scan");
+    assert_eq!(f.status.borrow().error.as_deref(), Some("receipt_scan"));
+    assert_eq!(f.status.borrow().message.as_deref(), problem.data["message"].as_str());
     assert_eq!(h.snapshot().await.unwrap()["error"],"receipt_scan");
     let count=f.state()["operations"].as_object().unwrap().len();
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -308,7 +465,21 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
     std::fs::write(&f.target.transcript,"").unwrap();
     h.confirm().await.unwrap();
     assert!(h.snapshot().await.unwrap()["error"].is_null());
+    assert_eq!(*f.status.borrow(), TerminalStatus::default());
     h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_status_reopening_resets_old_error_before_subscribing() {
+    let f=Fixture::new().await;
+    for _ in 0..2 {
+        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None});
+        let h=f.start();
+        h.snapshot().await.unwrap();
+        let late=f.status.subscribe();
+        assert_eq!(*late.borrow(), TerminalStatus::default());
+        h.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -321,6 +492,7 @@ async fn terminal_runtime_unknown_delivery_is_signaled_without_retyping() {
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"terminal_delivery_unknown");
+    assert_eq!(f.status.borrow().error.as_deref(), Some("terminal_delivery_unknown"));
     assert_eq!(h.snapshot().await.unwrap()["error"],"terminal_delivery_unknown");
     let calls=f.io.calls.lock().unwrap().len();
     h.command(command).await.unwrap(); tokio::time::sleep(Duration::from_millis(60)).await;
@@ -362,7 +534,7 @@ async fn terminal_runtime_unknown_survives_restart_and_never_requeues() {
 async fn terminal_runtime_idle_timer_drains_without_sse_and_claims_one() {
     let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("queued1","Um")).await.unwrap(); h.command(f.command("queued2","Dois")).await.unwrap();
-    assert!(f.io.calls.lock().unwrap().is_empty());
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
     f.idle.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("espera 1",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
     let state=f.state(); assert_eq!(state["rows"].as_array().unwrap().len(),2); h.stop().await.unwrap();
@@ -372,7 +544,7 @@ async fn terminal_runtime_queued_row_drains_while_claude_is_working() {
     // A fila só espera a caixa de digitar voltar; o turno em andamento é do Claude Code enfileirar.
     let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("queued","Um")).await.unwrap();
-    assert!(f.io.calls.lock().unwrap().is_empty());
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
     f.ready.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("sai com a sessão trabalhando",||f.state()["rows"][0]["delivered"]==true).await;
     h.stop().await.unwrap();
@@ -397,18 +569,12 @@ async fn terminal_runtime_cancel_http_does_not_release_lease_and_stop_waits() {
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); stopping.await.unwrap().unwrap(); drop(crate::lease_when_free(&f.target.lease_path));
 }
 #[tokio::test]
-async fn terminal_runtime_effect_policies_are_journaled_reads_are_not_and_root_id_is_stable() {
-    // A publicação no plugin tem efeito e fica no diário; a leitura de fatos não regrava o estado.
-    let f=Fixture::new().await; f.unknown.store(true,std::sync::atomic::Ordering::Release); let h=f.start(); h.command(f.command("root","Olá")).await.unwrap();
-    let calls=f.calls.lock().unwrap().clone(); let state=f.state();
-    assert!(calls.iter().any(|c|c["kind"]=="terminal_publish") && calls.iter().any(|c|c["kind"]=="terminal_facts"));
-    for call in &calls {
-        let phase=&state["operations"][call["phase_id"].as_str().unwrap()];
-        if call["kind"]=="terminal_facts" {assert!(phase.is_null());}
-        else {assert!(phase["payload"]==json!({"kind":call["kind"],"request_id":call["request_id"],"payload":call["payload"]}));}
-        assert_eq!(call["request_id"],"root");
-    }
-    h.stop().await.unwrap();
+async fn terminal_runtime_local_publication_keeps_journal_and_root_without_retired_policies() {
+    let f=Fixture::new().await;f.unknown.store(true,std::sync::atomic::Ordering::Release);let h=f.start();
+    let reply=h.command(f.command("root","Olá")).await.unwrap();assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    assert!(f.calls.lock().unwrap().is_empty());let requests=f.plugin_requests.lock().unwrap().clone();assert_eq!(requests.len(),1);
+    assert_eq!(requests[0]["publication_id"],"key:1:root");assert_eq!(requests[0]["_writing"],"dispatching");assert_eq!(f.state()["operations"]["root"]["status"],"unknown");
+    assert!(f.state()["operations"].as_object().unwrap().keys().all(|id|!id.starts_with("terminal-policy:")));h.stop().await.unwrap();
 }
 #[tokio::test]
 async fn terminal_runtime_slash_has_no_prompt_row_and_private_snapshot_has_no_public_state() {
@@ -434,7 +600,8 @@ async fn terminal_runtime_working_allows_safe_tui_enqueue_without_hiding_pending
 async fn terminal_runtime_explicit_steer_uses_driver_and_no_prompt_row() {
     let f=Fixture::new().await; let h=f.start();
     let result=h.control("steer-now".into(),"steer".into(),json!({})).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    // Sem a marca da fila na TUI não se prova consumo: adiado com o código.
+    assert_eq!((result.disposition,result.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("no_queued_input")),"{}",result.payload);
     assert!(f.state()["rows"].as_array().unwrap().is_empty()); h.stop().await.unwrap();
 }
 
@@ -475,23 +642,156 @@ async fn terminal_runtime_dispatching_recovers_unknown_not_redigitated() {
 
 #[tokio::test]
 async fn terminal_runtime_held_plugin_unknown_does_not_fall_back_and_repeat_does_not_publish() {
-    let f=Fixture::new().await; *f.control.lock().unwrap()=json!({"disposition":"unknown"}); let h=f.start();
-    let payload=json!({"option":1,"require_cursor":true,"request_id":"perm:held"});
-    let result=h.control("held".into(),"select".into(),payload.clone()).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
-    assert!(f.io.calls.lock().unwrap().is_empty()); let count=f.calls.lock().unwrap().len();
-    h.control("held".into(),"select".into(),payload).await.unwrap(); assert_eq!(f.calls.lock().unwrap().len(),count);
-    let call=f.calls.lock().unwrap()[0].clone(); assert_eq!(call["request_id"],"perm:held"); assert_eq!(call["payload"]["generation"],1);
+    use hangar_server::plugin::{Ask,PermissionGate,Receipt};
+    let f=Fixture::new().await;let h=f.start();f.owner(true);
+    let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    let poll=f.plugin.begin_ask(&binding,Ask {id:"perm:held".into(),questions:None,tool:Some("Bash".into()),janela_ms:None,summary:Some("comando".into())},PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false},std::time::Instant::now()).unwrap();
+    let interaction=f.plugin.pending(&binding,std::time::Instant::now()).unwrap().interaction_id;
+    let payload=json!({"option":1,"request_id":"perm:held","interaction_id":interaction});let hc=h.clone();let sent=payload.clone();
+    let command=tokio::spawn(async move {hc.control("held".into(),"select".into(),sent).await});
+    let body=tokio::time::timeout(WAIT,poll.wait()).await.unwrap();assert_eq!(body["permitir"],true);assert!(body.get("answers").is_none());
+    let receipt:Receipt=serde_json::from_value(json!({"publication_id":body["publication_id"],"generation":body["generation"],"session_id":body["session_id"]})).unwrap();
+    f.plugin.finish(&binding,"perm:held","terminal",Some(receipt)).unwrap();
+    assert_eq!(command.await.unwrap().unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    h.control("held".into(),"select".into(),payload).await.unwrap();
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));assert!(f.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_permission_without_receipt_never_gets_a_keyboard_fallback() {
+    use hangar_server::plugin::{Ask,PermissionGate};
+    let f=Fixture::new().await;let h=f.start();f.owner(false);let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    let poll=f.plugin.begin_ask(&binding,Ask {id:"perm:held".into(),questions:None,tool:None,janela_ms:None,summary:None},PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false},std::time::Instant::now()).unwrap();
+    let interaction=f.plugin.pending(&binding,std::time::Instant::now()).unwrap().interaction_id;
+    assert_eq!(h.control("select".into(),"select".into(),json!({"option":1,"request_id":"perm:held","interaction_id":interaction})).await.unwrap_err().code,"erro_interacao_indisponivel");
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]=="display-message"));
+    assert!(f.calls.lock().unwrap().is_empty());assert!(f.plugin_requests.lock().unwrap().is_empty());
+    assert!(tokio::time::timeout(Duration::ZERO,poll.wait()).await.is_err(),"nenhuma resposta entregue ao hook sem receipt_v2");
     h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_held_plugin_unavailable_permits_tui_and_accepted_answer_skips_keys() {
-    let f=Fixture::new().await; let h=f.start();
-    let result=h.control("select".into(),"select".into(),json!({"option":1,"request_id":"perm:held"})).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert!(!f.io.calls.lock().unwrap().is_empty());
-    f.io.calls.lock().unwrap().clear(); *f.control.lock().unwrap()=json!({"disposition":"accepted"});
-    let result=h.control("answer".into(),"answer_questions".into(),json!({"request_id":"ask:held","answers":[{"kind":"option","indices":[0],"labels":["A"]}]})).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Accepted); assert!(f.io.calls.lock().unwrap().is_empty()); h.stop().await.unwrap();
+async fn terminal_runtime_question_without_receipt_falls_back_to_the_pane_keys() {
+    // Vida nova antes do `/pull` voltar: o plugin segura a pergunta e não recebe a resposta. Como no Python, as
+    // teclas do pane respondem, conferindo que o picker mostra a pergunta dele.
+    use hangar_server::plugin::{Ask,PermissionGate};
+    let f=Fixture::new().await;let h=f.start();f.owner(false);let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    let questions=vec![json!({"question":"Escolha B","header":"B","options":[{"label":"primeira"},{"label":"segunda"}]})];
+    let poll=f.plugin.begin_ask(&binding,Ask {id:"ask:B".into(),questions:Some(questions),tool:None,janela_ms:None,summary:None},PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false},std::time::Instant::now()).unwrap();
+    let interaction=f.plugin.pending(&binding,std::time::Instant::now()).unwrap().interaction_id;
+    let picker="Escolha B\n❯ 1. primeira\n  2. segunda\n  3. Type something.\n  4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel\n".to_string();
+    let closed="────────────────────────────────\n❯ \n────────────────────────────────\n".to_string();
+    *f.io.panes.lock().unwrap()=vec![picker.clone(),picker.clone(),picker.clone(),picker,closed];
+    // Corpo torto: recusa com o código e o executor segue de pé para a resposta seguinte.
+    let bad=h.control("ask-bad".into(),"answer_questions".into(),json!({"request_id":"ask:B","interaction_id":interaction,"answers":[{"kind":"option","indices":"x"}]})).await;
+    assert_eq!(bad.unwrap_err().code,"terminal_payload");
+    let reply=h.control("ask-keys".into(),"answer_questions".into(),json!({"request_id":"ask:B","interaction_id":interaction,"answers":[{"kind":"option","indices":[0],"labels":["primeira"]}]})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!("answered")),"{}",reply.payload);
+    let keys:Vec<String>=f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="send-keys").map(|c|c.args.last().unwrap().clone()).collect();
+    assert_eq!(keys,["\r"]);
+    assert!(tokio::time::timeout(Duration::ZERO,poll.wait()).await.is_err(),"nada entregue ao hook sem receipt_v2");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_common_and_two_held_surfaces_use_local_services() {
+    use hangar_server::plugin::{Ask,PermissionGate,Receipt};
+    use hangar_server::terminal_facts::LocalTerminalFacts;
+    for form_first in [false,true] {
+        let f=Fixture::new().await;let h=f.start();
+        assert_eq!(h.command(f.command("common","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+        f.owner(true);f.io.calls.lock().unwrap().clear();let binding=LocalTerminalFacts::binding(&f.target);
+        let gate=PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false};
+        let approval=f.plugin.begin_ask(&binding,Ask {id:"perm:A".into(),questions:None,tool:Some("Bash".into()),janela_ms:None,summary:Some("comando A".into())},gate,std::time::Instant::now()).unwrap();
+        let form=f.plugin.begin_ask(&binding,Ask {id:"ask:B".into(),questions:Some(vec![json!({"question":"Escolha B","options":[{"label":"primeira"}]})]),tool:None,janela_ms:None,summary:None},gate,std::time::Instant::now()).unwrap();
+        let initial=f.plugin.pending_all(&binding,std::time::Instant::now()).unwrap();assert_eq!(initial.len(),2);
+        let a=initial.iter().find(|question|question.id=="perm:A").unwrap().interaction_id.clone();let b=initial.iter().find(|question|question.id=="ask:B").unwrap().interaction_id.clone();
+        let expected=f.plugin.interactions().expected(&binding,Some(&a)).unwrap();let local=LocalTerminalFacts::new(f.io.clone(),Some(f.plugin.clone()),None);
+        assert_eq!(local.plugin_question(&f.target,&expected).await.unwrap().id,"perm:A");
+        let mut wrong=expected.clone();wrong.interaction_id=b.clone();assert_eq!(local.plugin_question(&f.target,&wrong).await.unwrap_err().0,"erro_interacao_desatualizada");
+        let mut wrong=expected.clone();wrong.semantic["resumo"]=json!("mudou");assert!(local.plugin_question(&f.target,&wrong).await.is_err());
+        let mut wrong=expected;wrong.source_revision=Some("outra revisão".into());assert!(local.plugin_question(&f.target,&wrong).await.is_err());
+        let mut cases=vec![("perm:A",approval,"select",json!({"request_id":"perm:A","interaction_id":a,"option":1})),("ask:B",form,"answer_questions",json!({"request_id":"ask:B","interaction_id":b,"answers":[{"kind":"option","indices":[0],"labels":["primeira"]}]}))];
+        if form_first {cases.reverse();}
+        for (index,(request,poll,control,payload)) in cases.into_iter().enumerate() {
+            let hc=h.clone();let operation=format!("response:{request}");let op=operation.clone();let control=control.to_owned();let expected_id=payload["interaction_id"].clone();
+            let command=tokio::spawn(async move {hc.control(op,control,payload).await});let body=tokio::time::timeout(WAIT,poll.wait()).await.unwrap();
+            if request=="perm:A" {assert_eq!(body["permitir"],true);assert!(body.get("answers").is_none());}else {assert_eq!(body["answers"],json!({"Escolha B":"primeira"}));}
+            assert_eq!(f.state()["operations"][&operation]["wire_attempts"][format!("terminal:1:{operation}")]["status"],"dispatching");
+            let receipt:Receipt=serde_json::from_value(json!({"publication_id":body["publication_id"],"generation":body["generation"],"session_id":body["session_id"]})).unwrap();f.plugin.finish(&binding,request,"app",Some(receipt)).unwrap();
+            let reply=command.await.unwrap().unwrap();assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted);assert_eq!(reply.payload["interaction_id"],expected_id);
+            let remaining=f.plugin.pending_all(&binding,std::time::Instant::now()).unwrap();if index==0 {assert_eq!(remaining,vec![initial.iter().find(|question|question.id!=request).unwrap().clone()]);}else {assert!(remaining.is_empty());}
+        }
+        assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));assert!(f.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
+    }
+}
+#[cfg(target_os="linux")]
+#[tokio::test]
+async fn terminal_runtime_same_process_new_conversation_without_native_record_never_writes_old_binding() {
+    let f=Fixture::new().await;let h=f.start();
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    *f.io.native_record.lock().unwrap()=None;std::fs::remove_file(native).unwrap();
+    let current=f.target.transcript.parent().unwrap().join("sid-B.jsonl");std::fs::write(&current,"").unwrap();let _current_fd=std::fs::File::open(&current).unwrap();
+    let local=hangar_server::terminal_facts::LocalTerminalFacts::new(f.io.clone(),Some(f.plugin.clone()),None);
+    assert_eq!(local.read(&f.target,&f.target.binding,"").await.unwrap_err().0,"terminal_conversation_changed");
+    f.owner(true);let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    let poll=f.plugin.begin_ask(&binding,hangar_server::plugin::Ask {id:"perm:old-sid".into(),questions:None,tool:Some("Bash".into()),janela_ms:None,summary:None},hangar_server::plugin::PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false},std::time::Instant::now()).unwrap();
+    let interaction=f.plugin.pending(&binding,std::time::Instant::now()).unwrap().interaction_id;
+    assert_eq!(h.control("old-answer".into(),"select".into(),json!({"option":1,"request_id":"perm:old-sid","interaction_id":interaction})).await.unwrap_err().code,"terminal_conversation_changed");
+    assert!(tokio::time::timeout(Duration::ZERO,poll.wait()).await.is_err(),"Store::answer não entrega resposta em conversa sem prova");
+    let reply=h.command(f.command("old-sid","Não pode chegar à conversa B")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);assert_eq!(reply.payload["code"],"terminal_facts");
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]=="display-message"));
+    assert!(f.io.socket_calls.lock().unwrap().is_empty());assert!(f.plugin_requests.lock().unwrap().is_empty());assert!(f.calls.lock().unwrap().is_empty());
+    assert!(f.state()["rows"].as_array().unwrap().iter().all(|row|row["delivered"]!=true));h.stop().await.unwrap();
+}
+/// Sem o registro nativo, só o `/pull` aberto do plugin prova a conversa, e o `Fill` entrega esse
+/// `/pull` ao plugin: a prova sumia até ele voltar, o texto ficava no composer e a fila travava. A
+/// entrega vai pelo teclado, que deixa o `/pull` aberto.
+#[cfg(target_os="linux")]
+#[tokio::test]
+async fn terminal_runtime_fill_never_spends_the_only_conversation_proof() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    *f.io.native_record.lock().unwrap()=None;std::fs::remove_file(native).unwrap();
+    f.fill_plugin.store(true,std::sync::atomic::Ordering::Release);f.repull_ms.store(500,std::sync::atomic::Ordering::Release);
+    let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    f.wait_for("o /pull do plugin",||f.plugin.waiting(&binding).unwrap_or(false)).await;
+    let reply=h.command(f.command("fill","hello @peer")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{}",reply.payload);
+    assert!(f.io.text.lock().unwrap().is_empty(),"nada fica digitado no composer");
+    h.stop().await.unwrap();
+}
+/// Registro nativo ausente para o pid do agente e plugin sem `/pull`: nada prova a conversa. A sessão
+/// aparece como sem entrega segura antes de uma mensagem travar, e o aviso sai quando a prova volta.
+#[tokio::test]
+async fn terminal_runtime_missing_native_record_and_silent_plugin_mark_no_safe_delivery() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    let saved=f.io.native_record.lock().unwrap().take();std::fs::remove_file(native).unwrap();
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_millis(50));
+    f.wait_for("sem entrega segura",||f.status.borrow().input_stalled.as_deref()==Some("no_safe_delivery")).await;
+    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
+    *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
+    f.wait_for("o aviso sai com a prova de volta",||f.status.borrow().input_stalled.is_none()).await;
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_unreadable_capture_recovers_without_sse() {
+    let f=Fixture::new().await;f.ready.store(false,std::sync::atomic::Ordering::Release);let h=f.start();
+    assert_eq!(h.command(f.command("waiting-capture","Quando voltar")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    f.io.capture_error.store(true,std::sync::atomic::Ordering::Release);f.ready.store(true,std::sync::atomic::Ordering::Release);
+    assert_eq!(h.drain().await.unwrap_err().code,"terminal_facts");assert!(typed_at(&f,"Quando voltar").is_empty());
+    f.io.capture_error.store(false,std::sync::atomic::Ordering::Release);f.wait_for("a mesma fila retoma",||!typed_at(&f,"Quando voltar").is_empty()).await;
+    assert!(h.snapshot().await.unwrap()["error"].is_null());h.stop().await.unwrap();assert_eq!(typed_at(&f,"Quando voltar").len(),1);assert!(f.calls.lock().unwrap().is_empty());
+}
+// Binding Windows simulado: a sessão de logon não se lê fora do Windows, e a área de transferência
+// fica indisponível. No Windows o pane do teste é este processo, na sessão do servidor, e escreveria
+// na área de transferência real; ali a regra da sessão é coberta em `terminal_facts`.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn terminal_runtime_windows_clipboard_unavailable_does_not_write_multiline() {
+    let mut f=Fixture::new().await;f.target.binding.windows=true;f.target.binding.pane="=session:0.0".into();f.target.binding.clipboard_lock_path=Some(f._dir.path().join("clipboard.lock"));
+    let h=f.start();let reply=h.command(f.command("clipboard","linha1\nlinha2")).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Deferred);assert_eq!(reply.payload["code"],"clipboard_unavailable");
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));assert!(f.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
 }
 #[tokio::test]
 async fn terminal_runtime_binding_changes_while_an_operation_waits_prevents_old_second_effect() {
@@ -524,7 +824,7 @@ async fn terminal_runtime_native_receipt_for_queue_attempt_keeps_root_uuid_and_d
     let command=f.command("native-root","[de: peer] Olá"); h.command(command.clone()).await.unwrap();
     f.ready.store(true,std::sync::atomic::Ordering::Release); f.native.store(true,std::sync::atomic::Ordering::Release); h.drain().await.unwrap();
     assert_eq!(f.io.socket_calls.lock().unwrap().len(),1);
-    let envelope:Value=serde_json::from_slice(&f.io.socket_calls.lock().unwrap()[0]).unwrap(); assert_eq!(envelope["msg_id"],"native:native-root");
+    let envelope:Value=serde_json::from_slice(&f.io.socket_calls.lock().unwrap()[0]).unwrap(); assert_eq!(envelope["msg_id"].as_str().unwrap().len(),36);assert_eq!(envelope["from"],"uds:fixture-inbox");
     h.queue("receipt".into(),Action::Finish {id:"native-root".into(),status:queue::Status::Accepted,result:json!({"operation_id":"native-root","disposition":"accepted","payload":{"native_status":"delivered"}})}).await.unwrap();
     let replay=h.command(command).await.unwrap(); assert_eq!(replay.payload["native"],true); assert_eq!(replay.payload["native_status"],"delivered"); assert_ne!(f.state()["rows"][0]["confirmed"],true);
     assert_eq!(f.io.socket_calls.lock().unwrap().len(),1); h.stop().await.unwrap();
@@ -545,7 +845,10 @@ async fn terminal_runtime_clear_after_dispatch_holds_old_binding_until_detach() 
     assert_eq!(f.state()["runtime_state"]["preserve_binding"],true);
     let count=f.io.calls.lock().unwrap().len(); h.command(f.command("clear-now","/clear")).await.unwrap(); assert_eq!(f.io.calls.lock().unwrap().len(),count);
     assert!(h.command(f.command("old-life","Olá")).await.is_err());
-    assert!(h.control("old-key".into(),"interactive_key".into(),json!({"key":"C-c"})).await.is_err());
+    assert_eq!(f.io.calls.lock().unwrap().len(),count);
+    // A tecla do espelho não escreve na conversa: segue com a trava, como no Python.
+    assert_eq!(h.control("old-key".into(),"interactive_key".into(),json!({"key":"C-c"})).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let count=f.io.calls.lock().unwrap().len();
     h.drain().await.unwrap(); assert_eq!(f.io.calls.lock().unwrap().len(),count); h.stop().await.unwrap();
 }
 
@@ -586,8 +889,8 @@ async fn terminal_runtime_clear_without_new_conversation_releases_barrier_withou
     std::fs::write(f.target.transcript.with_file_name("00000000-0000-4000-8000-000000000001.jsonl"),"{\"message\":{\"content\":\"<command-name>/clear</command-name>\"}}\n").unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(h.command(f.command("clear-stuck","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
-    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
-    assert!(h.command(f.command("during-barrier","Olá")).await.is_err());
+    // A trava só vive 200 ms aqui: conferir a recusa no meio dela dependia da velocidade da máquina. O desfecho
+    // `clear_not_applied` abaixo prova que ela subiu; a recusa durante a trava é a do teste seguinte.
     h.queue("producer".into(),Action::Append {text:"Na fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("queued-row".into())}).await.unwrap();
     f.wait_for("trava sai",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
     // A saída grava a trava e depois a recusa: o retrato passa pelo ator e só volta com as duas no diário.
@@ -629,6 +932,95 @@ async fn terminal_runtime_clear_while_busy_waits_for_the_turn_before_releasing()
     assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
     f.idle.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("trava sai com a sessão parada",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_clear_barrier_lets_controls_through_while_the_turn_runs() {
+    // A trava espera o turno, mas Parar e as teclas do espelho não escrevem na conversa nova.
+    let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(100));
+    assert_eq!(h.command(f.command("clear-busy","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
+    let stop=h.control("stop-during-clear".into(),"interrupt".into(),json!({"clear":false})).await;
+    assert_eq!(stop.as_ref().map(|r|r.disposition).map_err(|e|e.code.clone()),Ok(hangar_server::runtime::protocol::Disposition::Accepted));
+    let key=h.control("key-during-clear".into(),"navigation_key".into(),json!({"key":"Down"})).await;
+    assert_eq!(key.as_ref().map(|r|r.disposition).map_err(|e|e.code.clone()),Ok(hangar_server::runtime::protocol::Disposition::Accepted));
+    let keys:Vec<String>=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys").map(|r|r.args.last().unwrap().clone()).collect();
+    assert!(keys.iter().any(|k|k=="Escape") && keys.iter().any(|k|k=="Down"),"{keys:?}");
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object(),"o controle não solta a trava");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_unreadable_composer_holding_the_queue_shows_why() {
+    // O desenho do composer mudou: nada é digitado às cegas, mas a vista diz por que a fila não anda.
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release);
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_millis(50));
+    h.queue("append-u".into(),Action::Append {text:"Parada".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("u".into())}).await.unwrap();
+    let start=std::time::Instant::now();
+    while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_unreadable" {
+        assert!(start.elapsed()<WAIT,"o motivo nunca apareceu: {}",h.snapshot().await.unwrap()["view"]); tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Parada"));
+    f.ready.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("entrega com o composer legível",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Parada")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_accepted_without_proof_is_given_up_and_rescued_when_it_shows_up() {
+    // Eco que não casa ou prompt barrado por hook: com o Claude parado, a bolha vira "não chegou" (o
+    // Descartar a tira), sem reenviar; a mensagem que aparece depois no transcript volta a ser entregue.
+    let f=Fixture::new().await; let h=f.start_give_up(Duration::from_millis(200));
+    assert_eq!(h.command(f.command("lost","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    f.wait_for("desistida no prazo",||f.state()["rows"][0]["desistiu"]==true).await;
+    let typed=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.contains(&"-l".into()) && r.args.last().unwrap()=="Olá").count();
+    assert_eq!(typed(),1,"nunca reenviada");
+    std::fs::write(&f.target.transcript,format!("{}\n",json!({"type":"user","sessionId":"sid","uuid":"late","timestamp":chrono::Utc::now().to_rfc3339(),"message":{"content":"Olá"}}))).unwrap();
+    h.confirm().await.unwrap();
+    assert_eq!(f.state()["rows"][0]["confirmed"],true); assert!(f.state()["rows"][0]["desistiu"].is_null());
+    h.stop().await.unwrap();
+    // A incerta desistida (`GiveUp`) também é resgatada.
+    let f=Fixture::new().await; f.io.fail_enter.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("unsure","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    assert_eq!(h.queue("give-up".into(),Action::GiveUp {entry_id:"unsure".into()}).await.unwrap(),json!(true));
+    assert_eq!(f.state()["rows"][0]["desistiu"],true);
+    std::fs::write(&f.target.transcript,format!("{}\n",json!({"type":"user","sessionId":"sid","uuid":"late","timestamp":chrono::Utc::now().to_rfc3339(),"message":{"content":"Olá"}}))).unwrap();
+    h.confirm().await.unwrap();
+    assert_eq!(f.state()["rows"][0]["confirmed"],true,"{}",f.state()["rows"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_question_scrolled_off_screen_holds_the_queue() {
+    // O menu do AskUserQuestion saiu da tela: as teclas do recado navegariam o picker. A fila espera a resposta.
+    let f=Fixture::new().await;
+    let config=f.target.metadata.config_dir.clone();std::fs::create_dir_all(config.join(".hangar-askq")).unwrap();
+    std::fs::write(&f.target.transcript,"{\"timestamp\":\"2099-01-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_q\",\"name\":\"AskUserQuestion\"}]}}\n").unwrap();
+    std::fs::write(config.join(".hangar-askq/sid.json"),json!({"transcript_path":f.target.transcript,"tool_use_id":"toolu_q","tool_input":{"questions":[
+        {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+    let h=f.start();
+    h.queue("append-q".into(),Action::Append {text:"Recado".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("q".into())}).await.unwrap();
+    assert_eq!(h.drain().await.unwrap()["drained"],0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado"),"nada digitado com a pergunta aberta");
+    use std::io::Write;
+    writeln!(std::fs::OpenOptions::new().append(true).open(&f.target.transcript).unwrap(),"{{\"timestamp\":\"2099-01-01T00:00:01Z\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_q\"}}]}}}}").unwrap();
+    f.wait_for("entrega depois da resposta",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado")).await;
+    h.stop().await.unwrap();
+    // Sidecar de uma vida que morreu na pergunta (mais velho que o processo): a conversa retomada não a mostra
+    // nem dispara o PostToolUse, e a fila não espera por ela.
+    let f=Fixture::new().await;
+    let config=f.target.metadata.config_dir.clone();std::fs::create_dir_all(config.join(".hangar-askq")).unwrap();
+    std::fs::write(&f.target.transcript,"{\"timestamp\":\"2099-01-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_q\",\"name\":\"AskUserQuestion\"}]}}\n").unwrap();
+    let sidecar=config.join(".hangar-askq/sid.json");
+    std::fs::write(&sidecar,json!({"transcript_path":f.target.transcript,"tool_use_id":"toolu_q","tool_input":{"questions":[
+        {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&sidecar).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(1))).unwrap();
+    let h=f.start();
+    h.queue("append-old".into(),Action::Append {text:"Recado".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("old".into())}).await.unwrap();
+    f.wait_for("entrega sem esperar a pergunta morta",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado")).await;
     h.stop().await.unwrap();
 }
 
@@ -824,6 +1216,7 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     assert_eq!(h.command(f.command("busy","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     let start=std::time::Instant::now();
     while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_busy" {assert!(start.elapsed()<WAIT,"o motivo não chegou à vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    f.wait_for("motivo chegou ao canal da sessão", || f.status.borrow().input_stalled.as_deref()==Some("composer_busy")).await;
     // Parada visível, as tentativas seguem espaçadas: o tique de 15 ms daria ~30 em 500 ms.
     let clears=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-s")).count();
     let before=clears(); tokio::time::sleep(Duration::from_millis(500)).await;
@@ -833,6 +1226,7 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     f.wait_for("entregue depois do rascunho sair",||f.state()["rows"][0]["delivered"]==true).await;
     let start=std::time::Instant::now();
     while !h.snapshot().await.unwrap()["view"]["input_stalled"].is_null() {assert!(start.elapsed()<WAIT,"o motivo não saiu da vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    f.wait_for("entrega limpou o canal da sessão", || f.status.borrow().input_stalled.is_none()).await;
     h.stop().await.unwrap();
 }
 // Tique de 15 ms dobrando: aos 2,5 s a próxima tentativa só viria perto de 3,8 s.
@@ -869,7 +1263,8 @@ async fn terminal_runtime_stall_belongs_to_the_line_not_the_session() {
 #[tokio::test(flavor="multi_thread")]
 async fn terminal_runtime_restart_during_a_deferral_without_write_requeues_and_delivers_once() {
     let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();
-    f.io.hold_capture.store(true,std::sync::atomic::Ordering::Release);
+    // Os fatos (uma captura) passam; segura a leitura do composer, já com o despacho começado.
+    f.io.hold_skip.store(1,std::sync::atomic::Ordering::Release); f.io.hold_capture.store(true,std::sync::atomic::Ordering::Release);
     // O backend cai com o ator lendo o composer: nada foi escrito no pane.
     let dying=tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
     let handle={let _inside=dying.enter(); f.start()};
@@ -1221,7 +1616,7 @@ async fn the_focus_guard_runs_only_when_the_delivery_presses_keys() {
 
 /// Os modos das publicações ao plugin, na ordem.
 fn published(f:&Fixture)->Vec<String> {
-    f.calls.lock().unwrap().iter().filter(|v|v["kind"]=="terminal_publish").map(|v|v["payload"]["publication"]["mode"].as_str().unwrap().to_owned()).collect()
+    f.plugin_requests.lock().unwrap().iter().map(|value|value["modo"].as_str().unwrap().to_owned()).collect()
 }
 
 /// Com o plugin vivo, o foco esquecido num mod volta pelo pedido a ele, sem o `ctrl+x tab`: também com só a
@@ -1276,16 +1671,17 @@ async fn the_click_asks_the_plugin_once_per_hold_and_only_when_it_is_live() {
     assert!(h.pane(PaneOp::ReturnFocus,far()).await.is_err(),"sem plugin vivo");
     assert!(published(&f).is_empty(),"nada publicado sem plugin");
     assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
-    f.unknown.store(true,std::sync::atomic::Ordering::Release);
+    f.unknown.store(true,std::sync::atomic::Ordering::Release);f.start_plugin();
     assert_eq!(hold().await.unwrap(),PaneReply::Done);
     assert!(h.pane(PaneOp::ReturnFocus,far()).await.is_err(),"o plugin não conhece o pedido");
     assert!(h.pane(PaneOp::ReturnFocus,far()).await.is_err());
-    assert_eq!(published(&f),["focus"],"a segunda volta na mesma reserva não pede de novo");
+    assert!(published(&f).is_empty(),"poll sem a capacidade focus não recebe publicação");
+    assert_eq!(f.state()["operations"].as_object().unwrap().values().filter(|operation|operation["payload"]["kind"]=="focus").count(),1);
     assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
-    f.focus_plugin.store(true,std::sync::atomic::Ordering::Release);
+    f.focus_plugin.store(true,std::sync::atomic::Ordering::Release);f.start_plugin();
     assert_eq!(hold().await.unwrap(),PaneReply::Done);
     assert_eq!(h.pane(PaneOp::ReturnFocus,far()).await.unwrap(),PaneReply::Done,"reserva nova, nova tentativa");
-    assert_eq!(published(&f),["focus","focus"]);
+    assert_eq!(published(&f),["focus"]);
     h.stop().await.unwrap();
 }
 
@@ -1298,7 +1694,7 @@ async fn without_the_plugin_focus_the_ring_returns_it() {
     let h=f.start_returning(broadcast::channel(128).0,Duration::from_secs(30),Duration::from_millis(300));
     assert_eq!(h.command(f.command("preso","Com @foco no mod")).await.unwrap().payload["code"],"mods_focus");
     f.wait_for("a entrada vai ao plugin depois do anel",||published(&f).contains(&"fill".to_string())).await;
-    assert_eq!(published(&f),["focus","fill"]);
+    assert_eq!(published(&f),["fill"],"sem focus o poll só recebe entrada");
     assert!(f.io.ring_keys.load(std::sync::atomic::Ordering::SeqCst)>=1);
     h.stop().await.unwrap();
 }
@@ -1353,5 +1749,186 @@ async fn each_mods_hold_checks_the_pane_again() {
         assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
     }
     assert_eq!(checks()-before,2,"uma conferência por reserva");
+    h.stop().await.unwrap();
+}
+
+fn projection(f:&Fixture)->Vec<Value> {
+    queue::read_replaced_to_string(&f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn direct_send_publishes_row_only_once_delivered() {
+    // Em idle a linha não aparece na vista enquanto os fatos são lidos: a primeira versão publicada já vem entregue.
+    let f=Fixture::new().await;
+    *f.io.projection_at_facts.lock().unwrap()=Some((f.target.projection_dir.join("session.jsonl"),vec![]));
+    let h=f.start();
+    assert_eq!(h.command(f.command("direct","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let seen=f.io.projection_at_facts.lock().unwrap().as_ref().unwrap().1.clone();
+    // Os fatos do `execute` são lidos entre a gravação da linha e o despacho: a primeira leitura não vê a
+    // linha, e nenhuma a vê ainda não entregue.
+    assert!(!seen.is_empty() && !seen[0].contains("\"direct\""),"vista publicada antes do despacho: {seen:?}");
+    assert!(!seen.iter().any(|view|view.contains("\"delivered\":false")),"linha publicada antes de entregue: {seen:?}");
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"direct"); assert_eq!(rows[0]["delivered"],true);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_send_publishes_queued_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("wait","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"wait"); assert_eq!(rows[0]["delivered"],false);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_projection_is_restored_on_restart() {
+    // Queda entre a gravação e o despacho: a linha está no diário e a abertura seguinte a publica.
+    let f=Fixture::new().await;
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let mut store=store;
+    store.exec_held(1,"held",ClockSample {monotonic_s:0.0,epoch_s:2.0},Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("held".into())},true).unwrap();
+    assert!(projection(&f).is_empty());
+    drop(store);
+    Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let rows=projection(&f); assert_eq!(rows.len(),1); assert_eq!(rows[0]["delivered"],false);
+}
+
+#[tokio::test]
+async fn new_message_waits_behind_older_deferred_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    let first=h.command(f.command("A","Primeira")).await.unwrap();
+    assert_eq!(first.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert!(first.payload["code"].is_null());
+    let second=h.command(f.command("B","Segunda")).await.unwrap();
+    assert_eq!(second.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(second.payload["code"],"queue_ahead"); assert_eq!(second.payload["queued"],true);
+    f.ready.store(true,std::sync::atomic::Ordering::Release);
+    let typed=||->Vec<String> {f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.contains(&"-l".into())).map(|r|r.args.last().unwrap().clone()).collect()};
+    f.wait_for("as duas digitadas",||typed().iter().any(|t|t=="Segunda")).await;
+    let typed=typed();
+    let (a,b)=(typed.iter().position(|t|t=="Primeira").unwrap(),typed.iter().position(|t|t=="Segunda").unwrap());
+    assert!(a<b,"ordem {typed:?}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delivered_row_confirms_when_transcript_grows_without_waiting_the_tick() {
+    let f=Fixture::new().await;
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.command(f.command("fast","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    std::fs::write(&f.target.transcript,"{\"type\":\"user\",\"uuid\":\"1\",\"message\":{\"content\":\"Olá\"}}\n").unwrap();
+    let start=std::time::Instant::now();
+    f.wait_for("confirmada pelo transcript",||f.state()["rows"][0]["confirmed"]==true).await;
+    assert!(start.elapsed()<Duration::from_secs(2),"confirmação esperou {:?}",start.elapsed());
+    h.stop().await.unwrap();
+}
+
+/// Parity A2: rodapé que não muda depois da tecla não deixa a sessão doente. O Python relia o modo
+/// e devolvia o final; a entrega seguia.
+#[tokio::test]
+async fn unchanged_footer_after_mode_key_reads_back_and_keeps_delivering() {
+    let f=Fixture::new().await;
+    *f.io.panes.lock().unwrap()=vec![format!("{}\n❯ \n{}\n⏵⏵ accept edits on (shift+tab to cycle)\n","─".repeat(32),"─".repeat(32))];
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:f.io.clone(),permissions:Some(memory.clone()),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let reply=h.control("mode".into(),"set_permission_mode".into(),json!({"mode":"plan"})).await.unwrap();
+    assert_eq!(reply.payload["current"],"acceptEdits","{reply:?}");
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Rejected,"{reply:?}");
+    let snapshot=h.snapshot().await.unwrap();
+    assert!(snapshot["error"].is_null(),"modo incerto não trava a entrega: {snapshot}");
+    assert_eq!(memory.lock().unwrap().confirmed("sid").unwrap().map(|v|v.current),Some("acceptEdits".into()));
+    h.stop().await.unwrap();
+}
+
+/// Pane cujo rodapé mostra o modo corrente e cada BTab passa ao seguinte do ciclo.
+struct CycleIo {inner:Arc<Io>,modes:Mutex<std::collections::VecDeque<&'static str>>,btabs:std::sync::atomic::AtomicUsize}
+impl TerminalIo for CycleIo {
+    fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
+        if r.args[0]=="send-keys" && r.args.last().is_some_and(|k|k=="BTab") {
+            self.btabs.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            let mut modes=self.modes.lock().unwrap();let first=modes.pop_front().unwrap();modes.push_back(first);
+            return Ok(CommandOutput {success:true,stdout:vec![]});
+        }
+        let capture=r.args[0]=="capture-pane";
+        let mut out=self.inner.command(r).await?;
+        if capture {
+            let phrase=match *self.modes.lock().unwrap().front().unwrap() {"manual"=>"manual mode on","auto"=>"auto mode on","plan"=>"plan mode on",_=>"accept edits on"};
+            out.stdout.extend(format!("⏵⏵ {phrase} (shift+tab to cycle)\n").into_bytes());
+        }
+        Ok(out)
+    }) }
+    fn socket<'a>(&'a self,m:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome> {self.inner.socket(m,e)}
+}
+
+/// Parity M2 (`test_perm_get_cache_usa_mesma_lista`): a lista sondada fica guardada na vida da conversa;
+/// a leitura seguinte a devolve e a sonda seguinte não dá outra volta de teclas.
+#[tokio::test]
+async fn probed_modes_are_cached_for_reads_and_later_probes() {
+    let f=Fixture::new().await;
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(["manual","auto","plan"].into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let probe=h.control("p1".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!(probe.payload["modes"],json!(["manual","auto","plan"]),"{probe:?}");
+    let pressed=io.btabs.load(std::sync::atomic::Ordering::SeqCst);
+    let read=h.control("r1".into(),"permission_modes".into(),json!({"probe":false})).await.unwrap();
+    assert_eq!(read.payload["modes"],json!(["manual","auto","plan"]),"{read:?}");
+    let again=h.control("p2".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!(again.payload["modes"],json!(["manual","auto","plan"]),"{again:?}");
+    assert_eq!(io.btabs.load(std::sync::atomic::Ordering::SeqCst),pressed,"a segunda sonda usa a lista guardada");
+    h.stop().await.unwrap();
+}
+
+/// Parity M3 (`test_bypass_fora_do_ciclo_com_sessao_trabalhando_recusa_sem_reabrir`): bypass fora do ciclo
+/// do processo vai direto à reabertura, sem girar o modo; a ociosidade recusa com o motivo do Python.
+#[tokio::test]
+async fn bypass_outside_the_cycle_presses_no_key_and_busy_says_why() {
+    let f=Fixture::new().await;
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(["manual","auto","plan"].into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    // O agente deste teste é o próprio processo de teste: nasceu sem a flag de bypass.
+    let reply=h.control("bypass".into(),"set_permission_mode".into(),json!({"mode":"bypassPermissions"})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["requires_reopen"].clone(),reply.payload["cycle_closed"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Deferred,json!(true),json!(true)),"{reply:?}");
+    assert_eq!(io.btabs.load(std::sync::atomic::Ordering::SeqCst),0,"sem girar o modo");
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    let busy=h.control("guard".into(),"lifecycle_guard".into(),json!({})).await.unwrap_err();
+    assert_eq!(busy.code,"erro_sessao_trabalhando");
+    h.stop().await.unwrap();
+}
+
+/// Parity B1 (`test_perm_get_sonda_que_nao_voltou_marca_restaurado_false`): sonda que não volta ao modo
+/// inicial responde 200 com a lista e `restaurado:false`, não 409 sem a lista.
+#[tokio::test]
+async fn probe_that_does_not_restore_still_answers_the_list() {
+    let f=Fixture::new().await;
+    let cycle=["manual","auto","plan","auto","plan","auto","plan","auto","plan","auto"];
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(cycle.into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let probe=h.control("p".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!((probe.disposition,probe.payload["restaurado"].clone(),probe.payload["modes"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Accepted,json!(false),json!(["manual","auto","plan"])),"{probe:?}");
     h.stop().await.unwrap();
 }

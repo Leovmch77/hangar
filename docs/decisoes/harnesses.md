@@ -5,6 +5,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Exceção à "entrada doente é 503": a permissão do Codex sem terminal caído.** Com o processo que
+  caiu e não voltou, `GET /codex-permissions` lê o modo do motor (o mesmo do arquivo da sessão) e o
+  `POST` grava o modo novo no arquivo da sessão, que vale na próxima subida; a resposta espera a
+  gravação. Modo desconhecido continua recusado (400), nunca Full Access. As outras rotas da entrada
+  doente seguem 503 `runtime_unhealthy`. Motivo: era o comportamento do Python, e sem ele a pílula de
+  permissão não abria depois de três subidas falhas (decisão do usuário, 13/10/2026).
+
 - **O organizador do ditado executa uma chamada mínima, separada da sessão principal.** Claude
   usa `--safe-mode` e conserva a autenticação de destino: assinatura OAuth, keychain, API key ou `apiKeyHelper`. Codex
   mantém a autenticação da conta de destino e usa execução efêmera com configurações mínimas.
@@ -160,9 +167,19 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   rebaixa. Nunca escrever nesse arquivo.
 - **Permissão segurada para o app não aparece no pane nem no registro nativo: lista e `Monitor`
   leem a pergunta segurada.** Com o app aberto, o hook `perm.ts` segura a permissão: a TUI fica em
-  "running PreToolUse hooks" sem cartão e o registro segue `busy`. O `Monitor` a lê dos fatos
-  empurrados (`question`); a lista, do `held` dos fatos da lista. Ver
+  "running PreToolUse hooks" sem cartão e o registro segue `busy`. `Monitor` e lista a leem do
+  `plugin::Store` do Rust (`state::facts::plugin_reading`); o `held` dos fatos Python da lista
+  vem sempre vazio. Ver
   [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
+- **Aprovação do plano com terminal: o plugin avisa, o diálogo do terminal responde.** No
+  `tool.check` do `ExitPlanMode`, `plan.ts` manda `plan:<tool_use_id>`, o plano e o caminho a
+  `POST /api/plugin/plan`, que guarda e responde na hora (devolver `allow` não pula o diálogo da
+  TUI, medido no 2.1.296). O cartão (`claude_plan_pending` + `interaction_id` do alvo
+  `plugin:plan:<id>`) só sai enquanto o pane mostra "Would you like to proceed?"; o menu comum
+  nunca ganha ID nesse diálogo, e sem o aviso o estado leva `plan_notice_missing`. O
+  `tool_result` no transcript encerra o aviso. `/select` aperta as teclas do diálogo (1 = auto,
+  2 = manual); a opção 3 com `text` digita o retorno na própria linha da opção e o Enter recusa o
+  plano levando o texto a Claude.
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
@@ -177,9 +194,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   para invalidar o cache da próxima reconciliação.
 - **Codex sem terminal: o app-server é do CANO, em stdio, e o cano é do Rust.** Com o
   `hangar-server` de pé, o Rust sobe, religa e mata o `hangar-cano` da sessão e conduz a thread;
-  o Python só calcula argv/env (`launch_env` da política) e grava o arquivo da sessão
-  (`session.patch_meta {cano}` / `session.clear_cano {pid}`). O `env` (tokens, `CODEX_HOME`) é
-  pedido ao Python a cada subida e nunca vai a disco nem a log. O cano que sai é religado por
+  argv/env saem de `runtime/codex_launch.rs` e o arquivo da sessão é gravado por
+  `runtime/codex_sidecar.rs`, sem pedir ao Python (`launch_env`/`patch_meta`/`clear_cano` da
+  política Python recusam Codex). O `env` (tokens, `CODEX_HOME`, Jev) é montado a cada subida e
+  nunca vai a disco nem a log. O cano que sai é religado por
   evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
   é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
   `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
@@ -193,7 +211,20 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
   pedido de thread de subagente nunca é descartado. Um cliente por cano.
   Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
-  Codex com terminal segue no Python até a 5C.
+- **Codex com terminal: o Rust adota o app-server que o lançador criou, sem criar outro.** Abrir
+  continua no Python (lançador `hangar-codex-tui`, app-server e TUI no pane); com o Rust de pé, um
+  ator `runtime/codex_terminal.rs` assume pelo WebSocket de loopback, conferindo identidade do
+  processo, endpoint, chave e geração, e fica com envio, fila, confirmação, `steer`, interrupção,
+  estado/prévia pelo feed, perguntas, aprovações, `/codex-permissions`, controles, pane morto,
+  fechamento e relançamento (`codex_relaunch.rs`: terminal↔sem terminal e `/recarregar`). Um
+  cliente Hangar por sessão além da TUI; o cliente Python é recusado (`refuse_python_client`).
+  Thread sem rollout aceita o primeiro envio antes da assinatura, que é retomada com espera
+  crescente; outro erro de assinatura é visível, nunca outra thread. Reconexão: uma tentativa em
+  voo, 1 s × 1,5 até 10 s, sem matar TUI nem app-server. Entrar na fila do WebSocket não é
+  `Written`. Resposta escrita não prova decisão: `serverRequest/resolved` não diz quem venceu, o
+  cartão fecha sem autoria e o app recebe 409 `erro_sem_confirmacao_resposta`. Pedido sem
+  resposta do app fica para a TUI; nunca recusar automaticamente como no sem terminal. Ver
+  [Codex com terminal no Rust](#codex-com-terminal-no-rust-adoção-e-dono-único).
 - **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
   `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
   `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
@@ -220,6 +251,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `jev-gateway` saiu: [superado.md](superado.md#o-jev-gateway-como-caminho-da-conversa).
 - **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
   `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
+  Texto desconhecido nunca vira Full Access: o sidecar é recusado (`launch_permission_mode`,
+  `codex_launch::stored`) e o pedido de troca também (`erro_modo_desconhecido`). Antes de passar o
+  terminal para sem terminal, o Rust lê o modo real no seletor vivo do `/permissions`.
 - **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
   `~/.hangar/claude-headless/`, Codex em `~/.hangar/codex-sessions/`; tmux só identifica sessões com
   terminal. Rename e `/clear` preservam a chave; `HANGAR_CANO_KEY` cobre sessões Codex já abertas
@@ -314,8 +348,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   sincronização. Sem thread não há sidecar, e o app fica esperando para sempre — o cartão de
   seletor pré-thread existe para isso.
 - **A abertura com terminal não pergunta nada que o Hangar já sabe responder** (decisão do
-  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm
-  antes do app-server (versão publicada consultada no máximo uma vez por hora, a tela mostra
+  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm,
+  ou o standalone oficial por `codex update` com `CODEX_RELEASE` fixado e o `CODEX_HOME` do
+  standalone (nunca o da conta), antes do app-server (versão publicada consultada no máximo
+  uma vez por hora, a tela mostra
   "atualizando o Codex"), e confia nos hooks pendentes pelo app-server (`hooks/list` +
   `config/batchWrite` do `trusted_hash`), porque eles vêm da sincronização do próprio Hangar.
   Falha em qualquer dos dois só registra na tela e a abertura segue. O cartão pré-thread
@@ -441,6 +477,18 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `problema=terminal_input_*` e grava um `terminal.input_stalled` no diário. A fila continua
   tentando. Ver [Entrada terminal parada sem aviso](#entrada-terminal-parada-sem-aviso).
 
+- **Nada é digitado sem prova da conversa que sobreviva à própria escrita.** Sem o registro
+  nativo do agente, o `/pull` aberto do plugin é a prova, e o `Fill` o entrega ao plugin: o
+  `publish` responde `NotWritten` e a entrega vai pelo teclado, que deixa o `/pull` aberto (o modo
+  `User` segue, porque não precisa de prova da tela). Se a prova some depois da escrita, a limpeza
+  (e o Enter recusado) confere só pane e agente (`life_check`), tira o texto que é nosso e adia
+  sem trava. Sem registro nativo nem `/pull` por mais que o `stall_notice`,
+  `view.input_stalled=no_safe_delivery` (`problema=terminal_input_no_safe_delivery`, que vence o
+  `terminal_facts` que causa); parada, sem pergunta e com mensagem na fila, o Rust reabre o Claude
+  na mesma conversa e no modo do rodapé (`heal_claude`, a reabertura do bypass com `heal_guard`),
+  uma vez por incidente e no máximo uma a cada 15 min por sessão, com o diário
+  (`rust.terminal_heal`). Ver [Registro nativo sumido e a prova no /pull](#registro-nativo-sumido-e-a-prova-no-pull).
+
 - **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
   precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
@@ -503,8 +551,21 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   - **Aparelho calado por mais de 30 s derruba o socket** (os clientes mandam `ping` a cada 10 s).
     Fim fatal da chamada manda `error{code, detail}` antes do `closed`.
   - **Escolhas da chamada** (conta Codex, modelo, esforço, velocidade, voz) em
-    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. A trava `codex_voice_beta` fica
-    no `runtime-config.json`, que o Rust só lê.
+    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. Sem o arquivo, a chamada
+    usa voz `sol` e `gpt-6.1-sol` com esforço `medium` no Direto e `high` no Planejar
+    (`VoiceSettings::default`); arquivo gravado vale como está, inclusive `null` (padrão da conta).
+    Arquivo que existe mas não lê não é primeira vez: cai no neutro (modelo da conta, `low`), com
+    linha no diário. Na abertura a chamada pede `model/list` da conta (ocultos incluídos): modelo
+    escolhido ou padrão que a conta não oferece vira o padrão dela (`ModeModels::fit`), com linha
+    no diário, e a tela mostra o modelo em uso; vale também para troca de modelo no meio da chamada.
+    Lista que não vem não muda nada (decisão do Jefferson, 14/10: a voz sempre abre).
+  - **A voz não tem interruptor.** `GET /api/voice/settings` responde `enabled` = Codex instalado
+    e ao menos uma conta Codex visível (catálogo ilegível conta como conta: a abertura mostra o
+    erro, nunca "sem conta" falso). Os clientes mostram o botão com Codex instalado; sem conta, o
+    PWA abre o painel que diz o que falta e o nativo recebe `account_missing` ao ligar. Ligar a chamada é
+    sempre gesto da pessoa, e a abertura recusa com `codex_missing`/`account_missing`. A chave
+    antiga `codex_voice_beta` do `runtime-config.json` é ignorada; `/api/harness/codex/opcoes`
+    ainda a aceita e devolve `true` só para o cliente antigo não quebrar.
   - Medição em [voz ao vivo no hangar-server](#voz-ao-vivo-no-hangar-server-10102026).
 - **Voz: WebRTC no aparelho:** o transporte websocket do realtime recusa login ChatGPT; envio só a
   partir de fala do usuário, com espera de 1,5 s cancelada se ele voltar a falar. Medição em
@@ -514,9 +575,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 - **Voz: o organizador tem o acesso de uma sessão.** `danger-full-access` com cwd em
   `~/.hangar/voz/arquivos` (fixa, nunca apagada), que só guarda rascunhos; ele lê e edita qualquer
-  arquivo pelo caminho completo. Destrutivo pede o sim falado: o servidor só vê o que o próprio Codex
-  marca como perigoso (`approval_decision`), o resto depende da regra do prompt. Modelo e esforço vêm
-  de `~/.hangar/voz/config.json` (padrão: modelo do config do Codex, esforço `low`).
+  arquivo pelo caminho completo. Destrutivo pede o sim falado pela regra do prompt e depois roda,
+  inclusive o que o Codex marca como perigoso (regra própria, em Full Access abaixo). Modelo
+  e esforço vêm de `~/.hangar/voz/config.json`.
 - **Voz: o Hangar se usa por ferramentas, a tela é o último recurso.** Ordem do prompt: ferramenta
   própria, depois o shell; `click_screen` só quando nada disso cobre e nunca para
   buscar, reabrir ou criar conversa, nem para atalho. Ferramentas (`controller/assist.rs`, pela mesma
@@ -568,8 +629,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `[de: voz]`, `new_session` não herda conta nem modo, e `group`/`pair`/`unpair`/`browser_open`/
   `browser`/`browser_batch`/`html_render` agem em nome da sessão do parâmetro `sessao` (sem ele,
   a resposta diz que falta); `close_session` do MCP recusa a voz e manda ao `close_session` próprio,
-  que pede o sim falado. `who_am_i` diz `kind: voice`. A aprovação de ferramenta MCP que o
-  Codex pedir (`mcpServer/elicitation/request` do `hangar`) passa só em turno com fala do usuário.
+  que pede o sim falado. `who_am_i` diz `kind: voice`. As tools do `hangar` não pedem
+  aprovação (`approve`); se ainda vier `mcpServer/elicitation/request` do `hangar`, passa só em turno
+  com fala do usuário.
 - **Voz: o organizador conversa; quem decide o envio é ele:** `send_to_session` sai sempre que o
   organizador chama a partir de um turno com fala do usuário, sem conferir verbo, "sim" ou nome da sessão
   na fala. Ficam a espera de 1,5 s ("segura" cancela), a recusa de pedido curto e a da mesma sessão duas
@@ -610,15 +672,25 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (com a oferta da voz) e a lista de sessões de todas as máquinas. Envio com intenção e destino ≥ 0,9 vira
   só uma nota "Atalho: … mandar para a sessão X" no turno da fala; quem envia é o organizador. Abaixo
   disso, ou com erro, o Jev não faz nada e nada do organizador é recusado por causa dele.
-- **Voz: o organizador roda sem aprovação visual.** `thread/start` com `danger-full-access` e
-  `approvalPolicy: "on-request"`: comando comum roda sem pedido. Todo pedido de aprovação que ainda vier
-  (`item/commandExecution|fileChange|permissions/requestApproval`, `execCommandApproval`,
-  `applyPatchApproval`, `mcpServer/elicitation/request`, este aceito só para o `hangar` em turno com
-  fala) é respondido na hora pelo servidor; o
-  destrutivo que chega como pedido passa por `approval_decision` e só sai com o sim falado, e o prompt
-  manda o organizador perguntar antes de qualquer destrutivo. Nenhum texto manda o usuário ao app.
-  Não usar `untrusted` (cada comando vira "aprove no app" falado) nem `never` (o perigoso fica recusado
-  mesmo com o sim). Medição em "Voz: envio sem trava de palavras".
+- **Voz: o organizador roda no Full Access das sessões Codex, sem pedido de aprovação.** `thread/start`
+  com `danger-full-access` e `approvalPolicy: "never"`, e a entrada do MCP `hangar` com
+  `default_tools_approval_mode: "approve"`. Motivo: todo pedido de aprovação que nasce, respondido ou
+  não, o Codex repassa à voz como "I need your approval to continue. Please review the request in
+  the app." (ou "I need your input…" para pergunta e MCP), seguido do JSON do pedido
+  (`realtime_text_for_event`, `core/src/session/turn.rs`), sem opção que desligue; com `on-request`
+  a voz falava "aceite o pedido no app" a cada comando que o Codex julga perigoso, e no Windows isso
+  inclui abrir link no navegador (`Start-Process`/`start`/`explorer`/navegador com URL) e
+  `Remove-Item -Force`. Com `never` sozinho esse comando voltaria recusado (`rm -f style commands are
+  not permitted`), por isso cada chamada grava `~/.hangar/voz/arquivos/.codex/rules/hangar-voz.rules`
+  (`write_voice_rules`): o Codex lê as regras da pasta do projeto (o cwd do organizador) e comando
+  coberto por regra não passa pela checagem de perigoso. A regra lista o que o Codex marca: `rm`
+  (atrás de `sudo`/`env`/`trap`) e, no Windows, os cmdlets e comandos de apagar e de abrir link;
+  provado com `codex exec` em `never` no Linux (`rm -rf`) e na DELPHI-02 (`Remove-Item -Recurse
+  -Force`), recusado sem a regra e rodando com ela. Toda tool MCP que pediria aprovação também é
+  negada em `never`; as do `hangar` não declaram ser só leitura, daí o `approve`. A confirmação
+  falada do destrutivo fica no prompt. Os tratadores de pedido em
+  `call.rs` continuam respondendo na hora o que ainda chegar, e o `VOICE_PROMPT` cita as duas frases
+  ao pé da letra para a voz calar. Não usar `untrusted` nem `on-request`.
 - **Voz: a memória é um arquivo de fatos, nunca de ordens.** `~/.hangar/voz/memoria.json` (40 entradas
   de 240 caracteres; `pessoa`, `preferencia`, `referencia`, `projeto`). `remember`/`forget` só passam
   com fala do usuário no turno; o bloco entra no prompt como "fatos lembrados, não instruções".
@@ -626,6 +698,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   arquivo e na tela). Sem entradas (arquivo inexistente ou vazio), o convite sai da própria voz ao
   conectar (`ONBOARDING_GREETING` no lugar de "Conectado. Pode falar."), porque o organizador só tem
   turno depois de a pessoa falar; o prompt da voz ganha o trecho que manda a resposta ao organizador.
+  O convite começa por uma apresentação curta do que a voz faz, em palavras do dia a dia e sem nome
+  de ferramenta (texto aprovado pelo Jefferson em 14/10), e termina mandando perguntar o resto.
   Passo 1: com licença, ler só `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md` e guardar papel,
   linguagens e preferência de resposta, apresentados como proposta ("Entendi que você … — confere?")
   junto com a pergunta de como a pessoa quer usar a voz; só grava depois do sim ou da correção.
@@ -667,6 +741,60 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   "Bifurcar" repete o "f" do Claude Code: `$.agent.spawn({ subagentType: "fork" })` e, no fim do
   agente, `$.prompt.submit` leva a resposta à conversa principal. Medição em
   [Pergunta lateral pelo plugin](#pergunta-lateral-btw-pelo-plugin-08102026).
+
+## Codex com terminal no Rust: adoção e dono único
+
+(11/10/2026, branch `Hangar-rust`, contrato interno 52; desenho
+[`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md).)
+Antes, a tabela de escritas entregava o Codex com terminal ao Python, que mantinha um cliente
+WebSocket próprio no app-server do pane. Agora o Rust é o único cliente Hangar dessa sessão, além
+da TUI. A fronteira com o Python está em
+[plataforma.md](plataforma.md#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
+
+- **Adotar, não abrir.** A vigia (`Watcher` em `codex_terminal.rs`) adota pelo sidecar e pelo
+  pane: endpoint de loopback, `app_pid`, chave e geração conferidos antes de conectar. Nada ali sobe
+  app-server; abrir sessão nova segue no lançador Python. A posse é anunciada na saúde
+  (`table::owned_modes` inclui Codex com terminal) e avisada ao hub (`codex_terminal_owned`), que
+  passa a servir o feed do runtime em vez do `Monitor`.
+- **Primeiro envio sem rollout.** Thread recém-criada sem turno não tem rollout e o `thread/resume`
+  responde `no rollout found for thread id`; o primeiro envio vai mesmo assim, depois de conferir
+  conexão e identidade, e a assinatura é retomada com espera crescente. Thread inválida, processo
+  diferente ou falha de protocolo são erro visível; nunca abrir outra thread para contornar.
+- **Recibo real.** O cliente WebSocket de `hangar-codex` podia terminar ao enfileirar a mensagem; a
+  adaptação devolve `NotWritten`, `Written` ou `Unknown` de verdade. Fila local não é escrita.
+- **Disputa app × TUI.** `serverRequest/resolved` traz `requestId` e `threadId`, não quem venceu
+  nem a decisão (`schema/0.161.0.json`). Com terminal, a resposta escrita vira `Disposition::Unknown`
+  (`decision_confirmed: false`) e o app mostra "sem confirmação" (409
+  `erro_sem_confirmacao_resposta`); o cartão fecha no `resolved`. Sem reenvio automático. Pedido
+  que o Hangar não mostra fica com a TUI (diário `codex_tui_request`), em vez do `-32601` do sem
+  terminal: ali a TUI é um participante legítimo.
+- **Permissões pelo seletor vivo.** `GET`/`POST /codex-permissions` leem e dirigem o `/permissions`
+  da TUI, conferem o item sob o cursor e a confirmação extra de Full Access, e releem o modo
+  efetivo. Prazo esgotado esperando a confirmação não prova que o diálogo não vai aparecer.
+  Rascunho no composer nunca recebe o comando por cima: ia ao modelo como
+  `<rascunho>/permissions`.
+- **Relançar a sessão aberta é do Rust (decisão A do usuário).** `codex_relaunch.rs` troca terminal
+  ↔ sem terminal e atende `/recarregar` do começo ao fim, sem devolver a posse ao Python (o
+  `hand-over`/`python_client_released` saiu). Argv vai só com `--cwd`/`--resume` + `CP_SESSION_KEY`
+  e o `hangar-codex-tui` completa pelo sidecar, para não haver segunda cópia do comando do
+  lançador. O ambiente do Jev é montado pelo Rust (`codex_launch::jev_env`, que decide por
+  `codex_launch::jev_destination`), uma das cinco cópias da regra do destino (lista em `plataforma.md`). Recibo da troca usa `call_id` determinístico (`codex-life:<geração>:<digest>`), para
+  A→B→A não reaproveitar o recibo antigo. Trocar de conta de um Codex aberto não existe e não foi
+  criado; importar do Claude abre um Codex novo e segue na abertura Python.
+- **Modo desconhecido recusa.** O `stored_mode` transformava texto desconhecido em Full Access; agora
+  recusa com código. Ausente segue Full Access, o padrão gravado pela abertura.
+- **`DELETE` do dono (decisão A do usuário).** O Rust encerra pane, ator, app-server, sidecar, fila e
+  a saída do grupo, depois repassa o mesmo pedido ao Python, que faz só a limpeza externa dele e
+  não chama o Rust de volta.
+
+Limites conhecidos (revisão de código, sem prova executada): o problema da queda do socket usa
+`runtime_falhou` com detalhe, não um código próprio; entre `kill_pane` e o fechamento do registro o
+ator ainda aceita escrita de quem já tinha passe; controles adotam só na próxima escrita; a vigia
+pode adotar o terminal que sobrou de uma troca com 500. Pendente de uso real (Task 13, Step 4):
+primeiro envio pelo app antes de qualquer turno, disputa nas duas ordens, `/permissions` com
+rascunho (composer = última linha `›` com sugestão esmaecida), queda e volta do Rust sem matar TUI,
+e DELPHI-02 (psmux, painel aberto, duas sessões com pane `%1`, `app_pid` do shim npm). Nada desta
+entrada foi compilado nem testado ainda.
 
 ## O /clear e o rodapé do Claude Code
 
@@ -3188,8 +3316,13 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
 - **Áudio.** Houve falta de áudio em 46 de 85 janelas, sem perda de pacote no decodificador e com o
   laço abaixo de 30 ms quase sempre. Os intervalos de 120–350 ms são os mesmos no socket e na
   entrega. O diário não separava perda, atraso da rede e silêncio que o servidor não manda, então o
-  resumo ganhou `lost`, `late_max_ms`, `skipped_max_ms` e `speech_underruns`. A correção espera a
-  próxima medição.
+  resumo ganhou `lost`, `late_max_ms`, `skipped_max_ms` e `speech_underruns`. Medição seguinte
+  (`native.log` do notebook, 09–12/10, 4.848 janelas): corte audível em 237 (~5%), laço em 13 ms na
+  mediana dos cortes e `late_max_ms` de 151 ms na mediana (pico acima de 700 ms): é atraso da rede,
+  não o app. Correção (14/10): a reserva começa em 240 ms e cada corte audível a aumenta em 80 ms, até
+  400 ms, pelo resto da chamada (`grown_prime` em `audio.rs`); o resumo mostra `prime_ms`. Rede boa
+  não paga espera maior. O Codex não tem parâmetro de áudio no `thread/realtime/start` (conferido na
+  0.160.1 e na 0.162.1).
 - **Troca entre máquinas.** Sessão com o mesmo nome em duas máquinas aceita a máquina na fala
   ("hangar lá no PC X", `X::hangar`, "hangar (máquina X)"). "Seção" conta como "sessão" na trava de
   troca. O "isso" depois da pergunta "qual?" vale só para uma das sessões oferecidas, por 1 min.
@@ -3261,9 +3394,11 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
   conta. Troca por clique continua calada. Pedido do Jefferson: trocar pode ser só para ir até lá.
 
 **Destino do Jev: uma regra para todos os usos.**
-- A regra está em quatro cópias que mudam juntas: `runtime_config.destino_jev` (Python),
+- A regra está em cinco cópias que mudam juntas: `runtime_config.destino_jev` (Python),
   `crates/hangar-server/src/voice/jev.rs` `destination` (voz no servidor),
-  `desktop-native/src/app/server_config.rs` `jev::destination` (tela do nativo) e `jev_config` (orq).
+  `desktop-native/src/app/server_config.rs` `jev::destination` (tela do nativo),
+  `destinoDoJev` do `shell/jev_objetivo.cjs` (CLI fora de sessão) e
+  `crates/hangar-server/src/runtime/codex_launch.rs` `jev_destination` (ambiente do Codex que o Rust lança).
 - Vai ao OpenRouter quando o endereço é dele ou, sem endereço, quando a chave é dele (`sk-or-`).
   - Modelo vazio vira `typesafe/jev-1.13-20260917`, porque o OpenRouter recusa o nome da TypeSafe.
   - `typesafe/jev-latest` ganha o `~`: só `~typesafe/jev-latest` existe lá, e sem o til ele responde
@@ -3817,6 +3952,18 @@ fila e a mensagem nunca mais saiu (sessões `Crack` às 09:09 e `Desktop` às 11
 sozinho não diz se algo chegou ao terminal; daí o estado `staged` até o escritor avisar a escrita.
 Python antigo lendo `staged` continua conservador (incerta), e Rust antigo nunca grava `staged`:
 nenhuma combinação reenvia o que foi escrito.
+
+## Registro nativo sumido e a prova no /pull
+
+(14/10/2026, servidor em `be14a5ee6`.) Sessão `corrige-credenciais` com Claude Code 2.1.296; às
+06:23 outra sessão da mesma conta abriu com o 2.1.299 e o `sessions/<pid>.json` da primeira sumiu.
+Daí em diante só o `/pull` do plugin provava a conversa (o transcript não fica aberto com o Claude
+parado). O "a" do app foi pelo `Fill`, que consome o `/pull`; a prova da tela leu os fatos antes
+de o plugin abrir o seguinte, falhou, a limpeza falhou pelo mesmo motivo e o texto ficou no
+composer (`disposition:unknown`, `stage:input_proof`, `code:input_unproved`), segurando a fila por
+`delivery_unproved` às 07:44 e 08:26 também. Trocar o modo de execução (reabrir o processo)
+resolveu. O teste `terminal_runtime_fill_never_spends_the_only_conversation_proof` reproduz o
+resultado exato antes da correção.
 
 ## Provedor padrão da abertura
 

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 pub type Snapshot = BTreeMap<String, Option<Sidecar>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JoinRefusal { Mix, TaskConflict { existing: String }, OrqOutside }
+pub enum JoinRefusal { Mix, TaskConflict { existing: String }, OrqOutside, Orq }
 
 pub struct JoinInput<'a> {
     pub name: &'a str,
@@ -158,10 +158,11 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
     (clears, writes)
 }
 
-/// Por que o grupo de `link` não recebe um par de fora: `orq`, ou par com máquina própria (1:1).
+/// Por que o grupo de `link` não recebe um par de fora: `orq` (o árbitro sozinho tem aviso próprio),
+/// ou par com máquina própria (1:1).
 pub fn external_link_refusal(link: Option<&Sidecar>, outside: &dyn Fn(&str) -> bool) -> Option<JoinRefusal> {
     let link = link?;
-    if link.orq { return Some(JoinRefusal::OrqOutside); }
+    if link.orq { return Some(if link.peers.is_empty() { JoinRefusal::Orq } else { JoinRefusal::OrqOutside }); }
     link.peers.iter().any(|p| is_remote(p) && !outside(p)).then_some(JoinRefusal::Mix)
 }
 

@@ -5,7 +5,7 @@
   import { toolLook } from '../lib/toolLook.svelte';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { planDisplayText, parseContextoUso, dayStarts } from '@hangar/core';
+  import { planDisplayText, parseContextoUso, dayStarts, waitsInQueue } from '@hangar/core';
   import OrqTimelineEvent from './OrqTimelineEvent.svelte';
   import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
@@ -53,6 +53,7 @@
     onAbrirAgente?: (prompt: string | undefined, titulo: string) => void;
     dockH: number;
     codex?: boolean;
+    headless?: boolean;
     plan?: {
       eventId: string | null;
       serverId?: string;
@@ -76,9 +77,10 @@
     previewVivo?: boolean; // deltas do proprio modelo, no ritmo real -> sem maquina de escrever
     pensamento?: string;   // raciocinio em voo (Claude sem terminal); some quando o bloco cai no transcript
     ferramenta?: { nome: string; input: Record<string, unknown> } | null;   // chamada com o pedido ainda sendo escrito
-    onSelectOption: (i: number) => void;
+    /** `text` só no "o que mudar" do plano; a promessa diz ao cartão quando o envio acabou. */
+    onSelectOption: (i: number, interactionId: string | null | undefined, text?: string) => void | Promise<void>;
     /** Múltipla escolha: envia o que já foi marcado. Ausente = sem botão de enviar. */
-    onSubmitSelected?: () => void;
+    onSubmitSelected?: (interactionId: string | null | undefined) => void;
     onCancel: () => void;
     // AskUserQuestion inline (desktop): quando askOpen, renderiza o card no fim da lista.
     askOpen?: boolean;
@@ -86,8 +88,8 @@
     // Stepper nativo AskUserQuestion ativo (em qualquer view). Suprime os OptionButtons crus:
     // o AskUserQuestion tambem desenha um picker TUI no pane -> sem isto os dois apareciam juntos.
     askActive?: boolean;
-    onAnswer?: (answers: AnswerItem[]) => Promise<void>;
-    onAskClose?: () => void;
+    onAnswer?: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
+    onAskClose?: (payload: AskQuestionPayload) => void;
     /** Rolou até o topo e não há mais nada em memória — quem tem o resto é o servidor. Ausente
      *  (arquivo, board) = a lista simplesmente para onde acabou, como antes. */
     onFimDoLocal?: () => void;
@@ -116,7 +118,7 @@
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
-    imageUrl, swapIds, codex = false, plan = null, footer,
+    imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
     onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
   const sessionServer = useSessionServer();
@@ -603,7 +605,9 @@
                nao chegou ao agente (fila: a TUI engoliu as teclas; held: o hook barrou). Sem esta
                linha a bolha perdida acendia solida igual a uma aceita e o usuario ficava achando
                que mandou — falha tem que aparecer, nao sumir. -->
-          <div class="queued-row" class:dim={working && !ev.desistiu}>
+          <!-- Atenua só o que ainda espera a vez: sem terminal, a já entregue ao processo não está na fila. -->
+          <div class="queued-row" class:dim={working && !ev.desistiu
+            && (ev.id.startsWith('held:') || waitsInQueue(ev, codex ? 'codex' : null, headless))}>
             {#if imgFotos}
               <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
@@ -752,6 +756,8 @@
       <OptionButtons
         question={stateEvent.question}
         options={stateEvent.options ?? []}
+        interactionId={stateEvent.interaction_id}
+        planReview={!!stateEvent.claude_plan_pending}
         onSelect={onSelectOption}
         onSubmit={onSubmitSelected}
         onCancel={onCancel}

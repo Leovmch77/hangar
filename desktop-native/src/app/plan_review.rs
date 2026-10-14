@@ -8,7 +8,11 @@ pub(super) struct ReviewState {
     reading: bool,
     file: Option<Result<String, String>>,
     expanded: Option<ExpandedReview>,
+    /// Campo do "o que mudar", aberto pela opção correspondente; pertence à chamada `tool_id`.
+    feedback: Option<Feedback>,
 }
+
+struct Feedback { tool_id: String, input: Entity<InputState>, _change: Subscription }
 
 #[derive(Clone)]
 struct ExpandedReview { focus: FocusHandle, origin: Option<WeakFocusHandle>, inline_offset: Point<Pixels> }
@@ -33,7 +37,7 @@ impl Hangar {
         let current = self.current_plan_review();
         if self.plan_review.current == current { return; }
         let same_call = self.plan_review.current.as_ref().zip(current.as_ref()).is_some_and(|((old_key, old), (key, next))| old_key == key && old.tool_id == next.tool_id);
-        if !same_call { self.close_plan_review(window, cx); }
+        if !same_call { self.close_plan_review(window, cx); self.plan_review.feedback = None; }
         self.plan_review.current = current;
         self.plan_review.generation += 1;
         self.plan_review.file = None;
@@ -96,6 +100,39 @@ impl Hangar {
         self.act(action, snapshot, cx);
     }
 
+    fn toggle_plan_feedback(&mut self, tool_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.plan_review.feedback.as_ref().is_some_and(|f| f.tool_id == tool_id) { self.plan_review.feedback = None; cx.notify(); return; }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("plan_review_changes_placeholder")));
+        // O botão Enviar depende do texto: cada edição redesenha o cartão; Enter envia como o botão.
+        let change = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+            // Shift+Enter (ou Ctrl/Cmd+Enter) não envia: só o Enter puro, como o compositor do subagente.
+            InputEvent::PressEnter { secondary: false, shift: false } => this.send_plan_feedback(cx),
+            InputEvent::PressEnter { .. } => {}
+            _ => cx.notify(),
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.plan_review.feedback = Some(Feedback { tool_id, input, _change: change });
+        cx.notify();
+    }
+
+    /// O mesmo envio do botão: opção "o que mudar" do plano exibido, com o texto do campo.
+    fn send_plan_feedback(&mut self, cx: &mut Context<Self>) {
+        let Some(expected) = self.plan_review.current.clone() else { return };
+        let Some(input) = self.plan_review.feedback.as_ref().filter(|f| f.tool_id == expected.1.tool_id).map(|f| f.input.clone()) else { return };
+        let text = input.read(cx).value().to_string();
+        let option = self.chat.state.options.clone().unwrap_or_default().iter()
+            .position(|option| interaction::plan_choice_key(option) == Some("plan_review_changes"));
+        if text.trim().is_empty() { return; }
+        // Sem a opção "o que mudar" no menu exibido, o pedido mudou: avisa em vez de engolir o texto.
+        let Some(index) = option else {
+            if let Some(key) = self.selected_key() { self.action_feedback.insert(key, (tr("request_changed"), true)); }
+            cx.notify();
+            return;
+        };
+        let snapshot = select_snapshot(&self.chat.state);
+        self.review_action(&expected, Action::SelectText(index + 1, text), snapshot, cx);
+    }
+
     pub(super) fn render_plan_review_card(&mut self, expanded: bool, busy: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let expected = self.plan_review.current.clone()?;
         let (_, plan) = &expected;
@@ -136,16 +173,37 @@ impl Hangar {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if expanded { this.close_plan_review(window, cx); } else { this.expand_plan_review(window, cx); }
                 })));
+        let feedback = self.plan_review.feedback.as_ref().filter(|f| f.tool_id == plan.tool_id).map(|f| f.input.clone());
+        let mut feedback_row = None;
         let mut choices = div().flex().flex_wrap().gap_2().items_center();
         for (index, option) in self.chat.state.options.clone().unwrap_or_default().iter().enumerate() {
-            let label = interaction::plan_choice_key(option).map(tr).unwrap_or_else(|| option.clone());
+            let key = interaction::plan_choice_key(option);
+            let label = key.map(tr).unwrap_or_else(|| option.clone());
             let request = expected.clone();
             let snapshot = select_snapshot(&self.chat.state);
-            choices = choices.child(Button::new(SharedString::from(format!("plan-review-option-{expanded}-{index}")))
+            let asks_text = key == Some("plan_review_changes");
+            let (send_request, send_snapshot) = (request.clone(), snapshot.clone());
+            let button = Button::new(SharedString::from(format!("plan-review-option-{expanded}-{index}")))
                 .small().outline().h_auto().min_h(px(32.)).max_w_full().disabled(busy || detached)
                 .accessibility_label(format!("{}. {option}", index + 1)).tooltip(option.clone())
-                .child(div().whitespace_normal().py_1().child(format!("{}. {label}", index + 1)))
-                .on_click(cx.listener(move |this, _, _, cx| this.review_action(&request, Action::Select(index + 1), snapshot.clone(), cx))));
+                .child(div().whitespace_normal().py_1().child(format!("{}. {label}", index + 1)));
+            choices = choices.child(if asks_text {
+                let tool_id = plan.tool_id.clone();
+                button.toggled(feedback.is_some()).on_click(cx.listener(move |this, _, window, cx| this.toggle_plan_feedback(tool_id.clone(), window, cx)))
+            } else {
+                button.on_click(cx.listener(move |this, _, _, cx| this.review_action(&request, Action::Select(index + 1), snapshot.clone(), cx)))
+            });
+            if let (true, Some(input), false) = (asks_text, feedback.as_ref(), detached) {
+                let ready = !input.read(cx).value().trim().is_empty();
+                let input_for_send = input.clone();
+                feedback_row = Some(div().flex().items_center().gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(input).disabled(busy)))
+                    .child(Button::new(SharedString::from(format!("plan-review-send-{expanded}"))).small().primary().label(tr("send")).disabled(busy || !ready)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let text = input_for_send.read(cx).value().to_string();
+                            this.review_action(&send_request, Action::SelectText(index + 1, text), send_snapshot.clone(), cx);
+                        }))));
+            }
         }
         let request = expected.clone();
         choices = choices.child(Button::new(if expanded { "plan-review-cancel-expanded" } else { "plan-review-cancel" }).small().ghost().disabled(busy || detached)
@@ -154,7 +212,8 @@ impl Hangar {
             .child(div().flex().flex_wrap().gap_2().items_center()
                 .child(div().flex_1().text_xs().text_color(theme::muted()).child(tr("plan_review_decision")))
                 .when_some(plan.path.as_ref(), |el, path| el.child(div().max_w_full().text_xs().text_color(theme::muted()).truncate().child(composer::safe_name(path)))))
-            .child(choices);
+            .child(choices)
+            .children(feedback_row);
         Some(div().flex().flex_col().min_h_0().when(expanded, |el| el.size_full())
             .rounded(px(14.)).border_1().border_color(theme::ask_highlight().opacity(0.55)).bg(theme::boxed()).overflow_hidden()
             .child(head).child(body).child(footer).into_any_element())

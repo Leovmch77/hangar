@@ -365,7 +365,7 @@ def _list_sig(infos) -> str:
           getattr(i, "git_added", None), getattr(i, "git_removed", None),
           i.state, i.tracked, getattr(i, "headless", False), i.jsonl, i.question, i.stalled, i.limited,
           getattr(i, "lifecycle_id", None), getattr(i, "transfer_id", None),
-          getattr(i, "transfer_phase", None),
+          getattr(i, "transfer_phase", None), getattr(i, "interaction_id", None),
           getattr(i, "last_reply", None), getattr(i, "last_reply_at", None),
           getattr(i, "pending_questions", 0),
           i.limit_reset, i.then_target, _status_sig(getattr(i, "status_line", None)),
@@ -700,6 +700,8 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
         except runtime_coordinator.TransferInProgress:
             pass        # posse passando ao Rust: a confirmação fica para a próxima rodada, o stream segue
         return
+    if runtime_coordinator.rust_owns_codex_terminal():
+        return      # fila e confirmação do Codex são do Rust (projeção dele): o Python nunca grava nela
     queue = PromptQueue(name)
     if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
         return
@@ -742,7 +744,7 @@ def _estado_do_rust(provider: str, name: str) -> bool:
         return True
     if provider == CLAUDE_HEADLESS:
         return owner.rust_owns("claude", True)
-    return _codex_headless(name) and owner.rust_owns("codex", True)
+    return owner.rust_owns("codex", _codex_headless(name))
 
 
 async def _estado_do_rust_async(provider: str, name: str) -> bool:
@@ -757,7 +759,7 @@ def _codex_headless(name: str) -> bool:
     return bool((codex_sessions.load(name) or {}).get("headless"))
 
 
-async def _canal_do_estado(name: str):
+async def _canal_do_estado(name: str, app: bool = True):
     """`(evento, dado)` do canal privado do hub (`/__hangar_server/state/{name}/events`), para quem
     entrou pelas portas do Python. HTTP/1.0: o corpo vem cru até o fim, sem pedaços."""
     from urllib.parse import quote
@@ -773,7 +775,9 @@ async def _canal_do_estado(name: str):
         raise RustStateChannelError("state_channel_unavailable") from e
     try:
         writer.write((f"GET /__hangar_server/state/{quote(name, safe='')}/events HTTP/1.0\r\n"
-                      f"host: {address}\r\nx-hangar-internal: {secret}\r\n\r\n").encode())
+                      f"host: {address}\r\nx-hangar-internal: {secret}\r\n"
+                      # Convidado assina o hub sem ser o app do dono presente (permissão segurada, push).
+                      f"x-hangar-app: {'1' if app else '0'}\r\n\r\n").encode())
         await writer.drain()
         status = (await asyncio.wait_for(reader.readline(), 10)).split()
         if len(status) < 2 or status[1] != b"200":
@@ -803,19 +807,12 @@ async def _canal_do_estado(name: str):
         writer.close()
 
 
-def _info_event(name: str, provider: str, jsonl: str | None) -> dict:
-    """`info` da conexão interna: o mesmo JSON da rota /internal/sessions/{name}/info."""
-    from app.internal_api import info_payload   # internal_api importa este módulo
-    return {"event": "info",
-            "data": json.dumps(info_payload(name, provider, jsonl), ensure_ascii=False)}
-
-
 async def merged_events(name: str, jsonl: str, provider: str = "claude",
                         start_offset: int | None = None, count_app: bool = True,
                         side: bool = False):
-    # side=True: conexão interna do hangar-server (internal_api.side_events). Abre com `info` e o
-    # repete no lugar do `reset`. A conversa o hangar-server lê do arquivo; aqui o transcript só é
-    # seguido para a supressão da prévia e a baixa da fila do Codex.
+    # side=True: conexão interna do hangar-server (internal_api.side_events). O transcript é o que
+    # o Rust escolheu, e a troca ele faz religando esta conexão; aqui ele só é seguido para a
+    # supressão da prévia e a baixa da fila do Codex.
     # count_app=False: conexao de convidado. Contar como app do dono aberto calaria as push dele.
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
     # (api.py so passa quando uma tarefa futura ligar o seletor de provider no endpoint).
@@ -1084,7 +1081,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     async def rust_state_pump():
         # Estado, prévia, pergunta e sugestão do `Monitor` do Rust, como o hub os publicou.
         try:
-            async for event, data in _canal_do_estado(name):
+            async for event, data in _canal_do_estado(name, count_app):
                 await queue.put(("__rust__", (event, data)))
         except asyncio.CancelledError:
             raise
@@ -1103,7 +1100,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         else:
             fontes = {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
                       "preview": asyncio.create_task(preview_pump(broker))}
-        if not (rust and prov in ("codex", CLAUDE_HEADLESS)):
+        # Com o Rust dono não há quem publique aqui: Claude com terminal nunca publicou, e o resto é do hub.
+        if not rust:
             fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))
             fontes["ferramenta"] = asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name)))
         return fontes
@@ -1199,9 +1197,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
-        asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
     ]
+    # Conexão interna do Rust: quem escolhe e troca o transcript é ele, que religa esta conexão.
+    if not side:
+        tasks.append(asyncio.create_task(jsonl_watcher()))
     # Aviso de mod pode trazer texto sensível do dono: convidado não recebe. O marcador do navegador
     # também não: a url da página de rascunho leva o token do dono.
     if count_app:
@@ -1222,9 +1222,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     if count_app:
         plugin_bridge.app_entrou()
     try:
-        if side:
-            # Dentro do try: quem desconecta já aqui ainda passa pelo finally (tarefas, app_saiu).
-            yield _info_event(name, current_provider, current_jsonl)
         while True:
             # Só o tail_pump enfileira o 3o item (o offset -> `id:` do SSE); os demais produtores
             # continuam mandando pares. Desempacota tolerante em vez de tocar em todos eles.
@@ -1272,8 +1269,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
                 state_tasks = _fontes_do_estado(novo_prov, rust_state)
                 tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]
-                yield (_info_event(name, current_provider, current_jsonl) if side
-                       else {"event": "reset", "data": "{}"})
+                yield {"event": "reset", "data": "{}"}
                 continue
             if event == "__reset__":
                 diag.registrar("sse.reiniciou", sessao=name, provider=current_provider,
@@ -1318,8 +1314,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                     state_tasks["state"].cancel()
                     state_tasks["state"] = asyncio.create_task(pump("state", _monitor_de(current_provider)))
                     tasks.append(state_tasks["state"])
-                yield (_info_event(name, current_provider, current_jsonl) if side
-                       else {"event": "reset", "data": "{}"})
+                yield {"event": "reset", "data": "{}"}
                 continue
             if event == "preview":
                 # Le o ULTIMO texto do slot na hora do envio (frames antigos ja foram sobrescritos).

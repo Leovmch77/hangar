@@ -31,6 +31,10 @@ export interface LoopState {
 export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp' | 'orq';
 
 export interface SessionInfo {
+  interaction_id?: string | null;
+  /** Formulário da pergunta aberta (AskUserQuestion, também a segurada pelo plugin), com o ID dele:
+   *  o card responde pelo `/answer`, como o passo a passo do chat. */
+  ask_form?: AskQuestionPayload | null;
   codex_account?: string | null;
   codex_home?: string | null;
   name: string;
@@ -185,6 +189,8 @@ export interface PatchHunk { old_start: number; new_start: number; lines: string
 export interface ChatEvent {
   queued_delivered?: boolean | null;
   queued_confirmed?: boolean | null;
+  /** Aceita com a sessão parada: não está na fila interna do Claude, só falta o registro real. */
+  queued_consumed?: boolean | null;
   /** Só em bolha "queued-": relógio da entrada (epoch s), pra ordenar quando chega ao vivo. */
   queued_ts?: number | null;
   // `thinking` = resumo do raciocínio. Só chega quando a sessão foi aberta com o resumo ligado
@@ -219,6 +225,7 @@ export interface ChatEvent {
 }
 
 export interface StateEvent {
+  interaction_id?: string | null;
   codex_buffering?: boolean;
   codex_mode?: 'default' | 'plan' | null;
   claude_permission_mode?: string | null;
@@ -419,6 +426,7 @@ export interface AskQuestionItem {
   isSecret?: boolean;
 }
 export interface AskQuestionPayload {
+  interaction_id?: string | null;
   is_async?: boolean;
   questions: AskQuestionItem[];
   provider?: 'codex';

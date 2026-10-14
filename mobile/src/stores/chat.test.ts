@@ -408,7 +408,7 @@ test('(e) user_msg da fila (queued-) sai quando o real chega com o mesmo texto',
   expect(events[0]?.id).toBe('a:9');
 });
 
-test('(f) filaCount conta pending + queued-* e zera quando o real chega', async () => {
+test('(f) filaCount conta só queued-* (o eco em voo não é fila) e zera quando o real chega', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
   chat.retain();
@@ -419,9 +419,10 @@ test('(f) filaCount conta pending + queued-* e zera quando o real chega', async 
   const p = chat.send('oi tudo bem');
   // eco local já entrou
   expect(chat.use.getState().pending).toHaveLength(1);
-  expect(filaCount(chat.use.getState(), 'kimi')).toBe(1);
-  // Claude com terminal também conta: o chip manda a fila da TUI com ctrl+x ctrl+s, como no PWA.
-  expect(filaCount(chat.use.getState(), 'claude')).toBe(1);
+  // Sem estado ainda: o eco nasce atenuado, mas o POST em voo não acende o chip.
+  expect(chat.use.getState().pending[0].solid).toBe(false);
+  expect(filaCount(chat.use.getState(), 'kimi')).toBe(0);
+  expect(filaCount(chat.use.getState(), 'claude')).toBe(0);
   // sintético queued-* chega com mesmo texto -> pending reconciliado, queued entra
   // restaura fetch falso de history pra não quebrar o SSE trigger, mas mantém send mock
   // o trigger não depende de fetch, só do store
@@ -618,6 +619,31 @@ test('pergunta Codex mantém identidade na reconexão e fecha na resolução', a
   created[0].trigger('ask_question', 'null');
   expect(chat.use.getState().askOpen).toBe(false);
   expect(chat.use.getState().askPayload).toBeNull();
+});
+
+test.each(['codex', undefined])('interaction_id distingue formulários idênticos na reconexão (%s)', async (provider) => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const first = { provider, request_id: 0, interaction_id: 'form-a', questions: [
+    { id: 'choice', header: 'H', question: 'Q?', multiSelect: false, options: [{ label: 'A' }] },
+  ] };
+  created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'awaiting_input', interaction_id: 'approval-a', question: 'Permitir?', options: ['Sim'] }));
+  created[0].trigger('ask_question', JSON.stringify(first));
+  const original = chat.use.getState().askPayload;
+  chat.closeAsk();
+  created[0].trigger('ask_question', JSON.stringify(first));
+  expect(chat.use.getState().askPayload).toBe(original);
+  expect(chat.use.getState().askOpen).toBe(false);
+  const second = { ...first, interaction_id: 'form-b' };
+  created[0].trigger('ask_question', JSON.stringify(second));
+  expect(chat.use.getState().askOpen).toBe(true);
+  expect(chat.use.getState().askPayload).toEqual(second);
+  expect(chat.use.getState().askPayload?.questions).toEqual(original?.questions);
+  created[0].trigger('ask_question', 'null');
+  expect(chat.use.getState().askOpen).toBe(false);
+  expect(chat.use.getState().stateEvent?.interaction_id).toBe('approval-a');
 });
 
 test('preview md flag espelha no store', async () => {

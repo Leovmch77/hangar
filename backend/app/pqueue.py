@@ -223,6 +223,7 @@ def _entry_event(entry: dict) -> ChatEvent:
     return ChatEvent(kind="user_msg", id="queued-" + str(entry.get("id")), text=entry.get("text"),
                      queued_delivered=entry.get("delivered") if isinstance(entry.get("delivered"), bool) else None,
                      desistiu=True if entry.get("desistiu") else None,
+                     queued_consumed=True if entry.get("consumed") is True else None,
                      queued_ts=float(ts) if isinstance(ts, (int, float)) else None)
 
 
@@ -998,7 +999,7 @@ class PromptQueue:
         # quebraria; reload + dedup por id e simples e correto). min_ts: descarta entradas anteriores
         # ao inicio da sessao atual (ex: pre-/clear) — espelha a poda do merged_history no live SSE.
         # Entrega e desistência mudam depois do primeiro evento. O front substitui pelo mesmo id.
-        seen: dict[str, tuple[bool | None, bool | None, bool]] = {}
+        seen: dict[str, tuple[bool | None, bool | None, bool, bool | None]] = {}
         inicio: float = time.time()
         primeira: bool = True
         last_marker = object()
@@ -1025,7 +1026,7 @@ class PromptQueue:
                 event = _entry_event(entry)
                 if confirmed:
                     event.queued_confirmed = True
-                signature = (event.desistiu, event.queued_delivered, confirmed)
+                signature = (event.desistiu, event.queued_delivered, confirmed, event.queued_consumed)
                 if eid in seen and seen[eid] == signature:
                     continue
                 seen[eid] = signature

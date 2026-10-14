@@ -10,16 +10,19 @@ use std::{net::SocketAddr, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Dura
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 
-fn hub(home: &Path, claude_dir: PathBuf, spawn: Option<SpawnFactory>) -> Arc<VoiceHub> {
+fn hub(home: &Path, claude_dir: PathBuf, spawn: Option<SpawnFactory>, accounts: Vec<String>) -> Arc<VoiceHub> {
     Arc::new(VoiceHub::with_parts(TestParts { home: home.to_path_buf(), claude_dir, grace: Duration::from_millis(400),
-        gate_every: Duration::from_millis(100), spawn, accounts: Some(vec!["default".into()]) }))
+        spawn, accounts: Some(accounts) }))
 }
 
 /// Só a configuração (Task 3): nenhuma chamada sobe.
-pub async fn server(home: &Path) -> SocketAddr {
+pub async fn server(home: &Path) -> SocketAddr { server_with_accounts(home, vec!["default".into()]).await }
+
+/// Como `server`, com as contas Codex que o servidor enxerga.
+pub async fn server_with_accounts(home: &Path, accounts: Vec<String>) -> SocketAddr {
     let (_python, upstream) = fake::spawn_fake().await;
     let mut state = hangar_server::routes::AppState::new(fake::config(upstream, ""));
-    state.voice = hub(home, home.join(".claude"), None);
+    state.voice = hub(home, home.join(".claude"), None, accounts);
     fake::spawn_state(state).await
 }
 
@@ -31,7 +34,6 @@ pub struct TestVoice {
     pub python: Arc<Fake>,
     seen: Seen,
     push: Push,
-    claude_dir: PathBuf,
     _home: tempfile::TempDir,
 }
 
@@ -95,23 +97,18 @@ fn fake_app_servers(seen: Seen, push: Push) -> SpawnFactory {
     })
 }
 
-fn write_gate(claude_dir: &Path, beta: bool) {
-    std::fs::write(claude_dir.join("runtime-config.json"), json!({"codex_voice_beta": beta}).to_string()).unwrap();
-}
-
 /// App-server que nem sobe, como um `codex` que falha ao iniciar.
 fn failing_app_server() -> SpawnFactory {
     Arc::new(|| -> Spawn { Box::new(|| Box::pin(async { Err(hangar_server::voice::rpc::RpcError::Spawn) })) })
 }
 
 /// `own_api`: `false` = API falsa; `true` = o próprio servidor de teste (o caminho real até o Python falso).
-async fn build(beta: bool, account: Option<&str>, own_api: bool) -> TestVoice { build_with(beta, account, own_api, false).await }
+async fn build(account: Option<&str>, own_api: bool) -> TestVoice { build_with(account, own_api, false).await }
 
-async fn build_with(beta: bool, account: Option<&str>, own_api: bool, failing: bool) -> TestVoice {
+async fn build_with(account: Option<&str>, own_api: bool, failing: bool) -> TestVoice {
     let home = tempfile::tempdir().unwrap();
     let claude_dir = home.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
-    write_gate(&claude_dir, beta);
     if let Some(account) = account {
         let dir = home.path().join(".hangar/voz");
         std::fs::create_dir_all(&dir).unwrap();
@@ -122,22 +119,22 @@ async fn build_with(beta: bool, account: Option<&str>, own_api: bool, failing: b
     let (python, upstream) = fake::spawn_fake().await;
     let mut state = hangar_server::routes::AppState::new(fake::config(upstream, ""));
     let spawn = if failing { failing_app_server() } else { fake_app_servers(seen.clone(), push.clone()) };
-    state.voice = hub(home.path(), claude_dir.clone(), Some(spawn));
+    state.voice = hub(home.path(), claude_dir, Some(spawn), vec!["default".into()]);
     // Nunca os peers reais da máquina.
     state.peers = Arc::new(PeerClient::new(PeerBook::new(None)));
     // O `set_self` do servidor não sobrescreve este (é gravado uma vez só).
     if !own_api { state.voice.set_self(fake_api().await, "t"); }
     let addr = fake::spawn_state(state).await;
-    TestVoice { addr, python, seen, push, claude_dir, _home: home }
+    TestVoice { addr, python, seen, push, _home: home }
 }
 
-pub async fn voice_server(beta: bool) -> TestVoice { build(beta, None, false).await }
+pub async fn voice_server() -> TestVoice { build(None, false).await }
 
-pub async fn voice_server_with_account(beta: bool, account: &str) -> TestVoice { build(beta, Some(account), false).await }
+pub async fn voice_server_with_account(account: &str) -> TestVoice { build(Some(account), false).await }
 
-pub async fn voice_server_self_api(beta: bool) -> TestVoice { build(beta, None, true).await }
+pub async fn voice_server_self_api() -> TestVoice { build(None, true).await }
 
-pub async fn voice_server_failing_spawn() -> TestVoice { build_with(true, None, false, true).await }
+pub async fn voice_server_failing_spawn() -> TestVoice { build_with(None, false, true).await }
 
 impl TestVoice {
     pub fn app_server_saw(&self, method: &str) -> bool { self.count(method) > 0 }
@@ -161,8 +158,6 @@ impl TestVoice {
     pub fn push(&self, v: Value) {
         let _ = self.push.lock().unwrap().as_ref().expect("nenhum app-server subiu").send(v);
     }
-
-    pub fn set_beta(&self, beta: bool) { write_gate(&self.claude_dir, beta); }
 
     /// Fala do usuário no turno `turn`, como a voz delega: libera as ferramentas desse turno.
     pub fn spoken_turn(&self, turn: &str, text: &str) {

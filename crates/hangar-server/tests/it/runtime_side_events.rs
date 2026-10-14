@@ -50,10 +50,12 @@ async fn provider_switch_no_double_state() {
     wait_until(|| python.side_conns() == 1).await;
     let info = info_json("codex", &path);
     python.set_info(info.clone());
-    python.push_side("info", &info.to_string());
+    readings(&python, 1).await;
     next_named(&mut events, "reset").await;
+    // Provider trocado vale na hora, e a conexão interna religa com ele.
+    wait_until(|| python.side_conns() == 2).await;
     python.push_side("state", &json!({"session":"s", "state":"idle", "headless":true}).to_string());
     let state = next_named(&mut events, "state").await;
     assert_eq!(serde_json::from_str::<serde_json::Value>(&state.data).unwrap()["state"], "idle");
-    assert_eq!(python.side_conns(), 1);
+    assert_eq!(python.side_conns(), 2);
 }

@@ -193,6 +193,7 @@ export interface ComputerControlState {
   llm_url: string;
   llm_model: string;
   llm_effort: string;
+  llm_from_jev_aux?: boolean;   // o modelo da leitura de tela é o auxiliar do Jev (só leitura aqui)
   llm_key_set: boolean;
   llm_key_tail: string;
   jev_key_set: boolean;
@@ -209,10 +210,10 @@ export interface ComputerControlRequest {
   mode?: 'package' | 'local';
   project_dir: string;
   agent_config: string;
-  llm_url: string;
-  llm_model: string;
-  llm_effort: string;
-  llm_key?: string | null;
+  // O servidor novo ignora o modelo igual ao auxiliar; o antigo exige o que já está salvo.
+  llm_url?: string;
+  llm_model?: string;
+  llm_effort?: string;
   use_cliproxy_key?: boolean;
 }
 
@@ -243,12 +244,6 @@ export function createComputerControlTarget(target: Server | null, request: {
   request_timeout?: number | null;
 }): Promise<ComputerControlState> {
   return em(target, '/api/computer-control/targets', { method: 'POST', body: JSON.stringify(request) });
-}
-
-export function listComputerControlModels(target: Server | null, request: {
-  llm_url: string; llm_key?: string | null; use_saved_key?: boolean; use_cliproxy_key?: boolean;
-}): Promise<{ models: string[] }> {
-  return em(target, '/api/computer-control/models', { method: 'POST', body: JSON.stringify(request) });
 }
 
 // Código + parâmetros vêm do backend (`codex_msgs.CATALOGO`); o front traduz por `harness_codex_m_<codigo>`.
