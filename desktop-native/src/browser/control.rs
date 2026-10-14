@@ -10,6 +10,10 @@ use super::preview_fmt::{Layout, SNAPSHOT_MAX, capped, compact_ax, key_event, pa
 pub trait Page {
     fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>>;
     fn sleep(&self, ms: u64) -> impl Future<Output = ()>;
+    /// Tamanho e densidade em que o painel pôs a página por último; `None` onde a página já segue a janela (WebView2).
+    fn panel_size(&self) -> Option<(u32, u32, f32)> { None }
+    /// Layout pedido (`mobile`, `<l> <a>`) manda no tamanho: o painel para de aplicar o dele até voltar ao desktop.
+    fn hold_size(&self, _held: bool) {}
 }
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
@@ -713,6 +717,8 @@ impl<P: Page> Controller<P> {
 
     async fn apply_layout(&self, layout: Layout) -> Result<(), String> {
         let metrics = |w: u32, h: u32, scale: f32, mobile: bool| json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": mobile});
+        // Antes de qualquer chamada: um ajuste do painel que chegue no meio não desfaz o layout pedido.
+        self.page.hold_size(layout != Layout::Desktop);
         if layout == Layout::Mobile {
             self.page.call("Emulation.setDeviceMetricsOverride", metrics(390, 844, 2., true)).await?;
             self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": true, "maxTouchPoints": 5})).await?;
@@ -729,7 +735,10 @@ impl<P: Page> Controller<P> {
         match layout {
             Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
             _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1., false)).await?,
+            // O Chromium sem janela não segue a janela: limpar deixava a página no tamanho velho, e o quadro esticado.
+            _ if let Some((w, h, scale)) = self.page.panel_size() => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, scale, false)).await?,
             _ => {
+                // WebView2: a página segue a janela de verdade.
                 self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?;
                 // Largura e altura 0 = o tamanho segue a janela; só a escala é emulada. Depois de limpar: sem isso o
                 // 0×0 mantém o tamanho da emulação anterior (a da página escondida).
@@ -841,6 +850,10 @@ impl Page for CdpPage {
         let timer = self.executor.timer(std::time::Duration::from_millis(ms));
         async move { timer.await; }
     }
+    #[cfg(target_os = "linux")]
+    fn panel_size(&self) -> Option<(u32, u32, f32)> { self.cdp.viewport.panel.get() }
+    #[cfg(target_os = "linux")]
+    fn hold_size(&self, held: bool) { self.cdp.viewport.held.set(held) }
 }
 
 #[cfg(test)]
@@ -851,8 +864,15 @@ mod tests {
     use std::cell::RefCell;
 
     /// `stuck`: método que nunca responde, como página presa num laço de JS.
-    struct Fake { calls: RefCell<Vec<(String, Value)>>, answer: Box<dyn Fn(&str, &Value) -> Result<Value, String>>, stuck: &'static str }
+    /// `panel`/`held`: o lado do motor do painel, que guarda o tamanho aplicado e obedece ao layout pedido.
+    struct Fake { calls: RefCell<Vec<(String, Value)>>, answer: Box<dyn Fn(&str, &Value) -> Result<Value, String>>, stuck: &'static str,
+        panel: Cell<Option<(u32, u32, f32)>>, held: Cell<bool> }
+    fn fake(answer: impl Fn(&str, &Value) -> Result<Value, String> + 'static, stuck: &'static str) -> Fake {
+        Fake { calls: RefCell::default(), answer: Box::new(answer), stuck, panel: Cell::new(None), held: Cell::new(false) }
+    }
     impl Page for Fake {
+        fn panel_size(&self) -> Option<(u32, u32, f32)> { self.panel.get() }
+        fn hold_size(&self, held: bool) { self.held.set(held) }
         fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> {
             self.calls.borrow_mut().push((method.into(), params.clone()));
             if method == self.stuck { Either::Left(std::future::pending()) } else { Either::Right(std::future::ready((self.answer)(method, &params))) }
@@ -860,7 +880,7 @@ mod tests {
         fn sleep(&self, _: u64) -> impl Future<Output = ()> { std::future::ready(()) }
     }
     fn ctl(answer: impl Fn(&str, &Value) -> Result<Value, String> + 'static) -> Controller<Fake> {
-        Controller::new(Fake { calls: RefCell::default(), answer: Box::new(answer), stuck: "" }, false)
+        Controller::new(fake(answer, ""), false)
     }
     fn text(r: Reply) -> String { match r { Reply::Text(t) => t, Reply::Png(_) => "png".into() } }
     fn methods(c: &Controller<Fake>) -> Vec<String> { c.page.calls.borrow().iter().map(|(m, _)| m.clone()).collect() }
@@ -1042,7 +1062,7 @@ mod tests {
 
     #[test]
     fn wait_gives_up_when_the_page_never_answers() {
-        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "Runtime.evaluate" }, false);
+        let c = Controller::new(fake(|_, _| Ok(json!({})), "Runtime.evaluate"), false);
         assert_eq!(text(block_on(c.run("wait", &s(&["--text", "x"])))), "erro: wait --text x nao aconteceu em 15000ms");
     }
 
@@ -1066,6 +1086,29 @@ mod tests {
         assert_eq!(last(&c), Some(json!({"width": 1280, "height": 800, "deviceScaleFactor": 1.0, "mobile": false})));
     }
 
+    /// Escondida → à vista → painel cresce (barra lateral recolhida) → controlador reaplica: a página termina no
+    /// tamanho e na densidade do painel, nunca limpa nem nos 1280×800 da escondida.
+    #[test]
+    fn visible_desktop_keeps_the_panel_size_and_a_requested_layout_holds_it() {
+        let c = ctl(|_, _| Ok(json!({})));
+        let last = |c: &Controller<Fake>| c.page.calls.borrow().iter().rev()
+            .find(|(m, _)| m.starts_with("Emulation.") && m.ends_with("DeviceMetricsOverride")).cloned();
+        let panel = |w: u32, h: u32| Some(("Emulation.setDeviceMetricsOverride".to_owned(),
+            json!({"width": w, "height": h, "deviceScaleFactor": 1.25, "mobile": false})));
+        block_on(c.set_hidden(true));
+        c.page.panel.set(Some((1076, 729, 1.25)));
+        block_on(c.set_hidden(false));
+        assert_eq!(last(&c), panel(1076, 729));
+        c.page.panel.set(Some((1400, 729, 1.25)));
+        block_on(c.set_scale(1.25));
+        assert_eq!(last(&c), panel(1400, 729));
+        block_on(c.run("layout", &s(&["800", "600"])));
+        assert!(c.page.held.get(), "layout pedido manda no tamanho");
+        block_on(c.run("layout", &s(&["desktop"])));
+        assert!(!c.page.held.get());
+        assert_eq!(last(&c), panel(1400, 729));
+    }
+
     #[test]
     fn late_hidden_request_never_overrides_a_newer_one() {
         let c = ctl(|_, _| Ok(json!({})));
@@ -1084,7 +1127,7 @@ mod tests {
 
     #[test]
     fn start_applies_the_panel_shown_while_it_was_starting() {
-        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "" }, true);
+        let c = Controller::new(fake(|_, _| Ok(json!({})), ""), true);
         let start = c.start();
         block_on(c.set_hidden(false));
         block_on(start);
