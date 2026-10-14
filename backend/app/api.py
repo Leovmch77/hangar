@@ -64,9 +64,6 @@ from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, 
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
-from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
-                          PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
-                          PlanWriteError)
 from app.pqueue import (PromptQueue, _saida_local, _transcript_start_ts, committed_user_lines,
                         fila_interna_pendente, linha_mais_parecida)
 from app.prune import prune_loop as _prune_loop
@@ -132,7 +129,6 @@ from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
 from app.sync import sync_admin_router, sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
-from app import plano_claude
 
 _log = logging.getLogger("hangar")
 
@@ -634,38 +630,60 @@ async def _grupos_indisponiveis(request: Request, exc: Exception):
     return JSONResponse(status_code=503, content={"detail": _group_unavailable(code).detail})
 
 
-@app.middleware("http")
-async def _contas_pelo_rust(request: Request, call_next):
-    """Contas e cotas têm um dono só, o Rust: Connect e convidado chegam aqui e o pedido
-    autenticado segue para ele pela ponte privada, e a resposta dele volta como veio. Sem o Rust
-    não há reserva Python: a rota responde indisponível."""
+async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str):
+    """Pedido de uma rota que só o Rust atende, chegado por uma porta do Python (Connect,
+    convidado): autenticado aqui, ele segue pela ponte privada e a resposta volta como veio. Sem o
+    Rust não há reserva Python: a rota responde indisponível, com o código de `sem_rust`."""
     from app import account_bridge
-    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
-        return await call_next(request)
     try:
         require_auth(request)
     except HTTPException as error:
         return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
     if account_bridge.owner_mode() == "python":
-        return JSONResponse({"detail": account_bridge.NEED_RUST}, status_code=503)
-    return await account_bridge.forward_public(request)
+        return JSONResponse({"detail": sem_rust}, status_code=503)
+    return await account_bridge.forward_public(request, destino)
+
+
+@app.middleware("http")
+async def _contas_pelo_rust(request: Request, call_next):
+    """Contas e cotas têm um dono só, o Rust."""
+    from app import account_bridge
+    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
+        return await call_next(request)
+    return await _repasse_ao_rust(request, account_bridge.NEED_RUST, "/__hangar_server/accounts/public")
 
 
 @app.middleware("http")
 async def _jev_aux_pelo_rust(request: Request, call_next):
-    """A busca de modelos do Jev é do Rust: o dono que entra pela porta do Python (Connect) segue para
-    ele pela ponte; sem o Rust, o erro diz isso em vez de um 404 que a tela leria como servidor antigo."""
+    """A busca de modelos do Jev é do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
+    leria como servidor antigo."""
     if not request.url.path.startswith("/api/jev/aux/"):
         return await call_next(request)
-    try:
-        require_auth(request)
-    except HTTPException as error:
-        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
-    from app import account_bridge
-    if account_bridge.owner_mode() == "python":
-        return JSONResponse({"detail": erro("erro_jev_aux_precisa_rust",
-                                            "o servidor está sem o processo Rust; reinicie o Hangar")}, status_code=503)
-    return await account_bridge.forward_public(request, "/__hangar_server/jev/aux")
+    return await _repasse_ao_rust(request, erro("erro_jev_aux_precisa_rust", "o servidor está sem o processo Rust; reinicie o Hangar"),
+                                  "/__hangar_server/jev/aux")
+
+
+# Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
+_PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$")
+_PLANOS_ESCRITA = re.compile(r"^/api/sessions/[^/]+/plan-(pin|step|archive)$")
+_CATALOGO = "/api/claude/customizations"
+
+
+@app.middleware("http")
+async def _planos_pelo_rust(request: Request, call_next):
+    """Os porteiros do convidado rodam por fora deste middleware; aqui só o catálogo, que é do
+    dono, recusa o convidado."""
+    path, metodo = request.url.path, request.method
+    if metodo == "GET" and path == _CATALOGO:
+        if guest_of(request) is not None or guest_users.current.get() is not None:
+            return JSONResponse({"detail": erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono")}, status_code=403)
+        return await _repasse_ao_rust(request, erro("claude_customizations_unavailable", "a seleção de plugins e skills precisa do servidor Rust"),
+                                      "/__hangar_server/forwarded")
+    padrao = _PLANOS_ESCRITA if metodo == "POST" else _PLANOS_LEITURA if metodo == "GET" else None
+    if padrao is None or not padrao.match(path):
+        return await call_next(request)
+    return await _repasse_ao_rust(request, erro("erro_planos_precisa_rust", "os planos precisam do servidor Rust, que não está rodando"),
+                                  "/__hangar_server/forwarded")
 
 
 @app.middleware("http")
@@ -1894,22 +1912,6 @@ class CreateBody(_StrictBody):
     # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
     # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
     creator: str | None = Field(default=None, min_length=1)
-
-
-@app.get("/api/claude/customizations", dependencies=[Depends(require_auth)])
-async def claude_customization_catalog(request: Request, cwd: str = Query(min_length=1),
-                                       config_dir: str | None = None):
-    if guest_of(request) is not None or guest_users.current.get() is not None:
-        raise HTTPException(403, detail=erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono"))
-    if config_dir is not None and config_dir not in {c.path for c in list_config_dirs()}:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    path = await asyncio.to_thread(lambda: str(Path(cwd).expanduser().resolve()))
-    if not await asyncio.to_thread(os.path.isdir, path):
-        raise HTTPException(400, detail=erro("erro_cwd_inexistente", "a pasta não existe", cwd=cwd))
-    try:
-        return await asyncio.to_thread(claude_customizations.catalog, path, tmux.config_dir_de(config_dir))
-    except claude_customizations.CustomizationsError as exc:
-        raise HTTPException(exc.status, detail=erro(exc.code, exc.detail)) from None
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -3930,30 +3932,6 @@ async def codex_session_cost(name: str):
         return await asyncio.to_thread(estimate_session_cost, info.jsonl)
     except OSError:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "Codex rollout not found")) from None
-
-
-@app.get("/api/sessions/{name}/plan-preview", dependencies=[Depends(require_auth)])
-async def plan_preview(name: str, content: bool = True):
-    info = await _cached_info(name)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    if info.provider != "claude":
-        return None
-    plano = await asyncio.to_thread(plano_claude.descobrir, info.jsonl, info.cwd)
-    if plano is None:
-        return None
-    resposta = {"name": plano.nome, "path": str(plano.caminho)}
-    if plano.anchor_id is not None:
-        resposta["anchor_id"] = plano.anchor_id
-    if not content:
-        return resposta
-    try:
-        resposta["markdown"] = await asyncio.to_thread(plano.caminho.read_text, encoding="utf-8")
-    except FileNotFoundError:
-        raise HTTPException(404, detail=erro("erro_plano_removido", "arquivo do plano não encontrado")) from None
-    except OSError:
-        raise HTTPException(500, detail=erro("erro_plano_ilegivel", "não foi possível ler o plano")) from None
-    return resposta
 
 
 async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
@@ -7863,53 +7841,6 @@ def _session_git_cwd(name: str) -> str:
     return _session_info_with_cwd(name).git_dir
 
 
-@app.get("/api/sessions/{name}/plan", dependencies=[Depends(require_auth)])
-async def session_plan(name: str):
-    """Detalhe do plano ativo da sessao + o markdown cru. O markdown vem JUNTO de proposito: o
-    GET /sessions/{name}/file so serve path que aparece no transcript, e um plano descoberto por
-    varredura (sessao nova, pos-/clear) nunca aparece la. O arquivo ja foi lido e parseado aqui."""
-    # to_thread e obrigatorio: _session_cwd chama registry.list(), que forka `tmux list-panes` e
-    # varre /proc inteiro. As outras 16 rotas que usam _session_cwd sao `def` sync (o FastAPI as
-    # joga no threadpool sozinho); esta e async, entao I/O direto na corrotina travaria o loop
-    # (mesma classe do incidente 2026-07-23). A HTTPException do 404 propaga pelo to_thread normal.
-    cwd = await asyncio.to_thread(_session_cwd, name)   # ja levanta 404 sem sessao/cwd
-    p = await asyncio.to_thread(plan_progress, cwd)
-    if p is None:
-        raise HTTPException(404, detail=erro("erro_sem_plano_ativo", "sem plano ativo"))
-    try:
-        markdown = await asyncio.to_thread(
-            lambda: Path(p.path).read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        # plan_progress vem de cache; o arquivo pode ter sumido/perdido permissao entre a leitura
-        # cacheada e esta segunda leitura. Degrada pra markdown vazio, mas NAO engole em silencio.
-        _log.warning("falha lendo markdown do plano path=%s", p.path, exc_info=True)
-        markdown = ""
-    return {
-        # `stem` (nome do arquivo) alem do `name` (ja sem o prefixo de data): e a chave que o
-        # cliente devolve pra marcar step e arquivar, e sao os dois caminhos que o `name`, com a
-        # data cortada, nao consegue reabrir.
-        "name": p.name, "path": p.path, "stem": Path(p.path).stem,
-        "task": p.task_idx, "task_total": p.task_total,
-        "done": p.done, "total": p.total, "complete": p.complete,
-        "tasks": [{"title": t.title, "done": t.done, "total": t.total,
-                   "steps": [{"title": s.title, "done": s.done, "manual": s.manual, "idx": s.idx}
-                             for s in t.steps]}
-                  for t in p.tasks],
-        "markdown": markdown,
-    }
-
-
-@app.get("/api/sessions/{name}/plans", dependencies=[Depends(require_auth)])
-async def session_plans(name: str):
-    """Todos os planos do repo, pro seletor. Inclui os nao-comecados e os completos — que a eleicao
-    automatica descarta, e que sao exatamente os que o usuario precisa poder escolher."""
-    cwd = await asyncio.to_thread(_session_cwd, name)
-    r = await asyncio.to_thread(list_plans, cwd)
-    if r is None:
-        raise HTTPException(404, detail=erro("erro_sem_pasta_planos", "repo sem pasta de planos"))
-    return r
-
-
 @app.get("/api/orq", dependencies=[Depends(require_auth)])
 async def orq_lista():
     """Execucoes de orquestracao (eventos.jsonl escrito pelo arbitro), mais recentes primeiro.
@@ -7959,83 +7890,6 @@ async def orq_conductor_panel(exec_id: str):
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
     unidades = await asyncio.to_thread(orq_conductor.units)
     return await asyncio.to_thread(orq_conductor.conductor, d, unidades)
-
-
-class PlanPinBody(_StrictBody):
-    stem: str | None = None   # None = solta o pin e volta pra eleicao automatica
-
-
-@app.post("/api/sessions/{name}/plan-pin", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def session_plan_pin(name: str, body: PlanPinBody):
-    """Fixa qual plano o painel mostra. Vale ate o plano fechar: em 100% o pin e ignorado e a
-    eleicao automatica volta (ver planprog.plan_progress)."""
-    cwd = await asyncio.to_thread(_session_cwd, name)
-    root = await asyncio.to_thread(_plans_dir, cwd)
-    if root is None:
-        raise HTTPException(404, detail=erro("erro_sem_pasta_planos", "repo sem pasta de planos"))
-    if body.stem is not None and body.stem != PIN_NONE:
-        # So um plano que existe DE VERDADE nesta raiz. Sem isto, o stem viraria nome de arquivo
-        # vindo do cliente — e a checagem de traversal do read_pin nao cobriria um nome valido
-        # apontando pra plano de outro repo. A guarda de separador vem ANTES do isfile: com um
-        # `../..` o proprio isfile ja responderia se existe .md fora da pasta de planos.
-        if not is_safe_stem(body.stem):
-            raise HTTPException(400, detail=erro("erro_nome_plano_invalido", f"nome de plano invalido: {body.stem}", nome=body.stem))
-        alvo = os.path.join(root, body.stem + ".md")
-        if not await asyncio.to_thread(os.path.isfile, alvo):
-            raise HTTPException(404, detail=erro("erro_plano_nao_encontrado", f"plano nao encontrado: {body.stem}", nome=body.stem))
-    try:
-        await asyncio.to_thread(write_pin, root, body.stem)
-    except PlanPinError as e:
-        raise HTTPException(500, detail=erro("erro_gravar_pin", f"nao deu pra gravar o pin: {e}", erro=str(e)))
-    return {"pinned": body.stem}
-
-
-async def _plans_root(name: str) -> tuple[str, str]:
-    """(cwd, raiz de planos). Devolve os DOIS porque `_session_cwd` chama `registry.list()`, que
-    forka tmux e varre /proc — pedir o cwd de novo depois dobraria esse scan por clique."""
-    cwd = await asyncio.to_thread(_session_cwd, name)
-    root = await asyncio.to_thread(_plans_dir, cwd)
-    if root is None:
-        raise HTTPException(404, detail=erro("erro_sem_pasta_planos", "repo sem pasta de planos"))
-    return cwd, root
-
-
-class PlanStepBody(_StrictBody):
-    stem: str
-    idx: int      # 0-based, na ordem do documento — vem do proprio /plan
-    done: bool
-
-
-@app.post("/api/sessions/{name}/plan-step", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def session_plan_step(name: str, body: PlanStepBody):
-    """Marca/desmarca UM step no .md do plano. Quem marca no fluxo normal e o agente; isto existe
-    pro caso dele esquecer — sem marcacao o plano nunca fecha e trava o painel na etapa errada."""
-    cwd, root = await _plans_root(name)
-    try:
-        path = caminho_do_plano(root, body.stem)
-        await asyncio.to_thread(marcar_step, path, body.idx, body.done)
-    except PlanWriteError as e:
-        # 409 e nao 500: os modos de falha reais aqui sao "o arquivo mudou/nao serve", nao bug do
-        # servidor — e a UI PRECISA mostrar o texto (o clique some sem explicacao, senao).
-        raise HTTPException(409, detail=erro("erro_marcar_step", f"nao deu pra marcar o step: {e}", erro=str(e)))
-    p = await asyncio.to_thread(plan_progress, cwd)
-    return {"done": p.done if p else None, "total": p.total if p else None,
-            "complete": bool(p and p.complete)}
-
-
-class PlanArchiveBody(_StrictBody):
-    stem: str
-
-
-@app.post("/api/sessions/{name}/plan-archive", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def session_plan_archive(name: str, body: PlanArchiveBody):
-    """Encerra o plano: move o .md (e o .html irmao) pra docs/superpowers/plans/feitos/."""
-    _, root = await _plans_root(name)
-    try:
-        movidos = await asyncio.to_thread(arquivar, root, body.stem)
-    except PlanWriteError as e:
-        raise HTTPException(409, detail=erro("erro_arquivar_plano", f"nao deu pra arquivar: {e}", erro=str(e)))
-    return {"moved": movidos}
 
 
 @app.get("/api/sessions/{name}/branches", dependencies=[Depends(require_auth)])

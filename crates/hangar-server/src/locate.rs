@@ -51,7 +51,7 @@ pub struct ListLocate {
 }
 
 /// Uma rodada da lista travada (multiplexador, fatos do Python) não pendura `/history` e `/events`.
-const LOCATE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LOCATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Locate for ListLocate {
     fn info<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<InternalInfo>, InfoFailed>> {
@@ -63,21 +63,9 @@ impl Locate for ListLocate {
 
 impl ListLocate {
     async fn find(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
-        {
-            let claude = self.list.env().dirs.as_ref().map(|d| d.claude.clone()).ok_or(InfoFailed("list_dirs_missing"))?;
-            let p = self.list.snapshot().await.map_err(|e| InfoFailed(e.code))?;
-            if let Some(row) = p.rows.iter().find(|r| r.name == name) {
-                return Ok(Some(info_of(row, &claude)));
-            }
-            // Sessão criada agora: o retrato de até 2 s ainda não a tem.
-            let p = self.list.refresh().await.map_err(|e| InfoFailed(e.code))?;
-            match p.rows.iter().find(|r| r.name == name) {
-                Some(row) => Ok(Some(info_of(row, &claude))),
-                // Sem os fatos do Python as linhas de transferência e `orq` faltam: ausência não prova nada.
-                None if p.facts.unknown => Err(InfoFailed("list_facts_unknown")),
-                None => Ok(None),
-            }
-        }
+        let claude = self.list.env().dirs.as_ref().map(|d| d.claude.clone()).ok_or(InfoFailed("list_dirs_missing"))?;
+        let row = self.list.find_row(name).await.map_err(|e| InfoFailed(e.code))?;
+        Ok(row.map(|row| info_of(&row, &claude)))
     }
 }
 

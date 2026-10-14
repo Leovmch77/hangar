@@ -189,11 +189,11 @@ pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
 pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {
     if target.provider!="claude" || target.name.is_empty() || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("lifecycle_sidecar_path"));}
     let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
-    let bytes=match std::fs::read(&path) {Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(failure("lifecycle_sidecar_read"))};
+    let bytes=match super::queue::read_replaced(&path) {Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(failure("lifecycle_sidecar_read"))};
     let value:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;
     if value["key"]!=target.key || value["session_id"]!=conversation || value["name"]!=target.name
         || value["cano"]["pid"].as_u64().is_some_and(|pid|pid!=u64::from(target.binding.pid)) {return Err(failure("lifecycle_sidecar_changed"));}
-    if std::fs::read(&path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Err(failure("lifecycle_sidecar_changed"));}
+    if super::queue::read_replaced(&path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Err(failure("lifecycle_sidecar_changed"));}
     std::fs::remove_file(path).map_err(|_|failure("lifecycle_sidecar_delete"))
 }
 
@@ -201,13 +201,13 @@ fn sidecar_hash(bytes:&[u8])->String {ring::digest::digest(&ring::digest::SHA256
 pub(super) fn sidecar_digest(target:&super::protocol::RuntimeTarget)->Result<String,RuntimeError> {
     if target.provider!="claude" || target.name.is_empty() || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("lifecycle_sidecar_path"));}
     let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
-    let bytes=std::fs::read(path).map_err(|_|failure("lifecycle_sidecar_read"))?;Ok(sidecar_hash(&bytes))
+    let bytes=super::queue::read_replaced(&path).map_err(|_|failure("lifecycle_sidecar_read"))?;Ok(sidecar_hash(&bytes))
 }
 pub fn patch_sidecar(target:&super::protocol::RuntimeTarget,patch:&serde_json::Value)->Result<serde_json::Value,RuntimeError> {
     use serde_json::{Value,json};
     if target.provider!="claude" || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) || target.name.is_empty() {return Err(failure("lifecycle_sidecar_path"));}
     let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
-    let bytes=std::fs::read(&path).map_err(|_|failure("lifecycle_sidecar_read"))?;
+    let bytes=super::queue::read_replaced(&path).map_err(|_|failure("lifecycle_sidecar_read"))?;
     let mut meta:Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;
     let recorded_pid=if meta["cano"].is_null() {0} else {meta["cano"]["pid"].as_u64().ok_or_else(||failure("lifecycle_sidecar_read"))?};
     if meta["key"]!=target.key || meta["session_id"]!=target.metadata["session_id"] || meta["name"]!=target.name
@@ -215,7 +215,7 @@ pub fn patch_sidecar(target:&super::protocol::RuntimeTarget,patch:&serde_json::V
     let fields=patch.as_object().ok_or_else(||failure("lifecycle_sidecar_patch"))?;
     if fields.keys().any(|k|!matches!(k.as_str(),"session_id"|"permission_mode"|"previous_non_plan"|"cano")) {return Err(failure("lifecycle_sidecar_patch"));}
     meta.as_object_mut().ok_or_else(||failure("lifecycle_sidecar_read"))?.extend(fields.clone());
-    if std::fs::read(&path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Ok(json!({"stale":true}));}
+    if super::queue::read_replaced(&path).map_err(|_|failure("lifecycle_sidecar_read"))?!=bytes {return Ok(json!({"stale":true}));}
     let written=serde_json::to_vec(&meta).map_err(|_|failure("lifecycle_sidecar_write"))?;
     super::queue::atomic_write(&path,&written).map_err(|_|failure("lifecycle_sidecar_write"))?;
     Ok(json!({"updated":true,"metadata":meta,"digest":sidecar_hash(&written)}))

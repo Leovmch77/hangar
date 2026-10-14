@@ -26,10 +26,10 @@ const MAX_ITEMS: usize = 4096;
 const MAX_PLUGINS: usize = 512;
 
 #[derive(Debug, Serialize)]
-struct CustomizationError {
-    status: u16,
-    code: &'static str,
-    detail: &'static str,
+pub(crate) struct CustomizationError {
+    pub(crate) status: u16,
+    pub(crate) code: &'static str,
+    pub(crate) detail: &'static str,
 }
 type Result<T> = std::result::Result<T, CustomizationError>;
 fn error(status: u16, code: &'static str, detail: &'static str) -> CustomizationError {
@@ -108,10 +108,69 @@ pub async fn private(
         Ok(op) => op,
         Err(_) => return envelope(Err(invalid())),
     };
+    envelope(run(&st, op).await)
+}
+
+pub(crate) const CATALOG_PATH: &str = "/api/claude/customizations";
+
+/// `GET /api/claude/customizations`: o catálogo de plugins e skills da pasta na conta, com o
+/// contrato da rota do Python. O dono entra aqui; Connect chega pela ponte `crate::forwarded`.
+pub async fn catalog_route(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (forward, owner) = crate::routes::gate(&st, peer, &req);
+    if !owner {
+        return crate::routes::pass(&st, req, &forward).await;
+    }
+    let headers = req.headers().clone();
+    let mut response = public_catalog(&st, req).await;
+    crate::routes::cors(&headers, response.headers_mut());
+    response
+}
+
+fn refused(status: u16, code: &'static str, msg: &str, params: Value) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    crate::diag::coded(crate::session_write::json_response(status, crate::session_write::detail_body(code, msg, params)), code)
+}
+
+/// Atende um pedido já autorizado (o dono pela porta pública, ou a ponte do Python).
+pub async fn public_catalog(st: &Arc<AppState>, req: Request) -> Response {
+    let query: std::collections::HashMap<String, String> =
+        form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()).into_owned().collect();
+    let Some(raw) = query.get("cwd").filter(|c| !c.is_empty()).cloned() else {
+        return crate::session_write::json_response(StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"detail": [{"type": "missing", "loc": ["query", "cwd"], "msg": "Field required", "input": null}]}));
+    };
+    let chosen = query.get("config_dir").cloned();
+    let accounts = st.accounts.clone();
+    let checked = tokio::task::spawn_blocking(move || -> std::result::Result<(PathBuf, PathBuf), Response> {
+        if let Some(dir) = &chosen {
+            let known = accounts.claude_catalog().map_err(|e| refused(503, e.code, &e.message, json!({})))?;
+            if !known.as_array().into_iter().flatten().any(|a| a["path"].as_str() == Some(dir.as_str())) {
+                return Err(refused(400, "erro_config_dir_invalido", "config_dir inválido", json!({})));
+            }
+        }
+        let path = hangar_workspace::real(Path::new(&raw));
+        if !path.is_dir() {
+            return Err(refused(400, "erro_cwd_inexistente", "a pasta não existe", json!({"cwd": raw})));
+        }
+        // A conta que a sessão nascida com este `config_dir` usaria: a escolhida, ou a padrão.
+        Ok((path, chosen.map_or_else(|| accounts.env.claude_base.clone(), PathBuf::from)))
+    }).await;
+    let (cwd, config_dir) = match checked {
+        Ok(Ok(v)) => v,
+        Ok(Err(r)) => return r,
+        Err(_) => return refused(500, "claude_customizations_failed", "Não deu para validar as escolhas da conversa.", json!({})),
+    };
+    match run(st, Operation::Catalog(Context { cwd, config_dir })).await {
+        Ok(v) => crate::session_write::json_response(StatusCode::OK, v),
+        Err(e) => refused(e.status, e.code, e.detail, json!({})),
+    }
+}
+
+async fn run(st: &Arc<AppState>, op: Operation) -> Result<Value> {
     let slots = if matches!(&op, Operation::Catalog(_)) { &st.workspace_read_slots } else { &st.workspace_slots };
     let permit = match slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => return envelope(Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada."))),
+        Err(_) => return Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada.")),
     };
     let op = match tokio::task::spawn_blocking(move || {
         match &op {
@@ -129,8 +188,8 @@ pub async fn private(
         Ok::<_, CustomizationError>(op)
     }).await {
         Ok(Ok(op)) => op,
-        Ok(Err(error)) => return envelope(Err(error)),
-        Err(_) => return envelope(Err(error(500, "claude_customizations_failed", "Não deu para validar as escolhas da conversa."))),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(error(500, "claude_customizations_failed", "Não deu para validar as escolhas da conversa.")),
     };
     // O CLI só consulta metadados; leituras de disco e gravação ficam fora do executor assíncrono.
     let context = match &op {
@@ -139,18 +198,15 @@ pub async fn private(
         _ => None,
     };
     let installations = if let Some((cwd, config_dir)) = context {
-        match installed_plugins(cwd, config_dir).await {
-            Ok(installations) => installations,
-            Err(error) => return envelope(Err(error)),
-        }
+        installed_plugins(cwd, config_dir).await?
     } else { Vec::new() };
-    envelope(match tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         execute(op, installations, &store_root()?)
     }).await {
         Ok(result) => result,
         Err(_) => Err(error(500, "claude_customizations_failed", "Não foi possível confirmar as escolhas da conversa.")),
-    })
+    }
 }
 
 fn valid_part(name: &str) -> bool {

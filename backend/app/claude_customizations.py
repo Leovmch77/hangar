@@ -70,10 +70,6 @@ def _request(operation: str, arguments: dict) -> dict:
     return result
 
 
-def catalog(cwd: str, config_dir: str) -> dict:
-    return _request("catalog", {"cwd": cwd, "config_dir": config_dir})
-
-
 def _validated_settings(settings: dict | None) -> dict | None:
     if settings is None:
         return None
