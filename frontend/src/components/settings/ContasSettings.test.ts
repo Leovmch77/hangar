@@ -422,7 +422,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     await tick(); await tick();
     const texto = t.el.textContent ?? '';
     expect(texto).toContain(m.contas_login_prazo());
-    expect(texto).toContain(m.contas_login_cli_mudo());
+    expect(texto).toContain(m.contas_login_nao_conferido());
     unmount(t.comp);
   });
 

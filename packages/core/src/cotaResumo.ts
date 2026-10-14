@@ -19,19 +19,22 @@ export interface CotaContaResumo {
 }
 
 /** Números da última leitura boa com o `motivo` da falha nova: por que não atualizaram. */
-export function motivoCotaAntiga(c: CotaContaResumo | null | undefined): string | null {
+export function motivoCotaAntiga(c: Pick<CotaContaResumo, 'estado' | 'motivo'> | null | undefined): string | null {
   const motivo = c?.estado === 'lida' ? c.motivo : null;
-  if (!motivo) return null;
-  return m.cota_nao_atualizou({ causa: causaDaFalha(motivo) });
+  const causa = motivo ? causaDaFalha(motivo) : null;
+  return causa ? m.cota_nao_atualizou({ causa }) : null;
 }
 
-function causaDaFalha(motivo: string): string {
+function causaDaFalha(motivo: string): string | null {
+  // Conta ocupada por login, renovação ou redefinição: não houve leitura que falhou.
+  if (motivo === 'sessao-viva') return null;
   if (motivo === 'sem-resposta') return m.cota_causa_sem_resposta();
   if (motivo === 'http-429') return m.cota_causa_limite();
   if (motivo === 'http-401' || motivo === 'http-403') return m.cota_causa_recusou();
   const status = /^http-(\d{3})$/.exec(motivo)?.[1];
-  if (status) return m.cota_causa_http({ status });
-  if (['formato-desconhecido', 'painel-sem-numeros', 'erro-leitor'].includes(motivo)) return m.cota_causa_formato();
+  // 2xx chega quando o corpo não serve (vazio, JSON que não é objeto): é formato, não erro da fonte.
+  if (status && !status.startsWith('2')) return m.cota_causa_http({ status });
+  if (status || ['formato-desconhecido', 'painel-sem-numeros', 'erro-leitor'].includes(motivo)) return m.cota_causa_formato();
   if (motivo === 'resposta-grande') return m.cota_causa_grande();
   if (motivo === 'credencial-invalida' || motivo === 'credencial-ilegivel') return m.cota_causa_credencial();
   return m.cota_causa_outra();

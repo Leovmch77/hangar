@@ -3293,7 +3293,6 @@
   "contas_login_prazo": "Sign-in not checked: the read ran out of time and keeps going in the background",
   "contas_login_leitura_falhou": "Sign-in not checked: the read failed",
   "contas_login_formato": "Sign-in not checked: the CLI answered in an unknown format",
-  "contas_login_cli_mudo": "Sign-in not checked: the CLI did not answer",
   "contas_login_nao_conferido": "Sign-in not checked",
   "contas_sem_leitura": "No limit reading yet: it only shows after a session runs in it.",
   "contas_entrar": "Sign in",

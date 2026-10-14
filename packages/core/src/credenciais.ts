@@ -95,7 +95,7 @@ export function motivoLoginIndisponivel(c: Credencial): string | null {
     case 'prazo': return m.contas_login_prazo();
     case 'leitura-falhou': return m.contas_login_leitura_falhou();
     case 'formato-desconhecido': return m.contas_login_formato();
-    case 'cli-indisponivel': return m.contas_login_cli_mudo();
+    // No Claude, `cli-indisponivel` também sai com a conta ocupada por um login: causa incerta.
     default: return m.contas_login_nao_conferido();
   }
 }

@@ -14,6 +14,8 @@ describe('cota antiga com a falha nova', () => {
     expect(motivoCotaAntiga(lida('http-401'))).toBe(aviso(m.cota_causa_recusou()));
     expect(motivoCotaAntiga(lida('http-403'))).toBe(aviso(m.cota_causa_recusou()));
     expect(motivoCotaAntiga(lida('http-502'))).toBe(aviso(m.cota_causa_http({ status: '502' })));
+    // 2xx com corpo que não serve não é erro da fonte: é formato.
+    expect(motivoCotaAntiga(lida('http-200'))).toBe(aviso(m.cota_causa_formato()));
     expect(motivoCotaAntiga(lida('formato-desconhecido'))).toBe(aviso(m.cota_causa_formato()));
     expect(motivoCotaAntiga(lida('painel-sem-numeros'))).toBe(aviso(m.cota_causa_formato()));
     expect(motivoCotaAntiga(lida('erro-leitor'))).toBe(aviso(m.cota_causa_formato()));
@@ -24,6 +26,10 @@ describe('cota antiga com a falha nova', () => {
   });
   it('sem falha nova, ou fora da leitura boa, não há aviso', () => {
     expect(motivoCotaAntiga(lida(null))).toBeNull();
+    // Conta ocupada (login, renovação, redefinição em curso) não é leitura que falhou.
+    expect(motivoCotaAntiga(lida('sessao-viva'))).toBeNull();
+    // A web manda a cota da linha sem `id`.
+    expect(motivoCotaAntiga({ estado: 'lida', motivo: 'sem-resposta' })).toBe(aviso(m.cota_causa_sem_resposta()));
     expect(motivoCotaAntiga({ ...lida('sem-resposta'), estado: 'indisponivel' })).toBeNull();
     expect(motivoCotaAntiga(undefined)).toBeNull();
   });

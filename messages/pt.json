@@ -3293,7 +3293,6 @@
   "contas_login_prazo": "Login não conferido: a leitura passou do prazo e segue em segundo plano",
   "contas_login_leitura_falhou": "Login não conferido: a leitura falhou",
   "contas_login_formato": "Login não conferido: o CLI respondeu num formato desconhecido",
-  "contas_login_cli_mudo": "Login não conferido: o CLI não respondeu",
   "contas_login_nao_conferido": "Login não conferido",
   "contas_sem_leitura": "Sem leitura de limite: só aparece depois que uma sessão rodar nela.",
   "contas_entrar": "Entrar",

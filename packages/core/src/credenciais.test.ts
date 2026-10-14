@@ -47,7 +47,8 @@ describe('login que o servidor não conferiu', () => {
     expect(motivoLoginIndisponivel(linha('prazo'))).toBe(m.contas_login_prazo());
     expect(motivoLoginIndisponivel(linha('leitura-falhou'))).toBe(m.contas_login_leitura_falhou());
     expect(motivoLoginIndisponivel(linha('formato-desconhecido'))).toBe(m.contas_login_formato());
-    expect(motivoLoginIndisponivel(linha('cli-indisponivel'))).toBe(m.contas_login_cli_mudo());
+    // No Claude o mesmo código sai com a conta ocupada por um login: não dá para afirmar a causa.
+    expect(motivoLoginIndisponivel(linha('cli-indisponivel'))).toBe(m.contas_login_nao_conferido());
     expect(motivoLoginIndisponivel(linha('causa-nova'))).toBe(m.contas_login_nao_conferido());
   });
   it('fica calado sem causa, com login lido ou com o Codex ausente, que tem frase própria', () => {
