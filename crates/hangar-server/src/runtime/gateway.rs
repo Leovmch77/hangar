@@ -96,15 +96,20 @@ pub struct RuntimeRegistry {
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
 /// Rust que acabou de cair no Windows. Espera até 3 s por ela.
 /// Só "trava ocupada" espera; outro erro (pasta sem permissão, disco cheio) responde na hora.
+/// O prazo é do relógio, não da contagem de voltas: com o executor disputado cada volta passa dos
+/// 50 ms, e 60 voltas chegavam a dobrar a espera.
 async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeError> {
-    for attempt in 0..60 {
-        if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
         let path = path.to_owned();
         match tokio::task::spawn_blocking(move ||acquire_lease(&path)).await.map_err(|_|failure("queue_job"))? {
             Ok(lease)=>return Ok(lease),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>{},
             Err(error)=>return Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
         }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() { break; }
+        tokio::time::sleep(left.min(Duration::from_millis(50))).await;
     }
     Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s"))
 }
@@ -1985,6 +1990,22 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Executor disputado, como no servidor carregado: cada volta da espera atrasa além dos 50 ms.
+    #[tokio::test]
+    async fn busy_lease_is_refused_after_three_seconds_of_clock_even_on_a_busy_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.lock");
+        let _held = acquire_lease(&path).unwrap();
+        let hog = tokio::spawn(async { loop { std::thread::sleep(Duration::from_millis(50)); tokio::task::yield_now().await; } });
+        let started = std::time::Instant::now();
+        let refused = wait_lease(&path).await;
+        let elapsed = started.elapsed();
+        hog.abort();
+        assert_eq!(refused.unwrap_err().code,"runtime_lease");
+        assert!(elapsed >= Duration::from_secs(3),"recusou antes dos 3 s: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(4500),"a espera passou dos 3 s prometidos: {elapsed:?}");
+    }
 
     struct SidRecipeProcesses {dir:std::path::PathBuf}
     impl crate::list::procs::ProcessView for SidRecipeProcesses {
