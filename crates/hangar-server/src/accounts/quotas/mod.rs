@@ -30,6 +30,9 @@ fn response(result: Result<Value, AccountError>) -> Response {
     }
 }
 
+/// O cliente desiste em 8 s: leitura de rede que passa disto sai do cache, e a leitura segue.
+pub const CLIENT_DEADLINE: Duration = Duration::from_secs(6);
+
 pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Response {
     let suggestion_only = request.uri().path().ends_with("/sugestao");
     let query: std::collections::HashMap<String, String> =
@@ -44,7 +47,11 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(bridge) => bridge,
         Err(error) => return response(Err(error)),
     };
-    let result = state.accounts.quotas(Some(bridge), force, false).await;
+    let (result, late) = state.accounts.quotas_within(Some(bridge), force, CLIENT_DEADLINE, None).await;
+    if late {
+        state.diag.report("rust.quota_sources_partial", "cotas", "quota_deadline",
+            "cotas passaram do prazo; a resposta sai com o cache e a leitura segue");
+    }
     if suggestion_only {
         return match result {
             Ok(rows) => match rows.as_array().and_then(|rows| suggestion(rows)) {
@@ -225,16 +232,16 @@ impl AccountService {
         bridge: Option<AccountsBridge>,
         force: bool,
         deadline: Duration,
-        config: Arc<other::Config>,
+        config: Option<Arc<other::Config>>,
     ) -> (Result<Value, AccountError>, bool) {
         // ponytail: leitura de rede já em voo e o pedido não é forçado → responde do cache em vez de
         // enfileirar outra (corrida curta entre o try_lock e o lock do worker: no pior caso uma leitura a mais).
         if !force && self.quotas.refresh.try_lock().is_err() {
-            return (self.quotas_with(bridge, false, true, Some(config)).await, false);
+            return (self.quotas_with(bridge, false, true, config).await, false);
         }
-        match tokio::time::timeout(deadline, self.quotas_with(bridge.clone(), force, false, Some(config.clone()))).await {
+        match tokio::time::timeout(deadline, self.quotas_with(bridge.clone(), force, false, config.clone())).await {
             Ok(result) => (result, false),
-            Err(_) => (self.quotas_with(bridge, false, true, Some(config)).await, true),
+            Err(_) => (self.quotas_with(bridge, false, true, config).await, true),
         }
     }
 
@@ -796,11 +803,11 @@ mod tests {
         let config = Arc::new(other::Config::default());
         let held = service.quotas.refresh.lock().await;
         let started = std::time::Instant::now();
-        let (rows, late) = service.quotas_within(None, false, Duration::from_secs(5), config.clone()).await;
+        let (rows, late) = service.quotas_within(None, false, Duration::from_secs(5), Some(config.clone())).await;
         assert!(rows.is_ok());
         assert!(!late, "em voo não conta como prazo");
         assert!(started.elapsed() < Duration::from_secs(1));
-        let (_, late) = service.quotas_within(None, true, Duration::from_millis(100), config).await;
+        let (_, late) = service.quotas_within(None, true, Duration::from_millis(100), Some(config)).await;
         assert!(late, "forçada espera o lock e estoura o prazo");
         drop(held);
     }
@@ -857,7 +864,7 @@ mod tests {
         let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
         let config = Arc::new(other::load(&service.env));
         let started = std::time::Instant::now();
-        let (rows, late) = service.quotas_within(None, false, Duration::from_millis(300), config).await;
+        let (rows, late) = service.quotas_within(None, false, Duration::from_millis(300), Some(config)).await;
         assert!(late && started.elapsed() < Duration::from_secs(3));
         assert!(row(&rows.unwrap(), "chave:test").is_none(), "o cache ainda não tinha a leitura");
         release.notify_one();

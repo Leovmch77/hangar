@@ -13,8 +13,6 @@ use serde_json::{Map, Value, json};
 use std::{sync::Arc, time::Duration};
 
 const CODEX_AUTH_DEADLINE: Duration = Duration::from_secs(3);
-/// O cliente desiste em 8 s: cota de rede que passa disto sai do cache, e a leitura segue.
-const QUOTA_DEADLINE: Duration = Duration::from_secs(6);
 
 fn unavailable_auth() -> Value {
     json!({"method":"unknown","status":"unavailable","email":null,"plan":null})
@@ -159,7 +157,7 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     };
     let snapshots = futures_util::future::join_all(codex.iter().map(|account| codex_snapshot(&state, account, force, bridge.as_ref())));
     let quotas = async {
-        let (result, late) = service.quotas_within(bridge.clone(), force, QUOTA_DEADLINE, config.clone()).await;
+        let (result, late) = service.quotas_within(bridge.clone(), force, super::quotas::CLIENT_DEADLINE, Some(config.clone())).await;
         if late {
             report("quota_deadline", "cotas passaram do prazo; a lista sai com o cache e a leitura segue");
         }

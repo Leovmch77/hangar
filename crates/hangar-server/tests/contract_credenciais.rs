@@ -152,10 +152,16 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
     (owner, connect)
 }
 
+/// A ponte das rotas de contas exige a identidade do runtime no ambiente.
+fn runtime_instance() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: processo de teste próprio; todo teste daqui passa por este `Once` antes de ler o ambiente.
+    ONCE.call_once(|| unsafe { std::env::set_var("HANGAR_RUNTIME_INSTANCE", "contract-instance") });
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn credentials_match_python() {
-    // SAFETY: processo de teste próprio; nenhuma outra thread lê o ambiente antes deste ponto.
-    unsafe { std::env::set_var("HANGAR_RUNTIME_INSTANCE", "contract-instance") };
+    runtime_instance();
     let hits = Arc::new(AtomicUsize::new(0));
     let recorded = hits.clone();
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -224,4 +230,77 @@ fn only_the_exact_get_is_rust_owned() {
         (Method::POST, "/api/credenciais")] {
         assert!(!rust_route(&method, path), "{method} {path} deveria seguir ao Python");
     }
+}
+
+/// Leitura de cota em voo: `/api/cotas` e `/api/cotas/sugestao` sem `forcar` respondem do cache na
+/// hora, e o pedido que esperava a leitura sai com o cache no prazo enquanto ela segue.
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_routes_answer_from_cache_while_a_read_is_slow() {
+    runtime_instance();
+    let (entered, mut in_flight) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = source.local_addr().unwrap();
+    tokio::spawn(async move {
+        let slow = move || {
+            let (entered, gate) = (entered.clone(), gate.clone());
+            async move {
+                let _ = entered.send(());
+                gate.notified().await;
+                ([(axum::http::header::CONTENT_TYPE, "application/json")], json!({"usage":{"limit":"10","remaining":"5"}}).to_string())
+            }
+        };
+        axum::serve(source, Router::new().route("/v1/usages", axum::routing::get(slow))).await.unwrap()
+    });
+    let python = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let python_addr = python.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(python, Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE })).await.unwrap()
+    });
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/engines.json"),
+        json!({"lenta":{"base_url":format!("http://{source_addr}/v1"),"api_key":"k","model":"m"}}).to_string()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut state = AppState::new(Config {
+        listen: addr,
+        upstream: python_addr,
+        internal_secret: "contract-internal".into(),
+        auth_token: "contract-only".into(),
+        log_path: None,
+        trusted: TrustedHosts::parse("127.0.0.1"),
+    });
+    let home_text = home.to_string_lossy().into_owned();
+    state.accounts = hangar_server::accounts::AccountService::new(
+        hangar_server::accounts::environment::AccountEnvironment::from_map([
+            ("HOME".into(), home_text.clone()),
+            ("USERPROFILE".into(), home_text),
+            ("PATH".into(), root.path().join("sem-bin").to_string_lossy().into_owned()),
+        ].into()),
+    );
+    let server = tokio::spawn(hangar_server::routes::serve_with_state(listener, state));
+    let client = reqwest::Client::new();
+    let get = |path: &str| client.get(format!("http://{addr}{path}")).bearer_auth("contract-only").send();
+    let started = std::time::Instant::now();
+    let first = tokio::spawn(get("/api/cotas"));
+    in_flight.recv().await.unwrap();
+    for path in ["/api/cotas", "/api/cotas/sugestao"] {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(3), get(path))
+            .await
+            .unwrap_or_else(|_| panic!("{path} esperou a leitura em voo"))
+            .unwrap();
+        assert!(matches!(response.status().as_u16(), 200 | 404), "{path}: {}", response.status());
+    }
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .expect("o pedido que leu a fonte lenta passou do prazo")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    assert!(started.elapsed() < std::time::Duration::from_secs(9), "{:?}", started.elapsed());
+    release.notify_waiters();
+    server.abort();
 }
