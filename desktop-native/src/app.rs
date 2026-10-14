@@ -80,6 +80,7 @@ mod tree;
 mod find;
 mod costs;
 mod worktrees;
+mod artifacts;
 mod stats;
 mod search;
 mod topbar;
@@ -263,6 +264,7 @@ enum Payload {
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
+    Artifacts(artifacts::ArtifactRequest, Result<Vec<artifacts::ArtifactItem>, Failure>),
     Mentions(u64, Result<Vec<String>, Failure>),
     // Resumo do bastão (`GET …/bastao/dossie`), amarrado ao estado da tela que o pediu e ao número do pedido.
     Dossier(EntityId, u64, Result<String, Failure>),
@@ -617,6 +619,7 @@ pub struct Hangar {
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
     costs: costs::Costs,
     worktrees: worktrees::Worktrees,
+    artifacts: artifacts::Artifacts,
     usage_stats: stats::UsageStats,
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
@@ -927,7 +930,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
-            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
+            costs: Default::default(), worktrees: Default::default(), artifacts: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             window_tray: window_tray::WindowTray::new(tray_tx), presence: Default::default(),
@@ -1252,6 +1255,7 @@ impl Hangar {
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
         self.leave_accounts();
         (self.selected, self.open_api, self.pending_remote) = (None, None, None);
+        self.artifacts.set_owner(None);
         (self.recents, self.reopen) = (Default::default(), None);
         self.sessions.clear();
         self.chat = Chat::default();
@@ -1393,6 +1397,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
+        self.sync_artifacts_owner(cx);
         self.voice_session_opened();
         if !same_server || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account() {
             self.load_session_accounts(cx);
@@ -1444,6 +1449,7 @@ impl Hangar {
         if let Some(task) = self.history_task.take() { task.abort(); }
         let remote = self.open_api.is_some();
         (self.selected, self.open_api) = (None, None);
+        self.artifacts.set_owner(None);
         if remote { self.load_notification_preferences(); }
         self.opening = None;
         self.chat = Chat::default();
@@ -1833,6 +1839,7 @@ impl Hangar {
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
             Payload::Dictation(seq, path, result) => { self.receive_dictation(seq, path, result, window, cx); return; }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
+            Payload::Artifacts(request, result) => { self.receive_artifacts(request, result, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
@@ -1987,6 +1994,7 @@ impl Hangar {
                     let before = self.selected_key();
                     if let Some(key) = &before { self.controls.on_session_update(key, &new); }
                     self.selected = Some(new);
+                    self.sync_artifacts_owner(cx);
                     // Recentes listados para a chave de antes: com outra chave, a lista some da tela mas seguiria aberta.
                     if self.selected_key() != before { self.close_recent(); }
                 }
@@ -1997,6 +2005,7 @@ impl Hangar {
                     if let Some(task) = self.history_task.take() { task.abort(); }
                     let remote = self.open_api.is_some();
                     (self.selected, self.open_api) = (None, None);
+                    self.artifacts.set_owner(None);
                     if remote { self.load_notification_preferences(); }
                     self.chat = Chat::default();
                     self.turn_seen = None;
@@ -2171,6 +2180,7 @@ impl Hangar {
                 None => self.defer_live_clear(Live::Tool, cx),
             },
             ChatUpdate::Reset => {
+                self.reset_artifacts(cx);
                 self.system_notifications.reset_stream();
                 // Transcript trocado: as perguntas respondidas desta sessão não valem mais.
                 if let Some(key) = self.selected_key() {
@@ -3514,8 +3524,12 @@ impl Hangar {
         // O arquivo que a ferramenta leu ou mandou: a pele Terminal mostra o do SendUserFile fora do corpo, sempre à vista.
         let shown_outside = appearance::get().tool_look == appearance::ToolLook::Terminal && sends_files(call);
         let refs = if shown_outside { Vec::new() } else { tool_file_refs(call) };
-        if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
-        if let Some(diff) = diff { body = body.child(diff); }
+        let look = appearance::get().tool_look;
+        if !refs.is_empty() {
+            let refs = self.render_refs(&format!("{row}-read"), refs, cx);
+            body = body.child(terminal_look::tool_body_control(look, &format!("{key}:files"), refs));
+        }
+        if let Some(diff) = diff { body = body.child(terminal_look::tool_body_control(look, &format!("{key}:diff"), diff)); }
         else if matches!(input, Prepared::Detail { total, .. } if total > 0) {
             body = body.child(self.detail(row, &input_key, input, tr("tool_input"), tr("copy_input"), false, cx));
         }
@@ -3591,8 +3605,9 @@ impl Hangar {
         div().flex().flex_col().gap_1()
             .child(div().flex().items_center().justify_between()
                 .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::muted() }).child(label))
-                .child(Button::new(SharedString::from(format!("copy-{key}"))).ghost().xsmall().icon(IconName::Copy).label(copy_label)
-                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.to_string())))))
+                .child(terminal_look::tool_body_control(appearance::get().tool_look, &format!("copy-{key}"),
+                    Button::new(SharedString::from(format!("copy-{key}"))).ghost().xsmall().icon(IconName::Copy).label(copy_label)
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.to_string()))))))
             .child(TextView::new(&view).selectable(true).scrollable(false))
             .when_some(note, |el, note| el.child(div().text_xs().text_color(theme::muted()).child(note)))
             .into_any_element()
@@ -3652,6 +3667,9 @@ impl Hangar {
     }
 
     fn render_thinking(&mut self, row: &str, parts: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        if appearance::get().tool_look == appearance::ToolLook::Terminal {
+            return self.render_terminal_thinking(row, parts, cx);
+        }
         let events = &self.chat.events;
         let thoughts: Vec<&ChatEvent> = parts.iter().map(|&i| &events[i]).filter(|e| e.kind == "thinking").collect();
         let summary = conversation::thought_summary(thoughts.first().and_then(|e| e.text.as_deref()).unwrap_or(""));
@@ -3703,10 +3721,7 @@ impl Hangar {
         let start = text.char_indices().rev().nth(LIVE_THINKING_TAIL).map(|(i, _)| i).unwrap_or(0);
         let source = safe_markdown(&text[start..]);
         let view = self.text_view(LIVE_THINKING, LIVE_THINKING, source, cx);
-        div().flex().flex_col().gap_1().px_3().py_2()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent()).child(tr("thinking_live")))
-            .child(chat_text(&view, cx).text_sm().text_color(theme::muted()))
-            .into_any_element()
+        terminal_look::live_thinking_content(appearance::get().tool_look, &view, cx)
     }
 
     fn render_live_tool(&self) -> AnyElement {
@@ -4369,6 +4384,7 @@ impl Hangar {
             div().pt(px(7.)).px(px(6.)).flex().flex_wrap().items_center().gap(px(6.)).gap_y(px(2.)).text_xs().text_color(theme::faint())
                 .children(session.as_ref().map(|s| self.render_group_chips(s, cx)))
                 .child(place)
+                .children(self.render_artifacts_button(cx))
                 .child(div().flex_1())
                 .child(usage)
         });
@@ -6412,7 +6428,7 @@ impl Render for Hangar {
             .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
                 else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }))
             .children(self.render_terminal(window, cx))
-            .children(self.render_file_view(cx));
+            .children(self.render_file_view(window, cx));
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
         let nav = if page.is_some() || costs_page || worktrees_page || files_expanded { None }

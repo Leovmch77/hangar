@@ -100,6 +100,25 @@ async fn execute(st: &Arc<AppState>, op: Operation) -> hangar_workspace::Result<
         Err(_) => Err(hangar_workspace::unavailable("pânico na leitura")),
     }
 }
+async fn resolve_root_file(st: &AppState, cwd: &str, path: &str) -> hangar_workspace::Result<std::path::PathBuf> {
+    let permit = st.workspace_read_slots.clone().try_acquire_owned().map_err(|_| hangar_workspace::busy())?;
+    let (cwd, path) = (cwd.to_owned(), path.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let cwd = Path::new(&cwd);
+        // O documento pode conservar um caminho absoluto; ele só entra por esta via se continuar na raiz real.
+        let relative = if Path::new(&path).is_absolute() {
+            let root = hangar_workspace::real(cwd);
+            let target = hangar_workspace::real(Path::new(&path));
+            target.strip_prefix(root).map_err(|_| hangar_workspace::file_error(400, "erro_arq_fora_da_raiz", "caminho sai da raiz da sessão"))?
+                .to_str().ok_or_else(|| hangar_workspace::file_error(400, "erro_arq_caminho_invalido", "caminho inválido"))?.to_owned()
+        } else { path };
+        let target = hangar_workspace::files::resolve(cwd, &relative)?;
+        if !target.is_file() { return Err(hangar_workspace::file_error(400, "erro_arq_nao_e_arquivo", "não é um arquivo comum")); }
+        Ok(target)
+    }).await.map_err(|_| hangar_workspace::unavailable("pânico na leitura"))?
+}
+
 pub async fn private(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -380,6 +399,18 @@ async fn run(
     };
     if method == Method::POST && !body_valid(tail, &payload) {
         return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
+    }
+    if tail == "file" && bool_param(params.get("root"), false) == Some(true) {
+        let Some(path) = params.get("path") else {
+            return Err(hangar_workspace::file_error(400, "erro_arq_caminho_invalido", "caminho ausente"));
+        };
+        let width = match crate::thumbnail::parse_width(params.get("w")) {
+            Ok(width) => width,
+            Err(response) => return Ok(response),
+        };
+        let cwd = ctx["session"]["cwd"].as_str().ok_or_else(|| hangar_workspace::unavailable("raiz indisponível"))?;
+        let target = resolve_root_file(st, cwd, path).await?;
+        return Ok(serve_file(&target, &parts.headers, bool_param(params.get("download"), false).unwrap_or(false), width).await);
     }
     let Some(op) = map_operation(tail, &method, &params, &payload, &ctx) else {
         return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);

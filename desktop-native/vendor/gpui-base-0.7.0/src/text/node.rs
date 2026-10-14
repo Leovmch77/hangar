@@ -2040,6 +2040,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
     pub(crate) image_source: Option<Arc<super::text_view::ImageSourceFn>>,
+    pub(crate) image_source_mapper: Option<Arc<super::text_view::ImageSourceMapperFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
     /// This frame's streamed fade-in, when any text is still fading.
@@ -2054,12 +2055,12 @@ impl NodeContext {
     fn image_source(&self, image: &ImageNode) -> ImageSource {
         match &self.image_source {
             Some(resolve) => resolve(&image.url),
-            None => image.source(),
+            None => self.image_source_mapper.as_ref().and_then(|resolve| resolve(&image.url)).unwrap_or_else(|| image.source()),
         }
     }
 
     pub(super) fn add_ref(&mut self, identifier: SharedString, link: LinkMark) {
-        self.link_refs.insert(identifier, link);
+        self.link_refs.entry(identifier).or_insert(link);
     }
 
     /// The fade ranges of the text leaf `key`, in its rendered byte space.
