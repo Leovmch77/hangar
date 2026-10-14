@@ -5,6 +5,7 @@ use super::*;
 
 fn chips() -> bool { appearance::get().tool_look == appearance::ToolLook::Chips }
 fn tree() -> bool { appearance::get().tool_look == appearance::ToolLook::Tree }
+fn terminal() -> bool { appearance::get().tool_look == appearance::ToolLook::Terminal }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tone { Muted, Accent, Warning }
@@ -70,8 +71,8 @@ fn tool_row(events: &[ChatEvent], call: usize, result: Option<usize>, finished: 
 
 fn prepare(events: &[ChatEvent], finished: bool, started: Option<f64>) -> Vec<Row> {
     let prompt = events.iter().position(|e| e.kind == "user_msg");
-    // Sem `every_run_groups`: o painel do subagente não desenha a dobra da pele Terminal.
-    let view = conversation::View { thinking: appearance::get().thinking_tools, tasks: false, merge_thinking: tree(), every_run_groups: false };
+    // ponytail: sem o cartão de tarefas (`task_list`); as chamadas de tarefa aparecem como chamadas comuns.
+    let view = conversation::View { thinking: appearance::get().thinking_tools, tasks: false, merge_thinking: tree(), every_run_groups: terminal() };
     let items = conversation::build(events, view, &HashSet::new());
     let paired = conversation::pair_results(events).0;
     let last = events.iter().rposition(|e| e.kind == "assistant_msg" || e.kind == "user_msg");
@@ -140,6 +141,12 @@ fn owner(rows: &[Row], key: &str) -> Option<usize> {
         .max_by_key(|(_, r)| r.id().len()).map(|(i, _)| i)
 }
 
+/// Eventos mais antigos entraram na frente: o id do primeiro de antes, onde a rolagem fica presa.
+fn prepended_anchor<'a>(old: &'a [ChatEvent], new: &[ChatEvent]) -> Option<&'a str> {
+    let first = old.first()?;
+    new.iter().skip(1).any(|e| e.id == first.id).then_some(first.id.as_str())
+}
+
 impl SubConversation {
     pub fn new() -> Self {
         Self { events: Vec::new(), finished: false, started: None, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
@@ -165,6 +172,7 @@ impl SubConversation {
     /// Conversa nova do mesmo subagente: só o trecho que mudou entra na lista, e linha igual não é remedida.
     pub fn set_events(&mut self, events: Vec<ChatEvent>, finished: bool, started: Option<f64>, cx: &mut Context<Self>) {
         let rows = prepare(&events, finished, started);
+        let anchor = prepended_anchor(&self.events, &events).map(str::to_owned);
         (self.events, self.finished, self.started) = (events, finished, started);
         // Só o estado do subagente mudou (chamadas, fim): as linhas são as mesmas e nada se redesenha.
         if rows == self.rows { return; }
@@ -176,11 +184,19 @@ impl SubConversation {
             self.list.splice(prefix..self.rows.len() - suffix, rows.len() - prefix - suffix);
         }
         for i in resized { self.list.remeasure_items(i..i + 1); }
+        // Página anterior carregada no topo: a primeira linha de antes continua onde estava, como na conversa principal.
+        // O splice já desloca a rolagem; isto cobre a linha do topo que mudou de forma ao juntar os eventos novos.
+        let top = self.list.logical_scroll_top();
+        if let (0, Some(i)) = (top.item_ix, anchor.and_then(|id| owner(&rows, &id)).filter(|&i| i > 0)) {
+            self.list.scroll_to(ListOffset { item_ix: i, offset_in_item: top.offset_in_item });
+        }
         self.rows = rows;
         let ids: HashSet<&str> = self.rows.iter().map(Row::id).collect();
         self.rich.retain(|key, _| ids.iter().any(|id| key.starts_with(id)));
-        self.expanded.retain(|key| self.events.iter().any(|e| &e.id == key)
-            || ids.contains(key.strip_suffix(":more").unwrap_or(key)));
+        self.expanded.retain(|key| {
+            let base = key.strip_suffix(":more").or_else(|| key.strip_suffix(":fold")).unwrap_or(key);
+            self.events.iter().any(|e| &e.id == key || e.id == base) || ids.contains(base)
+        });
         cx.notify();
     }
 
@@ -208,8 +224,9 @@ impl SubConversation {
         if !self.expanded.remove(&key) { self.expanded.insert(key.clone()); }
         self.remeasure(&key);
         // Chamada aberta dentro de um grupo ou pensamento: a linha é a do bloco.
+        let probe = key.strip_suffix(":fold").unwrap_or(&key);
         if let Some(i) = self.rows.iter().position(|r| match r {
-            Row::Group { tools, .. } => tools.iter().any(|t| t.key == key),
+            Row::Group { tools, .. } => tools.iter().any(|t| t.key == probe),
             Row::Thinking { parts, .. } => parts.iter().any(|p| matches!(p, Part::Tool(t) if t.key == key)),
             _ => false,
         }) { self.list.remeasure_items(i..i + 1); }
@@ -238,6 +255,7 @@ impl SubConversation {
     fn render_tool(&mut self, tool: &ToolRow, cx: &mut Context<Self>) -> AnyElement {
         // Nos Chips, a conversa do subagente segue o desenho da principal, como o `MessageList` do detalhe no web.
         if chips() && !tool.orphan { return super::rows::chip_box().child(self.render_chip(tool, cx)).into_any_element(); }
+        if terminal() && !tool.orphan { return self.render_terminal_tool(tool, cx); }
         let error = tool.tone == Tone::Warning;
         let header = self.header(&tool.key, cx)
             .accessibility_label(format!("{}: {}. {}", tool.name, tool.summary, tool.status))
@@ -308,6 +326,103 @@ impl SubConversation {
         body
     }
 
+    /// Uma chamada na pele Terminal, como `Hangar::render_terminal_tool`: "● Nome(arg)", o desfecho com o cotovelo e, na
+    /// edição, o diff. ponytail: sem o cartão de agente e os arquivos enviados da conversa principal.
+    fn render_terminal_tool(&mut self, tool: &ToolRow, cx: &mut Context<Self>) -> AnyElement {
+        use super::terminal_look as term;
+        let call = &self.events[tool.call];
+        let result = tool.result.map(|i| &self.events[i]);
+        let key = tool.key.clone();
+        let error = tool.tone == Tone::Warning;
+        let name = term::display_name(call.tool_name.as_deref().unwrap_or_default());
+        let edits = (!error).then(|| crate::editdiff::shown(call, result)).flatten();
+        let (arg, path) = term::header_arg(call.tool_name.as_deref(), call.tool_input.as_ref());
+        let dot = if error { theme::danger() } else if result.is_none() { theme::accent() } else { theme::success() };
+        let created = call.tool_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("write"))
+            && edits.as_deref().is_some_and(|e| e.iter().all(|e| !e.patched && e.removed == 0));
+        let shown = if created { term::WRITE_SHOWN } else { term::EDIT_SHOWN };
+        let expandable = edits.as_deref().is_some_and(|e| e.iter().map(|e| e.lines.len()).sum::<usize>() > shown);
+        let outcome = match &edits { Some(edits) if result.is_some() => term::edit_summary(edits, created), _ => tool.status.clone() };
+        let open = self.expanded.contains(&key);
+        let inner = div().w_full().flex().items_start().justify_start().gap(px(8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+            .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(dot))
+            .child(div().min_w_0().flex().flex_wrap()
+                .child(div().font_weight(FontWeight::BOLD).text_color(theme::text()).child(name.clone()))
+                .child(div().min_w_0().text_color(theme::text()).child(format!("({arg})"))));
+        let header: AnyElement = if edits.is_some() && !expandable {
+            div().id(SharedString::from(format!("sub-term-{key}"))).w_full()
+                .when_some(path.clone(), |el, path| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(path.clone()).build(window, cx)))
+                .child(inner).into_any_element()
+        } else {
+            let toggle = key.clone();
+            Button::new(SharedString::from(format!("sub-term-{key}"))).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
+                .accessibility_label(format!("{name}: {}. {outcome}", path.as_deref().unwrap_or(&arg)))
+                .when_some(path.clone(), |el, path| el.tooltip(path))
+                .child(inner)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx))).into_any_element()
+        };
+        let outcome_line = div().flex().gap(px(8.)).pl(px(term::INDENT - 8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+            .child(div().flex_none().text_color(theme::faint()).child("⎿"))
+            .child(div().min_w_0().text_color(if error { theme::danger() } else if edits.is_some() { theme::text() } else { tool.tone.color() }).child(outcome));
+        let body = match &edits {
+            Some(edits) => {
+                let (rows, hidden, total) = term::diff_body(&self.events[tool.call], edits, (!open).then_some(shown), cx);
+                let faint = |text: String| div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::faint()).child(text);
+                let more = (!open && hidden > 0).then(|| faint(crate::i18n::tr_shared("term_mais_linhas", &[("n", &hidden.to_string())])));
+                let clipped = (more.is_none() && total > super::edits::SHOWN_MAX).then(|| faint(tr("diff_clipped")
+                    .replace("{shown}", &super::edits::SHOWN_MAX.to_string()).replace("{total}", &total.to_string())));
+                let collapse = (open && expandable).then(|| faint(crate::i18n::tr_shared("term_recolher", &[])));
+                Some(div().pl(px(term::INDENT + 16.)).flex().flex_col().children(rows).children(more).children(clipped).children(collapse))
+            }
+            None => open.then(|| self.tool_body(tool, cx).pl(px(term::INDENT + 16.))),
+        };
+        div().flex().flex_col().child(header).child(outcome_line).children(body).into_any_element()
+    }
+
+    /// Chamadas seguidas na pele Terminal: buscas, leituras e comandos seguidos somam numa linha que abre no clique, como
+    /// `Hangar::render_terminal_group`.
+    fn render_terminal_group(&mut self, tools: &[ToolRow], cx: &mut Context<Self>) -> AnyElement {
+        use super::terminal_look as term;
+        let kinds: Vec<Option<term::FoldKind>> = tools.iter().map(|t| {
+            let call = &self.events[t.call];
+            if call.kind == "thinking" { None } else { term::fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref()) }
+        }).collect();
+        let running = |t: &ToolRow| t.result.is_none() && t.tone == Tone::Accent;
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut i = 0;
+        while i < tools.len() {
+            if kinds[i].is_none() { rows.push(self.render_tool(&tools[i], cx)); i += 1; continue; }
+            let run = kinds[i..].iter().take_while(|k| k.is_some()).count();
+            let folded = &tools[i..i + run];
+            let calls: Vec<Tool> = folded.iter().map(|t| Tool { call: t.call, result: t.result }).collect();
+            let folded_kinds: Vec<term::FoldKind> = kinds[i..i + run].iter().flatten().copied().collect();
+            let key = format!("{}:fold", folded[0].key);
+            let open = self.expanded.contains(&key);
+            let live = folded.iter().rev().find(|t| running(t));
+            let title = term::fold_title(&self.events, &calls, &folded_kinds, live.is_some());
+            let toggle = key.clone();
+            let mut block = vec![div().pl(px(term::INDENT - 8.)).child(Button::new(SharedString::from(format!("sub-{key}"))).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
+                .accessibility_label(title.clone())
+                .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))).into_any_element()];
+            if !open {
+                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(term::INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
+                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
+                if let Some(tool) = live {
+                    let call = &self.events[tool.call];
+                    let shell = call.tool_name.as_deref().is_some_and(|name| term::is_any(name, term::SHELL_TOOLS));
+                    block.push(sub(if shell { format!("$ {}", tool.summary) } else { tool.summary.clone() }, theme::muted()));
+                }
+                for tool in folded.iter().filter(|t| t.tone == Tone::Warning) { block.push(sub(tool.status.clone(), theme::danger())); }
+            }
+            rows.push(div().flex().flex_col().children(block).into_any_element());
+            if open { for tool in folded { rows.push(self.render_terminal_tool(tool, cx)); } }
+            i += run;
+        }
+        div().flex().flex_col().gap(px(10.)).children(rows).into_any_element()
+    }
+
     fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(index).cloned() else { return div().into_any_element() };
         let message = matches!(row, Row::Message { .. });
@@ -341,6 +456,7 @@ impl SubConversation {
                 } else { Vec::new() };
                 div().flex().flex_col().child(header).children(lines).into_any_element()
             }
+            Row::Group { tools, .. } if terminal() => self.render_terminal_group(&tools, cx),
             Row::Group { id, tools, .. } if chips() => {
                 let open = super::rows::chip_group_open(tools.len(), self.expanded.contains(&id));
                 let calls: Vec<Tool> = tools.iter().map(|t| Tool { call: t.call, result: t.result }).collect();
@@ -386,7 +502,16 @@ impl SubConversation {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEvent, Row, Tone, owner, prepare};
+    use super::{ChatEvent, Row, Tone, owner, prepare, prepended_anchor};
+
+    #[test]
+    fn older_events_in_front_anchor_the_previous_first_event_and_a_sliding_window_does_not() {
+        let evs = |ids: &[&str]| ids.iter().map(|id| event("user_msg", id, None, None)).collect::<Vec<_>>();
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["a", "b", "c", "d"])), Some("c"));
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["d", "e"])), None);
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["c", "d", "e"])), None);
+        assert_eq!(prepended_anchor(&[], &evs(&["a"])), None);
+    }
 
     #[test]
     fn a_key_belongs_to_the_row_with_the_same_id_or_the_longest_one_before_a_colon() {

@@ -5,7 +5,7 @@ use crate::fake::{self, OWNER, SECRET, client, config, next_named, sse, Events};
 use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
 use hangar_server::list::facts::FactsClient;
 use hangar_server::list::mux::Mux;
-use hangar_server::routes::{AppState, router};
+use hangar_server::routes::{AppState, router, terminal_router};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -40,7 +40,8 @@ pub fn calls(root: &Path, sub: &str) -> usize {
     std::fs::read_to_string(root.join("calls.log")).unwrap_or_default().lines().filter(|l| *l == sub).count()
 }
 
-pub struct Server { pub addr: SocketAddr, pub python: Arc<fake::Fake>, pub list: Arc<ListBridge> }
+/// `private`: a porta privada do mesmo estado, a das pontes que o Python chama.
+pub struct Server { pub addr: SocketAddr, pub private: SocketAddr, pub python: Arc<fake::Fake>, pub list: Arc<ListBridge> }
 
 pub async fn server(root: &Path, n: usize) -> Server {
     let script = sessions(root, n);
@@ -53,13 +54,21 @@ pub async fn server(root: &Path, n: usize) -> Server {
     let list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
         capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
         FactsClient::new(upstream, SECRET.into())));
+    // Como a subida do servidor: a lista lê a pergunta segurada do plugin pelo registro.
+    list.set_plugin_runtime(Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(upstream, SECRET.into(), "instance-test".into())
+        .with_plugin(state.plugin.clone())));
     state.list = list.clone();
     state.side.locate = Arc::new(hangar_server::locate::ListLocate { list: list.clone() });
+    let state = Arc::new(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
+    let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { addr, python, list }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let app = terminal_router(state).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Server { addr, private, python, list }
 }
 
 pub async fn get(addr: SocketAddr, token: &str) -> (u16, Value) {

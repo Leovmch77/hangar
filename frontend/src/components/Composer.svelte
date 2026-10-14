@@ -4,6 +4,9 @@
   // Cache de comandos por sessao: sobrevive a remontagens do Composer (ex: voltar de
   // awaiting_input) pra buscar a lista so uma vez por sessao.
   const commandCache = new Map<string, CommandInfo[]>();
+  // Última busca por `provider|sessão`: carga inicial e revalidação podem estar em voo juntas, e a
+  // resposta antiga que chega depois não pode sobrescrever a nova.
+  const commandSeq = new Map<string, number>();
 
   // Cache de anexos por sessao: sobrevive ao remount do Composer/Chat ao trocar de sessao
   // (App.svelte usa {#key route.sessionName}). So em memoria -> File nao cabe no localStorage
@@ -16,7 +19,7 @@
 
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
-  import { tick, onDestroy } from 'svelte';
+  import { tick, onDestroy, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import { novoEstadoVad, passoVad } from '@hangar/core';
@@ -229,15 +232,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     void aoAquecer(sn, aquecimento.signal).then((liberado) => {
       if (liberado === false || aquecimento.signal.aborted) return;
       if (sn !== sessionName) return;   // trocou de sessao na espera: esta busca nao serve mais
-      getCommands(sn, sessionServer())
-        .then((c) => {
-          commandCache.set(key, c);
-          if (sn === sessionName) commands = c;
-        })
-        .catch(() => {
-          // Lista indisponível: segue vazia, mas quem digita "/" fica sabendo (abaixo do campo).
-          if (sn === sessionName) comandosErro = true;
-        });
+      // Lista indisponível: segue vazia, mas quem digita "/" fica sabendo (abaixo do campo).
+      loadCommands(sn, key, () => { comandosErro = true; });
     });
     return () => aquecimento.abort();
   });
@@ -1167,6 +1163,31 @@ import { cachePrazo } from '../lib/cachePrazo';
   // Texto em que o Esc fechou a lista; ela volta quando a pessoa mexe no texto.
   let slashDismissed = $state<string | null>(null);
   const slashQuery = $derived(slashToken && inputText !== slashDismissed ? slashToken.query : null);
+
+  // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta
+  // (`/reload-plugins`, configuração do projeto). A guardada fica na tela enquanto a nova chega.
+  let slashWasOpen = false;
+  $effect(() => {
+    const open = slashQuery !== null;
+    if (open && !slashWasOpen) untrack(revalidateCommands);
+    slashWasOpen = open;
+  });
+  // Falhou a revalidação: a lista guardada continua valendo.
+  function revalidateCommands() {
+    loadCommands(sessionName, `${provider}|${sessionName}`, () => {});
+  }
+  function loadCommands(sn: string, key: string, onError: () => void) {
+    const seq = (commandSeq.get(key) ?? 0) + 1;
+    commandSeq.set(key, seq);
+    const current = () => commandSeq.get(key) === seq && key === `${provider}|${sessionName}`;
+    getCommands(sn, sessionServer())
+      .then((c) => {
+        if (commandSeq.get(key) !== seq) return;
+        commandCache.set(key, c);
+        if (current()) commands = c;
+      })
+      .catch(() => { if (current()) onError(); });
+  }
 
   // Completar só troca a palavra pelo nome, com o resto da mensagem intacto e nada enviado.
   async function completeSlashToken(cmd: CommandInfo) {

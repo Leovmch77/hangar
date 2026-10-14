@@ -101,9 +101,19 @@ impl ReceiptIndex {
         Self { provider:provider.into(),conversation:conversation.into(),identity:None,tail:Vec::new(),occurrences:Vec::new(),scan_offset:0,meta_conversation:None }
     }
 
+    /// Troca de conversa (a TUI adotou outra thread): o que foi lido e os cursores antigos não provam nada nela.
+    pub fn rebind(&mut self, conversation: &str) {
+        if self.conversation == conversation { return; }
+        *self = Self::new(&self.provider,conversation);
+    }
+
+    /// Caminho vazio = rollout ainda não existe (thread sem turno): ausência comprovada, sem abrir nada.
+    /// Caminho que existe e não é arquivo é inválido, nunca ausência.
     pub fn capture(&self, path: &Path) -> io::Result<DispatchCursor> {
-        let (identity, data, offset) = match File::open(path) {
+        let opened = if path.as_os_str().is_empty() { Err(io::ErrorKind::NotFound.into()) } else { File::open(path) };
+        let (identity, data, offset) = match opened {
             Ok(mut file) => {
+                if !file.metadata()?.is_file() { return Err(io::Error::new(io::ErrorKind::InvalidInput,"transcript não é arquivo")); }
                 let id = identity(&file)?;
                 let offset = file.seek(SeekFrom::End(0))?;
                 let data = bytes_before(&mut file,offset)?.unwrap_or_default();
@@ -119,7 +129,8 @@ impl ReceiptIndex {
 
     /// Lê só o que foi acrescentado desde a última vez; troca de arquivo ou reescrita relê do início.
     pub fn scan(&mut self, path: &Path) -> io::Result<&[Occurrence]> {
-        let mut file = match File::open(path) {
+        let opened = if path.as_os_str().is_empty() { Err(io::ErrorKind::NotFound.into()) } else { File::open(path) };
+        let mut file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.tail.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None;
@@ -152,7 +163,8 @@ impl ReceiptIndex {
             } else {
                 match obj["type"].as_str() {
                     Some("user") => (content_text(&obj["message"]["content"]),"user"),
-                    Some("queue-operation") if obj["operation"] == "dequeue" => (obj["content"].as_str().unwrap_or("").to_owned(),"dequeue"),
+                    // `remove` (absorbed_mid_turn): a CLI tirou a mensagem da fila interna porque o turno a consumiu.
+                    Some("queue-operation") if obj["operation"] == "dequeue" || obj["operation"] == "remove" => (obj["content"].as_str().unwrap_or("").to_owned(),"dequeue"),
                     Some("attachment") if obj["attachment"]["type"] == "queued_command" => (content_text(&obj["attachment"]["prompt"]),"steer"),
                     _ => continue,
                 }
@@ -164,11 +176,20 @@ impl ReceiptIndex {
             let recorded_conversation = if self.provider == "codex" { self.meta_conversation.clone() }
                 else { obj["sessionId"].as_str().map(str::to_owned) };
             let identity_unprovable = self.provider == "codex" && recorded_conversation.is_none();
-            // Vários recados num registro só: cada um é uma ocorrência, senão o primeiro gasta o registro e os outros nunca confirmam.
-            let peers:Vec<String> = if kind == "user" { crate::transcript::history::peer_bodies(&text).into_iter().map(str::to_owned).collect() } else { Vec::new() };
-            // O registro inteiro vem por último: o que foi digitado junto com os recados também confirma.
-            let mut parts:Vec<(String,String)> = peers.into_iter().enumerate().map(|(n,body)|(format!("#peer{n}"),body)).collect();
-            parts.push((String::new(),text));
+            // Mensagens que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto por entrada (cada
+            // entrada do Hangar é um bloco). Cada bloco é uma ocorrência, senão a primeira gasta o registro.
+            let blocks = if self.provider != "codex" && kind == "user" { text_blocks(&obj["message"]["content"]) } else { Vec::new() };
+            let records = if blocks.len() > 1 { blocks } else { vec![text] };
+            let tagged = records.len() > 1;
+            let mut parts:Vec<(String,String)> = Vec::new();
+            for (b,record) in records.into_iter().enumerate() {
+                let tag = if tagged { format!("#block{b}") } else { String::new() };
+                // Vários recados num registro só: cada um é uma ocorrência, senão o primeiro gasta o registro e os outros nunca confirmam.
+                let peers:Vec<String> = if kind == "user" { crate::transcript::history::peer_bodies(&record).into_iter().map(str::to_owned).collect() } else { Vec::new() };
+                parts.extend(peers.into_iter().enumerate().map(|(n,body)|(format!("{tag}#peer{n}"),body)));
+                // O registro inteiro vem por último: o que foi digitado junto com os recados também confirma.
+                if !record.trim().is_empty() { parts.push((tag,record)); }
+            }
             for (suffix,text) in parts {
                 self.occurrences.push(Occurrence { id:format!("{}|{id}|{record}{suffix}",self.conversation),conversation:self.conversation.clone(),
                     file_identity:id.clone(),offset:start,end_offset:offset,text,kind:kind.into(),timestamp,recorded_conversation:recorded_conversation.clone(),identity_unprovable });
@@ -233,6 +254,11 @@ pub(crate) fn legacy_accepts(occurrence: &Occurrence, sent: f64) -> bool {
     matches!(occurrence.kind.as_str(),"user" | "dequeue" | "steer")
         && occurrence.timestamp.is_some_and(|ts|ts + LEGACY_CLOCK_SLACK_S >= sent)
         && (occurrence.identity_unprovable || occurrence.recorded_conversation.as_deref() == Some(occurrence.conversation.as_str()))
+}
+
+fn text_blocks(content: &Value) -> Vec<String> {
+    content.as_array().map(|blocks| blocks.iter().filter(|b|b["type"] == "text")
+        .filter_map(|b|b["text"].as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
 fn content_text(content: &Value) -> String {

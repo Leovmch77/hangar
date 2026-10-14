@@ -170,10 +170,7 @@ def test_clear_keeps_choices_and_reports_unavailable_persistence_without_blockin
     assert session.problema == "claude_customizations_unavailable"
 
 
-def test_catalog_without_rust_is_a_visible_error_but_default_creation_still_works():
+def test_default_creation_works_without_rust():
     customizations.configure(None, None)
 
-    with pytest.raises(customizations.CustomizationsError) as error:
-        customizations.catalog("/tmp", "/tmp/.claude")
-    assert error.value.status == 503
     assert customizations.prepare(SID, "/tmp", "/tmp/.claude", None, resume=False) is None

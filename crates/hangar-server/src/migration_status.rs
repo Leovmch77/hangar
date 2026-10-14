@@ -93,6 +93,10 @@ pub fn area_of(path: &str) -> usize {
     table.iter().find(|(prefixes, _)| prefixes.iter().any(|p| under(path, p))).map_or(area(fallback), |(_, a)| area(a))
 }
 
+/// Rotas do roteador que o Rust só atende para o Codex dele: no Claude o relançamento e o recarregar
+/// seguem do Python, e a tabela as anuncia assim.
+pub const CODEX_RELAUNCH: [&str; 2] = ["modo-execucao", "recarregar"];
+
 /// O Rust atende este pedido do dono sem repassar? Mesma decisão do `routes::router`: as rotas
 /// GET registradas lá, mais os `matches` de Git/arquivos e de worktrees que o `pass_any` consulta.
 pub fn rust_route(method: &Method, path: &str) -> bool {
@@ -106,6 +110,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
         // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
         if matches!(tail, Some("history" | "events" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
+            return true;
+        }
+        if tail.is_some_and(|t| t == "subagents" || t.strip_prefix("subagents/").is_some_and(|id| !id.is_empty() && !id.contains('/'))) {
             return true;
         }
         if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
@@ -134,8 +141,26 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if *method == Method::POST && matches!(tail, Some("input" | "steer" | "interrupt" | "select" | "select/submit" | "answer" | "keys" | "term-input")) {
         return true;
     }
-    // Rotas só do Codex: o Rust atende o Codex sem terminal dele e repassa o resto.
-    if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "question/skip" | "codex-permissions")) {
+    // Texto a um subagente em segundo plano: o plugin do Claude entrega pelo `/pull`.
+    if *method == Method::POST && tail.and_then(|t| t.strip_prefix("subagents/")).and_then(|t| t.strip_suffix("/message"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/')) {
+        return true;
+    }
+    // Rotas só do Codex e modos de permissão do Claude: o Rust atende as sessões dele. `CODEX_RELAUNCH`
+    // fica de fora: no Claude relançar e recarregar são do Python.
+    if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "codex/plan/implement" | "question/skip" | "codex-permissions"
+        | "permission-mode")) {
+        return true;
+    }
+    if *method == Method::GET && tail == Some("permission-modes") {
+        return true;
+    }
+    // Encerrar (o Codex com terminal fecha aqui antes da limpeza do Python), broadcast e a ponte do plugin.
+    if *method == Method::DELETE && path.strip_prefix("/api/sessions/").is_some_and(|name| !name.is_empty() && !name.contains('/')) {
+        return true;
+    }
+    if *method == Method::POST && (path == "/api/broadcast" || matches!(path.strip_prefix("/api/plugin/"),
+        Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate" | "agent" | "agent-sent"))) {
         return true;
     }
     if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {
@@ -146,7 +171,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         | ("DELETE", Some("pair")) | ("GET", Some("pair/contract"))) {
         return true;
     }
-    crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
+    (*method == Method::GET && path == crate::claude_customizations::CATALOG_PATH)
+        || crate::plans::routes::matches(method, path) || crate::workspace_routes::matches(method, path)
+        || crate::worktree_routes::matches(method, path)
 }
 
 /// Um ou mais pedidos reais por área, só para a tabela; a decisão é de `rust_route`.
@@ -351,6 +378,17 @@ mod tests {
         assert!(rust_route(&Method::POST, "/api/sessions/a/pair") && rust_route(&Method::DELETE, "/api/sessions/a/pair")
             && get("/api/sessions/a/pair/contract") && rust_route(&Method::POST, "/api/sessions/a/unpair-remote")
             && !get("/api/sessions/a/pair") && !rust_route(&Method::POST, "/api/sessions/a/pair-invite"));
+        // O corte: relançar o Codex, modos do Claude, encerrar, broadcast e a ponte do plugin são do Rust.
+        let post = |p: &str| rust_route(&Method::POST, p);
+        assert!(!post("/api/sessions/a/modo-execucao") && !post("/api/sessions/a/recarregar"), "no Claude são do Python");
+        assert!(post("/api/sessions/a/permission-mode")
+            && get("/api/sessions/a/permission-modes") && rust_route(&Method::DELETE, "/api/sessions/a") && post("/api/broadcast"));
+        assert!(post("/api/sessions/a/subagents/x1/message") && !post("/api/sessions/a/subagents//message") && !get("/api/sessions/a/subagents/x1/message"));
+        assert!(["whoami", "pull", "ask", "ask-fim", "filled", "submitted", "state", "suggest", "rate", "agent", "agent-sent"].iter().all(|e| post(&format!("/api/plugin/{e}"))));
+        assert!(!rust_route(&Method::DELETE, "/api/sessions") && !post("/api/plugin/outra"));
+        assert!(get("/api/sessions/a/plan") && get("/api/sessions/a/plans") && get("/api/sessions/a/plan-preview")
+            && get("/api/claude/customizations") && rust_route(&Method::POST, "/api/sessions/a/plan-step")
+            && !rust_route(&Method::POST, "/api/sessions/a/plan") && !get("/api/sessions/a/plan-step"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");
         assert_eq!(AREAS[area_of("/assets/index.js")], "static");
@@ -370,6 +408,8 @@ mod tests {
             seen += 1;
             let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
             if !path.starts_with("/api/") { continue; }
+            // Atendidas no Rust só para o Codex dele: anunciadas como Python.
+            if CODEX_RELAUNCH.iter().any(|tail| path.ends_with(&format!("/{tail}"))) { assert!(!rust_route(&Method::POST, &path)); continue; }
             let method = if line.contains("post(") { Method::POST } else if line.contains("delete(") { Method::DELETE } else if line.contains("get(") { Method::GET }
                 else if line.contains("put(") { Method::PUT } else { panic!("método que o leitor não conhece: {line}") };
             assert!(!line.contains(").get(") && !line.contains(").post(") && !line.contains(").put("), "dois métodos numa rota: {line}");

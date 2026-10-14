@@ -1,7 +1,7 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
-  import { getSessionPlanPreview, planTitle, type SessionPlanPreview } from '@hangar/core';
+  import { getSessionPlanPreview, planHeading, type SessionPlanPreview } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
   import BottomSheet from './BottomSheet.svelte';
 
@@ -54,8 +54,62 @@
   const discoveryErrorAtual = $derived(discoveryControlada ? discoveryError : discoveryErrorInterno);
   const metadataModal = $derived(modalMetadata ?? metadataAtual);
   const titleText = $derived(codexPlan ?? (markdown || metadataModal?.markdown || ''));
-  const title = $derived(planTitle(titleText) ?? m.chat_plan_proposto());
-  const html = $derived(renderMarkdown(markdown, { joinWrapped: true }));
+  const title = $derived(planHeading(titleText).title ?? m.chat_plan_proposto());
+  // O título vai no cabeçalho: no topo do texto ele sairia repetido.
+  const html = $derived(renderMarkdown(planHeading(markdown).body, { joinWrapped: true }));
+
+  // Plano esperando a decisão: aberto acima das opções, porque escolher sem ler era o problema.
+  // Sem terminal o texto vem no estado; com terminal ele é buscado pela prévia. Só no celular: a
+  // vista desktop da web não ganha recurso novo.
+  const emAprovacao = $derived(aprovacaoPendente && !desktop);
+  let inlineMarkdown = $state('');
+  let inlineLoading = $state(false);
+  let inlineError = $state('');
+  let inlineRetry = $state(0);
+  let inlineKey = '';
+  let inlineGeneration = 0;
+  const inlineTexto = $derived(codexPlan ?? inlineMarkdown);
+  const inlineCabecalho = $derived(planHeading(inlineTexto));
+  const inlineTitulo = $derived(inlineCabecalho.title ?? metadataAtual?.name ?? m.chat_plan_proposto());
+  const inlineHtml = $derived(renderMarkdown(inlineCabecalho.body, { joinWrapped: true }));
+  const inlineCaminho = $derived(metadataAtual?.path ?? caminho ?? null);
+  let corpo = $state<HTMLElement | null>(null);
+  let temMais = $state(false);
+
+  $effect(() => {
+    if (!emAprovacao || codexPlan) return;
+    const key = `${serverId}\0${sessionName}\0${metadataAtual?.path ?? ''}\0${inlineRetry}`;
+    if (key === inlineKey) return;
+    inlineKey = key;
+    const request = ++inlineGeneration;
+    inlineLoading = true;
+    inlineError = '';
+    getSessionPlanPreview(sessionName, true, sessionServer()).then((value) => {
+      if (request !== inlineGeneration) return;
+      inlineMarkdown = (value as ClaudePlanPreview | null)?.markdown ?? '';
+      inlineError = value ? '' : m.chat_plan_ausente();
+    }).catch((cause) => {
+      if (request !== inlineGeneration) return;
+      inlineError = (cause as { status?: number }).status === 404 ? m.chat_plan_ausente() : m.chat_plan_erro();
+    }).finally(() => {
+      if (request === inlineGeneration) inlineLoading = false;
+    });
+  });
+
+  // Esmaece o pé do texto enquanto houver mais plano abaixo da dobra.
+  function medir() {
+    if (!corpo) return;
+    temMais = corpo.scrollHeight - corpo.scrollTop - corpo.clientHeight > 4;
+  }
+  $effect(() => {
+    if (!corpo) return;
+    void inlineHtml;
+    medir();
+    const observador = new ResizeObserver(medir);
+    observador.observe(corpo);
+    return () => observador.disconnect();
+  });
+
 
   $effect(() => {
     const name = sessionName;
@@ -112,7 +166,9 @@
     try {
       // Sem arquivo descoberto o plano É o texto da resposta (Codex, Claude sem terminal sem
       // arquivo): nada a buscar no servidor.
-      if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
+      // Plano aberto na aprovação já está em mãos: a tela cheia mostra o mesmo texto.
+      if (emAprovacao && inlineTexto) markdown = inlineTexto;
+      else if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
       else {
         const result = await getSessionPlanPreview(sessionName, true, sessionServer()) as ClaudePlanPreview | null;
         if (request !== generation) return;
@@ -141,7 +197,35 @@
   function close() { open = false; generation++; }
 </script>
 
-{#if metadataAtual || (codexPlan && implemented !== codexPlan) || actionError || discoveryErrorAtual}
+{#if emAprovacao}
+  <section class="plan-inline" aria-label={m.chat_plan_proposto()}>
+    <header class="inline-head">
+      <div class="inline-title">
+        <h3>{inlineTitulo}</h3>
+        <p>{m.chat_plan_aprovar_dica()}</p>
+      </div>
+      <button class="icon-btn" onclick={show} aria-label={m.chat_plan_tela_cheia()} title={m.chat_plan_tela_cheia()}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>
+    </header>
+    {#if inlineTexto}
+      <div class="inline-body prose" class:fade={temMais} bind:this={corpo} onscroll={medir} tabindex="0" role="region" aria-label={inlineTitulo}>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+        {@html inlineHtml}
+      </div>
+    {:else if inlineLoading}
+      <p class="plan-status" role="status">{m.chat_plan_carregando()}</p>
+    {:else if inlineError}
+      <div class="inline-problem">
+        <p class="error-msg" role="alert">{inlineError}</p>
+        <button class="ghost-btn" onclick={() => { inlineRetry++; }}>{m.lista_tentar_novamente()}</button>
+      </div>
+    {:else}
+      <p class="plan-status">{m.chat_plan_ausente()}</p>
+    {/if}
+    {#if inlineCaminho}<p class="inline-path">{inlineCaminho}</p>{/if}
+  </section>
+{:else if metadataAtual || (codexPlan && implemented !== codexPlan) || actionError || discoveryErrorAtual}
   <div class="plan-preview" role="group" aria-label={m.chat_plan_proposto()}>
     {#if metadataAtual || codexPlan}
       <button class="plan-open" onclick={show}>
@@ -188,6 +272,26 @@
 </BottomSheet>
 
 <style>
+  /* O trilho à esquerda é o sinal de "isto espera você"; o resto fica no material do painel. */
+  .plan-inline { display: grid; gap: var(--space-3); min-width: 0; padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+    border: 1px solid var(--border-subtle); border-left: 3px solid var(--accent); border-radius: var(--radius-lg); background: var(--surface-raised); }
+  .inline-head { display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; }
+  .inline-title { flex: 1; min-width: 0; }
+  .inline-title h3 { margin: 0; font-size: var(--text-base); font-weight: 650; line-height: 1.3; color: var(--text-primary); overflow-wrap: anywhere; }
+  .inline-title p { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--text-secondary); }
+  .icon-btn { flex-shrink: 0; display: grid; place-items: center; width: 44px; height: 44px; margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0 0;
+    color: var(--text-secondary); border-radius: var(--radius-md); }
+  .icon-btn:hover { color: var(--text-primary); background: var(--surface-inset); }
+  .inline-body { max-height: clamp(160px, 44vh, 560px); overflow-y: auto; overscroll-behavior: contain; padding-right: var(--space-2);
+    font-size: var(--text-sm); border-top: 1px solid var(--border-subtle); padding-top: var(--space-3); }
+  .inline-body.fade { mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); }
+  .inline-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .inline-body.prose :global(> :first-child) { margin-top: 0; }
+  /* Escala do cartão: os títulos do plano organizam o texto, não competem com o cabeçalho. */
+  .inline-body.prose :global(h1), .inline-body.prose :global(h2) { font-size: var(--text-base); margin: var(--space-4) 0 var(--space-2); }
+  .inline-body.prose :global(h3), .inline-body.prose :global(h4) { font-size: var(--text-sm); margin: var(--space-3) 0 var(--space-1); }
+  .inline-problem { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+  .inline-path { margin: 0; font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; }
   .plan-preview { padding: var(--space-3); display: grid; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-raised); min-width: 0; }
   .preview-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
   .preview-header h2 { min-width: 0; overflow-wrap: anywhere; }

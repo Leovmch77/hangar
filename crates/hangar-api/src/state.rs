@@ -28,6 +28,8 @@ pub struct StateEvent {
     pub label: Option<String>,
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<String>,
     pub status_line: Option<String>,
     pub overlay: bool,
     pub login: bool,

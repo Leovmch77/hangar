@@ -5,5 +5,6 @@ pub mod carry;
 mod engine;
 mod launch;
 pub mod pipe;
+pub mod proxy;
 
 pub use engine::{Engine, Warm};

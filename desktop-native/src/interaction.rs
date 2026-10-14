@@ -73,6 +73,7 @@ fn confirmed_plan_paths(events: &[ChatEvent], exit_id: &str) -> Vec<String> {
 pub fn plan_choice_key(option: &str) -> Option<&'static str> {
     match option {
         "Yes, and bypass permissions" | "Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session" => Some("plan_review_bypass"),
+        "Yes, and use auto mode" => Some("plan_review_auto_mode"),
         "Yes, manually approve edits" => Some("plan_review_manual"),
         "Yes, and auto-accept edits" => Some("plan_review_auto"),
         "Tell Claude what to change" => Some("plan_review_changes"),
@@ -129,7 +130,7 @@ pub fn ask_from_events(events: &[ChatEvent], provider: &str) -> Option<Ask> {
     let questions: Vec<AskItem> = questions.into_iter().filter(|q| !q.question.is_empty() && !q.options.is_empty()).collect();
     if questions.is_empty() { return None; }
     let id = event.tool_use_id.clone()?;
-    Some(Ask { fingerprint: format!("tool:{id}:{}", serde_json::to_string(input).unwrap_or_default()), payload: AskPayload { provider: None, request_id: None, is_async: false, questions }, tool_use_id: Some(id) })
+    Some(Ask { fingerprint: format!("tool:{id}:{}", serde_json::to_string(input).unwrap_or_default()), payload: AskPayload { provider: None, request_id: None, interaction_id: None, is_async: false, questions }, tool_use_id: Some(id) })
 }
 
 pub fn toggle(item: &AskItem, pick: &Pick, index: usize) -> Pick {
@@ -146,6 +147,14 @@ pub fn answer_body(ask: &Ask, picks: &[Pick]) -> Option<Value> {
     let answers = questions.iter().zip(picks).map(|(item, pick)| answer(ask, item, pick)).collect::<Option<Vec<_>>>()?;
     let mut body = json!({"answers": answers});
     if let Some(id) = &ask.payload.request_id { body["request_id"] = id.clone(); }
+    if let Some(id) = &ask.payload.interaction_id { body["interaction_id"] = json!(id); }
+    Some(body)
+}
+
+/// Corpo do `/question/skip`: o pedido e a identidade da pergunta exibida, que o servidor exige.
+pub fn skip_body(ask: &Ask) -> Option<Value> {
+    let mut body = json!({"request_id": ask.payload.request_id.clone()?});
+    if let Some(id) = &ask.payload.interaction_id { body["interaction_id"] = json!(id); }
     Some(body)
 }
 
@@ -249,12 +258,13 @@ fn plan_markers(text: &str) -> Vec<(usize, usize, bool)> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Action { Answer, Skip, Select(usize), Submit, Cancel, Steer, Discard(String), Implement }
+/// `SelectText`: a escolha que leva o texto digitado junto (o "o que mudar" do plano).
+pub enum Action { Answer, Skip, Select(usize), SelectText(usize, String), Submit, Cancel, Steer, Discard(String), Implement }
 
 impl Action {
     pub fn path(&self) -> Vec<&str> {
         match self {
-            Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) => vec!["select"], Action::Submit => vec!["select", "submit"],
+            Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) | Action::SelectText(..) => vec!["select"], Action::Submit => vec!["select", "submit"],
             Action::Cancel => vec!["interrupt"], Action::Steer => vec!["steer"], Action::Discard(id) => vec!["queue", id],
             Action::Implement => vec!["codex", "plan", "implement"],
         }
@@ -275,8 +285,8 @@ impl InFlight {
     }
     pub fn busy(&self, key: &SessionKey) -> bool { self.actions.contains_key(key) }
     pub fn running(&self, key: &SessionKey) -> Option<&Action> { self.actions.get(key).map(|(action, _)| action) }
-    pub fn finish(&mut self, key: &SessionKey, action: &Action) -> Option<String> {
-        if self.actions.get(key).is_none_or(|(current, _)| current != action) { return None; }
+    pub fn finish(&mut self, key: &SessionKey, action: &Action, snapshot: &str) -> Option<String> {
+        if self.actions.get(key).is_none_or(|(current, pending)| current != action || pending != snapshot) { return None; }
         self.actions.remove(key).map(|(_, snapshot)| snapshot)
     }
 }
@@ -346,6 +356,21 @@ mod tests {
     }
 
     #[test]
+    fn claude_plan_review_accepts_the_terminal_state_with_the_tui_choices() {
+        let state = crate::api::dto::SessionState {
+            options: Some(vec!["Yes, and use auto mode".into(), "Yes, manually approve edits".into(), "Tell Claude what to change".into()]),
+            interaction_id: Some("i1".into()),
+            claude_plan_pending: json!({"plan":"# Plano", "path":"/plans/p.md", "tool_use_id":"p1"}).as_object().cloned(), ..plan_state() };
+        let events = vec![tool("tool_use", "p1", "ExitPlanMode", json!({"plan":"# Plano"}))];
+        let plan = plan_review(&events, &state, "claude").unwrap();
+        assert_eq!((plan.tool_id.as_str(), plan.plan.as_str(), plan.path.as_deref()), ("p1", "# Plano", Some("/plans/p.md")));
+        assert!(plan_review(&[], &state, "claude").is_some());
+        let keys: Vec<_> = state.options.unwrap().iter().map(|o| plan_choice_key(o)).collect();
+        assert_eq!(keys, vec![Some("plan_review_auto_mode"), Some("plan_review_manual"), Some("plan_review_changes")]);
+        assert_eq!(plan_choice_key("Yes, and auto-accept edits"), Some("plan_review_auto"));
+    }
+
+    #[test]
     fn plan_review_labels_preserve_clear_context_and_unknown_choices() {
         assert_eq!(plan_choice_key("Yes, and bypass permissions"), Some("plan_review_bypass"));
         assert_eq!(plan_choice_key("Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session"), Some("plan_review_bypass"));
@@ -407,7 +432,7 @@ mod tests {
             options: labels.iter().map(|l| AskOption { label: (*l).into(), ..Default::default() }).collect() }
     }
     fn ask(provider: Option<&str>, request_id: Option<Value>, questions: Vec<AskItem>) -> Ask {
-        let payload = AskPayload { provider: provider.map(str::to_owned), request_id, is_async: false, questions };
+        let payload = AskPayload { provider: provider.map(str::to_owned), request_id, interaction_id: None, is_async: false, questions };
         Ask { fingerprint: "f".into(), payload, tool_use_id: None }
     }
 
@@ -423,13 +448,16 @@ mod tests {
             {"question": "Segunda?", "options": [{"label": "y"}]}]});
         let omp = ask_from_events(&[tool("tool_use", "t1", "ask", two.clone())], "omp").unwrap();
         assert_eq!(omp.payload.questions.len(), 1);
+        assert!(omp.payload.interaction_id.is_none());
         assert_eq!(omp.payload.questions[0].options.len(), 1);
         let kimi = ask_from_events(&[tool("tool_use", "t1", "AskUserQuestion", two)], "kimi").unwrap();
         assert!(kimi.payload.questions[0].multi_select && kimi.payload.questions.len() == 2);
         assert_eq!(kimi.tool_use_id.as_deref(), Some("t1"));
-        assert!(kimi.payload.request_id.is_none() && kimi.payload.provider.is_none());
+        assert!(kimi.payload.request_id.is_none() && kimi.payload.provider.is_none() && kimi.payload.interaction_id.is_none());
         let pi = json!({"question": "Qual?", "options": [{"label": "a", "description": "d"}]});
-        assert_eq!(ask_from_events(&[tool("tool_use", "p", "question", pi.clone())], "pi").unwrap().payload.questions[0].options[0].description, "d");
+        let pi_ask = ask_from_events(&[tool("tool_use", "p", "question", pi.clone())], "pi").unwrap();
+        assert_eq!(pi_ask.payload.questions[0].options[0].description, "d");
+        assert!(pi_ask.payload.interaction_id.is_none());
         assert!(ask_from_events(&[tool("tool_use", "p", "question", json!({"question": "Qual?"}))], "pi").is_none());
         let answered = [tool("tool_use", "p", "question", pi.clone()), ChatEvent { kind: "tool_result".into(), id: "r".into(), tool_use_id: Some("p".into()), ..Default::default() }];
         assert!(ask_from_events(&answered, "pi").is_none());
@@ -443,6 +471,26 @@ mod tests {
         assert_eq!(body, json!({"answers": [{"kind": "option", "indices": [1], "multi": false, "labels": ["B"], "question_id": "q1"}], "request_id": 7}));
         let text = answer_body(&a, &[Pick::Text("  livre ".into())]).unwrap();
         assert_eq!(text["answers"][0], json!({"kind": "text", "value": "livre", "type_index": 2, "labels": ["livre"], "question_id": "q1"}));
+    }
+
+    #[test]
+    fn conversation_answer_body_preserves_displayed_interaction() {
+        let raw = json!({"provider":"claude", "request_id":7, "interaction_id":"interaction-a", "is_async":false,
+            "questions":[{"header":"Escolha", "question":"Qual?", "multiSelect":false,
+                "options":[{"label":"A", "description":"Primeira"}]}]});
+        let a = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        let mut next = raw.clone();
+        next["interaction_id"] = json!("interaction-b");
+        let b = Ask::new(serde_json::from_value(next.clone()).unwrap(), &next);
+        assert_eq!(a.payload.questions, b.payload.questions);
+        assert_ne!(a, b);
+        assert_ne!(a.fingerprint, b.fingerprint);
+        let body = answer_body(&a, &[Pick::Options(vec![0])]).unwrap();
+        assert_eq!(body["interaction_id"], "interaction-a");
+        assert_eq!(body["request_id"], 7);
+        assert_eq!(answer_body(&b, &[Pick::Options(vec![0])]).unwrap()["interaction_id"], "interaction-b");
+        assert_eq!(skip_body(&a).unwrap(), json!({"request_id": 7, "interaction_id": "interaction-a"}));
+        assert_eq!(skip_body(&b).unwrap()["interaction_id"], "interaction-b");
     }
 
     #[test]
@@ -505,14 +553,26 @@ mod tests {
     }
 
     #[test]
+    fn conversation_late_result_does_not_finish_a_different_interaction() {
+        let key = SessionKey { server: "s".into(), name: "n".into(), jsonl: "j".into() };
+        let mut flight = InFlight::default();
+        assert!(flight.begin(key.clone(), Action::Answer, "interaction-a".into()));
+        assert!(flight.finish(&key, &Action::Answer, "interaction-a").is_some());
+        assert!(flight.begin(key.clone(), Action::Answer, "interaction-b".into()));
+        assert!(flight.finish(&key, &Action::Answer, "interaction-a").is_none());
+        assert!(flight.busy(&key));
+        assert!(flight.finish(&key, &Action::Answer, "interaction-b").is_some());
+    }
+
+    #[test]
     fn in_flight_is_per_session_and_late_result_of_other_action_is_ignored() {
         let key = |jsonl: &str| SessionKey { server: "s".into(), name: "n".into(), jsonl: jsonl.into() };
         let mut flight = InFlight::default();
         assert!(flight.begin(key("a"), Action::Select(1), "q".into()));
         assert!(!flight.begin(key("a"), Action::Answer, "q".into()));
         assert!(flight.begin(key("b"), Action::Answer, "q".into()));
-        assert_eq!(flight.finish(&key("a"), &Action::Answer), None);
-        assert_eq!(flight.finish(&key("a"), &Action::Select(1)).as_deref(), Some("q"));
+        assert_eq!(flight.finish(&key("a"), &Action::Answer, "q"), None);
+        assert_eq!(flight.finish(&key("a"), &Action::Select(1), "q").as_deref(), Some("q"));
         assert!(!flight.busy(&key("a")));
     }
 }

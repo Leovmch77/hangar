@@ -19,19 +19,39 @@ def test_policy_failure_is_visible_and_redacted(monkeypatch):
 
 
 def test_metadata_patch_has_a_strict_catalog(monkeypatch):
-    from app.adapters.codex import sessions
+    from app.adapters.claude_headless import sessions
     monkeypatch.setattr(sessions, "update", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("escrita indevida")))
     with pytest.raises(ValueError):
-        runtime_policy.run("session.patch_meta", {"key":"changed"}, {"provider":"codex", "name":"session"})
+        runtime_policy.run("session.patch_meta", {"key":"changed"}, {"provider":"claude", "name":"session"})
 
 
 @pytest.mark.parametrize("kind", ["prepare_prompt", "format_status", "skill_catalog", "answer_body", "quota",
-                                  "session.marker", "diag.error", "last_usage", "reload_stamp", "unknown_private"])
+                                  "session.marker", "diag.error", "last_usage", "reload_stamp", "unknown_private",
+                                  "launch_env"])
 def test_services_that_moved_to_rust_are_gone(kind):
     # O ator Rust roda estes por conta própria; o Python não responde mais.
     for provider in ("claude", "codex"):
         with pytest.raises(ValueError):
             runtime_policy.run(kind, {"text": "Olá", "catalog": {}, "questions": [], "answers": []}, {"provider": provider})
+
+
+@pytest.mark.parametrize("kind", ["terminal_facts", "terminal_publish", "terminal_plugin_control"])
+def test_python_terminal_reserve_still_reaches_its_services(monkeypatch, kind):
+    # A reserva do terminal no modo `python` (`runtime_terminal._service`) ainda passa por aqui.
+    from app import runtime_terminal
+    for attr in ("facts", "publish", "plugin_control"):
+        monkeypatch.setattr(runtime_terminal, attr, lambda payload, metadata, attr=attr: attr)
+    assert runtime_policy.run(kind, {}, {"provider": "claude", "terminal": {"pane": "%1"}}) == kind.removeprefix("terminal_")
+
+
+@pytest.mark.parametrize("kind,payload", [("session.patch_meta", {"cano": {"pid": 5}}), ("session.clear_cano", {"pid": 5})])
+def test_codex_sidecar_is_written_only_by_rust(monkeypatch, kind, payload):
+    # Sidecar e cano do Codex são do Rust (`codex_sidecar.rs`): o Python recusa sem ler nem gravar.
+    from app.adapters.codex import sessions
+    for attr in ("load", "update"):
+        monkeypatch.setattr(sessions, attr, lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sidecar tocado")))
+    with pytest.raises(ValueError):
+        runtime_policy.run(kind, payload, {"provider": "codex", "name": "cx", "key": "k", "validate": lambda: None})
 
 
 def test_native_message_has_journal_before_uds(monkeypatch):
@@ -44,121 +64,23 @@ def test_native_message_has_journal_before_uds(monkeypatch):
         assert kwargs["msg_id"]
         raise OSError("write sem prova")
     monkeypatch.setattr(uds_messaging, "enviar", send)
-    result = runtime_policy.native_message({"text":"[de: source] Olá"}, {"key":"key", "name":"session",
+    result = runtime_policy.native_message({"text":"[de: source] Olá", "mode":"prompting"}, {"key":"key", "name":"session",
         "session_id":"sid", "operation_id":"op", "validate":lambda: validated.append(True)})
     assert result["outcome"] == "unknown"
 
 
-def _codex_patch(tmp_path, monkeypatch, sidecar_thread):
-    import json
-    from app.adapters.codex import sessions
-    writes = []
-    state = tmp_path / "state.json"
-    # Vista que o Rust grava antes de chamar o serviço (control_view com service_tier no topo).
-    state.write_text(json.dumps({"runtime_state":{"view":{"thread_id":"t1", "service_tier":"priority"}}}))
-    monkeypatch.setattr(sessions, "load", lambda name: {"key":"k", "thread_id":sidecar_thread})
-    monkeypatch.setattr(sessions, "update", lambda name, **fields: writes.append(fields) or fields)
-    result = runtime_policy.run("session.patch_meta", {"service_tier":"priority"},
-        {"provider":"codex", "name":"session", "key":"k", "validate":lambda: None, "state_path":str(state)})
-    return result, writes
-
-
-def test_codex_patch_accepts_service_tier_from_rust(tmp_path, monkeypatch):
-    result, writes = _codex_patch(tmp_path, monkeypatch, "t1")
-    assert result == {"updated": True}
-    assert writes == [{"service_tier":"priority"}]
-
-
-def test_codex_service_tier_skips_sidecar_of_another_thread(tmp_path, monkeypatch):
-    result, writes = _codex_patch(tmp_path, monkeypatch, "t2")
-    assert result == {"updated": False, "stale": True}
-    assert writes == []
-
-
-def _fake_codex(tmp_path, monkeypatch):
-    directory = tmp_path / "bin"
-    directory.mkdir()
-    exe = directory / "codex"
-    exe.write_text("#!/bin/sh\n")
-    exe.chmod(0o755)
-    monkeypatch.setenv("PATH", str(directory))
-    return exe
-
-
-def test_launch_env_da_sessao_codex(monkeypatch, tmp_path):
-    from pathlib import Path
-    exe = _fake_codex(tmp_path, monkeypatch)
-    from app.adapters.codex import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "codex-sessions")
-    monkeypatch.setenv("TMUX", "x")
-    monkeypatch.setenv("TMUX_PANE", "%1")
-    meta = {"name": "cx", "key": "k" * 32, "codex_account": "default", "jev": False, "cwd": str(tmp_path)}
-    out = runtime_policy.run("launch_env", {}, {"provider": "codex", **meta})
-    env = out["env"]
-    assert env["CP_SESSION_KEY"] == env["HANGAR_CANO_KEY"] == "k" * 32
-    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
-    assert "TMUX" not in env and "TMUX_PANE" not in env and "CODEX_HOME" in env
-    assert Path(out["program"][0]).name.startswith("codex") and out["program"][1:3] == ["app-server", "--stdio"]
-    assert out["program"][0] == str(exe), "caminho resolvido: o Rust não procura o codex"
-    assert 'sandbox_mode="danger-full-access"' in out["program"], "os -c do modo da sessão"
-    assert out["cano_extra"] == {}
-
-
-def test_launch_env_reads_the_mode_the_rust_recorded(monkeypatch, tmp_path):
-    import json
-    from app.adapters.codex import sessions
-    _fake_codex(tmp_path, monkeypatch)
-    folder = tmp_path / "codex-sessions"
-    folder.mkdir()
-    monkeypatch.setattr(sessions, "_dir", lambda: folder)
-    (folder / "cx.json").write_text(json.dumps({"name": "cx", "key": "k" * 32, "headless": True, "permission_mode": "Ask for approval"}))
-    meta = {"name": "cx", "key": "k" * 32, "codex_account": "default", "jev": False, "cwd": str(tmp_path), "permission_mode": "Full Access"}
-    out = runtime_policy.run("launch_env", {}, {"provider": "codex", **meta})
-    assert 'sandbox_mode="read-only"' in out["program"], "trocar o sandbox sobe com o modo novo, não o da abertura"
-
-
-def test_codex_patch_meta_accepts_the_permission_mode(tmp_path, monkeypatch):
-    import json
-    from app.adapters.codex import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
-    (tmp_path / "cx.json").write_text(json.dumps({"name": "cx", "key": "k", "headless": True}))
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps({"runtime_state": {"view": {"permission_mode": "Ask for approval"}}}))
-    assert runtime_policy.run("session.patch_meta", {"permission_mode": "Ask for approval"}, {"provider": "codex", "name": "cx",
-        "key": "k", "validate": lambda: None, "state_path": str(state)}) == {"updated": True}
-    assert sessions.load("cx")["permission_mode"] == "Ask for approval"
-
-
-def test_launch_env_without_codex_is_a_code(monkeypatch, tmp_path):
-    monkeypatch.setenv("PATH", str(tmp_path))
-    meta = {"name": "cx", "key": "k" * 32, "cwd": str(tmp_path)}
-    assert runtime_policy.run("launch_env", {}, {"provider": "codex", **meta}) == {"error": "codex_ausente"}
-
-
-def test_patch_meta_records_the_cano_rust_launched(tmp_path, monkeypatch):
-    import json
-    from app.adapters.codex import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
-    (tmp_path / "cx.json").write_text(json.dumps({"name": "cx", "key": "k", "headless": True}))
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps({"runtime_state": {"view": {}}}))
-    cano = {"pid": 5, "escuta": "unix:/x", "token": "t", "ts": 1.0, "versao": 2}
-    assert runtime_policy.run("session.patch_meta", {"cano": cano}, {"provider": "codex", "name": "cx", "key": "k",
-        "validate": lambda: None, "state_path": str(state)}) == {"updated": True}
-    assert sessions.load("cx")["cano"] == cano
-
-
-def test_clear_cano_only_for_the_same_pid_and_never_recreates(tmp_path, monkeypatch):
-    import json
-    from app.adapters.codex import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
-    path = tmp_path / "cx.json"
-    path.write_text(json.dumps({"name": "cx", "key": "k", "headless": True, "cano": {"pid": 5}}))
-    meta = {"provider": "codex", "name": "cx", "key": "k", "validate": lambda: None}
-    assert runtime_policy.run("session.clear_cano", {"pid": 6}, meta) == {"cleared": False}
-    assert sessions.load("cx")["cano"] == {"pid": 5}, "outro processo já foi gravado: fica"
-    assert runtime_policy.run("session.clear_cano", {"pid": 5}, meta) == {"cleared": True}
-    assert sessions.load("cx")["cano"] is None
-    path.unlink()
-    assert runtime_policy.run("session.clear_cano", {"pid": 5}, meta) == {"cleared": False}
-    assert not path.exists(), "arquivo apagado não volta"
+def test_native_message_uses_the_mode_the_rust_sent(monkeypatch):
+    # Decisão do usuário (M6): o Rust manda a classe confirmada junto do recado; o Python não consulta
+    # memória nem volta ao Rust. Sem ela (ou inválida), vale o cálculo de antes.
+    from app import api, uds_messaging
+    sent = []
+    monkeypatch.setattr(uds_messaging, "socket_da_sessao", lambda *args: "fake.sock")
+    monkeypatch.setattr(api, "_classe_modo", lambda *args: "prompting")
+    monkeypatch.setattr(uds_messaging, "enviar", lambda sock, text, sender, mode, **kw: sent.append(mode))
+    meta = {"key":"key", "name":"session", "session_id":"sid", "operation_id":"op", "validate":lambda: None}
+    runtime_policy.native_message({"text":"[de: source] Olá", "mode":"bypass"}, meta)
+    # Sem a classe (ou com uma inválida) recusa com código: o Python não recalcula com o Rust de pé.
+    for payload in ({"text":"[de: source] Olá", "mode":"turbo"}, {"text":"[de: source] Olá"}):
+        with pytest.raises(runtime_policy.ModeClassMissing):
+            runtime_policy.native_message(payload, meta)
+    assert sent == ["bypass"]

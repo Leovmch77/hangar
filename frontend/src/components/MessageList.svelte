@@ -77,9 +77,10 @@
     previewVivo?: boolean; // deltas do proprio modelo, no ritmo real -> sem maquina de escrever
     pensamento?: string;   // raciocinio em voo (Claude sem terminal); some quando o bloco cai no transcript
     ferramenta?: { nome: string; input: Record<string, unknown> } | null;   // chamada com o pedido ainda sendo escrito
-    onSelectOption: (i: number) => void;
+    /** `text` só no "o que mudar" do plano; a promessa diz ao cartão quando o envio acabou. */
+    onSelectOption: (i: number, interactionId: string | null | undefined, text?: string) => void | Promise<void>;
     /** Múltipla escolha: envia o que já foi marcado. Ausente = sem botão de enviar. */
-    onSubmitSelected?: () => void;
+    onSubmitSelected?: (interactionId: string | null | undefined) => void;
     onCancel: () => void;
     // AskUserQuestion inline (desktop): quando askOpen, renderiza o card no fim da lista.
     askOpen?: boolean;
@@ -87,8 +88,8 @@
     // Stepper nativo AskUserQuestion ativo (em qualquer view). Suprime os OptionButtons crus:
     // o AskUserQuestion tambem desenha um picker TUI no pane -> sem isto os dois apareciam juntos.
     askActive?: boolean;
-    onAnswer?: (answers: AnswerItem[]) => Promise<void>;
-    onAskClose?: () => void;
+    onAnswer?: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
+    onAskClose?: (payload: AskQuestionPayload) => void;
     /** Rolou até o topo e não há mais nada em memória — quem tem o resto é o servidor. Ausente
      *  (arquivo, board) = a lista simplesmente para onde acabou, como antes. */
     onFimDoLocal?: () => void;
@@ -755,6 +756,8 @@
       <OptionButtons
         question={stateEvent.question}
         options={stateEvent.options ?? []}
+        interactionId={stateEvent.interaction_id}
+        planReview={!!stateEvent.claude_plan_pending}
         onSelect={onSelectOption}
         onSubmit={onSubmitSelected}
         onCancel={onCancel}

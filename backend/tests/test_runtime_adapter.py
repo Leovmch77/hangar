@@ -783,3 +783,18 @@ async def test_codex_runtime_steer_preserves_only_uncertain_attempts(tmp_path, m
         assert slot.store.state["rows"][0]["delivered"] is unknown
     finally:
         coordinator.close_python_leases()
+
+
+@pytest.mark.parametrize("mode,expected", [("rust", 3), ("pending", 3), ("python", 2)])
+def test_binding_takes_the_generation_the_rust_relaunch_wrote(tmp_path, monkeypatch, mode, expected):
+    # O relançamento do Rust avança a geração no arquivo da fila; o registro daqui ainda tem a antiga.
+    import json
+    from app import pqueue
+    from app.adapters.codex import sessions
+    from app.runtime_adapter import LegacyBridge
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    monkeypatch.setattr(sessions, "load", lambda name: {"key": "k", "headless": True, "rollout_path": "/r.jsonl"})
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "k.json").write_text(json.dumps({"generation": 3}))
+    coordinator = SimpleNamespace(mode=mode, slots={"k": SimpleNamespace(binding=SimpleNamespace(generation=2))})
+    assert LegacyBridge(coordinator, {}).binding("cx", "codex").generation == expected

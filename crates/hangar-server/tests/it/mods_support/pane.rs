@@ -43,6 +43,7 @@ pub fn view(panes: &[(&str, &str, &str, &str)]) -> TerminalView {
             tree: json!({"type": "Box", "children": [button(key, label, if id.starts_with("pm-mock") { "pm-mock" } else { "vitrine" })]}), data: None }).collect(),
         shown: None,
         caps: Vec::new(),
+        crop_columns: None,
     }
 }
 

@@ -32,6 +32,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `None`. Use `errors="replace"` e não carimbe como bom o que tem U+FFFD.
 - **`monkeypatch.setattr(os, "name", …)` leva o `pathlib` junto** e estoura longe de onde você
   aplicou. Em teste que faz isso, use `os.path`.
+- **A porta pública em `0.0.0.0` leva um segundo socket em `[::]` dual-stack, que atende igual.**
+  No Windows um `0.0.0.0` sozinho não impede outro processo de abrir a mesma porta em dual-stack
+  (Node, `python -m http.server`), e quem chega por IPv6 cai nele. Só IPv4 + dual-stack bloqueia os
+  dois tipos; quem abre só IPv6 ainda passa. Falha da guarda é aviso no log, nunca queda do servidor.
+  Medição em [Porta pública dividida com outro processo](#porta-pública-dividida-com-outro-processo-13102026).
 - **Código de retorno no Windows não se lê como falha** (`taskkill` sem processo devolve 128).
   Separe "comando não existe" de "comando falhou"; stderr vem na codepage do console.
 - **Captura avulsa do pane (`state/capture.rs`) decide pela saída, não pelo código.** Saída com
@@ -813,3 +818,23 @@ clique SGR são os do tmux; o que muda:
   0,44 s com a conferência do pane e a releitura do tamanho (seis processos). Dentro da reserva do pane o
   executor confere o pane uma vez, e o anel faz a tecla e uma leitura por passo; a volta ao prompt da
   limpeza tem prazo pelo tamanho do anel (até 9 s).
+
+## Porta pública dividida com outro processo (13/10/2026)
+
+Numa máquina Windows a atualização parava em "Porta 8765 ocupada por outro processo": uma sessão
+Claude de outro projeto tinha subido `python -m http.server 8765`, que escutava em `[::]` enquanto o
+`hangar-server` escutava em `0.0.0.0`. Medido no Windows 10 22H2, com um socket segurando a porta e
+outro tentando abri-la (`10048` = em uso, `10013` = acesso negado):
+
+| Hangar segura | só IPv6 | dual-stack | dual + `SO_REUSEADDR` (`http.server`) | `0.0.0.0` |
+|---|---|---|---|---|
+| `0.0.0.0` | abre | abre | abre | 10048 |
+| `[::]` dual-stack | abre | 10048 | 10013 | abre |
+| `0.0.0.0` + `[::]` só IPv6 | 10048 | abre | abre | 10048 |
+| `0.0.0.0` + `[::]` dual-stack | abre | 10048 | 10013 | 10048 |
+
+`SO_EXCLUSIVEADDRUSE` não mudou nenhuma linha. Trocar `0.0.0.0` por `[::]` dual-stack sozinho abriria
+a porta para quem pede só IPv4, então ficaram os dois sockets. No Linux o `0.0.0.0` já recusa o
+dual-stack de outro processo, e o segundo socket colidiria com o primeiro: a guarda é só do Windows.
+No socket dual-stack o cliente IPv4 chega como `::ffff:a.b.c.d`; o `ipv4_peer` em `routes.rs` devolve o
+IPv4 antes das rotas, que decidem "local" e proxy confiável por ele.

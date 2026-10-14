@@ -274,3 +274,4 @@ async def test_failed_start_waits_for_cano_and_children(transition, monkeypatch,
         assert adapter._falhas_subida["sess"] == adapter.TETO_SUBIDAS
     else:
         assert sessions.load("sess")["cano"] is None
+

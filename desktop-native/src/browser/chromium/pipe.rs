@@ -9,8 +9,8 @@ use std::{
     process::Child,
     rc::{Rc, Weak},
     sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -38,10 +38,44 @@ struct Wire {
     pending: Mutex<HashMap<u64, (Option<String>, Box<dyn FnOnce(Reply) + Send>)>>,
     /// Quadro de screencast por sessão, tratado antes de chegar à interface.
     sinks: Mutex<HashMap<String, Sink>>,
+    /// Clientes CDP de fora (`/cdp/browser`): cada um recebe os eventos das sessões dele, e só deles.
+    taps: Mutex<HashMap<u64, Tapped>>,
+    /// O processo; quem o fecha (o `Drop`, o `retire`) ou a thread de leitura, quando ele sai sozinho, o recolhe.
+    child: Mutex<Option<Child>>,
+    /// Por que este Chromium não serve mais. Gravado pela thread de leitura assim que o pipe fecha (sem esperar a
+    /// interface): quem chama depois recebe isto na hora, e o próximo pedido sobe outro processo.
+    gone: OnceLock<String>,
+    /// O app pediu o fim (fechar, refazer): a saída não é queda e não vai ao diário.
+    asked: AtomicBool,
+}
+
+struct Tapped {
+    /// Sessões que o cliente abriu e as filhas delas (iframe, worker), que o auto-attach dele traz.
+    scope: HashSet<String>,
+    out: async_channel::Sender<String>,
 }
 
 impl Wire {
+    fn new(writer: std::io::PipeWriter, child: Option<Child>) -> Arc<Wire> {
+        Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default(),
+            taps: Mutex::default(), child: Mutex::new(child), gone: OnceLock::new(), asked: AtomicBool::new(false) })
+    }
+
+    fn alive(&self) -> bool { self.gone.get().is_none() }
+
+    /// Marca o fim pedido pelo app; `false` quando o processo já tinha saído sozinho, e aí a queda segue ao diário.
+    fn retire(&self, reason: &str) -> bool {
+        if self.gone.set(format!("{RETIRED}: {reason}")).is_err() { return false; }
+        self.asked.store(true, Ordering::SeqCst);
+        true
+    }
+
     fn send(&self, session: Option<&str>, method: &str, params: Value, done: Option<Box<dyn FnOnce(Reply) + Send>>) {
+        // Processo que já saiu: a escrita poderia até passar (pipe ainda aberto por um instante) e ninguém responderia.
+        if let Some(gone) = self.gone.get() {
+            if let Some(done) = done { done(Err(gone.clone())); }
+            return;
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut message = json!({"id": id, "method": method, "params": params});
         if let Some(session) = session { message["sessionId"] = session.into(); }
@@ -50,7 +84,7 @@ impl Wire {
         bytes.push(0);
         if let Err(e) = lock(&self.writer).write_all(&bytes) {
             // Sem o pipe não haverá resposta: quem espera recebe o erro agora.
-            if let Some((_, done)) = lock(&self.pending).remove(&id) { done(Err(format!("o Chromium fechou: {e}"))); }
+            if let Some((_, done)) = lock(&self.pending).remove(&id) { done(Err(format!("{EXITED}: o Chromium fechou: {e}"))); }
         }
     }
 
@@ -73,8 +107,6 @@ fn reply_of(message: &Value) -> Reply {
 
 pub struct Browser {
     wire: Arc<Wire>,
-    /// `None` só no fim: o `Drop` o leva para a thread que espera o processo sair.
-    child: RefCell<Option<Child>>,
     /// (sessão, evento) → ouvintes.
     handlers: RefCell<HashMap<(String, String), Vec<Handler>>>,
     /// Evento do navegador (`Target.*`, `CLOSED`) → (sessão dona, ouvinte); sai junto com a sessão dona.
@@ -83,7 +115,6 @@ pub struct Browser {
     initial: RefCell<Vec<String>>,
     /// Páginas que os navegadores do app abriram; qualquer outra é janela que a página abriu.
     owned: RefCell<HashSet<String>>,
-    alive: std::cell::Cell<bool>,
     /// Aperto de mão do processo que nasceu sem travar a interface; `None` quando já respondeu.
     ready: RefCell<Option<Ready>>,
     _drain: RefCell<Option<Task<()>>>,
@@ -123,7 +154,7 @@ impl Browser {
         async move { match pending { Some(ready) => ready.await, None => Ok(()) } }
     }
 
-    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive.get()) }
+    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive()) }
 
     fn profile() -> Result<std::path::PathBuf, String> {
         crate::appearance::dir().map(|d| d.join("chromium")).ok_or_else(|| "sem pasta de configuracao do app".into())
@@ -153,8 +184,9 @@ impl Browser {
                 }
                 Err(e) => {
                     // Processo mudo não fica como o compartilhado: o próximo pedido sobe outro.
-                    browser.alive.set(false);
-                    Err(format!("o Chromium ({bin}) nao respondeu: {e}"))
+                    let e = format!("o Chromium ({bin}) nao respondeu: {e}");
+                    browser.retire(&e);
+                    Err(e)
                 }
             }
         }
@@ -163,20 +195,15 @@ impl Browser {
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
     fn spawn(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
         let launched = launch::spawn(bin, profile).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
-        let wire = Arc::new(Wire {
-            writer: Mutex::new(launched.writer),
-            next: AtomicU64::new(1),
-            pending: Mutex::default(),
-            sinks: Mutex::default(),
-        });
+        let wire = Wire::new(launched.writer, Some(launched.child));
         let (events, received) = async_channel::unbounded::<Value>();
         let reading = wire.clone();
         std::thread::Builder::new().name("chromium-pipe".into())
             .spawn(move || read(launched.reader, &reading, &events))
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
-            wire, child: RefCell::new(Some(launched.child)), handlers: RefCell::default(), watchers: RefCell::default(),
-            initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), ready: RefCell::new(None),
+            wire, handlers: RefCell::default(), watchers: RefCell::default(),
+            initial: RefCell::default(), owned: RefCell::default(), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
         let weak = Rc::downgrade(&browser);
@@ -190,7 +217,24 @@ impl Browser {
         Ok(browser)
     }
 
-    pub fn alive(&self) -> bool { self.alive.get() }
+    pub fn alive(&self) -> bool { self.wire.alive() }
+
+    /// Este Chromium não serve mais (morreu no meio de uma abertura, não consegue criar página): sai já de cena, para o
+    /// próximo pedido subir outro no mesmo perfil sem dois processos nele.
+    /// ponytail: SIGKILL sem `Browser.close`; o que o processo doente ainda não gravou do perfil se perde.
+    pub fn retire(&self, reason: &str) {
+        if !self.wire.retire(reason) { return; }
+        eprintln!("[nav] Chromium descartado: {reason}");
+        if let Some(mut child) = lock(&self.wire.child).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pid(&self) -> Option<u32> { lock(&self.wire.child).as_ref().map(Child::id) }
+
+    pub fn port(&self) -> Port { Port(self.wire.clone()) }
 
     pub fn own(&self, target: &str, owned: bool) {
         if owned { self.owned.borrow_mut().insert(target.to_owned()); } else { self.owned.borrow_mut().remove(target); }
@@ -203,12 +247,7 @@ impl Browser {
         for target in self.initial.take() { drop(self.call(None, "Target.closeTarget", json!({"targetId": target}))); }
     }
 
-    fn closed(&self) {
-        self.alive.set(false);
-        // O pipe fechou porque o processo morreu: recolhe já, senão ele fica zumbi até o motor ser refeito.
-        if let Some(child) = self.child.borrow_mut().as_mut() { let _ = child.try_wait(); }
-        self.notify(CLOSED, Value::Null);
-    }
+    fn closed(&self) { self.notify(CLOSED, Value::Null); }
 
     fn notify(&self, method: &str, params: Value) {
         // Clonados antes de chamar: o ouvinte pode registrar outro sem o mapa estar emprestado.
@@ -259,12 +298,16 @@ impl Browser {
 
 /// Evento sintético entregue a quem ouve o navegador quando o pipe fecha.
 pub const CLOSED: &str = "Hangar.closed";
+/// Início do erro de toda chamada a um Chromium que saiu sozinho (queda) ou que o app descartou.
+pub const EXITED: &str = "chromium_exited";
+pub const RETIRED: &str = "chromium_retired";
 
 impl Drop for Browser {
     fn drop(&mut self) {
         // Saída limpa primeiro: o perfil é persistente, e o SIGKILL perde cookies e localStorage ainda não gravados.
+        self.wire.asked.store(true, Ordering::SeqCst);
         self.wire.send(None, "Browser.close", json!({}), None);
-        let Some(mut child) = self.child.take() else { return };
+        let Some(mut child) = lock(&self.wire.child).take() else { return };
         // A espera (até 2 s) fora da thread da tela, que fechava o painel congelada.
         let waited = std::thread::Builder::new().name("chromium-exit".into()).spawn(move || {
             for _ in 0..40 {
@@ -292,8 +335,48 @@ fn read(reader: std::io::PipeReader, wire: &Wire, events: &async_channel::Sender
         let Ok(message) = serde_json::from_slice::<Value>(&buffer) else { continue };
         route(message, wire, events);
     }
-    for (_, (_, done)) in lock(&wire.pending).drain() { done(Err("o Chromium fechou".into())); }
+    // Antes de soltar quem espera: o erro deles já diz como o processo saiu.
+    let _ = wire.gone.set(exited(wire));
+    let gone = wire.gone.get().cloned().unwrap_or_default();
+    for (_, (_, done)) in lock(&wire.pending).drain() { done(Err(gone.clone())); }
+    // O socket de cada cliente de fora fecha depois de entregar o que já estava na fila.
+    for (_, tap) in lock(&wire.taps).drain() { tap.out.close(); }
     events.close();
+}
+
+/// Recolhe o processo que fechou o pipe e diz como ele saiu; queda que o app não pediu vai ao diário com o fim do
+/// `chromium.log`.
+fn exited(wire: &Wire) -> String {
+    let child = lock(&wire.child).take();
+    let status = child.and_then(|mut child| {
+        // O pipe fecha na saída do processo: a espera é de instantes. Pipe fechado com o processo ainda de pé (travado)
+        // não segura a thread; ele é morto.
+        for _ in 0..40 {
+            if let Ok(Some(status)) = child.try_wait() { return Some(status); }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        child.wait().ok()
+    });
+    let how = status.map_or_else(|| "saida desconhecida".to_owned(), |s| {
+        use std::os::unix::process::ExitStatusExt;
+        s.signal().map_or_else(|| format!("codigo {}", s.code().unwrap_or(-1)), |n| format!("sinal {n}"))
+    });
+    let reason = format!("{EXITED}: o Chromium fechou ({how})");
+    if !wire.asked.load(Ordering::SeqCst) {
+        let tail = std::fs::read_to_string(launch::log_path().unwrap_or_default()).map(|log| crash_tail(&log)).unwrap_or_default();
+        let line = format!("[nav] {reason}; fim do chromium.log: {tail}");
+        eprintln!("{line}");
+        crate::log_line(&line);
+    }
+    reason
+}
+
+/// As últimas linhas de texto do `chromium.log`, sem os quadros da pilha e os registradores que o Chromium despeja na
+/// queda: o que sobra diz o sinal e o que vinha acontecendo.
+fn crash_tail(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(' ')).collect();
+    lines[lines.len().saturating_sub(6)..].iter().map(|l| l.chars().take(200).collect::<String>()).collect::<Vec<_>>().join(" | ")
 }
 
 fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>) {
@@ -301,6 +384,7 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         if let Some((_, done)) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
         return;
     }
+    if tapped(&message, wire) { return; }
     if message["method"] == "Page.screencastFrame"
         && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
         && lock(&wire.sinks).contains_key(&session)
@@ -310,6 +394,95 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         return;
     }
     let _ = events.try_send(message);
+}
+
+/// Evento de sessão de um cliente de fora vai só a ele. O fim de uma sessão dele no nível do navegador
+/// (`Target.detachedFromTarget`) vai a ele e segue também para a interface, que confere se era dela.
+fn tapped(message: &Value, wire: &Wire) -> bool {
+    let mut taps = lock(&wire.taps);
+    if taps.is_empty() { return false; }
+    let (method, child) = (message["method"].as_str().unwrap_or(""), message["params"]["sessionId"].as_str());
+    let Some(session) = message["sessionId"].as_str() else {
+        if method == "Target.detachedFromTarget" && let Some(child) = child
+            && let Some(tap) = taps.values_mut().find(|t| t.scope.contains(child)) {
+            tap.scope.remove(child);
+            let _ = tap.out.try_send(message.to_string());
+            drop(taps);
+            wire.fail(child);
+        }
+        return false;
+    };
+    let Some(tap) = taps.values_mut().find(|t| t.scope.contains(session)) else { return false };
+    let _ = tap.out.try_send(message.to_string());
+    match (method, child) {
+        ("Target.attachedToTarget", Some(child)) => { tap.scope.insert(child.to_owned()); }
+        ("Target.detachedFromTarget", Some(child)) => {
+            tap.scope.remove(child);
+            drop(taps);
+            // O que o cliente ainda esperava dessa sessão não vai ser respondido.
+            wire.fail(child);
+        }
+        _ => {}
+    }
+    true
+}
+
+/// O pipe visto de qualquer thread, para o cliente CDP de fora: cada comando ganha um id novo do `Wire` (nunca
+/// colide com os do app) e os eventos chegam filtrados pelas sessões do cliente.
+#[derive(Clone)]
+pub struct Port(Arc<Wire>);
+
+impl Port {
+    pub fn call(&self, session: Option<&str>, method: &str, params: Value) -> impl Future<Output = Reply> + Send + use<> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.0.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
+        async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
+    }
+
+    /// Registra um cliente; `out` é fechado (para todos os remetentes) quando o Chromium cai.
+    pub fn tap(&self, out: async_channel::Sender<String>) -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        lock(&self.0.taps).insert(id, Tapped { scope: HashSet::new(), out });
+        id
+    }
+
+    pub fn adopt(&self, tap: u64, session: &str) {
+        if let Some(t) = lock(&self.0.taps).get_mut(&tap) { t.scope.insert(session.to_owned()); }
+    }
+
+    pub fn owns(&self, tap: u64, session: &str) -> bool { lock(&self.0.taps).get(&tap).is_some_and(|t| t.scope.contains(session)) }
+
+    /// Tira o cliente e devolve as sessões que ainda eram dele, para quem sai soltá-las.
+    pub fn untap(&self, tap: u64) -> Vec<String> { lock(&self.0.taps).remove(&tap).map(|t| t.scope.into_iter().collect()).unwrap_or_default() }
+
+    #[cfg(test)]
+    pub(in crate::browser) fn test() -> (Port, std::io::PipeReader) {
+        let (wire, reader) = tests::wire();
+        (Port(wire), reader)
+    }
+
+    /// Chromium de verdade num perfil descartável, sem a interface: os eventos dela são descartados.
+    #[cfg(test)]
+    pub(in crate::browser) fn launch(profile: &Path) -> (Port, Child) {
+        let launched = launch::spawn(launch::find().unwrap(), profile).unwrap();
+        let wire = Wire::new(launched.writer, None);
+        // O processo fica com o teste; o fim dele não vai ao diário de quem roda.
+        wire.asked.store(true, Ordering::SeqCst);
+        let (events, received) = async_channel::unbounded();
+        std::mem::forget(received);
+        let reading = wire.clone();
+        std::thread::spawn(move || read(launched.reader, &reading, &events));
+        (Port(wire), launched.child)
+    }
+
+    /// Mensagem como se viesse do Chromium; devolve o que seguiria para a interface.
+    #[cfg(test)]
+    pub(in crate::browser) fn inject(&self, message: Value) -> Option<Value> {
+        let (events, received) = async_channel::unbounded();
+        route(message, &self.0, &events);
+        received.try_recv().ok()
+    }
 }
 
 /// Uma sessão CDP num alvo, com a mesma forma do `cdp::Cdp` do WebView2. Cair a sessão a desliga do alvo.
@@ -359,9 +532,21 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn wire() -> (Arc<Wire>, std::io::PipeReader) {
+    pub(super) fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
-        (Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() }), reader)
+        (Wire::new(writer, None), reader)
+    }
+
+    #[test]
+    fn retire_after_a_real_death_leaves_it_for_the_diary() {
+        let (dead, _r) = wire();
+        let _ = dead.gone.set("morreu sozinho".into());
+        assert!(!dead.retire("doente"));
+        assert!(!dead.asked.load(Ordering::SeqCst), "a queda de verdade ainda vai ao diário");
+        let (alive, _r) = wire();
+        assert!(alive.retire("doente"));
+        assert!(alive.asked.load(Ordering::SeqCst));
+        assert!(alive.gone.get().unwrap().ends_with("doente"));
     }
 
     #[test]
@@ -407,6 +592,43 @@ mod tests {
         assert_eq!(lock(&wire.pending).len(), 2);
     }
 
+    #[test]
+    fn a_dead_chromium_fails_the_waiters_and_every_later_call_with_how_it_exited() {
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let (_theirs, writer) = std::io::pipe().unwrap();
+        let wire = Wire::new(writer, Some(child));
+        // Sem ir ao diário de verdade de quem roda o teste.
+        wire.asked.store(true, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let waiting = tx.clone();
+        wire.send(None, "Runtime.evaluate", json!({}), Some(Box::new(move |r| waiting.send(r).unwrap())));
+        // O fd 4 do "Chromium": fecha quando ele morre.
+        let (from_chromium, chromium_end) = std::io::pipe().unwrap();
+        let (reading, (events, _received)) = (wire.clone(), async_channel::unbounded());
+        let reader = std::thread::spawn(move || read(from_chromium, &reading, &events));
+        assert!(wire.alive());
+        // SAFETY: sinal para o filho que este teste criou.
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        drop(chromium_end);
+        let reply = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err();
+        assert_eq!(reply, format!("{EXITED}: o Chromium fechou (sinal 9)"));
+        reader.join().unwrap();
+        assert!(!wire.alive());
+        assert!(lock(&wire.child).is_none(), "recolhido, sem zumbi");
+        let started = std::time::Instant::now();
+        wire.send(None, "Browser.getVersion", json!({}), Some(Box::new(move |r| tx.send(r).unwrap())));
+        assert_eq!(rx.try_recv().unwrap(), Err(reply), "na hora, sem escrever no pipe");
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(lock(&wire.pending).is_empty());
+    }
+
+    #[test]
+    fn the_crash_tail_keeps_the_signal_line_and_drops_frames_and_registers() {
+        let log = "[1013/152052:INFO:CONSOLE:782] \"[HMR] connected\"\nReceived signal 11 SEGV_MAPERR 000000000000\n#0 0x55 (x+0x4)\n#1 0x56 (x+0x5)\n  r8: 00 r9: 40\n[end of stack trace]\n";
+        assert_eq!(crash_tail(log), "[1013/152052:INFO:CONSOLE:782] \"[HMR] connected\" | Received signal 11 SEGV_MAPERR 000000000000 | [end of stack trace]");
+    }
+
     /// Prova do modo página: fundo transparente chega ao quadro PNG do screencast com alfa 0.
     #[test]
     #[ignore = "sobe o Chromium da máquina"]
@@ -414,7 +636,8 @@ mod tests {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
         let launched = launch::spawn(bin, &profile).unwrap();
-        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
+        let wire = Wire::new(launched.writer, None);
+        wire.asked.store(true, Ordering::SeqCst);
         let (events, _received) = async_channel::unbounded();
         let reading = wire.clone();
         std::thread::spawn(move || read(launched.reader, &reading, &events));

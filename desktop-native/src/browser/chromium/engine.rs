@@ -206,6 +206,9 @@ impl Surface {
     }
 }
 
+/// Início do erro de uma abertura cuja página em branco caiu antes de ficar pronta.
+const BORN_DEAD: &str = "page_crashed_at_start";
+
 /// A janela da GPUI não entra: o Chromium não tem janela. Guarda os executores para os eventos do pipe e os prazos.
 pub struct Starter {
     executor: ForegroundExecutor,
@@ -271,18 +274,14 @@ impl Engine {
 impl Starter {
     /// O navegador do painel: sobe o Chromium (se ainda não há um) e abre o alvo desta sessão sem travar a interface.
     pub fn start(self, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
-        async move {
-            let browser = self.browser().await?;
-            self.open(&browser, None, None, events, true).await
-        }
+        async move { self.fresh(async |browser| self.open(browser, None, None, events.clone(), true).await).await }
     }
 
     /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
     /// no próprio alvo, como o painel. Nasce sem travar a interface.
     pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
-            let browser = self.browser().await?;
-            let engine = self.open(&browser, None, None, events, false).await?;
+            let engine = self.fresh(async |browser| self.open(browser, None, None, events.clone(), false).await).await?;
             engine.load(&url);
             Ok(engine)
         }
@@ -293,13 +292,28 @@ impl Starter {
     pub fn start_page(self, html: Rc<str>, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>)
         -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
-            let browser = self.browser().await?;
-            let created = self.browser_call(&browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
-            let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
-            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events, false).await;
-            // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
-            if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
-            opened
+            self.fresh(async |browser| {
+                let created = self.browser_call(browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
+                let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
+                let opened = self.open(browser, Some(context.clone()), Some((html.clone(), width, background)), events.clone(), false).await;
+                // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
+                if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
+                opened
+            }).await
+        }
+    }
+
+    /// Abre no Chromium compartilhado e, se ele morreu no meio ou não consegue mais criar página (o zygote caiu e toda
+    /// página nova cai ao nascer), descarta esse processo e tenta uma vez num novo. Aberturas simultâneas esperam o mesmo
+    /// processo novo: o `shared_async` devolve o que já está subindo.
+    async fn fresh(&self, open: impl AsyncFn(&Rc<Browser>) -> Result<Engine, String>) -> Result<Engine, String> {
+        let browser = self.browser().await?;
+        match open(&browser).await {
+            Err(e) if !browser.alive() || e.starts_with(BORN_DEAD) => {
+                browser.retire(&e);
+                open(&self.browser().await?).await
+            }
+            opened => opened,
         }
     }
 
@@ -354,7 +368,11 @@ impl Starter {
         let _ = session.on("Runtime.bindingCalled", move |params| {
             if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
         });
+        // Falhou aqui: quem fecha o alvo é o `open`, o único que chama.
         match self.setup_target(browser, &session, target, &document).await {
+            // Página em branco que cai antes de nascer não é a página: é o Chromium que não consegue mais criá-las.
+            Err(e) if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer ({e})")) }
+            _ if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer")) }
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
                 surface, dead, png: !panel, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
@@ -517,20 +535,20 @@ fn listen(
     let p = publish.clone();
     session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
-    let fell: Rc<dyn Fn()> = {
+    let fell: Rc<dyn Fn(&str, &Value)> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
-        Rc::new(move || {
+        Rc::new(move |event, params| {
             if dead.replace(true) { return; }
-            eprintln!("[nav] a pagina caiu");
+            eprintln!("[nav] a pagina caiu ({event} {params})");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
             p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
     let f = fell.clone();
-    let _ = session.on("Inspector.targetCrashed", move |_| f());
+    let _ = session.on("Inspector.targetCrashed", move |params| f("Inspector.targetCrashed", &params));
     for (event, key, id) in [("Target.targetCrashed", "targetId", main.clone()), ("Target.detachedFromTarget", "sessionId", session.id().to_owned())] {
         let f = fell.clone();
-        session.watch(event, move |params| { if params[key] == id.as_str() { f(); } });
+        session.watch(event, move |params| { if params[key] == id.as_str() { f(event, &params); } });
     }
     publish
 }
@@ -540,6 +558,9 @@ impl Engine {
 
     /// A sessão do painel, para o controlador do hangar-preview.
     pub fn cdp(&self) -> Rc<Session> { self.session.clone() }
+
+    /// O pipe e a página visível desta sessão, para o cliente CDP de fora (`/cdp/browser`).
+    pub fn port(&self) -> (super::pipe::Port, String) { (self.session.browser().port(), self.target.clone()) }
 
     /// Sessão própria para a tela remota do celular: o screencast dela tem o tamanho do aparelho, sem mexer no do painel.
     pub fn viewer_session(&self) -> impl Future<Output = Result<Rc<Session>, String>> + use<> {
@@ -824,6 +845,76 @@ mod tests {
         slot.unseen = false;
         assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("d"));
         assert_eq!(slot.next(), None);
+    }
+
+    /// Prova de ponta a ponta com o Chromium da máquina e a GPUI sem janela, num perfil e num HOME descartáveis:
+    /// processo morto (SIGSEGV) e processo doente (sem zygote, toda página nova cai ao nascer) são trocados pela
+    /// abertura seguinte, e aberturas simultâneas sobem um processo só.
+    #[test]
+    #[ignore = "sobe o Chromium da máquina"]
+    fn a_dead_or_sick_chromium_is_replaced_by_the_next_open() {
+        use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
+        super::launch::find().unwrap();
+        let home = std::env::temp_dir().join(format!("hangar-relaunch-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: antes de qualquer outra thread; o Chromium já foi achado com o HOME de verdade.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.join("config")); std::env::set_var("HOME", &home); }
+        let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::default();
+        let out = outcome.clone();
+        gpui_kit::platform::headless().run(move |cx| {
+            let (executor, background) = (cx.foreground_executor().clone(), cx.background_executor().clone());
+            let starter = move || super::Starter { executor: executor.clone(), background: background.clone() };
+            cx.spawn(async move |cx| {
+                *out.borrow_mut() = Some(scenario(starter).await);
+                let _ = cx.update(|cx| cx.quit());
+            }).detach();
+        });
+        let native_log = std::fs::read_to_string(home.join(".hangar/logs/privado/native.log")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&home);
+        outcome.take().expect("o cenario nao terminou").unwrap();
+        // Só a queda vai ao diário, uma vez, com o sinal e o fim do chromium.log; o descarte do doente não é queda.
+        assert_eq!(native_log.matches("chromium_exited").count(), 1, "{native_log}");
+        assert!(native_log.contains("(sinal 11); fim do chromium.log:") && native_log.contains("Received signal 11"), "{native_log}");
+
+        async fn scenario(starter: impl Fn() -> super::Starter) -> Result<(), String> {
+            let check = |ok: bool, what: String| if ok { Ok(()) } else { Err(what) };
+            let pid = |e: &super::Engine| e.session.browser().pid().unwrap_or(0);
+            let (events, _kept) = async_channel::unbounded();
+            let first = starter().start(events.clone()).await?;
+            let old = pid(&first);
+            let hanging = first.cdp().call("Runtime.evaluate", json!({"expression": "new Promise(() => {})", "awaitPromise": true}));
+            // SAFETY: o Chromium que este teste subiu.
+            unsafe { libc::kill(old as i32, libc::SIGSEGV); }
+            let crashed = Instant::now();
+            let failed = hanging.await.err().ok_or("a chamada pendente nao falhou")?;
+            check(failed.contains("chromium_exited") && failed.contains("sinal 11"), format!("erro da chamada pendente: {failed}"))?;
+            check(crashed.elapsed() < Duration::from_secs(5), format!("pendente falhou em {:?}", crashed.elapsed()))?;
+            check(!first.alive(), "o motor do Chromium morto segue vivo".into())?;
+            let (a, b) = futures::join!(starter().start(events.clone()), starter().start(events.clone()));
+            let (a, b) = (a?, b?);
+            eprintln!("refeito {:?} depois da queda", crashed.elapsed());
+            check(crashed.elapsed() < Duration::from_secs(10), format!("refeito em {:?}", crashed.elapsed()))?;
+            check(pid(&a) == pid(&b) && pid(&a) != old, format!("aberturas simultaneas: {} e {} (antigo {old})", pid(&a), pid(&b)))?;
+            // Doente: sem zygote o processo segue de pé, mas toda página nova cai ao nascer.
+            let sick = pid(&a);
+            for entry in std::fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
+                let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else { continue };
+                let parent = stat.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok());
+                let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+                if parent == Some(sick) && cmdline.windows(13).any(|w| w == b"--type=zygote")
+                    && let Some(zygote) = entry.file_name().to_str().and_then(|p| p.parse::<i32>().ok()) {
+                    // SAFETY: filho do Chromium que este teste subiu.
+                    unsafe { libc::kill(zygote, libc::SIGKILL); }
+                }
+            }
+            let asked = Instant::now();
+            let c = starter().start(events.clone()).await?;
+            eprintln!("doente trocado em {:?}", asked.elapsed());
+            check(pid(&c) != sick && c.alive(), format!("abertura no Chromium doente: pid {} (doente {sick})", pid(&c)))?;
+            check(asked.elapsed() < Duration::from_secs(10), format!("troca do doente em {:?}", asked.elapsed()))?;
+            check(!a.alive() && !b.alive(), "motores do Chromium descartado seguem vivos".into())?;
+            Ok(())
+        }
     }
 
     fn stroke(key: &str, key_char: Option<&str>, control: bool, shift: bool) -> Keystroke {

@@ -195,7 +195,7 @@ impl SetupWizard {
 
     fn panel_view(&self) -> PanelView<'_> {
         let agent = self.agent.as_ref().map(|run| AgentPanel { agent: run.agent, phase: &run.phase,
-            explanation: run.transcript.explanation.as_deref(),
+            explanation: run.transcript.explanation.as_deref(), activity: &run.transcript.lines,
             notes: run.restored.as_ref().map(|r| report::restore_notes(r.head_moved.as_ref(), &r.errors, run.timed_out)).unwrap_or_default(),
             not_stopped: run.not_stopped });
         // O aviso da correção só aparece depois que o envio dela saiu de verdade.

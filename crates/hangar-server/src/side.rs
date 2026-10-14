@@ -214,6 +214,17 @@ pub struct SideCtx {
     pub monitors: Option<SpawnMonitor>,
     /// Faixa e avisos que o Rust publica nas sessões sem terminal dele (interface dos mods).
     pub mods: crate::mods::state::Mods,
+    /// Registro do runtime, quando ligado: diz se o ator do Codex com terminal é do Rust (dono do estado).
+    pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
+}
+
+impl SideCtx {
+    /// A conversa da sessão: a do runtime daqui quando ele abriu o Claude (ele já confirmou a troca e
+    /// religou o hub), senão a descoberta. Sem isso a vigia desfaria o `/clear` que a descoberta ainda não viu.
+    pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, crate::locate::InfoFailed> {
+        if let Some(runtime) = self.runtime.get() && let Some(info) = runtime.claude_info(name).await { return Ok(Some(info)); }
+        self.locate.info(name).await
+    }
 }
 
 #[derive(Default)]
@@ -335,6 +346,11 @@ pub struct Hub {
     wake: Arc<Notify>,
     /// Vezes que a troca vazou (o Python mandou um dos quatro para sessão do Rust) e foi registrada.
     pub(crate) python_leaks: AtomicU32,
+    /// O ator do Codex com terminal desta sessão é do Rust: o feed publica o estado. O pane continua no
+    /// `Binding` (`headless: false`); dono é outra coisa.
+    runtime_owned: std::sync::atomic::AtomicBool,
+    /// Assinantes que entraram pelo convite (não contam como app do dono).
+    guests: std::sync::atomic::AtomicUsize,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -366,6 +382,7 @@ impl From<Bytes> for Queued {
 impl Hub {
     fn start(name: &str, binding: Binding, ctx: SideCtx) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
+        let owned = ctx.runtime.get().is_some_and(|registry| registry.owns_codex_terminal(name));
         let hub = Arc::new_cyclic(|weak| {
             let tail = FileTail::spawn(
                 binding.jsonl.clone(),
@@ -387,6 +404,8 @@ impl Hub {
                 committed: Mutex::new(None),
                 wake: Arc::new(Notify::new()),
                 python_leaks: AtomicU32::new(0),
+                runtime_owned: std::sync::atomic::AtomicBool::new(owned),
+                guests: std::sync::atomic::AtomicUsize::new(0),
             }
         });
         hub.ensure_monitor();
@@ -399,7 +418,7 @@ impl Hub {
     /// morta, pânico) volta quando alguém religa ou assina de novo.
     fn ensure_monitor(self: &Arc<Self>) {
         let Some(spawn) = self.ctx.monitors.clone() else { return };
-        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events().map(|e| (e, b.binding.provider)));
+        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| self.owner_events(&b.binding).map(|e| (e, b.binding.provider)));
         let mut slot = self.monitor.lock().unwrap();
         // Dono que acabou conta como ausente.
         let alive = slot.as_ref().filter(|(m, _, _)| !m.is_finished()).map(|(_, _, key)| *key);
@@ -433,11 +452,40 @@ impl Hub {
 
     /// Os eventos do estado que esta ligação tem no Rust, para o canal privado.
     fn state_events(&self) -> &'static [&'static str] {
-        self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events()).unwrap_or(&STATE_EVENTS)
+        self.bound.lock().unwrap().as_ref().and_then(|b| self.owner_events(&b.binding)).unwrap_or(&STATE_EVENTS)
+    }
+
+    /// Eventos que o Rust publica nesta ligação: os do `Binding`, ou os do feed quando o ator do Codex com
+    /// terminal é do Rust (o registro avisa o hub na abertura e no fechamento).
+    fn owner_events(&self, binding: &Binding) -> Option<&'static [&'static str]> {
+        binding.state_events().or_else(|| self.codex_terminal_owned(binding).then_some(&FEED_EVENTS[..]))
+    }
+
+    fn codex_terminal_owned(&self, binding: &Binding) -> bool {
+        binding.provider == Provider::Codex && !binding.headless && self.runtime_owned.load(Ordering::Acquire)
+    }
+
+    /// O estado sai do feed do runtime: sem terminal pelo `Binding`, Codex com terminal pelo dono.
+    pub fn runtime_feed(&self) -> bool {
+        self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.runtime_feed() || self.codex_terminal_owned(&b.binding))
+    }
+
+    /// O registro abriu ou fechou o ator do Codex com terminal desta sessão: troca o dono do estado.
+    pub(crate) fn set_runtime_owned(self: &Arc<Self>, owned: bool) {
+        if self.runtime_owned.swap(owned, Ordering::AcqRel) != owned {
+            self.ensure_monitor();
+            self.wake.notify_one();
+        }
+    }
+
+    pub(crate) fn source_binding(&self) -> Option<(u64, Binding)> {
+        self.bound.lock().unwrap().as_ref().map(|bound| (bound.generation, bound.binding.clone()))
     }
 
     /// A ligação atual: o feed escolhe por ela.
     pub fn binding(&self) -> Option<Binding> { self.bound.lock().unwrap().as_ref().map(|b| b.binding.clone()) }
+    /// Os mods da sessão: a faixa e os painéis que cortam a prévia.
+    pub(crate) fn mods(&self) -> &crate::mods::state::Mods { &self.ctx.mods }
 
     /// Geração da ligação atual (a época do `Monitor`); `None` com o hub fechado.
     pub fn generation(&self) -> Option<u64> { self.bound.lock().unwrap().as_ref().map(|b| b.generation) }
@@ -475,6 +523,18 @@ impl Hub {
             return false;
         }
         self.deliver(event, data);
+        true
+    }
+
+    pub(crate) fn publish_own_bound(&self, expected: &(u64, Binding), event: &str, data: &str) -> bool {
+        self.publish_own_bound_with(expected, event, data, || {})
+    }
+
+    pub(crate) fn publish_own_bound_with(&self, expected: &(u64, Binding), event: &str, data: &str, published: impl FnOnce()) -> bool {
+        let bound = self.bound.lock().unwrap();
+        let Some(bound) = bound.as_ref().filter(|bound| bound.generation == expected.0 && bound.binding == expected.1) else { return false };
+        self.deliver_bound(event, data, bound.binding.provider == Provider::Claude);
+        published();
         true
     }
 
@@ -518,7 +578,7 @@ impl Hub {
         loop {
             tokio::time::sleep(WATCH_EVERY).await;
             let Some(before) = self.binding() else { return };
-            let info = match self.ctx.locate.info(&self.name).await {
+            let info = match self.ctx.info(&self.name).await {
                 Ok(info) => {
                     if let Some(code) = failing.take() {
                         tracing::info!(session = %self.name, code, "descoberta da sessão voltou");
@@ -653,9 +713,13 @@ impl Hub {
     /// Quadro de evento para os aparelhos: entra no retrato e sai pelo canal, salvo quando é igual
     /// ao último do mesmo tipo (o aparelho já o tem). Serve ao Python (side-events) e ao Rust (mods).
     fn deliver(&self, event: &str, data: &str) {
+        let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+        self.deliver_bound(event, data, pane_question);
+    }
+
+    fn deliver_bound(&self, event: &str, data: &str, pane_question: bool) {
         let frame = sse_frame(event, data, None);
         // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
-        let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
         let mut cache = self.cache.lock().unwrap();
         // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
         let repeated = event != "ask_question"
@@ -879,6 +943,7 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
         }
         match ev.event.as_str() {
             "ping" => {}
+            "stats" => overlay_plugin_rate(hub, &ev.data).await,
             event => {
                 // Sessão sem terminal atendida pelo Rust: faixa e avisos vêm dele (dono único). Um
                 // `plugin_ui` velho do Python (sessão que mudou de modo) não pode sobrescrevê-los.
@@ -889,6 +954,39 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
             }
         }
     }
+}
+
+async fn overlay_plugin_rate(hub: &Arc<Hub>, data: &str) {
+    let Some(runtime) = hub.ctx.runtime.get() else { hub.deliver("stats", data); return };
+    let Some(binding) = hub.binding().filter(|binding| binding.provider == Provider::Claude) else {
+        hub.deliver("stats", data); return;
+    };
+    let generation = hub.generation();
+    let Ok(mut stats) = serde_json::from_str::<serde_json::Value>(data) else {
+        tracing::warn!(session = %hub.name, code = "plugin_stats_invalid", "estatísticas da sessão não são JSON");
+        return;
+    };
+    let reading = runtime.interaction_binding_readonly(&hub.name).await;
+    match reading {
+        Ok(life) if life.conversation == binding.key => {
+            let (path, conversation) = (binding.jsonl.clone(), life.conversation.clone());
+            let ts = match tokio::task::spawn_blocking(move || crate::plugin::sources::last_call_ts(&path, &conversation)).await {
+                Ok(ts) => ts,
+                Err(_) => { tracing::warn!(session = %hub.name, code = "plugin_rate_transcript_failed", "taxa: relógio do transcript indisponível"); None },
+            };
+            if hub.generation() != generation || runtime.interaction_binding_readonly(&hub.name).await.ok().as_ref() != Some(&life) { return; }
+            hub.ctx.hubs.plugin_rates().overlay(&life, ts, &mut stats);
+        }
+        _ => {
+            if let Some(stats) = stats.as_object_mut() {
+                if stats.remove("tok_s_exact") == Some(serde_json::json!(true)) { stats.remove("tok_s_now"); stats.remove("tok_s_recent"); }
+            }
+            if crate::warn_limit::allow(Some(&hub.name), "plugin_rate_binding_unavailable") {
+                tracing::warn!(session = %hub.name, code = "plugin_rate_binding_unavailable", "taxa: vínculo não confirmado; mantém os demais dados");
+            }
+        }
+    }
+    if hub.generation() == generation { hub.deliver("stats", &stats.to_string()); }
 }
 
 /// Evento da conexão interna (fora `info` e `ping`). Com o dono do estado vivo, os eventos dele
@@ -978,11 +1076,15 @@ pub async fn private_events(
     };
     // Convidado abrindo a conversa também reabre a sessão em erro, como o dono.
     if info.is_some() { st.request_reopen(&name); }
-    // Só Claude (com ou sem terminal) e Codex sem terminal têm o estado aqui; o resto o Python observa.
-    let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some()) else {
+    // Só Claude (com ou sem terminal), Codex sem terminal e Codex com terminal de ator no Rust têm o estado
+    // aqui; o resto o Python observa.
+    let owned = |b: &Binding| b.provider == Provider::Codex && st.side.runtime.get().is_some_and(|r| r.owns_codex_terminal(&name));
+    let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some() || owned(b)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    // O Python diz se quem entrou é convidado (`x-hangar-app: 0`); sem o cabeçalho, conta como app do dono.
+    let guest = req.headers().get("x-hangar-app").is_some_and(|value| value == "0");
+    let lease = st.side.hubs.acquire_as(&name, binding, &st.side, guest);
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     tokio::spawn(private_loop(lease, tx));
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -1040,25 +1142,36 @@ type HubMap = Mutex<HashMap<String, (Arc<Hub>, usize)>>;
 
 /// Hubs vivos por nome de sessão, com a contagem de aparelhos.
 #[derive(Clone, Default)]
-pub struct Hubs(Arc<HubMap>);
+pub struct Hubs(Arc<HubMap>, Arc<crate::plugin::sources::RateStore>);
 
 /// O mapa de hubs sem segurá-lo vivo: o `Mods` entrega por aqui sem formar ciclo com o `SideCtx`.
 #[derive(Clone)]
-pub struct WeakHubs(Weak<HubMap>);
+pub struct WeakHubs(Weak<HubMap>, Weak<crate::plugin::sources::RateStore>);
 
 impl WeakHubs {
     pub fn upgrade(&self) -> Option<Hubs> {
-        self.0.upgrade().map(Hubs)
+        Some(Hubs(self.0.upgrade()?, self.1.upgrade()?))
     }
 }
 
 pub struct Lease {
     hubs: Hubs,
     pub hub: Arc<Hub>,
+    /// Convidado: assina o hub, mas não é o app do dono aberto (nem segura permissão, nem cala push).
+    guest: bool,
 }
 
 impl Hubs {
-    pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease {
+    pub fn plugin_rates(&self) -> Arc<crate::plugin::sources::RateStore> { self.1.clone() }
+    /// Algum aparelho do dono (direto ou pelo Connect) com uma conversa aberta; convidado não conta, como no Python.
+    pub fn app_present(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).values().any(|(hub, n)| *n > hub.guests.load(Ordering::Acquire))
+    }
+
+    pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease { self.acquire_as(name, binding, ctx, false) }
+
+    /// `guest`: assinante que entrou pelo convite.
+    pub fn acquire_as(&self, name: &str, binding: Binding, ctx: &SideCtx, guest: bool) -> Lease {
         let mut map = self.0.lock().unwrap();
         let hub = match map.get_mut(name) {
             Some((hub, n)) => {
@@ -1067,20 +1180,23 @@ impl Hubs {
             }
             None => {
                 let hub = Hub::start(name, binding, ctx.clone());
+                // O convidado conta sob a mesma trava do `n`: fora dela, `app_present` veria o hub só com ele como do dono.
+                if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
                 map.insert(name.to_string(), (hub.clone(), 1));
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
                 hub.seed(ctx.mods.replay(name));
-                return Lease { hubs: self.clone(), hub };
+                return Lease { hubs: self.clone(), hub, guest };
             }
         };
+        if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
         drop(map);
         hub.ensure_current(&binding);
-        Lease { hubs: self.clone(), hub }
+        Lease { hubs: self.clone(), hub, guest }
     }
 
     pub fn downgrade(&self) -> WeakHubs {
-        WeakHubs(Arc::downgrade(&self.0))
+        WeakHubs(Arc::downgrade(&self.0), Arc::downgrade(&self.1))
     }
 
     /// Evento do próprio Rust (interface dos mods) para o hub da sessão. Sem aparelho não há hub, e o
@@ -1090,6 +1206,32 @@ impl Hubs {
         if let Some(hub) = hub {
             hub.deliver(event, data);
         }
+    }
+
+    /// Aviso do registro: o ator do Codex com terminal de `name` abriu (`true`) ou fechou. Sem aparelho não
+    /// há hub; o que nascer depois pergunta ao registro.
+    pub(crate) fn set_runtime_owned(&self, name: &str, owned: bool) {
+        let hub = self.0.lock().unwrap().get(name).map(|(hub, _)| hub.clone());
+        if let Some(hub) = hub {
+            hub.set_runtime_owned(owned);
+        }
+    }
+
+    pub(crate) fn rebind_claude(&self,name:&str,conversation:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
+        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:conversation.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None})
+    }
+    pub(crate) fn rebind_claude_info(&self,name:&str,info:InternalInfo)->Result<(),crate::runtime::protocol::RuntimeError> {
+        let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
+        let hub=self.0.lock().map_err(|_|crate::runtime::protocol::RuntimeError::new("lifecycle_hub_unavailable","hub da sessão indisponível"))?.get(name).map(|(hub,_)|hub.clone());
+        if let Some(hub)=hub {
+            // A mesma conversa (reabertura em bypass): nada a religar; o `reset` faria o chat sumir e voltar
+            // em todos os aparelhos. Como o Python, só o transcript novo reseta.
+            if hub.bound.lock().unwrap().as_ref().is_some_and(|bound|bound.binding.same_conversation(&binding)) {return Ok(());}
+            hub.rebind(binding);
+            // A conexão interna leva a conversa escolhida: renasce com a nova, como na troca da vigia.
+            hub.restart_side();
+        }
+        Ok(())
     }
 
     /// A ligação do hub vivo da sessão: o transcript que o chat ao vivo segue.
@@ -1114,6 +1256,7 @@ impl Drop for Lease {
         if !Arc::ptr_eq(h, &self.hub) {
             return;
         }
+        if self.guest { self.hub.guests.fetch_sub(1, Ordering::AcqRel); }
         *n -= 1;
         if *n == 0 {
             let (h, _) = map.remove(&self.hub.name).expect("presente acima");
@@ -1136,6 +1279,7 @@ pub(crate) fn test_ctx() -> SideCtx {
         locate: Arc::new(crate::locate::Unavailable),
         monitors: None,
         mods: Default::default(),
+        runtime: Default::default(),
     }
 }
 
@@ -1165,6 +1309,33 @@ pub(crate) fn fake_monitors(pane: &'static str) -> (SpawnMonitor, Arc<std::sync:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stamped_publication_cannot_write_to_rebound_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx();
+        let binding = |sid: &str| Binding {provider:Provider::ClaudeHeadless,jsonl:dir.path().join(format!("{sid}.jsonl")),key:sid.into(),headless:true,life:None};
+        let a = ctx.hubs.acquire("stamped", binding("a"), &ctx);
+        let old = a.hub.source_binding().unwrap();
+        let mut reopened = binding("a");
+        reopened.jsonl = dir.path().join("another-account/a.jsonl");
+        // Troca já confirmada (vigia ou runtime): um aparelho entrando com outra leitura não religa sozinho.
+        a.hub.rebind(reopened);
+        let b = &a;
+        let fresh = b.hub.source_binding().unwrap();
+        assert_eq!(old.1.key, fresh.1.key);
+        assert_ne!(old.0, fresh.0);
+        let published = crate::state::published::Published::default();
+        published.set(1, "stamped", Some("a".into()), Arc::new(hangar_api::state::StateEvent {state:"working".into(), ..Default::default()}));
+        assert!(!b.hub.publish_own_bound_with(&old, "state", r#"{"state":"idle"}"#,
+            || published.set(1, "stamped", Some("a".into()), Arc::new(hangar_api::state::StateEvent {state:"idle".into(), ..Default::default()}))));
+        assert_eq!(published.get("stamped",Some("a")).unwrap().state,"working");
+        assert!(!b.hub.publish_own_bound(&old, "ask_question", r#"{"interaction_id":"a"}"#));
+        assert!(b.hub.publish_own_bound(&fresh, "ask_question", r#"{"interaction_id":"b"}"#));
+        let cached = b.hub.cache.lock().unwrap().replay();
+        assert!(!cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"a\"")));
+        assert!(cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"b\"")));
+    }
 
     fn bind(jsonl: &str, life: Option<&str>) -> Binding {
         Binding { provider: Provider::Claude, jsonl: jsonl.into(), key: jsonl.into(), headless: false, life: life.map(str::to_owned) }
@@ -1331,6 +1502,41 @@ mod tests {
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1, "o rebind não cria outro Monitor");
     }
 
+    /// Parity B8: a reabertura em bypass religa a mesma conversa; o chat não recebe `reset` por isso.
+    #[tokio::test]
+    async fn same_conversation_rebind_does_not_reset_the_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = |sid: &str| InternalInfo { provider: "claude".into(), jsonl: Some(dir.path().join(format!("{sid}.jsonl"))), session_key: sid.into(),
+            history: serde_json::json!({"queue": dir.path().join("s.jsonl")}), headless: false, lifecycle_id: None };
+        let (spawn, _) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", Binding::from_info(&info("a")).unwrap(), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        side_events(&mut rx, Duration::from_millis(200)).await;
+        ctx.hubs.rebind_claude_info("s", info("a")).unwrap();
+        let same = side_events(&mut rx, Duration::from_millis(200)).await;
+        assert!(!same.iter().any(|(e, _)| e == "rebind"), "{same:?}");
+        ctx.hubs.rebind_claude_info("s", info("b")).unwrap();
+        let other = side_events(&mut rx, Duration::from_millis(200)).await;
+        assert!(other.iter().any(|(e, _)| e == "rebind"), "{other:?}");
+    }
+
+    /// Decisão P24, como o Python: o convidado assina o hub, mas não é app do dono presente; o Connect é.
+    #[tokio::test]
+    async fn guest_subscriber_is_not_the_owner_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
+        let (spawn, _) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let guest = ctx.hubs.acquire_as("s", binding.clone(), &ctx, true);
+        assert!(!ctx.hubs.app_present(), "convidado sozinho não segura permissão");
+        let owner = ctx.hubs.acquire_as("s", binding, &ctx, false);
+        assert!(ctx.hubs.app_present());
+        drop(owner);
+        assert!(!ctx.hubs.app_present());
+        drop(guest);
+    }
+
     #[tokio::test]
     async fn python_state_for_rust_session_dropped_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1441,6 +1647,56 @@ mod tests {
             tokio::spawn(std::future::pending())
         });
         (spawn, count)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopted_codex_terminal_moves_the_hub_to_the_runtime_feed_and_back() {
+        use crate::runtime::codex_terminal::CodexTerminalTarget;
+        use crate::runtime::gateway::RuntimeRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        // App-server falso: aceita o WebSocket e segura a conexão; o pid é um processo com argv de app-server.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(stream).await { held.push(ws); }
+            }
+        });
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 120; true", "app-server", &endpoint]).spawn().unwrap();
+        // O `spawn` volta quando o exec troca a memória do filho, antes de o kernel gravar o argv novo: por um
+        // instante o `cmdline` vem vazio, e a admissão lê o argv. O app-server adotado de verdade já roda há tempo.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::runtime::codex_terminal::app_server(child.id(), &endpoint) != crate::runtime::codex_terminal::AppServer::Ours {
+            assert!(std::time::Instant::now() < deadline, "o filho não chegou ao argv do app-server");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (spawn, count) = fake_feeds();
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
+        registry.bind_hubs(ctx.hubs.downgrade());
+        let _ = ctx.runtime.set(registry.clone());
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout.jsonl"), key: "thread-1".into(), headless: false, life: None };
+        let lease = ctx.hubs.acquire("cx-proof", binding, &ctx);
+        assert!(!lease.hub.runtime_feed() && lease.hub.owned_events().is_empty(), "sem ator no Rust, o Python observa");
+        let target = CodexTerminalTarget { key: "codex-key".into(), generation: 1, name: "cx-proof".into(), endpoint: endpoint.clone(),
+            app_pid: child.id(), thread_id: "thread-1".into(),
+            terminal: crate::terminal_input::TerminalBinding { name: "cx-proof".into(), pane: "%7".into(), conversation: "thread-1".into(),
+                generation: 1, created: 1, mux_argv: vec!["tmux".into()], windows: false, clipboard_lock_path: None },
+            metadata: serde_json::json!({"key": "codex-key", "codex_home": dir.path().join("codex-home")}),
+            transcript: None, lease_path: dir.path().join("lock"), state_path: dir.path().join("state"), projection_dir: dir.path().join("projection"),
+            sidecar_dir: None };
+        registry.open_codex_terminal(target).await.unwrap();
+        assert!(lease.hub.runtime_feed(), "ator adotado aberto: o estado sai do feed");
+        assert_eq!(lease.hub.owned_events(), &FEED_EVENTS[..]);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(!lease.hub.binding().unwrap().headless, "o pane continua no binding");
+        registry.close("codex-key", 1).await.unwrap();
+        assert!(!lease.hub.runtime_feed() && lease.hub.owned_events().is_empty(), "fechado, o estado volta ao Python");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -1721,5 +1977,35 @@ mod tests {
         lease.hub.restart_side();
         assert!(lease.hub.side.lock().unwrap().is_none(), "hub fechado não religa");
         assert!(lease.hub.bound.lock().unwrap().is_none());
+    }
+
+    /// Claude com terminal aberto no runtime: o hub ligado por `SideCtx::info` leva a conversa como
+    /// chave, que é o que o `Monitor` compara antes de capturar (senão `state_binding_changed`).
+    #[tokio::test]
+    async fn terminal_hub_bound_by_the_runtime_keys_the_conversation() {
+        use crate::runtime::gateway::RuntimeRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()));
+        let ctx = test_ctx();
+        registry.bind_hubs(ctx.hubs.downgrade());
+        assert!(ctx.runtime.set(registry.clone()).is_ok());
+        let server = tokio::spawn(crate::runtime::gateway::serve(listener, registry.clone(), "secret-test".into(), "instance-test".into(), crate::INTERNAL_PROTOCOL));
+        let pid = std::process::id();
+        let terminal = serde_json::json!({"name":"s","pane":"%1","conversation":"sid","generation":1,"created":1,"mux_argv":["fake"],"windows":false,"clipboard_lock_path":null});
+        let descriptor = serde_json::json!({"name":"s","key":"terminal_key","provider":"claude","headless":false,
+            "meta":{"key":"terminal_key","terminal":terminal,"config_dir":dir.path(),"agent_pid":pid,"agent_birth":crate::terminal_facts::agent_birth(pid).unwrap(),"fingerprint":"fixture-life","message_origin":"uds:fixture"},
+            "jsonl":dir.path().join("sid.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+        let send = |command: serde_json::Value| reqwest::Client::new().post(format!("http://{address}/runtime/op"))
+            .header("x-hangar-internal", "secret-test").header("x-hangar-runtime-instance", "instance-test").header("content-type", "application/json")
+            .body(serde_json::json!({"protocol":crate::INTERNAL_PROTOCOL,"instance":"instance-test","key":"terminal_key","generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},"command":command}).to_string()).send();
+        assert!(send(serde_json::json!({"kind":"open","descriptor":descriptor})).await.unwrap().status().is_success());
+        let info = ctx.info("s").await.unwrap().unwrap();
+        let lease = ctx.hubs.acquire("s", Binding::from_info(&info).unwrap(), &ctx);
+        let life = registry.interaction_binding_readonly("s").await.unwrap();
+        assert_eq!(lease.hub.session_key().as_deref(), Some(life.conversation.as_str()));
+        assert!(send(serde_json::json!({"kind":"close"})).await.unwrap().status().is_success());
+        server.abort();
     }
 }

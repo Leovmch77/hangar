@@ -35,6 +35,10 @@ pub struct RowState {
     pub label: Option<String>,
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
+    /// O ID das `options`, como o Rust o publicou: a projeção só o transporta, e sem ele as opções
+    /// não respondem nada.
+    #[serde(default)]
+    pub interaction_id: Option<String>,
     pub problema: Option<String>,
     pub status_line: Option<String>,
     #[serde(default)]
@@ -53,6 +57,11 @@ pub struct RowState {
     /// Só Codex: o snapshot ao vivo vence o sidecar.
     #[serde(default)]
     pub codex_service_tier: Option<String>,
+    /// Só Pi, omp e Kimi: o histórico deles ainda é lido pelo Python.
+    #[serde(default)]
+    pub last_reply: Option<String>,
+    #[serde(default)]
+    pub last_reply_at: Option<f64>,
 }
 
 /// Todos os campos são obrigatórios na resposta: chave que falta é contrato quebrado, nunca vazio.
@@ -72,9 +81,8 @@ pub struct ListFacts {
     /// Escondidas do dono (sessão de convidado que ele não vê).
     pub hidden: HashSet<String>,
     pub problems: BTreeMap<String, String>,
-    /// Pergunta que o hook do plugin segura agora, por nome (`plugin_bridge.pergunta_pendente`):
-    /// a permissão segurada para o app não desenha cartão no pane.
-    pub held: BTreeMap<String, Value>,
+    // A pergunta que o plugin segura não vem mais daqui: a lista a lê do `plugin::Store` do Rust
+    // (`ListBridge::plugin_facts`); um `held` que o Python ainda mande é ignorado.
     pub stall_seconds: f64,
     /// Pedidos de navegador vivos, `{nome: {url, ts}}`, já vencidos pelo Python.
     pub nav: Value,
@@ -83,6 +91,9 @@ pub struct ListFacts {
     /// Só no pedido da sombra: a assinatura de cada linha da lista que o Python serviu, por nome.
     /// `None` sem lista recente dele (ninguém com ela aberta) ou fora da sombra.
     pub shadow: Option<super::shadow::PySigs>,
+    /// Aparelhos do dono que o Python atende (lista e chat pelo Connect): também são o app presente.
+    #[serde(default)]
+    pub owner_apps: u32,
     /// Nenhuma resposta boa ainda: acesso, escondidas, transferências e orquestrações são
     /// desconhecidos, não vazios. Todas as linhas levam o problema, e o hub não serve a lista ao dono.
     #[serde(skip)]
@@ -92,8 +103,8 @@ pub struct ListFacts {
 impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
-            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(), held: BTreeMap::new(),
-            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, unknown: true }
+            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
+            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, owner_apps: 0, unknown: true }
     }
 }
 
@@ -268,6 +279,9 @@ const MAX_NOTES: usize = 64;
 #[cfg(test)]
 const MAX_NOTES: usize = 100_000;
 static NOTES: LazyLock<Mutex<Vec<Note>>> = LazyLock::new(Default::default);
+/// Nos testes, tudo o que entrou na fila: a rodada da lista de outro teste a esvazia em paralelo.
+#[cfg(test)]
+static NOTED: LazyLock<Mutex<Vec<(String, String)>>> = LazyLock::new(Default::default);
 
 pub fn note(event: &'static str, session: &str, code: String, reason: &'static str) {
     let mut q = NOTES.lock().unwrap_or_else(|e| e.into_inner());
@@ -279,6 +293,8 @@ pub fn note(event: &'static str, session: &str, code: String, reason: &'static s
         return;
     }
     if crate::warn_limit::allow(Some(session), &format!("note:{event}:{code}")) {
+        #[cfg(test)]
+        NOTED.lock().unwrap_or_else(|e| e.into_inner()).push((session.to_owned(), code.clone()));
         q.push(Note { event, session: session.to_owned(), code, reason });
     }
 }
@@ -287,7 +303,7 @@ pub fn take_notes() -> Vec<Note> { std::mem::take(&mut *NOTES.lock().unwrap_or_e
 
 #[cfg(test)]
 pub fn notes_for(session: &str) -> Vec<String> {
-    NOTES.lock().unwrap().iter().filter(|n| n.session == session).map(|n| n.code.clone()).collect()
+    NOTED.lock().unwrap().iter().filter(|(noted, _)| noted == session).map(|(_, code)| code.clone()).collect()
 }
 
 /// Fatos sobre as linhas descobertas. Devolve as que vão à classificação e à decoração e as postas
@@ -297,8 +313,22 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
     let mut work = Vec::with_capacity(rows.len());
     let mut aside = Vec::new();
     for row in rows {
-        let row = overrides.remove(row.name.as_str()).cloned().unwrap_or(row);
-        if facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
+        let external = overrides.remove(row.name.as_str());
+        // Quem decide é a sessão descoberta: da Claude, vida e pergunta são do Rust e só a transferência
+        // vem do Python; a de outro agente em troca (mesmo que o destino seja Claude) segue a linha dela.
+        let claude = row.provider == "claude";
+        let row = match external {
+            Some(ext) if claude => {
+                let mut row = row;
+                row.transfer_id.clone_from(&ext.transfer_id);
+                row.transfer_phase.clone_from(&ext.transfer_phase);
+                if ext.problema.is_some() { row.problema.clone_from(&ext.problema); }
+                row
+            }
+            Some(ext) => ext.clone(),
+            None => row,
+        };
+        if (!claude || row.transfer_id.is_some()) && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
     }
     // Linha que a transferência cria (a sessão de origem já saiu da descoberta).
     for row in facts.overrides.iter().filter(|r| overrides.contains_key(r.name.as_str())) {
@@ -311,6 +341,7 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
             row.label.clone_from(&s.label);
             row.question.clone_from(&s.question);
             row.options.clone_from(&s.options);
+            row.interaction_id.clone_from(&s.interaction_id);
             row.problema.clone_from(&s.problema);
             row.status_line.clone_from(&s.status_line);
             row.pending_questions = s.pending_questions;
@@ -323,6 +354,8 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
                 row.codex_service_tier.clone_from(&s.codex_service_tier);
             } else {
                 row.conta.clone_from(&s.conta);
+                row.last_reply.clone_from(&s.last_reply);
+                row.last_reply_at = s.last_reply_at;
             }
         }
         if !ok { row.problema = Some(UNAVAILABLE.into()); }
@@ -347,6 +380,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A rodada da lista esvazia a fila em paralelo aos testes: o que um teste anotou continua visível.
+    #[test]
+    fn a_note_stays_visible_after_the_round_takes_the_queue() {
+        note("list_test", "notes-drained", "list_test_code".into(), "teste");
+        drop(take_notes());
+        assert_eq!(notes_for("notes-drained"), ["list_test_code"]);
+    }
 
     /// Python de mentira: `answer(caminho, n-ésimo pedido dos fatos)` dá (status, corpo); guarda caminho e corpo.
     async fn python(answer: fn(&str, usize) -> (u16, String)) -> (SocketAddr, Seen) {
@@ -454,6 +495,63 @@ mod tests {
         assert_eq!(names, [("orq-1", Some(ORQ_UNAVAILABLE))]);
         assert!(second.facts.hidden.contains("orq-1"), "escondida continua escondida");
         assert_eq!(diary(&seen, "rust.list_orq_unavailable").await["codigo"], "orq_unreadable");
+    }
+
+    #[test]
+    fn external_overrides_and_frozen_flags_do_not_decide_claude_life_or_question() {
+        let row = |provider: &str, id: &str| serde_json::from_value::<SessionRow>(json!({"name":"s","provider":provider,"interaction_id":id})).unwrap();
+        let facts = ListFacts { overrides: vec![row("claude", "old-python")], frozen: HashSet::from(["s".into()]),
+            unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row("claude", "rust")], &facts, true);
+        assert!(aside.is_empty());
+        assert_eq!(work[0].interaction_id.as_deref(), Some("rust"));
+        let facts = ListFacts { overrides: vec![row("pi", "pi")], frozen: HashSet::from(["s".into()]), unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row("pi", "")], &facts, true);
+        assert!(work.is_empty());
+        assert_eq!(aside[0].interaction_id.as_deref(), Some("pi"));
+    }
+
+    /// Parity M13: a última resposta de Pi, omp e Kimi (histórico ainda do Python) chega à linha.
+    #[test]
+    fn other_agents_last_reply_comes_with_the_facts() {
+        let row = serde_json::from_value::<SessionRow>(json!({"name":"p","provider":"pi"})).unwrap();
+        let state: RowState = serde_json::from_value(json!({"state":"idle","label":null,"question":null,"options":null,"problema":null,
+            "status_line":null,"last_activity":5.0,"limit_reset":null,"last_reply":"pronto","last_reply_at":4.0})).unwrap();
+        let facts = ListFacts { states: HashMap::from([("p".into(), state)]), unknown: false, ..Default::default() };
+        let (work, _) = apply(vec![row], &facts, true);
+        assert_eq!((work[0].last_reply.as_deref(), work[0].last_reply_at), (Some("pronto"), Some(4.0)));
+    }
+
+    /// Parity A4 (`test_facts_transfer_overrides_by_name`): a troca Claude → Codex põe fase e falha na
+    /// linha Claude, não a classifica enquanto corre, e a linha de recuperação aparece sem a origem.
+    #[test]
+    fn claude_transfer_keeps_phase_and_recovery_row() {
+        let row = |v: Value| serde_json::from_value::<SessionRow>(v).unwrap();
+        let ext = row(json!({"name":"s","provider":"claude","interaction_id":"old-python","transfer_id":"t1","transfer_phase":"prepared","problema":"restore_failed"}));
+        let facts = ListFacts { overrides: vec![ext.clone()], frozen: HashSet::from(["s".into()]), unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row(json!({"name":"s","provider":"claude","interaction_id":"rust"}))], &facts, true);
+        assert!(work.is_empty(), "transferência em curso não é classificada");
+        assert_eq!((aside[0].transfer_id.as_deref(), aside[0].transfer_phase.as_deref(), aside[0].problema.as_deref()),
+            (Some("t1"), Some("prepared"), Some("restore_failed")));
+        assert_eq!(aside[0].interaction_id.as_deref(), Some("rust"), "a pergunta segue a do Rust");
+        let (work, aside) = apply(vec![], &facts, true);
+        assert_eq!(work.len() + aside.len(), 1, "linha de recuperação sem a origem descoberta");
+        let done = ListFacts { overrides: vec![ext], frozen: HashSet::new(), unknown: false, ..Default::default() };
+        let (work, _) = apply(vec![row(json!({"name":"s","provider":"claude"}))], &done, true);
+        assert_eq!(work[0].transfer_phase.as_deref(), Some("prepared"), "fase terminal classifica e mostra a fase");
+    }
+
+    #[test]
+    fn projected_options_keep_their_id_and_a_python_held_question_is_ignored() {
+        let facts: ListFacts = serde_json::from_str(&facts_json(json!([]), Value::Null)
+            .replace(r#""states":{}"#, r#""states":{"cx":{"state":"awaiting_input","label":null,"question":"Rodar?",
+                "options":["Sim","Não"],"interaction_id":"shown-a","problema":null,"status_line":null}}"#)
+            .replace(r#""held":{}"#, r#""held":{"cx":{"id":"perm:velha","questions":[]}}"#)).unwrap();
+        assert_eq!(facts.states["cx"].interaction_id.as_deref(), Some("shown-a"), "o estado substituído chegou");
+        let row = serde_json::from_value::<SessionRow>(json!({"name": "cx", "provider": "codex", "interaction_id": "velho"})).unwrap();
+        let (work, _) = apply(vec![row], &ListFacts { unknown: false, ..facts }, true);
+        assert_eq!((work[0].options.as_ref().map(Vec::len), work[0].interaction_id.as_deref()), (Some(2), Some("shown-a")),
+            "opções sem o ID delas não respondem; ID de outra pergunta também não");
     }
 
     #[test]

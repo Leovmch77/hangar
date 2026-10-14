@@ -53,9 +53,29 @@ pub enum OperationKind {
     Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort, SetServiceTier,
     SetPermissionMode, Compact, ListModels, ListSkills, ReadRateLimits, ReadSettings,
     SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Commands, Cwd, Detach,
+    /// Interna: só o ator a cria, a partir da entrada reservada que a fila devolveu.
+    DispatchAsyncAnswer,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// Resposta a uma pergunta assíncrona do Codex com terminal, já formada e guardada na fila como
+/// entrada própria até sair como `turn/start`. `operation_id` é o da operação persistida (igual à entrada).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReservedAsyncAnswer {
+    pub request_id: String,
+    pub interaction_id: String,
+    pub entry_id: String,
+    pub operation_id: String,
+    pub text: String,
+}
+
+impl ReservedAsyncAnswer {
+    /// Reservada não é entregue: quem respondeu recebe o resultado incerto, nunca "permitido".
+    pub fn reply_payload(&self) -> Value {
+        serde_json::json!({"reserved":true,"entry_id":self.entry_id,"decision_confirmed":false})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCommand {
     pub operation_id: String,
@@ -72,16 +92,21 @@ pub enum EngineInput {
     Tick,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
     Write { frame: Value, operation_id: Option<String> },
     Publish { channel: String, data: Value },
     Policy { kind: String, request_id: RequestId, payload: Value },
+    /// Sidecar Claude e vínculo da conversa: gravados localmente sob a lease da fila.
+    PersistClaude { operation_id:Option<String>, patch:Value },
     Reply { operation_id: String, disposition: Disposition, payload: Value },
     WakeQueue,
     /// A CLI consumiu um comando local (`/clear`, `/cost`…), que não vira linha `user` no transcript.
     ConfirmLocalCommands,
+    /// Claude sem terminal: o eco (`isReplay`, mesmo `uuid`) da mensagem escrita por esta operação saiu, então
+    /// ela entrou na conversa (o prompt barrado por hook não ecoa).
+    InputEchoed { operation_id: String },
     StateChanged,
     /// Interface dos mods (superfície remota): quadro fora do diário, publicação, aviso e resposta aos apps.
     Surface { effect: crate::mods::model::SurfaceEffect },
@@ -91,24 +116,28 @@ pub enum Effect {
     /// O processo da sessão sobe de novo na mesma conversa (reiniciar, trocar o sandbox). Quem sobe é
     /// o ator; `patch` vai ao arquivo da sessão antes de pedir o comando novo ao Python.
     Respawn { operation_id: String, reason: String, patch: Value, reply: Value },
+    /// Grava na fila, numa atualização só, a entrada e a operação `DispatchAsyncAnswer`; quem
+    /// respondeu (`operation_id`) só recebe a resposta depois de gravada.
+    ReserveAsyncAnswer { operation_id: String, reservation: ReservedAsyncAnswer, command: RuntimeCommand },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DiagEvent { CodexVersion, CodexDecode, CodexBootstrap }
+pub enum DiagEvent { CodexVersion, CodexDecode, CodexBootstrap, CodexConnectionClosed }
 
 impl DiagEvent {
-    pub fn event(self) -> &'static str { match self { Self::CodexVersion => "rust.codex_version", Self::CodexDecode => "rust.codex_decode", Self::CodexBootstrap => "rust.codex_bootstrap" } }
+    pub fn event(self) -> &'static str { match self { Self::CodexVersion => "rust.codex_version", Self::CodexDecode => "rust.codex_decode", Self::CodexBootstrap => "rust.codex_bootstrap", Self::CodexConnectionClosed => "rust.codex_connection_closed" } }
     pub fn reason(self) -> &'static str {
         match self {
             Self::CodexVersion => "versão do Codex diferente da conferida ou ilegível; campo renomeado pode faltar",
             Self::CodexDecode => "formato inesperado do Codex: notificação ignorada (ciclo de vida lido cru), resposta com o padrão, pedido mostrado pela linha crua",
             Self::CodexBootstrap => "o Codex recusou abrir a conversa na subida; a sessão não fica pronta e mostra o problema",
+            Self::CodexConnectionClosed => "a conexão de controle com o app-server do Codex com terminal caiu; o ator reconecta ao mesmo processo",
         }
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeReply {
     pub operation_id: String,
@@ -120,6 +149,7 @@ pub struct RuntimeReply {
 /// só por aqui, fora do `events`, e o feed do hub a publica coalescida.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveState {
+    pub binding: Option<crate::interactions::InteractionBinding>,
     pub public_state: Value,
     pub preview: String,
     pub thinking: String,

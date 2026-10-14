@@ -43,6 +43,14 @@ describe('recusas novas dos mods', () => {
   });
 });
 
+describe('resposta recusada por identidade da pergunta', () => {
+  it('traduz os três códigos em vez do texto do servidor', () => {
+    expect(formataErro({ code: 'erro_interacao_sem_identidade', params: {}, msg: 'x' })).toBe(m.erro_interacao_sem_identidade());
+    expect(formataErro({ code: 'erro_interacao_desatualizada', params: {}, msg: 'x' })).toBe(m.erro_interacao_desatualizada());
+    expect(formataErro({ code: 'erro_interacao_indisponivel', params: {}, msg: 'x' })).toBe(m.erro_interacao_indisponivel());
+  });
+});
+
 describe('transcrição de áudio já enviado', () => {
   it('traduz o áudio sumido e a recusa do convidado', () => {
     expect(formataErro({ code: 'erro_upload_inexistente', params: {}, msg: 'x' })).toBe(m.erro_upload_inexistente());

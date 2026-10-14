@@ -95,6 +95,15 @@ def test_resgate_com_sessao_em_grupo_nao_gasta_o_codigo(client, monkeypatch):
     share_store.peek(code, kind="pair")
 
 
+def test_arbitro_sozinho_no_orq_recusa_par_externo_com_aviso_proprio(client, monkeypatch):
+    # Decisão do usuário (B13): o árbitro sozinho num `orq` recusa o convite com código próprio; o grupo fica.
+    _, code = share_store.create("X", "t:1", kind="pair")
+    monkeypatch.setattr(pair.PairLink, "get", lambda self: {"peers": [], "gid": "g", "task": "t", "orq": True})
+    r = _redeem(client, code)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_par_externo_orq"
+    share_store.peek(code, kind="pair")
+
+
 def test_resgate_com_conflito_de_tarefa_e_409(client, monkeypatch):
     _, code = share_store.create("X", "t:1", kind="pair")
     monkeypatch.setattr(pair, "join_group", lambda *a, **k: (_ for _ in ()).throw(pair.TaskConflito("t")))

@@ -321,3 +321,71 @@ def test_terminal_stalled_input_surfaces_reason_once_per_series(monkeypatch, tmp
     finally:
         gateway.close()
         owner.close_python_leases()
+
+
+class RustAdvancedLife(Gateway):
+    """O Rust troca a conversa sozinho (`/clear`) e passa à geração 2: só aceita pedidos dela."""
+
+    def __init__(self):
+        super().__init__('runtime_lease', 0)
+        self.generation, self.closed_with = 1, []
+
+    async def op(self, target, command, operation_id, clock):
+        if command['kind'] == 'close':
+            self.closed_with.append(target['generation'])
+            if target['generation'] != self.generation:
+                raise RustOpError('IPC recusou a operação (503: runtime_generation)', 503, 'runtime_generation')
+        return await super().op(target, command, operation_id, clock)
+
+
+def test_python_follows_the_generation_the_rust_advanced_and_close_works(monkeypatch, tmp_path):
+    # Parity A1: `/clear` (ou reabertura em bypass) avança a geração no Rust; o Python seguia com a
+    # velha e fechar, renomear e trocar de conta recebiam `runtime_generation`.
+    gateway = RustAdvancedLife()
+    owner, slot, _, _ = setup(monkeypatch, tmp_path, gateway)
+    finished = None
+    async def events():
+        # O Rust grava a vida nova na fila antes de avisar.
+        state = json.loads(slot.binding.state_path.read_bytes())
+        slot.binding.state_path.write_text(json.dumps({**state, 'generation': 2}))
+        gateway.generation = 2
+        yield {'key': slot.binding.key, 'generation': 2, 'revision': 0, 'channel': 'reset',
+               'data': {'conversation': 'sid2', 'generation': 2}}
+        await finished.wait()
+    gateway.events = events
+    async def flow():
+        nonlocal finished
+        finished = asyncio.Event()
+        owner.loop = asyncio.get_running_loop()
+        assert await _to_rust(owner, 'session')
+        task = asyncio.create_task(owner._events(gateway, gateway.instance))
+        try:
+            for _ in range(50):
+                if slot.binding.generation == 2:
+                    break
+                await asyncio.sleep(0)
+            assert slot.binding.generation == 2
+            assert slot.binding.meta['session_id'] == 'sid2' and slot.binding.meta['terminal']['conversation'] == 'sid2'
+            assert slot.binding.meta['terminal']['generation'] == 2
+            assert slot.binding.jsonl.endswith('sid2.jsonl')
+            reply = await owner.detach('session', restore=False)
+            assert reply == {'closed': True} and gateway.closed_with == [2]
+        finally:
+            finished.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    try:
+        asyncio.run(flow())
+    finally:
+        gateway.close()
+        owner.close_python_leases()
+
+
+def test_claude_headless_opens_managed_with_the_sidecar_dir():
+    # Parity A3: sem a pasta o Rust abria o Claude sem terminal sem administrar o processo, e o que caía
+    # ficava parado até alguém sair e entrar na conversa.
+    from app.adapters.claude_headless import sessions
+    headless = {'provider': 'claude', 'headless': True, 'name': 's'}
+    assert rc._open_command(headless) == {'kind': 'open', 'descriptor': {**headless, 'sidecar_dir': str(sessions._dir())}}
+    terminal = {'provider': 'claude', 'headless': False, 'name': 's'}
+    assert rc._open_command(terminal) == {'kind': 'open', 'descriptor': terminal}

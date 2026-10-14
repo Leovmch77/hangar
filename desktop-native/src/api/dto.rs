@@ -66,6 +66,10 @@ pub struct SessionInfo {
     pub tracked: Option<bool>,
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
+    #[serde(default)] pub interaction_id: Option<String>,
+    /// Formulário da pergunta aberta (`AskUserQuestion`, também a segurada pelo plugin), com o ID dele: o
+    /// passo a passo responde pelo `/answer` logo ao abrir a sessão, sem esperar o stream.
+    #[serde(default)] pub ask_form: Option<Value>,
     /// Perguntas esperando resposta fora do terminal (as assíncronas do Codex); a aba mostra "? N".
     #[serde(default)] pub pending_questions: u32,
     pub problema: Option<String>,
@@ -543,6 +547,7 @@ pub struct AskPayload {
     pub provider: Option<String>,
     // Valor cru: o Codex recusa id com outro tipo JSON (número × texto).
     pub request_id: Option<Value>,
+    #[serde(default)] pub interaction_id: Option<String>,
     #[serde(default)] pub is_async: bool,
     #[serde(default)] pub questions: Vec<AskItem>,
 }

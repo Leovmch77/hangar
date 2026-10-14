@@ -75,6 +75,23 @@ def test_unreadable_rollout_preserves_queue(tmp_path, monkeypatch):
     assert queue.path.read_bytes() == before
 
 
+def test_rust_owned_codex_queue_is_never_written_by_python(tmp_path, monkeypatch):
+    # A projeção é do Rust: com ele dono do Codex com terminal, o Python não confirma nem reconcilia.
+    from types import SimpleNamespace
+    from app import runtime_coordinator
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    queue = pqueue.PromptQueue("codex-queue")
+    queue.append("[de: outra] orientação", delivered=True)
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "id": "real",
+        "content": [{"type": "input_text", "text": "[de: outra] orientação"}]}}) + "\n")
+    before = queue.path.read_bytes()
+    owner = SimpleNamespace(mode="rust", managed_runtime=lambda name: False, rust_owns=lambda provider, headless: True)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    sse._confirm_codex_queue("codex-queue", str(path))
+    assert queue.path.read_bytes() == before
+
+
 async def test_api_reserves_uncertain_codex_send_before_rpc_and_never_replays(tmp_path, monkeypatch):
     from app import api
     from app.adapters.codex.adapter import CodexAdapter
@@ -150,3 +167,24 @@ def test_idle_codex_confirmation_does_not_release_unproved_entry(tmp_path, monke
     row = queue.load()[0]
     assert row["id"] == entry["id"] and row["delivered"] is True
     assert not row.get("confirmed") and not row.get("attempts") and not row.get("desistiu")
+
+
+def test_confirm_and_drain_never_writes_the_projection_of_a_rust_codex_terminal(tmp_path, monkeypatch):
+    # O hook ocioso agenda `_confirm_and_drain`: com o Rust dono do Codex com terminal, a projeção da fila é
+    # dele; o Python gravar `confirmed` nela era desfeito pelo Rust e a bolha sumia e voltava.
+    from types import SimpleNamespace
+    from app import api, runtime_coordinator
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    queue = pqueue.PromptQueue("codex-term")
+    queue.append("[de: outra] orientação", delivered=True)
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "id": "real",
+        "content": [{"type": "input_text", "text": "[de: outra] orientação"}]}}) + "\n")
+    before = queue.path.read_bytes()
+    owner = SimpleNamespace(mode="rust", managed_runtime=lambda name: False, rust_owns=lambda provider, headless: True)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    monkeypatch.setattr(api, "_cached_info_sync", lambda name: SimpleNamespace(name=name, jsonl=str(path), provider="codex", headless=False))
+    monkeypatch.setattr(api, "_headless", lambda name: False)
+    monkeypatch.setattr(api, "_CONFIRM_GRACE", -10.0)     # a entrada já passou do prazo de conferência
+    api._confirm_and_drain("codex-term")
+    assert queue.path.read_bytes() == before

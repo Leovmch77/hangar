@@ -664,8 +664,9 @@ class FalhaDoNavegador extends Error {
  * `perguntar(estado, perguntas)` fala com o Jev, `executar(verbo, args)` com o navegador e
  * `escreverTexto(pedido)` com o LLM pequeno.
  */
-async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, permitirRisco = false, log = () => {} }) {
-  const feito = [];
+async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, permitirRisco = false, log = () => {}, feitoInicial = [] }) {
+  // Quem repetiu um roteiro e divergiu entrega os passos já feitos: o Jev continua dali.
+  const feito = [...feitoInicial];
   let anterior = null;
   let repetidas = 0;
   let esperouCarregar = false;
@@ -1018,4 +1019,5 @@ module.exports = {
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
+  SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo,
 };

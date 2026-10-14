@@ -83,12 +83,20 @@ mod tests {
     #[tokio::test]
     async fn ipv6_wildcard_inspects_the_real_dual_stack_setting() {
         for v6_only in [false, true] {
-            let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).unwrap();
-            socket.set_only_v6(v6_only).unwrap();
-            socket.set_nonblocking(true).unwrap();
-            socket.bind(&"[::]:0".parse::<SocketAddr>().unwrap().into()).unwrap();
-            socket.listen(128).unwrap();
-            let public = TcpListener::from_std(socket.into()).unwrap();
+            // A ponte abre a MESMA porta em 127.0.0.1, que o socket só-IPv6 não reserva. Porta abaixo
+            // da faixa efêmera (Linux 32768+, macOS e Windows 49152+): o `bind` em porta 0 de outro
+            // processo nunca a pega no meio do teste, como acontecia com a efêmera do IPv6.
+            let public = (0..12_000u16).find_map(|i| {
+                let port = 20_000 + (std::process::id() as u16).wrapping_add(i) % 12_000;
+                let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).unwrap();
+                socket.set_only_v6(v6_only).unwrap();
+                socket.set_nonblocking(true).unwrap();
+                let free_v4 = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
+                (free_v4 && socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into()).is_ok()).then(|| {
+                    socket.listen(128).unwrap();
+                    TcpListener::from_std(socket.into()).unwrap()
+                })
+            }).expect("porta livre abaixo da faixa efêmera");
             let bridge = bind(&public).await.unwrap();
             assert_eq!(bridge.is_some(), v6_only);
             let ipv4 = SocketAddr::from((Ipv4Addr::LOCALHOST, public.local_addr().unwrap().port()));

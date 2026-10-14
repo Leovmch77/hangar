@@ -90,6 +90,12 @@ fn two_way(here: &str, name: &str, going: i64, back: i64) -> Stateful<Div> {
         .child(node(name, theme::muted()))
 }
 
+/// A resposta de `/api/peers/anunciar` (ou os `avisos` de gravar o nome): uma linha por outra máquina.
+pub(super) fn parse_announced(value: Option<&Value>) -> Option<Vec<(String, bool, String)>> {
+    value?.as_array()?.iter().map(|a| Some((a.get("id")?.as_str()?.to_owned(), a.get("estado")?.as_str()? == "ok",
+        a.get("motivo").and_then(Value::as_str).unwrap_or_default().to_owned()))).collect()
+}
+
 pub(super) fn parse_reach(value: &Value) -> Option<Reach> {
     // Uma linha fora do formato derruba a leitura inteira: sumir com ela mudaria o veredito sem aviso.
     let addresses = value.get("enderecos")?.as_array()?.iter().map(|e| Some(Address {
@@ -378,6 +384,7 @@ pub(super) enum MachinesReply {
     Reach(u64, Result<Value, Failure>),
     Id(u64, Result<Value, Failure>),
     IdSaved(u64, Result<Value, Failure>),
+    Announced(u64, Result<Value, Failure>),
     Restart(u64, Result<Value, Failure>),
     RestartEnd(u64, RestartEnd),
     Upgrade(u64, Result<Value, Failure>),
@@ -440,6 +447,10 @@ pub(in crate::app) struct Machines {
     id_seq: u64,
     id_error: Option<String>,
     id_saved: bool,
+    announcing: bool,
+    announce_seq: u64,
+    /// Cada outra máquina avisada do nome desta: (nome, recebeu, motivo).
+    announced: Option<Result<Vec<(String, bool, String)>, String>>,
     restart: Restart,
     upgrade: Upgrade,
     advanced: bool,
@@ -508,6 +519,7 @@ impl Hangar {
         // Atualização em curso segue na tela; o resultado de uma anterior sai, como o do reinício.
         if !m.upgrade.busy() { m.upgrade = Upgrade { seq: m.upgrade.seq + 1, ..Upgrade::default() }; }
         (m.id_saved, m.leave_error, m.peer_error, m.adopt_error, m.far_failed) = (false, None, None, None, false);
+        m.announced = None;
         // "Não respondem" nasce fechado, como o `<details>` do web remontado; o painel volta a este servidor.
         (m.silent_open, m.peer_open, m.peer_advanced, m.rename) = (false, None, false, None);
         // Medições só em memória: cada abertura mede de novo, e a resposta de um teste de antes cai pelo `seq`.
@@ -768,6 +780,20 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Regrava esta máquina em cada outra: nome, endereço e token de agora.
+    fn announce_machine(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        let m = &mut self.machines;
+        if m.announcing { return; }
+        m.announce_seq += 1;
+        (m.announcing, m.announced) = (true, None);
+        let (seq, done) = (m.announce_seq, self.machines_send_later());
+        self.runtime.spawn(async move {
+            done(MachinesReply::Announced(seq, api.server_send(reqwest::Method::POST, &["peers", "anunciar"], None, 60).await)).await
+        });
+        cx.notify();
+    }
+
     fn undo_machine_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let loaded = self.machines.id_loaded().to_owned();
         if let Some((input, _)) = &self.machines.id_input { input.update(cx, |state, cx| state.set_value(loaded, window, cx)); }
@@ -881,9 +907,12 @@ impl Hangar {
                 if seq != m.id_seq { return; }
                 m.id_saving = false;
                 // O motivo do servidor, como o web; o texto de "entrega incerta" é do envio de mensagens.
+                let result_avisos = result.as_ref().ok().and_then(|v| v.get("avisos")).cloned();
                 match result.map_err(|e| Self::fetch_failure(&e))
                     .and_then(|v| v.get("identificador").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| tr("invalid_response"))) {
                     Ok(saved) => {
+                        // Nome igual ao de antes não avisa ninguém: a lista vazia não diz nada e fica de fora.
+                        m.announced = parse_announced(result_avisos.as_ref()).filter(|l| !l.is_empty()).map(Ok);
                         // Mais novo que qualquer leitura em voo: ela passa a ser descartada.
                         let newest = m.id.start();
                         m.id.finish(newest, Ok(saved.clone()));
@@ -893,6 +922,13 @@ impl Hangar {
                     // A recusa do backend ("identificador invalido…") chega como veio; o digitado fica no campo.
                     Err(error) => m.id_error = Some(error),
                 }
+            }
+            MachinesReply::Announced(seq, result) => {
+                let m = &mut self.machines;
+                if seq != m.announce_seq { return; }
+                m.announcing = false;
+                m.announced = Some(result.map_err(|e| Self::fetch_failure(&e))
+                    .and_then(|v| parse_announced(Some(&v)).ok_or_else(|| tr("invalid_response"))));
             }
             MachinesReply::Restart(seq, result) => {
                 let r = &mut self.machines.restart;
@@ -1614,11 +1650,32 @@ impl Hangar {
                 .into_any_element())
         } else { None };
         let id_read_error = m.id.value.as_ref().and_then(|v| v.as_ref().err()).filter(|_| !m.id.loading).cloned();
+        // As outras máquinas guardam este nome, endereço e token; quando um deles muda, elas precisam ouvir de novo.
+        let announce = (id_ready && !id.is_empty() && !changed && !m.id_saving).then(|| {
+            let line = |key: &str, text: String, color: Hsla| div().id(SharedString::from(format!("machines-announce-{key}")))
+                .text_size(px(12.5)).text_color(color).whitespace_normal().child(text);
+            let lines: Vec<Stateful<Div>> = match &m.announced {
+                None => Vec::new(),
+                Some(Err(error)) => vec![line("error", error.clone(), theme::danger())],
+                Some(Ok(list)) if list.is_empty() => vec![line("none", tr("machines_announce_none"), theme::muted())],
+                Some(Ok(list)) => list.iter().map(|(peer, ok, why)| if *ok {
+                    line(peer, tr("machines_announce_ok").replace("{maquina}", peer), theme::success())
+                } else {
+                    line(peer, tr("machines_announce_failed").replace("{maquina}", peer).replace("{erro}", why), theme::danger())
+                }).collect(),
+            };
+            div().flex().flex_col().gap(px(4.))
+                .child(div().flex().child(Button::new("machines-announce").outline().small().icon(IconName::RotateCw)
+                    .label(tr(if m.announcing { "machines_announcing" } else { "machines_announce" })).loading(m.announcing).disabled(m.announcing)
+                    .on_click(cx.listener(|this, _, _, cx| this.announce_machine(cx)))))
+                .child(div().id("machines-announce-result").role(Role::Status).flex().flex_col().gap(px(2.)).children(lines))
+        });
         let identifier = div().flex().flex_col().gap(px(8.))
             .when(id_ready && id.is_empty(), |el| el.child(muted(tr("machines_id_legend")))
                 .child(div().text_size(px(12.5)).text_color(theme::warning()).whitespace_normal().child(tr("machines_id_unset"))))
             .child(id_row)
             .children(id_state)
+            .children(announce)
             .when_some(m.id_error.clone(), |el, error| el.child(div().id("machines-id-error").role(Role::Alert).text_size(px(12.5))
                 .text_color(theme::danger()).whitespace_normal().child(error)))
             // Sem leitura boa o campo não grava: o vazio de uma falha apagaria o nome que o servidor tem.

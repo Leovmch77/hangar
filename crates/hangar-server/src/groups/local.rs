@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 pub type Snapshot = BTreeMap<String, Option<Sidecar>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JoinRefusal { Mix, TaskConflict { existing: String }, AlreadyGrouped }
+pub enum JoinRefusal { Mix, TaskConflict { existing: String }, AlreadyGrouped, Orq }
 
 pub struct JoinInput<'a> {
     pub name: &'a str,
@@ -154,8 +154,11 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
 /// Par com sessão de outra pessoa: só o sidecar local existe, com o endereço como único peer.
 pub fn plan_external_link(read: &dyn Fn(&str) -> Option<Sidecar>, local: &str, address: &str,
     harness: &BTreeMap<String, String>, fresh_gid: &dyn Fn() -> String) -> Result<Vec<(String, Sidecar)>, JoinRefusal> {
-    if read(local).is_some() {
-        return Err(JoinRefusal::AlreadyGrouped);
+    match read(local) {
+        // Árbitro de uma orquestração: o grupo dela fica, com o aviso próprio.
+        Some(sidecar) if sidecar.orq => return Err(JoinRefusal::Orq),
+        Some(_) => return Err(JoinRefusal::AlreadyGrouped),
+        None => {},
     }
     let sidecar = Sidecar { peers: vec![address.to_owned()], task: Some(String::new()), gid: fresh_gid(), harness: harness.clone(), orq: false, fed: None };
     Ok(vec![(local.to_owned(), sidecar)])

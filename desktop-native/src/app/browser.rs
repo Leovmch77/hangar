@@ -1729,9 +1729,32 @@ impl Hangar {
         }
     }
 
+    /// `/cdp/browser/<nome>` sem token: a sessão é do servidor desta máquina, e o navegador dela nasce (escondido, como
+    /// no `hangar-preview open` fora da tela) se ainda não existir. Devolve a chave.
+    #[cfg(target_os = "linux")]
+    fn open_for_cdp(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<String, (u16, String)> {
+        let local = self.api.as_ref().is_some_and(|api| api.is_loopback());
+        let Some(server) = self.server.as_deref().filter(|_| local) else {
+            return Err((503, "erro: no_local_server: o servidor ativo do app nao e o desta maquina".into()));
+        };
+        if !self.sessions.iter().any(|s| s.name == name) {
+            return Err((404, format!("erro: session_not_found: a sessao {name} nao existe no servidor desta maquina")));
+        }
+        let key = format!("{}::{name}", super::servers::norm(server));
+        let browser = self.browser_for(key.clone(), window, cx);
+        browser.update(cx, |panel, cx| if panel.starting.is_none() && panel.engine().is_none_or(|e| !e.alive()) {
+            panel.go("about:blank".into(), By::Agent, window, cx);
+        });
+        // A aba aparece na sessão; a da tela não troca de aba sozinha.
+        self.side.browser_open.insert(key.clone());
+        if self.browser_key().as_deref() != Some(key.as_str()) { self.side.tabs.insert(key.clone(), SideTab::Browser); }
+        cx.notify();
+        Ok(key)
+    }
+
     /// Pedido do servidor local: vai ao navegador da sessão pedida, esteja ela na tela ou não.
     #[cfg(not(target_os = "macos"))]
-    pub(super) fn dispatch_preview(&mut self, request: crate::browser::server::Request, cx: &mut Context<Self>) {
+    pub(super) fn dispatch_preview(&mut self, request: crate::browser::server::Request, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::{control::Reply, server::Request};
         fn answer(reply: futures::channel::oneshot::Sender<Reply>, text: String) { let _ = reply.send(Reply::Text(text)); }
         let missing = |key: &str| format!("erro: a sessao {key} nao tem navegador aberto");
@@ -1757,6 +1780,14 @@ impl Hangar {
                 if let Some(b) = self.side.browsers.get(&key) { b.read(cx).unwatch(id); }
                 return;
             }
+            #[cfg(target_os = "linux")]
+            Request::Pipe { key, reply } => {
+                let found = self.side.browsers.get(&key).and_then(|b| b.read(cx).engine().filter(|e| e.alive()).map(|e| e.port()));
+                let _ = reply.send(found.ok_or_else(|| missing(&key)));
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            Request::Open { name, reply } => { let _ = reply.send(self.open_for_cdp(&name, window, cx)); return; }
         };
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
         if verb == "login" {

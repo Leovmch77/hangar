@@ -647,7 +647,8 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "a CLI não recebeu a primeira leitura de confirmação"
             );
-            tokio::task::yield_now().await;
+            // Dormir, não girar: o giro ocupa a CPU que a CLI esperada precisa para subir.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let gate = service.claude_logins.gates.gate(&key);
         let control = gate.lock().await;
@@ -664,7 +665,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "a confirmação não avaliou a fronteira de 299 s"
             );
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let control = gate.lock().await;
         assert!(
@@ -774,7 +775,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !status_called.exists() {
             assert!(std::time::Instant::now() < deadline, "a CLI não foi lida");
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // Entre duas leituras: o navegador concluiu, a CLI gravou o token, e o cancelar chega
         // antes da leitura seguinte.

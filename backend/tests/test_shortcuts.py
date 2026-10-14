@@ -404,8 +404,24 @@ def test_run_code_uses_declared_linux_shell_and_rejects_powershell(client, monke
     wrong = client.post("/api/sessions/s/run-code", json={"command": "Write-Output 1", "language": "powershell"}, headers=_auth())
     assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "erro_run_code_shell_incompativel"
     right = client.post("/api/sessions/s/run-code", json={"command": "printf BASH > prova.txt", "language": "bash"}, headers=_auth())
-    assert right.status_code == 202
+    assert right.status_code == 202, right.text
     assert _wait_file(tmp_path / "prova.txt") == "BASH"
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("1\t\t\n", (True, None)),
+    ("1\t0\t\n", (False, 0)),
+    ("1\t3\t\n", (False, 3)),
+    ("1\t\tHUP\n", (False, None)),
+    ("0\t\t\n", (True, None)),
+])
+def test_dead_pane_without_exit_code_is_still_settling(monkeypatch, line, expected):
+    # O tmux marca o pane morto ao ler o fim do pty e só recolhe o código no SIGCHLD seguinte.
+    if os.name == "nt":
+        pytest.skip("o psmux devolve o codigo por arquivo")
+    from app import shortcut_terminals as st, tmux
+    monkeypatch.setattr(tmux, "RUN", lambda args, **kw: subprocess.CompletedProcess(args, 0, line, ""))
+    assert st.status("cp-short-s-abcdef") == expected
 
 
 def test_windows_run_code_writes_powershell_script_with_bom_and_one_crlf(monkeypatch, tmp_path):

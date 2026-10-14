@@ -12,7 +12,7 @@ use axum::response::Response;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
-use super::{Ctx, Write, WriteRoute, admit, busy_body, detail_body, json_response, relay, route_write, session_name};
+use super::{Ctx, Write, WriteRoute, admit, busy_body, detail_body, invalid_body, json_response, route_write};
 use crate::mods::state::random_hex;
 use crate::proxy::Forward;
 use crate::routes::{AppState, cors, pass};
@@ -21,6 +21,7 @@ use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, Runti
 
 const MSG_UNKNOWN: &str = "resultado incerto; entrada conservada sem reenvio";
 const MSG_REJECTED: &str = "entrada recusada pelo runtime";
+const MSG_CLEAR_WAIT: &str = "Espere o /clear terminar e envie de novo.";
 pub(super) const MSG_STEER_UNKNOWN: &str = "resultado incerto; a operação foi conservada sem reenvio";
 pub(super) const MSG_STEER_REFUSED: &str = "operação recusada pelo runtime";
 pub(super) const MSG_CONTROL_DEFERRED: &str = "O controle não foi executado; confira a sessão.";
@@ -32,6 +33,8 @@ pub struct Params<'a> {
     pub text: &'a str,
     pub steer: bool,
     pub terminal: bool,
+    /// No Codex a barra também tem linha na fila (o ator anexa toda entrada), como no `_send_one_codex_locked`.
+    pub codex: bool,
     pub operation_id: &'a str,
 }
 
@@ -63,9 +66,15 @@ fn failed(code: String, msg: String) -> (Sent, Diary) {
 pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent, Diary) {
     let reply = match sent {
         Ok(reply) => reply,
+        // Texto durante a trava do `/clear`: fora da fila (a troca de conversa a esvaziaria calada), o app o guarda.
+        Err(error) if error.code == "runtime_clear_barrier" => {
+            let refused = Sent::Refused { code: "erro_aguarde_clear", msg: MSG_CLEAR_WAIT.into(), params: json!({}) };
+            return (refused, Some(("runtime.send_failed", diary_code(&error.code))));
+        }
         Err(error) => return failed(error.code.clone(), error.to_string()),
     };
-    let (queued, entry) = (queued(p.text), p.steer && queued(p.text));
+    let queued = queued(p.text) || p.codex;
+    let entry = p.steer && queued;
     let unknown = reply.disposition == Disposition::Unknown;
     // Com terminal a entrega incerta é confirmada depois pelo transcript, uma vez, sem reenvio.
     let proved_later = unknown && queued && p.terminal;
@@ -88,9 +97,10 @@ pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent,
     }
 }
 
-/// Só sem terminal: com ele o Claude não promove (só o Kimi), então não há `steer_queue`.
+/// Sem terminal, ou Codex com terminal (o turno é do app-server, como o `steer_queue` do Python): o Claude
+/// com terminal não promove (só o Kimi).
 pub fn wants_steer_queue(p: &Params, sent: &Sent) -> bool {
-    !p.terminal && p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
+    (!p.terminal || p.codex) && p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
 }
 
 pub fn was_steered(operation_id: &str, promoted: &Result<RuntimeReply, RuntimeError>) -> bool {
@@ -162,12 +172,40 @@ pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>
     }
 }
 
-/// O `/compact` do Codex é controle (`thread/compact/start`), não texto: quem decide é o `_send_managed` do Python.
-pub fn relays_codex_input(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
+/// O `/compact` do Codex é controle do motor (`thread/compact/start`), não texto, com e sem terminal.
+pub fn is_codex_compact(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
+
+/// Emoji cortado no ditado ou na colagem chega como `\ud83d` solto, que o serde recusa: vira U+FFFD e a
+/// mensagem sai, como no Python. Par completo e `\\u` literal ficam como estão.
+pub(crate) fn scrub_lone_surrogates(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let escape = |at: usize| -> Option<u16> {
+        let hex = bytes.get(at..at + 6)?;
+        if hex[0] != b'\\' || hex[1] != b'u' { return None; }
+        u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()
+    };
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' { if let Some(out) = out.as_mut() { out.push(bytes[i]); } i += 1; continue; }
+        let step = match escape(i) {
+            Some(0xD800..=0xDBFF) if escape(i + 6).is_some_and(|low| (0xDC00..=0xDFFF).contains(&low)) => 12,
+            Some(0xD800..=0xDFFF) => {
+                let out = out.get_or_insert_with(|| bytes[..i].to_vec());
+                out.extend_from_slice(&[b'\\', b'u', b'f', b'f', b'f', b'd']);
+                i += 6; continue;
+            }
+            Some(_) => 6,
+            None => 2.min(bytes.len() - i),
+        };
+        if let Some(out) = out.as_mut() { out.extend_from_slice(&bytes[i..i + step]); }
+        i += step;
+    }
+    out.map_or(std::borrow::Cow::Borrowed(bytes), std::borrow::Cow::Owned)
+}
 
 /// Corpo do `InputBody` do FastAPI: só `text` (texto) e `steer` (booleano); o resto é 422 dele.
 fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
-    let object = serde_json::from_slice::<Value>(bytes).ok()?;
+    let object = serde_json::from_slice::<Value>(&scrub_lone_surrogates(bytes)).ok()?;
     let object = object.as_object()?;
     if object.keys().any(|k| k != "text" && k != "steer") { return None; }
     let steer = match object.get("steer") { None => false, Some(Value::Bool(b)) => *b, Some(_) => return None };
@@ -180,12 +218,6 @@ pub(crate) fn json_content_type(headers: &HeaderMap) -> bool {
     let Ok(text) = value.to_str() else { return false };
     let mime = text.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
     mime == "application/json" || (mime.starts_with("application/") && mime.ends_with("+json"))
-}
-
-fn is_clear(text: &str) -> bool { text.split_whitespace().next() == Some("/clear") }
-
-fn first_token_is_clear(bytes: &Bytes) -> bool {
-    serde_json::from_slice::<Value>(bytes).ok().is_some_and(|v| v["text"].as_str().is_some_and(is_clear))
 }
 
 pub(super) fn answer(ctx: &Ctx, (status, body): (StatusCode, Value)) -> Response {
@@ -207,7 +239,7 @@ fn report(st: &AppState, name: &str, diary: Diary) {
 /// O miolo do `/input` depois da admissão: envia ao ator, orienta se pedido e responde como o Python.
 async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer: bool) -> (StatusCode, Value) {
     let operation_id = random_hex(16);
-    let params = Params { text, steer, terminal: target.terminal, operation_id: &operation_id };
+    let params = Params { text, steer, terminal: target.terminal, codex: target.provider == "codex", operation_id: &operation_id };
     let sent = target.handle.command(RuntimeCommand { operation_id: operation_id.clone(), kind: OperationKind::Input,
         payload: json!({"text": text, "pre_transcript": false}) }).await;
     let (sent, diary) = classify(&params, &sent);
@@ -223,18 +255,18 @@ async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer
     input_answer(&sent, steered)
 }
 
+/// `/clear` é texto como os outros: o ator do terminal levanta a barreira e vigia a conversa nova, e
+/// `reconcile_claude` esvazia a fila e reabre nela; nada passa pelo Python.
 pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    // O /clear com terminal esvazia a fila sob `freeze` no Python: segue a ele antes da porta.
-    let terminal = match (st.state.runtime.get(), session_name(req.uri().path())) {
-        (Some(runtime), Some(name)) => runtime.is_terminal(&name).await,
-        _ => false,
-    };
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Input, |body| terminal && first_token_is_clear(body)).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Input).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
-    if relays_codex_input(&ctx.target.provider, &text) { return relay(ctx, bytes).await; }
+    let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    if is_codex_compact(&ctx.target.provider, &text) {
+        let result = super::codex::compact(&ctx.target, &text).await;
+        return answer(&ctx, result);
+    }
     let result = send(&ctx.st, &ctx.name, &ctx.target, &text, steer).await;
     answer(&ctx, result)
 }
@@ -242,18 +274,28 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 /// Recado de fora da rota (aviso de grupo): o mesmo `/input` com `steer: false` que o `_enviar` do
 /// Python faz. `Err` = o `detail` da resposta, o envelope `{code, params, msg}`.
 pub async fn deliver_text(st: &AppState, name: &str, text: &str) -> Result<(), Value> {
+    let (status, reply) = deliver_reply(st, name, text).await;
+    if status.is_success() { return Ok(()); }
+    Err(match reply.get("detail") {
+        Some(detail) if !detail.is_null() => detail.clone(),
+        // O mesmo genérico do `_deliver` do Python para resposta sem o envelope.
+        _ => json!({"code": "erro_envio_falhou_desconhecida", "params": {}, "msg": "falha desconhecida no envio"}),
+    })
+}
+
+/// O mesmo recado, com a resposta inteira do `/input` (o broadcast a devolve por sessão).
+pub async fn deliver_reply(st: &AppState, name: &str, text: &str) -> (StatusCode, Value) {
     let body = json!({"text": text, "steer": false}).to_string();
     let route = match st.state.runtime.get() {
-        // Mesma ordem do handler: o /clear com terminal segue ao Python antes da porta.
-        Some(runtime) if !(runtime.is_terminal(name).await && is_clear(text)) =>
-            route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
-        _ => Write::Python,
+        Some(runtime) => route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
+        None => Write::Python,
     };
-    let (status, reply) = match route {
-        // O /compact do Codex o handler também repassa ao Python, com o passe já solto.
-        Write::Rust(held, target) if relays_codex_input(&target.provider, text) => {
+    match route {
+        // O /compact do Codex é do motor, como no handler.
+        Write::Rust(held, target) if is_codex_compact(&target.provider, text) => {
+            let result = super::codex::compact(&target, text).await;
             drop(held);
-            relay_as_owner(st, name, body).await
+            result
         }
         Write::Rust(held, target) => {
             let result = send(st, name, &target, text, false).await;
@@ -262,13 +304,79 @@ pub async fn deliver_text(st: &AppState, name: &str, text: &str) -> Result<(), V
         }
         Write::Busy => (StatusCode::CONFLICT, busy_body()),
         Write::Python => relay_as_owner(st, name, body).await,
-    };
-    if status.is_success() { return Ok(()); }
-    Err(match reply.get("detail") {
-        Some(detail) if !detail.is_null() => detail.clone(),
-        // O mesmo genérico do `_deliver` do Python para resposta sem o envelope.
-        _ => json!({"code": "erro_envio_falhou_desconhecida", "params": {}, "msg": "falha desconhecida no envio"}),
-    })
+        Write::Failed(error) => (StatusCode::SERVICE_UNAVAILABLE, detail_body(&error.code, &error.message, json!({}))),
+    }
+}
+
+/// Corpo do `BroadcastBody` do FastAPI (estrito): `names` não vazio de textos e `text`.
+fn parse_broadcast(bytes: &Bytes) -> Option<(Vec<String>, String)> {
+    let object = serde_json::from_slice::<Value>(bytes).ok()?;
+    let object = object.as_object()?;
+    if object.keys().any(|k| k != "names" && k != "text") { return None; }
+    let names: Vec<String> = object.get("names")?.as_array()?.iter().map(|n| n.as_str().map(str::to_owned)).collect::<Option<_>>()?;
+    let text = object.get("text")?.as_str()?.to_owned();
+    (!names.is_empty()).then_some((names, text))
+}
+
+/// `POST /api/broadcast` do dono: o alvo com entrada no Rust (Claude ou Codex) ou Codex com terminal que dá
+/// para adotar recebe aqui, pela entrega do `/input`, e nunca passa pelo Python; os demais seguem ao Python
+/// num pedido só com os nomes deles, e os resultados se juntam na ordem pedida. Sem alvo do Rust, o pedido
+/// vai ao Python como chegou.
+pub async fn broadcast(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, owner) = crate::routes::gate(&st, peer, &req);
+    let (Some(runtime), true) = (st.state.runtime.get().cloned(), owner) else { return pass(&st, req, &fwd).await };
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = to_bytes(body, super::BODY_LIMIT).await else { return super::too_large(&parts.headers) };
+    // Barra e corpo torto: a recusa é a do Python, com o corpo intacto.
+    let parsed = parse_broadcast(&bytes).filter(|(_, text)| json_content_type(&parts.headers) && !text.trim_start().starts_with('/'));
+    let Some((names, text)) = parsed else { return super::forward_whole(&st, parts, bytes, &fwd).await };
+    let mut ours = std::collections::BTreeSet::new();
+    // Codex com terminal do Rust que não deu para adotar: o código é daqui e o nome nunca vai ao Python.
+    let mut refused = serde_json::Map::new();
+    for name in &names {
+        if runtime.has_entry(None, name).await { ours.insert(name.clone()); continue; }
+        match runtime.adopt_now(name).await {
+            Some(Ok(())) => { ours.insert(name.clone()); }
+            Some(Err(error)) => {
+                let detail = detail_body(&error.code, &error.message, json!({}))["detail"].clone();
+                refused.insert(name.clone(), json!({"ok": false, "error": detail, "delivered": false}));
+            }
+            None => {}
+        }
+    }
+    if ours.is_empty() && refused.is_empty() { return super::forward_whole(&st, parts, bytes, &fwd).await; }
+    let rest: Vec<&String> = names.iter().filter(|n| !ours.contains(*n) && !refused.contains_key(*n)).collect();
+    let mut python = serde_json::Map::new();
+    if !rest.is_empty() {
+        let body = json!({"names": rest, "text": text}).to_string();
+        let Ok(forwarded) = Request::post("/api/broadcast").header(header::AUTHORIZATION, format!("Bearer {}", st.cfg.auth_token))
+            .header(header::CONTENT_TYPE, "application/json").body(Body::from(body)) else { return super::forward_whole(&st, parts, bytes, &fwd).await };
+        let response = pass(&st, forwarded, &Forward { client_ip: "127.0.0.1".into(), https: false }).await;
+        if !response.status().is_success() { return response; }
+        let reply = to_bytes(response.into_body(), RELAY_REPLY_LIMIT).await.unwrap_or_default();
+        if let Some(results) = serde_json::from_slice::<Value>(&reply).ok().and_then(|v| v["results"].as_object().cloned()) { python = results; }
+    }
+    // Resposta sem corpo legível nunca vira `error: null`: o envio pode ter falhado sem dizer por quê.
+    let unreadable = || json!({"ok": false, "delivered": false, "error": detail_body("broadcast_reply_unreadable",
+        "A resposta do envio veio ilegível; confira a sessão antes de reenviar.", json!({}))["detail"].clone()});
+    let mut results = serde_json::Map::new();
+    for name in &names {
+        let result = if let Some(refusal) = refused.get(name) { refusal.clone() } else if ours.contains(name) {
+            match deliver_reply(&st, name, &text).await {
+                (status, reply) if status.is_success() => reply,
+                (_, reply) => match reply.get("detail").filter(|detail| !detail.is_null()) {
+                    Some(detail) => json!({"ok": false, "error": detail, "delivered": false}),
+                    None => unreadable(),
+                },
+            }
+        } else {
+            python.remove(name).unwrap_or_else(unreadable)
+        };
+        results.insert(name.clone(), result);
+    }
+    let mut response = json_response(StatusCode::OK, json!({"results": results}));
+    crate::routes::cors(&parts.headers, response.headers_mut());
+    response
 }
 
 /// O `/input` do Python, pelo mesmo repasse do handler, como o dono local.
@@ -286,13 +394,13 @@ async fn relay_as_owner(st: &AppState, name: &str, body: String) -> (StatusCode,
 }
 
 pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Steer, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Steer).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
     // Sem corpo = promover a fila; com corpo, o `InputBody` estrito do FastAPI.
     let body = if bytes.is_empty() { Some(None) } else { parse_body(&bytes).map(|(text, _)| Some(text)) };
-    let Some(text) = body.filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some(text) = body.filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
         crate::runtime::gateway::EntryHandle::Terminal { handle, .. } => {
@@ -316,4 +424,29 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         }
     };
     answer(&ctx, result)
+}
+
+#[cfg(test)]
+mod broadcast_tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_body_is_as_strict_as_the_fastapi_model() {
+        let b = |s: &'static str| Bytes::from_static(s.as_bytes());
+        assert_eq!(parse_broadcast(&b(r#"{"names":["a","b"],"text":"oi"}"#)), Some((vec!["a".into(), "b".into()], "oi".into())));
+        for refused in [r#"{"names":[],"text":"oi"}"#, r#"{"names":["a"],"text":"oi","x":1}"#, r#"{"names":["a",1],"text":"oi"}"#,
+            r#"{"names":"a","text":"oi"}"#, r#"{"names":["a"]}"#, "[]", "oi"] {
+            assert_eq!(parse_broadcast(&b(refused)), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn cut_emoji_is_replaced_and_the_text_still_goes() {
+        let b = |s: &'static str| Bytes::from_static(s.as_bytes());
+        assert_eq!(parse_body(&b(r#"{"text":"oi \ud83d"}"#)), Some(("oi \u{FFFD}".into(), false)));
+        // Par completo escapado (alto + baixo) continua sendo o emoji.
+        let pair = format!("{{\"text\":\"{}udc00 e {}ud83d{}ude00 e {}{}ud83d\"}}", '\\', '\\', '\\', '\\', '\\');
+        assert_eq!(parse_body(&Bytes::from(pair)), Some(("\u{FFFD} e \u{1F600} e \\ud83d".into(), false)));
+        assert!(crate::session_write::table::body_ok(crate::session_write::table::WriteRoute::Steer, &b(r#"{"text":"\ud83d"}"#)));
+    }
 }

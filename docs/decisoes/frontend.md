@@ -992,3 +992,38 @@ depois da volta da barra fechar encerrava o app.
 Não conferido no uso real: o serviço da bandeja sumindo de vez, sem outro assumir (Linux); no Windows, o
 duplo clique físico, o Explorer que demora a aceitar o ícone e o navegador embutido com o
 painel dele aberto na tela na hora de esconder; compositores Wayland além do Hyprland.
+
+## CDP de navegador inteiro do nativo: uma página só, a visível
+
+`GET /cdp/browser?chave=<chave>` no servidor local do navegador (mesma porta e mesmo
+`Authorization: Bearer` do `/cmd`; só Linux) fala CDP do nível do navegador, o do
+`connectOverCDP` do Playwright, com o navegador de UMA sessão. O endereço, sem token, fica no
+campo `cdp` do sidecar da sessão em `~/.hangar/nav/`; o token só sai do `_srv.json` para o
+cabeçalho, nunca para a URL.
+
+- O Chromium é um só para todas as sessões: o cliente vê apenas a página visível do painel da
+  sessão e as sessões CDP que ele mesmo abriu (e as filhas delas). Ids do cliente ganham id novo
+  do pipe; nada colide com o app.
+- Página nova (`Target.createTarget`) e contexto novo (`Target.createBrowserContext`, fictício)
+  ligam o cliente a essa mesma página: a pessoa vê a execução no painel. Contexto novo não isola
+  cookies; é o perfil do painel.
+- Fechar a página (`Target.closeTarget`, `Page.close`) e desconectar só soltam as sessões do
+  cliente; a página continua. Download segue negado pelo app.
+- O `/cdp` da tela remota do celular continua com a lista fechada de 8 comandos.
+
+## CDP sem token por nome de sessão: sempre de pé, só loopback, sem Origin
+
+`ws://127.0.0.1:<porta>/cdp/browser/<nome>` (app nativo, Linux) é o mesmo CDP do `/cdp/browser`,
+sem token, para quem só recebe uma URL (o `connectOverCDP` do Playwright dentro de um MCP). Vale
+enquanto o app roda, sem passo prévio do modelo: se o navegador da sessão não existe, a conexão o
+abre em `about:blank` (escondido, como o `hangar-preview open` fora da tela) e espera o motor.
+A porta é a do servidor local (`_srv.json`); o app tenta reusar a da execução anterior. O endereço
+também sai no campo `cdp_local` do sidecar da sessão.
+
+- Recusa (403) pedido com `Origin` (página web sempre manda, o Playwright não) e `Host` diferente
+  de `127.0.0.1:<porta>`/`localhost:<porta>` (rebinding de DNS). Escuta só em 127.0.0.1.
+- Só sessões do servidor desta máquina; nome desconhecido é 404 `session_not_found`, navegador que
+  não sobe em 20 s é 503 `browser_not_ready`. Nunca aceita o WebSocket e fica parado.
+- Risco que fica: qualquer programa local pode dirigir o navegador da sessão enquanto o app roda,
+  como uma porta de depuração do Chrome. O `/cdp/browser` com `Authorization` e o `/cdp` do celular
+  não mudam.

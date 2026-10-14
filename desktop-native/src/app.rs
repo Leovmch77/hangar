@@ -69,6 +69,7 @@ mod session_picker;
 mod side;
 mod terminal;
 mod sidebar;
+mod machines_tray;
 mod subagent;
 mod dictation;
 mod sync;
@@ -125,6 +126,24 @@ thread_local! {
 /// Caixa da coluna da conversa, como o `max-width` da `.messages-inner` e do `.composer-card` do web (MessageList.svelte,
 /// Chat.svelte, Composer.svelte): teto por degrau da janela, maior com o painel direito aberto, e a escala da Aparência
 /// sobre o menor entre o teto e o espaço, sem passar do espaço.
+/// O cartão do compositor (borda que acende com o foco, fundo e sombra), o mesmo na conversa e no subagente.
+fn composer_card(focused: bool) -> Div {
+    div().relative().flex().flex_col().gap(px(10.)).pt(px(12.)).pr(px(12.)).pb(px(10.)).pl(px(16.)).rounded(px(18.)).border_1()
+        .border_color(if focused { theme::accent_focus() } else { theme::border_strong() }).bg(theme::boxed()).shadow(theme::card_shadow())
+}
+
+/// O Enviar redondo do compositor. Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
+fn send_button<T: 'static>(id: &'static str, enabled: bool, label: String, cx: &mut Context<T>) -> Button {
+    let (fill, ink) = match (enabled, theme::is_floating()) {
+        (false, _) => (theme::raised(), theme::faint()),
+        (true, true) => (theme::accent(), theme::on_accent()),
+        (true, false) => (theme::text(), theme::background()),
+    };
+    Button::new(id).custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
+        .bg(fill).icon(chrome::small_icon(IconName::ArrowUp, 16., ink))
+        .size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(label).disabled(!enabled)
+}
+
 fn column_box(composer: bool) -> Div {
     let (window, side) = COLUMN_FRAME.get();
     let a = crate::appearance::get();
@@ -178,12 +197,12 @@ enum Payload {
     // Mensagem entregue e o texto do campo que a originou (com anexo os dois diferem).
     Sent(SessionKey, String, String, Result<Delivery, Failure>),
     Interrupted(SessionKey, Result<(), Failure>),
-    Acted(SessionKey, Action, Result<serde_json::Value, Failure>),
+    Acted(SessionKey, Action, String, Result<serde_json::Value, Failure>),
     Files(SessionKey, Option<SessionOwner>, u64, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
     UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
-    Commands(String, Result<Vec<CommandInfo>, Failure>),
+    Commands(String, u64, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
     Media(SessionKey, Source, Result<Option<Arc<RenderImage>>, Failure>),
@@ -384,6 +403,16 @@ struct PluginFailure;
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
 
+impl AskForm {
+    fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
+        // Envio com identidade não prova resolução; só a publicação do servidor encerra o cartão.
+        if ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot && ask.payload.interaction_id.is_none()) {
+            *ask = None;
+            *self = Self::default();
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Live { Thinking, Tool }
 
@@ -496,7 +525,12 @@ pub struct Hangar {
     attach_seq: u64,
     uploading: HashMap<SessionKey, Vec<u64>>,
     commands: HashMap<String, Result<Vec<CommandInfo>, String>>,
+    /// Última busca de cada lista: a resposta de uma busca anterior que chega depois é descartada.
+    commands_latest: HashMap<String, u64>,
+    commands_seq: u64,
     suggest_pick: usize,
+    /// O campo já mostrava sugestões do `/`: a lista é revalidada só quando elas abrem.
+    slash_open: bool,
     suggest_dismissed: Option<String>,
     mention: mention::Mention,
     command_panel: bool,
@@ -593,6 +627,7 @@ pub struct Hangar {
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
     sidebar: sidebar::Sidebar,
+    machines_tray: machines_tray::Tray,
     terminal: Option<terminal::Panel>,
     terminal_serial: u64,
     // Busca do seletor de modelo quando a lista é longa.
@@ -778,7 +813,16 @@ impl Hangar {
                 }
                 // A lista de comandos acompanha o que se digita.
                 // Texto e sugestões só aparecem na faixa de baixo.
-                InputEvent::Change => { this.suggest_pick = 0; this.redraw(panes::Area::Bottom, cx); }
+                InputEvent::Change => {
+                    this.suggest_pick = 0;
+                    // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta.
+                    // Abertas = há `/nome` sob o cursor e o Esc não as fechou neste texto.
+                    let open = this.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some()
+                        && this.suggest_dismissed.as_deref() != Some(text.as_str()));
+                    if open && !this.slash_open { this.ensure_commands(true); }
+                    this.slash_open = open;
+                    this.redraw(panes::Area::Bottom, cx);
+                }
                 _ => {}
             }
         });
@@ -828,7 +872,7 @@ impl Hangar {
             match crate::browser::server::start(&runtime, requests) {
                 Ok(_) => cx.spawn_in(window, async move |this, cx| {
                     while let Ok(request) = received.recv().await {
-                        if this.update_in(cx, |this, _, cx| this.dispatch_preview(request, cx)).is_err() { break; }
+                        if this.update_in(cx, |this, window, cx| this.dispatch_preview(request, window, cx)).is_err() { break; }
                     }
                 }).detach(),
                 Err(e) => eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"),
@@ -838,6 +882,7 @@ impl Hangar {
         let list_state = ListState::new(0, ListAlignment::Bottom, px(300.)).hold_tail(px(160.));
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
+        let machines_tray = machines_tray::Tray::new(cx);
         let panes = panes::Panes::new(cx);
         let owner = window.window_handle();
         let weak = cx.weak_entity();
@@ -871,8 +916,8 @@ impl Hangar {
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
-            attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
-            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
+            attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(), commands_latest: HashMap::new(), commands_seq: 0,
+            suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
@@ -882,7 +927,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
-            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             window_tray: window_tray::WindowTray::new(tray_tx), presence: Default::default(),
@@ -1304,6 +1349,8 @@ impl Hangar {
         self.clear_visible_preview();
         self.chat.state.state = session.state.clone();
         self.chat.state.question = session.question.clone();
+        // O app responde: o formulário que a lista trouxe já abre o passo a passo (`/answer`), antes do stream.
+        if let Some(ask) = list_form(&session) { self.chat.update_ask(Some(ask)); }
         self.error = None;
         self.loading = session.readable();
         self.history_started = false;
@@ -1495,8 +1542,8 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Acted(key, action, result) => {
-                self.receive_acted(key, action, result, window, cx);
+            Payload::Acted(key, action, snapshot, result) => {
+                self.receive_acted(key, action, snapshot, result, window, cx);
                 self.sync_rows(cx);
                 cx.notify();
                 return;
@@ -1697,7 +1744,13 @@ impl Hangar {
                 }
             }
             Payload::History(..) => return,
-            Payload::Commands(cache, result) => { self.commands.insert(cache, result.map_err(|error| Self::failure(&error))); }
+            Payload::Commands(cache, seq, result) => {
+                // Revalidação que falha não troca a lista boa que já está na tela pelo erro.
+                if self.commands_latest.get(&cache) == Some(&seq)
+                    && (result.is_ok() || !self.commands.get(&cache).is_some_and(Result::is_ok)) {
+                    self.commands.insert(cache, result.map_err(|error| Self::failure(&error)));
+                }
+            }
             Payload::Recent(key, result) => {
                 if let Some(recent) = self.recent.as_mut().filter(|recent| recent.key == key) {
                     recent.files = Some(result.map(|mut files| {
@@ -2082,6 +2135,12 @@ impl Hangar {
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
+                // A escolha enviada já teve efeito quando a sessão sai da pergunta ou passa a outra.
+                if (state.state != "awaiting_input" || state.interaction_id != self.chat.state.interaction_id)
+                    && let Some(key) = self.selected_key()
+                    && self.action_feedback.get(&key).is_some_and(|(text, _)| *text == tr("option_sent")) {
+                    self.action_feedback.remove(&key);
+                }
                 self.chat.update_state(state);
                 self.sync_working_row(cx);
                 if turned { self.restart_subagent_count(cx); }
@@ -2300,14 +2359,18 @@ impl Hangar {
         self.commands_key().and_then(|key| self.commands.get(&key)).and_then(|r| r.as_ref().ok()).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    // Codex muda a lista conforme o modo: sempre relê. Os demais usam a lista já buscada.
+    // Codex muda a lista conforme o modo: sempre relê. Os demais usam a lista já buscada, salvo `force`
+    // (abrir o `/` ou o painel), que mantém a guardada na tela enquanto a nova chega.
     fn ensure_commands(&mut self, force: bool) {
         let (Some(api), Some(session), Some(cache)) = (self.session_api(), self.selected.clone(), self.commands_key()) else { return; };
         if !force && session.provider != "codex" && self.commands.get(&cache).is_some_and(|r| r.is_ok()) { return; }
+        self.commands_seq += 1;
+        let seq = self.commands_seq;
+        self.commands_latest.insert(cache.clone(), seq);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = api.commands(&session.name).await;
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Commands(cache, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Commands(cache, seq, result) }).await;
         });
     }
 
@@ -2870,7 +2933,7 @@ impl Hangar {
     fn current_snapshot(&self, action: &Action) -> Option<String> {
         match action {
             Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
-            Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
+            Action::Select(_) | Action::SelectText(..) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
             Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}")
                 && (e.desistiu == Some(true) || holds_queue(e, self.chat.state.problema.as_deref()))).then(|| id.clone()),
@@ -2904,26 +2967,27 @@ impl Hangar {
         }
         let body = match &action {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
-            Action::Skip => match self.chat.ask.as_ref().and_then(|ask| ask.payload.request_id.clone()) {
-                Some(id) => Some(json!({"request_id": id})), None => return },
-            Action::Select(option) => Some(json!({"option": option})),
+            Action::Skip => match self.chat.ask.as_ref().and_then(interaction::skip_body) { Some(body) => Some(body), None => return },
+            Action::Select(option) => match select_body(&snapshot, Some(*option)) { Some(body) => Some(body), None => return },
+            Action::SelectText(option, text) => match select_text_body(&snapshot, *option, text) { Some(body) => Some(body), None => return },
+            Action::Submit => match select_body(&snapshot, None) { Some(body) => Some(body), None => return },
             _ => None,
         };
         let tool = (action == Action::Answer).then(|| self.chat.ask.as_ref().and_then(|ask| ask.tool_use_id.clone())).flatten();
-        if !self.flight.begin(key.clone(), action.clone(), snapshot) { return; }
+        if !self.flight.begin(key.clone(), action.clone(), snapshot.clone()) { return; }
         if let Some(tool) = tool { self.answering.insert(key.clone(), tool); }
         self.action_feedback.remove(&key);
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = if action == Action::Cancel { api.interrupt(&session.name, false).await.map(|_| Value::Null) }
                 else { api.act(&session.name, &action.path(), body, matches!(action, Action::Discard(_)), action.seconds()).await };
-            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, snapshot, result) }).await;
         });
         cx.notify();
     }
 
-    fn receive_acted(&mut self, key: SessionKey, action: Action, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.flight.finish(&key, &action) else { return; };
+    fn receive_acted(&mut self, key: SessionKey, action: Action, snapshot: String, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.flight.finish(&key, &action, &snapshot) else { return; };
         let answering = if action == Action::Answer { self.answering.remove(&key) } else { None };
         let current = self.selected_key().as_ref() == Some(&key);
         let note = match result {
@@ -2941,10 +3005,7 @@ impl Hangar {
                 Action::Answer => {
                     // O `tool_result` chega depois; sem a marca a pergunta do transcript reabriria nesse meio-tempo.
                     if let Some(tool) = answering { self.answered_tools.insert((key.clone(), tool)); }
-                    if current && self.chat.ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot) {
-                        self.chat.ask = None;
-                        self.ask_form = AskForm::default();
-                    }
+                    if current { self.ask_form.finish_answer(&mut self.chat.ask, &snapshot); }
                     (tr(if value.get("fallback").and_then(Value::as_bool) == Some(true) { "ask_fallback" } else { "ask_sent" }), false)
                 }
                 Action::Skip => {
@@ -2954,7 +3015,7 @@ impl Hangar {
                     }
                     (tr("ask_skipped"), false)
                 }
-                Action::Select(_) | Action::Submit => (tr("option_sent"), false),
+                Action::Select(_) | Action::SelectText(..) | Action::Submit => (tr("option_sent"), false),
                 Action::Cancel => (tr("stop_requested"), false),
                 Action::Implement => (tr("plan_implement_sent"), false),
                 Action::Discard(id) => {
@@ -4286,7 +4347,7 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, window, cx| this.open_git_panel(window, cx))).into_any_element()
             } else { place.into_any_element() };
             // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
-            let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
+            let usage = div().flex_shrink_0().ml_auto().mr(px(-6.)).flex().items_center().gap(px(2.))
                 .when_some(cache, |el, cache| el.child(cache_chip(cache)))
                 .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
@@ -4294,7 +4355,9 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
-            div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+            // Coluna estreita (painel direito aberto): os anéis descem para a linha de baixo em vez de vazar para baixo do
+            // painel, que os cobria.
+            div().pt(px(7.)).px(px(6.)).flex().flex_wrap().items_center().gap(px(6.)).gap_y(px(2.)).text_xs().text_color(theme::faint())
                 .children(session.as_ref().map(|s| self.render_group_chips(s, cx)))
                 .child(place)
                 .child(div().flex_1())
@@ -4308,16 +4371,7 @@ impl Hangar {
                 .tooltip(tr("stop_hint")).accessibility_label(tr("stop")).disabled(stopping)
                 .on_click(cx.listener(|this, _, window, cx| this.request_stop(window, cx)))
         } else {
-            let enabled = !blocked && has_input;
-            // Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
-            let (fill, ink) = match (enabled, theme::is_floating()) {
-                (false, _) => (theme::raised(), theme::faint()),
-                (true, true) => (theme::accent(), theme::on_accent()),
-                (true, false) => (theme::text(), theme::background()),
-            };
-            Button::new("send").custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
-                .bg(fill).icon(chrome::small_icon(IconName::ArrowUp, 16., ink))
-                .size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(send_label).disabled(!enabled)
+            send_button("send", !blocked && has_input, send_label, cx)
                 .on_click(cx.listener(|this, _, window, cx| this.submit(false, false, window, cx)))
         };
         let commands = chrome::icon_button("commands", IconName::SquareSlash, tr("commands"), cx).disabled(!readable).selected(self.command_panel)
@@ -4326,7 +4380,7 @@ impl Hangar {
                 if this.command_panel {
                     this.close_controls();
                     this.close_recent();
-                    this.ensure_commands(false);
+                    this.ensure_commands(true);
                     this.command_search.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); });
                 }
                 cx.notify();
@@ -4344,8 +4398,7 @@ impl Hangar {
             .children(pills)
             .children(mode)
             .child(div().ml(px(6.)).child(action));
-        let card = div().relative().flex().flex_col().gap(px(10.)).pt(px(12.)).pr(px(12.)).pb(px(10.)).pl(px(16.)).rounded(px(18.)).border_1()
-            .border_color(if focused { theme::accent_focus() } else { theme::border_strong() }).bg(theme::boxed()).shadow(theme::card_shadow())
+        let card = composer_card(focused)
             .when_some(tray, |el, tray| el.child(tray))
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
                 .child(tr("attach_progress").replace("{done}", &done.to_string()).replace("{total}", &total.to_string()))))
@@ -4398,7 +4451,11 @@ impl Hangar {
         if self.confirm.is_some() { self.confirm = None; self.confirm_no_ask = false; }
         else if self.cancel_machine_rename() {}
         else if self.mention_is_open(cx) { self.mention.close(); }
-        else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
+        else if !self.visible_suggestions(cx).is_empty() {
+            self.suggest_dismissed = Some(self.composer.read(cx).value().to_string());
+            // Fechadas pelo Esc: reaparecer ao digitar conta como nova abertura e revalida a lista.
+            self.slash_open = false;
+        }
         else if self.close_popups() {}
         else if self.side_menu_escape(cx) {}
         else if self.can_interrupt() {
@@ -5088,7 +5145,7 @@ impl Hangar {
             let menu_target = sidebar::Target::new(&active, &session.name);
             let label = self.session_number_label(&menu_target, label);
             let number = self.session_number_badge(&menu_target);
-            Some(div().id(SharedString::from(format!("tab-{}", session.name))).track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
+            Some(div().id(SharedString::from(format!("tab-{}", session.name))).relative().track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
                     else { el.border_color(transparent_black()).text_color(theme::muted()).hover(|el| el.bg(theme::hover())) })
@@ -5113,6 +5170,7 @@ impl Hangar {
                 }))
                 // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
+                .when(!self.active_invite() && !session.read_only(), |el| self.group_row(el, session, None, 6., cx))
                 .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
         }).collect::<Vec<_>>();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
@@ -5138,6 +5196,7 @@ impl Hangar {
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
+            .child(self.render_machines_tray_button(cx))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
                 .child(strip)
@@ -5544,7 +5603,31 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
-fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
+/// O formulário da linha da lista, no mesmo formato do `ask_question` do stream.
+fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
+    let raw = session.ask_form.clone()?;
+    let payload: crate::api::dto::AskPayload = serde_json::from_value(raw.clone()).ok()?;
+    (!payload.questions.is_empty() && payload.interaction_id.is_some()).then(|| Ask::new(payload, &raw))
+}
+
+fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options, state.interaction_id]).to_string() }
+
+fn select_body(snapshot: &str, option: Option<usize>) -> Option<Value> {
+    let (_, _, interaction_id): (Option<String>, Option<Vec<String>>, Option<String>) = serde_json::from_str(snapshot).ok()?;
+    let mut body = json!({});
+    if let Some(option) = option { body["option"] = json!(option); }
+    if let Some(id) = interaction_id { body["interaction_id"] = json!(id); }
+    Some(body)
+}
+
+/// Texto vazio não sai: a TUI trataria como "mudar nada".
+fn select_text_body(snapshot: &str, option: usize, text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty() { return None; }
+    let mut body = select_body(snapshot, Some(option))?;
+    body["text"] = json!(text);
+    Some(body)
+}
 
 fn display_body(event: &ChatEvent) -> String {
     match event.kind.as_str() {
@@ -6710,6 +6793,94 @@ mod tests {
                               worktree_path: Some("/r/hangar-x".into()), ..Default::default() };
         assert_eq!(super::worktree_label(&s).as_deref(), Some("hangar-x"));
         assert_eq!(super::worktree_label(&SessionInfo { name: "a".into(), ..Default::default() }), None);
+    }
+
+    #[test]
+    fn conversation_select_snapshot_and_envelopes_keep_the_displayed_id() {
+        use super::{select_body, select_snapshot, SessionState};
+        let a = SessionState { question: Some("Qual?".into()), options: Some(vec!["[ ] A".into()]),
+            interaction_id: Some("interaction-a".into()), ..Default::default() };
+        let mut b = a.clone();
+        b.interaction_id = Some("interaction-b".into());
+        let displayed = select_snapshot(&a);
+        assert_ne!(displayed, select_snapshot(&b));
+        assert_eq!(select_body(&displayed, Some(1)), Some(serde_json::json!({"option":1, "interaction_id":"interaction-a"})));
+        assert_eq!(select_body(&displayed, None), Some(serde_json::json!({"interaction_id":"interaction-a"})));
+        b.options = Some(vec!["[✔] A".into()]);
+        assert_eq!(select_body(&select_snapshot(&b), None).unwrap()["interaction_id"], "interaction-b");
+        b.interaction_id = None;
+        assert_eq!(select_body(&select_snapshot(&b), Some(1)), Some(serde_json::json!({"option":1})));
+        assert_eq!(select_body(&select_snapshot(&b), None), Some(serde_json::json!({})));
+        assert!(select_body("invalid", Some(1)).is_none());
+    }
+
+    #[test]
+    fn conversation_plan_feedback_goes_with_its_option_and_the_displayed_id() {
+        use super::{select_text_body, select_snapshot, SessionState};
+        let state = SessionState { question: Some("Proceed?".into()), options: Some(vec!["A".into(), "B".into(), "Tell Claude what to change".into()]),
+            interaction_id: Some("i1".into()), ..Default::default() };
+        let snapshot = select_snapshot(&state);
+        assert_eq!(select_text_body(&snapshot, 3, "  Use Postgres  "), Some(serde_json::json!({"option":3, "interaction_id":"i1", "text":"Use Postgres"})));
+        assert!(select_text_body(&snapshot, 3, "   ").is_none());
+        assert!(select_text_body("invalid", 3, "x").is_none());
+    }
+
+    #[test]
+    fn list_form_opens_the_stepper_with_its_interaction_id() {
+        // Decisão M11: a pergunta da lista (também a segurada pelo plugin) abre o passo a passo e responde
+        // pelo `/answer` com o ID do formulário; sem ID ou sem perguntas, nada abre.
+        let raw = serde_json::json!({"name":"n", "ask_form": {"request_id":"ask:t1", "interaction_id":"form-a", "provider":"claude",
+            "questions":[{"header":"H", "question":"Qual?", "multiSelect":false, "options":[{"label":"A"}]}]}});
+        let session: crate::api::dto::SessionInfo = serde_json::from_value(raw).unwrap();
+        use super::list_form;
+        let ask = list_form(&session).expect("passo a passo da lista");
+        assert_eq!(ask.payload.interaction_id.as_deref(), Some("form-a"));
+        assert_eq!(ask.payload.request_id, Some(serde_json::json!("ask:t1")));
+        let bare: crate::api::dto::SessionInfo = serde_json::from_value(serde_json::json!({"name":"n", "ask_form": {"questions": []}})).unwrap();
+        assert!(list_form(&bare).is_none());
+    }
+
+    #[test]
+    fn conversation_form_and_options_use_independent_interaction_ids() {
+        use super::{interaction, select_body, select_snapshot, Ask, Pick, SessionInfo, SessionState};
+        let raw = serde_json::json!({"name":"n", "question":"Qual?", "options":["A"], "interaction_id":"options-id"});
+        let session: SessionInfo = serde_json::from_value(raw.clone()).unwrap();
+        let state: SessionState = serde_json::from_value(raw).unwrap();
+        assert_eq!(session.interaction_id, state.interaction_id);
+        let raw = serde_json::json!({"request_id":9, "interaction_id":"form-id",
+            "questions":[{"question":"Qual?", "options":[{"label":"A"}]}]});
+        let ask = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        let form_body = interaction::answer_body(&ask, &[Pick::Options(vec![0])]).unwrap();
+        assert_eq!(form_body["interaction_id"], "form-id");
+        assert_eq!(form_body["request_id"], 9);
+        assert_eq!(select_body(&select_snapshot(&state), Some(1)).unwrap()["interaction_id"], "options-id");
+        let legacy: SessionInfo = serde_json::from_value(serde_json::json!({"name":"n"})).unwrap();
+        assert!(legacy.interaction_id.is_none());
+    }
+
+    #[test]
+    fn conversation_late_answer_keeps_the_new_form_and_waits_for_resolution() {
+        use super::{Ask, AskForm, Pick};
+        let raw = serde_json::json!({"interaction_id":"interaction-a", "questions":[{"question":"Qual?"}]});
+        let a = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        let mut raw_b = raw.clone();
+        raw_b["interaction_id"] = serde_json::json!("interaction-b");
+        let b = Ask::new(serde_json::from_value(raw_b.clone()).unwrap(), &raw_b);
+        let mut ask = Some(b.clone());
+        let mut form = AskForm { fingerprint: b.fingerprint.clone(), picks: vec![Pick::Text("B".into())], ..Default::default() };
+        form.finish_answer(&mut ask, &a.fingerprint);
+        assert_eq!(ask, Some(b.clone()));
+        assert_eq!(form.fingerprint, b.fingerprint);
+        assert_eq!(form.picks, vec![Pick::Text("B".into())]);
+        form.finish_answer(&mut ask, &b.fingerprint);
+        assert_eq!(ask, Some(b));
+        assert_eq!(form.picks, vec![Pick::Text("B".into())]);
+        let legacy = serde_json::json!({"questions":[{"question":"Qual?"}]});
+        let legacy = Ask::new(serde_json::from_value(legacy.clone()).unwrap(), &legacy);
+        ask = Some(legacy.clone());
+        form.finish_answer(&mut ask, &legacy.fingerprint);
+        assert!(ask.is_none());
+        assert!(form.picks.is_empty());
     }
 
     #[test]

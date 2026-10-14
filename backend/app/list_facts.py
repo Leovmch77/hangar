@@ -7,7 +7,7 @@ linhas, nunca troca a lista pela do Python."""
 import asyncio
 import logging
 
-from app import guest_users, plugin_bridge, registry, runtime_config, share_store, sse
+from app import guest_users, registry, runtime_config, share_store, sse
 from app.internal_pool import internal_thread
 from app.models import SessionInfo
 
@@ -17,14 +17,15 @@ _problema_avisado: set[tuple[str, str]] = set()
 
 _OTHERS = frozenset({"codex", "pi", "omp", "kimi"})
 _STATE_FIELDS = ("state", "label", "question", "options", "problema", "status_line", "pending_questions",
-                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled", "codex_service_tier")
+                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled", "codex_service_tier",
+                 "last_reply", "last_reply_at")
 # A lista não espera terminal de atalho: o leitor do refresher, com a última leitura boa.
 _shortcuts = sse._ListRefresher()
 # Campos do `sse._list_sig`, pelo nome: a sombra do Rust compara campo a campo e grava só o nome.
 SIG_FIELDS = ("name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty",
               "git_ahead", "git_behind", "git_added", "git_removed", "state", "tracked", "headless",
               "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase",
-              "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line",
+              "interaction_id", "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line",
               "context", "model", "label", "startup_steps", "loop_status", "loop_iter", "engine", "conta",
               "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task", "plan_task_total",
               "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner",
@@ -37,7 +38,6 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
     infos = [SessionInfo.model_validate(r) for r in rows]
     if shadow:
         return await _shadow(infos, pane_pids)
-    plugin_bridge.app_remoto(owner_clients)
     others = [i for i in infos if i.provider in _OTHERS]
     if others:
         # O código de hoje, só sobre as linhas que o Rust não classifica.
@@ -54,6 +54,9 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
     _shortcuts._launch_shortcuts()
     out["shortcuts"] = _shortcuts.shortcuts_data
     out["shadow"] = None
+    # Lista e chat do dono que o Python atende (Connect): também seguram a permissão no app, no Rust.
+    from app import plugin_bridge
+    out["owner_apps"] = plugin_bridge.apps_abertos()
     return out
 
 
@@ -76,6 +79,7 @@ async def _shadow(infos: list[SessionInfo], pane_pids: dict[str, int]) -> dict:
 def _row_sig(i: SessionInfo) -> dict:
     """A tupla do `sse._list_sig`, com nome por campo."""
     d = i.model_dump(mode="json", include=set(SIG_FIELDS))
+    d["interaction_id"] = i.interaction_id      # fora do JSON do modelo, dentro da assinatura
     d["status_line"] = sse._status_sig(i.status_line)
     d["context"] = sse._context_sig(i.context)
     d["label"] = i.label if i.provider == "codex" and not i.tracked else bool(i.label)
@@ -104,7 +108,8 @@ def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[
         "owners": owners,
         "hidden": hidden,
         "problems": _problems(infos),
-        "held": _held(infos),
+        # A pergunta segurada pelo plugin é do Store do Rust; o campo fica vazio pelo contrato.
+        "held": {},
         "stall_seconds": float(runtime_config.get("stall_seconds")),
     }
 
@@ -162,17 +167,6 @@ def _access(names: set[str]) -> tuple[list[str], dict[str, str], list[str]]:
     owners = {n: o for n in names if (o := guest_users.owner_name(n))}
     hidden = sorted(n for n in names if not guest_users.visible_to(None, n))
     return shared, owners, hidden
-
-
-def _held(infos: list[SessionInfo]) -> dict[str, dict]:
-    """Pergunta que o hook do plugin segura agora, das linhas Claude com terminal. A permissão
-    segurada para o app não desenha cartão no pane e o registro nativo segue `busy`: sem isto a
-    lista diria `working`."""
-    out = {}
-    for info in infos:
-        if info.provider == "claude" and not info.headless and (q := plugin_bridge.pergunta_pendente(info.name)):
-            out[info.name] = q
-    return out
 
 
 def _problems(infos: list[SessionInfo]) -> dict[str, str]:

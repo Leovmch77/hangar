@@ -57,7 +57,7 @@ async fn malformed_cli_message_keeps_following_ack_and_event() {
     });
     let binding = CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 };
     let mut io = cano::connect(&binding).await.unwrap().start(1,16);
-    io.writer.send(cano::WireFrame { operation_id:"wire:1".into(),frame:json!({"type":"user"}),ephemeral:false,until:None }).await.unwrap();
+    io.writer.send(cano::WireFrame { operation_id:"wire:1".into(),frame:json!({"type":"user"}),ephemeral:false,until:None,guard:None }).await.unwrap();
     let next = tokio::time::timeout(std::time::Duration::from_secs(2),io.events.recv()).await.unwrap().unwrap();
     assert!(matches!(next,cano::IoEvent::WriteAck { outcome:WriteOutcome::Written,.. }));
     assert!(matches!(io.events.recv().await.unwrap(),cano::IoEvent::Line(value) if value["type"] == "result"));
@@ -111,7 +111,7 @@ async fn counting_cano(count:usize) -> (String,tokio::task::JoinHandle<Vec<Strin
 }
 
 fn frame(id:&str,ephemeral:bool) -> cano::WireFrame {
-    cano::WireFrame { operation_id:id.into(),frame:json!({"type":"control_request"}),ephemeral,until:None }
+    cano::WireFrame { operation_id:id.into(),frame:json!({"type":"control_request"}),ephemeral,until:None,guard:None }
 }
 
 #[tokio::test]

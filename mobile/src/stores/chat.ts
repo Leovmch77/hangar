@@ -529,8 +529,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         }
         if (!Array.isArray(payload.questions) || !payload.questions.length) return;
         const current = useChatStore.getState().askPayload;
-        if (payload.provider === 'codex' && current?.provider === 'codex'
-            && payload.request_id === current.request_id) return;
+        if (current && payload.interaction_id === current.interaction_id
+            && payload.request_id === current.request_id
+            && (payload.interaction_id != null || (payload.provider === 'codex' && current.provider === 'codex'))) return;
         useChatStore.setState({ askPayload: payload, askOpen: true, askPiId: null });
       } catch {
         quadroFalhou('ask_question');

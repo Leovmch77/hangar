@@ -585,14 +585,14 @@ fn account_guard_remains_held_until_parent_ownership_ends() {
 }
 
 #[cfg(target_os = "linux")]
-struct PreExecGuardChild {
+pub(crate) struct PreExecGuardChild {
     pid: libc::pid_t,
     release: std::fs::File,
 }
 
 #[cfg(target_os = "linux")]
 impl PreExecGuardChild {
-    fn spawn(lock_path: &std::path::Path, close_in_child: bool) -> Self {
+    pub(crate) fn spawn(lock_path: &std::path::Path, close_in_child: bool) -> Self {
         use std::{
             io::Read,
             os::fd::{AsRawFd, FromRawFd},

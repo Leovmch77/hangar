@@ -16,7 +16,7 @@ use super::capped::SESSION_CAP;
 use super::facts_files::{self, HookStates};
 use crate::state::capture::MuxProcess;
 use crate::state::published::Published;
-use crate::terminal_state::{analyze, held_question, PaneAnalysis};
+use crate::terminal_state::{analyze, PaneAnalysis};
 use hangar_api::state::StateEvent;
 
 /// Escrita no transcript até 1 s depois do idle é o resumo pós-Stop, não turno novo.
@@ -35,6 +35,30 @@ pub const RUNTIME_ABSENT: &str = "list_runtime_absent";
 const CAPTURE_PARALLEL: usize = 4;
 
 /// Os quadros na ordem dos nomes, no máximo `CAPTURE_PARALLEL` processos de uma vez.
+/// ID do menu do pane da sessão Claude com terminal do Rust, para os botões do card responderem pelo app.
+/// `before`: o vínculo lido antes da captura; mudou no meio, a leitura não vale.
+async fn menu_interaction<C: CaptureSource>(runtime: &crate::runtime::gateway::RuntimeRegistry, io: &C, row: &mut SessionRow,
+    before: Option<&crate::interactions::InteractionBinding>, pane: Result<&str, ()>) -> Result<Option<String>, String> {
+    // `claude` aberto à mão, sem entrada no Rust: não há resposta a identificar, nem problema.
+    if runtime.hand_opened(&row.name).await { return Ok(None); }
+    let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
+    if before != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
+    let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;
+    if io.target(&row.name).as_deref() != Some(target.binding.pane.as_str()) { return Err("terminal_capture_target_changed".into()); }
+    let jsonl = row.jsonl.as_deref().map(Path::new).ok_or("askq_transcript_missing")?;
+    let pane = pane.map_err(|()| "list_capture_failed")?;
+    let store = runtime.plugin().map_err(|e| e.code)?;
+    let question = crate::state::ask::observe_terminal(store.interactions(), &binding, jsonl, pane)?;
+    let (menu, _) = crate::state::ask::observe_screen_menu(&store, &binding, jsonl, pane)?;
+    if runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)? != binding { return Err("erro_interacao_desatualizada".into()); }
+    if let Some(question) = question {
+        row.pending_questions = row.pending_questions.max(1);
+        // O formulário vai à linha com o ID dele: o card responde pelo `/answer`, como o passo a passo do chat.
+        row.ask_form = serde_json::to_value(&question).ok();
+    }
+    Ok(menu)
+}
+
 async fn capture_all<C: CaptureSource>(io: &C, names: Vec<&str>) -> Vec<Result<String, CaptureFailed>> {
     // Os futuros montados antes: um closure dentro do stream tira o `Send` da rodada.
     let pending: Vec<_> = names.into_iter().map(|n| io.capture(n)).collect();
@@ -51,6 +75,7 @@ pub trait CaptureSource: Sync {
     fn pause(&self, d: Duration) -> impl Future<Output = ()> + Send;
     fn wall(&self) -> f64;
     fn mono(&self) -> f64;
+    fn target(&self, _name: &str) -> Option<String> { None }
 }
 
 /// O que a rodada pede a quem é dono do registro (o Python, a partir da Fase B).
@@ -73,8 +98,6 @@ pub struct Facts<'a> {
     /// Código de problema do runtime, por nome.
     pub problems: &'a BTreeMap<String, String>,
     pub stall_seconds: f64,
-    /// Pergunta que o hook do plugin segura agora (`plugin_bridge.pergunta_pendente`), por nome.
-    pub held: &'a BTreeMap<String, Value>,
     /// Último estado de cada `Monitor` vivo.
     pub monitors: &'a Published,
 }
@@ -82,6 +105,8 @@ pub struct Facts<'a> {
 /// Caches que atravessam rodadas.
 #[derive(Default)]
 pub struct Classifier {
+    plugin_runtime: Option<std::sync::Arc<crate::runtime::gateway::RuntimeRegistry>>,
+    permissions: Option<crate::state::permission::PermissionStore>,
     idle_checked: BTreeMap<String, f64>,
     status: BTreeMap<String, (f64, Option<String>)>,
     label: BTreeMap<String, Option<String>>,
@@ -130,10 +155,27 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
     row.label = text("label");
     row.question = text("question");
     row.options = state["options"].as_array().map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
+    row.interaction_id = text("interaction_id");
     row.status_line = text("status_line");
-    if let Some(q) = state["codex_question"].as_object() {
-        row.state = "awaiting_input".into();
-        row.question = q["questions"][0]["question"].as_str().map(str::to_owned);
+    // O problema da vista (queda do socket, falha do runtime) aparece também na lista.
+    if row.problema.is_none() { row.problema = text("problema"); }
+    codex_question(row, state["codex_question"].as_object());
+    codex_pending(row, Some(retrato));
+}
+
+/// Pergunta do Codex na linha: com o turno rodando a assíncrona não troca "trabalhando" por espera
+/// (o motor já decide o estado), como na lista do Python.
+fn codex_question(row: &mut SessionRow, question: Option<&serde_json::Map<String, Value>>) {
+    let Some(q) = question else { return };
+    if row.state != "working" { row.state = "awaiting_input".into(); }
+    row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
+}
+
+/// Contagem de perguntas assíncronas sem resposta, do ator do Rust (os fatos do Python não o veem).
+fn codex_pending(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>>) {
+    if let Some(count) = retrato.and_then(|r| r.get(&row.name)).filter(|s| s["error"].is_null())
+        .and_then(|s| s["view"]["pending_questions"].as_u64()) {
+        row.pending_questions = u32::try_from(count).unwrap_or(u32::MAX);
     }
 }
 
@@ -144,6 +186,7 @@ fn from_monitor(row: &mut SessionRow, ev: &StateEvent) {
     row.label.clone_from(&ev.label);
     row.question.clone_from(&ev.question);
     row.options.clone_from(&ev.options);
+    row.interaction_id.clone_from(&ev.interaction_id);
     row.status_line.clone_from(&ev.status_line);
     row.limit_reset.clone_from(&ev.limit_reset);
     row.limited = ev.limited;
@@ -158,6 +201,25 @@ fn apply(row: &mut SessionRow, a: &PaneAnalysis) {
 }
 
 impl Classifier {
+    pub fn set_plugin_runtime(&mut self, runtime: std::sync::Arc<crate::runtime::gateway::RuntimeRegistry>) { self.plugin_runtime = Some(runtime); }
+
+    pub fn set_permissions(&mut self, permissions: crate::state::permission::PermissionStore) { self.permissions = Some(permissions); }
+
+    async fn observe_permission(&self, name: &str, pane: &str, expected: Option<&crate::interactions::InteractionBinding>, revision: Option<crate::state::permission::MemoryRevision>) {
+        let (Some(runtime), Some(memory), Some(mode)) = (&self.plugin_runtime, &self.permissions, crate::state::permission::parse_permission_mode(pane)) else { return };
+        match runtime.interaction_binding_readonly(name).await {
+            Ok(binding) if expected == Some(&binding) => match memory.lock() {
+                Ok(mut memory) => match revision.ok_or("permission_frame_unavailable").and_then(|revision| memory.observe_capture(&binding.conversation, mode, revision)) {
+                    Ok(_) => {},
+                    Err(code) => super::facts::note("rust.list_permission_failed", name, code.into(), "captura de permissão recusada"),
+                },
+                Err(_) => super::facts::note("rust.list_permission_failed", name, "permission_store_unavailable".into(), "memória de permissão indisponível"),
+            },
+            Err(error) => super::facts::note("rust.list_permission_failed", name, error.code, "vínculo de permissão não confirmado"),
+            Ok(_) => super::facts::note("rust.list_permission_failed", name, "permission_binding_changed".into(), "captura pertence a outra vida"),
+        }
+    }
+
     /// Caches expostos para o contrato com o Python comparar tique a tique.
     pub fn idle_checked(&self) -> &BTreeMap<String, f64> { &self.idle_checked }
     pub fn status_cache(&self) -> &BTreeMap<String, (f64, Option<String>)> { &self.status }
@@ -210,18 +272,32 @@ impl Classifier {
         // Linhas com `Monitor` vivo: nenhuma captura, nem a da statusline nem a do limite.
         let mut watched = HashSet::new();
         for (i, row) in rows.iter_mut().enumerate() {
+            // Codex com terminal cujo ator está no Rust: o pane só diz que a TUI existe; quem publica é o ator.
+            let rust_codex_terminal = row.provider == "codex" && !row.headless
+                && facts.headless.is_some_and(|r| r.contains_key(&row.name));
             // Codex sem terminal com chat aberto: o feed do hub e o chat dizem o mesmo; sem ele, vale o
             // fato do Python (o mesmo espelho da vista do Rust). Contagem, conta e atividade seguem dos fatos.
-            if row.provider == "codex" && row.headless
+            // Sem o cliente Python, o fato dele infere "hooks não aprovados" de um turno no rollout sem marcador;
+            // o ator do Rust sabe o turno pelo app-server e não usa o marcador.
+            let rust_codex = row.provider == "codex" && facts.headless.is_some_and(|r| r.contains_key(&row.name));
+            if rust_codex && row.problema.as_deref() == Some("codex_hooks_nao_aprovados") { row.problema = None; }
+            if row.provider == "codex" && (row.headless || rust_codex_terminal)
                 && let Some(ev) = facts.monitors.get(&row.name, sid(row).as_deref())
             {
                 from_monitor(row, &ev);
-                if let Some(q) = &ev.codex_question {
-                    row.state = "awaiting_input".into();
-                    row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
-                }
+                codex_question(row, ev.codex_question.as_ref());
+                codex_pending(row, facts.headless);
                 continue;
             }
+            // Sem feed, o estado sai da vista do ator: o Python perdeu o cliente e o fato dele ficou para trás.
+            if rust_codex_terminal {
+                // A vista do ator nasce sem linha de status até o primeiro turno; a do rollout (fato) cobre.
+                let from_rollout = row.status_line.take();
+                headless_state(row, facts.headless, None);
+                if row.status_line.is_none() { row.status_line = from_rollout; }
+                continue;
+            }
+            if row.provider == "codex" && row.headless { codex_pending(row, facts.headless); }
             // Sem feed, a linha de status sai da vista do ator, a mesma do chat: a do fato vem do
             // rollout, com cache, e só vê o modelo novo no turno seguinte.
             if row.provider == "codex" && row.headless
@@ -271,6 +347,16 @@ impl Classifier {
         }
 
         if !pending.is_empty() {
+            let mut capture_bindings = BTreeMap::new();
+            if let Some(runtime) = &self.plugin_runtime {
+                for &i in &pending { capture_bindings.insert(rows[i].name.clone(), runtime.interaction_binding_readonly(&rows[i].name).await); }
+            }
+            let mut permission_revisions = BTreeMap::new();
+            if let Some(memory) = &self.permissions && let Ok(memory) = memory.lock() {
+                for (name, binding) in &capture_bindings {
+                    if let Ok(binding) = binding { permission_revisions.insert(name.clone(), memory.revision(&binding.conversation)); }
+                }
+            }
             let frames = capture_all(io, pending.iter().map(|&i| rows[i].name.as_str()).collect()).await;
             let mut analyses: Vec<Option<PaneAnalysis>> = frames.iter().map(|f| f.as_ref().ok().map(|t| analyze(t))).collect();
             let spinning: Vec<usize> = (0..pending.len())
@@ -303,6 +389,12 @@ impl Classifier {
                     continue;
                 };
                 apply(row, a);
+                if let Ok(pane) = &frames[k] { self.observe_permission(&row.name, pane, capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()), permission_revisions.get(&row.name).copied()).await; }
+                if let Some(runtime) = &self.plugin_runtime {
+                    let before = capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()).cloned();
+                    let pane = frames[k].as_ref().map(String::as_str).map_err(|_| ());
+                    match menu_interaction(runtime, io, row, before.as_ref(), pane).await { Ok(id) => row.interaction_id = id, Err(code) => row.problema = Some(code) }
+                }
                 match row.last_activity {
                     Some(t) if a.state == "idle" => { self.idle_checked.insert(row.name.clone(), t); }
                     _ => { self.idle_checked.remove(&row.name); }
@@ -321,19 +413,11 @@ impl Classifier {
             }
         }
 
-        // Pergunta que o pane não mostra: a permissão que o hook do plugin segura para o app (a TUI
-        // não desenha cartão e o registro nativo segue `busy`), ou o menu que rolou para fora e o
-        // marcador não carrega.
+        // Pergunta que o pane não mostra: o menu que rolou para fora e o marcador não carrega. A
+        // permissão que o hook do plugin segura vem do `plugin::Store` depois daqui (`ListBridge::project_plugins`).
         for row in rows.iter_mut() {
             if row.provider != "claude" || row.headless || row.state == "awaiting_input"
                 || row.options.as_ref().is_some_and(|o| !o.is_empty()) || watched.contains(&row.name) {
-                continue;
-            }
-            if let Some(q) = facts.held.get(&row.name).and_then(held_question) {
-                row.state = "awaiting_input".into();
-                row.label = None;
-                row.question = q.question;
-                row.options = Some(q.options);
                 continue;
             }
             if row.jsonl.is_none() {
@@ -344,6 +428,17 @@ impl Classifier {
                 row.label = None;
                 row.question = Some(q.question);
                 row.options = Some(q.options);
+                // O app responde (decisão do usuário): o quadro desta rodada não foi lido, então lê agora e dá ao
+                // card o ID do menu do pane, que o `/select` responde pelas teclas como no chat.
+                if let Some(runtime) = &self.plugin_runtime && !runtime.hand_opened(&row.name).await {
+                    let before = runtime.interaction_binding_readonly(&row.name).await.ok();
+                    let frame = io.capture(&row.name).await;
+                    if let Ok(pane) = &frame && let Some(options) = analyze(pane).options.filter(|o| !o.is_empty()) { row.options = Some(options); }
+                    match menu_interaction(runtime, io, row, before.as_ref(), frame.as_deref().map_err(|_| ())).await {
+                        Ok(id) => row.interaction_id = id,
+                        Err(code) => row.problema = Some(code),
+                    }
+                }
             }
         }
 
@@ -359,8 +454,12 @@ impl Classifier {
         stale.sort_by(|a, b| age(&self.status, a).total_cmp(&age(&self.status, b)));
         stale.truncate(STATUS_BUDGET);
         for name in stale {
+            let binding = match &self.plugin_runtime { Some(runtime) => runtime.interaction_binding_readonly(&name).await.ok(), None => None };
+            let revision = self.permissions.as_ref().and_then(|memory| memory.lock().ok())
+                .and_then(|memory| binding.as_ref().map(|binding| memory.revision(&binding.conversation)));
             match io.capture(&name).await {
                 Ok(text) => {
+                    self.observe_permission(&name, &text, binding.as_ref(), revision).await;
                     let a = analyze(&text);
                     let now = io.mono();
                     self.status.insert(name.clone(), (now, a.status_line.clone()));
@@ -446,7 +545,7 @@ pub struct MuxCapture {
 }
 
 /// Uma origem por processo: os caches do `Classifier` atravessam rodadas e instâncias de captura.
-fn process_start() -> std::time::Instant {
+pub(crate) fn process_start() -> std::time::Instant {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *START.get_or_init(std::time::Instant::now)
 }
@@ -458,6 +557,7 @@ impl MuxCapture {
 }
 
 impl CaptureSource for MuxCapture {
+    fn target(&self, name: &str) -> Option<String> { self.targets.get(name).cloned() }
     fn capture(&self, name: &str) -> impl Future<Output = Result<String, CaptureFailed>> + Send {
         let target = self.targets.get(name).cloned().unwrap_or_else(|| format!("={name}:"));
         let (mux, name) = (self.mux.clone(), name.to_owned());
@@ -502,29 +602,48 @@ mod tests {
     async fn run(row: &mut SessionRow, dirs: &[PathBuf], io: &Fixed, headless: Option<&BTreeMap<String, Value>>) -> Vec<Effect> {
         let hooks = HookStates::load(dirs);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: dirs, headless,
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(row), &facts, io).await
     }
 
     #[tokio::test]
     async fn permission_card_after_bash_is_awaiting() {
         // Com o app aberto, o hook do plugin segura a permissão do Bash: a TUI não desenha cartão,
-        // o registro nativo fica `busy` e o marcador `working`. Só a pergunta segurada diz que espera.
+        // o registro nativo fica `busy` e o marcador `working`. Só a pergunta segurada no `plugin::Store`
+        // diz que espera, e ela entra depois da classificação, como em `ListBridge::project_plugins`.
         let (_d, dirs, mut row) = setup("working", 990.0);
         let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
         let hooks = HookStates::load(&dirs);
-        let held = BTreeMap::from([("s".to_owned(), serde_json::json!({"id": "perm:t1", "questions": [], "tool": "Bash", "resumo": "ls"}))]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &held, monitors: &Published::default() };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
-        assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Bash: ls")));
-        assert_eq!(row.options, Some(vec!["Yes".into(), "No".into()]));
-        assert_eq!(row.label, None);
+        assert_eq!(row.state, "working", "a classificação não inventa a pergunta segurada");
+        let mut state = hangar_api::state::StateEvent { state: row.state.clone(), label: row.label.clone(), question: row.question.clone(),
+            options: row.options.clone(), interaction_id: row.interaction_id.clone(), ..Default::default() };
+        let held = [serde_json::json!({"id": "perm:t1", "interaction_id": "shown", "questions": [], "tool": "Bash", "resumo": "ls"})];
+        crate::state::facts::project_plugin_state(&mut state, &held).unwrap();
+        assert_eq!((state.state.as_str(), state.question.as_deref(), state.interaction_id.as_deref()), ("awaiting_input", Some("Bash: ls"), Some("shown")));
+        assert_eq!(state.options, Some(vec!["Yes".into(), "No".into()]));
+        assert_eq!(state.label, None);
         // Sem pergunta segurada, o marcador responde como antes.
         let mut row2 = setup("working", 990.0).2;
         row2.jsonl = row.jsonl.clone();
         run(&mut row2, &dirs, &io, Some(&BTreeMap::new())).await;
         assert_eq!(row2.state, "working");
+    }
+
+    /// Parity M12: `claude` aberto à mão (sem entrada no Rust) não ganha o aviso `runtime_binding`.
+    #[tokio::test]
+    async fn hand_opened_claude_without_rust_entry_has_no_false_problem() {
+        let (_d, dirs, mut row) = setup("awaiting_input", 900.0);
+        let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
+        let hooks = HookStates::load(&dirs);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
+        let mut classifier = Classifier::default();
+        classifier.set_plugin_runtime(std::sync::Arc::new(crate::runtime::gateway::RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "t".into(), "i".into())));
+        classifier.classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert_eq!(row.problema, None);
     }
 
     #[tokio::test]
@@ -539,7 +658,7 @@ mod tests {
             options: Some(vec!["Yes".into(), "No".into()]), status_line: Some("🤖 Haiku".into()),
             limited: true, limit_reset: Some("9:10pm".into()), ..Default::default() }));
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &monitors };
         let effects = Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(*io.calls.lock().unwrap(), 0, "nenhuma captura com o Monitor vivo");
         assert_eq!(effects, vec![], "o Monitor não rebaixa o registro nativo pela lista");
@@ -596,7 +715,7 @@ mod tests {
             let hooks = HookStates::load(&dirs);
             let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
-                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &Published::default() };
+                                problems: &problems, stall_seconds: 1e12, monitors: &Published::default() };
             let mut c = Classifier::default();
             let io = Fixed { frame: Ok(frame.clone()), wall: 1e9, calls: Mutex::new(0) };
             let n = 200;
@@ -631,7 +750,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         let io = Slow { now: Mutex::new(0), peak: Mutex::new(0) };
         Classifier::default().classify(&mut rows, &facts, &io).await;
         assert!(rows.iter().all(|r| r.state == "idle"));
@@ -644,7 +763,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         let io = MuxCapture::new("tmux", Duration::from_secs(1), Default::default());
         send(Classifier::default().classify(&mut [], &facts, &io));
     }
@@ -673,6 +792,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_terminal_owned_by_rust_reads_the_actor_not_the_python_fact() {
+        let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": false,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl"})).unwrap() };
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "working", "label": null, "question": null, "options": null, "status_line": "gpt-5", "headless": false}}}))]);
+        let (monitors, empty) = (Published::default(), BTreeMap::new());
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&owned),
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
+        let mut rust = row();
+        Classifier::default().classify(std::slice::from_mut(&mut rust), &facts, &io).await;
+        assert_eq!((rust.state.as_str(), rust.status_line.as_deref()), ("working", Some("gpt-5")));
+        // A queda do socket chega à lista pelo problema da vista.
+        let dropped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "idle", "problema": "runtime_falhou", "problema_detalhe": "a conexão de controle caiu", "headless": false}}}))]);
+        let mut lost = row();
+        Classifier::default().classify(std::slice::from_mut(&mut lost), &Facts { headless: Some(&dropped), ..facts }, &io).await;
+        assert_eq!(lost.problema.as_deref(), Some("runtime_falhou"));
+        // Sem ator no Rust, o pane continua sendo do Python: o fato dele vale.
+        let facts = Facts { headless: Some(&empty), ..facts };
+        let mut python = row();
+        Classifier::default().classify(std::slice::from_mut(&mut python), &facts, &io).await;
+        assert_eq!(python.state, "idle");
+        assert_eq!(*io.calls.lock().unwrap(), 0, "Codex nunca é raspado");
+    }
+
+    #[tokio::test]
+    async fn codex_terminal_of_the_rust_keeps_the_rollout_status_line_and_drops_the_stale_hooks_warning() {
+        // Depois de reiniciar, a vista do ator só tem linha de status no primeiro turno: a do rollout (fato)
+        // fica. O "hooks não aprovados" do fato vem de o Python não ter mais o cliente: o ator não usa o marcador.
+        let row = serde_json::from_value::<SessionRow>(serde_json::json!({"name": "cx", "provider": "codex", "headless": false,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl", "status_line": "🤖 gpt (high) │ 💬 46k/95", "problema": "codex_hooks_nao_aprovados"})).unwrap();
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "working", "status_line": null, "headless": false}}}))]);
+        let monitors = Published::default();
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&owned),
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
+        let mut rust = row;
+        Classifier::default().classify(std::slice::from_mut(&mut rust), &facts, &io).await;
+        assert_eq!(rust.state, "working");
+        assert_eq!(rust.status_line.as_deref(), Some("🤖 gpt (high) │ 💬 46k/95"));
+        assert_eq!(rust.problema, None);
+    }
+
+    #[tokio::test]
     async fn codex_headless_reads_the_feed() {
         // Linha do Codex sem terminal com o feed vivo: estado e pergunta dele; sem feed, o fato do Python.
         let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": true,
@@ -682,7 +851,7 @@ mod tests {
         let monitors = Published::default();
         let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
         let mut without = row();
         Classifier::default().classify(std::slice::from_mut(&mut without), &facts, &io).await;
         assert_eq!(without.state, "idle", "sem chat aberto vale o fato do Python");
@@ -691,9 +860,22 @@ mod tests {
             state: "working".into(), status_line: Some("gpt".into()), codex_question: question.as_object().cloned(), ..Default::default() }));
         let mut with = row();
         Classifier::default().classify(std::slice::from_mut(&mut with), &facts, &io).await;
+        // Turno rodando: a pergunta assíncrona aparece, mas a sessão segue trabalhando (como no Python).
         assert_eq!((with.state.as_str(), with.question.as_deref(), with.status_line.as_deref()),
-                   ("awaiting_input", Some("Qual caminho?"), Some("gpt")));
-        assert_eq!(with.pending_questions, without.pending_questions, "contagem segue dos fatos");
+                   ("working", Some("Qual caminho?"), Some("gpt")));
+        assert_eq!(with.pending_questions, without.pending_questions, "sem o ator no retrato, a contagem segue dos fatos");
+        // Ocioso com a pergunta: espera.
+        monitors.set(2, "cx", Some("rollout-abc".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
+            state: "idle".into(), codex_question: question.as_object().cloned(), ..Default::default() }));
+        let mut idle = row();
+        Classifier::default().classify(std::slice::from_mut(&mut idle), &facts, &io).await;
+        assert_eq!(idle.state, "awaiting_input");
+        // Com o ator no retrato, a contagem vem dele: os fatos do Python não enxergam sessão do Rust.
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "pending_questions": 1,
+            "public_state": {"state": "idle"}}}))]);
+        let mut counted = row();
+        Classifier::default().classify(std::slice::from_mut(&mut counted), &Facts { headless: Some(&owned), ..facts }, &io).await;
+        assert_eq!(counted.pending_questions, 1);
         assert_eq!(*io.calls.lock().unwrap(), 0);
     }
 
@@ -713,7 +895,7 @@ mod tests {
         for line in ["🤖 gpt-6-luna (medium) │ 💬 46k/95 46k/828k", "🤖 gpt-6-luna (medium) │ 💬 50k/5 50k/828k"] {
             let headless = view(line);
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                                problems: &problems, stall_seconds: 1e12, monitors: &monitors };
             let mut r = row();
             classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
             assert_eq!(r.status_line.as_deref(), Some(line));
@@ -721,7 +903,7 @@ mod tests {
         // Ator parado: fica o fato do Python.
         let stopped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": false}}))]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&stopped),
-                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
         let mut r = row();
         classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
         assert_eq!(r.status_line.as_deref(), Some("🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"));
@@ -745,7 +927,7 @@ mod tests {
         let hooks = HookStates::load(&dirs);
         let problems = BTreeMap::from([("s".to_owned(), "cano_exited".to_owned())]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: None,
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(row.problema.as_deref(), Some(RUNTIME_ABSENT));
     }

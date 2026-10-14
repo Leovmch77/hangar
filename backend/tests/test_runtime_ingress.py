@@ -116,7 +116,8 @@ def test_partial_close_failure_reopens_only_what_closed(tmp_path):
 def session_file(monkeypatch, record):
     """Arquivo da sessão falso que `_rebind` relê antes de religar."""
     from app import runtime_policy
-    monkeypatch.setattr(runtime_policy, "_sessions", lambda provider: SimpleNamespace(load=lambda name: dict(record)))
+    # Sem argumento, como o de verdade: o fake que aceitava `provider` escondia o `TypeError`.
+    monkeypatch.setattr(runtime_policy, "_sessions", lambda: SimpleNamespace(load=lambda name: dict(record)))
 
 
 def test_rebind_closes_gate_before_marking_frozen(tmp_path, monkeypatch):
@@ -134,6 +135,32 @@ def test_rebind_closes_gate_before_marking_frozen(tmp_path, monkeypatch):
     asyncio.run(flow())
     assert seen == {"gate": [("session", True)], "frozen": True}
     assert transport.ingress() == [("session", True), ("session", False)]
+    coordinator.close_python_leases()
+
+
+def test_rebind_reads_the_real_claude_session_file(tmp_path, monkeypatch):
+    # Sem fake de `_sessions`: a chamada tem de casar com a assinatura real (antes, `TypeError` calado na tarefa).
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "load", lambda name: {"session_id": "sid-new"})
+    coordinator, slot = coordinator_with(tmp_path, Transport())
+    changes = []
+    async def change(name, action, **kw):
+        changes.append(name)
+    coordinator.change = change
+    async def flow():
+        coordinator._rebind(slot, "sid-new")
+        await coordinator.rebindings[slot.binding.key]
+    asyncio.run(flow())
+    assert changes == ["session"]
+    coordinator.close_python_leases()
+
+
+def test_codex_conversation_change_is_not_rebound_here(tmp_path, monkeypatch):
+    # Thread nova do Codex é do Rust: o Python não relê sidecar nem religa.
+    coordinator, slot = coordinator_with(tmp_path, Transport())
+    slot.binding.provider = "codex"
+    coordinator._rebind(slot, "thread-new")
+    assert slot.binding.key not in coordinator.rebindings
     coordinator.close_python_leases()
 
 

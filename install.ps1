@@ -815,6 +815,19 @@ if ($script:temLog) { Add-Content -Path $logInstall -Value '  ok  CP_AUTH_TOKEN 
 Retoma-Log
 Nota 'E esse token que voce digita no celular na primeira conexao.'
 
+# Sem nome a maquina nao conversa com as outras (recado de volta sai sem endereco). Nome que ja
+# existe fica: troca-lo pela tela avisa as outras maquinas, troca-lo aqui nao avisaria.
+if (-not $SoChecar -and -not (Select-String -Path $envFile -Pattern '^CP_SERVER_ID=.' -Quiet)) {
+    $nomeMaquina = ($env:COMPUTERNAME.ToLower() -replace '[^a-z0-9_-]', '-').TrimStart('-_')
+    if ($nomeMaquina.Length -gt 32) { $nomeMaquina = $nomeMaquina.Substring(0, 32) }
+    if ($nomeMaquina) {
+        Set-EnvKey -Chave 'CP_SERVER_ID' -Valor $nomeMaquina
+        Ok "nome desta maquina para as outras: $nomeMaquina"
+    } else {
+        Falta 'nome desta maquina nao definido: o nome do computador nao serve; defina na tela Maquinas'
+    }
+}
+
 # Segunda e ultima pergunta. A resposta decide se o Tailscale entra na lista do 1/8 - instalar
 # terceiro no meio do passo 6 era o que fazia a instalacao parar de novo quase no fim.
 $script:querTailscale = $false
@@ -2707,7 +2720,9 @@ Ok 'leitura de processo (psutil) funcionando'
 Pop-Location
 
 # Sobra de rodada anterior: o kill pode demorar, entao limpa antes de contar de novo.
-$antigas = & tmux list-sessions -F '#{session_name}' 2>$null | Where-Object { $_ -like 'cp-fumaca-*' }
+# Sem servidor do psmux ainda (instalacao nova) o list-sessions avisa no stderr; com 'Stop' isso
+# derrubaria o instalador antes do teste de verdade.
+$antigas = & { $ErrorActionPreference = 'Continue'; & tmux list-sessions -F '#{session_name}' 2>$null } | Where-Object { $_ -like 'cp-fumaca-*' }
 foreach ($velha in $antigas) { Nativo tmux kill-session -t "=$velha" | Out-Null }
 
 $sessao = "cp-fumaca-$PID"
@@ -2733,7 +2748,7 @@ if (-not $morreu) {
     # O kill-session do psmux nao derruba o pane. Como a sessao e NOSSA e sabemos o pane_pid,
     # matamos o processo direto - sem `tmux kill-server`, que levaria junto as sessoes do usuario.
     # Limpar o proprio lixo e obrigacao do teste; deixar isso pra pessoa e transferir trabalho.
-    $pids = & tmux list-panes -t "=$sessao" -F '#{pane_pid}' 2>$null
+    $pids = & { $ErrorActionPreference = 'Continue'; & tmux list-panes -t "=$sessao" -F '#{pane_pid}' 2>$null }
     foreach ($pane in $pids) {
         if ($pane -match '^\d+$') { Stop-Process -Id $pane -Force -ErrorAction SilentlyContinue }
     }
