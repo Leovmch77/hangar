@@ -348,6 +348,7 @@ impl Hangar {
     }
 
     fn open_group_ask(&mut self, mode: AskMode, task: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.machines_tray.open = false;
         let origin = ask_origin(&mode).clone();
         let join = matches!(mode, AskMode::Join { .. });
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(web("grupo_drop_tarefa")).default_value(task));
