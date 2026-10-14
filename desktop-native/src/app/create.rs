@@ -13,7 +13,7 @@ use super::device::Remote;
 use super::machines::{FocusOnClick, enter_to_focused};
 use super::settings::Disclosure;
 use super::sidebar::{Target, wrap_step};
-use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
+use gpui_kit::component::{IndexPath, WindowExt, popover::Popover, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 use super::chrome::Skeleton;
 use serde::Deserialize;
 use std::{future::Future, pin::Pin, rc::Rc};
@@ -81,7 +81,17 @@ fn next_root(current: usize, count: usize, reverse: bool) -> Option<usize> {
 struct Probe { disponivel: bool, #[serde(default)] default: bool }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(super) struct Checkout { current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
+pub(super) struct Checkout { current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool,
+    /// Branch aberta em outra worktree: o git recusa trocar a pasta para ela.
+    #[serde(default)] elsewhere: HashMap<String, Elsewhere> }
+
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct Elsewhere { path: String, #[serde(default)] main: bool }
+
+/// "em <pasta>" ao lado da branch aberta em outra worktree.
+fn elsewhere_hint(checkout: &Checkout, branch: &str) -> Option<String> {
+    checkout.elsewhere.get(branch).map(|at| tr("git_elsewhere_tag").replace("{pasta}", basename(&at.path)))
+}
 
 fn checkout_of(result: Result<Value, Failure>) -> Result<Option<Checkout>, String> {
     match result {
@@ -274,6 +284,8 @@ pub(super) enum CreateReply {
     Git(u64, Result<Value, Failure>),
     /// Fetch, pull, troca ou criação de branch: a ação, a branch dela e o estado que voltou.
     GitDone(folder_git::GitAction, String, Result<Value, Failure>),
+    /// A outra worktree não foi fechada: o motivo, já em frase.
+    GitElsewhere(String),
     /// As worktrees do servidor, para a pílula de branch mostrar as do repositório da pasta.
     Worktrees(u64, Result<Value, Failure>),
 }
@@ -963,6 +975,8 @@ impl NewSession {
         }
         let seq = self.sessions.start();
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Sessions(seq, api.sessions().await)).await }));
+        self.reset_git();
+        self.load_branches(window, cx);
         self.load_archive(window, cx);
         self.sync_customizations(window, cx);
         cx.notify();
@@ -1052,7 +1066,6 @@ impl NewSession {
 
     fn read_branches(&mut self, fresh: bool, cx: &mut Context<Self>) {
         if self.creating { return; }
-        if !self.compact { return; }
         let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
         let root = root.path.clone();
         let seq = self.checkout.start();
@@ -1119,27 +1132,27 @@ impl NewSession {
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.is_transfer() && !self.customizations.is_open() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
+            && !self.checkout.loading
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
-                && !self.models.loading && self.models.ok().is_some()
-                && !self.checkout.loading))
+                && !self.models.loading && self.models.ok().is_some()))
     }
 
     pub(super) fn create(&mut self, first: Option<(u64, String, Vec<FirstFile>)>, cx: &mut Context<Self>) {
         if !self.can_create(cx) || self.compact != first.is_some() { return; }
         let Some(cwd) = self.picked.clone() else { return };
         // Worktree que já existe: a sessão nasce dentro dela, sem pedir worktree nova.
-        let cwd = self.existing.clone().filter(|_| self.compact && !self.new_branch).unwrap_or(cwd);
+        let cwd = self.existing.clone().filter(|_| !self.new_branch).unwrap_or(cwd);
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
         let typed = self.new_branch_name.read(cx).value().trim().to_string();
         let typed_empty = typed.is_empty();
         let wanted = if self.new_branch { if typed.is_empty() { name.clone() } else { typed } } else { self.branch.clone() };
-        let mut requested_branch = (self.compact && !wanted.is_empty()).then(|| wanted.clone());
+        let mut requested_branch = (!wanted.is_empty()).then(|| wanted.clone());
         // Sem nome digitado, a branch é o nome final da sessão, que só sai do `unique_name` abaixo.
         let branch_is_name = self.compact && self.new_branch && typed_empty && self.baton.is_none();
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
-        if self.compact && !wanted.is_empty() {
+        if !wanted.is_empty() {
             if let (Some(obj), Value::Object(extra)) = (body.as_object_mut(), worktree_body(&wanted, self.new_branch, &self.base)) {
                 obj.extend(extra);
             }
@@ -1298,7 +1311,7 @@ impl NewSession {
                 }
             }
             CreateReply::Branches(seq, result) => {
-                if !self.compact || !self.checkout.finish(seq, result) { return None; }
+                if !self.checkout.finish(seq, result) { return None; }
                 // A base padrão da branch nova é a branch atual da pasta; com HEAD solto, a primeira local.
                 if self.base.is_empty() {
                     self.base = self.checkout.ok().and_then(Option::as_ref).and_then(default_base).unwrap_or_default();
@@ -1387,7 +1400,7 @@ impl NewSession {
             reply @ (CreateReply::Models(..) | CreateReply::Engines(..) | CreateReply::Config(..) | CreateReply::Quotas(..)
                 | CreateReply::Context(..) | CreateReply::Account(..)) => self.receive_extra(reply, window, cx),
             reply @ (CreateReply::Archive(..) | CreateReply::Preview(..)) => self.receive_archive(reply, cx),
-            reply @ (CreateReply::Git(..) | CreateReply::GitDone(..)) => { if !self.compact { return None; } self.receive_git(reply, window, cx) }
+            reply @ (CreateReply::Git(..) | CreateReply::GitDone(..) | CreateReply::GitElsewhere(..)) => self.receive_git(reply, window, cx),
             CreateReply::Baton(seq, result) => {
                 // "Não consegui ler" e "o resumo está vazio" são respostas diferentes: a falha nunca vira caixa vazia.
                 let view = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1959,6 +1972,7 @@ impl NewSession {
         // Retomar pelo proxy recebe modelo; nome, modo, esforço e permissão continuam fora desse pedido.
         let session = [
             fresh.then(|| field(tr("create_name"), Input::new(&self.name).disabled(busy).aria_label(tr("create_name")).into_any_element())),
+            (fresh && self.baton.is_none()).then(|| self.render_branch_field(cx)).flatten(),
             Some(div().flex().flex_col().gap(px(6.)).child(label(tr("create_provider"))).child(providers)
                 .when_some(probe_error, |el, error| el.child(muted(tr("create_probe_failed").replace("{erro}", &error))
                     .id("create-probe-error").role(Role::Alert)))
@@ -2110,7 +2124,18 @@ impl NewSession {
             }),
             _ => None,
         };
-        let branch = match (self.checkout.loading, self.checkout.ok()) {
+        let branch = self.branch_label(cx);
+        div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.))
+            .children(account.map(|(label, aria)| quiet_pill(Menu::Account, open == Some(Menu::Account), IconName::CircleUser, label, aria,
+                self.configs.loading || self.codex.loading, cx)))
+            .children(branch.map(|label| quiet_pill(Menu::Branch, open == Some(Menu::Branch), IconName::GitBranch, label,
+                tr("create_checkout_branch"), self.checkout.loading, cx)))
+            .children(self.render_git_pill(open == Some(Menu::Git), cx))
+    }
+
+    /// O texto da pílula de branch (e do campo no formulário): a pasta principal, a worktree escolhida ou a nova.
+    fn branch_label(&self, cx: &App) -> Option<String> {
+        match (self.checkout.loading, self.checkout.ok()) {
             (true, _) => Some(tr("create_checkout_loading")),
             (false, Some(Some(_))) if self.new_branch => {
                 let typed = self.new_branch_name.read(cx).value().trim().to_string();
@@ -2121,13 +2146,42 @@ impl NewSession {
                 Some(tr_shared("worktree_menu_pill_existente", &[("nome", self.existing.as_deref().map(basename).unwrap_or_default())])),
             (false, Some(Some(checkout))) => Some(checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"))),
             _ => None,
+        }
+    }
+
+    /// O mesmo menu da pílula de branch, no formulário: pasta principal, worktree nova, as que já existem e a troca de branch.
+    /// Ao lado, a pílula do Git da pasta (fetch, pull, trocar e criar branch, alterações), com o mesmo menu do compositor.
+    fn render_branch_field(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let failed = self.checkout.value.as_ref().filter(|_| !self.checkout.loading).and_then(|v| v.as_ref().err())
+            .map(|e| alert("create-checkout-error", tr("create_checkout_failed").replace("{reason}", e)));
+        let branch = self.branch_label(cx);
+        let git = self.git_label();
+        if branch.is_none() && git.is_none() && failed.is_none() { return None; }
+        let opened = self.menu.get();
+        let trigger = |id: &'static str, icon: IconName, text: String, aria: String, disabled: bool| Button::new(id).outline()
+            .disabled(self.creating || disabled).accessibility_label(format!("{aria}: {text}"))
+            .child(div().w_full().flex().items_center().gap(px(8.))
+                .child(chrome::small_icon(icon, 14., theme::faint()))
+                .child(div().flex_1().min_w_0().truncate().text_sm().child(text))
+                .child(chrome::small_icon(IconName::ChevronDown, 12., theme::faint())));
+        let popover = |id: &'static str, menu: Menu, width: f32, button: Button, cx: &mut Context<Self>| {
+            let view = cx.entity();
+            // A superfície do kit sai (fundo, sombra, margem) e entra a dos menus do compositor: vidro, não bloco opaco.
+            Popover::new(id).anchor(Anchor::TopLeft).open(opened == Some(menu)).bg(transparent_black()).shadow(Vec::new()).p_0()
+                .on_open_change({ let view = view.clone(); move |open, window, cx| view.update(cx, |this, cx| {
+                    if (this.menu.get() == Some(menu)) != *open { this.toggle_menu(menu, window, cx); }
+                }) })
+                .trigger(button)
+                .content(move |_, _, cx| view.update(cx, |this, cx|
+                    chrome::popover(div().w(px(width)).child(this.render_menu(menu, px(480.), cx)).into_any_element(), false)))
         };
-        div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.))
-            .children(account.map(|(label, aria)| quiet_pill(Menu::Account, open == Some(Menu::Account), IconName::CircleUser, label, aria,
-                self.configs.loading || self.codex.loading, cx)))
-            .children(branch.map(|label| quiet_pill(Menu::Branch, open == Some(Menu::Branch), IconName::GitBranch, label,
-                tr("create_checkout_branch"), self.checkout.loading, cx)))
-            .children(self.render_git_pill(open == Some(Menu::Git), cx))
+        let branch = branch.map(|text| div().flex_1().min_w_0().child(popover("create-branch-menu", Menu::Branch, 400.,
+            trigger("create-branch", IconName::GitBranch, text, tr("create_checkout_branch"), self.checkout.loading).w_full(), cx)));
+        let git = git.map(|(text, waiting)| popover("create-git-menu", Menu::Git, 416.,
+            trigger("create-git", IconName::RefreshCw, text, tr("folder_git_title"), waiting), cx));
+        Some(div().flex().flex_col().gap(px(6.)).child(label(tr("create_checkout_branch")))
+            .child(div().flex().items_start().gap(px(8.)).children(branch).children(git))
+            .children(failed).into_any_element())
     }
 
     /// A conta da conversa fechada aberta, abaixo do compositor: Claude troca pelo menu (com a cota de cada conta), Codex só
@@ -2415,7 +2469,8 @@ impl NewSession {
         let rows: Vec<AnyElement> = checkout.branches.iter().chain(&checkout.remotes)
             .filter(|b| checkout.current.as_ref() != Some(*b) && wanted(query, b, "")).map(|b| {
                 let id = b.clone();
-                menu_row(SharedString::from(format!("new-chat-branch-{id}")), false, b.clone(), String::new()).disabled(locked)
+                menu_row(SharedString::from(format!("new-chat-branch-{id}")), false, b.clone(), elsewhere_hint(checkout, b).unwrap_or_default())
+                    .disabled(locked)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.creating { return; }
                         // A troca é na pasta: o menu fica aberto para mostrar a recusa ou o resultado.

@@ -10750,6 +10750,7 @@ class WorktreeDeleteBody(_StrictBody):
     path: str = Field(min_length=1)
     confirm: bool = Field(default=False, strict=True)
     delete_branch: bool = Field(default=False, strict=True)
+    keep_branch: bool = Field(default=False, strict=True)
 
 
 @app.post("/api/worktrees/delete", dependencies=[Depends(require_auth)])
@@ -10759,7 +10760,8 @@ async def worktrees_delete(body: WorktreeDeleteBody):
     sessions = await asyncio.to_thread(registry.list)
     try:
         return await asyncio.to_thread(worktrees.delete, repo, path, sessions,
-                                       confirm=body.confirm, delete_branch=body.delete_branch)
+                                       confirm=body.confirm, delete_branch=body.delete_branch,
+                                       keep_branch=body.keep_branch)
     except GitError as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     finally:   # falha no meio também muda a lista (conversa que não voltou, worktree que saiu)
