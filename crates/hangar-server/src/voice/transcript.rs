@@ -11,13 +11,23 @@ impl Transcript {
     /// Falhar ao abrir não derruba a chamada: o diário registra o código e a conversa segue sem arquivo.
     pub fn open(voice_dir: &Path, started: DateTime<Local>) -> Transcript {
         let dir = voice_dir.join("conversas");
-        let path = dir.join(format!("{}.md", started.format("%Y-%m-%d_%H-%M-%S")));
+        let stamp = started.format("%Y-%m-%d_%H-%M-%S").to_string();
+        let mut path = dir.join(format!("{stamp}.md"));
         let opened = std::fs::create_dir_all(&dir).and_then(|()| {
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
             #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options.open(&path)?;
+            std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            // Duas chamadas no mesmo segundo: a segunda ganha sufixo, nunca escreve no arquivo da outra.
+            let mut file = (1..100).find_map(|n| {
+                let candidate = if n == 1 { dir.join(format!("{stamp}.md")) } else { dir.join(format!("{stamp}-{n}.md")) };
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                match options.open(&candidate) {
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    other => { path = candidate; Some(other) }
+                }
+            }).unwrap_or_else(|| Err(std::io::ErrorKind::AlreadyExists.into()))?;
             writeln!(file, "# Conversa por voz — {}\n", started.format("%d/%m/%Y %H:%M"))?;
             Ok(file)
         });
@@ -68,6 +78,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = Transcript::open(dir.path(), at(9, 0, 0));
         assert_eq!(std::fs::metadata(&t.path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_is_private_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        Transcript::open(dir.path(), at(9, 0, 0));
+        assert_eq!(std::fs::metadata(dir.path().join("conversas")).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn two_calls_in_the_same_second_never_share_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (Transcript::open(dir.path(), at(9, 0, 0)), Transcript::open(dir.path(), at(9, 0, 0)));
+        assert_ne!(a.path, b.path);
+        assert!(a.path.is_file() && b.path.is_file());
     }
 
     #[test]

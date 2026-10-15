@@ -8,8 +8,14 @@ pub const KEYS: [&str; 4] = ["WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SI
 /// de `systemctl --user show-environment`) e, sem ele, da pasta de runtime: o primeiro socket `wayland-*` e a instância do
 /// Hyprland mais recente em `hypr/`. O que o processo já tem nunca é trocado.
 pub fn missing(current: impl Fn(&str) -> Option<String>, systemd: &str, runtime: Option<&Path>) -> Vec<(String, String)> {
+    // Valor do gerenciador que aponta para socket ou instância que não existe mais (Hyprland reiniciado) não vale.
+    let alive = |key: &str, value: &str| match (key, runtime) {
+        ("WAYLAND_DISPLAY", Some(run)) => run.join(value).exists(),
+        ("HYPRLAND_INSTANCE_SIGNATURE", Some(run)) => run.join("hypr").join(value).exists(),
+        _ => true,
+    };
     let from_systemd = |key: &str| systemd.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).filter(|v| !v.is_empty())
-        .map(str::to_owned);
+        .filter(|v| alive(key, v)).map(str::to_owned);
     let from_runtime = |key: &str| match key {
         "WAYLAND_DISPLAY" => names(runtime?).into_iter().filter(|(n, _)| n.starts_with("wayland-") && !n.ends_with(".lock"))
             .map(|(n, _)| n).min(),
@@ -38,17 +44,23 @@ pub fn fill() -> Vec<(String, String)> {
 
 /// Com prazo: barramento do usuário quebrado não pode prender quem lança.
 fn systemd_environment() -> Option<String> {
-    let mut child = std::process::Command::new("systemctl").args(["--user", "show-environment"])
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        if child.try_wait().ok()?.is_some() { break; }
-        if std::time::Instant::now() >= deadline { let _ = child.kill(); let _ = child.wait(); return None; }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    read_with_limit(std::process::Command::new("systemctl").args(["--user", "show-environment"]), std::time::Duration::from_secs(3))
+}
+
+/// A saída é lida enquanto o filho roda (pipe cheio o prenderia); estourado o prazo, ele é morto e colhido.
+fn read_with_limit(command: &mut std::process::Command, limit: std::time::Duration) -> Option<String> {
+    let mut child = command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn()
+        .map_err(|e| crate::voice::log(format!("display env: spawn failed kind={:?}", e.kind()))).ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let mut out = String::new(); let _ = tx.send(std::io::Read::read_to_string(&mut stdout, &mut out).map(|_| out)); });
+    let read = rx.recv_timeout(limit);
+    if read.is_err() { let _ = child.kill(); }
+    let _ = child.wait();
+    match read {
+        Ok(Ok(out)) => Some(out),
+        _ => { crate::voice::log("display env: user manager environment unreadable in time"); None }
     }
-    let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out)
 }
 
 #[cfg(test)]
@@ -80,6 +92,27 @@ mod tests {
         std::fs::create_dir_all(hypr.join("new_2")).unwrap();
         let got = missing(env(&[("XDG_RUNTIME_DIR", "x")]), "", Some(run.path()));
         assert_eq!(got, [("WAYLAND_DISPLAY".into(), "wayland-1".into()), ("HYPRLAND_INSTANCE_SIGNATURE".into(), "new_2".into())]);
+    }
+
+    #[test]
+    fn a_stale_instance_from_the_user_manager_loses_to_the_one_that_exists() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(run.path().join("hypr").join("vivo_2")).unwrap();
+        std::fs::write(run.path().join("wayland-1"), "").unwrap();
+        let systemd = "WAYLAND_DISPLAY=wayland-0\nHYPRLAND_INSTANCE_SIGNATURE=morto_1\n";
+        let got = missing(env(&[("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x")]), systemd, Some(run.path()));
+        assert_eq!(got, [("WAYLAND_DISPLAY".into(), "wayland-1".into()), ("HYPRLAND_INSTANCE_SIGNATURE".into(), "vivo_2".into())]);
+        std::fs::create_dir_all(run.path().join("hypr").join("morto_1")).unwrap();
+        let got = missing(env(&[("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x"), ("WAYLAND_DISPLAY", "w")]), systemd, Some(run.path()));
+        assert_eq!(got, [("HYPRLAND_INSTANCE_SIGNATURE".into(), "morto_1".into())], "existindo, o do gerenciador vale");
+    }
+
+    #[test]
+    fn a_large_user_environment_is_read_whole() {
+        let big = "head -c 200000 /dev/zero | tr '\\0' a; echo; echo WAYLAND_DISPLAY=wayland-9";
+        assert!(read_with_limit(std::process::Command::new("sh").args(["-c", big]), std::time::Duration::from_secs(5))
+            .is_some_and(|out| out.contains("WAYLAND_DISPLAY=wayland-9")), "pipe cheio não pode prender o filho");
+        assert!(read_with_limit(std::process::Command::new("sh").args(["-c", "sleep 5"]), std::time::Duration::from_millis(200)).is_none());
     }
 
     #[test]
