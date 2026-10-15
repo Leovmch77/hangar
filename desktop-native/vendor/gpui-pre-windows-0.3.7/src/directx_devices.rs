@@ -92,7 +92,8 @@ impl SurfaceTexture {
     /// Replaces the contents with `pixels` (RGBA, `width * 4` bytes per row). Only on the thread that draws the windows:
     /// it goes through the device's immediate context, which the renderer also uses.
     pub fn write(&self, pixels: &[u8]) -> Result<()> {
-        anyhow::ensure!(pixels.len() >= (self.width * self.height * 4) as usize, "surface pixels too short");
+        let needed = (self.width as usize).checked_mul(self.height as usize).and_then(|n| n.checked_mul(4)).context("surface too large")?;
+        anyhow::ensure!(pixels.len() >= needed, "surface pixels too short");
         // SAFETY: the immediate context of the device that owns the texture.
         let context = unsafe { self.device.GetImmediateContext() }.context("no immediate context")?;
         // SAFETY: `pixels` holds `height` rows of `width * 4` bytes and outlives the call.

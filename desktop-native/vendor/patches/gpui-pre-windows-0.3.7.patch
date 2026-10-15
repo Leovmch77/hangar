@@ -1542,7 +1542,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/directx_devices.rs gpui-pre-windows-0.3.7/src/directx_devices.rs
 --- gpui-pre-windows-0.3.7/src/directx_devices.rs
 +++ gpui-pre-windows-0.3.7/src/directx_devices.rs
-@@ -35,6 +35,78 @@
+@@ -35,6 +35,79 @@
          .context("DirectXRenderer failed to recover from lost device after multiple attempts")
  }
  
@@ -1603,7 +1603,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +    /// Replaces the contents with `pixels` (RGBA, `width * 4` bytes per row). Only on the thread that draws the windows:
 +    /// it goes through the device's immediate context, which the renderer also uses.
 +    pub fn write(&self, pixels: &[u8]) -> Result<()> {
-+        anyhow::ensure!(pixels.len() >= (self.width * self.height * 4) as usize, "surface pixels too short");
++        let needed = (self.width as usize).checked_mul(self.height as usize).and_then(|n| n.checked_mul(4)).context("surface too large")?;
++        anyhow::ensure!(pixels.len() >= needed, "surface pixels too short");
 +        // SAFETY: the immediate context of the device that owns the texture.
 +        let context = unsafe { self.device.GetImmediateContext() }.context("no immediate context")?;
 +        // SAFETY: `pixels` holds `height` rows of `width * 4` bytes and outlives the call.
@@ -1621,7 +1622,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  #[derive(Clone)]
  pub(crate) struct DirectXDevices {
      pub(crate) adapter: IDXGIAdapter1,
-@@ -63,6 +135,7 @@
+@@ -63,6 +136,7 @@
              _ => unreachable!(),
          }
  

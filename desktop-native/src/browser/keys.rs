@@ -2,8 +2,6 @@
 use gpui_kit::*;
 use serde_json::{Value, json};
 
-/// Tecla da GPUI → `Input.dispatchKeyEvent`. Texto digitado vence, para "ç"/"ã" de tecla morta; tecla morta ainda
-/// compondo (sem texto) não vai à página.
 pub fn modifier_bits(m: &Modifiers) -> u8 {
     [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b)
 }
@@ -21,6 +19,8 @@ fn punctuation(c: char) -> Option<(&'static str, u32)> {
     })
 }
 
+/// Tecla da GPUI → `Input.dispatchKeyEvent`. Texto digitado vence, para "ç"/"ã" de tecla morta; tecla morta ainda
+/// compondo (sem texto) não vai à página.
 pub fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
     let m = &keystroke.modifiers;
     let modifiers = modifier_bits(m);
