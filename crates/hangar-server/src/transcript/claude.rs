@@ -590,11 +590,12 @@ fn user_blocks(obj: &Map<String, Value>, uid: &str, items: &[Value]) -> Vec<Chat
     // Todas aparecem, uma por linha: só a primeira sumia da conversa com as outras, que o modelo recebeu.
     let mut parts = Vec::with_capacity(texts.len());
     for (k, text) in texts.iter().enumerate() {
-        // Bloco seguinte que é marcação do harness (comando, notificação, skill) não é texto digitado.
-        if k > 0 && is_command_meta(text) {
+        let cleaned = strip_meta_blocks(text);
+        // Bloco seguinte que, sem os `<system-reminder>`, é marcação do harness (comando, notificação,
+        // skill) não é texto digitado; o que sobra de texto depois do lembrete fica.
+        if k > 0 && is_command_meta(&cleaned) {
             continue;
         }
-        let cleaned = strip_meta_blocks(text);
         if IMAGE_SOURCE.is_match(&cleaned) {
             if k == 0 {
                 return Vec::new();
@@ -732,10 +733,12 @@ mod tests {
         let meta = json!({"type": "user", "uuid": "u-meta", "message": {"content": [
             {"type": "text", "text": "pedido"},
             {"type": "text", "text": "<task-notification><task-id>t-1</task-id></task-notification>"},
-            {"type": "text", "text": "Base directory for this skill: /s"}]}});
+            {"type": "text", "text": "Base directory for this skill: /s"},
+            {"type": "text", "text": "<system-reminder>x</system-reminder>\n<command-name>/y</command-name>"},
+            {"type": "text", "text": "<system-reminder>lembrete</system-reminder>\ndepois do lembrete"}]}});
         let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(meta.to_string().as_bytes(), 0))
             .expect("um evento");
-        assert_eq!((ev.text.as_deref(), ev.commit_blocks.is_none()), (Some("pedido"), true));
+        assert_eq!(ev.text.as_deref(), Some("pedido\ndepois do lembrete"));
         // A fonte da imagem num bloco seguinte não vira texto; a primeira continua tirando a linha da conversa.
         let with_source = json!({"type": "user", "uuid": "u-img", "message": {"content": [
             {"type": "text", "text": "[Image #1] veja"}, {"type": "image"}, {"type": "text", "text": "[Image: source: /tmp/a.png]"}]}});

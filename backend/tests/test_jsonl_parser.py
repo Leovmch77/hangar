@@ -37,9 +37,11 @@ def test_entradas_juntadas_pela_cli_mostram_todos_os_blocos():
         "type": "user", "uuid": "u-meta", "message": {"content": [
             {"type": "text", "text": "pedido"},
             {"type": "text", "text": "<task-notification><task-id>t-1</task-id></task-notification>"},
-            {"type": "text", "text": "Base directory for this skill: /s"}]},
+            {"type": "text", "text": "Base directory for this skill: /s"},
+            {"type": "text", "text": "<system-reminder>x</system-reminder>\n<command-name>/y</command-name>"},
+            {"type": "text", "text": "<system-reminder>lembrete</system-reminder>\ndepois do lembrete"}]},
     }))
-    assert evs == [ChatEvent(kind="user_msg", id="u-meta", text="pedido")]
+    assert [(e.id, e.text) for e in evs] == [("u-meta", "pedido\ndepois do lembrete")]
     # A fonte da imagem num bloco seguinte não vira texto; na primeira, a linha continua fora.
     evs = parse_line(_line({
         "type": "user", "uuid": "u-img", "message": {"content": [

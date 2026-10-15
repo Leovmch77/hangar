@@ -1237,13 +1237,14 @@ def answer_rows() -> list:
 
 
 def write_session_write(out: Path | None = None) -> None:
-    from app import api, runtime_coordinator, runtime_terminal, terminal_input
+    from app import api, runtime_coordinator, runtime_terminal, terminal_input, termsock
 
     out = out or HERE / "session_write"
     out.mkdir(parents=True, exist_ok=True)
     # Os casos trocam o coordenador e funções do `api` por dublês; sem devolver os originais, as rotas de
     # grupo que vêm depois liam os dublês (`rust_owns_groups` quebrava, a recusa do orquestrador sumia).
-    patched = (api, api.diag, api.plugin_bridge, runtime_coordinator, runtime_terminal, terminal_input.TerminalInput)
+    patched = (api, api.diag, api.plugin_bridge, runtime_coordinator, runtime_terminal, termsock,
+               terminal_input.TerminalInput)
     saved = [(owner, dict(vars(owner))) for owner in patched]
     try:
         inputs, steers = session_write_rows()
@@ -1254,7 +1255,8 @@ def write_session_write(out: Path | None = None) -> None:
             for name in set(vars(owner)) - set(before):
                 delattr(owner, name)
             for name, value in before.items():
-                if vars(owner).get(name, value) is not value:
+                # Apagado por um caso também volta: ausente não é "igual ao original".
+                if name not in vars(owner) or vars(owner)[name] is not value:
                     setattr(owner, name, value)
     for name, rows in rows_by_name:
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
