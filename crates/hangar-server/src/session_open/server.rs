@@ -157,6 +157,14 @@ fn explicitly_other(request: &SessionOpenRequest) -> bool {
 
 pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
 
+/// `decide` numa tarefa própria: cliente que desconecta no meio não interrompe a criação (a worktree
+/// criada sem o pane ficaria para trás), como o `complete_on_cancel` do Python.
+async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
+    let st = st.clone();
+    tokio::spawn(async move { decide(&st, request, caller).await }).await
+        .unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
+}
+
 /// Resolve e, sendo Claude com terminal, abre. O resto (Codex, Pi, omp, Kimi, sem terminal) ainda é
 /// do Python. Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
 pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
@@ -204,7 +212,7 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     };
     if !owner { return pass(parts, bytes).await; }
     let Ok(request) = SessionOpenRequest::parse(&bytes) else { return pass(parts, bytes).await };
-    match decide(&st, request, OpenCaller::Owner).await {
+    match decide_detached(&st, request, OpenCaller::Owner).await {
         Decision::Opened(opened) => {
             let mut response = crate::session_write::json_response(StatusCode::OK, opened.body);
             crate::routes::cors(&parts.headers, response.headers_mut());
@@ -236,7 +244,7 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Some(root) => OpenCaller::Guest { root: PathBuf::from(root) },
         None => OpenCaller::Owner,
     };
-    match decide(&st, request, caller).await {
+    match decide_detached(&st, request, caller).await {
         Decision::Opened(opened) => crate::session_write::json_response(StatusCode::OK, json!({"info": opened.body, "undo": opened.undo})),
         Decision::Refused(error) => reply(&error),
         Decision::NotOurs => StatusCode::MISDIRECTED_REQUEST.into_response(),
