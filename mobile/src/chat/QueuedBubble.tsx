@@ -48,16 +48,18 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
 }) {
   const queued = event.id.startsWith('queued-');
   const failed = event.desistiu === true;
-  const holdsQueue = queued && problem === 'terminal_input_delivery_unproved' && event.queued_delivered === true && !failed;
+  const holdsQueue = queued && !event.queued_consumed && problem === 'terminal_input_delivery_unproved' && event.queued_delivered === true && !failed;
   const notes: string[] = [];
-  if (failed || event.id.startsWith('held:') || event.hook_error != null) {
-    notes.push(event.hook_error ?? m.native_delivery_failed());
+  if (!event.queued_consumed) {
+    if (failed || event.id.startsWith('held:') || event.hook_error != null) {
+      notes.push(event.hook_error ?? m.native_delivery_failed());
+    }
+    if (failed) notes.push(m.msg_nao_chegou_reenvie());
+    else if (holdsQueue) notes.push(m.native_delivery_unproved());
+    else if (queued && event.queued_delivered !== true && problem === 'terminal_input_delivery_unproved') notes.push(m.native_queue_held());
+    else if (queued && event.queued_delivered !== true && problem === 'terminal_input_no_safe_delivery') notes.push(m.native_no_safe_delivery());
+    else if (queued) notes.push(event.queued_delivered === true ? m.native_delivering() : m.native_queued());
   }
-  if (failed) notes.push(m.msg_nao_chegou_reenvie());
-  else if (holdsQueue) notes.push(m.native_delivery_unproved());
-  else if (queued && event.queued_delivered !== true && problem === 'terminal_input_delivery_unproved') notes.push(m.native_queue_held());
-  else if (queued && event.queued_delivered !== true && problem === 'terminal_input_no_safe_delivery') notes.push(m.native_no_safe_delivery());
-  else if (queued && !event.queued_consumed) notes.push(event.queued_delivered === true ? m.native_delivering() : m.native_queued());
 
   return (
     <View>
@@ -66,7 +68,7 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
           eventId={event.id} imageCount={event.image_count ?? 0} />
       </View>
       {notes.length ? <Text style={styles.note}>{notes.join(' · ')}</Text> : null}
-      {queued && (failed || holdsQueue) && sessionName && serverId
+      {queued && !event.queued_consumed && (failed || holdsQueue) && sessionName && serverId
         ? <DiscardQueued id={event.id.slice('queued-'.length)} text={event.text ?? ''} sessionName={sessionName} serverId={serverId} /> : null}
     </View>
   );

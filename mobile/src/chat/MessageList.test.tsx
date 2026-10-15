@@ -97,6 +97,26 @@ describe('notas da entrega na conversa', () => {
     expect(discardButtons(container)).toHaveLength(0);
   });
 
+  it.each([
+    [{ queued_delivered: true }, 'terminal_input_delivery_unproved'],
+    [{ queued_delivered: false }, 'terminal_input_delivery_unproved'],
+    [{ queued_delivered: false }, 'terminal_input_no_safe_delivery'],
+    [{ desistiu: true }, undefined],
+    [{ hook_error: 'hook recusou' }, undefined],
+    [{ queued_delivered: true }, undefined],
+    [{ queued_delivered: false }, undefined],
+    [{ id: 'held:one', hook_error: 'hook recusou' }, undefined],
+  ] as [Partial<ChatEvent>, string | undefined][])('consumida fica sólida, sem nota ou descarte: %j/%s', (patch, problem) => {
+    const { container } = mount(createElement(MessageList, props([event({ ...patch, queued_consumed: true })], {
+      sessionName: 'sess', serverId: 'a', stateEvent: { session: 'sess', state: 'working', problema: problem },
+    })));
+    expect(container.querySelector('[data-user]')?.textContent).toBe('mensagem');
+    expect(container.querySelector('[data-user]')?.closest('[style*="opacity"]')).toBeNull();
+    expect(container.textContent).toBe('mensagem');
+    expect(discardButtons(container)).toHaveLength(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('desistida fica sólida e não aparece como esperando, mesmo trabalhando', () => {
     const { container } = mount(createElement(MessageList, props([event({ desistiu: true, queued_delivered: false })])));
     expect(container.querySelector('[data-user]')?.closest('[style*="opacity"]')).toBeNull();
