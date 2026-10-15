@@ -136,15 +136,16 @@ export function uploadUrlNative(name: string, filename: string, server?: Server)
 }
 
 // Par nativo do transcriptImageUrl: o token vai no header (fileAuthHeader), nunca na URL.
-export function transcriptImageUrlNative(name: string, id: string, idx: number): string {
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/transcript-image/${encodeURIComponent(id)}/${idx}`;
+export function transcriptImageUrlNative(name: string, id: string, idx: number, server?: Server): string {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  return `${base}/api/sessions/${encodeURIComponent(name)}/transcript-image/${encodeURIComponent(id)}/${idx}`;
 }
 
 // URL do mp3 gerado. `?token` porque <audio> nao manda header Authorization e o front vem de outra
 // origem (PWA servido pela VPS, backend no Tailscale) — cookie tambem nao viaja.
-export function ttsAudioUrl(path: string): string {
-  const t = apiEnv().getToken() ?? '';
-  return `${apiEnv().getBaseUrl()}${path}?token=${encodeURIComponent(t)}`;
+export function ttsAudioUrl(path: string, server?: Server | null): string {
+  const t = (server ? server.token : apiEnv().getToken()) ?? '';
+  return `${server ? baseOf(server) : apiEnv().getBaseUrl()}${path}?token=${encodeURIComponent(t)}`;
 }
 
 function authHeaders(): Record<string, string> {
@@ -3134,8 +3135,9 @@ export interface TtsResposta { url: string; chars: number; cached: boolean; prov
 // aqui: quando isto chega, o texto ja esta pronto pra virar audio.
 export async function sintetizarTts(
   body: { text: string; voice?: string; provider?: string; confirm?: boolean; instruction?: string },
+  server?: Server | null,
 ): Promise<TtsResposta> {
-  return apiFetch<TtsResposta>('/api/tts', { method: 'POST', body: JSON.stringify(body) });
+  return sessionFetch<TtsResposta>(server, '/api/tts', { method: 'POST', body: JSON.stringify(body) });
 }
 
 export interface TtsVoz { id: string; nome: string }

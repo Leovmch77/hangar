@@ -11,7 +11,7 @@ export default function TerminalSheet() {
   return (
     <KeyboardAvoidingView behavior="padding" style={styles.root}>
       <View style={styles.inner}>
-        <TerminalMirror name={sessionName} aviso={avisoText} />
+        <TerminalMirror serverId={String(server ?? '')} name={sessionName} aviso={avisoText} />
       </View>
     </KeyboardAvoidingView>
   );

@@ -2,11 +2,16 @@
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { UploadFile } from '@hangar/core';
+import { configureApi, type Server, type UploadFile } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const h = vi.hoisted(() => ({ list: vi.fn(), dictate: vi.fn(), back: vi.fn(), push: vi.fn(), toast: vi.fn() }));
+const h = vi.hoisted(() => ({ list: vi.fn(), dictate: vi.fn(), back: vi.fn(), push: vi.fn(), toast: vi.fn(),
+  audio: vi.fn(), card: vi.fn(), doc: vi.fn() }));
+const servers = vi.hoisted(() => ({ ready: true, activeId: 's2', servers: [
+  { id: 's1', label: 'A', baseUrl: 'https://a.test', token: 'token-a' },
+  { id: 's2', label: 'B', baseUrl: 'https://b.test', token: 'token-b' },
+] as Server[] }));
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ server: 's1', name: 'sess' }),
   useRouter: () => ({ push: h.push, back: h.back }),
@@ -14,33 +19,39 @@ vi.mock('expo-router', () => ({
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   listUploads: h.list,
-  uploadUrlNative: (name: string, filename: string) => `https://a.test/${name}/${filename}`,
-  fileUrlNative: (name: string, filename: string) => `https://a.test/file/${name}/${filename}`,
-  fileAuthHeader: () => ({ Authorization: 'Bearer t' }),
 }));
-vi.mock('../../stores/servers', () => {
-  const state = { ready: true, servers: [{ id: 's1' }], ensureActive: () => true };
-  return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
-});
+vi.mock('../../stores/servers', () => ({
+  useServers: Object.assign((select: (s: typeof servers) => unknown) => select(servers), { getState: () => servers }),
+}));
 vi.mock('../../stores/sessions', () => {
   const state = { rows: [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }], byServerRecord: {} };
   return { useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
-vi.mock('../ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: true, valor: 'prosa' }) } }));
+vi.mock('../ditado/ditadoEstiloStore', () => ({ dictationStyleStore: (server: Server) => ({
+  getState: () => ({ pronto: true, valor: server.id === 's1' ? 'prosa' : 'briefing' }),
+}) }));
 vi.mock('../ditado/dictationRun', () => ({
   dictateUpload: h.dictate,
   DictationError: class extends Error {
     constructor(message: string, readonly lost: boolean, readonly storageIssue: string) { super(message); }
   },
 }));
-vi.mock('../../chat/AudioChip', () => ({ AudioChip: ({ name }: { name: string }) => createElement('span', null, `audio:${name}`) }));
+vi.mock('../../chat/AudioChip', () => ({ AudioChip: (props: { name: string; uri: string; headers?: Record<string, string> }) => {
+  h.audio(props);
+  return createElement('span', null, `audio:${props.name}`);
+} }));
 vi.mock('./AttachmentCard', () => ({
-  AttachmentCard: ({ file, onPress }: { file: UploadFile; onPress: () => void }) =>
-    createElement('button', { 'aria-label': file.filename, onClick: onPress }, file.filename),
+  AttachmentCard: (props: { file: UploadFile; serverId: string; onPress: () => void }) => {
+    h.card(props);
+    return createElement('button', { 'aria-label': props.file.filename, onClick: props.onPress }, props.file.filename);
+  },
 }));
 vi.mock('./Lightbox', () => ({ Lightbox: () => null }));
 vi.mock('./DocumentViewer', () => ({
-  DocumentViewer: ({ doc }: { doc: { kind: string; name: string } | null }) => (doc ? createElement('div', { 'data-doc': doc.kind }, doc.name) : null),
+  DocumentViewer: ({ doc }: { doc: { kind: string; name: string; uri: string; headers?: Record<string, string> } | null }) => {
+    h.doc(doc);
+    return doc ? createElement('div', { 'data-doc': doc.kind }, doc.name) : null;
+  },
 }));
 vi.mock('../../ui/Toast', () => ({ toast: { erro: h.toast, ok: () => {} } }));
 vi.mock('../../theme/superficie', () => ({ superficie: () => '#eee' }));
@@ -63,7 +74,16 @@ const byLabel = (c: HTMLElement, label: string) => [...c.querySelectorAll('butto
   .find((el) => el.textContent === label || el.getAttribute('aria-label') === label) as HTMLButtonElement | undefined;
 
 describe('galeria de anexos', () => {
-  beforeEach(() => { h.list.mockReset(); h.dictate.mockReset(); h.back.mockReset(); h.toast.mockReset(); });
+  beforeEach(() => {
+    vi.clearAllMocks(); h.list.mockReset(); h.dictate.mockReset();
+    servers.ready = true;
+    servers.servers = [
+      { id: 's1', label: 'A', baseUrl: 'https://a.test', token: 'token-a' },
+      { id: 's2', label: 'B', baseUrl: 'https://b.test', token: 'token-b' },
+    ];
+    configureApi({ getBaseUrl: () => 'https://b.test', getToken: () => 'token-b', onUnauthorized: () => {},
+      origin: null, createEventSource: () => { throw new Error('unexpected SSE'); } });
+  });
 
   it('carregando, vazio, erro com tentar de novo e lista', async () => {
     let finish!: (v: { files: UploadFile[] }) => void;
@@ -88,7 +108,7 @@ describe('galeria de anexos', () => {
     const { container, root } = await render();
     expect(container.textContent).toContain('audio:ditado-1.m4a');
     await act(async () => byLabel(container, 'composer_transcrever_de_novo: ditado-1.m4a')!.click());
-    expect(h.dictate).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 's1', 'sess', '/t/a.jsonl', 'ditado-1.m4a', 'prosa');
+    expect(h.dictate).toHaveBeenCalledExactlyOnceWith(servers.servers[0], 's1', 'sess', '/t/a.jsonl', 'ditado-1.m4a', 'prosa');
     expect(h.back).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
   });
@@ -116,6 +136,38 @@ describe('galeria de anexos', () => {
     const { container, root } = await render();
     await act(async () => byLabel(container, 'clip.mp4')!.click());
     expect(container.querySelector('[data-doc="video"]')?.textContent).toBe('clip.mp4');
+    act(() => root.unmount());
+  });
+
+  it('lista e mídia da rota ficam em A com B ativo', async () => {
+    h.list.mockResolvedValueOnce({ files: [file('ditado.m4a'), file('clip.mp4')] });
+    const { container, root } = await render();
+    expect(h.list).toHaveBeenCalledExactlyOnceWith('sess', servers.servers[0]);
+    expect(servers.activeId).toBe('s2');
+    expect(h.audio).toHaveBeenCalledWith(expect.objectContaining({
+      uri: 'https://a.test/api/sessions/sess/uploads/ditado.m4a', headers: { Authorization: 'Bearer token-a' },
+    }));
+    expect(h.card).toHaveBeenCalledWith(expect.objectContaining({ serverId: 's1' }));
+    await act(async () => byLabel(container, 'clip.mp4')!.click());
+    expect(h.doc).toHaveBeenLastCalledWith(expect.objectContaining({
+      uri: 'https://a.test/api/sessions/sess/uploads/clip.mp4', headers: { Authorization: 'Bearer token-a' },
+    }));
+    servers.servers = servers.servers.filter((s) => s.id !== 's1');
+    await act(async () => root.render(createElement(AttachmentsScreen)));
+    expect(container.textContent).toContain('chat_servidor_removido');
+    expect(container.querySelector('[data-doc]')).toBeNull();
+    expect(h.list).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
+
+  it('sem servidor da rota não lista nem monta mídia do ativo', async () => {
+    servers.servers = servers.servers.filter((s) => s.id !== 's1');
+    const { container, root } = await render();
+    expect(container.textContent).toContain('chat_servidor_removido');
+    expect(h.list).not.toHaveBeenCalled();
+    expect(h.audio).not.toHaveBeenCalled();
+    expect(h.card).not.toHaveBeenCalled();
+    expect(h.doc).not.toHaveBeenCalled();
     act(() => root.unmount());
   });
 

@@ -17,6 +17,7 @@ export const useDictationOrganizationStore = create<State>((set, get) => ({
   byServer: {},
   // Relê sempre: o modo é trocado no app desktop. Falha de leitura não apaga um modo já conhecido.
   load: (server) => {
+    if (server === null || server?.removed) return Promise.resolve();
     const key = server?.id ?? '';
     const running = pending.get(key);
     if (running) return running;
@@ -33,6 +34,7 @@ export const useDictationOrganizationStore = create<State>((set, get) => ({
 /** Lê o modo do servidor na montagem e quando ele muda; `reloadKey` verdadeiro força nova leitura. */
 export function useDictationOrganization(server: Server | null | undefined, reloadKey?: unknown): DictationOrganization {
   const id = server?.id ?? '';
+  const unavailable = server === null || !!server?.removed;
   const value = useDictationOrganizationStore((s) => s.byServer[id]) ?? 'unknown';
   // O objeto do servidor muda a cada atualização da lista; a leitura segue o id.
   const serverRef = useRef(server);
@@ -40,6 +42,6 @@ export function useDictationOrganization(server: Server | null | undefined, relo
   useEffect(() => {
     if (reloadKey === false) return;
     void useDictationOrganizationStore.getState().load(serverRef.current);
-  }, [id, reloadKey]);
-  return value;
+  }, [id, unavailable, reloadKey]);
+  return unavailable ? 'unknown' : value;
 }

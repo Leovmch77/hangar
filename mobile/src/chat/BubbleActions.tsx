@@ -6,6 +6,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { sintetizarTts, ttsAudioUrl } from '@hangar/core';
 import { Icon } from '../ui/Icon';
 import { toast } from '../ui/Toast';
+import { useServers } from '../stores/servers';
 import * as m from '../paraglide/messages';
 
 function hora(ts?: number | null) {
@@ -36,9 +37,10 @@ type ComListener = {
 // ícones no lugar. Ícone grande em toda resposta disputava atenção com o texto. `defaultOpen` é de
 // quem já abriu por gesto (toque longo na bolha do usuário). Compartilhar usa o Share do RN; Ouvir
 // chama o mesmo POST /api/tts da PWA e toca a URL devolvida.
-export function BubbleActions({ text, ts, ouvir = true, defaultOpen = false, align = 'start' }: {
+export function BubbleActions({ text, ts, serverId, ouvir = true, defaultOpen = false, align = 'start' }: {
   text: string;
   ts?: number | null;
+  serverId?: string;
   ouvir?: boolean;
   defaultOpen?: boolean;
   align?: 'start' | 'end';
@@ -67,11 +69,13 @@ export function BubbleActions({ text, ts, ouvir = true, defaultOpen = false, ali
     }
   };
   const falar = async () => {
+    const server = useServers.getState().servers.find((s) => s.id === serverId);
+    if (!server) { toast.erro(m.chat_servidor_removido()); return; }
     try {
-      const r = await sintetizarTts({ text });
+      const r = await sintetizarTts({ text }, server);
       if (!vivo.current) return;
       pararTocando();
-      const p = createAudioPlayer(ttsAudioUrl(r.url));
+      const p = createAudioPlayer(ttsAudioUrl(r.url, server));
       tocando = p;
       // A URL pode responder 404, ou o áudio não decodificar: sem olhar o `error` do status, a
       // pessoa toca "Ouvir" e não acontece som nenhum, sem aviso.

@@ -1,19 +1,14 @@
 import { create } from 'zustand';
-import { getConfig, patchConfig } from '@hangar/core';
-import { ehEstilo } from '@hangar/core';
-import type { EstiloDitado } from '@hangar/core';
+import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, ehEstilo } from '@hangar/core';
+import type { EstiloDitado, Server } from '@hangar/core';
+import * as m from '../../paraglide/messages';
 
 const PADRAO: EstiloDitado = 'prosa';
-
-let escritas = 0;
-let carregando: Promise<void> | null = null;
 
 interface DitadoEstiloState {
   valor: EstiloDitado;
   pronto: boolean;
-  // A carga falhou: o valor em uso é o padrão, não o que está no servidor. Quem mostra o estilo
-  // precisa saber disso — antes o erro sumia num catch vazio e a tela exibia `prosa` como se
-  // fosse a escolha da pessoa.
+  // A leitura falhou: o valor local não confirma a escolha salva no servidor.
   falhou: boolean;
   carregar: () => Promise<void>;
   revalidar: () => Promise<void>;
@@ -21,57 +16,86 @@ interface DitadoEstiloState {
   _zerarParaTeste: () => void;
 }
 
-export const useDitadoEstiloStore = create<DitadoEstiloState>((set, get) => ({
-  valor: PADRAO,
-  pronto: false,
-  falhou: false,
+function createDictationStyleStore(server?: Server | null) {
+  let target = server;
+  let escritas = 0;
+  let carregando: Promise<void> | null = null;
 
-  carregar: async () => {
-    if (get().pronto) return;
-    if (carregando) return carregando;
-    const escritasNoInicio = escritas;
-    carregando = getConfig()
-      .then((cfg) => {
-        const v = cfg.campos?.ditado_estilo?.valor;
-        if (ehEstilo(v) && escritas === escritasNoInicio) {
-          set({ valor: v });
-        }
+  const store = create<DitadoEstiloState>((set, get) => ({
+    valor: PADRAO,
+    pronto: false,
+    falhou: false,
+
+    carregar: async () => {
+      if (target === null) return;
+      if (get().pronto) return;
+      if (carregando) return carregando;
+      const server = target ? { ...target } : undefined;
+      const escritasNoInicio = escritas;
+      carregando = (server ? getConfigForServer(server) : getConfig())
+        .then((cfg) => {
+          const v = cfg.campos?.ditado_estilo?.valor;
+          if (ehEstilo(v) && escritas === escritasNoInicio) {
+            set({ valor: v });
+          }
+          set({ pronto: true, falhou: false });
+        })
+        .catch(() => {
+          // `pronto` mesmo assim: sem ele a tela fica esperando para sempre. O que muda é que
+          // `falhou` diz que o valor exibido é o padrão, não o do servidor.
+          set({ pronto: true, falhou: true });
+        })
+        .finally(() => {
+          carregando = null;
+        });
+      return carregando;
+    },
+
+    revalidar: async () => {
+      set({ pronto: false });
+      return get().carregar();
+    },
+
+    trocar: async (novo: EstiloDitado) => {
+      if (target === null) throw new Error(m.chat_servidor_removido());
+      const server = target ? { ...target } : undefined;
+      const antes = get().valor;
+      const minha = ++escritas;
+      set({ valor: novo });
+      try {
+        await (server ? patchConfigForServer(server, { ditado_estilo: novo }) : patchConfig({ ditado_estilo: novo }));
         set({ pronto: true, falhou: false });
-      })
-      .catch(() => {
-        // `pronto` mesmo assim: sem ele a tela fica esperando para sempre. O que muda é que
-        // `falhou` diz que o valor exibido é o padrão, não o do servidor.
-        set({ pronto: true, falhou: true });
-      })
-      .finally(() => {
-        carregando = null;
-      });
-    return carregando;
-  },
-
-  revalidar: async () => {
-    set({ pronto: false });
-    return get().carregar();
-  },
-
-  trocar: async (novo: EstiloDitado) => {
-    const antes = get().valor;
-    const minha = ++escritas;
-    set({ valor: novo });
-    try {
-      await patchConfig({ ditado_estilo: novo });
-      set({ pronto: true, falhou: false });
-    } catch (e) {
-      if (escritas === minha) {
-        set({ valor: antes });
+      } catch (e) {
+        if (escritas === minha) {
+          set({ valor: antes });
+        }
+        throw e;
       }
-      throw e;
-    }
-  },
+    },
 
-  _zerarParaTeste: () => {
-    escritas = 0;
-    carregando = null;
-    set({ valor: PADRAO, pronto: false, falhou: false });
-  },
-}));
+    _zerarParaTeste: () => {
+      escritas = 0;
+      carregando = null;
+      set({ valor: PADRAO, pronto: false, falhou: false });
+    },
+  }));
+
+  return { store, updateServer: (server: Server) => { target = server; } };
+}
+
+export const useDitadoEstiloStore = createDictationStyleStore().store;
+const unavailable = createDictationStyleStore(null).store;
+const stores = new Map<string, ReturnType<typeof createDictationStyleStore>>();
+
+export function dictationStyleStore(server?: Server | null) {
+  if (server === undefined) return useDitadoEstiloStore;
+  if (server === null || server.removed) return unavailable;
+  let entry = stores.get(server.id);
+  if (!entry) {
+    entry = createDictationStyleStore(server);
+    stores.set(server.id, entry);
+  } else {
+    entry.updateServer(server);
+  }
+  return entry.store;
+}

@@ -6,19 +6,22 @@ import { parseImageMessage, parseRealtimeDelegation, transcriptImageUrlNative, u
 import * as m from '../paraglide/messages';
 import { BubbleActions } from './BubbleActions';
 import { superficie } from '../theme/superficie';
+import { useServers } from '../stores/servers';
 
 // Bolha do usuário: pequena, à direita, no fundo superficie(0.8) — o mesmo degrau da bolha do nativo,
 // e por isso acompanha Transparência e Solidez. Se parseImageMessage(text) não nulo → legenda +
 // miniaturas. As ações (copiar, compartilhar) não ficam à mostra: o toque longo abre a linha embaixo.
-export const UserBubble = memo(function UserBubble({ text, sessionName, ts, eventId, imageCount = 0 }: {
+export const UserBubble = memo(function UserBubble({ text, sessionName, serverId, ts, eventId, imageCount = 0 }: {
   text: string;
   sessionName?: string;
+  serverId?: string;
   ts?: number | null;
   eventId?: string;
   /** Imagens coladas no TERMINAL: vêm do transcript por /transcript-image, não do texto. */
   imageCount?: number;
 }) {
   const { theme } = useUnistyles();
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const voice = parseRealtimeDelegation(text);
   const [showOriginal, setShowOriginal] = useState(false);
   const [acoes, setAcoes] = useState(false);
@@ -32,10 +35,10 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, ts, even
     : doTerminal && parsed.marcadores === parsed.filenames.length
       ? parsed.filenames.slice(0, Math.max(0, parsed.filenames.length - imageCount))
       : parsed.filenames;
-  const galeria: MediaItem[] = hasImages ? [
-    ...filenames.map((fn): MediaItem => ({ uri: uploadUrlNative(sessionName!, fn), headers: fileAuthHeader(), name: fn, kind: 'image' })),
+  const galeria: MediaItem[] = hasImages && server ? [
+    ...filenames.map((fn): MediaItem => ({ uri: uploadUrlNative(sessionName!, fn, server), headers: fileAuthHeader(server), name: fn, kind: 'image' })),
     ...(doTerminal ? Array.from({ length: imageCount }, (_, i): MediaItem => ({
-      uri: transcriptImageUrlNative(sessionName!, eventId!, i), headers: fileAuthHeader(), name: m.anexos_imagem_enviada(), kind: 'image',
+      uri: transcriptImageUrlNative(sessionName!, eventId!, i, server), headers: fileAuthHeader(server), name: m.anexos_imagem_enviada(), kind: 'image',
     })) : []),
   ] : [];
   const alternar = () => setAcoes((v) => !v);
@@ -75,6 +78,10 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, ts, even
 
   // Se há imagens válidas, exibe legenda + thumbnails; senão fallback texto cru
   if (hasImages) {
+    if (!server) return bolha(<>
+      {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
+      <Text style={[styles.txt, { color: theme.tokens.status.error }]} accessibilityRole="alert">{m.chat_servidor_removido()}</Text>
+    </>, caption || text);
     // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
     if (galeria.length === 0) {
       const display = caption || text;

@@ -7,10 +7,12 @@ import * as m from '../../paraglide/messages';
 import { uploadUrlNative, fileAuthHeader } from '@hangar/core';
 import { Icon, type IconName } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
+import { useServers } from '../../stores/servers';
 
 interface Props {
   file: UploadFile;
   sessionName: string;
+  serverId: string;
   onPress: () => void;
 }
 
@@ -27,12 +29,14 @@ function icone(f: UploadFile): IconName {
   return k === 'pdf' ? 'FileText' : k === 'html' ? 'Globe' : k === 'audio' ? 'Music' : 'Paperclip';
 }
 
-export function AttachmentCard({ file, sessionName, onPress }: Props) {
+export function AttachmentCard({ file, sessionName, serverId, onPress }: Props) {
   const { theme } = useUnistyles();
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
+  if (!server) return <Text style={{ color: theme.tokens.status.error }} accessibilityRole="alert">{m.chat_servidor_removido()}</Text>;
   const kind = fileKind(file.filename);
   const p = prazo(file.expires_in_days);
-  const uri = uploadUrlNative(sessionName, file.filename);
-  const headers = fileAuthHeader();
+  const uri = uploadUrlNative(sessionName, file.filename, server);
+  const headers = fileAuthHeader(server);
   return (
     <View style={styles.item}>
       {kind === 'image' ? (
