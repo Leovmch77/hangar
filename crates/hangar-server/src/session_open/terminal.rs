@@ -105,6 +105,21 @@ pub fn join(argv: &[String], windows: bool) -> String {
     argv.iter().map(|arg| crate::runtime::claude_relaunch::quote(arg, windows)).collect::<Vec<_>>().join(" ")
 }
 
+/// S-63: o que só a sessão põe (ou a configuração do servidor, relida na abertura) e o que é
+/// segredo do servidor. Servidor tmux subido de dentro de outra sessão teria os dela; o pane sai sem
+/// os que esta não pôs por `-e`.
+pub const NOT_INHERITED: [&str; 28] = [
+    "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS", "HANGAR_PLUGIN_URL", "HANGAR_PLUGIN_TOKEN",
+    "HANGAR_CLAUDE_SETTINGS", "HANGAR_JEV", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL",
+    "JEV_TEXTO_BASE_URL", "JEV_TEXTO_API_KEY", "JEV_TEXTO_MODELO", "JEV_TEXTO_CMD",
+    "JEV_AUX_BASE_URL", "JEV_AUX_API_KEY", "JEV_AUX_MODELO", "JEV_AUX_ESFORCO",
+    "CP_ENGINE", "CP_ENGINE_ACCOUNT", "CP_ENGINE_CREDENTIAL_ID", "CP_ENGINE_ACCOUNT_BASE_URL", "CP_ENGINE_SERVICE_TIER",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HANGAR_ORQ_READ_ONLY", "HANGAR_CANO_KEY", "HANGAR_CANO_OWNER",
+    "CP_PI_SESSION", "OMP_PROFILE",
+];
+/// Do servidor: nunca para o pane, nem para o cliente que pode subir o servidor tmux.
+const SERVER_SECRETS: [&str; 3] = ["CP_AUTH_TOKEN", "HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE"];
+
 /// O argv do `new-session`, sem o escopo.
 pub fn new_session_argv(env: &TerminalEnv, pane: &PaneSpec) -> Vec<String> {
     let mut argv: Vec<String> = [env.program.as_str(), "new-session", "-d", "-s", &pane.name, "-c", &pane.cwd, "-x", "200", "-y", "50"]
@@ -122,13 +137,16 @@ pub fn new_session_argv(env: &TerminalEnv, pane: &PaneSpec) -> Vec<String> {
     if let Some(dir) = &exported { e("CLAUDE_CONFIG_DIR", dir); }
     let command = join(&pane.command, env.windows);
     // `exec`: o agente vira o processo do pane e recebe o teclado. No psmux o comando roda sem shell
-    // no meio, e `exec` mataria o pane ao nascer.
-    argv.push(match (env.windows, exported.is_some()) {
-        (true, _) => command,
-        (false, true) => format!("exec {command}"),
-        // O pane herda o ambiente do servidor tmux, de quem o subiu: a conta padrão é a ausência.
-        (false, false) => format!("exec env -u CLAUDE_CONFIG_DIR {command}"),
-    });
+    // no meio, e `exec` mataria o pane ao nascer; lá o pane herda de quem chama (`client_command`).
+    if env.windows {
+        argv.push(command);
+        return argv;
+    }
+    // O pane herda o ambiente do servidor tmux, de quem o subiu: a conta padrão é a ausência.
+    let own = |var: &&str| pane.env.iter().any(|(key, _)| key == var);
+    let unset: Vec<&str> = exported.is_none().then_some("CLAUDE_CONFIG_DIR").into_iter()
+        .chain(NOT_INHERITED.iter().copied().filter(|var| !own(var))).chain(SERVER_SECRETS).collect();
+    argv.push(format!("exec env {} {command}", unset.iter().map(|var| format!("-u {var}")).collect::<Vec<_>>().join(" ")));
     argv
 }
 
@@ -152,6 +170,14 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     if output.ok() { Ok(()) } else { Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) }) }
 }
 
+/// O cliente do multiplexador: no psmux o pane herda o ambiente dele, e no tmux ele vira o do
+/// servidor quando é ele quem o sobe. A conta vai só pelo `-e`.
+pub fn client_command(program: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::from(crate::terminal_input::child_command(program));
+    for var in ["CLAUDE_CONFIG_DIR"].into_iter().chain(NOT_INHERITED).chain(SERVER_SECRETS) { command.env_remove(var); }
+    command
+}
+
 /// O processo de verdade, sem os segredos do servidor no ambiente do cliente (que vira o do
 /// servidor tmux quando é ele quem o sobe).
 pub struct ProcessMux { pub timeout: Duration }
@@ -169,7 +195,7 @@ impl Mux for ProcessMux {
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
         Box::pin(async move {
             let Some((program, args)) = argv.split_first() else { return MuxOutput::default() };
-            let mut command = tokio::process::Command::from(crate::terminal_input::child_command(program));
+            let mut command = client_command(program);
             command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
             match tokio::time::timeout(self.timeout, command.output()).await {
                 Ok(Ok(out)) => MuxOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -249,8 +275,28 @@ pub(crate) mod tests {
             let at = python.iter().position(|a| a == "CP_PROVIDER=claude").unwrap() + 1;
             python.splice(at..at, ["-e".to_owned(), format!("CP_SESSION_KEY={}", "k".repeat(32))]);
             python.insert(0, "tmux".into());
-            assert_eq!(new_session_argv(&machine(), &claude(env, config_dir)), python, "{fixture}");
+            let mut ours = new_session_argv(&machine(), &claude(env, config_dir));
+            let command = ours.pop().unwrap();
+            ours.push(undo_not_inherited(&command));
+            assert_eq!(ours, python, "{fixture}");
         }
+    }
+
+    /// O comando sem o `env -u` do S-63, como o Python o montava.
+    pub(crate) fn undo_not_inherited(command: &str) -> String {
+        let words: Vec<&str> = command.split(' ').collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < words.len() {
+            if words[i] == "-u" && words.get(i + 1).is_some_and(|var| NOT_INHERITED.contains(var) || SERVER_SECRETS.contains(var)) {
+                i += 2;
+                continue;
+            }
+            out.push(words[i]);
+            i += 1;
+        }
+        let out = out.join(" ");
+        out.strip_prefix("exec env ").filter(|rest| !rest.starts_with("-u ")).map_or(out.clone(), |rest| format!("exec {rest}"))
     }
 
     /// Servidor com `CLAUDE_CONFIG_DIR` próprio exporta sempre, até a padrão; no psmux a padrão é a
@@ -261,13 +307,39 @@ pub(crate) mod tests {
         env.server_config_dir = Some("/r/home/.claude".into());
         let argv = new_session_argv(&env, &claude(Vec::new(), None));
         assert!(argv.contains(&"CLAUDE_CONFIG_DIR=/r/home/.claude".to_owned()));
-        assert!(argv.last().unwrap().starts_with("exec claude "), "{argv:?}");
+        assert!(undo_not_inherited(argv.last().unwrap()).starts_with("exec claude "), "{argv:?}");
         let windows = TerminalEnv { windows: true, wayland: None, default_config_dir: "C:\\Users\\j\\.claude".into(), ..machine() };
         let mut pane = claude(Vec::new(), Some("C:/Users/j/.claude/"));
         pane.command = vec!["claude".into(), "--settings".into(), "{\"a\":\"it's\"}".into()];
         let argv = new_session_argv(&windows, &pane);
         assert!(!argv.iter().any(|a| a.starts_with("CLAUDE_CONFIG_DIR=")), "a padrão escrita de outro jeito: {argv:?}");
         assert_eq!(argv.last().unwrap(), "claude --settings '{\"a\":\"it''s\"}'");
+    }
+
+    /// S-63: nada que o servidor tmux herdou de outra sessão (subagente, Jev, ponte, portão de hooks,
+    /// motor, cano) nem segredo do servidor chega ao pane; o que a sessão põe por `-e` fica.
+    #[test]
+    fn the_pane_does_not_inherit_what_belongs_to_another_session() {
+        let pane = claude(vec![("HANGAR_JEV".into(), "on".into()), ("TYPESAFE_API_KEY".into(), "k".into()),
+            ("CLAUDE_CODE_SUBAGENT_MODEL".into(), "sonnet".into())], None);
+        let command = new_session_argv(&machine(), &pane).pop().unwrap();
+        let unset: Vec<&str> = command.split(" -u ").skip(1).map(|rest| rest.split(' ').next().unwrap()).collect();
+        for var in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS", "HANGAR_PLUGIN_URL", "HANGAR_PLUGIN_TOKEN",
+            "JEV_ENDPOINT", "JEV_MODEL", "JEV_AUX_API_KEY", "JEV_TEXTO_CMD", "CP_ENGINE", "CP_ENGINE_SERVICE_TIER",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HANGAR_CANO_KEY", "CP_PI_SESSION", "CP_AUTH_TOKEN", "HANGAR_INTERNAL_SECRET"] {
+            assert!(unset.contains(&var), "{var} não sai: {command}");
+        }
+        for var in ["HANGAR_JEV", "TYPESAFE_API_KEY", "CLAUDE_CODE_SUBAGENT_MODEL", "CP_SESSION_KEY"] {
+            assert!(!unset.contains(&var), "{var} é da sessão: {command}");
+        }
+        assert!(command.starts_with("exec env -u CLAUDE_CONFIG_DIR -u "), "{command}");
+        // No psmux o pane herda de quem chama: o cliente sai sem eles.
+        let client = client_command("tmux");
+        let removed: Vec<String> = client.as_std().get_envs().filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        for var in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_SUBAGENT_MODEL", "HANGAR_PLUGIN_TOKEN", "TYPESAFE_API_KEY", "CP_AUTH_TOKEN"] {
+            assert!(removed.iter().any(|r| r == var), "{var} fica no cliente: {removed:?}");
+        }
     }
 
     #[tokio::test]
