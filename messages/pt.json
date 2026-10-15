@@ -1329,6 +1329,8 @@
   "composer_fila_erro": "Falha ao mandar agora",
   "composer_ditado_pill": "Ditado",
   "ditado_estilo_titulo": "Estilo do ditado",
+  "dictation_style_unavailable": "Estilo indisponível",
+  "dictation_style_load_failed": "Não foi possível ler o estilo. O ditado usará o padrão do servidor.",
   "ditado_estilo_dica": "Do mais fiel à sua fala ao mais estruturado.",
   "ditado_organizacao_desligada": "Organização desligada — o texto vai cru. Ligue no app desktop.",
   "ditado_organizacao_desligada_rotulo": "Texto cru",

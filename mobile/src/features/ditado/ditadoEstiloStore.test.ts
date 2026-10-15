@@ -111,7 +111,7 @@ describe('ditadoEstiloStore', () => {
     const storeA = dictationStyleStore(a);
     const storeB = dictationStyleStore(b);
     await Promise.all([storeA.getState().carregar(), storeB.getState().carregar()]);
-    expect(storeA.getState()).toMatchObject({ pronto: true, falhou: true, valor: 'prosa' });
+    expect(storeA.getState()).toMatchObject({ pronto: false, falhou: true, valor: 'prosa' });
     expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
     const writeA = deferred<core.RespostaPatchConfig>();
     vi.mocked(core.patchConfigForServer).mockImplementation((server) => server.id === a.id
@@ -122,6 +122,35 @@ describe('ditadoEstiloStore', () => {
     await failed;
     expect(storeA.getState().valor).toBe('prosa');
     expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+  });
+
+  it('falha não confirma estilo local e permite nova leitura do servidor', async () => {
+    vi.mocked(core.getConfigForServer).mockRejectedValueOnce(new Error('502'))
+      .mockResolvedValueOnce(campos('briefing') as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    expect(store.getState()).toMatchObject({ pronto: false, falhou: true });
+    await store.getState().revalidar();
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
+    expect(core.getConfigForServer).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{}, campos('desconhecido')])('resposta sem estilo válido não confirma Prosa: %j', async (response) => {
+    vi.mocked(core.getConfigForServer).mockResolvedValue(response as core.ConfigServidor);
+    await dictationStyleStore(a).getState().carregar();
+    expect(dictationStyleStore(a).getState()).toMatchObject({ pronto: false, falhou: true });
+  });
+
+  it('GET que falha depois da escolha confirmada não invalida o estilo salvo', async () => {
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as core.RespostaPatchConfig);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    await store.getState().trocar('briefing');
+    read.reject(new Error('502'));
+    await loading;
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
   });
 
   it('mesmo ID atualiza token e LAN sem apagar estado nem mudar pedido em voo', async () => {

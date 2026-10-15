@@ -32,18 +32,15 @@ function createDictationStyleStore(server?: Server | null) {
       if (carregando) return carregando;
       const server = target ? { ...target } : undefined;
       const escritasNoInicio = escritas;
+      set({ falhou: false });
       carregando = (server ? getConfigForServer(server) : getConfig())
         .then((cfg) => {
           const v = cfg.campos?.ditado_estilo?.valor;
-          if (ehEstilo(v) && escritas === escritasNoInicio) {
-            set({ valor: v });
-          }
-          set({ pronto: true, falhou: false });
+          if (!ehEstilo(v)) throw new Error('invalid dictation style');
+          if (escritas === escritasNoInicio) set({ valor: v, pronto: true, falhou: false });
         })
         .catch(() => {
-          // `pronto` mesmo assim: sem ele a tela fica esperando para sempre. O que muda é que
-          // `falhou` diz que o valor exibido é o padrão, não o do servidor.
-          set({ pronto: true, falhou: true });
+          if (escritas === escritasNoInicio) set({ pronto: false, falhou: true });
         })
         .finally(() => {
           carregando = null;

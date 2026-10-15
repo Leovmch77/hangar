@@ -1329,6 +1329,8 @@
   "composer_fila_erro": "Could not send now",
   "composer_ditado_pill": "Dictation",
   "ditado_estilo_titulo": "Dictation style",
+  "dictation_style_unavailable": "Style unavailable",
+  "dictation_style_load_failed": "Could not read the style. Dictation will use the server default.",
   "ditado_estilo_dica": "From closest to your speech to most structured.",
   "ditado_organizacao_desligada": "Organization is off — text goes in raw. Turn it on in the desktop app.",
   "ditado_organizacao_desligada_rotulo": "Raw text",

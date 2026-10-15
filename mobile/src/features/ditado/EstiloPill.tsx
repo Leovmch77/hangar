@@ -10,11 +10,15 @@ import { useDictationOrganization } from './dictationOrganization';
 export function useDictationStyleLabel(server?: Server | null): string {
   const useStyleStore = dictationStyleStore(server);
   const valor = useStyleStore((s) => s.valor);
+  const pronto = useStyleStore((s) => s.pronto);
+  const falhou = useStyleStore((s) => s.falhou);
   const organization = useDictationOrganization(server);
   useEffect(() => {
     void useStyleStore.getState().carregar();
   }, [useStyleStore]);
   if (organization === 'off') return m.ditado_organizacao_desligada_rotulo();
+  if (falhou) return m.dictation_style_unavailable();
+  if (!pronto) return m.comum_carregando();
   return estilosDitado().find((e) => e.valor === valor)?.rotulo ?? m.ditado_estilo_prosa();
 }
 
@@ -24,6 +28,8 @@ export function DictationStyleMenu({ open, onClose, server }: { open: boolean; o
   const organization = useDictationOrganization(server, open);
   const useStyleStore = dictationStyleStore(server);
   const valor = useStyleStore((s) => s.valor);
+  const pronto = useStyleStore((s) => s.pronto);
+  const falhou = useStyleStore((s) => s.falhou);
   const revalidar = useStyleStore((s) => s.revalidar);
   const trocar = useStyleStore((s) => s.trocar);
 
@@ -70,7 +76,9 @@ export function DictationStyleMenu({ open, onClose, server }: { open: boolean; o
         label: it.label + (aplicando && lista.find((x) => x.valor === aplicando)?.rotulo === it.label ? ' …' : ''),
       }))}
       onSelect={handleSelect}
-      error={erro}
+      loading={!off && !pronto && !falhou}
+      error={erro ?? (!off && falhou ? m.dictation_style_load_failed() : null)}
+      onRetry={() => { setErro(null); void revalidar(); }}
       title={m.ditado_estilo_titulo()}
       emptyText={off ? m.ditado_organizacao_desligada() : undefined}
     />
