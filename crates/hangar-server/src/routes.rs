@@ -374,7 +374,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
     Router::new()
         .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(fallback.clone()))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
-        .route("/api/sessions", get(crate::list::hub::list).fallback(fallback.clone()))
+        .route("/api/sessions", get(crate::list::hub::list).post(crate::session_open::create).fallback(fallback.clone()))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(fallback.clone()))
         .route("/api/sessions/{name}/history", get(history).fallback(fallback.clone()))
         .route("/api/sessions/{name}/events", get(events).fallback(fallback.clone()))

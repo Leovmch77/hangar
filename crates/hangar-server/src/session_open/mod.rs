@@ -306,6 +306,25 @@ pub struct SessionChange {
     pub service_tier: Option<ServiceTier>,
 }
 
+/// Despacho provisório do `POST /api/sessions`: lê o pedido e, enquanto nenhum provedor × modo é do
+/// Rust (Tasks 4, 6, 7 e 9), repassa ao Python com o corpo intacto pelo mesmo caminho do repasse
+/// de hoje (a ponte privada recebe 421). Corpo que o Rust recusaria segue igual: o Python dá o 422 dele.
+pub async fn create(
+    axum::extract::State(st): axum::extract::State<std::sync::Arc<crate::routes::AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, crate::session_write::BODY_LIMIT).await else {
+        return crate::session_write::too_large(&parts.headers);
+    };
+    if let Err(error) = SessionOpenRequest::parse(&bytes) {
+        tracing::debug!(code = error.code, "pedido de abertura que o Rust recusaria; o Python decide");
+    }
+    let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    crate::routes::pass_any(axum::extract::State(st), axum::extract::ConnectInfo(peer), req).await
+}
+
 impl SessionSpec {
     /// Reabrir = spec gravado ⊕ mudança.
     pub fn with(&self, change: &SessionChange) -> SessionSpec {

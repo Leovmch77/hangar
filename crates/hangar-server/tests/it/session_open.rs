@@ -4,6 +4,21 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use crate::fake::*;
+
+#[tokio::test]
+async fn create_goes_to_python_with_the_body_untouched() {
+    let (fake, up) = spawn_fake().await;
+    let srv = spawn_server(config(up, "127.0.0.1")).await;
+    // Um pedido válido, um que o Rust recusaria (`bogus`) e um que nem é JSON: o Python decide os três.
+    for body in [&br#"{"name":"s1","cwd":"/x","provider":"claude"}"#[..], br#"{"name":"s1","cwd":"/x","bogus":1}"#, b"nem json"] {
+        let resp = client().post(format!("http://{srv}/api/sessions")).bearer_auth(OWNER)
+            .header("content-type", "application/json").body(body.to_vec()).send().await.unwrap();
+        assert_eq!(resp.text().await.unwrap(), "from-python");
+        assert_eq!(fake.last_body(), body, "corpo repassado byte a byte");
+    }
+    assert_eq!(fake.hits_to("/api/sessions"), 3);
+}
 
 fn fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract/session-open").join(format!("{name}.json"));

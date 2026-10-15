@@ -92,7 +92,7 @@ Status: ready-for-agent
   `resolve_open()` e o plano de lançamento numa biblioteca usada pelo servidor e por um comando
   (`hangar-open`, nome a fechar). Com o servidor de pé, o comando pede ao servidor; fora do ar, abre
   igual e o servidor adota depois.
-- [ ] **Step 5: Despacho provisório do `POST /api/sessions` no Rust**
+- [x] **Step 5: Despacho provisório do `POST /api/sessions` no Rust**
   Por provider × com/sem terminal; o que ainda não migrou responde 421 e segue ao Python só durante
   a branch. Sai na Task 11.
 - [ ] **Step 6: Modo `python` e atualização**
