@@ -162,7 +162,17 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     let scope = if env.windows { Vec::new() } else { mux.scope() };
     let mut scoped = scope.clone();
     scoped.extend(argv.iter().cloned());
-    let mut output = mux.run(scoped).await;
+    let mut output = mux.run(scoped.clone()).await;
+    // S-31: escopos criados juntos (o `orq` cria em rajada) recebem do systemd uma recusa passageira;
+    // ela se repete, com o escopo e com espera; esgotada, é erro com o código dela.
+    let mut waits = crate::runtime::process::SCOPE_RETRY.iter();
+    while !scope.is_empty() && !output.ok() && crate::runtime::process::scope_unit_missing(output.stderr.as_bytes()).is_some() {
+        let Some(wait) = waits.next() else {
+            return Err(SpawnError { code: crate::runtime::process::SCOPE_UNIT_MISSING, stderr: tail(&output.stderr) });
+        };
+        tokio::time::sleep(crate::runtime::process::scope_wait(*wait)).await;
+        output = mux.run(scoped.clone()).await;
+    }
     if !scope.is_empty() && !output.ok() && output.stderr.trim_start().starts_with("Failed to ") {
         tracing::warn!(code = "systemd_scope_refused", cause = %tail(&output.stderr), "escopo do systemd recusado; o terminal sobe sem ele");
         output = mux.run(argv).await;
@@ -351,6 +361,22 @@ pub(crate) mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][..6], scope[..]);
         assert_eq!(runs[1][0], "tmux", "a segunda vez sem o escopo");
+    }
+
+    /// S-31: a recusa passageira do systemd a escopos criados juntos se repete, com espera, até três
+    /// vezes, sempre com o escopo; esgotada, é erro com o código dela.
+    #[tokio::test(start_paused = true)]
+    async fn the_transient_scope_refusal_is_retried_with_the_scope() {
+        let scope: Vec<String> = ["systemd-run", "--user", "--scope", "--collect", "-q", "--"].map(str::to_owned).into();
+        let missing = || failed("Failed to start transient scope unit: Unit run-p4242.scope not found.\n");
+        let mux = FakeMux { scope: scope.clone(), ..FakeMux::answering(vec![missing(), missing()]) };
+        spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap();
+        assert_eq!(mux.runs().len(), 3);
+        assert!(mux.runs().iter().all(|run| run[..6] == scope[..]), "todas com o escopo");
+        let mux = FakeMux { scope: scope.clone(), ..FakeMux::answering(vec![missing(), missing(), missing(), missing()]) };
+        let error = spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err();
+        assert_eq!((error.code, mux.runs().len()), ("systemd_scope_unit_missing", 4));
+        assert_eq!(error.stderr, "Failed to start transient scope unit: Unit run-p4242.scope not found.");
     }
 
     #[tokio::test]

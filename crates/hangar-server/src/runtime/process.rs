@@ -167,8 +167,8 @@ fn probe_binary(bin: &Path) -> bool {
 
 /// Recusa do systemd ao criar um escopo logo depois de outro ("Failed to start transient scope unit:
 /// Unit run-….scope not found"). Só ela se repete, com estas esperas; qualquer outra falha responde na hora.
-const SCOPE_RETRY: [Duration; 3] = [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
-const SCOPE_UNIT_MISSING: &str = "systemd_scope_unit_missing";
+pub(crate) const SCOPE_RETRY: [Duration; 3] = [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
+pub(crate) const SCOPE_UNIT_MISSING: &str = "systemd_scope_unit_missing";
 const SCOPE_REFUSED: &str = "systemd_scope_refused";
 const SCOPE_ABSENT: &str = "systemd_scope_absent";
 
@@ -179,12 +179,12 @@ fn first_line(text: &[u8]) -> Option<String> {
 
 /// A recusa vem de escopos criados ao mesmo tempo: quem foi recusado junto não pode repetir junto.
 /// Espera entre a base e o dobro dela.
-fn scope_wait(base: Duration) -> Duration {
+pub(crate) fn scope_wait(base: Duration) -> Duration {
     let spread = u64::from_str_radix(&crate::mods::state::random_hex(2), 16).unwrap_or(0);
     base + base.mul_f64(spread as f64 / 65536.0)
 }
 
-fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
+pub(crate) fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().find(|line| line.contains("transient scope unit") && line.contains("not found"))?;
     Some(line.chars().take(200).collect())
