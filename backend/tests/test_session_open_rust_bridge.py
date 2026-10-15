@@ -87,3 +87,30 @@ def test_what_comes_through_python_opens_in_rust_and_the_rest_stays_here(monkeyp
     with pytest.raises(HTTPException) as refused:
         asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
     assert (refused.value.status_code, refused.value.detail["code"]) == (409, "erro_nome_em_uso")
+
+
+def test_a_failed_guest_claim_undoes_the_worktree_this_open_created(monkeypatch, tmp_path):
+    """S-66: o registro do convidado falhou depois de a sessão nascer: ela é encerrada e a worktree (e a
+    branch que esta abertura criou) sai junto, senão a nova tentativa daria 409 na branch."""
+    from app import guest_users, runtime_coordinator
+    undo = {"source": "/r/repo", "path": "/r/repo-feat-x", "branch": "feat/x", "branch_created": True}
+    monkeypatch.setattr(runtime_coordinator, "rust_session_open",
+                        lambda payload: (200, json.dumps({"info": INFO, "undo": undo}).encode()))
+    killed, undone = [], []
+
+    async def kill(name):
+        killed.append(name)
+    monkeypatch.setattr(api_mod, "_kill_unclaimed", kill)
+    monkeypatch.setattr(api_mod, "_undo_worktree", undone.append)
+
+    def refuse(name, guest_id):
+        raise OSError("guests.json")
+    monkeypatch.setattr(guest_users, "claim", refuse)
+    marker = guest_users.current.set(SimpleNamespace(id="g1", name="ana", root=str(tmp_path)))
+    try:
+        with pytest.raises(OSError):
+            asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+    finally:
+        guest_users.current.reset(marker)
+    assert killed == ["s1"]
+    assert undone == [{"source": "/r/repo", "path": "/r/repo-feat-x", "new_branch": "feat/x"}]

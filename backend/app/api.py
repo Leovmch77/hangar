@@ -2340,6 +2340,12 @@ async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSes
             # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
             _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
             await _kill_unclaimed(info.name)
+            # S-66: a worktree e a branch que esta abertura criou saem junto; senão a próxima
+            # tentativa com a mesma branch daria 409.
+            if undo := data.get("undo"):
+                await asyncio.shield(asyncio.to_thread(_undo_worktree, {
+                    "source": undo["source"], "path": undo["path"],
+                    "new_branch": undo["branch"] if undo["branch_created"] else None}))
             raise
         info = info.model_copy(update={"owner": guest.name})
     return info
