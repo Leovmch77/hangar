@@ -260,14 +260,14 @@ impl Pages {
         }
     }
 
-    /// Conversa com página: o Chromium sobe já, em paralelo ao resto, e não no primeiro desenho do cartão (que pode nem
-    /// estar à vista). Sem página, ele é solto e nada sobe.
+    /// Conversa com página: o Chromium das páginas sobe já, em paralelo ao resto, e não no primeiro desenho do cartão
+    /// (que pode nem estar à vista). Sem página, ele é solto e nada sobe.
     pub fn warm(&mut self, wanted: bool, window: &Window, cx: &App) {
         #[cfg(target_os = "linux")]
         {
             if !wanted || !self.live { self.warm = None; return; }
             if self.warm.is_some() { return; }
-            match Engine::warm(window, cx) {
+            match Engine::warm_pages(window, cx) {
                 Ok(warm) => self.warm = Some(warm),
                 Err(error) => eprintln!("[pagina] Chromium não subiu antes da página: {error}"),
             }
@@ -751,7 +751,8 @@ impl Hangar {
                 }
             }).absolute().inset_0();
             let cover = (!framed).then(|| match view.last_frame.clone() {
-                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+                // Tirado no tamanho em que saiu da tela: o cartão pode ter mudado desde então, e esticado ele deformava.
+                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Contain).into_any_element(),
                 None => loading().into_any_element(),
             });
             let focused = view.focus.clone();
