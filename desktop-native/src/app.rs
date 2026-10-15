@@ -47,6 +47,7 @@ mod recent;
 mod orq_timeline;
 mod panes;
 mod page_card;
+mod page_fullscreen;
 mod popup;
 mod rail;
 mod rows;
@@ -851,6 +852,8 @@ impl Hangar {
             // Tab dentro da página navega os campos dela, não o foco do app.
             KeyBinding::new("tab", NoAction, Some("BrowserPage")),
             KeyBinding::new("shift-tab", NoAction, Some("BrowserPage")),
+            KeyBinding::new("tab", NoAction, Some("PageFullscreen")),
+            KeyBinding::new("shift-tab", NoAction, Some("PageFullscreen")),
             // Num campo de texto o Ctrl+W apaga a palavra, como no readline; fechar sessão fica fora dele.
             KeyBinding::new("ctrl-w", gpui_kit::base::input::DeleteToPreviousWordStart, Some("Input"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
