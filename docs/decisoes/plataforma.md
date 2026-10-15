@@ -868,6 +868,18 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   alfa de superfície `Rgba8Unorm`, com alfa puro: o `blend_color` já multiplica, e pré-multiplicar
   aplicaria o alfa duas vezes; a superfície XRGB do WPE continua opaca. Navegação bloqueada responde
   `Aborted`: `BlockedByClient` troca a página pela tela de erro do Chrome.
+- **Tela cheia (14/10/2026, pedido do usuário, referência T3):** diálogo grande com zoom de 50% a 200%. No nativo vivo
+  (Linux e Windows) é um motor próprio do tamanho do palco, que toma uma vaga fixa do orçamento de páginas vivas
+  enquanto aberto (`Budget::pin`) e a devolve quando a entidade do diálogo cai. O zoom é a escala do motor, não imagem
+  ampliada: no Linux, viewport CSS dividido e densidade multiplicada no `Emulation.setDeviceMetricsOverride`; no Windows,
+  escala de rasterização da WebView2 no mesmo tamanho físico. O quadro mantém os pixels e as coordenadas de clique e
+  roda são divididas pelo zoom. No macOS o diálogo amplia a imagem do `/shot`, a partir da largura do diálogo. Na roda
+  do nativo um dente do mouse (3 linhas de 16 px) é um degrau: com o limiar de 50 px, um dente sozinho não ampliava.
+  No PWA o zoom é CSS `zoom`, como no T3, e a cópia do diálogo leva uma ponte própria (`hangar-zoom`) que traz
+  Ctrl+roda, Ctrl+=/-/0 e Esc de dentro do iframe em origem opaca; sem ela o Ctrl+roda ampliava o app inteiro pelo
+  navegador. A cópia nasce no tema de agora, não no da carga do cartão. No PWA a tela cheia só existe fora da vista
+  desktop (abaixo de 820 px): a web desktop está congelada e a tela cheia de desktop é a do nativo. No app é uma tela
+  de pilha com a pinça do WebView, liberada mesmo em página que trava o `viewport`.
 - **Windows:** viva, como no Linux. Cada página é uma WebView2 própria estacionada fora da área da
   janela (visível para o Chromium: `SW_HIDE` para os quadros), com o documento posto pelo CDP, quadro
   por `Page.startScreencast` em PNG no dobro da tela e entrada por `Input.*`. O DirectX do GPUI
