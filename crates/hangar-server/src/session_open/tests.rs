@@ -979,6 +979,31 @@ fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
     }
 }
 
+/// S-45: pasta pedida com `~` é normalizada na entrada; o pane, a pré-confiança e o transcript usam o
+/// caminho absoluto (o Python registrava o texto cru: chave da confiança e pasta do transcript com `~`).
+#[test]
+fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work/proj")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let body = json!({"name": "s1", "cwd": "~/work/proj", "provider": "claude", "headless": false, "permission_mode": "manual"});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let spec = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime)).unwrap().spec;
+    let absolute = home.join("work/proj").to_string_lossy().into_owned();
+    assert_eq!(spec.cwd, absolute);
+    let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None };
+    let argv = terminal::new_session_argv(&terminal::tests::machine_at(&home.join(".claude").to_string_lossy()), &claude::pane(&spec, "sid", &ctx));
+    assert_eq!(argv[argv.iter().position(|a| a == "-c").unwrap() + 1], absolute);
+    let transcript = claude::transcript(&spec, "sid", &home.join(".claude/projects"));
+    assert_eq!(transcript.parent().unwrap().file_name().unwrap().to_string_lossy(), hangar_workspace::worktrees::sanitize_cwd(&absolute));
+    claude::pretrust(&home.join(".claude.json"), &spec.cwd, false);
+    let trusted: Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(trusted["projects"][&absolute]["hasTrustDialogAccepted"], true);
+}
+
 /// A abertura inteira pelo lado Rust do harness: nasceu, a ordem do diário é a do Python e o spec
 /// fica gravado; o pane recusado não chega ao "criada" nem grava o spec.
 #[cfg(target_os = "linux")]
