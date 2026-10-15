@@ -206,8 +206,8 @@ pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens:
 #[derive(Default)]
 pub struct ContextCache {
     entries: Capped<String, Entry>,
-    /// Janela que o Claude informou por conta e modelo respondido (sem a data), quando e por qual transcript.
-    windows: std::collections::HashMap<String, (u64, std::time::Instant, std::path::PathBuf)>,
+    /// Janela que o Claude informou por conta e modelo respondido (sem a data), e desde quando.
+    windows: std::collections::HashMap<String, (u64, std::time::Instant)>,
 }
 
 /// Validade do aprendido: troca de plano na conta não pode deixar a janela antiga para sempre.
@@ -255,13 +255,13 @@ impl ContextCache {
         let reported = if inputs.engine || variant { None } else {
             inputs.declared.filter(|w| declared_reported && *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window))
         };
-        // Reler a mesma informação (mesmo valor, mesma sessão) não a renova: a validade conta de quando foi dada.
+        let fresh = |at: &std::time::Instant| now.saturating_duration_since(*at) < LEARNED_FOR;
+        // O mesmo valor de novo (desta sessão ou de outra) não renova: a validade conta de quando ele apareceu.
         if let (Some(k), Some(w)) = (&key, reported) {
-            let same = self.windows.get(k).is_some_and(|(old, _, from)| *old == w && from == inputs.jsonl);
-            if !same { self.windows.insert(k.clone(), (w, now, inputs.jsonl.to_path_buf())); }
+            let same = self.windows.get(k).is_some_and(|(old, at)| *old == w && fresh(at));
+            if !same { self.windows.insert(k.clone(), (w, now)); }
         }
-        let learned = key.and_then(|k| self.windows.get(&k))
-            .filter(|(_, at, _)| now.saturating_duration_since(*at) < LEARNED_FOR).map(|(w, _, _)| *w);
+        let learned = key.and_then(|k| self.windows.get(&k)).filter(|(_, at)| fresh(at)).map(|(w, _)| *w);
         reading_with(inputs, scan, learned)
     }
 
