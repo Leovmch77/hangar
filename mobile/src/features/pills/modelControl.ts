@@ -65,7 +65,7 @@ export function useModelControl({ serverId, name, provider, chosen, onChosen, cl
   const display = tempError ?? (model ? spacedModel(model) : m.composer_modelo());
 
   const load = useCallback(async () => {
-    if (!server) { setItems([]); setError(m.servidor_nao_existe()); return; }
+    if (!server) { setItems([]); setError(m.chat_servidor_removido()); return; }
     setLoading(true);
     setError(null);
     setNotice(null);
@@ -111,7 +111,7 @@ export function useModelControl({ serverId, name, provider, chosen, onChosen, cl
 
   const select = useCallback(
     async (it: PillMenuItem) => {
-      if (!server) { setNotice(m.servidor_nao_existe()); return; }
+      if (!server) { setNotice(m.chat_servidor_removido()); return; }
       const id = it.id ?? it.label;
       let closedEarly = false;
       setNotice(null);

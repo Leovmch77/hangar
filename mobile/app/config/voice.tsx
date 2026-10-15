@@ -97,7 +97,10 @@ export default function Voice() {
       <TranscriptionProviders cfg={cfg} />
 
       <BlockHead title={m.native_voice_after()} />
-      <Box><ConfigRow cfg={cfg} k="ditado_vocabulario" removable /></Box>
+      <Box>
+        <ConfigRow cfg={cfg} k="ditado_vocabulario" removable />
+        <ConfigRow cfg={cfg} k="dictation_max_minutes" removable />
+      </Box>
 
       <BlockHead title={m.native_voice_cleanup()} help={m.native_voice_cleanup_help()}
         right={<Chip text={organization?.label() ?? m.native_voice_organization_unknown()} tone={organization && organizing ? 'success' : 'muted'} />} />

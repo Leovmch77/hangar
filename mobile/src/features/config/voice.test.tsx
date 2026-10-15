@@ -50,7 +50,7 @@ beforeEach(() => {
   calls.patch.mockReset();
   fields = Object.fromEntries(Object.entries({
     dictation_organization_mode: 'none', dictation_claude_model: 'claude-old', dictation_codex_model: 'codex-old',
-    dictation_include_recent_messages: false, ditado_estilo: 'limpar', ditado_vocabulario: '',
+    dictation_include_recent_messages: false, ditado_estilo: 'limpar', ditado_vocabulario: '', dictation_max_minutes: 5,
     groq_api_key: '', transcription_base_url: '', transcription_model: '',
     llm_base_url: 'https://organization.test', llm_api_key: 'masked-key', llm_model: 'api-old', llm_reasoning_effort: '',
     llm_briefing_base_url: '', llm_briefing_api_key: '', llm_briefing_model: '',
@@ -79,6 +79,15 @@ const edit = (label: string, value: string) => act(async () => {
 const render = () => act(async () => root.render(createElement(Voice)));
 
 describe('organização do ditado na tela de Voz', () => {
+  it('limite de gravação continua visível e salvável com organização desligada', async () => {
+    await render();
+    expect(container.textContent).not.toContain(m.native_voice_style());
+    expect(input(m.native_voice_dictation_max())?.value).toBe('5');
+    await edit(m.native_voice_dictation_max(), '12');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { dictation_max_minutes: '12' });
+  });
+
   it('parte desligada, muda pelo rascunho e salva modelos, estilo e referência do harness', async () => {
     await render();
     expect(container.textContent).toContain(m.native_voice_transcribe());

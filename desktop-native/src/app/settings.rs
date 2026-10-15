@@ -100,6 +100,7 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Voice, &[("voice_transcribe", Some("voice_transcribe_help")), ("voice_groq", Some("voice_groq_help")),
         ("voice_transcription_endpoint", Some("voice_transcription_endpoint_help")), ("voice_transcription_model", Some("voice_transcription_model_help")),
         ("voice_hands_free", Some("voice_hands_free_help")), ("voice_style", Some("voice_style_help")), ("voice_vocabulary", Some("voice_vocabulary_help")),
+        ("voice_dictation_max", Some("voice_dictation_max_help")),
         ("voice_cleanup", Some("voice_cleanup_help")), ("voice_llm_endpoint", Some("voice_llm_endpoint_help")), ("voice_llm_key", Some("voice_llm_key_help")),
         ("voice_llm_model", Some("voice_llm_model_help")), ("voice_llm_effort", Some("voice_llm_effort_help")),
         ("voice_briefing_endpoint", Some("voice_briefing_endpoint_help")), ("voice_briefing_key", Some("voice_briefing_key_help")),

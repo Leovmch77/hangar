@@ -27,10 +27,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function campos(valor: string) {
+function campos(valor: string, maxMinutes = 5) {
   return {
     campos: {
       ditado_estilo: { valor, definido: true, origem: 'app' as const },
+      dictation_max_minutes: { valor: maxMinutes, definido: true, origem: 'app' as const },
     },
     somente_leitura: {},
   };
@@ -48,6 +49,37 @@ beforeEach(() => {
 });
 
 describe('ditadoEstiloStore', () => {
+  it('leitura confirma o padrão do estilo e o teto configurado juntos', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValue({ campos: {
+      dictation_max_minutes: { valor: 12, definido: true, origem: 'app' },
+    } } as core.ConfigServidor);
+    await dictationStyleStore(a).getState().carregar();
+    expect(dictationStyleStore(a).getState()).toMatchObject({ valor: 'prosa', pronto: true, falhou: false, ceilingMs: 720_000 });
+  });
+
+  it('leitura atrasada atualiza o teto sem desfazer o estilo confirmado por escrita', async () => {
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as core.RespostaPatchConfig);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    await store.getState().trocar('briefing');
+    read.resolve(campos('limpar', 7) as core.ConfigServidor);
+    await loading;
+    expect(store.getState()).toMatchObject({ valor: 'briefing', pronto: true, falhou: false, ceilingMs: 420_000 });
+  });
+
+  it('relê só o teto da máquina da conversa sem trocar o estilo nem o estado pronto', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValueOnce(campos('limpar', 7) as core.ConfigServidor)
+      .mockResolvedValueOnce(campos('briefing', 9) as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    await store.getState().refreshCeiling();
+    expect(core.getConfigForServer).toHaveBeenLastCalledWith(a);
+    expect(core.getConfig).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({ valor: 'limpar', pronto: true, falhou: false, ceilingMs: 540_000 });
+  });
+
   it('A e B guardam valores separados e usam GET/PATCH explícitos com B ativo', async () => {
     vi.mocked(core.getConfigForServer).mockImplementation(async (server) => campos(server.id === a.id ? 'limpar' : 'briefing') as never);
     vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);

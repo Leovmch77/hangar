@@ -126,6 +126,7 @@ impl AppState {
             monitors: None,
             mods: mods.clone(),
             runtime: Default::default(),
+            queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
@@ -1031,6 +1032,7 @@ mod tests {
             monitors: None,
             mods: Default::default(),
             runtime: Default::default(),
+            queue_dir: None,
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

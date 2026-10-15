@@ -81,6 +81,8 @@ EDITAVEIS: dict[str, type] = {
     "dictation_claude_model": str,
     "dictation_codex_model": str,
     "dictation_include_recent_messages": bool,
+    # Teto da gravação do ditado, em minutos (0 = padrão de 5). Os três apps leem daqui.
+    "dictation_max_minutes": int,
     # Origens EXTRAS que podem abrir o terminal, no mesmo formato "a,b" do CP_TERM_ORIGINS.
     # SOMA com o env, ao contrario do scan_roots logo abaixo, que sobrescreve: aqui a lista e o
     # perimetro de quem PODE abrir o terminal, e um override por inteiro feito do celular tiraria
@@ -520,6 +522,8 @@ def _coagir(campo: str, valor: Any) -> Any:
             raise ValueError(f"{campo}: esperado número") from None
         if n < 0:
             raise ValueError(f"{campo}: não pode ser negativo")
+        if campo == "dictation_max_minutes" and n > 30:
+            raise ValueError("dictation_max_minutes: no máximo 30")
         return n
     if not isinstance(valor, str):
         raise ValueError(f"{campo}: esperado texto")

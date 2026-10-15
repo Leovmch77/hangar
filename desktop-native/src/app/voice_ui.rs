@@ -266,6 +266,8 @@ pub(super) struct VoiceUi {
     /// Árvore de acessibilidade mantida sem leitor de tela: na chamada (para o `read_screen`) ou com `HANGAR_A11Y_DUMP`.
     pub(super) a11y_retained: bool,
     pub(super) a11y_dump: bool,
+    /// Altura livre embaixo do painel lateral, medida no último quadro: o cartão da voz só aparece quando cabe.
+    pub(super) dock_room: std::rc::Rc<std::cell::Cell<f32>>,
 }
 
 /// Teto do texto que o `read_screen` devolve ao organizador.
@@ -479,6 +481,17 @@ pub(super) fn action_text(action: &OrganizerAction) -> String {
             tr("voice_action_command").replace("{command}", &clip(line, 80))
         }
     }
+}
+
+/// Altura fixa do cartão da voz no pé do painel lateral.
+pub(super) const VOICE_DOCK_H: f32 = 96.;
+
+pub(super) fn voice_dock_fits(room: f32) -> bool { room >= VOICE_DOCK_H }
+
+/// Linha do cartão do painel: a ação em curso, senão a etapa no computador, senão a sessão que a voz conhece.
+pub(super) fn dock_line(action: Option<&OrganizerAction>, progress: Option<&str>, target: Option<&str>) -> Option<String> {
+    action.map(action_text).or_else(|| progress.map(str::to_owned))
+        .or_else(|| target.map(|name| tr("side_voice_session").replace("{name}", name)))
 }
 
 pub(super) fn call_clock(elapsed: Duration) -> String {
@@ -703,6 +716,7 @@ impl Hangar {
         self.voice.activity = CallActivity::Idle;
         (self.voice.thought, self.voice.action, self.voice.progress) = (String::new(), None, None);
         self.voice.shown = None;
+        self.voice.dock_room.set(0.);
     }
 
     pub(super) fn stop_voice(&mut self, cx: &mut Context<Self>) {
@@ -1251,6 +1265,32 @@ impl Hangar {
         row.children(equalizer(level, self.voice.frame, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)))
     }
 
+    /// Cartão compacto da chamada no pé do painel lateral: ocupa só a sobra embaixo das seções. A sobra é medida a cada
+    /// quadro e o cartão some quando não cabe, em vez de empurrar o painel ou criar rolagem.
+    pub(super) fn render_voice_dock(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.voice.call.as_ref()?;
+        let room = self.voice.dock_room.clone();
+        let shown = voice_dock_fits(room.get());
+        let owner = cx.entity().downgrade();
+        let measure = canvas(move |bounds, _, cx| {
+            let height = f32::from(bounds.size.height);
+            let flipped = voice_dock_fits(height) != voice_dock_fits(room.get());
+            room.set(height);
+            if flipped { cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); }); }
+        }, |_, _, _, _| {}).absolute().inset_0();
+        let line = dock_line(self.voice.action.as_ref(), self.voice.progress.as_deref(), self.voice.target.as_ref().map(|(_, name)| name.as_str()));
+        let card = div().id("side-voice").h(px(VOICE_DOCK_H)).flex_shrink_0().overflow_hidden().px_4().py(px(14.))
+            .border_t_1().border_color(theme::border()).flex().flex_col().gap(px(8.))
+            .child(chrome::section_label(tr("side_voice")))
+            .child(div().flex().items_center().gap(px(10.))
+                .child(self.render_equalizer(3., 18., 3.))
+                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(self.voice_state_color()).child(self.voice_status()))
+                .children(self.call_time().map(|time| div().flex_shrink_0().text_xs().text_color(theme::faint()).child(time))))
+            .children(line.map(|text| div().truncate().text_xs().text_color(theme::muted()).child(text)));
+        Some(div().flex_1().min_h_0().relative().overflow_hidden().flex().flex_col().justify_end()
+            .child(measure).when(shown, |el| el.child(card)).into_any_element())
+    }
+
     /// Só o que foi medido: contexto da thread do organizador e janelas da conta. Sem dado, nada aparece.
     fn render_voice_usage(&self) -> Option<AnyElement> {
         let tone = |pct: f64| if pct >= 90. { theme::danger() } else if pct >= 70. { theme::warning() } else { theme::text() };
@@ -1644,6 +1684,18 @@ mod tests {
         assert_eq!(tail[0].chars().count(), 10);
         assert!(tail[0].ends_with('…'));
         assert!(thought_tail("a\nb\nc\nd", 3, 140) == ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn voice_dock_shows_only_with_room_and_names_what_happens() {
+        assert!(!voice_dock_fits(0.));
+        assert!(!voice_dock_fits(VOICE_DOCK_H - 1.));
+        assert!(voice_dock_fits(VOICE_DOCK_H));
+        let search = OrganizerAction::Search("tokio".into());
+        assert_eq!(dock_line(Some(&search), Some("Lendo a tela"), Some("hangar")), Some(action_text(&search)), "a ação vence");
+        assert_eq!(dock_line(None, Some("Lendo a tela"), Some("hangar")).as_deref(), Some("Lendo a tela"));
+        assert!(dock_line(None, None, Some("hangar")).is_some_and(|l| l.contains("hangar")));
+        assert_eq!(dock_line(None, None, None), None);
     }
 
     #[test]

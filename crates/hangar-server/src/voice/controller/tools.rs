@@ -31,7 +31,7 @@ impl Controller {
     pub(super) fn lookup(&self, want: Want) {
         let ctx = self.ctx();
         tokio::spawn(async move {
-            let (rows, unreachable) = watch::read_rows(&ctx.machines, &ctx.backoff).await;
+            let (rows, unreachable) = watch::read_rows(&ctx.machines, &ctx.backoff, false).await;
             let _ = ctx.done.send(Done::Rows { rows, unreachable, want });
         });
     }
@@ -367,7 +367,7 @@ impl Controller {
         let ctx = self.ctx();
         tokio::spawn(async move {
             match read_text(&ctx, &key, head, user_turns).await {
-                Ok(text) => ctx.voice.reply(call, tool_reply(text, true)),
+                Ok(text) => { ctx.voice.heard(key.1.clone(), text.clone()); ctx.voice.reply(call, tool_reply(text, true)); }
                 Err(error) => ctx.fail(call, "read_session", format!("Não consegui ler a sessão {}: {error}", key.1)),
             }
         });
@@ -384,6 +384,7 @@ impl Controller {
             match read_text(&ctx, &key, head, 1).await {
                 Ok(text) => {
                     log(format!("jev act=read bytes={}", text.len()));
+                    ctx.voice.heard(key.1.clone(), text.clone());
                     let note = format!("O Hangar já leu a conversa da sessão {} a pedido do usuário; não chame read_session para ela de \
                         novo, a não ser que precise de pedidos anteriores (user_turns maior).\n{text}", key.1);
                     ctx.voice.jev_verdict(turn, None, Some(note));

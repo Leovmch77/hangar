@@ -9,10 +9,10 @@ import {
 import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio';
 import type { SharedObject } from 'expo';
 import { novoEstadoVad, passoVad, registrarDiag } from '@hangar/core';
-import type { EstadoVad, MotivoFim } from '@hangar/core';
+import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { dictationStyleStore } from './ditadoEstiloStore';
 
-const TETO_MS = 180_000;
 const STOP_STATUS_TIMEOUT_MS = 5_000;
 
 // O tipo do áudio não resolve a base quando o core do Expo fica aninhado no SDK.
@@ -21,6 +21,8 @@ type ManagedRecorder = AudioRecorder & InstanceType<SharedObject<RecordingEvents
 interface Opts {
   onFim: (file: File, motivo: MotivoFim, uri: string) => void;
   onErroParada?: (e: Error) => void;
+  /** Máquina da conversa: o teto da gravação é o configurado nela. */
+  server?: Server | null;
 }
 
 interface Recording {
@@ -47,7 +49,7 @@ function reportRecordingError(recording: Recording, error: unknown) {
   }
 }
 
-export function useDitado({ onFim, onErroParada }: Opts) {
+export function useDitado({ onFim, onErroParada, server }: Opts) {
   const [gravando, setGravando] = useState(false);
   const [rms, setRms] = useState(0);
 
@@ -186,9 +188,18 @@ export function useDitado({ onFim, onErroParada }: Opts) {
       setGravando(true);
       setRms(0);
 
-      tetoRef.current = setTimeout(() => {
-        void finishRecording(recording, 'teto');
-      }, TETO_MS);
+      const armCeiling = (ceilingMs: number) => {
+        if (tetoRef.current) clearTimeout(tetoRef.current);
+        tetoRef.current = setTimeout(() => {
+          void finishRecording(recording, 'teto');
+        }, Math.max(0, ceilingMs - (Date.now() - inicioRef.current)));
+      };
+      const styleStore = dictationStyleStore(server);
+      armCeiling(styleStore.getState().ceilingMs);
+      // O teto pode ter mudado na tela de Voz: relido agora, rearma o prazo desta gravação.
+      void styleStore.getState().refreshCeiling().then(() => {
+        if (recording.phase === 'recording') armCeiling(styleStore.getState().ceilingMs);
+      });
 
       intervaloRef.current = setInterval(() => {
         const st = recorder.getStatus();
@@ -211,7 +222,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
           rmsVal = 0;
         }
         setRms(rmsVal);
-        if (Date.now() - inicioRef.current >= TETO_MS) {
+        if (Date.now() - inicioRef.current >= styleStore.getState().ceilingMs) {
           void finishRecording(recording, 'teto');
         }
       }, 55);
@@ -227,7 +238,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
         }
       }
     }
-  }, [onFim, onErroParada, finishRecording, releaseRecording]);
+  }, [onFim, onErroParada, server, finishRecording, releaseRecording]);
 
   useEffect(() => {
     mountedRef.current = true;
