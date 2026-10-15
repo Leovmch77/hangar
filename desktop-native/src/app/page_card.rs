@@ -86,17 +86,31 @@ fn scrolls_inside(page: &PageRef, width: f32, reported: Option<f32>) -> bool {
     natural(page, width, reported) > frame_height(page, width, reported) + 0.5
 }
 
-/// Fila das páginas vivas, mais recente no fim: passou do teto, a mais antiga sai.
+/// Fila das páginas vivas, mais recente no fim: passou do teto, a mais antiga sai. A tela cheia ocupa uma vaga fora da
+/// fila enquanto aberta: o motor dela não é de nenhum cartão.
 #[derive(Default)]
-pub struct Budget { order: VecDeque<String> }
+pub struct Budget { order: VecDeque<String>, pinned: usize }
 
 impl Budget {
     /// Marca `id` como usada agora; devolve quem deve fechar.
     pub fn touch(&mut self, id: &str) -> Option<String> {
         self.order.retain(|x| x != id);
         self.order.push_back(id.to_owned());
-        (self.order.len() > LIVE_MAX).then(|| self.order.pop_front()).flatten()
+        (self.order.len() + self.pinned > LIVE_MAX).then(|| self.order.pop_front()).flatten()
     }
+
+    /// Tela cheia abriu: reserva a vaga e devolve quem deve fechar para ela caber.
+    pub fn pin(&mut self) -> Vec<String> {
+        self.pinned += 1;
+        let mut out = Vec::new();
+        while self.order.len() + self.pinned > LIVE_MAX && let Some(old) = self.order.pop_front() { out.push(old); }
+        out
+    }
+
+    pub fn unpin(&mut self) { self.pinned = self.pinned.saturating_sub(1); }
+
+    /// Conversa trocada: a fila esvazia, a vaga da tela cheia aberta continua dela.
+    pub fn clear(&mut self) { self.order.clear(); }
 }
 
 #[derive(Debug, PartialEq)]
@@ -224,9 +238,12 @@ impl Pages {
     /// junto com as visões.
     pub fn clear(&mut self) {
         self.views.clear();
-        self.budget = Budget::default();
+        self.budget.clear();
         self.paint.away.borrow_mut().clear();
     }
+
+    /// Tela cheia fechou: a vaga dela volta para os cartões.
+    pub fn unpin(&mut self) { self.budget.unpin(); }
 
     /// Conversa refeita: sai quem não tem mais linha.
     pub fn retain_rows(&mut self, keep: impl Fn(&String) -> bool) {
@@ -783,6 +800,27 @@ mod tests {
         for id in ["a", "b", "c", "d"] { assert_eq!(b.touch(id), None); }
         assert_eq!(b.touch("a"), None);
         assert_eq!(b.touch("e"), Some("b".into()));
+    }
+
+    #[test]
+    fn pinned_fullscreen_takes_a_slot_until_released() {
+        let mut b = Budget::default();
+        for id in ["a", "b", "c", "d"] { assert_eq!(b.touch(id), None); }
+        assert_eq!(b.pin(), vec!["a".to_owned()]);
+        assert_eq!(b.touch("b"), None, "quem já está vivo não expulsa ninguém");
+        assert_eq!(b.touch("e"), Some("c".into()));
+        b.unpin();
+        b.unpin();
+        assert_eq!(b.touch("f"), None, "a vaga voltou, e soltar de novo não fica negativo");
+    }
+
+    #[test]
+    fn clear_keeps_the_pinned_slot() {
+        let mut b = Budget::default();
+        assert!(b.pin().is_empty());
+        b.clear();
+        for id in ["a", "b", "c"] { assert_eq!(b.touch(id), None); }
+        assert_eq!(b.touch("d"), Some("a".into()), "conversa recarregada com a tela cheia aberta: a vaga dela continua");
     }
 
     #[test]

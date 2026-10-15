@@ -18,6 +18,7 @@ pub(super) struct Page {
     placed: Cell<Option<(Size<Pixels>, f32)>>,
     visible: Cell<bool>,
     pressed: Cell<bool>,
+    zoom: Cell<f32>,
     _acks: Task<()>,
 }
 
@@ -101,7 +102,7 @@ impl Starter {
                 cdp.fire("Page.screencastFrameAck", json!({"sessionId": id}));
             }
         });
-        let page = Page { cdp, frames, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false), _acks: acks };
+        let page = Page { cdp, frames, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false), zoom: Cell::new(1.), _acks: acks };
         Ok(Engine {
             view, _context: context, state: Rc::default(), events, placed: Cell::new(None), asleep: Cell::new(false), dead,
             _watch: None, page: Some(page),
@@ -123,7 +124,8 @@ impl Page {
             self.placed.set(Some((bounds.size, scale)));
             // A densidade emulada pelo CDP não chega ao screencast da WebView2: quem desenha no dobro é a escala de
             // rasterização dela, com a janela no tamanho físico correspondente (a página continua vendo w×h de CSS).
-            rasterize(view, frame_scale);
+            // Zoom da tela cheia: a WebView2 rasteriza mais denso no mesmo tamanho físico, e a página vê `w/zoom` de CSS.
+            rasterize(view, frame_scale * self.zoom.get());
             let (pw, ph) = ((w * frame_scale).round().max(1.) as u32, (h * frame_scale).round().max(1.) as u32);
             if let Err(e) = view.set_bounds(Rect {
                 // Toda à esquerda da área do pai, que recorta a janela filha.
@@ -141,6 +143,11 @@ impl Page {
         }
     }
 
+    /// Zoom da página em tela cheia: o próximo `place` refaz a escala e o screencast.
+    pub(super) fn set_zoom(&self, zoom: f32) {
+        if self.zoom.replace(zoom) != zoom { self.placed.set(None); }
+    }
+
     /// Fora da tela: sem screencast e sem a textura na GPU.
     pub(super) fn hide(&self) {
         if self.visible.replace(false) { self.cdp.fire("Page.stopScreencast", json!({})); }
@@ -149,6 +156,7 @@ impl Page {
 
     /// O `clickCount` da soltura repete o do aperto: sem ele o Chromium não dispara `dblclick`.
     pub(super) fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        let at = crate::browser::unzoom(at, self.zoom.get());
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
         let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
         let left = name == "left";
@@ -168,6 +176,7 @@ impl Page {
 
     /// `delta.y > 0` avança a página; quem chama já inverteu o sinal da GPUI.
     pub(super) fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
+        let (at, delta) = (crate::browser::unzoom(at, self.zoom.get()), crate::browser::unzoom(delta, self.zoom.get()));
         self.cdp.fire("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
             "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),

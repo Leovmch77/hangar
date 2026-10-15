@@ -55,3 +55,23 @@ pub enum Pointer {
     Up,
     Move,
 }
+
+/// Ponto da tela (px lógicos, relativo à página) em px CSS da página ampliada: com zoom, ela vê `1/zoom` do espaço.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn unzoom(p: gpui_kit::Point<gpui_kit::Pixels>, zoom: f32) -> gpui_kit::Point<gpui_kit::Pixels> {
+    let z = if zoom > 0. { zoom } else { 1. };
+    gpui_kit::point(gpui_kit::px(f32::from(p.x) / z), gpui_kit::px(f32::from(p.y) / z))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unzoom;
+    use gpui_kit::{point, px};
+
+    #[test]
+    fn unzoom_divides_screen_points() {
+        assert_eq!(unzoom(point(px(200.), px(100.)), 2.), point(px(100.), px(50.)));
+        assert_eq!(unzoom(point(px(200.), px(100.)), 0.5), point(px(400.), px(200.)));
+        assert_eq!(unzoom(point(px(7.), px(9.)), 0.), point(px(7.), px(9.)), "zoom inválido não divide por zero");
+    }
+}
