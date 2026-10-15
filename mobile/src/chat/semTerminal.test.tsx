@@ -111,7 +111,6 @@ vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, chi
 // A folha de anexo também é um Sheet; fora daqui para o `sheetEvents` seguir preso à folha de opções.
 vi.mock('../ui/AttachSheet', () => ({ AttachSheet: () => null }));
 vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
-vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => Object.fromEntries(
