@@ -35,7 +35,8 @@ fim da lista à vista, a altura que o fim perdeu como espaço embaixo (até `max
 esse espaço antes de empurrar as linhas de cima. A régua é a primeira linha à vista e a altura dela até o fim; `splice`
 a desloca, e `reset` zera a folga. Quando a folga muda, o layout é refeito no mesmo quadro, para não haver um quadro
 com o conteúdo fora do lugar. É o comportamento do terminal: o que já está na tela não sobe e desce quando uma linha
-do fim aparece e some. Os testes da lib não compilam nesta cópia (faltam as fontes do repositório de origem); a
+do fim aparece e some. A folga que fica parada por 500 ms desliza até zero (`released_slack`); um despertador acorda a
+view no fim da espera, porque a conversa quieta não redesenha sozinha. Os testes da lib não compilam nesta cópia (faltam as fontes do repositório de origem); a
 medição está na mensagem do commit.
 
 Redimensionamento: `List::prepaint` invalida a régua e a folga do fim quando a largura ou a altura da lista muda,

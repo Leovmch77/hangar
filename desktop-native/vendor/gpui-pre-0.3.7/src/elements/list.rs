@@ -16,7 +16,7 @@ use crate::{
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{cell::{Cell, RefCell}, ops::Range, rc::Rc, time::{Duration, Instant}};
 use sum_tree::{Bias, Dimensions, SumTree};
 #[path = "list_tail.rs"]
 mod tail;
@@ -88,6 +88,10 @@ struct StateInner {
     tail_ref: Option<(usize, Pixels)>,
     /// O fim estava à vista no último layout: só então o que muda nele mexeria no que está na tela.
     tail_visible: bool,
+    /// Quando a folga mudou pela última vez e o último passo do deslize que a devolve.
+    tail_settled: Option<Instant>,
+    tail_step: Option<Instant>,
+    tail_wake: Rc<Cell<bool>>,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -344,6 +348,9 @@ impl ListState {
             tail_slack: px(0.),
             tail_ref: None,
             tail_visible: false,
+            tail_settled: None,
+            tail_step: None,
+            tail_wake: Rc::new(Cell::new(false)),
         })));
         this.splice(0..0, item_count);
         this
@@ -1075,6 +1082,14 @@ impl StateInner {
             return self.layout_items_once(available_width, available_height, padding, render_item, window, cx);
         };
         let held = |slack: Pixels| Edges { bottom: padding.bottom + slack, ..*padding };
+        let now = Instant::now();
+        if let Some(settled) = self.tail_settled.filter(|_| self.tail_slack > px(0.)) {
+            let quiet = (now - settled).as_secs_f32() * 1000.;
+            let from = self.tail_step.unwrap_or(settled + Duration::from_secs_f32(tail::TAIL_HOLD_MS / 1000.));
+            let step = now.saturating_duration_since(from).as_secs_f32() * 1000.;
+            self.tail_slack = px(tail::released_slack(self.tail_slack.0, quiet, step));
+            if quiet >= tail::TAIL_HOLD_MS { self.tail_step = Some(now); }
+        }
         let mut response = self.layout_items_once(available_width, available_height, &held(self.tail_slack), render_item, window, cx);
         let tail_from = |items: &SumTree<ListItem>, ix: usize| items.summary().height - height_before(items, ix);
         // Com o fim à vista no último layout (colado nele ou pousado logo acima pela mola de quem acompanha), o trecho da
@@ -1083,6 +1098,7 @@ impl StateInner {
             let slack = px(tail::held_slack(self.tail_slack.0, before.0, tail_from(&self.items, ix).0, max.0));
             if (slack - self.tail_slack).abs() >= px(0.5) {
                 self.tail_slack = slack;
+                (self.tail_settled, self.tail_step) = (Some(now), None);
                 response = self.layout_items_once(available_width, available_height, &held(slack), render_item, window, cx);
             }
         }
@@ -1091,7 +1107,24 @@ impl StateInner {
         let shown_until = self.scroll_top(&response.scroll_top) + available_height;
         // Folga de 2 px: a mola pousa um pixel acima do fim de propósito.
         self.tail_visible = shown_until + px(2.) >= self.items.summary().height + padding.bottom + self.tail_slack;
+        self.wake_for_release(now, window, cx);
         response
+    }
+
+    /// A folga parada só vai embora com um quadro novo: a conversa quieta não redesenha sozinha. Um despertador acorda
+    /// a view no fim da espera, e o deslize pede quadro a quadro até zerar.
+    fn wake_for_release(&mut self, now: Instant, window: &mut Window, cx: &mut App) {
+        let Some(settled) = self.tail_settled.filter(|_| self.tail_slack > px(0.)) else { return };
+        let hold = Duration::from_secs_f32(tail::TAIL_HOLD_MS / 1000.);
+        let quiet = now.saturating_duration_since(settled);
+        if quiet >= hold { window.request_animation_frame(); return; }
+        if self.tail_wake.replace(true) { return; }
+        let (wake, view) = (self.tail_wake.clone(), window.current_view());
+        window.spawn(cx, async move |cx| {
+            cx.background_executor().timer(hold - quiet).await;
+            wake.set(false);
+            cx.update(move |_, cx| cx.notify(view)).ok();
+        }).detach();
     }
 
     fn layout_items_once(
