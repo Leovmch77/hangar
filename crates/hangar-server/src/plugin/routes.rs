@@ -91,6 +91,8 @@ struct Finished {
 #[derive(Deserialize)]
 struct Acknowledged {
     ok: bool, publication_id: Option<String>, generation: Option<u64>, session_id: Option<String>,
+    #[serde(default)]
+    dropped: bool,
 }
 #[derive(Clone, Debug, Deserialize)]
 pub struct MeasuredContext { pub used: u64, pub window: u64 }
@@ -257,7 +259,13 @@ async fn acknowledge(st: &RouteState, body: Envelope<Acknowledged>, mode: Plugin
     let identity = match admit(st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     let body = body.body;
     let receipt = match receipt(body.publication_id, body.generation, body.session_id) { Ok(r) => r, Err(error) => return fail(error) };
-    match st.store.acknowledge(&identity.binding, receipt.as_ref(), mode, body.ok) { Ok(()) => ok(), Err(error) => fail(error) }
+    let result = if body.dropped {
+        if body.ok || mode != PluginMode::User { return fail(ServiceError("plugin_body_invalid")); }
+        st.store.submission_dropped(&identity.binding, receipt.as_ref())
+    } else {
+        st.store.acknowledge(&identity.binding, receipt.as_ref(), mode, body.ok)
+    };
+    match result { Ok(()) => ok(), Err(error) => fail(error) }
 }
 async fn filled(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Acknowledged>>) -> Response {
     acknowledge(&st, body, PluginMode::Fill).await

@@ -462,12 +462,21 @@ impl Store {
     }
 
     pub fn acknowledge(&self, binding: &InteractionBinding, receipt: Option<&Receipt>, mode: PluginMode, ok: bool) -> Result<(), ServiceError> {
+        let reply = if !ok { PluginReply::Unknown } else if mode == PluginMode::Fill { PluginReply::Filled } else { PluginReply::Accepted };
+        self.acknowledge_result(binding, receipt, mode, reply)
+    }
+
+    pub fn submission_dropped(&self, binding: &InteractionBinding, receipt: Option<&Receipt>) -> Result<(), ServiceError> {
+        self.acknowledge_result(binding, receipt, PluginMode::User, PluginReply::NotWritten)
+    }
+
+    fn acknowledge_result(&self, binding: &InteractionBinding, receipt: Option<&Receipt>, mode: PluginMode, reply: PluginReply) -> Result<(), ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;
         if let Some(p) = &s.publication {
             let expected_mode = if p.mode == PluginMode::Focus { PluginMode::Fill } else { p.mode.clone() };
             if receipt == Some(&p.receipt) && expected_mode == mode && p.handed {
-                p.result.send_replace(Some(if !ok { PluginReply::Unknown } else if mode == PluginMode::Fill { PluginReply::Filled } else { PluginReply::Accepted }));
+                p.result.send_replace(Some(reply));
                 s.publication = None;
             }
         }

@@ -5,6 +5,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **O recibo de `prompt.submit` confere o resultado, não só a ausência de exceção.** O Claude
+  também recusa a entrada resolvendo a promessa com `drop`. Nesse caso o plugin responde
+  `submitted` com `ok: false` e `dropped: true`, e o escritor Rust pode seguir pelo composer e Enter. Resposta
+  incerta continua sem reenvio automático. Ver [recusa explícita da entrada pelo plugin](#recusa-explícita-da-entrada-pelo-plugin).
+
 - **Exceção à "entrada doente é 503": a permissão do Codex sem terminal caído.** Com o processo que
   caiu e não voltou, `GET /codex-permissions` lê o modo do motor (o mesmo do arquivo da sessão) e o
   `POST` grava o modo novo no arquivo da sessão, que vale na próxima subida; a resposta espera a
@@ -2166,6 +2171,31 @@ a mensagem seguinte entrou uma vez só na conversa nova, ainda pelo plugin. Plug
 mesmo cwd ele não segue o `/clear`, e aquela sessão fica na tecla até reabrir. O cwd dessa busca
 sai do pane do agente (o mesmo do `list()`), não do pane ativo. `/whoami` com `{"sessao": None}`
 é repetido em 2, 10 e 30 s e para: o marcador do `state_hook` pode chegar depois da largada.
+
+### Recusa explícita da entrada pelo plugin
+
+Em 15/10/2026, no Claude Code 2.1.300, mensagens enviadas pelo app recebiam
+`plugin_accepted` e eram marcadas como consumidas sem aparecer no transcript. Uma mensagem
+digitada diretamente no terminal voltava a iniciar o turno. Houve também três entradas
+anteriores encerradas com `delivery_given_up`.
+
+A implementação de `prompt.submit` do CLI devolve `{drop: ...}` quando a sessão foi interrompida
+e ainda não recebeu nova entrada humana. Outro hook também pode descartar o prompt da mesma
+forma. O plugin do Hangar aguardava a promessa, ignorava seu resultado e respondia `ok: true`.
+Isso convertia uma recusa explícita em aceite, bloqueando o caminho alternativo do escritor.
+Os registros dos episódios não guardavam o resultado do engine; o motivo exato de cada recusa
+histórica não pôde ser recuperado. O recibo novo leva `dropped: true` só para a recusa explícita:
+`ok: false` sozinho continua incerto, pois uma exceção pode acontecer depois do envio.
+
+A prova de regressão usa `prompt.submit` e observa o recibo HTTP `submitted`: os retornos com
+`drop` precisam produzir `ok: false` e `dropped: true`; o retorno com texto continua produzindo
+`ok: true`. A rota HTTP real `/submitted` converte apenas o descarte explícito para `NotWritten`;
+recibos antigos ou de exceção continuam `Unknown`.
+A costura Rust usa `TerminalDriver::prompt` com `PluginReply::NotWritten` e confere uma única
+escrita do texto seguida de um único Enter. Essa prova não depende do motivo da recusa do CLI.
+Na prova com o CLI real em tmux isolado e um hook descartando a entrada, a versão anterior
+respondeu `ok: true`. A corrigida respondeu `ok: false`, e o envio seguinte por texto e Enter
+gravou a mensagem uma única vez no transcript. Não foi necessário outro prompt humano.
 
 ### Mods no 2.1.287 medidos (01/10/2026)
 
