@@ -21,7 +21,7 @@ fn variable<'a>(recipe:&'a ProcessRecipe,key:&str)->Option<&'a OsStr> {
         Some(unsafe {OsStr::from_encoded_bytes_unchecked(value)})
     })
 }
-fn flag(argv:&[OsString],name:&str)->Result<Option<(usize,usize,OsString)>,RuntimeError> {
+pub(crate) fn flag(argv:&[OsString],name:&str)->Result<Option<(usize,usize,OsString)>,RuntimeError> {
     let mut found=None;
     for (i,arg) in argv.iter().enumerate().skip(1) {
         if arg=="--" { break; }

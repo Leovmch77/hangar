@@ -394,6 +394,18 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     grava em cada fala do transcript. `plan` é pulado porque o receptor conta plan vindo de bypass
     como bypass. Pôr `crossSessionInbound: "accept"` também resolveria, mas desligaria a proteção
     do receptor contra uma sessão que pede aprovação mandar outra rodar sem pedir.
+  - **Sessão com terminal recém-aberta: o modo de abertura (argv do agente) vem antes da conta**
+    (15/10/2026, Claude Code 2.1.300). O aviso `[painel: …]` não tem remetente, então a classe é a
+    do alvo, e o Rust (`message_class`) caía no `defaultMode` da conta quando ainda não tinha lido o
+    rodapé nem o transcript tinha `permissionMode`. Medido com duas sessões Haiku em
+    `--permission-mode bypassPermissions` numa conta com `"defaultMode": "auto"`: pareadas logo após
+    a criação, a primeira a nascer ficou com "Held peer message" (`prompting` × `bypass`); pareadas
+    cerca de 20 s depois, ou depois de um prompt, as duas receberam o aviso. A ordem agora é: modo
+    confirmado no rodapé, `permissionMode` do transcript, `--permission-mode` (ou
+    `--dangerously-skip-permissions`) do argv do `claude` e, por último, a conta.
+    `--allow-dangerously-skip-permissions` só põe o bypass no ciclo e não conta como abertura. Sem
+    terminal, o sidecar já traz o modo de abertura. O caminho Python (`_classe_modo`), que só decide
+    com o Rust fora do ar, segue sem essa leitura.
   - **Aviso do app sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`** (`pair_texto.PREFIXO`,
     24/09/2026). Os avisos de grupo saíam `[de: hangar]` e terminavam em "Confirme em uma linha": o
     uma sessão solta num grupo pelo arrasto confirmou com `hangar-send hangar …` e o

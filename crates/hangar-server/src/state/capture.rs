@@ -223,9 +223,10 @@ mod tests {
         assert_eq!(vanished.mux().capture_checked("s", "=s:").await, Err("capture_session_missing"));
         let blank = Fake::new(b"", 0, 0);
         assert_eq!(blank.mux().capture_checked("s", "=s:").await.as_deref(), Ok(""));
-        // Recusa com o multiplexador calado no `has-session` não é recusa conferida.
+        // Recusa com o multiplexador calado no `has-session` não é recusa conferida. O prazo cobre também o
+        // `capture-pane`, que em máquina carregada demora a nascer; o `has-session` calado do Windows dura ~5 s.
         let silent = Fake::new(b"", 1, HANG);
-        let mux = MuxProcess::new(&silent.program, Duration::from_millis(500));
+        let mux = MuxProcess::new(&silent.program, Duration::from_secs(2));
         assert_eq!(mux.capture_checked("s", "=s:").await, Err("capture_mux_no_answer"));
     }
 
