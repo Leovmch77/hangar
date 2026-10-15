@@ -362,7 +362,7 @@ passo_mobile_rapido() {
     app="$(mudados '^mobile/')"
     npm run i18n:compile --prefix mobile > /dev/null || return 1
     # Dependência ou configuração do app mudou: não há "relacionado", vale tudo.
-    if [[ -n "$(mudados '^mobile/(package(-lock)?\.json|tsconfig[^/]*\.json|vitest[^/]*\.ts|babel\.config\.js|metro\.config\.js|app\.json)$')" ]]; then
+    if [[ -n "$(mudados '^mobile/(package(-lock)?\.json|tsconfig[^/]*\.json|vitest[^/]*\.ts|babel\.config\.js|metro\.config\.js|app\.json|eas\.json|plugins/.*)$')" ]]; then
         (cd mobile && npx tsc --noEmit && npx vitest run)
         return
     fi
