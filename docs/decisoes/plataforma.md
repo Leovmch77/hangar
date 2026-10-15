@@ -901,6 +901,40 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   [frontend.md](frontend.md#página-da-conversa-no-windows-webview2-fora-da-tela-14102026). O macOS
   segue no cartão estático.
 
+## Rascunho da página devolve o print, e o tema da página tem a paleta completa (15/10/2026)
+
+- **O rascunho (`html_render` com `draft=true`) devolve o print como bloco de imagem do MCP**, além do
+  resultado estruturado de antes (o `shot` com o caminho continua nele). `width` (240 a 1600, padrão
+  728) e `theme` (`dark`/`light`, padrão `dark`) escolhem o print, para o agente conferir a versão de
+  celular e a clara. As larguras de coluna (360, 728, 1000) continuam medidas no escuro.
+  - O print do rascunho sai em densidade 1 e sobre o fundo da conversa do tema pedido: o modelo lê a
+    imagem sem a conversa atrás, e com fundo transparente o texto claro do escuro sumia. É um trabalho
+    de render à parte, que não conta como medição da coluna, e mora num arquivo próprio
+    (`<id>.draft.png`), fora do cache que os clientes leem no dobro e transparente.
+  - A largura, o tema e o print são do Rust. O servidor MCP ainda é do Python: a tool só repassa os dois
+    campos e põe o PNG que o Rust gravou num `CallToolResult`, como o `shot` do navegador já fazia. A
+    anotação de retorno continua `dict`: é dela que sai o `outputSchema`, e o resultado estruturado é o
+    que o Codex lê.
+- **Paleta completa.** Além das cores-base (`--foreground`, `--muted-foreground`, `--surface`,
+  `--border`, `--accent`, `--accent-foreground`, `--danger`, `--warning`, `--success`, `--info`,
+  `--code-background`, `--chart-1` a `--chart-6`), a página tem os nomes comuns de tema de componente:
+  `--card`, `--popover`, `--muted`, `--secondary`, `--primary`, `--input`, `--ring`, `--destructive`,
+  `--code-foreground`, as superfícies suaves `--accent-surface`, `--destructive-surface` e
+  `--warning-surface` e os `-foreground` de cada uma.
+  - As derivadas saem das base por `var()` e `color-mix()` num `:where(:root)` do CSS base: seguem o tema
+    do app e a troca ao vivo, e a página ou o cliente sobrescrevem (especificidade zero).
+  - O bloco de tema guarda os padrões de cada esquema (`data-dark`, `data-light`: cores, raio e
+    fontes). A troca ao vivo (`__hangarApply`) e o documento montado pela PWA e pelo app partem deles e
+    aplicam as cores do cliente por cima; o `data-base`, que vem depois, só tem CSS sem variável que o
+    cliente mande. Antes ele trazia as fontes padrão e sobrescrevia as do cliente: a Geist que o nativo
+    manda virava `-apple-system` (medido no Chromium).
+  - Antes, a troca reescrevia o bloco só com o que o cliente mandava. O nativo manda menos que a lista, e
+    depois da troca `--danger`, `--success`, `--code-background` e os gráficos ficavam vazios (medido no
+    Chromium com as cores que o nativo enviava). O nativo agora manda também acento-sobre, perigo,
+    aviso, sucesso e fundo de código. O que o app não tem (`--info`, `--chart-5/6`) fica com o padrão
+    do esquema.
+  - O app do celular passa as fontes que usa: a do sistema e a mono do tema dele.
+
 ## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
 
 (25/09/2026, pedido do usuário.) Levar a configuração de uma máquina para outras, só manual.

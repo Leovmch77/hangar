@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context, Image
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import CallToolResult, TextContent
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app import auth as auth_mod
@@ -350,8 +351,9 @@ _HTML_RENDER = (
     "Mostra uma página HTML pronta (gráfico, tabela, diagrama, mock de tela, comparação) DENTRO desta conversa, "
     "no lugar desta chamada e acima do seu texto final; chame antes de escrever a resposta. O leitor já vê a página: "
     "a resposta não a anuncia, não diz onde ela está e não repete o que ela mostra — diga só o que ela não diz. "
-    "Confira antes de publicar com draft=true: devolve `shot` (PNG, leia com a ferramenta de imagem), `console` e "
-    "`heights`; com o app desktop aberto, passe a `url` do rascunho a browser_open exatamente como veio (caminho "
+    "Confira antes de publicar com draft=true: devolve o print da página como imagem, `console` e `heights`; "
+    "width (240-1600, padrão 728; ~390 para celular) e theme (dark|light, padrão dark) escolhem o print, para "
+    "conferir a versão de celular e a clara. Com o app desktop aberto, passe a `url` do rascunho a browser_open exatamente como veio (caminho "
     "relativo; o servidor completa endereço e acesso) e use browser para passar o mouse e clicar. "
     "Página publicada não muda: corrigir é publicar de novo. "
     "INTERAÇÃO: mock de tela é funcional, não imagem. O que parece clicável funciona com JS embutido (abas trocam, "
@@ -369,8 +371,11 @@ _HTML_RENDER = (
     "resposta. Caixa que precisa de fundo próprio leva padding de 16px ou mais e cantos var(--radius). Gráfico com "
     "altura fixa em pixel. Nada de 100vh nem height:100% em html/body: a moldura cresce com a página. "
     "TEMA: use as variáveis --foreground, --muted-foreground, --surface, --border, --accent, --accent-foreground, "
-    "--danger, --warning, --success, --code-background, --chart-1 a --chart-4, --radius, --font-sans, --font-mono; "
-    "--background é transparente. Elas seguem o tema claro/escuro do app; seu CSS pode sobrescrever. "
+    "--danger, --warning, --success, --info, --code-background, --code-foreground, --chart-1 a --chart-6, "
+    "--radius, --font-sans, --font-mono; para componente, também --card, --popover, --muted, --secondary, "
+    "--primary, --input, --ring, --destructive e as superfícies suaves --accent-surface, --destructive-surface e "
+    "--warning-surface (cada uma com seu -foreground). --background é transparente. Elas seguem o tema claro/escuro "
+    "do app; seu CSS pode sobrescrever. "
     "own_theme=true para mock de outro produto/site ou página que precisa das próprias cores: ela leva o próprio "
     "fundo e paleta, como foi desenhada, e não recebe o tema do app; sem ele, a página segue o tema do app. "
     "height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela.")
@@ -379,6 +384,7 @@ _HTML_RENDER = (
 @mcp.tool(description=_HTML_RENDER + _SESSAO_DESC)
 async def html_render(ctx: Context, title: str, html: str | None = None, url: str | None = None,
                       height: int | None = None, draft: bool = False, own_theme: bool = False,
+                      width: int | None = None, theme: Literal["dark", "light"] | None = None,
                       sessao: str = "") -> dict[str, Any]:
     from app import pages_bridge
     if (html is None) == (url is None):
@@ -392,12 +398,19 @@ async def html_render(ctx: Context, title: str, html: str | None = None, url: st
     # Só quando pedido: hangar-server antigo recusa campo desconhecido no corpo.
     if own_theme:
         payload["own_theme"] = True
-    if height is not None:
-        payload["height"] = height
+    payload |= {k: v for k, v in (("height", height), ("width", width), ("theme", theme)) if v is not None}
     try:
-        return await asyncio.to_thread(pages_bridge.publish, payload)
+        result = await asyncio.to_thread(pages_bridge.publish, payload)
     except pages_bridge.PagesBridgeError as e:
         raise ToolError(f"{e.code}: {e.detail}" if e.detail else e.code) from e
+    # O print do rascunho volta na resposta, como o `shot` do navegador; o resultado estruturado fica igual.
+    shot = (result.get("draft") or {}).get("shot")
+    png = Path(shot) if isinstance(shot, str) else None
+    if png and png.is_file():
+        image = await asyncio.to_thread(Image(path=png).to_image_content)
+        content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False)), image]
+        return CallToolResult(content=content, structured_content=result)
+    return result
 
 
 _BROWSER = (
