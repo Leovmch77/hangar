@@ -4,7 +4,8 @@ import type { HtmlPageRef } from '@hangar/core';
 export function pageScreenHref(serverId: string, sessionName: string, page: HtmlPageRef): string {
   const q = new URLSearchParams({ id: page.id, title: page.title });
   if (page.ownTheme) q.set('own', '1');
-  return `/s/${serverId}/${sessionName}/page?${q.toString()}`;
+  // Segmentos codificados: nome com `/`, `?` ou `#` quebraria a rota; o expo-router entrega os parâmetros já decodificados.
+  return `/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}/page?${q.toString()}`;
 }
 
 // Parâmetro de rota do expo-router: repetido vira lista, e vale o primeiro.

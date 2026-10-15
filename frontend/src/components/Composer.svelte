@@ -630,6 +630,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (document.querySelector('[role="dialog"]:not(.board-overlay)')) return;
     e.preventDefault();   // senao o Ctrl+Space solta um espaco no textarea
     e.stopImmediatePropagation();
+    // Editando um item da fila o mic fica desligado, como o botão: o atalho só para o que já grava.
+    if (queueEditing && !recording && !starting) return;
     void toggleRecord();
   }
 

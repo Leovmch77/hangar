@@ -1,7 +1,8 @@
 //! Servidores MCP que um plugin do Claude Code cria com `$.tool.register`. O Claude Code mostra as
 //! chamadas deles sozinhas, com o ponto, e dobra as dos outros servidores; o transcript só diz quais
 //! são pelo anexo `mcp_instructions_delta`, cujo bloco traz a instrução fixa desses servidores.
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::fs::{File, Metadata};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -13,8 +14,51 @@ const MARK: &[u8] = b"\"mcp_instructions_delta\"";
 const PREFIX: &str = "Tools registered by the ";
 const SUFFIX: &str = " plugin through $.tool.register.";
 
+/// Bytes do fim do trecho já lido conferidos antes de continuar: o mesmo arquivo reescrito no lugar (mesmo inode)
+/// não muda a identidade.
+const TAIL: usize = 256;
+
+#[cfg(unix)]
+type Identity = (u64, u64);
+#[cfg(not(unix))]
+type Identity = Option<std::time::SystemTime>;
+
+/// Quem é o arquivo, estável enquanto ele só cresce: volume e inode no Unix; a data de criação nos outros,
+/// porque a de modificação muda a cada linha acrescentada.
+fn identity(metadata: &Metadata) -> Identity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.created().ok()
+    }
+}
+
 #[derive(Clone, Default)]
-struct Scan { offset: u64, servers: Vec<String> }
+struct Scan { offset: u64, identity: Identity, tail: Vec<u8>, servers: Vec<String> }
+
+impl Scan {
+    /// O arquivo ainda é o que foi lido até `offset`: mesma identidade, não encolheu e termina nos mesmos bytes.
+    fn continues(&self, file: &mut File, len: u64, identity: &Identity) -> bool {
+        if self.offset > len || self.identity != *identity { return false; }
+        let mut tail = vec![0; self.tail.len()];
+        file.seek(SeekFrom::Start(self.offset - tail.len() as u64)).is_ok()
+            && file.read_exact(&mut tail).is_ok() && tail == self.tail
+    }
+
+    fn remember(&mut self, line: &[u8]) {
+        if line.len() >= TAIL {
+            self.tail = line[line.len() - TAIL..].to_vec();
+        } else {
+            self.tail.extend_from_slice(line);
+            let excess = self.tail.len().saturating_sub(TAIL);
+            self.tail.drain(..excess);
+        }
+    }
+}
 
 static SCANS: LazyLock<Mutex<Capped<PathBuf, Scan>>> = LazyLock::new(Default::default);
 
@@ -48,8 +92,7 @@ fn apply_delta(servers: &mut Vec<String>, attachment: &Map<String, Value>) {
 }
 
 /// Só as linhas inteiras novas: a última, ainda sendo escrita, fica para a próxima leitura.
-fn read_from(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
-    let mut file = std::fs::File::open(path)?;
+fn read_from(mut file: File, scan: &mut Scan) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(scan.offset))?;
     let mut reader = BufReader::with_capacity(1 << 16, file);
     let mut line = Vec::new();
@@ -58,6 +101,7 @@ fn read_from(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
         let read = reader.read_until(b'\n', &mut line)?;
         if read == 0 || line.last() != Some(&b'\n') { return Ok(()); }
         scan.offset += read as u64;
+        scan.remember(&line);
         if memchr::memmem::find(&line, MARK).is_none() { continue; }
         let Ok(Value::Object(obj)) = serde_json::from_slice::<Value>(&line) else { continue };
         if let Some(Value::Object(attachment)) = obj.get("attachment")
@@ -69,16 +113,21 @@ fn read_from(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
 }
 
 /// Os servidores de plugin do transcript. A primeira leitura percorre o arquivo inteiro; as seguintes,
-/// só o que ele ganhou. Arquivo menor que o já lido foi trocado e é relido do começo.
+/// só o que ele ganhou. Arquivo trocado (outra identidade, menor ou com outro fim no trecho lido) é relido do começo.
 pub fn plugin_tool_servers(path: &Path) -> Vec<String> {
-    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else { return Vec::new() };
-    let cached = |scans: &mut Capped<PathBuf, Scan>| scans.get(path).filter(|s| s.offset <= len).cloned();
-    let mut scan = cached(&mut SCANS.lock().unwrap_or_else(|e| e.into_inner())).unwrap_or_default();
+    let Ok(mut file) = File::open(path) else { return Vec::new() };
+    let Ok(metadata) = file.metadata() else { return Vec::new() };
+    let (len, id) = (metadata.len(), identity(&metadata));
+    let cached = SCANS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned()
+        .filter(|s| s.continues(&mut file, len, &id));
+    let restarted = cached.is_none();
+    let mut scan = cached.unwrap_or_else(|| Scan { identity: id, ..Scan::default() });
     if scan.offset < len {
         // Fora do cadeado: a primeira leitura de um transcript grande não segura as outras linhas. Leitura que
-        // falhou no meio aplicou parte dos anexos: vale o que o cache tem.
-        if read_from(path, &mut scan).is_err() {
-            return cached(&mut SCANS.lock().unwrap_or_else(|e| e.into_inner())).map(|s| s.servers).unwrap_or_default();
+        // falhou no meio aplicou parte dos anexos: vale o que o cache tem, se ainda for deste arquivo.
+        if read_from(file, &mut scan).is_err() {
+            if restarted { return Vec::new(); }
+            return SCANS.lock().unwrap_or_else(|e| e.into_inner()).get(path).map(|s| s.servers.clone()).unwrap_or_default();
         }
         SCANS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), scan.clone());
     }
@@ -167,5 +216,25 @@ mod tests {
         // Arquivo trocado por um menor: relido do começo.
         std::fs::write(&path, format!("{}\n", delta(&[("kit", "Tools registered by the kit plugin through $.tool.register.")], &[]))).unwrap();
         assert_eq!(plugin_tool_servers(&path), vec!["kit".to_owned()]);
+    }
+
+    #[test]
+    fn a_file_replaced_by_one_of_equal_or_greater_size_is_read_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let kit = |name: &str| delta(&[(name, &format!("Tools registered by the {name} plugin through $.tool.register."))], &[]);
+        std::fs::write(&path, format!("{}\n", kit("aaa"))).unwrap();
+        assert_eq!(plugin_tool_servers(&path), vec!["aaa".to_owned()]);
+        // Outro arquivo, por rename, do mesmo tamanho: sem o delta que removia "aaa", ele não pode sobrar.
+        let other = dir.path().join("novo.jsonl");
+        std::fs::write(&other, format!("{}\n", kit("bbb"))).unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert_eq!(plugin_tool_servers(&path), vec!["bbb".to_owned()]);
+        // Reescrito no lugar (mesmo inode), maior: também relido do começo.
+        std::fs::write(&path, format!("{}\n{}\n", kit("ccc"), kit("ddd"))).unwrap();
+        assert_eq!(plugin_tool_servers(&path), vec!["ccc".to_owned(), "ddd".to_owned()]);
+        // Reescrito no lugar com o mesmo tamanho exato.
+        std::fs::write(&path, format!("{}\n{}\n", kit("eee"), kit("fff"))).unwrap();
+        assert_eq!(plugin_tool_servers(&path), vec!["eee".to_owned(), "fff".to_owned()]);
     }
 }

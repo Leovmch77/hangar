@@ -115,11 +115,9 @@
               <IconGripVertical size={14} />
             </button>
           {/if}
-          <!-- O texto inteiro também está no `title` e no que o leitor de tela lê; o toque só serve a quem não tem ponteiro. -->
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="qp-text" title={entry.text}
-                onclick={() => (fullId = fullId === entry.id ? null : entry.id)}>{#if editing}<span class="sr-only">{m.queue_panel_editing()}: </span>{/if}{entry.text}</span>
+          <!-- Botão com cara de texto: toque, clique e teclado mostram a mensagem inteira; o `title` serve ao ponteiro. -->
+          <button type="button" class="qp-text" title={entry.text} aria-expanded={fullId === entry.id}
+                  onclick={() => (fullId = fullId === entry.id ? null : entry.id)}>{#if editing}<span class="sr-only">{m.queue_panel_editing()}: </span>{/if}{entry.text}</button>
           {#if panel.actions}
             {#if editing}
               <button type="button" class="qp-cancel" disabled={busy} onclick={onCancelEdit}>{m.comum_cancelar()}</button>
@@ -219,6 +217,12 @@
   .qp-text {
     flex: 1;
     min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -228,7 +232,7 @@
     cursor: default;
   }
   .qp-row.full .qp-text { white-space: pre-wrap; overflow-wrap: anywhere; padding-block: 6px; }
-  .qp-row button {
+  .qp-row button:not(.qp-text) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -252,10 +256,10 @@
      linha ganha altura (área invisível transbordando a linha cairia na vizinha). */
   @media (pointer: coarse) {
     .qp-row { min-height: 40px; }
-    .qp-row button { height: 40px; min-width: 36px; }
+    .qp-row button:not(.qp-text) { height: 40px; min-width: 36px; }
   }
   @media (hover: hover) {
-    .qp-row button:not(:disabled):hover { color: var(--text-primary); background: var(--glass-border); }
+    .qp-row button:not(:disabled):not(.qp-text):hover { color: var(--text-primary); background: var(--glass-border); }
     .qp-steer:not(:disabled):hover { color: var(--accent); }
   }
 </style>

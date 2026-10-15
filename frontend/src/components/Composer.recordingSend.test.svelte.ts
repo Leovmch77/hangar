@@ -67,7 +67,7 @@ afterEach(async () => { if (app) await unmount(app); app = undefined; target.rem
 
 function render(draft = '') {
   const props = $state({ sessionName: 'recording-send', sessionState: 'idle' as const, status: null,
-    sessionJsonl: 'transcript', inputText: draft, pairPeers: ['par'] as string[] | null, sendToPair: false, onSend: vi.fn(), onCommand: vi.fn(),
+    sessionJsonl: 'transcript', inputText: draft, pairPeers: ['par'] as string[] | null, sendToPair: false, queueEditing: false, onSend: vi.fn(), onCommand: vi.fn(),
     onInterrupt: vi.fn(), onOpenGit: vi.fn(), onOpenPreview: vi.fn() });
   app = mount(Composer, { target, props }); return props;
 }
@@ -160,5 +160,26 @@ describe('envio encerra o microfone no PWA', () => {
     resolveText({ path: '/uploads/audio.webm', text: 'fala transcrita', raw: 'fala transcrita' });
     await vi.waitFor(() => expect(target.textContent).toContain('Confira o texto antes de enviar'));
     expect(props.onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('Ctrl+Espaço durante a edição de um item da fila', () => {
+  function shortcut() {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', ctrlKey: true, bubbles: true, cancelable: true }));
+  }
+  it('não começa a gravar', async () => {
+    const props = render('item'); props.queueEditing = true; await tick();
+    shortcut(); await tick();
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    props.queueEditing = false; await tick();
+    shortcut();
+    await vi.waitFor(() => expect(Recorder.last.state).toBe('recording'));
+  });
+
+  it('ainda para a gravação já em andamento', async () => {
+    const props = render(); await start();
+    props.queueEditing = true; await tick();
+    shortcut();
+    expect(Recorder.last.stop).toHaveBeenCalledOnce();
   });
 });

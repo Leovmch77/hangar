@@ -51,7 +51,7 @@ describe('QueuePanel', () => {
   });
   it('em voo desativa os botões; em edição a linha só tem Cancelar', async () => {
     const busy = montar({ busy: true });
-    expect([...busy.target.querySelectorAll<HTMLButtonElement>('.qp-row button')].every((b) => b.disabled)).toBe(true);
+    expect([...busy.target.querySelectorAll<HTMLButtonElement>('.qp-row button:not(.qp-text)')].every((b) => b.disabled)).toBe(true);
     unmount(busy.comp);
     const editing = montar({ editingId: 'a' });
     const row = editing.target.querySelectorAll('.qp-row')[0];
@@ -61,19 +61,25 @@ describe('QueuePanel', () => {
     expect(editing.onCancelEdit).toHaveBeenCalledOnce();
     unmount(editing.comp);
   });
-  it('tocar no texto mostra a mensagem inteira', async () => {
+  it('tocar no texto mostra a mensagem inteira; é um botão, então o teclado também alcança', async () => {
     const { target, comp } = montar();
     const row = target.querySelectorAll('.qp-row')[0];
-    row.querySelector<HTMLElement>('.qp-text')!.click(); await tick();
+    const text = row.querySelector<HTMLElement>('.qp-text')!;
+    expect(text.tagName).toBe('BUTTON');
+    expect(text.getAttribute('type')).toBe('button');
+    expect(text.getAttribute('aria-expanded')).toBe('false');
+    text.click(); await tick();
     expect(row.classList.contains('full')).toBe(true);
-    row.querySelector<HTMLElement>('.qp-text')!.click(); await tick();
+    expect(text.getAttribute('aria-expanded')).toBe('true');
+    text.click(); await tick();
     expect(row.classList.contains('full')).toBe(false);
+    expect(text.getAttribute('aria-expanded')).toBe('false');
     unmount(comp);
   });
   it('sem ações (Pi, omp, Kimi) mostra as linhas sem botões', () => {
     const { target, comp } = montar({ panel: panel(false) });
     expect(target.querySelectorAll('.qp-row')).toHaveLength(2);
-    expect(target.querySelector('.qp-row button')).toBeNull();
+    expect(target.querySelector('.qp-row button:not(.qp-text)')).toBeNull();
     unmount(comp);
   });
   it('sem entradas o painel não existe', () => {

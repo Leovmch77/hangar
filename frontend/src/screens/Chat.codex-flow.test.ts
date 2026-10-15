@@ -750,7 +750,7 @@ it('celular, Kimi: painel derivado das bolhas, sem botões, e o chip da fila con
   await emit('state', { session: 'codex-flow', state: 'working' });
   await emit('message', { kind: 'user_msg', id: 'queued-k', text: 'para o kimi', queued_delivered: false, queued_ts: 1 });
   expect(document.querySelectorAll('.qp-row')).toHaveLength(1);
-  expect(document.querySelector('.qp-row button')).toBeNull();
+  expect(document.querySelector('.qp-row button:not(.qp-text)')).toBeNull();
   expect(document.querySelector('.queued-row')).toBeNull();
   expect(document.querySelector('button.fila-chip')).not.toBeNull();
 });

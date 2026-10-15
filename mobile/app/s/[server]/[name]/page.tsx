@@ -30,7 +30,7 @@ export default function PageScreen() {
 function Shell({ title, serverId, sessionName, children }: { title: string; serverId: string; sessionName: string; children: React.ReactNode }) {
   const { theme } = useUnistyles();
   const router = useRouter();
-  const back = () => (router.canGoBack() ? router.back() : router.replace(`/s/${serverId}/${sessionName}` as never));
+  const back = () => (router.canGoBack() ? router.back() : router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never));
   return (
     <Screen>
       <View style={[styles.header, { borderBottomColor: theme.tokens.border.subtle }]}>
