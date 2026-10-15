@@ -25,6 +25,7 @@ import {
   moveTarget,
   editQueuedMessage,
   cancelQueuedMessage,
+  descartarDaFila,
   steerQueuedMessage,
   reorderQueuedMessage,
   formataErro,
@@ -128,6 +129,7 @@ export interface ChatApi {
   dropQueueEdit: (text?: string) => void;
   submitQueueEdit: (text: string) => Promise<void>;
   removeQueued: (id: string) => Promise<void>;
+  discardQueued: (id: string) => Promise<void>;
   steerQueued: (id: string) => Promise<void>;
   moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
@@ -669,8 +671,12 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
   // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
   async function queueAction(run: (target: Server) => Promise<unknown>): Promise<boolean> {
+    if (useChatStore.getState().queueBusy) return false;
     const target = destino();
-    if (!target || useChatStore.getState().queueBusy) return false;
+    if (!target) {
+      showQueueError(m.chat_servidor_removido());
+      return false;
+    }
     clearTimeout(queueErrorTimer);
     useChatStore.setState({ queueBusy: true, queueError: null });
     try {
@@ -738,6 +744,11 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const ok = await queueAction((t) => cancelQueuedMessage(name, id, t));
       if (!ok) return;
       // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
+      useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+    },
+    async discardQueued(id: string) {
+      const ok = await queueAction((t) => descartarDaFila(name, id, t));
+      if (!ok) return;
       useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
     },
     // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.

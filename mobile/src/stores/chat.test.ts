@@ -560,6 +560,63 @@ test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da e
   expect(chat.use.getState().queueBusy).toBe(false);
 });
 
+test('descartar usa ID cru e servidor da rota, espera ACK e recompõe o índice sem tirar vizinhos', async () => {
+  configureApi({ getBaseUrl: () => 'http://10.0.0.2:8765', getToken: () => 'tok2', onUnauthorized: () => {},
+    origin: null, createEventSource: fakeCreateEventSource as never });
+  historyResponses = [[ev({ id: 'queued-raw/id', text: 'incerta', queued_delivered: true }),
+    ev({ id: 'raw/id', text: 'real' }), ev({ id: 'queued-b', text: 'outra' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  const discard = chat.discardQueued('raw/id');
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toBe('http://10.0.0.1:8765/api/sessions/sess/queue/raw%2Fid');
+  expect(requests[0].init?.method).toBe('DELETE');
+  expect(new Headers(requests[0].init?.headers).get('Authorization')).toBe('Bearer tok');
+  expect(chat.use.getState().queueBusy).toBe(true);
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-raw/id', 'raw/id', 'queued-b']);
+  await chat.discardQueued('b');
+  expect(requests).toHaveLength(1);
+  requests[0].responder(null);
+  await discard;
+  expect(chat.use.getState().queueBusy).toBe(false);
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['raw/id', 'queued-b']);
+  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-b', text: 'outra atualizada' })));
+  created[0].trigger('message', JSON.stringify(ev({ id: 'raw/id', text: 'real atualizado' })));
+  expect(chat.use.getState().events.map((e) => [e.id, e.text])).toEqual([
+    ['raw/id', 'real atualizado'], ['queued-b', 'outra atualizada'],
+  ]);
+});
+
+test('descarte recusado conserva a bolha e mostra a causa; nova tentativa só sai no sucesso', async () => {
+  historyResponses = [[ev({ id: 'queued-a', text: 'perdida', desistiu: true })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"entrega ainda em análise"}', { status: 409 })));
+  await chat.discardQueued('a');
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-a']);
+  expect(chat.use.getState().queueError).toBe('entrega ainda em análise');
+  expect(chat.use.getState().queueBusy).toBe(false);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
+  await chat.discardQueued('a');
+  expect(chat.use.getState().events).toEqual([]);
+  expect(chat.use.getState().queueError).toBeNull();
+});
+
+test('descarte com servidor removido mostra erro e não chama o servidor ativo', async () => {
+  const chat = chatStore('sumiu', 'sess');
+  const lost = ev({ id: 'queued-a', desistiu: true });
+  chat.use.setState({ events: [lost] });
+  const requests = fetchManual();
+  await chat.discardQueued('a');
+  expect(requests).toHaveLength(0);
+  expect(chat.use.getState().events).toEqual([lost]);
+  expect(chat.use.getState().queueError).toBe(m.chat_servidor_removido());
+  expect(chat.use.getState().queueBusy).toBe(false);
+});
+
 test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
