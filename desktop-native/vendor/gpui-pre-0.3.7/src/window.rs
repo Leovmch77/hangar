@@ -5149,10 +5149,11 @@ impl Window {
         });
     }
 
-    /// Paint an externally owned GPU texture (a `wgpu::Texture` on the wgpu renderer), stretched to `bounds`.
+    /// Paint an externally owned GPU texture (a `wgpu::Texture` on the wgpu renderer, a `SurfaceTexture` on DirectX),
+    /// stretched to `bounds`.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,

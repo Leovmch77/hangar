@@ -29,6 +29,9 @@ pub struct Engine {
     /// Escondida de verdade por estar parada (ver `sleep`).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     asleep: Cell<bool>,
+    /// Página da conversa: WebView2 estacionada pintada pelo app, com entrada por CDP. `None` é o painel.
+    #[cfg(target_os = "windows")]
+    page: Option<page::Page>,
 }
 
 /// Clique e tecla de verdade na página vão ao painel, que pausa o agente se ele estiver agindo. Script de
@@ -38,26 +41,43 @@ const USER_INPUT: &str = "(()=>{const f=e=>{if(e.isTrusted&&window.ipc)window.ip
 /// Link com `target=_blank` e `window.open` abrem nesta página: o painel é um navegador de uma aba só.
 const SAME_TAB: &str = "(()=>{addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[target]');if(a&&a.target!=='_self'&&a.target!=='_top'&&a.target!=='_parent')a.target='_self'},true);const o=window.open;window.open=function(u){if(u){location.href=u;return window}return o.apply(this,arguments)}})()";
 
+/// Os três primeiros são os padrões do wry, que somem quando se passa argumentos. Todo WebView2 de uma mesma pasta
+/// precisa nascer com os mesmos.
+#[cfg(target_os = "windows")]
+const BROWSER_ARGS: &str = concat!(
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion ",
+    "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows");
+
 fn send(events: &async_channel::Sender<Event>, state: &model::PageState) {
     let _ = events.try_send(Event::State(state.clone()));
 }
 
 /// Janela pai guardada sem o empréstimo da `Window` da GPUI, para o motor nascer fora dele.
-pub struct Starter(raw_window_handle::RawWindowHandle);
+pub struct Starter {
+    parent: raw_window_handle::RawWindowHandle,
+    /// Confirmações de quadro da página da conversa, que voltam ao WebView2 na thread da interface.
+    #[cfg(target_os = "windows")]
+    executor: ForegroundExecutor,
+}
 
 impl HasWindowHandle for Starter {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         // SAFETY: a janela GPUI dura mais que o motor: o painel que o cria e o guarda vive nela.
-        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.parent) })
     }
 }
 
 impl Engine {
     pub fn available() -> Result<(), String> { Ok(()) }
 
-    pub fn prepare(window: &Window, _cx: &App) -> Result<Starter, String> {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    pub fn prepare(window: &Window, cx: &App) -> Result<Starter, String> {
         // Caminho completo: a `Window` tem um `window_handle()` próprio, que devolve o identificador da GPUI.
-        Ok(Starter(HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw()))
+        Ok(Starter {
+            parent: HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw(),
+            #[cfg(target_os = "windows")]
+            executor: cx.foreground_executor().clone(),
+        })
     }
 }
 
@@ -74,14 +94,11 @@ impl Starter {
             .with_ipc_handler(move |req| if req.body() == "hangar-user" { let _ = on_ipc.try_send(Event::UserInput); });
         // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
         // O agente dirige a página com o app em segundo plano ou com ela estacionada: sem estes, o WebView2 a dá por
-        // encoberta e congela os timers (eval e url estouravam o prazo até um clique no app). Os três primeiros são os
-        // padrões do wry, que somem quando se passa argumentos. Todo WebView2 desta pasta nasce com os mesmos.
+        // encoberta e congela os timers (eval e url estouravam o prazo até um clique no app).
         #[cfg(target_os = "windows")]
         let builder = {
             use wry::WebViewBuilderExtWindows;
-            builder.with_focused(false).with_additional_browser_args(concat!(
-                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion ",
-                "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"))
+            builder.with_focused(false).with_additional_browser_args(BROWSER_ARGS)
         };
         let view = builder
             // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
@@ -162,7 +179,11 @@ impl Starter {
             cdp.fire("Inspector.enable", serde_json::json!({}));
             Some(cdp)
         };
-        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch };
+        let engine = Engine {
+            view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead,
+            #[cfg(target_os = "windows")] _watch: watch,
+            #[cfg(target_os = "windows")] page: None,
+        };
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
@@ -278,7 +299,10 @@ impl Engine {
         }
     }
 
-    pub fn place(&self, bounds: Bounds<Pixels>, _window: &mut Window) {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    pub fn place(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        #[cfg(target_os = "windows")]
+        if let Some(page) = &self.page { return page.place(&self.view, bounds, window); }
         let hidden = self.placed.get().is_none();
         if self.placed.get() == Some(bounds) { return; }
         self.placed.set(Some(bounds));
@@ -318,6 +342,8 @@ impl Engine {
     }
 
     pub fn hide(&self) {
+        #[cfg(target_os = "windows")]
+        if let Some(page) = &self.page { return page.hide(); }
         if self.placed.take().is_some() {
             #[cfg(target_os = "windows")]
             self.park();
@@ -328,17 +354,72 @@ impl Engine {
         }
     }
 
+    // O painel é janela filha e recebe a entrada direto; só a página da conversa, pintada pelo app, passa por aqui.
+    #[cfg(target_os = "windows")]
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+    #[cfg(target_os = "windows")]
+    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
+    #[cfg(target_os = "windows")]
+    pub fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        if let Some(page) = &self.page { page.mouse(kind, button, at, clicks, modifiers); }
+    }
+    #[cfg(target_os = "windows")]
+    pub fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
+        if let Some(page) = &self.page { page.scroll(at, delta, modifiers); }
+    }
+    #[cfg(target_os = "windows")]
+    pub fn key(&self, down: bool, keystroke: &Keystroke) {
+        if let Some(page) = &self.page && let Some(event) = super::keys::key_event(down, keystroke) { page.cdp.fire("Input.dispatchKeyEvent", event); }
+    }
+    #[cfg(target_os = "windows")]
+    pub fn insert_text(&self, text: &str) {
+        if let Some(page) = &self.page { page.cdp.fire("Input.insertText", serde_json::json!({"text": text})); }
+    }
+    /// Roda um script na página sem esperar o resultado. Pelo CDP, como no Linux: a fonte do app vai em base64 e passa
+    /// de centenas de KB.
+    #[cfg(target_os = "windows")]
+    pub fn evaluate(&self, expression: &str) {
+        match &self.page {
+            Some(page) => page.cdp.fire("Runtime.evaluate", serde_json::json!({"expression": expression})),
+            None => self.report(self.view.evaluate_script(expression)),
+        }
+    }
+    /// A tela desenhou o último quadro: o próximo já pode ser decodificado.
+    #[cfg(target_os = "windows")]
+    pub fn frame_seen(&self) { if let Some(page) = &self.page { page.frames.seen(); } }
+    /// Chamado ao chegar um quadro, na thread da interface: escreve-o na textura e diz se ela foi recriada (um desenho
+    /// guardado ainda mostraria a antiga).
+    #[cfg(target_os = "windows")]
+    pub fn texture_replaced(&self) -> bool { self.page.as_ref().is_some_and(|page| page.frames.commit()) }
+    #[cfg(not(target_os = "windows"))]
     pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}
+    #[cfg(not(target_os = "windows"))]
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
+    #[cfg(not(target_os = "windows"))]
     pub fn mouse(&self, _kind: Pointer, _button: MouseButton, _at: Point<Pixels>, _clicks: usize, _modifiers: &Modifiers) {}
+    #[cfg(not(target_os = "windows"))]
     pub fn scroll(&self, _at: Point<Pixels>, _delta: Point<Pixels>, _modifiers: &Modifiers) {}
+    #[cfg(not(target_os = "windows"))]
     pub fn key(&self, _down: bool, _keystroke: &Keystroke) {}
+    #[cfg(not(target_os = "windows"))]
     pub fn insert_text(&self, _text: &str) {}
     /// O WebView nasce sem foco no Windows: sem mover o foco aqui, o que se digita depois do Enter na barra não chega.
     #[cfg(target_os = "windows")]
-    pub fn focus(&self, focused: bool) { if focused { self.report(self.view.focus()); } }
+    pub fn focus(&self, focused: bool) { if focused && self.page.is_none() { self.report(self.view.focus()); } }
     #[cfg(not(target_os = "windows"))]
     pub fn focus(&self, _focused: bool) {}
     /// A janela filha guarda o foco do sistema depois de um clique nela; sem devolver, o que se digita na barra vai à página.
-    pub fn release_focus(&self) { self.report(self.view.focus_parent()); }
+    pub fn release_focus(&self) {
+        #[cfg(target_os = "windows")]
+        if self.page.is_some() { return; }
+        self.report(self.view.focus_parent());
+    }
 }
+
+#[cfg(target_os = "windows")]
+impl Drop for Engine {
+    fn drop(&mut self) { if let Some(page) = &self.page { page.frames.close(); } }
+}
+
+#[cfg(target_os = "windows")]
+mod page;

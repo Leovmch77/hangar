@@ -1,5 +1,5 @@
 // Modified for Hangar: backdrop blur scene ordering ported from zeronsh/zui 18a89af.
-// Modified for Hangar: `PaintSurface::texture` carries an external GPU texture on Linux (embedded browser).
+// Modified for Hangar: `PaintSurface::texture` carries an external GPU texture on Linux and Windows (embedded browser).
 // todo("windows"): remove
 #![cfg_attr(windows, allow(dead_code))]
 
@@ -830,8 +830,8 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
-    /// Renderer-owned GPU texture (a `wgpu::Texture` on the wgpu renderer).
-    #[cfg(target_os = "linux")]
+    /// Renderer-owned GPU texture (a `wgpu::Texture` on the wgpu renderer, a `SurfaceTexture` on DirectX).
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 

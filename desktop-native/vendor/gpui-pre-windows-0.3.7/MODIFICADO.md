@@ -38,3 +38,9 @@ Bandeja: `PlatformWindow::set_hidden` em `src/window.rs`, com `ShowWindowAsync` 
 
 Tecla física: `physical_digit(lparam)` (`src/events.rs`) mapeia os códigos de varredura 0x02 a 0x0B (sem o bit de
 tecla estendida) para `KeyDownEvent::physical_digit`.
+
+Superfície externa (página da conversa): `SurfaceTexture` (`src/directx_devices.rs`) é uma textura RGBA no device em que
+o GPUI desenha, criada de qualquer thread (`new`) e escrita na thread da janela (`write`, pelo contexto imediato).
+`DirectXDevices::new` guarda o device atual para isso, trocado na perda do device; `is_current` avisa o dono para criar
+outra. `draw_surfaces` (`src/directx_renderer.rs`) desenha cada `PaintSurface` como um sprite policromático cuja peça é a
+textura inteira, num pipeline próprio (`surface_sprites`), e pula a textura de um device perdido.
