@@ -310,12 +310,17 @@ async def test_codex_turning_rust_owned_moves_the_queue_to_the_channel(codex, mo
     queue = pqueue.PromptQueue("cx")
     antes = queue.append("do python", delivered=False)
 
+    vistos, troca, viu_python = [], {}, []
+
     async def lista():
+        # Só o vigia do stream consulta a lista, e depois de ler o modo inicial: trocar aqui garante que
+        # ele viu o Codex com terminal antes da troca.
+        if viu_python:
+            sidecar["headless"] = True
         return [SessionInfo(name="cx", jsonl=str(jsonl), provider="codex", headless=sidecar["headless"])]
 
     monkeypatch.setattr(sse, "_cached_list", lista)
     bolha = json.dumps({"kind": "user_msg", "id": "queued-do-rust", "text": "do rust"})
-    vistos, troca = [], {}
     async with _CanalRust([("message", bolha)]):
         gen = sse.merged_events("cx", str(jsonl), provider="codex", count_app=False)
 
@@ -323,7 +328,7 @@ async def test_codex_turning_rust_owned_moves_the_queue_to_the_channel(codex, mo
             async for ev in gen:
                 vistos.append(ev)
                 if ev["event"] == "message" and f"queued-{antes['id']}" in ev["data"]:
-                    sidecar["headless"] = True
+                    viu_python.append(True)
                 elif ev["event"] == "reset":
                     troca["confirmados"] = len(confirmados)
                     troca["depois"] = queue.append("depois da troca", delivered=False)
