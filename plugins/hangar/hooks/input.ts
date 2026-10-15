@@ -72,11 +72,12 @@ async function pullAgentMessages($: EngineInterface, ponte: Bridge) {
 // chegar depois da largada. Tenta de novo poucas vezes e para.
 const DISCOVER_RETRY_MS = [2000, 10000, 30000];
 
-async function discover($: EngineInterface, attempt = 0) {
+/** `onFail`: quem perdeu a ponte não pode parar quando a descoberta falha (backend ainda subindo). */
+async function discover($: EngineInterface, attempt = 0, onFail?: () => void) {
   try {
     // USERPROFILE antes: no Git Bash do Windows o HOME vem como /c/Users/...
     const home = (await $.env.get("USERPROFILE")) ?? (await $.env.get("HOME"));
-    if (!home) return;
+    if (!home) return onFail?.();
     const { url, chave } = JSON.parse(await $.fs.read(`${home}/.hangar/plugin.json`)) as { url: string; chave: string };
     const r = await $.http.fetch(`${url}/whoami`, {
       method: "POST",
@@ -89,18 +90,20 @@ async function discover($: EngineInterface, attempt = 0) {
         session_id: await $.session.id(),
       }),
     });
-    if (r.status !== 200) return;
+    if (r.status !== 200) return onFail?.();
     const { sessao, token } = JSON.parse(r.text) as { sessao: string | null; token?: string };
     if (!sessao || !token) {
       const wait = DISCOVER_RETRY_MS[attempt];
-      if (sessao === null && wait !== undefined) $.clock.after(wait, () => void discover($, attempt + 1));
+      if (sessao === null && wait !== undefined) $.clock.after(wait, () => void discover($, attempt + 1, onFail));
+      else onFail?.();
       return;
     }
     // Otimista pelo mesmo motivo do `session.start`.
     setBridge({ url, token, sessao });
     void pull($, { url, token, sessao }, true);
   } catch {
-    // Sem arquivo, backend fora ou resposta estranha: o plugin fica parado e o tmux segue.
+    // Sem arquivo, backend fora ou resposta estranha: na largada o plugin fica parado e o tmux segue.
+    onFail?.();
   }
 }
 
@@ -245,8 +248,9 @@ async function pull($: EngineInterface, ponte: Bridge, discovered = false) {
       espera = r.status === 409 ? BACKOFF_DONO_MS : BACKOFF_MS;
       // Chave do `whoami` recusada: o backend trocou (reinício, Python → Rust) e ela morreu com ele. Insistir nela
       // deixava a sessão sem ponte até ser reaberta; a mesma espera vale para a pergunta nova.
-      if (discovered && (r.status === 403 || r.text.includes("plugin_identity_missing"))) {
-        $.clock.after(espera, () => void discover($));
+      if (discovered && (r.status === 403 || (r.status === 409 && r.text.includes("plugin_identity_missing")))) {
+        // Descoberta que falha volta a esta ponte, que segue tentando como antes.
+        $.clock.after(espera, () => void discover($, 0, () => $.clock.after(espera, () => void pull($, ponte, discovered))));
         return;
       }
     }

@@ -219,7 +219,10 @@ fix_last() {
 # do shell: sem isto o plugin do Hangar nem carrega na sessão restaurada.
 _plugin_dirs() {
   local file="$HOME/.hangar/plugin-dir" dir
-  [ -r "$file" ] || return 0
+  if [ ! -r "$file" ]; then
+    echo "  $file ausente; a sessão sobe sem o plugin do Hangar" >> "$LOG"
+    return 0
+  fi
   while IFS= read -r dir || [ -n "$dir" ]; do
     [ -n "$dir" ] || continue
     if [ -d "$dir" ]; then printf ' --plugin-dir %q' "$dir"

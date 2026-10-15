@@ -88,6 +88,37 @@ test("ponte do `whoami` recusada pelo backend novo: pergunta de novo e segue com
   expect(pulls).toContain("nova");
 });
 
+test("ponte recusada e `whoami` falhando com o backend ainda subindo: o plugin não desiste", {}, async ($, on) => {
+  const relogio = mock.clock(on, { now: 1_000_000 });
+  const env: Record<string, string> = { HOME: "/home/x", TMUX_PANE: "%3" };
+  const whoami = [200, 503, 200];
+  const tokens = ["velha", "nova"];
+  const pulls: string[] = [];
+  on("env.get", ($, e) => ({ value: env[e.name] }));
+  on("fs.read", () => ({ value: '{"url":"http://127.0.0.1:1/api/plugin","chave":"k"}' }) as never);
+  on("session.start", ($, e) => ({ cwd: e.cwd }));
+  on("session.cwd", () => ({ value: "/tmp" }));
+  on("session.model", () => ({ value: "modelo" }));
+  on("session.id", () => ({ value: "sid" }) as never);
+  on("command.register", () => ({ value: undefined }) as never);
+  on("http.fetch", ($, e) => {
+    const path = e.url.slice(e.url.lastIndexOf("/") + 1);
+    const resp = (status: number, text: string) => ({ value: { status, ok: status === 200, headers: {}, text } }) as never;
+    if (path === "whoami") {
+      const status = whoami.shift() ?? 200;
+      return status === 200 ? resp(200, JSON.stringify({ sessao: "s", token: tokens.shift() ?? "nova" })) : resp(status, "");
+    }
+    if (path !== "pull") return resp(200, '{"ok":true}');
+    const token = (JSON.parse(e.init?.body as string) as { token: string }).token;
+    pulls.push(token);
+    return token === "velha" ? resp(409, '{"error":"plugin_identity_missing"}') : resp(200, '{"text":null}');
+  });
+  await $.session.start({ cwd: "/tmp", surface: "terminal", isInteractive: true });
+  // 409 espera 30 s: descoberta que falha, nova tentativa na ponte velha, descoberta que dá certo.
+  await relogio.advance(100_000);
+  expect(pulls).toContain("nova");
+});
+
 /** Composer de mentira: `typed` é a tecla da pessoa que chega logo depois do espaço; `failBack` recusa a volta. */
 function composer(draft: string, opts: { typed?: string; failBack?: boolean } = {}) {
   const box = { text: draft };

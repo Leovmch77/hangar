@@ -176,7 +176,15 @@ impl Sources for NativeSources {
                 // Sem entrada de terminal no runtime (aberta à mão, em troca de vida) a linha não é candidata;
                 // falhar aqui deixaria todo plugin sem identidade por causa de uma sessão alheia.
                 let Some(target) = registry.terminal_target(&row.name).await.map_err(|_| ServiceError("plugin_identity_ambiguous"))? else { continue };
-                let Ok(identity) = self.identity(&row.name).await else { continue };
+                let identity = match self.identity(&row.name).await {
+                    Ok(identity) => identity,
+                    Err(ServiceError(code)) => {
+                        if crate::warn_limit::allow(Some(&row.name), code) {
+                            tracing::warn!(session = %row.name, code, "whoami: sessão sem identidade do plugin fica de fora da descoberta");
+                        }
+                        continue;
+                    }
+                };
                 let raw = self.command(&target.binding, vec!["display-message".into(), "-p".into(), "-t".into(), target.binding.pane.clone(),
                     "#{session_name}\t#{session_created}\t#{pane_id}\t#{socket_path}\t#{session_id}\t#{pid}".into()]).await?;
                 let fields: Vec<_> = raw.trim_end_matches(['\r', '\n']).split('\t').collect();
