@@ -111,6 +111,17 @@ fn reopen_keeps_what_the_change_does_not_name() {
     assert_eq!((next.model.as_deref(), next.effort.as_deref(), next.jev), (Some("opus"), Some("high"), true));
 }
 
+/// `names.sanitize_session_name`, executado (`python3 -c 'from app.names import …'`): NFKD e o que
+/// sobra fora do ASCII some (S-54).
+#[test]
+fn session_names_fold_like_python() {
+    let python = [("Łódź-ńś ž", "odz-ns-z"), ("Área de trabalho", "Area-de-trabalho"), ("São Paulo/ação", "Sao-Paulo-acao"),
+        ("会话", ""), ("ﬁle①", "file1"), ("  -x- ", "x"), ("Ǆemal", "DZemal"), ("a\u{301}b", "ab")];
+    for (raw, expected) in python {
+        assert_eq!(crate::list::discover_other::sanitize_session_name(raw), expected, "{raw:?}");
+    }
+}
+
 proptest! {
     #[test]
     fn parse_never_panics_on_bytes(body in proptest::collection::vec(any::<u8>(), 0..256)) {
