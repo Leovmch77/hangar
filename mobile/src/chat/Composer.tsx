@@ -796,7 +796,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   );
 
   const { gravando, rms, iniciar, parar } = useDitado({
-    server,
+    server: styleServer,
     onFim: handleTranscribe,
     onErroParada: (e) => {
       if (mountedRef.current) setError(e.message === 'ditado_parada_falhou' ? m.composer_falha_gravacao() : e.message || m.composer_falha_gravacao());
