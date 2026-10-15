@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { configureApi } from './apiEnv';
-import { fileUrl, fileUrlNative, fileAuthHeader, uploadUrl, uploadUrlNative, transcriptImageUrlNative } from './api';
+import { fileUrl, fileUrlNative, fileAuthHeader, uploadUrl, uploadUrlNative, transcriptImageUrlNative, sintetizarTts, ttsAudioUrl } from './api';
 import type { Server } from './servers';
 
 function stubEventSource() {
@@ -44,6 +44,38 @@ describe('fileUrls token handling', () => {
     expect(transcriptImageUrlNative('s 1', 'msg/1', 2, server)).toBe('https://a.test/api/sessions/s%201/transcript-image/msg%2F1/2');
     expect(fileAuthHeader(server)).toEqual({ Authorization: 'Bearer token-a' });
     expect(transcriptImageUrlNative('s', 'msg', 0)).toBe('https://backend.example/api/sessions/s/transcript-image/msg/0');
+  });
+
+  it('TTS fixa POST e áudio em A mesmo com outro servidor ativo durante a espera', async () => {
+    const server: Server = { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' };
+    let active = { baseUrl: 'https://b.test', token: 'token-b' };
+    configureApi({
+      getBaseUrl: () => active.baseUrl, getToken: () => active.token, onUnauthorized: () => {},
+      origin: null, createEventSource: () => stubEventSource(),
+    });
+    let finish!: (r: Response) => void;
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = sintetizarTts({ text: 'resposta de A' }, server);
+    expect(request).toHaveBeenCalledWith('https://a.test/api/tts', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ text: 'resposta de A' }),
+      headers: expect.objectContaining({ Authorization: 'Bearer token-a' }),
+    }));
+    active = { baseUrl: 'https://c.test', token: 'token-c' };
+    finish(Response.json({ url: '/api/tts/audio/1.mp3', chars: 13, cached: false, provider: 'local' }));
+    const result = await pending;
+    expect(ttsAudioUrl(result.url, server)).toBe('https://a.test/api/tts/audio/1.mp3?token=token-a');
+    expect(ttsAudioUrl(result.url)).toBe('https://c.test/api/tts/audio/1.mp3?token=token-c');
+  });
+
+  it('TTS sem servidor explícito preserva o ativo da PWA', async () => {
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({
+      url: '/api/tts/audio/1.mp3', chars: 5, cached: false, provider: 'local',
+    }));
+    await sintetizarTts({ text: 'texto' });
+    expect(request).toHaveBeenCalledWith('https://backend.example/api/tts', expect.objectContaining({
+      method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer CP-token-real-do-usuario' }),
+    }));
+    expect(ttsAudioUrl('/api/tts/audio/1.mp3')).toBe('https://backend.example/api/tts/audio/1.mp3?token=CP-token-real-do-usuario');
   });
 
   it('mutação: se fileUrlNative voltasse a anexar token, este teste ficaria vermelho', () => {

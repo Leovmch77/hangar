@@ -27,7 +27,9 @@ vi.mock('../../stores/sessions', () => {
   const state = { rows: [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }], byServerRecord: {} };
   return { useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
-vi.mock('../ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: true, valor: 'prosa' }) } }));
+vi.mock('../ditado/ditadoEstiloStore', () => ({ dictationStyleStore: (server: Server) => ({
+  getState: () => ({ pronto: true, valor: server.id === 's1' ? 'prosa' : 'briefing' }),
+}) }));
 vi.mock('../ditado/dictationRun', () => ({
   dictateUpload: h.dictate,
   DictationError: class extends Error {

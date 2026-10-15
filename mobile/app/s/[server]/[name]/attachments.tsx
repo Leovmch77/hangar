@@ -14,7 +14,7 @@ import { superficie } from '../../../../src/theme/superficie';
 import { AudioChip } from '../../../../src/chat/AudioChip';
 import { DocumentViewer, type DocumentItem } from '../../../../src/features/attachments/DocumentViewer';
 import { DictationError, dictateUpload } from '../../../../src/features/ditado/dictationRun';
-import { useDitadoEstiloStore } from '../../../../src/features/ditado/ditadoEstiloStore';
+import { dictationStyleStore } from '../../../../src/features/ditado/ditadoEstiloStore';
 import { useSessions } from '../../../../src/stores/sessions';
 import { toast } from '../../../../src/ui/Toast';
 
@@ -95,7 +95,7 @@ export default function AttachmentsSheet() {
     const sessions = useSessions.getState();
     const transcript = (sessions.byServerRecord?.[serverId]?.find((x) => x.name === sessionName)?.jsonl
       ?? sessions.rows.find((x) => x.serverId === serverId && x.name === sessionName)?.jsonl) || null;
-    const style = useDitadoEstiloStore.getState();
+    const style = dictationStyleStore(target).getState();
     let run: Promise<unknown>;
     try {
       run = dictateUpload(target, serverId, sessionName, transcript, f.filename, style.pronto ? style.valor : undefined);

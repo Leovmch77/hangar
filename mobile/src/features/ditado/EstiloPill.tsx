@@ -2,18 +2,18 @@ import { useEffect, useState } from 'react';
 import { estilosDitado } from '@hangar/core';
 import type { Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
-import { useDitadoEstiloStore } from './ditadoEstiloStore';
+import { dictationStyleStore } from './ditadoEstiloStore';
 import { PillMenu } from '../pills/PillMenu';
 import { useDictationOrganization } from './dictationOrganization';
 
 // Rótulo do estilo vigente: é o que a pessoa precisa ler antes de falar.
 export function useDictationStyleLabel(server?: Server | null): string {
-  const valor = useDitadoEstiloStore((s) => s.valor);
+  const useStyleStore = dictationStyleStore(server);
+  const valor = useStyleStore((s) => s.valor);
   const organization = useDictationOrganization(server);
-  // carrega na montagem
   useEffect(() => {
-    void useDitadoEstiloStore.getState().carregar();
-  }, []);
+    void useStyleStore.getState().carregar();
+  }, [useStyleStore]);
   if (organization === 'off') return m.ditado_organizacao_desligada_rotulo();
   return estilosDitado().find((e) => e.valor === valor)?.rotulo ?? m.ditado_estilo_prosa();
 }
@@ -22,9 +22,10 @@ export function useDictationStyleLabel(server?: Server | null): string {
 // Com a organização desligada no servidor, mostra só o aviso: todo estilo voltaria cru.
 export function DictationStyleMenu({ open, onClose, server }: { open: boolean; onClose: () => void; server?: Server | null }) {
   const organization = useDictationOrganization(server, open);
-  const valor = useDitadoEstiloStore((s) => s.valor);
-  const revalidar = useDitadoEstiloStore((s) => s.revalidar);
-  const trocar = useDitadoEstiloStore((s) => s.trocar);
+  const useStyleStore = dictationStyleStore(server);
+  const valor = useStyleStore((s) => s.valor);
+  const revalidar = useStyleStore((s) => s.revalidar);
+  const trocar = useStyleStore((s) => s.trocar);
 
   const [erro, setErro] = useState<string | null>(null);
   const [aplicando, setAplicando] = useState<string | null>(null);

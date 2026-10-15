@@ -6,12 +6,26 @@ vi.mock('@hangar/core', async () => {
   return {
     ...actual,
     getConfig: vi.fn(),
+    getConfigForServer: vi.fn(),
     patchConfig: vi.fn(),
+    patchConfigForServer: vi.fn(),
+    fetchDictationOrganization: vi.fn(),
   };
 });
 
-import { useDitadoEstiloStore } from './ditadoEstiloStore';
+import { dictationStyleStore, useDitadoEstiloStore } from './ditadoEstiloStore';
 import * as core from '@hangar/core';
+import { useDictationOrganizationStore } from './dictationOrganization';
+
+const a: core.Server = { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' };
+const b: core.Server = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 function campos(valor: string) {
   return {
@@ -24,10 +38,147 @@ function campos(valor: string) {
 
 beforeEach(() => {
   useDitadoEstiloStore.getState()._zerarParaTeste();
-  vi.clearAllMocks();
+  dictationStyleStore(a).getState()._zerarParaTeste();
+  dictationStyleStore(b).getState()._zerarParaTeste();
+  dictationStyleStore(null).getState()._zerarParaTeste();
+  useDictationOrganizationStore.setState({ byServer: {} });
+  vi.resetAllMocks();
+  core.configureApi({ getBaseUrl: () => b.baseUrl, getToken: () => b.token, onUnauthorized: () => {},
+    origin: null, createEventSource: () => { throw new Error('unexpected SSE'); } });
 });
 
 describe('ditadoEstiloStore', () => {
+  it('A e B guardam valores separados e usam GET/PATCH explícitos com B ativo', async () => {
+    vi.mocked(core.getConfigForServer).mockImplementation(async (server) => campos(server.id === a.id ? 'limpar' : 'briefing') as never);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);
+    const storeA = dictationStyleStore(a);
+    const storeB = dictationStyleStore(b);
+
+    await Promise.all([storeA.getState().carregar(), storeB.getState().carregar()]);
+    expect(storeA.getState().valor).toBe('limpar');
+    expect(storeB.getState().valor).toBe('briefing');
+    expect(core.getConfigForServer).toHaveBeenCalledWith(a);
+    expect(core.getConfigForServer).toHaveBeenCalledWith(b);
+    await storeA.getState().trocar('prosa');
+    expect(storeB.getState().valor).toBe('briefing');
+    await storeB.getState().trocar('limpar');
+    expect(storeA.getState().valor).toBe('prosa');
+    expect(core.patchConfigForServer).toHaveBeenNthCalledWith(1, a, { ditado_estilo: 'prosa' });
+    expect(core.patchConfigForServer).toHaveBeenNthCalledWith(2, b, { ditado_estilo: 'limpar' });
+    expect(core.getConfig).not.toHaveBeenCalled();
+    expect(core.patchConfig).not.toHaveBeenCalled();
+  });
+
+  it('cargas simultâneas deduplicam só o próprio servidor', async () => {
+    const readA = deferred<core.ConfigServidor>();
+    const readB = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockImplementation((server) => server.id === a.id ? readA.promise : readB.promise);
+    const storeA = dictationStyleStore(a);
+    const storeB = dictationStyleStore(b);
+    const loads = [storeA.getState().carregar(), storeA.getState().carregar(), storeB.getState().carregar()];
+    expect(core.getConfigForServer).toHaveBeenCalledTimes(2);
+    readA.resolve(campos('limpar') as core.ConfigServidor);
+    await loads[0];
+    expect(storeA.getState().pronto).toBe(true);
+    expect(storeB.getState().pronto).toBe(false);
+    readB.resolve(campos('briefing') as core.ConfigServidor);
+    await Promise.all(loads);
+    expect(storeB.getState().valor).toBe('briefing');
+  });
+
+  it('GET atrasado de A não desfaz troca em A nem perde a leitura de B', async () => {
+    const readA = deferred<core.ConfigServidor>();
+    const readB = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockImplementation((server) => server.id === a.id ? readA.promise : readB.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);
+    const storeA = dictationStyleStore(a);
+    const storeB = dictationStyleStore(b);
+    const loadA = storeA.getState().carregar();
+    const loadB = storeB.getState().carregar();
+    await storeA.getState().trocar('briefing');
+    readA.resolve(campos('limpar') as core.ConfigServidor);
+    readB.resolve(campos('limpar') as core.ConfigServidor);
+    await Promise.all([loadA, loadB]);
+    expect(storeA.getState().valor).toBe('briefing');
+    expect(storeB.getState().valor).toBe('limpar');
+  });
+
+  it('falha e rollback de A não afetam B nem são anulados por escrita em B', async () => {
+    vi.mocked(core.getConfigForServer).mockImplementation(async (server) => {
+      if (server.id === a.id) throw new Error('502');
+      return campos('briefing') as never;
+    });
+    const storeA = dictationStyleStore(a);
+    const storeB = dictationStyleStore(b);
+    await Promise.all([storeA.getState().carregar(), storeB.getState().carregar()]);
+    expect(storeA.getState()).toMatchObject({ pronto: true, falhou: true, valor: 'prosa' });
+    expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
+    const writeA = deferred<core.RespostaPatchConfig>();
+    vi.mocked(core.patchConfigForServer).mockImplementation((server) => server.id === a.id
+      ? writeA.promise : Promise.resolve({ campos: {} } as never));
+    const failed = expect(storeA.getState().trocar('limpar')).rejects.toThrow('502');
+    await storeB.getState().trocar('limpar');
+    writeA.reject(new Error('502'));
+    await failed;
+    expect(storeA.getState().valor).toBe('prosa');
+    expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+  });
+
+  it('mesmo ID atualiza token e LAN sem apagar estado nem mudar pedido em voo', async () => {
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);
+    const store = dictationStyleStore(a);
+    const load = store.getState().carregar();
+    const updated = { ...a, token: 'new-token', lan: { url: 'http://192.168.1.2:8765', id: a.id } };
+    expect(dictationStyleStore(updated)).toBe(store);
+    expect(core.getConfigForServer).toHaveBeenCalledExactlyOnceWith(a);
+    read.resolve(campos('briefing') as core.ConfigServidor);
+    await load;
+    expect(dictationStyleStore(updated).getState()).toMatchObject({ pronto: true, valor: 'briefing' });
+    await store.getState().trocar('limpar');
+    expect(core.patchConfigForServer).toHaveBeenCalledExactlyOnceWith(updated, { ditado_estilo: 'limpar' });
+    await store.getState().revalidar();
+    expect(core.getConfigForServer).toHaveBeenLastCalledWith(updated);
+  });
+
+  it('sem argumento preserva o store e as APIs legadas', async () => {
+    vi.mocked(core.getConfig).mockResolvedValue(campos('limpar') as never);
+    vi.mocked(core.patchConfig).mockResolvedValue({ campos: {} } as never);
+    expect(dictationStyleStore()).toBe(useDitadoEstiloStore);
+    await dictationStyleStore().getState().carregar();
+    await dictationStyleStore().getState().trocar('briefing');
+    expect(core.getConfig).toHaveBeenCalledExactlyOnceWith();
+    expect(core.patchConfig).toHaveBeenCalledExactlyOnceWith({ ditado_estilo: 'briefing' });
+    expect(core.getConfigForServer).not.toHaveBeenCalled();
+    expect(core.patchConfigForServer).not.toHaveBeenCalled();
+  });
+
+  it('null ou servidor removido não leem nem escrevem no ativo', async () => {
+    await dictationStyleStore(null).getState().carregar();
+    await dictationStyleStore(null).getState().revalidar();
+    await expect(dictationStyleStore(null).getState().trocar('limpar')).rejects.toThrow();
+    const removed = { ...a, removed: true };
+    await dictationStyleStore(removed).getState().carregar();
+    await expect(dictationStyleStore(removed).getState().trocar('briefing')).rejects.toThrow();
+    expect(dictationStyleStore(null)).not.toBe(useDitadoEstiloStore);
+    expect(dictationStyleStore(null).getState()).toMatchObject({ pronto: false, valor: 'prosa' });
+    await useDictationOrganizationStore.getState().load(null);
+    await useDictationOrganizationStore.getState().load(removed);
+    expect(core.fetchDictationOrganization).not.toHaveBeenCalled();
+    expect(core.getConfig).not.toHaveBeenCalled();
+    expect(core.getConfigForServer).not.toHaveBeenCalled();
+    expect(core.patchConfig).not.toHaveBeenCalled();
+    expect(core.patchConfigForServer).not.toHaveBeenCalled();
+  });
+
+  it('organização sem servidor explícito mantém a leitura legada', async () => {
+    vi.mocked(core.fetchDictationOrganization).mockResolvedValue('off');
+    await useDictationOrganizationStore.getState().load(undefined);
+    expect(core.fetchDictationOrganization).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(useDictationOrganizationStore.getState().byServer['']).toBe('off');
+  });
+
   it('GET atrasado não sobrescreve troca', async () => {
     const getConfig = vi.mocked(core.getConfig);
     const patchConfig = vi.mocked(core.patchConfig);

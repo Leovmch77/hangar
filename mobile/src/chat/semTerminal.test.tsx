@@ -180,7 +180,7 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim:
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
 } }));
-vi.mock('../features/ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: false }) } }));
+vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: false }) }) }));
 vi.mock('./CommandSheet', () => ({
   CommandSheet: () => null,
   useSessionCommands: () => ({ commands: [], error: '', retry: () => {} }),

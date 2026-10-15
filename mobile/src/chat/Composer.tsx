@@ -20,7 +20,7 @@ import { useNavigation, useRouter } from 'expo-router';
 import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
 import { useDictationOrganization } from '../features/ditado/dictationOrganization';
 import { useDitado } from '../features/ditado/useDitado';
-import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
+import { dictationStyleStore } from '../features/ditado/ditadoEstiloStore';
 import { DictationError, dictationAudio, runDictation, uploadName, type DictationSource } from '../features/ditado/dictationRun';
 import { AudioChip } from './AudioChip';
 import { CommandSheet, useSessionCommands } from './CommandSheet';
@@ -399,7 +399,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [focado, setFocado] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
-  const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
+  const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId) ?? null);
   const dictationStyle = useDictationStyleLabel(styleServer);
   // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
   const organizationOff = useDictationOrganization(styleServer) === 'off';
@@ -829,7 +829,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const snapshot = draftRef.current!;
       // Mesmo vazio precisa de revisão em disco para comparar o retorno da voz.
       writeDraft(origin.serverId, origin.name, snapshot);
-      const style = useDitadoEstiloStore.getState();
+      const style = dictationStyleStore(server).getState();
       recordingTargetRef.current = { server: { ...server }, snapshot,
         generation: activityGenerationRef.current, estilo: style.pronto ? style.valor : undefined };
       setBar(null);

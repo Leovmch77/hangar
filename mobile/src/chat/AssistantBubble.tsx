@@ -247,7 +247,7 @@ export const AssistantBubble = memo(function AssistantBubble({
           ))}
         </View>
       ) : null}
-      <BubbleActions text={text} ts={ts} />
+      <BubbleActions text={text} ts={ts} serverId={serverId} />
     </View>
   );
 });

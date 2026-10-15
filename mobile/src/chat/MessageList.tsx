@@ -298,7 +298,7 @@ export function MessageList({
         {temNovas ? <View style={[styles.novasDot, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.bg.base }]} /> : null}
       </Pressable>
     ) : null}
-    <ToolDetailSheet ref={detail} resultOf={resultDe} sessionName={sessionName} />
+    <ToolDetailSheet ref={detail} resultOf={resultDe} sessionName={sessionName} serverId={serverId} />
     </View>
   );
 }
