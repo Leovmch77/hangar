@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const calls = vi.hoisted(() => ({
   getPane: vi.fn(),
   server: { id: 'srv1', label: 'fixture-server', baseUrl: 'https://fixture.test', token: 'token' },
-  appState: 'active' as 'active' | 'background',
-  listeners: new Set<(state: 'active' | 'background') => void>(),
+  appState: 'active' as 'active' | 'inactive' | 'background',
+  listeners: new Set<(state: 'active' | 'inactive' | 'background') => void>(),
   remove: vi.fn(),
 }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), getPane: calls.getPane }));
@@ -17,7 +17,7 @@ vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
   AppState: {
     get currentState() { return calls.appState; },
-    addEventListener: (_event: string, listener: (state: 'active' | 'background') => void) => {
+    addEventListener: (_event: string, listener: (state: 'active' | 'inactive' | 'background') => void) => {
       calls.listeners.add(listener);
       return { remove: () => { calls.listeners.delete(listener); calls.remove(); } };
     },
@@ -55,7 +55,7 @@ describe('TerminalMirror', () => {
     calls.appState = 'background';
     const container = document.createElement('div');
     const root = createRoot(container);
-    let listener!: (state: 'active' | 'background') => void;
+    let listener!: (state: 'active' | 'inactive' | 'background') => void;
     try {
       await act(async () => {
         root.render(React.createElement(TerminalMirror, { name: 'fixture', serverId: 'srv1' }));
@@ -81,6 +81,41 @@ describe('TerminalMirror', () => {
     expect(calls.listeners.size).toBe(0);
     listener('active');
     expect(calls.getPane).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['active', 'inactive'] as const)('inactive mantém um único poll, inclusive ao montar em %s', async (initialState) => {
+    calls.appState = initialState;
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(React.createElement(TerminalMirror, { name: 'fixture', serverId: 'srv1' }));
+      });
+      expect(calls.getPane).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('[data-testid="terminal-lines"]')!.textContent).toBe('pane-200');
+      expect(vi.getTimerCount()).toBe(1);
+      const listener = [...calls.listeners][0];
+      await act(async () => { await vi.advanceTimersByTimeAsync(450); });
+      expect(calls.getPane).toHaveBeenCalledTimes(2);
+
+      await act(async () => { listener('inactive'); });
+      expect(calls.getPane).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
+      calls.getPane.mockResolvedValueOnce({ text: 'inactive-output', scrollback: 2000 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(450); });
+      expect(calls.getPane).toHaveBeenCalledTimes(3);
+      expect(container.querySelector('[data-testid="terminal-lines"]')!.textContent).toBe('inactive-output');
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () => { listener('active'); });
+      expect(calls.getPane).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+    expect(calls.remove).toHaveBeenCalledTimes(1);
+    expect(calls.listeners.size).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -110,6 +145,42 @@ describe('TerminalMirror', () => {
       expect(calls.getPane.mock.calls.map((call) => call[1])).toEqual([200, 600, 1200]);
       expect(container.querySelector('[data-testid="terminal-lines"]')!.textContent).toBe('pane-1200');
       expect(container.querySelector('button[aria-label^="load-more-"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([200, 600])('falha ao ampliar de %s linhas mantém contagem, texto e tamanho do próximo poll', async (previous) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(React.createElement(TerminalMirror, { name: 'fixture', serverId: 'srv1' }));
+      });
+      if (previous === 600) {
+        await act(async () => {
+          container.querySelector<HTMLButtonElement>('button[aria-label="load-more-200"]')!.click();
+        });
+      }
+      calls.getPane.mockRejectedValueOnce(new Error('expansion-failed'));
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(`button[aria-label="load-more-${previous}"]`)!.click();
+      });
+
+      const button = container.querySelector<HTMLButtonElement>(`button[aria-label="load-more-${previous}"]`);
+      expect(button).not.toBeNull();
+      expect(button!.disabled).toBe(false);
+      expect(button!.textContent).toBe(`load-more-${previous}`);
+      expect(container.querySelector('[role="alert"]')!.textContent).toBe('expansion-failed');
+      expect(container.querySelector('[data-testid="terminal-lines"]')!.textContent).toBe(`pane-${previous}`);
+      expect(calls.getPane).toHaveBeenLastCalledWith('fixture', previous === 200 ? 600 : 1200, calls.server);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(450); });
+      expect(calls.getPane).toHaveBeenLastCalledWith('fixture', previous, calls.server);
+      expect(container.querySelector('[role="alert"]')!.textContent).toBe('expansion-failed');
+      expect(container.querySelector('[data-testid="terminal-lines"]')!.textContent).toBe(`pane-${previous}`);
     } finally {
       await act(async () => root.unmount());
     }

@@ -64,7 +64,7 @@ describe('criarPanePoller — porte de TerminalMirror.svelte:75-100', () => {
     const p = criarPanePoller(getPane, 'sess', 200, e.onSnapshot, null);
     p.start();
     await vi.advanceTimersByTimeAsync(1000);
-    await p.refresh();
+    await expect(p.refresh()).rejects.toThrow(m.servidor_nao_existe());
     expect(getPane).not.toHaveBeenCalled();
     expect(e.atual.err).toBe(m.servidor_nao_existe());
     expect(vi.getTimerCount()).toBe(0);
@@ -131,6 +131,45 @@ describe('criarPanePoller — porte de TerminalMirror.svelte:75-100', () => {
     await vi.advanceTimersByTimeAsync(450);
     expect(e.atual.err).toBe('');
     expect(e.atual.text).toBe('ok');
+    p.stop();
+  });
+
+  it('refresh publica e rejeita erro atual sem apagar o texto anterior', async () => {
+    const getPane = vi.fn().mockResolvedValueOnce({ text: 'initial', scrollback: 10 });
+    const e = espiao();
+    const p = criarPanePoller(getPane, 'sess', 200, e.onSnapshot, server);
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const error = new Error('refresh-failed');
+    getPane.mockRejectedValueOnce(error);
+
+    await expect(p.refresh()).rejects.toBe(error);
+
+    expect(e.atual.text).toBe('initial');
+    expect(e.atual.err).toBe('refresh-failed');
+    p.stop();
+  });
+
+  it.each(['generation', 'lines', 'stop'])('refresh descarta erro antigo por %s sem rejeitar nem publicar', async (reason) => {
+    let reject!: (error: Error) => void;
+    const getPane = vi.fn().mockResolvedValueOnce({ text: 'initial', scrollback: 10 })
+      .mockReturnValueOnce(new Promise((_done, fail) => { reject = fail; }));
+    const e = espiao();
+    const p = criarPanePoller(getPane, 'sess', 200, e.onSnapshot, server);
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const pending = p.refresh();
+    if (reason === 'generation') p.setActive(false);
+    else if (reason === 'lines') p.setLines(600);
+    else p.stop();
+    const publications = e.vistos.length;
+    reject(new Error('late-refresh-failed'));
+
+    await expect(pending).resolves.toBeUndefined();
+
+    expect(e.vistos).toHaveLength(publications);
+    expect(e.atual.text).toBe('initial');
+    expect(e.atual.err).toBe('');
     p.stop();
   });
 

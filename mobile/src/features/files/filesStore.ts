@@ -312,7 +312,12 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   async function setOnlyModified(onlyModified: boolean) {
     if (onlyModified === getS().soModificados) return;
     for (const [path, generation] of gLista) gLista.set(path, generation + 1);
-    setS({ soModificados: onlyModified, porPasta: new Map(), cortePorPasta: new Map() });
+    const s = getS();
+    setS({
+      soModificados: onlyModified,
+      porPasta: new Map([...s.porPasta].filter(([path]) => path === '' || s.abertos.has(path))),
+      cortePorPasta: new Map([...s.cortePorPasta].filter(([path]) => path === '' || s.abertos.has(path))),
+    });
     await recarregarInterno();
   }
 

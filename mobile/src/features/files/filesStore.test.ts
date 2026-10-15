@@ -226,6 +226,64 @@ describe('filesStore', () => {
     expect(api.use.getState().cortePorPasta.get('closed')).toBe(false);
   });
 
+  it.each([false, true])('trocar filtro preserva raiz e pasta aberta durante reload e após falha (erro: %s)', async (fail) => {
+    const listFiles = vi.mocked(core.listFiles);
+    const directory: core.TreeEntry = { name: 'open', path: 'open', is_dir: true, size: 0, changed: null, add: 0, del: 0 };
+    const oldFile: core.TreeEntry = { name: 'old.txt', path: 'open/old.txt', is_dir: false, size: 1, changed: 'M', add: 1, del: 0 };
+    const newFile: core.TreeEntry = { name: 'new.txt', path: 'open/new.txt', is_dir: false, size: 1, changed: null, add: 0, del: 0 };
+    const oldRoot = [directory, { ...oldFile, path: 'old.txt' }];
+    const newRoot = [directory, { ...newFile, path: 'new.txt' }];
+    listFiles.mockResolvedValueOnce({ entries: oldRoot, truncated: true })
+      .mockResolvedValueOnce({ entries: [oldFile], truncated: true });
+    const api = apis();
+    await api.listar('');
+    await api.alternarPasta('open');
+    let resolveRoot!: (value: core.TreeListing) => void;
+    let resolveOpen!: (value: core.TreeListing) => void;
+    let rejectRoot!: (error: Error) => void;
+    let rejectOpen!: (error: Error) => void;
+    listFiles.mockReturnValueOnce(new Promise((done, reject) => { resolveRoot = done; rejectRoot = reject; }))
+      .mockReturnValueOnce(new Promise((done, reject) => { resolveOpen = done; rejectOpen = reject; }));
+
+    const pending = api.setOnlyModified(false);
+
+    expect(api.use.getState().soModificados).toBe(false);
+    expect(listFiles.mock.calls.slice(2)).toEqual([
+      [sessao, undefined, false, srv1],
+      [sessao, 'open', false, srv1],
+    ]);
+    expect(api.entries()).toEqual([directory, oldFile, oldRoot[1]]);
+    expect(api.use.getState().porPasta.get('')).toEqual(oldRoot);
+    expect(api.use.getState().porPasta.get('open')).toEqual([oldFile]);
+    expect(api.use.getState().cortePorPasta).toEqual(new Map([['', true], ['open', true]]));
+    expect(api.listaCortada()).toBe(true);
+
+    if (fail) {
+      rejectRoot(new Error('500: root-reload-failed'));
+      rejectOpen(new Error('500: open-reload-failed'));
+    } else {
+      resolveRoot({ entries: newRoot, truncated: false });
+      resolveOpen({ entries: [newFile], truncated: false });
+    }
+    await pending;
+
+    if (fail) {
+      expect(api.entries()).toEqual([directory, oldFile, oldRoot[1]]);
+      expect(api.use.getState().porPasta.get('')).toEqual(oldRoot);
+      expect(api.use.getState().porPasta.get('open')).toEqual([oldFile]);
+      expect(api.use.getState().cortePorPasta).toEqual(new Map([['', true], ['open', true]]));
+      expect(api.listaCortada()).toBe(true);
+      expect(api.use.getState().erro).toBe('open-reload-failed');
+    } else {
+      expect(api.entries()).toEqual([directory, newFile, newRoot[1]]);
+      expect(api.use.getState().porPasta.get('')).toEqual(newRoot);
+      expect(api.use.getState().porPasta.get('open')).toEqual([newFile]);
+      expect(api.use.getState().cortePorPasta).toEqual(new Map([['', false], ['open', false]]));
+      expect(api.listaCortada()).toBe(false);
+      expect(api.use.getState().erro).toBeNull();
+    }
+  });
+
   it.each(['response', 'error', '404'] as const)('trocar filtro ignora leitura antiga pendente em pasta fechada: %s', async (outcome) => {
     const listFiles = vi.mocked(core.listFiles);
     let resolve!: (value: core.TreeListing) => void;

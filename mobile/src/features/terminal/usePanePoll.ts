@@ -100,7 +100,12 @@ export function criarPanePoller(
     setLines: (v: number) => { linhas = v; },
     refresh: async () => {
       const g = generation;
-      try { await ler(true, g); } catch (e) { erro(e, g); }
+      const requestedLines = linhas;
+      try { await ler(true, g); } catch (e) {
+        if (!alive || !active || g !== generation || requestedLines !== linhas) return;
+        erro(e, g);
+        throw e;
+      }
     },
   };
 }
@@ -111,10 +116,10 @@ export function usePanePoll(name: string, server: Server | null, lines = 200) {
 
   useEffect(() => {
     const p = criarPanePoller(getPane, name, lines, setSnap, server);
-    p.setActive((AppState.currentState ?? 'active') === 'active');
+    p.setActive(AppState.currentState !== 'background');
     setSnap(p.estado());
     poller.current = p;
-    const subscription = AppState.addEventListener('change', (state) => p.setActive(state === 'active'));
+    const subscription = AppState.addEventListener('change', (state) => p.setActive(state !== 'background'));
     p.start();
     return () => { p.stop(); subscription.remove(); poller.current = undefined; };
     // `lines` não reinicia o laço de propósito (setLines abaixo) — porte do untrack da barra.

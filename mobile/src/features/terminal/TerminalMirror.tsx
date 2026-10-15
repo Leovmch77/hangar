@@ -63,6 +63,8 @@ export function TerminalMirror({ serverId, name, aviso }: Props) {
       await refresh();
       setLocalErr('');
     } catch (e) {
+      setPollLines(lines);
+      setLines(lines);
       setLocalErr(e instanceof Error ? e.message : m.term_erro());
     } finally {
       setLoadingMore(false);
