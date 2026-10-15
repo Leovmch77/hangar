@@ -31,6 +31,8 @@ pub struct ClaudeContext<'a> {
     /// O envelope `bwrap … --` do só leitura.
     pub read_only: Option<&'a [String]>,
     pub windows: bool,
+    /// A primeira mensagem da conversa (S-40).
+    pub initial_prompt: Option<&'a str>,
 }
 
 /// `runtime_config.get`: o `runtime-config.json` vence; senão a variável `CP_*`; senão o padrão.
@@ -112,6 +114,12 @@ pub fn pane(spec: &SessionSpec, sid: &str, ctx: &ClaudeContext) -> PaneSpec {
     if let Some(mode) = spec.permission_mode { claude.extend(["--permission-mode".into(), mode.name().into()]); }
     if let Some(settings) = ctx.settings.filter(|s| s.as_object().is_some_and(|o| !o.is_empty())) {
         claude.extend(["--settings".into(), settings_json(settings)]);
+    }
+    // S-40: o prompt inicial é o posicional do `claude`, depois das opções; começando com `-`, o `--`
+    // impede que vire flag.
+    if let Some(prompt) = ctx.initial_prompt.filter(|p| !p.is_empty()) {
+        if prompt.starts_with('-') { claude.push("--".into()); }
+        claude.push(prompt.into());
     }
     let mut command = Vec::new();
     // O ambiente do motor entra dentro do pane (`hangar-engine --exec`): a chave nunca passa por `-e`.

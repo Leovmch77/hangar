@@ -257,7 +257,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
     }
 }
 
-async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, _initial_prompt: Option<&str>,
+async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
                 remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref()).await?) } else { None };
@@ -280,7 +280,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
             crate::accounts::LockError::Io(e) => creation(format!("trava da conta: {e}")),
         })?;
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name);
-    let result = terminal_life(host, spec, read_only.as_deref(), &mut diary, remember_provider, runtime).await;
+    let result = terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await;
     let events = diary.end(result.as_ref().err());
     host.diary(events);
     let (jsonl, mut born_warnings) = result?;
@@ -289,7 +289,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
 }
 
 /// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
-async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, diary: &mut Diary,
+async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
                        remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>), OpenError> {
     diary.step("validar");
     host.leave_old_group(&spec.name).await?;
@@ -314,7 +314,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     let bridge = host.bridge();
     let key = host.new_bridge_key();
     let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: bridge.as_ref(), bridge_key: &key, runtime_config: runtime,
-        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows };
+        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt };
     let pane = claude::pane(spec, &sid, &ctx);
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
     diary.step("confiar_pasta");

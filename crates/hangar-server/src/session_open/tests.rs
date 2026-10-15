@@ -905,7 +905,7 @@ fn the_claude_pane_is_the_one_python_launched() {
         let bridge = claude::PluginBridge { port: 8765, secret: "segredo".into() };
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: Some(&bridge), bridge_key: &"a".repeat(32),
             runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
-            read_only: read_only.as_deref(), windows: false };
+            read_only: read_only.as_deref(), windows: false, initial_prompt: None };
         let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
         // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
         let inner = |words: Vec<String>| words.iter().enumerate()
@@ -960,6 +960,23 @@ fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
     assert_eq!(keys, ["HANGAR_JEV", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_AUX_BASE_URL", "JEV_AUX_MODELO", "JEV_TEXTO_CMD"]);
     assert_eq!(pairs[4].1, "https://h/v1?api-version=2");
     assert_eq!(claude::jev_pairs(false, &runtime), [("HANGAR_JEV".to_owned(), "off".to_owned())]);
+}
+
+/// S-40: o prompt inicial do Claude com terminal é entregue (o Python o perdia calado): vai como o
+/// prompt posicional do `claude`, depois das opções, e com `--` quando começa com `-`.
+#[test]
+fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_initial_prompt_ignored").unwrap();
+    let resolved = resolve_fixture(&fixture).unwrap();
+    assert_eq!(resolved.initial_prompt.as_deref(), Some("olá"));
+    let roots = ["<REPO>/plugins/hangar".to_owned()];
+    for (prompt, tail) in [("olá", vec!["--permission-mode", "bypassPermissions", "olá"]),
+                           ("-v e depois", vec!["--permission-mode", "bypassPermissions", "--", "-v e depois"])] {
+        let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: None, bridge_key: "k", runtime_config: &Value::Null,
+            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt) };
+        let command = claude::pane(&resolved.spec, "sid", &ctx).command;
+        assert_eq!(command[command.len() - tail.len()..], tail.iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]);
+    }
 }
 
 /// A abertura inteira pelo lado Rust do harness: nasceu, a ordem do diário é a do Python e o spec

@@ -504,7 +504,7 @@ def _new_sessions(raw: dict) -> list[dict]:
     return [p for p in raw.get("subprocesses", []) if p.get("prog") == "tmux" and p.get("argv", [])[:1] == ["new-session"]]
 
 
-def _rule_s63(expected: dict, raw: dict) -> bool | None:
+def _rule_s63(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """S-63: o pane sai sem o que outra sessão deixou no servidor tmux (`env -u` de cada variável)."""
     found = False
 
@@ -531,7 +531,7 @@ def _rule_s63(expected: dict, raw: dict) -> bool | None:
     return found if created else None
 
 
-def _rule_session_key(expected: dict, raw: dict) -> bool | None:
+def _rule_session_key(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """Matriz, item 2 (D-012): `CP_SESSION_KEY` em toda sessão, também no Claude com terminal."""
     created = _new_sessions(raw)
     found = False
@@ -546,7 +546,7 @@ def _rule_session_key(expected: dict, raw: dict) -> bool | None:
     return found if created else None
 
 
-def _rule_spec_record(expected: dict, raw: dict) -> bool | None:
+def _rule_spec_record(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """Task 3 (D-012, item 3): a sessão nascida deixa o spec em `~/.hangar/session-specs/<key>.json`."""
     created = [p for p in _new_sessions(raw) if p.get("rc") == 0]
     records = [p for p in raw.get("files", {}) if "/home/.hangar/session-specs/" in p]
@@ -555,7 +555,7 @@ def _rule_spec_record(expected: dict, raw: dict) -> bool | None:
     return bool(records) if created else None
 
 
-def _rule_s15_diary(expected: dict, raw: dict) -> bool | None:
+def _rule_s15_diary(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """S-15/S-35: a recusa do lançamento vai ao diário com a etapa, o código e o stderr resumido."""
     refused = [e for e in raw.get("diary", []) if e.get("evento") == "sessao.criar_recusada" and e.get("nivel") == "erro"]
     for e in refused:
@@ -564,7 +564,7 @@ def _rule_s15_diary(expected: dict, raw: dict) -> bool | None:
     return all(e["detalhe"] for e in refused) if refused else None
 
 
-def _rule_only_python(expected: dict, raw: dict) -> None:
+def _rule_only_python(expected: dict, raw: dict, scenario: dict) -> None:
     """Do Python e não da abertura: o `api.servidor` do middleware HTTP dele (a rota é do Rust), as
     consultas ao tmux dele (`mux.comando`), a sonda `claude --version` (o Rust lê o `plugin-dir` que o
     servidor publica, como o terminal), o PATH do shell de login (Task 3: o do servidor), o `bwrap`
@@ -581,7 +581,7 @@ def _rule_only_python(expected: dict, raw: dict) -> None:
     return None
 
 
-def _rule_name_before_lock(expected: dict, raw: dict) -> bool | None:
+def _rule_name_before_lock(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """Ordem: o nome inválido ou em uso é recusado antes de tocar a conta; o Python já tinha
     tomado a trava dela e deixava o arquivo de trava vazio."""
     detail = (raw.get("steps") or [{}])[0].get("body", {}).get("detail")
@@ -594,7 +594,24 @@ def _rule_name_before_lock(expected: dict, raw: dict) -> bool | None:
     return not any("/home/.hangar/account-locks/" in p for p in raw.get("files", {}))
 
 
+def _rule_s40(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """S-40: o prompt inicial do Claude com terminal é entregue: o posicional no fim do comando."""
+    prompt = next((st.get("json", {}).get("initial_prompt") for st in scenario["steps"] if "json" in st), None)
+    created = _new_sessions(raw)
+    if not prompt or not created:
+        return None
+    tail = (" -- " if prompt.startswith("-") else " ") + shlex.quote(prompt)
+    found = False
+    for p in created:
+        if p["argv"][-1].endswith(tail):
+            p["argv"][-1], found = p["argv"][-1][:-len(tail)], True
+    for s in raw.get("tmux_sessions", {}).values():
+        s["command"] = s["command"].removesuffix(tail)
+    return found
+
+
 RUST_DIFFERENCES = (
+    ("S-40", _rule_s40),
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
     ("matriz item 2 (CP_SESSION_KEY)", _rule_session_key),
@@ -604,12 +621,12 @@ RUST_DIFFERENCES = (
 )
 
 
-def apply_rust_differences(expected: dict, raw: dict) -> tuple[dict, dict, list[str]]:
+def apply_rust_differences(expected: dict, raw: dict, scenario: dict) -> tuple[dict, dict, list[str]]:
     """Fixture (normalizada) e saída crua do Rust com as diferenças esperadas desfeitas."""
     expected, raw = copy.deepcopy(expected), copy.deepcopy(raw)
     missing = []
     for rule, fn in RUST_DIFFERENCES:
-        if fn(expected, raw) is False:
+        if fn(expected, raw, scenario) is False:
             missing.append(f"$: a diferença esperada '{rule}' não apareceu na saída do Rust")
     return expected, raw, missing
 
@@ -630,7 +647,7 @@ def diff(side: str, names: list[str] | None = None) -> dict[str, list[str]]:
             raw = run_rust_side(sc)
         except RustSideNotImplemented as exc:
             return sc["name"], [f"$: {exc}"]
-        expected, raw, missing = apply_rust_differences(fx["result"], raw)
+        expected, raw, missing = apply_rust_differences(fx["result"], raw, sc)
         return sc["name"], missing + compare(expected, normalize(raw, sc))
     return dict(_parallel(one, chosen))
 

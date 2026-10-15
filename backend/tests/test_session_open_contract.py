@@ -79,7 +79,8 @@ def test_rust_differences_undo_each_fix_and_report_a_missing_one():
                       "detalhe": "boom"}, {"evento": "sessao.criar.fim", "erro_tipo": "erro_criacao_sessao"}]}
     expected = {"diary": [{"evento": "api.servidor"}, {"evento": "sessao.criar.fim", "erro_tipo": "ValueError"}],
                 "probes": [{"prog": "claude"}, {"prog": "bwrap", "argv": ["a"]}, {"prog": "bwrap", "argv": ["a"]}]}
-    exp, out, missing = c.apply_rust_differences(expected, raw)
+    scenario = {"steps": [{"json": {"name": "s1"}}]}
+    exp, out, missing = c.apply_rust_differences(expected, raw, scenario)
     assert missing == []
     assert out["subprocesses"][0]["argv"] == ["new-session", "-s", "s1", "-e", "CP_PROVIDER=claude",
                                               "exec env -u CLAUDE_CONFIG_DIR claude --session-id x"]
@@ -89,4 +90,4 @@ def test_rust_differences_undo_each_fix_and_report_a_missing_one():
     assert exp == {"diary": [{"evento": "sessao.criar.fim"}], "probes": [{"prog": "bwrap", "argv": ["a"]}]}
     # Sem o `env -u` do S-63 a regra acusa o conserto que faltou.
     raw["subprocesses"][0]["argv"][-1] = "exec env -u CLAUDE_CONFIG_DIR claude"
-    assert any("S-63" in m for m in c.apply_rust_differences(expected, raw)[2])
+    assert any("S-63" in m for m in c.apply_rust_differences(expected, raw, scenario)[2])
