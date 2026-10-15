@@ -285,6 +285,8 @@ pub(crate) mod tests {
     pub(crate) fn ok() -> MuxOutput { MuxOutput { code: Some(0), ..Default::default() } }
     pub(crate) fn failed(stderr: &str) -> MuxOutput { MuxOutput { code: Some(1), stdout: String::new(), stderr: stderr.into() } }
 
+    pub(crate) fn machine_at(default_config_dir: &str) -> TerminalEnv { TerminalEnv { default_config_dir: default_config_dir.into(), ..machine() } }
+
     pub(crate) fn machine() -> TerminalEnv {
         TerminalEnv { windows: false, program: "tmux".into(), wayland: Some("wayland-1".into()), server_config_dir: None,
             default_config_dir: "/r/home/.claude".into(), birth: Duration::from_millis(500) }

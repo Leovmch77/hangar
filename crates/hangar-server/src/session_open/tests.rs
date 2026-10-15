@@ -2,6 +2,7 @@
 //! da saída do Rust; as diferenças dos consertos (D-001, D-011) estão nomeadas onde aparecem.
 use super::*;
 use proptest::prelude::*;
+use regex::Regex;
 use std::path::PathBuf;
 
 fn fixture_dir() -> PathBuf {
@@ -853,6 +854,112 @@ fn an_unreadable_account_mode_refuses_unless_a_mode_was_asked() {
     let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
     let resolved = resolve::resolve_open(&request, &OWNER, &facts).unwrap();
     assert_eq!((resolved.spec.permission_mode, resolved.warnings.len()), (Some(PermissionMode::Manual), 0));
+}
+
+// ── plano do Claude com terminal ─────────────────────────────────────────────────────────────
+
+/// Palavras de uma linha de comando POSIX (aspas simples e duplas, como o `shlex.split`).
+fn shell_words(line: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut started) = (Vec::new(), String::new(), None, false);
+    for c in line.chars() {
+        match (quote, c) {
+            (None, ' ') => { if started { words.push(std::mem::take(&mut word)); started = false; } }
+            (None, '\'' | '"') => { quote = Some(c); started = true; }
+            (Some(q), c) if c == q => quote = None,
+            (_, c) => { word.push(c); started = true; }
+        }
+    }
+    if started { words.push(word); }
+    words
+}
+
+/// O que o Python passou ao `new-session`: o `-e` (sem os de todo provedor) e as palavras do comando.
+fn launched_pane(argv: &[String]) -> (Vec<(String, String)>, Vec<String>) {
+    let token = Regex::new(r"\A[0-9a-f]{32}\.[0-9a-f]{32}\z").unwrap();
+    let env = argv.windows(2).filter(|w| w[0] == "-e").filter_map(|w| w[1].split_once('='))
+        .filter(|(k, _)| *k != "CP_SESSION_KEY")
+        .map(|(k, v)| (k.to_owned(), if token.is_match(v) { "<hex:1>.<hex:2>".to_owned() } else { v.to_owned() })).collect();
+    (env, shell_words(argv.last().unwrap()))
+}
+
+/// Os Claude com terminal que o Python lançou: o pane do `claude::pane` sobre o spec do
+/// `resolve_open()` dá o mesmo `-e` e o mesmo comando, menos o que o S-63 tira e a chave da sessão
+/// (matriz, item 2). O `-c` vem do `new-session` (a worktree troca a pasta na abertura).
+#[test]
+fn the_claude_pane_is_the_one_python_launched() {
+    let mut compared = 0;
+    for (name, fixture) in create_fixtures() {
+        let Some(tmux) = fixture["result"]["subprocesses"].as_array().into_iter().flatten()
+            .find(|p| p["prog"] == "tmux" && p["argv"][0] == "new-session") else { continue };
+        let python: Vec<String> = tmux["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
+        if !python.iter().any(|a| a == "CP_PROVIDER=claude") { continue; }
+        let mut spec = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("{name}: {e}")).spec;
+        spec.cwd = python[python.iter().position(|a| a == "-c").unwrap() + 1].clone();
+        let state = &fixture["scenario"]["state"]["files"];
+        let runtime = state["<ROOT>/home/.claude/runtime-config.json"].clone();
+        let settings = fixture["scenario"]["fakes"]["rust_bridge"]["claude_customizations.prepare"]["result"]["settings"].clone();
+        let probe = fixture["result"]["probes"].as_array().into_iter().flatten().find(|p| p["prog"] == "bwrap");
+        let read_only: Option<Vec<String>> = probe.map(|p| std::iter::once("<ROOT>/bin/bwrap".to_owned())
+            .chain(p["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).filter(|a| a != "/bin/true")).collect());
+        let roots = ["<REPO>/plugins/hangar".to_owned(), "<REPO>/plugins/github-actions".to_owned()];
+        let bridge = claude::PluginBridge { port: 8765, secret: "segredo".into() };
+        let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: Some(&bridge), bridge_key: &"a".repeat(32),
+            runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
+            read_only: read_only.as_deref(), windows: false };
+        let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
+        // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
+        let inner = |words: Vec<String>| words.iter().enumerate()
+            .flat_map(|(i, w)| if i > 0 && words[i - 1] == "-c" { shell_words(w) } else { vec![w.clone()] }).collect::<Vec<_>>();
+        let (env, words) = launched_pane(&python);
+        let words = inner(words);
+        let (our_env, _) = launched_pane(&ours);
+        let our_words = inner(shell_words(&terminal::tests::undo_not_inherited(ours.last().unwrap())));
+        assert_eq!(our_env, env, "{name}: -e");
+        assert_eq!(our_words, words, "{name}: comando");
+        compared += 1;
+    }
+    assert_eq!(compared, 26);
+}
+
+/// `_pretrust_cwd` e `default_model.drop_foreign` (test_registry, test_default_model): a pasta
+/// confiada no arquivo, já confiada sem reescrever; modelo de motor fora dos dois `settings.json`.
+#[test]
+fn the_folder_is_pretrusted_and_a_foreign_default_model_is_dropped() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join(".claude.json");
+    std::fs::write(&file, r#"{"numStartups": 3, "projects": {"/x": {"allowedTools": []}}}"#).unwrap();
+    claude::pretrust(&file, "/x", false);
+    let data: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(data, json!({"numStartups": 3, "projects": {"/x": {"allowedTools": [], "hasTrustDialogAccepted": true}}}));
+    let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    claude::pretrust(&file, "/x", false);
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before, "já confiada não reescreve");
+    claude::pretrust(&file, "C:\\x\\y", true);
+    let data: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(data["projects"]["C:/x/y"]["hasTrustDialogAccepted"], true, "barra normal no Windows");
+
+    let account = home.path().join(".claude-b");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(account.join("settings.json"), r#"{"model": "claude-200-2/gpt-6.1-sol", "theme": "dark"}"#).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), r#"{"model": "opus[1m]"}"#).unwrap();
+    let warnings = claude::drop_foreign_model(home.path(), Some(&account.to_string_lossy()));
+    assert_eq!(warnings, ["O modelo padrão 'claude-200-2/gpt-6.1-sol' do settings.json não é da Anthropic (provavelmente veio de um /model numa sessão de motor) e foi removido."]);
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(account.join("settings.json")).unwrap()).unwrap(), json!({"theme": "dark"}));
+    assert_eq!(std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(), r#"{"model": "opus[1m]"}"#);
+}
+
+/// O auxiliar do Jev de antes da configuração única vem do `jev_texto_*` sem o `/chat/completions`.
+#[test]
+fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
+    let runtime = json!({"jev_api_key": "sk-or-x", "jev_texto_base_url": "https://h/v1/chat/completions?api-version=2",
+        "jev_texto_modelo": "m", "jev_texto_cmd": "texto"});
+    let pairs = claude::jev_pairs(true, &runtime);
+    let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["HANGAR_JEV", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_AUX_BASE_URL", "JEV_AUX_MODELO", "JEV_TEXTO_CMD"]);
+    assert_eq!(pairs[4].1, "https://h/v1?api-version=2");
+    assert_eq!(claude::jev_pairs(false, &runtime), [("HANGAR_JEV".to_owned(), "off".to_owned())]);
 }
 
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
