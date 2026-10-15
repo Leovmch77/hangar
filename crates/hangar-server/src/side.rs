@@ -254,11 +254,12 @@ impl SideCache {
     /// `pane_question`: Claude com terminal, cujo `ask_question` sai uma vez por pergunta e nada o
     /// apaga depois. Só vale enquanto o último `state` for `awaiting_input`; senão quem chega
     /// depois abriria uma pergunta já respondida. Codex e Claude sem terminal mandam o próprio
-    /// `ask_question` vazio ao fechar.
-    fn record(&mut self, event: &str, data: &str, frame: &Bytes, pane_question: bool) {
+    /// `ask_question` vazio ao fechar. `false`: quadro de uma entrada da fila já apagada, que não vai
+    /// ao retrato nem aos aparelhos.
+    fn record(&mut self, event: &str, data: &str, frame: &Bytes, pane_question: bool) -> bool {
         if event == "plugin_toast" {
             self.record_toast(data, Instant::now());
-            return;
+            return true;
         }
         if let Some(i) = LATEST.iter().position(|e| *e == event) {
             self.latest[i] = Some(frame.clone());
@@ -280,17 +281,17 @@ impl SideCache {
                     self.latest[ASK_QUESTION] = None;
                 }
             }
-            return;
+            return true;
         }
         if event != "message" && event != "queue_confirmed" {
-            return;
+            return true;
         }
         let id = serde_json::from_str::<serde_json::Value>(data)
             .ok()
             .and_then(|v| v.get("id")?.as_str().map(str::to_owned));
-        let Some(id) = id else { return };
+        let Some(id) = id else { return true };
         if self.retired.contains(&id) {
-            return;
+            return false;
         }
         match self.queue.iter_mut().find(|(k, _)| *k == id) {
             Some(slot) => slot.1 = frame.clone(),
@@ -303,6 +304,7 @@ impl SideCache {
             let i = self.queue.iter().position(|(_, f)| f.starts_with(b"event: queue_confirmed")).unwrap_or(0);
             self.queue.remove(i);
         }
+        true
     }
 
     /// O `removed` do painel da fila: as que esperavam e foram apagadas. Sem isto, o aparelho que abre o chat
@@ -796,8 +798,9 @@ impl Hub {
         // A mesma vista de novo (o Python a reenvia a cada religação; o Rust limpa duas vezes seguidas) não
         // sobe a versão: sem marcador novo, a versão nova invalidaria o marcador que a fila de um aparelho
         // lento ainda tem, e ele ficaria com a vista anterior.
-        if !(repeated && event == LATEST[PLUGIN_UI]) {
-            cache.record(event, data, &frame, pane_question);
+        // Quadro atrasado de uma entrada apagada: os aparelhos abertos já a retiraram pelo `removed`.
+        if !(repeated && event == LATEST[PLUGIN_UI]) && !cache.record(event, data, &frame, pane_question) {
+            return;
         }
         // O envio fica sob a trava do retrato (o `send` do broadcast não bloqueia): com o Python e o Rust
         // escrevendo no mesmo hub, fora dela dois quadros poderiam sair em ordem diferente da do retrato.
@@ -2169,8 +2172,14 @@ mod tests {
         write(&[sent, a]);
         let gone = waiting_for_removal.await;
         assert_eq!(gone["removed"], serde_json::json!(["b"]), "{gone}");
-        // Quadro atrasado do Python, lido antes da exclusão: chega depois e não volta ao retrato.
+        // Quadro atrasado do Python, lido antes da exclusão: chega depois e não volta ao retrato nem a
+        // quem já está no chat (esse já retirou a bolha pelo `removed`).
+        let mut open_device = lease.hub.tx.subscribe();
         assert!(on_side_event(&lease.hub, "message", r#"{"kind":"user_msg","id":"queued-b","text":"segunda","queued_delivered":false}"#));
+        assert!(on_side_event(&lease.hub, "stats", r#"{"turns":1}"#));
+        let seen = side_events(&mut open_device, Duration::from_millis(100)).await;
+        assert!(seen.iter().any(|(event, _)| event == "stats"), "o canal segue entregando: {seen:?}");
+        assert!(!seen.iter().any(|(_, data)| data.contains("queued-b")), "bolha fantasma no aparelho aberto: {seen:?}");
         // O aparelho que abre o chat agora recebe o retrato.
         let late = lease.hub.attach(None).await.expect("aparelho novo");
         let frames: Vec<String> = late.frames.iter().map(|f| String::from_utf8_lossy(f).into_owned()).collect();
