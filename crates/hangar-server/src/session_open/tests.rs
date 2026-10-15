@@ -1074,6 +1074,45 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
+/// Um cenário de criação pelo lado Rust do harness, com `patch` no cenário e os repositórios Git dele
+/// inicializados. Devolve o resultado e a raiz (viva enquanto o `TempDir` viver).
+#[cfg(target_os = "linux")]
+fn run_contract(name: &str, patch: impl FnOnce(&mut Value)) -> (Value, tempfile::TempDir, PathBuf) {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
+    patch(&mut fixture["scenario"]);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    materialize(&fixture, &root);
+    for repo in fixture["scenario"]["state"]["git_repos"].as_array().into_iter().flatten() {
+        let path = contract::place(repo["path"].as_str().unwrap(), &root);
+        for (file, text) in repo["files"].as_object().into_iter().flatten() {
+            std::fs::write(std::path::Path::new(&path).join(file), text.as_str().unwrap()).unwrap();
+        }
+        for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&path).args(args).status().unwrap().success());
+        }
+    }
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
+    let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
+        .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
+    let raw = test_runtime().block_on(contract::run(&fixture["scenario"], &root, env));
+    (raw, dir, root)
+}
+
+/// Sem resposta do tmux a sessão pode ter nascido: a abertura responde incerta e não desfaz a
+/// worktree (desfazer apagaria a pasta e a branch debaixo de um pane vivo).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_uncertain_terminal_keeps_the_worktree() {
+    let (raw, _dir, root) = run_contract("create_worktree_rollback_on_tmux_failure",
+        |s| s["fakes"]["tmux_new_session"] = json!({"silent": true}));
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(504), json!("session_open_uncertain")), "{}", raw["steps"][0]["body"]);
+    let branches = std::process::Command::new("git").arg("-C").arg(root.join("home/pessoal/repo")).args(["branch", "--list", "feat/y"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).contains("feat/y"), "a branch criada fica");
+}
+
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
 
 fn fixture_spec(name: &str) -> SessionSpec {

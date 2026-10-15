@@ -16,6 +16,20 @@ impl MuxOutput {
     fn ok(&self) -> bool { self.code == Some(0) }
 }
 
+/// O pane pedido pode estar de pé, mas o multiplexador não respondeu: quem chama não desfaz nada em volta dele.
+pub const UNCERTAIN: &str = "terminal_incerto";
+
+/// O que o multiplexador disse de uma sessão. Sem resposta (`code: None`) não é ausência.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence { Present, Absent, Unknown }
+
+/// `has-session` em três estados, com a última linha do stderr.
+pub async fn presence(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> (Presence, String) {
+    let out = mux.run(vec![env.program.clone(), "has-session".into(), "-t".into(), format!("={name}")]).await;
+    let presence = match out.code { Some(0) => Presence::Present, Some(_) => Presence::Absent, None => Presence::Unknown };
+    (presence, tail(&out.stderr))
+}
+
 /// Quem roda o multiplexador: o processo de verdade ou o falso dos testes e do harness.
 pub trait Mux: Send + Sync {
     /// Prefixo do escopo transiente do systemd (`systemd-run … --`); vazio sem ele. Bloqueante.
@@ -184,38 +198,48 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     }
     // S-32: sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
     // pé). Só vale se for esta: outra de mesmo nome ganhou a corrida e o pedido é recusado.
-    if !output.ok() && !is_this_one(mux, env, pane).await {
-        return Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) });
+    if !output.ok() {
+        match is_this_one(mux, env, pane).await {
+            Presence::Present => {}
+            Presence::Absent => return Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) }),
+            Presence::Unknown => return Err(SpawnError { code: UNCERTAIN, stderr: tail(&output.stderr) }),
+        }
     }
     born(mux, env, &pane.name).await
 }
 
 /// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada):
-/// sem `remain-on-exit` a sessão some com ele. Conferida a cada 100 ms durante a janela.
+/// sem `remain-on-exit` a sessão some com ele. Conferida a cada 100 ms durante a janela; sem
+/// resposta até o fim dela é incerto, nunca "morreu".
 async fn born(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> Result<(), SpawnError> {
     let step = Duration::from_millis(100);
     let mut waited = Duration::ZERO;
+    let mut unanswered = None;
     while waited < env.birth {
         tokio::time::sleep(step).await;
         waited += step;
-        let alive = mux.run(vec![env.program.clone(), "has-session".into(), "-t".into(), format!("={name}")]).await;
-        if !alive.ok() {
-            return Err(SpawnError { code: "terminal_morreu_ao_nascer", stderr: tail(&alive.stderr) });
+        match presence(mux, env, name).await {
+            (Presence::Absent, stderr) => return Err(SpawnError { code: "terminal_morreu_ao_nascer", stderr }),
+            (Presence::Unknown, stderr) => unanswered = Some(stderr),
+            (Presence::Present, _) => unanswered = None,
         }
     }
-    Ok(())
+    unanswered.map_or(Ok(()), |stderr| Err(SpawnError { code: UNCERTAIN, stderr }))
 }
 
 /// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
 fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
 
-/// A sessão `pane.name` existe e carrega a chave deste pedido.
-async fn is_this_one(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> bool {
-    let target = target(env, &pane.name);
-    let exists = mux.run(vec![env.program.clone(), "has-session".into(), "-t".into(), format!("={}", pane.name)]).await;
-    if !exists.ok() { return false; }
-    let key = mux.run(vec![env.program.clone(), "show-environment".into(), "-t".into(), target, "CP_SESSION_KEY".into()]).await;
-    key.ok() && key.stdout.trim() == format!("CP_SESSION_KEY={}", pane.key)
+/// A sessão `pane.name` existe e carrega a chave deste pedido. `Absent` também quando a de mesmo nome é outra.
+async fn is_this_one(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Presence {
+    let (exists, _) = presence(mux, env, &pane.name).await;
+    if exists != Presence::Present { return exists; }
+    let key = mux.run(vec![env.program.clone(), "show-environment".into(), "-t".into(), target(env, &pane.name), "CP_SESSION_KEY".into()]).await;
+    match key.code {
+        None => Presence::Unknown,
+        Some(0) if key.stdout.trim() == format!("CP_SESSION_KEY={}", pane.key) => Presence::Present,
+        Some(_) => Presence::Absent,
+    }
 }
 
 /// O cliente do multiplexador: no psmux o pane herda o ambiente dele, e no tmux ele vira o do
@@ -460,6 +484,19 @@ pub(crate) mod tests {
             let at = argv.iter().position(|a| a == &format!("CP_PROVIDER={}", provider.name())).unwrap();
             assert_eq!((argv[at - 1].as_str(), argv[at - 2].as_str()), ("-e", "CP_SESSION_NAME=s1"));
         }
+    }
+
+    /// Sem resposta do multiplexador não é "não existe": a sessão pode estar de pé, e a falha volta
+    /// incerta (quem chama não desfaz a worktree debaixo dela).
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_multiplexer_is_uncertain_not_absent() {
+        let silent = || MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() };
+        let mux = FakeMux::answering(vec![silent(), silent()]);
+        assert_eq!(spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, UNCERTAIN);
+        let mux = FakeMux::answering(vec![ok(), silent(), silent(), silent(), silent(), silent()]);
+        assert_eq!(spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, UNCERTAIN, "a janela inteira sem resposta");
+        let mux = FakeMux::answering(vec![ok(), silent(), ok()]);
+        spawn(&mux, &machine(), &claude(Vec::new(), None)).await.expect("uma resposta perdida com o pane de pé no fim é nascimento");
     }
 
     #[tokio::test]

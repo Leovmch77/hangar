@@ -150,6 +150,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Contas e cotas sem o servidor Rust de pé: não há reserva Python.
   accounts_need_rust_server: () => m.accounts_need_rust_server(),
   session_open_needs_rust_server: () => m.session_open_needs_rust_server(),
+  session_open_uncertain: () => m.session_open_uncertain(),
   // /api/claude-configs — apagar conta recusado por alguma condicao da maquina
   erro_config_dirs_fixo: () => m.erro_config_dirs_fixo(),
   erro_conta_ativa_backend: () => m.erro_conta_ativa_backend(),

@@ -134,6 +134,9 @@ fn allowed_root(host: &dyn OpenHost, caller: &OpenCaller, cwd: &str, runtime: &V
 
 fn creation(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_criacao_sessao", msg) }
 
+/// O pane pode ter nascido sem o multiplexador confirmar: nada em volta dele é desfeito.
+const UNCERTAIN: &str = "session_open_uncertain";
+
 /// `orq_readonly.prepare`: o envelope `bwrap` que deixa o código só leitura, provado com `/bin/true`.
 async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&str>) -> Result<Vec<String>, OpenError> {
     let refuse = |msg: String| OpenError::new(400, "erro_criacao_sessao", msg);
@@ -250,8 +253,9 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, &runtime).await {
         Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo }),
+        // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
         Err(error) => {
-            if let Some(undo) = undo { undo.undo()?; }
+            if let Some(undo) = undo && error.code != Some(UNCERTAIN) { undo.undo()?; }
             Err(error)
         }
     }
@@ -329,6 +333,9 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     host.release_name(&spec.name).await?;
     if let Err(error) = terminal::spawn(host.mux(), host.terminal(), &pane).await {
         diary.refused("erro", error.code, Some("criar_terminal"), Some(&error.stderr));
+        if error.code == terminal::UNCERTAIN {
+            return Err(OpenError::new(504, UNCERTAIN, "o tmux não respondeu e a sessão pode ter nascido; confira a lista antes de tentar de novo"));
+        }
         return Err(creation(match error.code {
             "terminal_morreu_ao_nascer" => format!("o terminal fechou logo depois de abrir: {}", error.stderr),
             _ => "falha ao criar sessao no tmux".to_owned(),

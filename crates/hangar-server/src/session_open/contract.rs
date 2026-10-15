@@ -76,6 +76,10 @@ impl Mux for FakeTmux {
         let args = &inner[1..];
         let opt = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
         let target = opt("-t").map(|t| t.trim_start_matches('=').split(':').next().unwrap_or_default().to_owned());
+        // Um tmux que não responde no prazo a nada (só os testes do Rust o pedem).
+        if self.force["silent"] == true {
+            return Box::pin(async { MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() } });
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let (code, stdout, stderr) = match args.first().map(String::as_str) {
             Some("new-session") => {
