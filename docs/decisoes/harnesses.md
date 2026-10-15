@@ -790,7 +790,28 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   agente, `$.prompt.submit` leva a resposta à conversa principal. Medição em
   [Pergunta lateral pelo plugin](#pergunta-lateral-btw-pelo-plugin-08102026).
 
-## Codex com terminal no Rust: adoção e dono único
+- **Mensagem `user` do Claude com vários blocos de texto mostra todos, um por linha.** É o que a CLI
+  grava quando junta entradas que chegaram durante o turno (um bloco por entrada). Os testes da
+  primeira linha (comando, interrupção, agente, colega, fonte de imagem) seguem só no primeiro
+  bloco; bloco seguinte que é só a fonte da imagem ou só `<system-reminder>` não entra. Python
+  (`transcript.py`) e Rust (`transcript/claude.rs`) iguais, provados pelo golden do contrato. Ver
+  [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
+
+## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
+
+Na prova de ponta a ponta da fila, duas entradas orientadas no mesmo turno ("fila A editada" e
+"fila C terceira") chegaram ao modelo como uma mensagem `user` com dois blocos de texto, e o
+`/history` mostrava só a primeira: os dois parsers liam apenas o primeiro bloco. A confirmação não
+dependia disso (o recibo e o índice de linhas confirmadas já liam todos os blocos, uma ocorrência
+por bloco), então a entrada sumia da conversa sem voltar como bolha.
+
+Com o texto juntado por `\n`, cada entrada continua casando com a própria linha: as chaves de
+commit (`chaves_de_commit`/`_chaves_de_commit`) e o dedup dos aparelhos (`especificidade`/`claim`)
+aceitam a entrada que é uma linha da mensagem. O `/history` esconde as duas bolhas pela linha de
+cada uma. Nos aparelhos, a mensagem real aposenta pelo texto só a bolha dona (regra antiga, de
+propósito: duas "ok" na fila e uma real deixam a segunda visível); as outras saem pelo
+`queue_confirmed` do recibo.
+
 
 (11/10/2026, branch `Hangar-rust`, contrato interno 52; desenho
 [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md).)

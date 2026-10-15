@@ -180,6 +180,10 @@ CLAUDE = [
     j({"type": "user", "uuid": "u-023", "timestamp": T(30), "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "toolu_16", "content": "ok"}]},
        "toolUseResult": {"structuredPatch": [{"oldStart": 4294967296, "newStart": 1, "lines": ["+z"]}]}}),
+    # Duas entradas da fila que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto
+    # por entrada. As duas aparecem, e cada entrada (`q-juntada-*`) é absorvida pela própria linha.
+    j({"type": "user", "uuid": "u-024", "timestamp": T(32), "message": {"role": "user", "content": [
+        {"type": "text", "text": "fila A editada\n"}, {"type": "text", "text": "fila C terceira"}]}}),
 ]
 
 # Surrogate solto numa mensagem COM relógio: o RewriteFilter do Python estoura no md5
@@ -286,6 +290,8 @@ CLAUDE_QUEUE = [
     {"id": "q-quebrada", "text": "antes depois", "ts": epoch(T(12)), "delivered": False},
     {"id": 42, "text": "id numérico", "ts": epoch(T(12)), "delivered": "sim"},
     {"id": "q-pendente", "text": "ainda na fila", "ts": epoch(T(24, 100)), "delivered": False},
+    {"id": "q-juntada-a", "text": "fila A editada", "ts": epoch(T(31)), "delivered": True},
+    {"id": "q-juntada-c", "text": "fila C terceira", "ts": epoch(T(31, 500)), "delivered": True},
 ]
 
 CODEX_QUEUE = [
