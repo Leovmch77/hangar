@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Alert, Pressable, RefreshControl, SectionList, Text, TextInput, View, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
@@ -86,6 +86,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   const [wt, setWt] = useState<{ server: Server; path: string } | null>(null);
   const [convite, setConvite] = useState<PairTarget | null>(null);
   const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
+  const deleting = useRef(new Set<string>());
 
   // 1 stream por servidor via refcount compartilhado
   useEffect(() => {
@@ -120,7 +121,9 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   }, []);
 
   const excluir = useCallback(
-    (s: AggSession) =>
+    (s: AggSession) => {
+      const key = `${s.serverId}::${s.name}`;
+      if (deleting.current.has(key)) return;
       Alert.alert(m.sessao_excluir(), s.name, [
         { text: m.comum_cancelar(), style: 'cancel' },
         {
@@ -128,6 +131,9 @@ export function SessionList({ onClose, onOpenServers }: Props) {
           style: 'destructive',
           onPress: () =>
             comServidor(s, () => {
+              if (deleting.current.has(key)) return;
+              deleting.current.add(key);
+              useSessions.getState().markDeleting(s.serverId, s.name);
               deleteSession(s.name)
                 .then((r) => {
                   // A sessão morreu, mas um companheiro do grupo pode não ter sido avisado: o
@@ -135,10 +141,15 @@ export function SessionList({ onClose, onOpenServers }: Props) {
                   if (r.warning) toast.erro(formataErro(r.warning) ?? String(r.warning));
                   else toast.ok(s.name);
                 })
-                .catch((e: unknown) => toast.erro(mensagemDe(e)));
+                .catch((e: unknown) => {
+                  useSessions.getState().unmarkDeleting(s.serverId, s.name);
+                  toast.erro(mensagemDe(e));
+                })
+                .finally(() => deleting.current.delete(key));
             }),
         },
-      ]),
+      ]);
+    },
     [comServidor],
   );
 
