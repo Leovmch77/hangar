@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Path as UrlPath, Request, State};
@@ -22,6 +22,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::interactions::InteractionBinding;
+use crate::list::capped::{Capped, SESSION_CAP};
 use crate::plugin::{AgentLife, AgentSend, AgentState};
 use crate::routes::{AppState, cors, gate, pass, route_failed};
 use crate::side::Binding;
@@ -424,17 +425,21 @@ fn num(a: &Map<String, Value>, k: &str) -> f64 {
     a.get(k).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-/// Linhas JSON-objeto do arquivo; None se não abriu.
-fn objects(f: &Path) -> Option<Vec<Map<String, Value>>> {
+/// Linhas JSON-objeto do arquivo, uma por vez: o transcript inteiro em `Value` custava várias
+/// vezes o tamanho dele. None se não abriu; item None = falha de leitura no meio (já registrada).
+fn objects(f: &Path) -> Option<impl Iterator<Item = Option<Map<String, Value>>>> {
     let file = File::open(f).map_err(|e| tracing::warn!("subagents: não consegui ler {}: {e}", f.display())).ok()?;
-    let mut out = Vec::new();
-    for line in BufReader::new(file).split(b'\n') {
-        let line = line.map_err(|e| tracing::warn!("subagents: não consegui ler {}: {e}", f.display())).ok()?;
-        if let Some(Value::Object(o)) = decode_line(&line) {
-            out.push(o);
+    let shown = f.display().to_string();
+    Some(BufReader::new(file).split(b'\n').filter_map(move |line| match line {
+        Err(e) => {
+            tracing::warn!("subagents: não consegui ler {shown}: {e}");
+            Some(None)
         }
-    }
-    Some(out)
+        Ok(line) => match decode_line(&line) {
+            Some(Value::Object(o)) => Some(Some(o)),
+            _ => None,
+        },
+    }))
 }
 
 fn s<'a>(o: &'a Map<String, Value>, k: &str) -> Option<&'a str> {
@@ -528,10 +533,32 @@ const FORK_DIRECTIVE: &str = "\nYour directive: ";
 static TEAMMATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)^\s*<teammate-message\b[^>]*>\n?(.*?)\n?</teammate-message>\s*$").unwrap());
 
+type Stamp = (Option<std::time::SystemTime>, u64, Option<std::time::SystemTime>);
+
+/// Resumo por (arquivo, cauda); a lista é pedida a cada 5 s enquanto a sessão trabalha e só o
+/// arquivo que cresceu precisa ser relido.
+static CLAUDE_AGENTS: LazyLock<Mutex<Capped<(PathBuf, usize), (Stamp, Map<String, Value>)>>> =
+    LazyLock::new(|| Mutex::new(Capped::new(SESSION_CAP)));
+
 fn read_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
+    let modified = |p: &Path| p.metadata().and_then(|m| m.modified()).ok();
+    let stamp: Stamp = (modified(f), f.metadata().map_or(0, |m| m.len()), modified(&f.with_extension("meta.json")));
+    let key = (f.to_path_buf(), tail);
+    if let Some((seen, agent)) = CLAUDE_AGENTS.lock().unwrap_or_else(PoisonError::into_inner).get(&key)
+        && *seen == stamp
+    {
+        return Some(agent.clone());
+    }
+    let agent = parse_agent_claude(f, tail)?;
+    CLAUDE_AGENTS.lock().unwrap_or_else(PoisonError::into_inner).insert(key, (stamp, agent.clone()));
+    Some(agent)
+}
+
+fn parse_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
     let mut acc = Acc::default();
     let mut failed = false;
     for r in objects(f)? {
+        let r = r?;
         if let Some(ts) = s(&r, "timestamp") {
             acc.when(ts.to_owned());
         }
@@ -599,6 +626,7 @@ fn read_agent_kimi(d: &Path, tail: usize) -> Option<Map<String, Value>> {
     let mut acc = Acc::default();
     let mut ended = false;
     for r in objects(&f)? {
+        let r = r?;
         let when = ms_iso(truthy(r.get("time")).or(r.get("created_at")));
         if !when.is_empty() {
             acc.when(when);
@@ -735,6 +763,7 @@ fn read_agent_pi(task: &Path, run: &Path, tail: usize) -> Option<Map<String, Val
     let mut acc = Acc::default();
     let mut last: (Option<String>, Option<String>) = (None, None);
     for r in objects(&f)? {
+        let r = r?;
         if let Some(ts) = s(&r, "timestamp") {
             acc.when(ts.to_owned());
         }
@@ -901,6 +930,21 @@ mod tests {
         assert!(conversation(&guessed, None).is_none(), "chute do cwd não decide a conversa");
         let fresh = row(json!({"name": "s", "provider": "claude", "tracked": true}));
         assert!(conversation(&fresh, None).is_none());
+    }
+
+    #[test]
+    fn list_rereads_a_subagent_only_after_its_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("c.jsonl");
+        claude_agent(dir.path(), "c", "a1", "faz X");
+        assert_eq!(list_subagents("claude", &own)[0]["toolCalls"], 3);
+        let f = dir.path().join("c/subagents/agent-a1.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+        std::io::Write::write_all(&mut file, format!("{}\n", json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Grep", "input": {"pattern": "y"}}]}})).as_bytes()).unwrap();
+        drop(file);
+        assert_eq!(list_subagents("claude", &own)[0]["toolCalls"], 4);
+        assert_eq!(list_subagents("claude", &own)[0]["recent"].as_array().unwrap().last().unwrap()["name"], "Grep");
     }
 
     #[test]
