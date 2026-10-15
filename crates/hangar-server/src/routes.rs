@@ -392,7 +392,12 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(fallback.clone()))
         .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(fallback.clone()))
         .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(fallback.clone()))
-        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(fallback.clone()))
+        // Painel da fila. `reorder` é caminho fixo: o DELETE e o PATCH dele valem como os de um id de mesmo nome.
+        .route("/api/sessions/{name}/queue/reorder", axum::routing::post(crate::session_write::control::queue_reorder)
+            .delete(crate::session_write::control::queue_remove).patch(crate::session_write::control::queue_edit).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove)
+            .patch(crate::session_write::control::queue_edit).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/queue/{entry_id}/steer", axum::routing::post(crate::session_write::control::queue_steer).fallback(fallback.clone()))
         // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(fallback.clone()))
         .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(fallback.clone()))

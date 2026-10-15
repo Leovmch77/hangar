@@ -1,4 +1,4 @@
-//! `/interrupt`, `/keys`, `/term-input`, `/select`, `/select/submit` e o descarte da fila servidos pelo
+//! `/interrupt`, `/keys`, `/term-input`, `/select`, `/select/submit` e as rotas da fila servidos pelo
 //! Rust: o corpo e o código de cada resposta vêm do golden que o Python gera (`gen_golden.py`), e o
 //! resto prova a rota inteira com um cano falso e o plugin falso do Python.
 use crate::fake;
@@ -315,7 +315,7 @@ pub(crate) async fn serve_with_interactions(registry: Arc<RuntimeRegistry>, inte
 
 pub(crate) async fn send(server: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, Value) {
     let url = format!("http://{server}/api/sessions/{path}");
-    let request = match method { "DELETE" => client().delete(url), _ => client().post(url) };
+    let request = client().request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url);
     let response = request.header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
         .body(body.to_owned()).send().await.unwrap();
     let status = response.status().as_u16();
@@ -383,6 +383,47 @@ async fn queue_discard_of_an_entry_that_is_not_there_is_404() {
     assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["msg"].as_str()),
         (404, Some("erro_fila_entrada_nao_encontrada"), Some("entrada não está na fila")));
     assert_eq!(python.hits_to("/api/sessions/s/queue/nao-existe"), 0);
+}
+
+#[tokio::test]
+async fn queue_panel_routes_are_served_in_rust_and_an_absent_entry_is_409_gone() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_headless(&registry, dir.path(), "s").await;
+    let (python, server) = serve(registry).await;
+    for (method, path, body) in [("PATCH", "s/queue/nada", r#"{"text":"x"}"#), ("DELETE", "s/queue/nada?only_waiting=true", ""),
+        ("POST", "s/queue/reorder", r#"{"id":"nada","before_id":null}"#), ("POST", "s/queue/nada/steer", "")] {
+        let (status, reply) = send(server, method, path, body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some("queue_entry_gone")), "{method} {path}: {reply}");
+    }
+    assert_eq!(python.hits_to("/api/sessions/s/queue/nada") + python.hits_to("/api/sessions/s/queue/reorder")
+        + python.hits_to("/api/sessions/s/queue/nada/steer"), 0);
+}
+
+#[tokio::test]
+async fn queue_edit_with_an_empty_or_slash_text_is_422() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_headless(&registry, dir.path(), "s").await;
+    let (_python, server) = serve(registry).await;
+    for body in [r#"{"text":"  "}"#, r#"{"text":"/clear"}"#] {
+        let (status, reply) = send(server, "PATCH", "s/queue/a", body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("queue_text_invalid")), "{body}");
+    }
+    for body in [r#"{"text":"x","extra":1}"#, r#"{"texto":"x"}"#, "[]"] {
+        assert_eq!(send(server, "PATCH", "s/queue/a", body).await.1["detail"]["code"], "erro_corpo_invalido", "{body}");
+    }
+    assert_eq!(send(server, "DELETE", "s/queue/a?only_waiting=talvez", "").await.1["detail"]["code"], "erro_corpo_invalido");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_steer_of_an_absent_entry_is_409_and_sends_no_keys() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (_python, server) = serve(registry).await;
+    let before = keys_sent(&log);
+    let (status, reply) = send(server, "POST", "t/queue/nada/steer", "").await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some("queue_entry_gone")), "{reply}");
+    assert_eq!(keys_sent(&log), before);
 }
 
 #[cfg(unix)]

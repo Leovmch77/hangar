@@ -1,6 +1,6 @@
 //! Pontes privadas do Rust para o que entra pelo Python (convidado 8766, Connect 8768, broadcast, grupo,
 //! par, MCP): a do Codex (com e sem terminal), que também recebe o `DELETE` que ele administra, e a das
-//! respostas de pergunta do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
+//! respostas de pergunta e do painel da fila do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
 //! como a do dono, com o corpo intacto, e o que o Rust não atende volta como 421, para o Python tratar
 //! sozinho (nunca outro repasse ao Rust).
 use std::net::SocketAddr;
@@ -38,14 +38,18 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 }
 
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit` e
-/// `permission-mode`, e `GET` em `permission-modes`, de sessão Claude com entrada no Rust, pela mesma rota
-/// do dono. Outra rota, método ou sessão: 421.
+/// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
+/// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
+/// mesma rota do dono. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
+    let queue = rest.strip_prefix("queue/").filter(|tail| !tail.is_empty());
     let allowed = match *req.method() {
-        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
+        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode")
+            || queue.is_some_and(|tail| tail == "reorder" || tail.strip_suffix("/steer").is_some_and(|id| !id.is_empty() && !id.contains('/'))),
+        Method::PATCH | Method::DELETE => queue.is_some_and(|tail| !tail.contains('/')),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
@@ -54,12 +58,17 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
     let (s, c) = (State(st), ConnectInfo(peer));
-    match rest.as_str() {
-        "answer" => answer::answer(s, c, req).await,
-        "select" => control::select(s, c, req).await,
-        "permission-mode" => permissions::set_mode(s, c, req).await,
-        "permission-modes" => permissions::modes(s, c, req).await,
-        _ => control::select_submit(s, c, req).await,
+    let method = req.method().clone();
+    match (method, rest.as_str()) {
+        (Method::POST, "answer") => answer::answer(s, c, req).await,
+        (Method::POST, "select") => control::select(s, c, req).await,
+        (Method::POST, "permission-mode") => permissions::set_mode(s, c, req).await,
+        (Method::GET, "permission-modes") => permissions::modes(s, c, req).await,
+        (Method::POST, "select/submit") => control::select_submit(s, c, req).await,
+        (Method::POST, "queue/reorder") => control::queue_reorder(s, c, req).await,
+        (Method::POST, _) => control::queue_steer(s, c, req).await,
+        (Method::PATCH, _) => control::queue_edit(s, c, req).await,
+        _ => control::queue_remove(s, c, req).await,
     }
 }
 
@@ -172,6 +181,9 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "keys") => control::keys(s, c, req).await,
         ("POST", "term-input") => control::term_input(s, c, req).await,
         ("DELETE", queue) if queue.starts_with("queue/") => control::queue_remove(s, c, req).await,
+        ("PATCH", queue) if queue.starts_with("queue/") => control::queue_edit(s, c, req).await,
+        ("POST", "queue/reorder") => control::queue_reorder(s, c, req).await,
+        ("POST", queue) if queue.starts_with("queue/") && queue.ends_with("/steer") => control::queue_steer(s, c, req).await,
         ("GET", "models") => codex::models(s, c, req).await,
         ("POST", "model") => codex::model(s, c, req).await,
         ("POST", "service-tier") => codex::service_tier(s, c, req).await,

@@ -16,6 +16,8 @@ impl Provider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteRoute {
     Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove,
+    /// Painel da fila: editar, reordenar e orientar uma entrada.
+    QueueEdit, QueueReorder, QueueSteer,
     /// Rotas só do Codex (`/models`, `/model`, `/limits`, `/commands`…), com e sem terminal.
     CodexControl,
     /// `/codex-permissions`: como `CodexControl`, e a única que atende o sem terminal caído (`route_write`).
@@ -58,8 +60,8 @@ pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     use WriteRoute::*;
     let object = || serde_json::from_slice::<serde_json::Value>(&super::input::scrub_lone_surrogates(body)).is_ok_and(|v| v.is_object());
     match route {
-        Input | Select | Answer | Keys | TermInput => object(),
-        Steer | SelectSubmit => body.is_empty() || object(),
+        Input | Select | Answer | Keys | TermInput | QueueEdit | QueueReorder => object(),
+        Steer | SelectSubmit | QueueSteer => body.is_empty() || object(),
         Interrupt | QueueRemove | CodexControl | CodexPermission => true,
     }
 }
@@ -69,7 +71,7 @@ mod tests {
     use super::*;
     use WriteRoute::*;
 
-    const ALL: [WriteRoute; 9] = [Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove];
+    const ALL: [WriteRoute; 12] = [Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove, QueueEdit, QueueReorder, QueueSteer];
 
     #[test]
     fn with_a_terminal_every_route_is_rust_for_both_providers() {
@@ -115,5 +117,8 @@ mod tests {
         assert!(!body_ok(Input, &b("oi")) && !body_ok(Input, &b("[]")) && !body_ok(Input, &b("")));
         assert!(body_ok(Steer, &b("")) && body_ok(Steer, &b("{}")) && !body_ok(Steer, &b("x")));
         assert!(body_ok(Interrupt, &b("")) && body_ok(QueueRemove, &b("")));
+        assert!(body_ok(QueueEdit, &b(r#"{"text":"oi"}"#)) && !body_ok(QueueEdit, &b("")));
+        assert!(body_ok(QueueReorder, &b(r#"{"id":"a","before_id":null}"#)) && !body_ok(QueueReorder, &b("x")));
+        assert!(body_ok(QueueSteer, &b("")) && body_ok(QueueSteer, &b("{}")) && !body_ok(QueueSteer, &b("x")));
     }
 }
