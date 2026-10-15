@@ -180,13 +180,22 @@ fn problem_banner(state: &SessionState) -> Option<String> {
     }
 }
 
+fn conversation_metrics(user: bool) -> (f32, f32) { if user { (16., 1.55) } else { (17., 1.7) } }
+
 /// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência. Em 100% são os do web no desktop:
 /// resposta 17 px/1,7 (`.prose`, AssistantBubble.svelte) e bolha do usuário 16 px/1,55 (`.bubble-text`, UserBubble.svelte).
 fn conversation_text(el: Div, user: bool) -> Div {
     let a = crate::appearance::get();
-    let (size, line) = if user { (16., 1.55) } else { (17., 1.7) };
+    let (size, line) = conversation_metrics(user);
     el.font_family(a.font.family())
         .text_size(px(size * a.text_size as f32 / 100.)).line_height(relative(line * a.line_height as f32 / 100.))
+}
+
+/// Altura da primeira linha do texto da conversa, em px: o ponto da pele Terminal se centra nela.
+fn conversation_line(user: bool) -> f32 {
+    let a = crate::appearance::get();
+    let (size, line) = conversation_metrics(user);
+    size * a.text_size as f32 / 100. * line * a.line_height as f32 / 100.
 }
 const DETAIL_MAX: usize = 20_000;
 const LIVE_THINKING_TAIL: usize = 1_500;
@@ -4632,6 +4641,8 @@ impl Hangar {
         // Conversa sem cartões: usuário em bolha à direita, agente em texto corrido. Só o que não é nenhum dos
         // dois (erro, aviso, formato desconhecido) mantém o rótulo, porque ali o rótulo é informação.
         let plain = id == PREVIEW || (kind_of(&self.conversation.items, index, &self.chat.events) == Some("assistant_msg") && !error);
+        // Pele Terminal: o texto do agente (gravado ou chegando) começa com o ponto branco, como no Claude Code.
+        let dotted = plain && appearance::get().tool_look == appearance::ToolLook::Terminal;
         // Resposta gravada com tabela numérica: o texto vai em trechos, e cada tabela ganha o botão Gráfico.
         // Só o retrato do `sync_tables`, e só com a mesma fonte que está sendo desenhada; a prévia nunca tem gráfico.
         let charted = (plain && id != PREVIEW && appearance::get().table_chart).then(|| self.tables.get(&id)).flatten()
@@ -4673,7 +4684,8 @@ impl Hangar {
         let actions = (id != PREVIEW && (user || plain)).then(|| {
             let ts = match self.conversation.items.get(index) { Some(Item::Event(i)) => self.chat.events.get(*i).and_then(|e| e.ts), _ => None };
             let (view, copy_id) = (cx.weak_entity(), id.clone());
-            div().h(px(24.)).flex().items_center().gap_1().opacity(0.).group_hover(ROW_GROUP, |s| s.opacity(1.))
+            // Com o ponto da pele Terminal, a hora alinha com o texto, como na PWA.
+            div().h(px(24.)).flex().items_center().gap_1().when(dotted, |el| el.pl(px(15.))).opacity(0.).group_hover(ROW_GROUP, |s| s.opacity(1.))
                 .when_some(stamp(ts), |el, at| el.child(div().text_xs().text_color(theme::faint()).child(at)))
                 .child(CopyButton {
                     id: SharedString::from(format!("copy-{id}")).into(),
@@ -4688,7 +4700,9 @@ impl Hangar {
             .when_some(more, |el, more| el.child(more))
             .when_some(files, |el, files| el.child(files));
         let row = div().id(SharedString::from(format!("message-{id}"))).group(ROW_GROUP).w_full().flex().flex_col().gap_2()
-            .map(|el| if user { el.items_end().child(match peer_scope { Some(scope) => peer_bubble(content, scope), None => user_bubble(content) }) } else { el.child(content) })
+            .map(|el| if user { el.items_end().child(match peer_scope { Some(scope) => peer_bubble(content, scope), None => user_bubble(content) }) }
+                else if dotted { el.child(terminal_look::assistant_text_row(content, conversation_line(false))) }
+                else { el.child(content) })
             .when_some(note, |el, note| el.child(div().flex().items_center().gap_2().when(user, |el| el.justify_end())
                 .child(div().min_w_0().text_sm().text_color(theme::warning()).child(note))
                 .when_some(discard, |el, button| el.child(button))))

@@ -119,6 +119,25 @@ pub(super) const WRITE_SHOWN: usize = 10;
 pub(super) const EDIT_SHOWN: usize = 40;
 pub(super) const INDENT: f32 = 22.;
 
+/// O ponto do Claude Code: 7 px, centrado numa linha de `line` px. A coluna tem a altura da linha para o ponto
+/// ficar na primeira, mesmo com o texto quebrando.
+pub(super) fn bullet(color: Hsla, line: f32) -> Div {
+    div().flex_none().w(px(7.)).h(px(line)).flex().items_center().child(div().size(px(7.)).rounded_full().bg(color))
+}
+
+/// Começo da linha dobrada: o ponto enquanto alguma chamada roda; terminada, só o espaço dele, como o Claude Code.
+pub(super) fn fold_lead(live: bool) -> Div {
+    if live { bullet(theme::accent(), 19.).debug_selector(|| "term-fold-dot".into()) }
+    else { div().flex_none().w(px(7.)).h(px(19.)) }
+}
+
+/// Texto do agente na pele Terminal: o ponto branco antes do primeiro parágrafo, como o "● texto" do Claude Code.
+pub(super) fn assistant_text_row(content: Div, line: f32) -> Div {
+    div().w_full().flex().items_start().gap(px(8.))
+        .child(bullet(theme::text(), line).debug_selector(|| "term-text-dot".into()))
+        .child(content.flex_1().min_w_0())
+}
+
 /// Edit, MultiEdit e o patch do Codex aparecem como "Update", e MCP como "servidor - ferramenta (MCP)": os nomes que
 /// o terminal usa.
 pub(super) fn display_name(name: &str) -> String {
@@ -465,7 +484,7 @@ impl Hangar {
         let toggle_key = key.clone();
         // Botão sem ícone: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo de acessibilidade, como o `disclosure`.
         let inner = |name: String| div().w_full().flex().items_start().justify_start().gap(px(8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-            .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(dot))
+            .child(bullet(dot, 19.))
             .child(div().min_w_0().flex().flex_wrap()
                 .child(div().font_weight(FontWeight::BOLD).text_color(theme::text()).child(name))
                 .child(div().min_w_0().text_color(theme::text()).child(format!("({arg})"))));
@@ -535,13 +554,14 @@ impl Hangar {
             let title = fold_title(&self.chat.events, folded, &folded_kinds, live.is_some());
             let toggle_key = key.clone();
             // Botão: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo, como o cabeçalho da chamada.
-            let mut block = vec![div().pl(px(INDENT - 8.)).child(Button::new(SharedString::from(key)).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
-                .accessibility_label(title.clone())
-                .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element()];
+            let mut block = vec![div().flex().gap(px(8.)).child(fold_lead(live.is_some()))
+                .child(Button::new(SharedString::from(key)).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
+                    .accessibility_label(title.clone())
+                    .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element()];
             if !open {
                 // Recolhida, a linha mostra o que roda agora e a saída de cada falha, como o Claude Code.
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(15.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
                     .child(div().flex_none().text_color(theme::faint()).child("⎿"))
                     .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {

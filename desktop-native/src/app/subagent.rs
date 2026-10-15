@@ -355,7 +355,7 @@ impl SubConversation {
         let outcome = match &edits { Some(edits) if result.is_some() => term::edit_summary(edits, created), _ => tool.status.clone() };
         let open = self.expanded.contains(&key);
         let inner = div().w_full().flex().items_start().justify_start().gap(px(8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-            .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(dot))
+            .child(term::bullet(dot, 19.))
             .child(div().min_w_0().flex().flex_wrap()
                 .child(div().font_weight(FontWeight::BOLD).text_color(theme::text()).child(name.clone()))
                 .child(div().min_w_0().text_color(theme::text()).child(format!("({arg})"))));
@@ -411,12 +411,13 @@ impl SubConversation {
             let live = folded.iter().rev().find(|t| running(t));
             let title = term::fold_title(&self.events, &calls, &folded_kinds, live.is_some());
             let toggle = key.clone();
-            let mut block = vec![div().pl(px(term::INDENT - 8.)).child(Button::new(SharedString::from(format!("sub-{key}"))).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
-                .accessibility_label(title.clone())
-                .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))).into_any_element()];
+            let mut block = vec![div().flex().gap(px(8.)).child(term::fold_lead(live.is_some()))
+                .child(Button::new(SharedString::from(format!("sub-{key}"))).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
+                    .accessibility_label(title.clone())
+                    .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))).into_any_element()];
             if !open {
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(term::INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(15.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
                     .child(div().flex_none().text_color(theme::faint()).child("⎿"))
                     .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
@@ -439,6 +440,7 @@ impl SubConversation {
         let row_id = SharedString::from(format!("sub-row-{}", row.id()));
         let inner = match row {
             Row::Message { id, markdown, user, label, at } => {
+                let dotted = terminal() && !user && label.is_none();
                 let (long, more_key) = (user && long_message(&markdown), format!("{id}:more"));
                 let open = self.expanded.contains(&more_key);
                 let view = self.text(id.clone(), markdown, cx);
@@ -448,7 +450,9 @@ impl SubConversation {
                     .child(collapse(chat_text(&view, cx).on_link_click(open_web_link), long, open))
                     .when(long, |el| el.child(more_button(SharedString::from(format!("sub-more-{id}")), open)
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx)))));
-                div().w_full().flex().flex_col().map(|el| if user { el.items_end().child(user_bubble(content)) } else { el.child(content) })
+                div().w_full().flex().flex_col().map(|el| if user { el.items_end().child(user_bubble(content)) }
+                    else if dotted { el.child(super::terminal_look::assistant_text_row(content, super::conversation_line(false))) }
+                    else { el.child(content) })
                     .when_some(at, |el, at| el.child(div().pt(px(4.)).text_xs().text_color(theme::faint()).child(at)))
                     .into_any_element()
             }
