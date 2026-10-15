@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Roda nesta máquina o que o CI rodaria para o que o commit muda, e grava o resultado pela árvore
+# Roda nesta máquina o que está ligado aos arquivos que o commit muda (o rápido, que as travas
+# exigem) ou, com --completo, o que o CI rodaria para essas áreas, e grava o resultado pela árvore
 # (tree sha) para a trava pre-push conferir. Windows roda por SSH numa VM (git config
-# hangar.verificarWindows <host>), ao mesmo tempo que o Linux.
+# hangar.verificarWindows <host>), ao mesmo tempo que o Linux, só com arquivo de Windows no diff no
+# rápido, e com teto de tempo (HANGAR_VERIFICAR_WINDOWS_MAX, 600 s; 2400 s no completo).
 #
-# Uso:  scripts/verificar-local                 HEAD, Linux e (se couber) Windows
+# Uso:  scripts/verificar-local                 HEAD, só o ligado aos arquivos mudados
+#       scripts/verificar-local --completo      a bateria do CI para as áreas mudadas
 #       scripts/verificar-local --commit <ref>  outro commit
 #       scripts/verificar-local --base <ref>    o que mudou desde que saiu de <ref> (ex.: o PR inteiro)
-#       scripts/verificar-local --tudo          todos os passos, mude o que mudar
+#       scripts/verificar-local --tudo          todos os passos completos, mude o que mudar
 #       scripts/verificar-local --so linux|windows
 #       scripts/verificar-local --passos "a b"  só esses passos do plano (ex.: repetir um que falhou)
 #       scripts/verificar-local --de-novo       repete os passos que já passaram nesta árvore
@@ -115,6 +118,41 @@ classificar() {
 
 TODOS_LINUX="rust backend front mobile nativo shell statusline pi"
 TODOS_WINDOWS="rust statusline"
+RAPIDOS="rust_rapido backend_rapido front_rapido mobile_rapido"
+
+# O plano padrão, que as travas exigem: só o ligado aos arquivos mudados (cada passo `*_rapido` lê a
+# lista); a bateria inteira é do CI e do `--completo`. Windows só com arquivo de Windows no diff.
+classificar_rapido() {
+    local f lin=() win=()
+    local rust=0 back=0 front=0 mobile=0 nativo=0 wrap=0 status=0 pi=0 winback=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        case "$f" in crates/*) rust=1 ;; esac
+        case "$f" in backend/*) back=1 ;; esac
+        case "$f" in packages/*|frontend/*|messages/*|project.inlang/*|package.json|package-lock.json) front=1 ;; esac
+        case "$f" in mobile/*) mobile=1 ;; esac
+        case "$f" in desktop-native/*|crates/hangar-api/*|crates/hangar-workspace/*|crates/Cargo.toml|messages/*) nativo=1 ;; esac
+        case "$f" in
+            scripts/shell/*|scripts/test-wrappers.sh|scripts/hangar-engine|scripts/install-claude-wrapper.sh|\
+            scripts/verificar-local|scripts/test-verificar-local.sh|scripts/podar-target|scripts/test-podar-target.sh|\
+            scripts/hook-pr-verificado.mjs|scripts/hooks/*) wrap=1 ;;
+        esac
+        case "$f" in scripts/*statusline*) status=1 ;; esac
+        case "$f" in scripts/pi/*|scripts/test-pi-hangar-state.mjs) pi=1 ;; esac
+        case "$f" in *.ps1|backend/app/procinfo.py|backend/app/atomico.py) winback=1 ;; esac
+    done
+    (( rust )) && lin+=(rust_rapido)
+    (( back )) && lin+=(backend_rapido)
+    (( front )) && lin+=(front_rapido)
+    (( mobile )) && lin+=(mobile_rapido)
+    (( nativo )) && lin+=(nativo)
+    (( wrap )) && lin+=(shell)
+    (( status )) && lin+=(statusline) && win+=(statusline)
+    (( pi )) && lin+=(pi)
+    (( winback )) && win+=(runtime)
+    echo "linux: ${lin[*]}"
+    echo "windows: ${win[*]}"
+}
 
 # ── passos (cwd = árvore fixa) ────────────────────────────────────────────────────────────────
 
@@ -154,16 +192,20 @@ passo_preparo() {
     local plano=" $PLANO " pid pids=() falhou=0
     (( PROCESSOS > CARGO_BUILD_JOBS )) && export CARGO_BUILD_JOBS="$PROCESSOS"
     # Rede e disco correm ao lado da compilação.
-    if [[ "$plano" == *" front "* || "$plano" == *" mobile "* ]]; then
+    local web=0 mobile=0
+    [[ "$plano" == *" front "* || "$plano" == *" front_rapido "* ]] && web=1
+    [[ "$plano" == *" mobile "* || "$plano" == *" mobile_rapido "* ]] && web=1 && mobile=1
+    if (( web )); then
         { npm_ci_se_mudou package-lock.json npm ci --workspace=@hangar/core --workspace=frontend && \
-            { [[ "$plano" != *" mobile "* ]] || npm_ci_se_mudou mobile/package-lock.json npm ci --prefix mobile; }; } &
+            { (( ! mobile )) || npm_ci_se_mudou mobile/package-lock.json npm ci --prefix mobile; }; } &
         pids+=($!)
     fi
-    if [[ "$plano" == *" backend "* ]]; then
+    if [[ "$plano" == *" backend "* || "$plano" == *" backend_rapido "* ]]; then
         omp_de_teste >/dev/null &
         pids+=($!)
     fi
-    if [[ "$plano" == *" rust "* || "$plano" == *" backend "* ]]; then
+    # Os rápidos compilam só o que usam, no próprio passo.
+    if [[ "$plano" == *" rust "* || "$plano" == *" backend "* || "$plano" == *" backend_rapido "* ]]; then
         (cd backend && uv sync) || falhou=1
     fi
     if [[ "$plano" == *" rust "* ]]; then
@@ -225,8 +267,9 @@ passo_mobile() {
     npm run i18n:compile -w @hangar/core && npm run check:app && npm run test:app
 }
 
-# O nativo é outro workspace: fora do target do crates/.
-passo_nativo() { (cd desktop-native && env -u CARGO_TARGET_DIR cargo test --locked); }
+# O nativo é outro workspace: fora do target do crates/, e num target só da árvore fixa. O
+# `target-dir` global da máquina é o mesmo dos builds de quem programa: o passo esperava a trava dele.
+passo_nativo() { (cd desktop-native && CARGO_TARGET_DIR="$PWD/target" cargo test --locked); }
 passo_shell() {
     bash scripts/test-wrappers.sh || return 1
     [[ ! -f scripts/test-verificar-local.sh ]] || bash scripts/test-verificar-local.sh || return 1
@@ -238,6 +281,99 @@ passo_statusline() {
     return 0
 }
 passo_pi() { node scripts/test-pi-hangar-state.mjs; }
+
+# ── passos rápidos: só o ligado aos arquivos mudados (ARQUIVOS, um por linha); o resto é do CI ──
+# Chamam vitest/tsc direto, fora do flock global dos scripts npm: a fila daquele é a das suítes
+# inteiras de todas as sessões, e o rápido roda poucos arquivos.
+mudados() { grep -E "$1" <<< "$ARQUIVOS" || true; }
+
+passo_rust_rapido() {
+    local f dir nome args=() todos=0
+    while IFS= read -r f; do
+        case "$f" in
+            crates/Cargo.toml|crates/Cargo.lock|crates/rust-toolchain.toml) todos=1 ;;
+            crates/*/*)
+                dir="${f#crates/}"; dir="${dir%%/*}"
+                nome="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "crates/$dir/Cargo.toml" 2>/dev/null | head -1)"
+                [[ -n "$nome" && " ${args[*]} " != *" $nome "* ]] && args+=(-p "$nome") ;;
+        esac
+    done <<< "$(mudados '^crates/')"
+    # Só o hangar-server é folha; crate de base muda quem depende dele.
+    for nome in "${args[@]}"; do [[ "$nome" == -p || "$nome" == hangar-server ]] || todos=1; done
+    (( todos )) && args=(--workspace)
+    (( ${#args[@]} )) || { echo "nenhum crate mudou"; return 0; }
+    (cd crates && cargo test --locked --no-fail-fast "${args[@]}")
+}
+
+# Os testes que mudaram e os que importam um módulo do app que mudou.
+passo_backend_rapido() {
+    local f m t testes=() inteiro=0
+    while IFS= read -r f; do
+        case "$f" in
+            backend/tests/test_*.py) [[ -f "$f" ]] && testes+=("${f#backend/}") ;;
+            backend/app/*.py)
+                m="$(basename "$f" .py)"
+                [[ "$m" == __init__ ]] && m="$(basename "$(dirname "$f")")"
+                [[ "$m" == app ]] && { inteiro=1; continue; }
+                # O teste com o nome do módulo pode chegar a ele por outro (app.api registra o router).
+                [[ -f "backend/tests/test_${m}.py" ]] && testes+=("tests/test_${m}.py")
+                # Palavra solta, não só `app.x`: import em várias linhas (`from app import (\n x,`) também conta.
+                while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lw -- "$m" tests/test_*.py 2>/dev/null) ;;
+            # Dependência, conftest e helper de teste valem para a suíte inteira.
+            backend/pyproject.toml|backend/uv.lock|backend/tests/*.py) inteiro=1 ;;
+        esac
+    done <<< "$(mudados '^backend/')"
+    (( inteiro )) && { echo "mudou o que vale para a suíte inteira: pytest completo"; passo_backend; return; }
+    mapfile -t testes < <(printf '%s\n' "${testes[@]}" | grep . | sort -u)
+    (( ${#testes[@]} )) || { echo "nenhum teste ligado aos arquivos mudados do backend"; return 0; }
+    echo "pytest: ${testes[*]}"
+    local omp; omp="$(omp_de_teste)" || return 1
+    local pytest=(pytest -q)
+    (( PROCESSOS > 1 )) && pytest+=(-n "$PROCESSOS" --dist loadfile)
+    mkdir -p "/var/tmp/hangar-verificacao-$USER"
+    (cd backend && OMP_TEST_BIN="$omp" uv run "${pytest[@]}" --basetemp="/var/tmp/hangar-verificacao-$USER/pytest-rapido" "${testes[@]}")
+}
+
+# Tipos só com .ts/.svelte ou mensagens no diff (chave removida quebra o m.<chave>()); testes, os
+# que importam o que mudou.
+passo_front_rapido() {
+    local web f rel=() tipos=0 msgs=0
+    web="$(mudados '^(frontend|packages/core)/')"
+    [[ -n "$(mudados '^(messages|project\.inlang)/')" ]] && msgs=1
+    grep -qE '\.(ts|svelte)$' <<< "$web" && tipos=1
+    npm run i18n:compile -w frontend > /dev/null || return 1
+    # Dependência ou configuração mudou: não há "relacionado", vale tudo (menos o build, que é do CI).
+    if [[ -n "$(mudados '^(package(-lock)?\.json|(frontend|packages/core)/(package\.json|tsconfig[^/]*\.json|vite[^/]*\.ts|vitest[^/]*\.ts|svelte\.config\.js))$')" ]]; then
+        (cd packages/core && npx tsc --noEmit -p tsconfig.json && npx vitest run) || return 1
+        (cd frontend && npx svelte-check --tsconfig ./tsconfig.app.json --threshold error && npx vitest run)
+        return
+    fi
+    if (( tipos || msgs )); then
+        (cd packages/core && npx tsc --noEmit -p tsconfig.json) || return 1
+        (cd frontend && npx svelte-check --tsconfig ./tsconfig.app.json --threshold error) || return 1
+    fi
+    while IFS= read -r f; do [[ -n "$f" && -f "$f" ]] && rel+=("$PWD/$f"); done <<< "$web"
+    (( msgs )) && rel+=("$PWD/frontend/src/lib/i18nGuard.test.ts")
+    (( ${#rel[@]} )) || return 0
+    (cd packages/core && npx vitest related --run --passWithNoTests "${rel[@]}") || return 1
+    (cd frontend && npx vitest related --run --passWithNoTests "${rel[@]}")
+}
+
+passo_mobile_rapido() {
+    local app f rel=()
+    app="$(mudados '^mobile/')"
+    npm run i18n:compile --prefix mobile > /dev/null || return 1
+    # Dependência ou configuração do app mudou: não há "relacionado", vale tudo.
+    if [[ -n "$(mudados '^mobile/(package(-lock)?\.json|tsconfig[^/]*\.json|vitest[^/]*\.ts|babel\.config\.js|metro\.config\.js|app\.json|eas\.json|plugins/.*)$')" ]]; then
+        (cd mobile && npx tsc --noEmit && npx vitest run)
+        return
+    fi
+    if grep -qE '\.(ts|tsx)$' <<< "$app"; then (cd mobile && npx tsc --noEmit) || return 1; fi
+    while IFS= read -r f; do [[ -n "$f" && -f "$f" ]] && rel+=("$PWD/$f"); done <<< "$app"
+    (( ${#rel[@]} )) || return 0
+    (cd mobile && npx vitest related --run --passWithNoTests "${rel[@]}")
+}
+
 
 # ── execução na árvore fixa (Linux em processo; Windows chega por `bash -s` via SSH) ──────────
 
@@ -279,7 +415,7 @@ vigiar_disco() {   # $1 = pid do passo, $2 = log
 
 executar() {   # $1 = so, $2 = sha, $3 = bundle ("-" = sem bundle), resto = passos
     SO="$1"; local sha="$2" bundle="$3"; shift 3
-    PROCESSOS="${HANGAR_VERIFICAR_PROCESSOS:-1}"; PLANO="$*"
+    PROCESSOS="${HANGAR_VERIFICAR_PROCESSOS:-1}"; PLANO="$*"; ARQUIVOS="${HANGAR_VERIFICAR_ARQUIVOS:-}"
     preparar_arvore "$sha" "$bundle" || return $?
     if [[ "$SO" == windows ]]; then rodar_passos "$sha" "$@"; return; fi
     NODE_DIR="$(node_da_arvore)"
@@ -314,7 +450,11 @@ rodar_em_faixas() {   # $1 = sha, resto = passos
         if (( PROCESSOS == 1 )); then web+=("$p")
         else
             # front e mobile juntos: os dois compilam as mensagens do core no mesmo lugar.
-            case "$p" in rust|backend|nativo) faixas+=("$p") ;; front|mobile) web+=("$p") ;; *) leves+=("$p") ;; esac
+            case "$p" in
+                rust|backend|nativo|rust_rapido|backend_rapido) faixas+=("$p") ;;
+                front|mobile|front_rapido|mobile_rapido) web+=("$p") ;;
+                *) leves+=("$p") ;;
+            esac
         fi
     done
     (( ${#web[@]} )) && faixas+=("${web[*]}")
@@ -362,6 +502,7 @@ preparar_arvore() {   # $1 = sha, $2 = bundle ("-" = sem bundle); usa $SO
     if [[ "$SO" == linux ]]; then
         [[ ! -d crates/target ]] || "$(dirname "$SCRIPT")/podar-target" crates/target >&3
         podar_target crates/target $(( ${HANGAR_VERIFICAR_TARGET_GB:-40} * 1048576 )) >&3
+        podar_target desktop-native/target $(( ${HANGAR_VERIFICAR_TARGET_GB:-40} * 1048576 / 2 )) >&3
     fi
     local livre minimo=4
     livre="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
@@ -392,7 +533,7 @@ rodar_passos() {   # $1 = sha, resto = passos; cwd = árvore preparada
         echo ">> $SO: $p…" >&3
         ini=$SECONDS
         # setsid no Linux: o passo vira grupo próprio e o vigia mata a árvore inteira.
-        "${LIMPO[@]}" SO="$SO" $SETSID bash -c "$(declare -f); $(declare -p RUNTIME_TESTS PROCESSOS PLANO); passo_$p" >"$log" 2>&1 &
+        "${LIMPO[@]}" SO="$SO" $SETSID bash -c "$(declare -f); $(declare -p RUNTIME_TESTS PROCESSOS PLANO ARQUIVOS); passo_$p" >"$log" 2>&1 &
         local spid=$! vigia rc
         vigiar_disco "$spid" "$log" &
         vigia=$!
@@ -423,23 +564,41 @@ gravar() {   # $1 = sha, $2 = so, $3 = base, resto = passos
     mkdir -p "$ESTADO/resultados"
     arq="$(registro "$sha" "$so")"
     [[ -f "$arq" ]] && read -ra ja <<< "$(sed -n 's/^passos=//p' "$arq")"
+    # O registro guarda uma base só: rápido gravado com outra base deixa de valer junto com ela.
+    if [[ -f "$arq" && "$(sed -n 's/^base=//p' "$arq")" != "$base" ]]; then
+        local manter=()
+        for p in "${ja[@]}"; do [[ "$p" == *_rapido ]] || manter+=("$p"); done
+        ja=("${manter[@]}")
+    fi
     # shellcheck disable=SC2207
-    ja+=($(faltando "$arq" "$@"))
+    ja+=($(BASE_ATUAL="$base" faltando "$arq" "$@"))
     printf 'commit=%s\nbase=%s\npassos=%s\nquando=%s\n' "$sha" "$base" "${ja[*]}" "$(date -Is)" > "$arq"
 }
 
 # Passos de $2.. que o registro $1 não cobre, na ordem dada.
 faltando() {
-    local arq="$1" feitos="" p saida=()
+    local arq="$1" feitos="" p saida=() base_reg
     shift
     [[ -f "$arq" ]] && feitos=" $(sed -n 's/^passos=//p' "$arq") "
-    for p in "$@"; do [[ "$feitos" == *" $p "* ]] || saida+=("$p"); done
+    # O rápido olhou só o diff desde a base dele: vale se ela é a pedida ou mais velha (diff maior).
+    base_reg="$(sed -n 's/^base=//p' "$arq" 2>/dev/null)"
+    if [[ -n "${BASE_ATUAL:-}" && -n "$base_reg" ]] && ! git merge-base --is-ancestor "$base_reg" "$BASE_ATUAL" 2>/dev/null; then
+        local f completos=" "
+        for f in $feitos; do [[ "$f" == *_rapido ]] || completos+="$f "; done
+        feitos="$completos"
+    fi
+    # O passo completo cobre o rápido da mesma área; o rápido nunca cobre o completo.
+    for p in "$@"; do [[ "$feitos" == *" $p "* || ( "$p" == *_rapido && "$feitos" == *" ${p%_rapido} "* ) ]] || saida+=("$p"); done
     echo "${saida[*]}"
 }
 
 # ── Windows pela VM ───────────────────────────────────────────────────────────────────────────
 
-vm_ssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@" 2> >(grep -v 'post-quantum\|store now\|upgraded\|openssh.com' >&2); }
+# Keepalive: VM que para de responder no meio derruba a conexão em ~1 min em vez de pendurar.
+vm_ssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$VM" "$@" \
+    2> >(grep -v 'post-quantum\|store now\|upgraded\|openssh.com' >&2); }
+# Teto da rodada inteira na VM: VM travada já segurou a fila da máquina por mais de uma hora.
+VM_MAX="${HANGAR_VERIFICAR_WINDOWS_MAX:-600}"
 
 vm_rodar() {   # $1 = sha, resto = passos; saída inteira no stdout
     local sha="$1"; shift
@@ -471,15 +630,19 @@ vm_rodar() {   # $1 = sha, resto = passos; saída inteira no stdout
     # abaixo do normal passa para os filhos (cargo, pytest) e não disputa com o Hangar da VM.
     ps="\$ProgressPreference='SilentlyContinue'
 \$m = New-Object System.Threading.Mutex(\$false, 'Global\\hangar-verificacao')
-try { [void]\$m.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+try { if (-not \$m.WaitOne(${VM_MAX}000)) { 'verificar-local: outra verificação ocupa a VM'; exit 3 } } catch [System.Threading.AbandonedMutexException] { }
 [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal'
 & 'C:\\Program Files\\Git\\bin\\bash.exe' -s -- --executar windows $sha $([[ $nome == - ]] && echo - || echo "$VM_WIN/$nome") $*
 \$rc = \$LASTEXITCODE
 \$m.ReleaseMutex()
 exit \$rc"
     b64="$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)"
-    vm_ssh "powershell -NoProfile -NonInteractive -EncodedCommand $b64" < "$SCRIPT" | tr -d '\r'
-    return "${PIPESTATUS[0]}"
+    timeout --kill-after=10 "$VM_MAX" ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+        "$VM" "powershell -NoProfile -NonInteractive -EncodedCommand $b64" < "$SCRIPT" \
+        2> >(grep -v 'post-quantum\|store now\|upgraded\|openssh.com' >&2) | tr -d '\r'
+    local rc="${PIPESTATUS[0]}"
+    (( rc == 124 || rc == 137 )) && echo "verificar-local: a VM $VM não terminou em ${VM_MAX}s; Windows não verificado"
+    return "$rc"
 }
 
 # Poda do target acima do teto, do que volta mais barato ao mais caro: o cache incremental, depois os
@@ -537,6 +700,17 @@ if [[ "${1:-}" == --classificar ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == --classificar-rapido ]]; then
+    classificar_rapido
+    exit 0
+fi
+
+if [[ "${1:-}" == --faltando ]]; then   # uso do teste: --faltando <registro> passos…
+    shift
+    faltando "$@"
+    exit 0
+fi
+
 if [[ "${1:-}" == --executar ]]; then
     shift
     { true >&3; } 2>/dev/null || exec 3>&1
@@ -544,12 +718,13 @@ if [[ "${1:-}" == --executar ]]; then
     exit $?
 fi
 
-commit=HEAD base="" tudo=0 so="" modo=rodar de_novo=0 so_passos=""
+commit=HEAD base="" tudo=0 completo=0 so="" modo=rodar de_novo=0 so_passos=""
 while (( $# )); do
     case "$1" in
         --commit) commit="${2:?}"; shift ;;
         --base) base="${2:?}"; shift ;;
         --tudo) tudo=1 ;;
+        --completo) completo=1 ;;
         --de-novo) de_novo=1 ;;
         --so) so="${2:?}"; shift ;;
         --passos) so_passos="${2:?}"; shift ;;
@@ -560,6 +735,8 @@ while (( $# )); do
     esac
     shift
 done
+
+(( completo || tudo )) && VM_MAX="${HANGAR_VERIFICAR_WINDOWS_MAX:-2400}"
 
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 sha="$(git rev-parse --verify -q "$commit^{commit}")" || erro "commit inválido: $commit"
@@ -573,13 +750,14 @@ if [[ -n "$base" ]]; then
 else
     base="$(base_padrao "$sha")"
 fi
+BASE_ATUAL="$base"
 
 if (( tudo )); then
     plano_lin="$TODOS_LINUX"; plano_win="$TODOS_WINDOWS"
 else
     # quotepath=off: caminho com acento sairia entre aspas e escaparia dos padrões.
     arquivos="$(git -c core.quotepath=off diff --name-only --no-renames "$base" "$sha")" || erro "não consegui comparar $base com $sha"
-    plano="$(classificar <<< "$arquivos")"
+    if (( completo )); then plano="$(classificar <<< "$arquivos")"; else plano="$(classificar_rapido <<< "$arquivos")"; fi
     plano_lin="$(sed -n 's/^linux: //p' <<< "$plano")"
     plano_win="$(sed -n 's/^windows: //p' <<< "$plano")"
 fi
@@ -593,7 +771,9 @@ filtrar() {   # $1 = lista, resto = passos aceitos; imprime a lista só com os a
     echo "${saida[*]}"
 }
 if [[ -n "$so_passos" ]]; then
-    for p in $so_passos; do [[ " $TODOS_LINUX " == *" $p "* ]] || erro "passo desconhecido: $p"; done
+    for p in $so_passos; do [[ " $TODOS_LINUX $RAPIDOS " == *" $p "* ]] || erro "passo desconhecido: $p"; done
+    # O rápido precisa da lista de arquivos mudados, que o --tudo não calcula.
+    (( tudo )) && [[ " $so_passos " == *"_rapido "* ]] && erro "--tudo roda passos completos; sem passo rápido"
     # shellcheck disable=SC2086
     plano_lin="$(filtrar "$plano_lin" $so_passos)"
     # shellcheck disable=SC2086
@@ -687,7 +867,7 @@ exec 3> >(marcar "$ANDAMENTO" >&2)
     rl=0
     if [[ -n "$plano_lin" ]]; then
         # shellcheck disable=SC2086
-        ORIGEM="$ORIGEM" HANGAR_VERIFICAR_PROCESSOS="$PROCESSOS" nice -n 10 ionice -c 3 \
+        ORIGEM="$ORIGEM" HANGAR_VERIFICAR_PROCESSOS="$PROCESSOS" HANGAR_VERIFICAR_ARQUIVOS="${arquivos:-}" nice -n 10 ionice -c 3 \
             bash "$SCRIPT" --executar linux "$sha" - $plano_lin 9>&- | tee "$saida_lin"
         rl=${PIPESTATUS[0]}
     fi
