@@ -1553,6 +1553,8 @@ impl Results {
             let mut sessions = self.held_sessions();
             sessions.retain(|s| !self.listening_to(s));
             let count = self.queue.iter().filter(|(s, _)| !s.is_empty() && !self.listening_to(s)).count();
+            // Sessão que passou a ser ouvida sai da conta do aviso já feito; sem baixar, o próximo de outra não seria avisado.
+            self.offered = self.offered.min(count);
             if count > self.offered { self.offered = count; self.offer = Some(offer_text(count, &sessions)); }
         }
         // Em silêncio só passa a resposta de ask_session (sessão vazia): foi o usuário quem perguntou. Com o aviso à espera
@@ -2681,6 +2683,23 @@ mod tests {
         assert!(results.set_user_talking(false).is_some() && results.take_offer().is_none(), "ele pediu para acompanhar");
         results.listen("hangar", false);
         assert!(asks_again_for_deploy_named(results, "hangar"), "parou de acompanhar: volta a perguntar");
+    }
+
+    #[test]
+    fn following_mid_offer_still_offers_the_next_of_another_session() {
+        let mut results = Results::default();
+        results.set_user_talking(true);
+        results.push("deploy".into(), "a".into());
+        results.push("hangar".into(), "b".into());
+        results.set_user_talking(false);
+        assert!(results.take_offer().unwrap().contains("dois resultados"));
+        results.listen("deploy", true);
+        results.turn_started();
+        assert!(results.turn_completed().unwrap()["input"][0]["text"].as_str().unwrap().contains("deploy"), "a acompanhada sai");
+        results.turn_started();
+        results.push("hangar".into(), "c".into());
+        assert!(results.turn_completed().is_none());
+        assert!(results.take_offer().unwrap().contains("dois resultados da hangar"), "a hangar cresceu: avisa");
     }
 
     #[test]
