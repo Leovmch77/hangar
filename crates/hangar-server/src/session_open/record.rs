@@ -45,6 +45,19 @@ pub fn read(home: &Path, key: &str) -> io::Result<Option<SessionSpec>> {
     Ok(Some(spec))
 }
 
+/// O spec que vale para reabrir a sessão viva `name`: o registro dela (pela `key` do sidecar), senão
+/// o montado do sidecar. No Codex o modo que o `hangar-codex-tui` gravou por último no sidecar (só
+/// valor válido) vence o da criação: o estado observado vale, como no S-02 do Claude.
+pub fn live(home: &Path, name: &str) -> io::Result<Option<SessionSpec>> {
+    let Some(sidecar) = from_sidecars(home, name)? else { return Ok(None) };
+    let Some(mut spec) = read(home, &sidecar.key)? else { return Ok(Some(sidecar)) };
+    if spec.provider == AgentProvider::Codex && sidecar.permission_mode.is_some() {
+        spec.permission_mode = sidecar.permission_mode;
+    }
+    spec.name = sidecar.name;
+    Ok(Some(spec))
+}
+
 fn text(meta: &Value, key: &str) -> Option<String> { meta[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned) }
 
 /// Spec de uma sessão viva que nasceu antes do registro, montado do sidecar dela. A conta gravada

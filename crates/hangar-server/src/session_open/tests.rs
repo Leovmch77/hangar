@@ -506,6 +506,24 @@ fn live_sessions_without_a_record_get_their_spec_from_the_sidecar() {
     assert_eq!(record::from_sidecars(home.path(), "pi-sem-sidecar").unwrap(), None);
 }
 
+/// Codex vivo: o modo que o `hangar-codex-tui` gravou por último no sidecar vence o da criação
+/// (valor válido só); o resto vem do registro, e sem registro, do sidecar.
+#[test]
+fn a_live_codex_session_keeps_the_mode_its_terminal_last_wrote() {
+    let key = "b".repeat(32);
+    let written = |mode: &str| sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| m["permission_mode"] = json!(mode));
+    let born = SessionSpec { key: key.clone(), name: "mae-codex".into(), model: Some("gpt-5.5".into()),
+        permission_mode: Some(PermissionMode::AskForApproval), ..fixture_spec("create_codex_headless_default") };
+    let home = written("Full Access");
+    assert_eq!(record::live(home.path(), "mae-codex").unwrap().unwrap().permission_mode, Some(PermissionMode::FullAccess), "sem registro, o sidecar");
+    record::write(home.path(), &born).unwrap();
+    let spec = record::live(home.path(), "mae-codex").unwrap().unwrap();
+    assert_eq!((spec.permission_mode, spec.model.as_deref()), (Some(PermissionMode::FullAccess), Some("gpt-5.5")));
+    let home = written("Tudo");
+    record::write(home.path(), &born).unwrap();
+    assert_eq!(record::live(home.path(), "mae-codex").unwrap().unwrap().permission_mode, Some(PermissionMode::AskForApproval), "valor inválido não vence");
+}
+
 /// Sidecar quebrado não é "sessão sem sidecar": quem reabre ou herda precisa saber que não leu.
 #[test]
 fn unreadable_sidecars_are_errors_not_absent() {
