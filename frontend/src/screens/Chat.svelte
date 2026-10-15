@@ -786,6 +786,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // neste repo) e passa pelo mesmo scan de tmux+/proc do registry que o poll da lista — refazer
   // isso a cada 5s dobrava a taxa de scan e ~47 MB/h de tráfego à toa no celular via Tailscale.
   const planName = $derived(planSession?.plan_name ?? null);
+  // Primitivo, pelo mesmo motivo do `planName`: `allSessions` troca de referência a cada lista.
+  const pluginServersKey = $derived((planSession?.plugin_tool_servers ?? []).join('\n'));
+  const pluginServers = $derived(pluginServersKey ? pluginServersKey.split('\n') : []);
   // Busca só quando o plano MUDA de nome E o painel que o mostra PODE estar visível — os MESMOS
   // sinais que já decidem a renderização (`desktop && showContextPanel` no DesktopSessionContext;
   // `activityOpen` na ActivitySheet mobile). Sem isto o fetch rodava até com a sessão em split/
@@ -3491,6 +3494,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {stateEvent}
       {pending}
       {sessionName}
+      {pluginServers}
       agentesRodando={activity.agents.filter((a) => a.running)}
       onFimDoLocal={pedirMaisAntigos}
       {ancora}

@@ -3,7 +3,7 @@
   import { computeEditDiff, extractEdits, extractEditPaths, diffFromPatch, diffFromEdits, extractFilePath, pseudoCaminhoPorConteudo, htmlPageFromResult, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
-  import { getBashOutput, getToolProgress, nomeFerramenta, separarComando, type EtapaFerramenta } from '@hangar/core';
+  import { getBashOutput, getToolProgress, nomeFerramenta, separarComando, terminalToolName, type EtapaFerramenta } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { pollSequential } from '../lib/pollSequential';
   import { fmtDur } from '../lib/fmt';
@@ -165,11 +165,8 @@
     const p = extractFilePath(event.tool_input) || String((event.tool_input as Record<string, unknown> | null)?.['notebook_path'] ?? '');
     return p ? fileName(p, summary) : summary;
   });
-  // Pele 'terminal': Edit e MultiEdit aparecem como "Update", o nome que o terminal usa.
-  const termName = $derived(
-    TERM_UPDATE_TOOLS.includes((event.tool_name ?? '').toLowerCase())
-      ? 'Update' : nomeFerramenta(event.tool_name),
-  );
+  // Pele 'terminal': "Update" na edição e "servidor - ferramenta (MCP)", os nomes que o Claude Code usa.
+  const termName = $derived(terminalToolName(event.tool_name));
   // Os caminhos só servem quando o resultado não trouxe patch (mesma regra do `numberedDiff`).
   const termDiff = $derived.by(() => {
     if (!showDiff || !editEdits) return null;

@@ -13,6 +13,7 @@
   import { enhanceTables } from '../lib/tableChartMount';
   import { tableChartPref } from '../lib/tableChartPref.svelte';
   import { Typewriter } from '../lib/typewriter.svelte';
+  import { toolLook } from '../lib/toolLook.svelte';
 
   interface Props {
     text: string;
@@ -172,7 +173,7 @@
 
 <!-- ponytail: sem long-press aqui de proposito — o timer de 500ms roubava o gesto de SELECIONAR
      texto do iOS (segurar abria a sheet de encaminhar). As acoes moram na linha do horario. -->
-<div class="assistant-msg" class:noanim={!animate} class:preview>
+<div class="assistant-msg" class:noanim={!animate} class:preview class:term={toolLook.look === 'terminal'}>
   {#if preview}
     <!-- Preview ao vivo: texto PLANO (markdown so no snap final canonico, pra nao piscar **/code-fence
          meio-aberto) + caret. Mesma casca da bolha real -> swap quase invisivel. -->
@@ -318,6 +319,18 @@
     font-size: calc(var(--text-base) * var(--cp-text-scale, 1));
     line-height: calc(1.6 * var(--cp-lh-scale, 1));
   }
+
+  /* Pele 'terminal': "● texto", como o Claude Code. O ponto mora no recuo do próprio .prose, que é
+     relative e pode cortar o que transborda; `0.5lh` o centra na primeira linha com a entrelinha
+     que valer (1,6 no celular, 1,7 a partir de 820px, vezes a escala da Aparência). */
+  .assistant-msg.term > .prose { position: relative; padding-left: 15px; }
+  .assistant-msg.term > .prose::before {
+    content: ''; position: absolute; left: 0;
+    top: calc(0.5lh - 3.5px);
+    width: 7px; height: 7px; border-radius: 50%; background: var(--text-primary);
+  }
+  /* Anexos (raiz `.atts` do FileAttachment) e ações alinham com o texto, depois do ponto. */
+  .assistant-msg.term > :global(.atts), .assistant-msg.term > .msg-actions { margin-left: 15px; }
 
   .prose :global(p) { margin: 0; }
   /* Linhas consecutivas (sem linha em branco) = mesmo bloco: quase coladas. Paragrafo REAL (linha

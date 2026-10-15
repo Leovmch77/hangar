@@ -14,8 +14,10 @@
     toolResults: { get: (id: string) => ChatEvent | undefined };
     sessionName: string;
     animate?: boolean;   // false = grupo de HISTORICO remontado (paginacao/janela): sem fade
+    /** Servidores MCP criados por plugin: ficam fora da dobra, como no Claude Code. */
+    pluginServers?: readonly string[];
   }
-  let { tools, toolResults, sessionName, animate = true }: Props = $props();
+  let { tools, toolResults, sessionName, pluginServers = [], animate = true }: Props = $props();
 
   // Colapsado por padrao: o burst vira UMA linha — cabecalho com a contagem. A arvore de uma linha
   // por chamada saiu: 22 Bash viravam 22 linhas de scroll, e o argumento que ela mostrava e o mesmo
@@ -68,7 +70,7 @@
 
   // Pele 'terminal': sem moldura de grupo. Buscas, leituras, MCP e comandos seguidos somam numa linha
   // cinza, como no Claude Code; edição nunca fica escondida.
-  const termParts = $derived(toolLook.look === 'terminal' ? splitTerminalRun(tools) : []);
+  const termParts = $derived(toolLook.look === 'terminal' ? splitTerminalRun(tools, pluginServers) : []);
   let openFolds = $state<Record<string, boolean>>({});
   const faseDe = $derived(new Map(tools.map((t, i) => [t, phases[i]])));
   // Na pele 'terminal' uma chamada só também passa pela dobra, como o "Ran 1 shell command" do Claude Code.
@@ -93,7 +95,11 @@
         {@const key = part.tools[0].id}
         {@const viva = part.tools.findLast((t) => faseDe.get(t) === 'pending') ?? null}
         <button type="button" class="tg-fold" aria-expanded={!!openFolds[key]}
-                onclick={() => (openFolds[key] = !openFolds[key])}>{terminalFoldTitle(part.tools, viva !== null)}</button>
+                onclick={() => (openFolds[key] = !openFolds[key])}>
+          <!-- O ponto só enquanto roda; terminada, o espaço dele fica e o texto não anda, como no Claude Code. -->
+          <span class="tg-fold-lead" aria-hidden="true">{#if viva}<span class="tg-fold-dot"></span>{/if}</span>
+          <span>{terminalFoldTitle(part.tools, viva !== null)}</span>
+        </button>
         {#if openFolds[key]}
           {#each part.tools as t (t.id)}
             <ToolCard event={t} result={resultOf(t)} {sessionName} {animate} />
@@ -186,12 +192,18 @@
 <style>
   .tg-term { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
   .tg-fold {
-    justify-content: flex-start; min-height: 24px; padding: 0 0 0 14px; border: 0; background: transparent;
+    display: flex; align-items: center; gap: 8px;
+    justify-content: flex-start; min-height: 24px; padding: 0; border: 0; background: transparent;
     font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55;
     color: var(--text-muted); text-align: left; cursor: pointer;
   }
+  .tg-fold-lead { flex: none; width: 7px; display: inline-flex; align-items: center; }
+  .tg-fold-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    animation: pulse-scale 1.2s ease-in-out infinite;
+  }
   .tg-fold-sub {
-    display: flex; gap: 8px; min-width: 0; padding-left: 14px;
+    display: flex; gap: 8px; min-width: 0; padding-left: 15px;
     font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55; color: var(--text-muted);
   }
   .tg-fold-txt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

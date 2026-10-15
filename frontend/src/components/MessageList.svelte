@@ -113,13 +113,15 @@
     ancora?: number;
     /** Mensagem pra abrir rolada até ela (trecho escolhido na busca). */
     focoId?: string | null;
+    /** Servidores MCP criados por plugin: a pele 'terminal' deixa as chamadas deles fora da dobra. */
+    pluginServers?: readonly string[];
   }
 
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
-    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
+    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null, pluginServers = []
   }: Props = $props();
   const sessionServer = useSessionServer();
 
@@ -546,7 +548,7 @@
       {#if item.type === 'tasks'}
         <TaskRows tasks={tarefas} />
       {:else if item.type === 'group'}
-        <ToolGroup tools={item.tools} toolResults={{ get: resultadoDe }} {sessionName} animate={!histIds.has(item.tools[0].id)} />
+        <ToolGroup tools={item.tools} toolResults={{ get: resultadoDe }} {sessionName} {pluginServers} animate={!histIds.has(item.tools[0].id)} />
         {#if plan?.eventId && item.tools.some((tool) => tool.id === plan?.eventId)}
           <SessionPlanPreview {...planoProps()} />
         {/if}
