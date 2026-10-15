@@ -14,6 +14,7 @@ pub mod routes;
 pub mod rpc;
 pub mod rules;
 pub mod settings;
+pub mod transcript;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod usage;
