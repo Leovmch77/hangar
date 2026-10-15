@@ -440,23 +440,37 @@ impl Api {
     }
 
     /// Mesmo túnel e mesmos pré-requisitos do compartilhamento: o 409 devolve o que falta.
-    pub async fn create_pair_invite(&self, name: &str) -> Result<PairInvite, ShareFailure> {
-        self.post_with_prerequisites(name, "pair-invite", None).await
+    pub async fn create_pair_invite(&self, name: &str, level: PairLevel) -> Result<PairInvite, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-invite", Some(json!({"level": level.wire()}))).await
     }
 
-    pub async fn accept_pair(&self, name: &str, link: &str) -> Result<PairAccepted, ShareFailure> {
-        self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link}))).await
+    /// `level`: o que quem convidou terá aqui.
+    pub async fn accept_pair(&self, name: &str, link: &str, level: PairLevel) -> Result<PairAccepted, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link, "level": level.wire()}))).await
     }
 
-    // Rota que sobe o Funnel: 409 de pré-requisito vira `Blocked`, e o resto segue como falha comum.
+    /// Nível que o par `alias` tem na sessão `name` (o "Liberar" e o pôr no grupo com acesso completo).
+    pub async fn pair_access(&self, name: &str, alias: &str, level: PairLevel) -> Result<(), Failure> {
+        self.act(name, &["pair-access"], Some(json!({"alias": alias, "level": level.wire()})), false, 30).await.map(|_| ())
+    }
+
+    /// Desfaz o par com `alias::session` dos dois lados: "Sair do pareamento" e "Desfazer par".
+    pub async fn leave_external_pair(&self, alias: &str, session: &str) -> Result<(), Failure> {
+        self.server_send_query(reqwest::Method::DELETE, &["external-pairs", alias], &[("session", session)], None, 30).await.map(|_| ())
+    }
+
+    // Rota que sobe o Funnel: as recusas de `share_refusal` têm tela própria, e o resto segue como falha comum. O
+    // servidor só responde com o link do Funnel aberto de fora: até 20 s do `tailscale status` mais 3 min de conferência,
+    // então o prazo daqui fica acima disso para não desistir na véspera da resposta.
     async fn post_with_prerequisites<T: serde::de::DeserializeOwned>(&self, name: &str, action: &str, body: Option<Value>) -> Result<T, ShareFailure> {
-        let mut req = self.client.post(self.endpoint(Some(name), Some(action))).timeout(Duration::from_secs(60));
+        let mut req = self.client.post(self.endpoint(Some(name), Some(action))).timeout(Duration::from_secs(220));
         if let Some(body) = body { req = req.json(&body); }
         let r = req.send().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
-        if r.status() == StatusCode::CONFLICT {
+        let status = r.status().as_u16();
+        if matches!(status, 404 | 405 | 409) {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
-            if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
-            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false, code: None }));
+            if let Some(refusal) = share_refusal(status, &body) { return Err(refusal); }
+            return Err(ShareFailure::Other(Failure { status: Some(status), detail: failure_detail(Some(body), status), retry_after: None, uncertain: false, code: None }));
         }
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
     }
@@ -740,8 +754,17 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 /// O convite de par tem a mesma forma do de compartilhamento: link e validade.
 pub type PairInvite = ShareCreated;
 
+/// Nível do par: `Full` escreve e tem o terminal; `View` lê e manda recado. Ausente (Hangar antigo) é `View`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairLevel { Full, #[default] View }
+
+impl PairLevel {
+    pub fn wire(self) -> &'static str { match self { PairLevel::Full => "full", PairLevel::View => "view" } }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
-pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String }
+pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String, #[serde(default)] pub level: PairLevel }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
@@ -758,7 +781,27 @@ fn tailscale_link<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     Ok(value.filter(|url| url.starts_with("https://login.tailscale.com/")))
 }
 
-pub enum ShareFailure { Blocked(SharePrereqs), Other(Failure) }
+/// `Unreachable`: o link do Funnel não abriu de fora no prazo (o servidor já revogou o convite); `NeedsRust`: a rota não
+/// existe (backend sem o servidor Rust).
+pub enum ShareFailure { Blocked(SharePrereqs), Unreachable { stage: String, detail: String }, NeedsRust, Other(Failure) }
+
+/// Recusa da criação que a tela trata à parte; o resto segue como falha comum.
+pub fn share_refusal(status: u16, body: &Value) -> Option<ShareFailure> {
+    match status {
+        // Só a rota ausente (sem código) ou a recusa explícita do Python; o 404 com código do Rust é falha comum.
+        404 | 405 => match body.get("detail").and_then(|d| d.get("code")).and_then(Value::as_str) {
+            None | Some("share_needs_rust_server") => Some(ShareFailure::NeedsRust),
+            Some(_) => None,
+        },
+        409 => share_blocked(body).map(ShareFailure::Blocked).or_else(|| {
+            let detail = body.get("detail")?;
+            if detail.get("code")?.as_str()? != "share_reach_failed" { return None; }
+            let field = |k: &str| detail.get("params").and_then(|p| p.get(k)).and_then(Value::as_str).unwrap_or_default().to_owned();
+            Some(ShareFailure::Unreachable { stage: field("stage"), detail: field("detail") })
+        }),
+        _ => None,
+    }
+}
 
 /// Lista vazia ainda é pré-requisito: o `fix` diz o que fazer.
 pub fn share_blocked(body: &Value) -> Option<SharePrereqs> {
@@ -812,6 +855,23 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn coded_not_found_is_not_needs_rust() {
+        let missing = json!({"detail": {"code": "erro_sessao_inexistente", "msg": "x"}});
+        assert!(share_refusal(404, &missing).is_none());
+        let python = json!({"detail": {"code": "share_needs_rust_server", "msg": "x"}});
+        assert!(matches!(share_refusal(404, &python), Some(ShareFailure::NeedsRust)));
+        assert!(matches!(share_refusal(405, &json!({"detail": "Method Not Allowed"})), Some(ShareFailure::NeedsRust)));
+    }
+
+    #[test]
+    fn pair_accept_without_level_is_view() {
+        let old: PairAccepted = serde_json::from_value(json!({"ok": true, "alias": "a", "owner": "Ana", "session": "Y"})).unwrap();
+        assert_eq!(old.level, PairLevel::View);
+        let new: PairAccepted = serde_json::from_value(json!({"alias": "a", "owner": "Ana", "session": "Y", "level": "full"})).unwrap();
+        assert_eq!((new.level, new.level.wire()), (PairLevel::Full, "full"));
+    }
 
     #[test]
     fn dictation_client_defaults_to_no_organization_without_loading_any_model() {

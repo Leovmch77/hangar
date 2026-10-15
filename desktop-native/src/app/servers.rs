@@ -56,6 +56,9 @@ pub(crate) fn upsert(list: &mut Vec<ServerEntry>, entry: ServerEntry) {
 }
 
 /// O que vai ao arquivo: a entrada só do par é refeita a cada abertura e nunca é gravada.
+/// Máquina que vira seção na barra: ligada e não só de par (a sessão de fora mora dentro do grupo).
+pub(super) fn has_section(s: &ServerEntry) -> bool { !s.disabled && !s.ephemeral }
+
 pub(crate) fn persistable(list: &[ServerEntry]) -> Vec<ServerEntry> { list.iter().filter(|s| !s.ephemeral).cloned().collect() }
 
 pub(crate) fn new_id() -> String {
@@ -107,7 +110,7 @@ impl Hangar {
         if generation != self.remote_gen { return false; }
         let invite = self.server_entry(&key).is_some_and(|s| s.invite);
         // 401 só é "encerrado" num convite; nos outros continua sendo login perdido.
-        let ended = |error: &Failure| error.status == Some(410) || (invite && error.status == Some(401));
+        let ended = |error: &Failure| error.status == Some(410) || (invite && super::invite::ends_invite(error.status));
         let Some(list) = self.remote.get_mut(&key) else { return false };
         // Ping e lista igual à de antes não redesenham: cada aviso aqui acordava todas as áreas.
         let mut changed = true;
@@ -348,7 +351,10 @@ impl Hangar {
     }
 
     /// Com mais de uma máquina, a barra separa por servidor (o "Servidor" padrão do web); a ativa vem na ordem da lista.
-    pub(super) fn multi_server(&self) -> bool { !self.remote.is_empty() }
+    /// Entrada só de par não conta: a sessão dela vai dentro do grupo, não numa seção.
+    pub(super) fn multi_server(&self) -> bool {
+        self.remote.keys().any(|key| self.servers.iter().any(|s| has_section(s) && norm(&s.address) == *key))
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +384,13 @@ mod tests {
         assert!(list[0].invite);
         let old: ServerEntry = serde_json::from_str(r#"{"id":"a","label":"PC","address":"http://127.0.0.1:8765","token":"t"}"#).unwrap();
         assert!(!old.invite);
+    }
+
+    #[test]
+    fn pair_only_entry_never_becomes_a_section() {
+        let entry = |invite, ephemeral, disabled| ServerEntry { invite, ephemeral, disabled, ..Default::default() };
+        assert!(!has_section(&entry(true, true, false)), "a entrada só do par fica fora da barra");
+        assert!(has_section(&entry(true, false, false)), "convite de compartilhar segue com a seção dele");
+        assert!(has_section(&entry(false, false, false)) && !has_section(&entry(false, false, true)));
     }
 }

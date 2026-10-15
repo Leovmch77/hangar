@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
-import type { LanInfo, Server } from '@hangar/core';
+import { reconcilePairEntries } from '@hangar/core';
+import type { ExternalPair, LanInfo, PairAttach, Server } from '@hangar/core';
 
 const KEY = 'cp_servers_v1';
 
@@ -37,7 +38,16 @@ export interface ServersState {
   ensureActive(id: string): boolean;
   limparAviso(): void;
   rememberLan(id: string, lan: LanInfo): void;
+  applyPairs(pairs: ExternalPair[]): PairAttach[];
+  markEnded(id: string): void;
+  ensureOwnActive(): void;
 }
+
+// Máquinas desta pessoa: a entrada de convite é da máquina de outra pessoa e não vira escolha.
+export const ownServers = (list: Server[]) => list.filter((s) => !s.invite);
+
+// A ativa guardada é sempre uma máquina própria: a entrada do par não é gravada e some ao reabrir.
+let lastOwnActive: string | null = null;
 
 export const useServers = create<ServersState>((set, get) => ({
   servers: [],
@@ -48,6 +58,7 @@ export const useServers = create<ServersState>((set, get) => ({
     try {
       const raw = await SecureStore.getItemAsync(KEY);
       const p: Persisted = raw ? JSON.parse(raw) : { servers: [], activeId: null };
+      lastOwnActive = p.activeId;
       set({ ...p, ready: true });
     } catch {
       // JSON corrompido ou SecureStore falhou: reseta pra vazio e libera a tela
@@ -56,7 +67,8 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   add({ baseUrl, token, label }) {
     const base = baseUrl.replace(/\/+$/, '');
-    const existing = get().servers.find((s) => s.baseUrl === base);
+    // Só máquina própria troca o token: a entrada do par no mesmo endereço tem o token de convidado.
+    const existing = get().servers.find((s) => s.baseUrl === base && !s.invite);
     const s: Server = existing
       ? { ...existing, token }
       : { id: `s_${Date.now().toString(36)}`, label: label ?? hostLabel(base), baseUrl: base, token };
@@ -67,7 +79,7 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   remove(id) {
     const servers = get().servers.filter((s) => s.id !== id);
-    const activeId = get().activeId === id ? (servers[0]?.id ?? null) : get().activeId;
+    const activeId = get().activeId === id ? (ownServers(servers)[0]?.id ?? null) : get().activeId;
     void persistir(set, { servers, activeId });
     set({ servers, activeId });
   },
@@ -79,6 +91,8 @@ export const useServers = create<ServersState>((set, get) => ({
     return get().servers.find((s) => s.id === get().activeId) ?? null;
   },
   markInvalid(id) {
+    // Convite recusado é par/compartilhamento que acabou, não máquina a remover.
+    if (get().servers.find((s) => s.id === id)?.invite) { get().markEnded(id); return; }
     const label = get().servers.find((s) => s.id === id)?.label ?? '';
     get().remove(id);
     set({ aviso: { tipo: 'token', label } });
@@ -90,6 +104,21 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   limparAviso() {
     set({ aviso: null });
+  },
+  applyPairs(pairs) {
+    const { servers, attach } = reconcilePairEntries(get().servers, pairs, () => `p_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
+    const activeId = servers.some((s) => s.id === get().activeId) ? get().activeId : lastOwnActive;
+    set({ servers, activeId });
+    return attach;
+  },
+  ensureOwnActive() {
+    const list = get().servers;
+    if (!list.find((s) => s.id === get().activeId)?.invite) return;
+    const own = list.find((s) => s.id === lastOwnActive && !s.invite) ?? list.find((s) => !s.invite);
+    if (own) set({ activeId: own.id });
+  },
+  markEnded(id) {
+    set({ servers: get().servers.map((s) => (s.id === id && s.invite ? { ...s, inviteEnded: true } : s)) });
   },
   rememberLan(id, lan) {
     const servers = get().servers.map((s) => (s.id === id ? { ...s, lan } : s));
@@ -103,7 +132,10 @@ export const useServers = create<ServersState>((set, get) => ({
 // memória segue certo, a pessoa é avisada de que aquilo não sobreviveu a fechar o app, e não
 // descobre isso só no próximo boot com a lista vazia.
 function persistir(set: (p: Partial<ServersState>) => void, p: Persisted): Promise<void> {
-  return SecureStore.setItemAsync(KEY, JSON.stringify(p)).catch(() => {
+  const servers = p.servers.filter((s) => !s.ephemeral);
+  if (servers.some((s) => s.id === p.activeId) || p.activeId === null) lastOwnActive = p.activeId;
+  const salvo: Persisted = { servers, activeId: servers.some((s) => s.id === lastOwnActive) ? lastOwnActive : (servers[0]?.id ?? null) };
+  return SecureStore.setItemAsync(KEY, JSON.stringify(salvo)).catch(() => {
     set({ aviso: { tipo: 'persistencia' } });
   });
 }

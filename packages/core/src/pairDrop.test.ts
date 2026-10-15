@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canPair, canLeave } from './pairDrop';
+import { canPair, canLeave, pairAnchor } from './pairDrop';
 import type { AggSession } from './types';
 
 const s = (over: Partial<AggSession> = {}): AggSession =>
@@ -38,6 +38,21 @@ describe('canPair', () => {
     const comPeerRemoto = s({ name: 'b', pair_peers: ['srv2::outra'] });
     expect(canPair(comPeerRemoto, local)).toEqual({ ok: false, reason: 'cross_server' });
     expect(canPair(local, comPeerRemoto)).toEqual({ ok: false, reason: 'cross_server' });
+  });
+
+  it('membro de fora (par externo) não conta como par de outro servidor', () => {
+    const comFora = s({ name: 'b', pair_gid: 'g1', pair_peers: ['casa::h'],
+      pair_externals: [{ alias: 'casa', owner: 'Ana', session: 'h', address: 'https://casa.ts.net:8443', level: 'view', pending: false }] });
+    expect(canPair(s({ name: 'a' }), comFora)).toEqual({ ok: true });
+    expect(canPair(comFora, s({ name: 'a' }))).toEqual({ ok: true });
+  });
+
+  it('a linha de fora vale pela sessão local do grupo dela', () => {
+    const fora = s({ name: 'h', serverId: 'convite', pair_gid: 'g1',
+      outside: { alias: 'casa', owner: 'Ana', localServerId: 'srv1', localSession: 'b' } });
+    expect(canPair(s({ name: 'a' }), fora)).toEqual({ ok: true });
+    expect(canPair(s({ name: 'b', pair_gid: 'g1' }), fora)).toEqual({ ok: false, reason: 'same' });
+    expect(pairAnchor(fora)).toMatchObject({ serverId: 'srv1', name: 'b' });
   });
 
   it('recusa a linha do orquestrador, tanto na origem quanto no alvo', () => {

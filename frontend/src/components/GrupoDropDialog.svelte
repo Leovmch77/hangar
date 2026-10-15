@@ -6,8 +6,8 @@
   import ModalDialog from './ModalDialog.svelte';
   import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { withServer } from '../lib/auth';
-  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair } from '@hangar/core';
+  import { findServer, withServer } from '../lib/auth';
+  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, fullPairsByAlias, grantFull } from '@hangar/core';
   import type { AggSession } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
@@ -20,11 +20,34 @@
     return sessionsStore.rows.find((s) => s.serverId === chave.serverId && s.name === chave.name) ?? null;
   }
 
-  const origemSessao = $derived(porChave(pedido?.origem));
+  // A linha de fora entra no grupo pela sessão local que tem o par: é ela que o pedido usa.
+  function local(s: AggSession | null): AggSession | null {
+    if (!s?.outside) return s;
+    const a = pairAnchor(s);
+    return sessionsStore.rows.find((r) => r.serverId === a.serverId && r.name === a.name) ?? a;
+  }
+  // Sair nunca troca pela ponta: tiraria do grupo a sessão local e desfaria o par.
+  const origemSessao = $derived(pedido?.modo === 'sair' ? porChave(pedido.origem) : local(porChave(pedido?.origem)));
   const alvoSessao = $derived.by(() => {
     const p = pedido;
-    return p && p.modo === 'agrupar' ? porChave(p.alvo) : null;
+    return p && p.modo === 'agrupar' ? local(porChave(p.alvo)) : null;
   });
+
+  // Par de fora com acesso completo no grupo: quem entra agora fica em "ver e recado" até o
+  // clique de liberar, que é por par e começa desmarcado.
+  const membros = (s: AggSession | null) => !s ? [] : s.pair_gid
+    ? sessionsStore.rows.filter((r) => !r.outside && r.serverId === s.serverId && r.pair_gid === s.pair_gid) : [s];
+  const liberacoes = $derived.by(() => {
+    if (pedido?.modo !== 'agrupar') return [];
+    const todos = [...membros(origemSessao), ...membros(alvoSessao)];
+    return fullPairsByAlias(todos).map(({ alias, owner }) => ({
+      alias, owner, sessoes: todos.filter((s) => !pairExternals(s).some((p) => p.alias === alias)).map((s) => s.name),
+    })).filter((l) => l.sessoes.length > 0);
+  });
+  let liberar = $state<string[]>([]);
+  // Ponta do par saindo do grupo desfaz o par para todos: a tela diz antes.
+  const pontaDe = $derived(pedido?.modo === 'sair' && origemSessao
+    ? sessionsStore.anchoredPairs(origemSessao.serverId, origemSessao.name) : []);
 
   // join_group funde os grupos INTEIROS (api.py:3581): a lista é a união de origem, alvo e os
   // pares de cada um — mostrar só os dois nomes escondia quem mais o arrasto afeta.
@@ -89,6 +112,7 @@
       conflito = null;
       avisoFalhou = false;
       grupoNoClique = null;
+      liberar = [];
     });
   });
 
@@ -117,10 +141,13 @@
     try {
       const res = await withServer(a.serverId, () => pairSession(a.name, [o.name], herda ? '' : tarefa.trim(), substituir));
       if (pedido !== pedidoEmVoo) return;
-      if (res.warning) {
+      const falhas = await grantFull(liberacoes.filter((x) => liberar.includes(x.alias))
+        .flatMap((l) => l.sessoes.map((name) => ({ name, alias: l.alias }))), findServer(a.serverId));
+      if (pedido !== pedidoEmVoo) return;
+      if (res.warning || falhas.length) {
         conflito = null;
         avisoFalhou = true;
-        erro = formataErro(res.warning) ?? String(res.warning);
+        erro = [res.warning ? formataErro(res.warning) ?? String(res.warning) : '', ...falhas].filter(Boolean).join('\n');
       } else {
         arrastarGrupo.cancelar();
       }
@@ -164,6 +191,8 @@
     if (!o) { erro = mensagemRecusa('dead'); return; }
     busy = true;
     erro = null;
+    // A ponta saindo desfaz os pares dela: o sumiço deles não é a outra pessoa saindo.
+    const desfazer = pontaDe.map((x) => sessionsStore.markLeavingPair(x.alias, x.session));
     try {
       const res = await withServer(o.serverId, () => unpairSession(o.name));
       if (pedido !== pedidoEmVoo) return;
@@ -174,6 +203,7 @@
         arrastarGrupo.cancelar();
       }
     } catch (e) {
+      for (const d of desfazer) d();
       if (pedido !== pedidoEmVoo) return;
       erro = e instanceof Error && e.message ? e.message : m.grupo_drop_sair_falhou();
     } finally {
@@ -222,6 +252,16 @@
         </div>
       {/if}
 
+      {#if !avisoFalhou}
+        {#each liberacoes as l (l.alias)}
+          <label class="gd-liberar">
+            <input type="checkbox" checked={liberar.includes(l.alias)} disabled={busy}
+                   onchange={(e) => { liberar = e.currentTarget.checked ? [...liberar, l.alias] : liberar.filter((x) => x !== l.alias); }} />
+            <span><b>{m.pair_release({ dono: l.owner })}</b> {m.pair_full_confirm({ sessao: l.sessoes.join(', '), dono: l.owner })}</span>
+          </label>
+        {/each}
+      {/if}
+
       {#if erro}<p class="gd-erro">{erro}</p>{/if}
       {#if conflito}<p class="gd-erro">{conflito}</p>{/if}
       {#if bloqueio && !erro && !conflito && !busy}<p class="gd-erro">{bloqueio}</p>{/if}
@@ -254,6 +294,7 @@
         </div>
       {/if}
 
+      {#each [...new Set(pontaDe.map((x) => x.owner))] as dono (dono)}<p class="gd-erro">{m.pair_undo_anchor_body({ dono })}</p>{/each}
       {#if erro}<p class="gd-erro">{erro}</p>{/if}
       {#if bloqueio && !erro}<p class="gd-erro">{bloqueio}</p>{/if}
 
@@ -299,7 +340,8 @@
   }
   .gd-tarefa:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
   .gd-tarefa::placeholder { color: var(--text-muted); }
-  .gd-erro { font-size: var(--text-sm); color: #e5484d; }
+  .gd-erro { font-size: var(--text-sm); color: #e5484d; white-space: pre-line; }
+  .gd-liberar { display: flex; gap: var(--space-2); align-items: flex-start; font-size: var(--text-sm); color: var(--text-secondary); }
   .gd-acoes { display: flex; gap: var(--space-2); }
   .gd-btn {
     flex: 1;

@@ -9,6 +9,18 @@ pub struct ContextUse {
     pub window: u64,
 }
 
+/// Par de fora do grupo da sessão. `level` é o acesso DESTA sessão sob ele (`full`/`view`);
+/// `pending` = o par tem acesso completo e esta sessão ainda não (espera o "Liberar").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairExternal {
+    pub alias: String,
+    pub owner: String,
+    pub session: String,
+    pub address: String,
+    pub level: String,
+    pub pending: bool,
+}
+
 /// Campos na ordem de models.py, para o JSON sair igual ao `model_dump_json`. `state` e `provider`
 /// ficam em texto como no `StateEvent`: valor novo do Python passa adiante igual. Só `name` é
 /// obrigatório; o resto tem o padrão do pydantic.
@@ -114,6 +126,9 @@ pub struct SessionRow {
     pub pair_peers: Option<Vec<String>>,
     #[serde(default)]
     pub pair_external: Option<Map<String, Value>>,
+    /// Todos os pares de fora do grupo; `pair_external` fica com o primeiro para cliente antigo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_externals: Option<Vec<PairExternal>>,
     #[serde(default)]
     pub pair_gid: Option<String>,
     #[serde(default)]

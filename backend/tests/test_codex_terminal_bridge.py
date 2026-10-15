@@ -11,7 +11,7 @@ from starlette.requests import Request
 import app.api as api_mod
 from app import list_bridge, runtime_coordinator
 from app.runtime_coordinator import RuntimeCoordinator
-from app.share_tunnel import GUEST_PORT
+from app.config import GUEST_PORT
 
 
 def _owner(monkeypatch, mode="rust", terminal=True):
@@ -217,17 +217,17 @@ def test_delete_marked_by_the_rust_only_cleans_python_stores(monkeypatch):
     monkeypatch.setattr(api_mod.registry, "kill", lambda name, closed_by_rust=False: calls.append(closed_by_rust) or [])
     monkeypatch.setattr(api_mod, "_invalidate_lists", lambda: calls.append("invalidate"))
     monkeypatch.setattr(api_mod, "_recusa_orq", lambda name: None)
-    monkeypatch.setattr(api_mod.share_store, "revoke_session", lambda name: 0)
+    monkeypatch.setattr(api_mod.share_bridge, "revoke_session", lambda name: calls.append("revoke"))
 
     def request(mark):
         return Request({"type": "http", "method": "DELETE", "path": "/api/sessions/cx", "query_string": b"",
                         "headers": [(b"x-hangar-rust-closed", mark)]})
     assert asyncio.run(api_mod.kill_session("cx", request=request(b"segredo")))["ok"] is True
-    assert calls == [True], "marcado pelo Rust: só as lojas daqui, sem invalidar a lista dele"
+    assert calls == [True], "marcado pelo Rust: só as lojas daqui, sem invalidar a lista nem pedir a revogação a ele"
     asyncio.run(api_mod.kill_session("cx", request=request(b"forjado")))
-    assert calls[1:] == [False, "invalidate"], "marca que não é o segredo não vale"
+    assert calls[1:] == [False, "invalidate", "revoke"], "marca que não é o segredo não vale"
     asyncio.run(api_mod.kill_session("cx"))
-    assert calls[3:] == [False, "invalidate"], "chamada em processo (MCP) encerra como sempre"
+    assert calls[4:] == [False, "invalidate", "revoke"], "chamada em processo (MCP) encerra como sempre"
 
 
 def test_delete_closed_by_the_rust_records_the_closed_name_from_its_transcript(monkeypatch, caplog):
@@ -237,7 +237,7 @@ def test_delete_closed_by_the_rust_records_the_closed_name_from_its_transcript(m
     monkeypatch.setattr(api_mod.registry, "kill", lambda name, closed_by_rust=False: killed.append(name) or [])
     monkeypatch.setattr(api_mod.registry, "list", lambda: pytest.fail("fechada pelo Rust: não procura na lista"))
     monkeypatch.setattr(api_mod, "_recusa_orq", lambda name: None)
-    monkeypatch.setattr(api_mod.share_store, "revoke_session", lambda name: 0)
+    monkeypatch.setattr(api_mod.share_bridge, "revoke_session", lambda name: None)
     monkeypatch.setattr(api_mod.closed_names, "record", lambda jsonl, name: recorded.append((jsonl, name)))
 
     def request(*extra):

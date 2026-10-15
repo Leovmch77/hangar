@@ -8,7 +8,8 @@
 import * as m from '../paraglide/messages';
 import type { EventSourceLike } from '@hangar/core';
 import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
-import { getActiveId, listServers, onServersChanged, type Server } from './auth';
+import { getActiveId, listServers, onServersChanged, setEphemeralServers, type Server } from './auth';
+import { attachGuest, createExternalPairSync, listExternalPairs, reconcilePairEntries, type ExternalPair } from '@hangar/core';
 import { navPelaLista } from './navPelaLista';
 import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
 import { getIdentificador } from './peers';
@@ -104,6 +105,40 @@ function createSessionsStore() {
   // SUBSTITUÍDO quando muda, como `latencias`: é o que acorda o `{#key}` do Chat no desktop.
   let epocas: Epocas = { vistas: new Map(), sumidas: new Map(), epochs: new Map() };
   let epochs = $state.raw<ReadonlyMap<string, number>>(epocas.epochs);
+
+  // ── Par externo: os pares nas linhas próprias dizem quando reler `/api/external-pairs`, que traz
+  // o token de cada um; com ele nascem as entradas temporárias (em memória, no auth) que leem a
+  // sessão de fora. Sem par nenhum, nada é pedido. "Saiu do pareamento" vem da leitura, não da
+  // linha: sessão fechada ou lista com problema tiram a linha sem o par ter acabado.
+  let pairLeft = $state<{ owner: string; seq: number } | null>(null);
+  let pairSeq = 0;
+  // Último aviso já mostrado: fora do $state, a lista que remonta não o mostra de novo.
+  let pairLeftShown = 0;
+  // Releitura terminada: quem lê `anchoredPairs` num `$derived` acorda por aqui.
+  let pairsTick = $state(0);
+  const diagCode = (e: unknown) => (e as { code?: string })?.code ?? 'erro';
+  const pairSync = createExternalPairSync({
+    read: (s) => listExternalPairs(s).catch((e: unknown) => {
+      registrarDiag({ evento: 'lista.pares_falhou', nivel: 'aviso', codigo: diagCode(e) }, s.baseUrl);
+      throw e;
+    }),
+    apply(all) {
+      pairsTick++;
+      const { servers: entries, attach } = reconcilePairEntries(listServers(), all, () => '');
+      // Id pelo endereço: o mesmo par continua achável pelo chat depois de outra leitura.
+      setEphemeralServers(entries.filter((s) => s.ephemeral).map((s) => (s.id ? s : { ...s, id: `pair:${s.baseUrl}` })));
+      return attach;
+    },
+    attach: (entry, token) => attachGuest(entry, token).catch((e: unknown) => {
+      registrarDiag({ evento: 'lista.par_ligar_falhou', nivel: 'aviso', codigo: diagCode(e) }, entry.baseUrl);
+      throw e;
+    }),
+    onLeft: (p) => { pairLeft = { owner: p.owner, seq: ++pairSeq }; },
+  });
+
+  function notePairs() {
+    void pairSync.refresh(servers, (id) => slots.get(id)?.sessions);
+  }
 
   function recompute() {
     hidden = sweepHidden(hidden, slots);
@@ -293,6 +328,7 @@ function createSessionsStore() {
           const sessions = JSON.parse(e.data);
           if (!Array.isArray(sessions)) throw new Error('sessions frame must be an array');
           slots.set(s.id, { sessions, error: null });
+          if (!s.invite) notePairs();
           identityNeeded = sessions.some((session: { pair_peers?: string[] }) =>
             session.pair_peers?.some(peer => peer.includes('::')));
           loadIdentity();
@@ -453,6 +489,9 @@ function createSessionsStore() {
     // voltaria exibindo a latência de outra época, que ninguém mais vai corrigir.
     latencias = new Map();
     identities = new Map();
+    // As entradas temporárias ficam no auth: o chat de uma sessão de fora segue com a lista fechada.
+    pairSync.reset();
+    pairLeft = null;
     slots.clear();
     quedas.clear(); tentativas.clear();
     // Parar não é sumiço: sem isto, o próximo retain() (o próprio DesktopShell, ao remontar)
@@ -474,6 +513,25 @@ function createSessionsStore() {
     get loading() { return agg.loading; },
     get servers() { return servers; },
     get identities() { return identities; },
+    /** Último par que sumiu da lista sem ter sido desfeito aqui: "<dono> saiu do pareamento". */
+    get pairLeft() { return pairLeft; },
+    /** O aviso de `pairLeft` uma vez só, mesmo com a lista remontando; lê `pairLeft`, então acorda um `$effect`. */
+    takePairLeft(): string | null {
+      const n = pairLeft;
+      if (!n || n.seq <= pairLeftShown) return null;
+      pairLeftShown = n.seq;
+      return n.owner;
+    },
+    /** "Sair"/"Desfazer" feito aqui: o par sumir em seguida não é a outra pessoa saindo. Devolve o
+     * desfazer da marca, para quando a saída falhar. */
+    markLeavingPair(alias: string, session: string): () => void {
+      return pairSync.markLeaving(alias, session);
+    },
+    /** Pares cuja ponta é esta sessão, pela última leitura: sair do grupo os desfaz para todos. */
+    anchoredPairs(serverId: string, name: string): ExternalPair[] {
+      void pairsTick;
+      return pairSync.anchored(serverId, name);
+    },
     retain() { if (++refs === 1) start(); },
     // Guarda contra consumidor futuro desbalanceado: um release a mais deixaria refs negativo e o
     // singleton nunca mais reconectaria (nenhum retain voltaria a bater 1). Piso em 0.

@@ -76,7 +76,6 @@ pub struct ListFacts {
     /// Leitura das orquestrações falhou: `orq` vem vazio e vale a da última resposta boa, marcada.
     #[serde(default)]
     pub orq_error: Option<String>,
-    pub shared: HashSet<String>,
     pub owners: HashMap<String, String>,
     /// Escondidas do dono (sessão de convidado que ele não vê).
     pub hidden: HashSet<String>,
@@ -103,7 +102,7 @@ pub struct ListFacts {
 impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
-            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
+            orq_error: None, owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
             stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, owner_apps: 0, unknown: true }
     }
 }
@@ -243,13 +242,12 @@ impl FactsClient {
 }
 
 /// As linhas `orq` da resposta boa anterior, com o acesso que valia para elas: o Python desta vez
-/// não as conhecia e não decidiu escondida, compartilhada nem dono.
+/// não as conhecia e não decidiu escondida nem dono.
 fn keep_orq(facts: &mut ListFacts, prev: &ListFacts) {
     facts.orq = prev.orq.clone();
     for row in &mut facts.orq {
         row.problema = Some(ORQ_UNAVAILABLE.into());
         if prev.hidden.contains(&row.name) { facts.hidden.insert(row.name.clone()); }
-        if prev.shared.contains(&row.name) { facts.shared.insert(row.name.clone()); }
         if let Some(o) = prev.owners.get(&row.name) { facts.owners.insert(row.name.clone(), o.clone()); }
     }
 }
@@ -367,10 +365,16 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
         for row in work.iter_mut() { row.problema = Some(UNAVAILABLE.into()); }
     }
     for row in work.iter_mut().chain(aside.iter_mut()) {
-        row.shared = facts.shared.contains(&row.name);
         row.owner = facts.owners.get(&row.name).cloned();
     }
     (work, aside)
+}
+
+/// Compartilhada = convite ativo na loja do Rust, a única dona de `shares.json`.
+pub fn mark_shared(rows: &mut [SessionRow], active: &HashSet<String>) {
+    for row in rows {
+        row.shared = active.contains(&row.name);
+    }
 }
 
 #[cfg(test)]

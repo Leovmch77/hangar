@@ -3,11 +3,13 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { getSessions, pairSession, unpairSession, getHistory, getPairContract } from '@hangar/core';
+  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
   import { formataErro } from '@hangar/core';
   import { rotuloEstado, stateColors, parsePeerMessage, relativeTime, encodeCompareIds } from '@hangar/core';
   import { getActiveId } from '../lib/auth';
   import type { SessionInfo, State } from '@hangar/core';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
 
@@ -29,6 +31,16 @@
   const peersKey = $derived(peers.join(','));
 
   let sessions = $state<SessionInfo[]>([]);
+  let self = $state<SessionInfo | null>(null);
+  // Par externo no grupo: membros locais (eu + os da lista), cabeçalho e o que cada par libera.
+  const locais = $derived([...(self ? [self] : []), ...sessions.filter((s) => peers.includes(s.name))]);
+  const temFora = $derived(locais.some((s) => pairExternals(s).length > 0));
+  const parCabecalho = $derived(temFora ? pairHeaderLabel(sessionName, locais) : '');
+  // Quem entra agora fica em "ver e recado" para o par com acesso completo, até marcar liberar.
+  const liberacoes = $derived(fullPairsByAlias(locais));
+  let liberar = $state<string[]>([]);
+  // Esta sessão é a ponta de algum par: sair do grupo desfaz o par para todos.
+  const pontaDe = $derived(sessionsStore.anchoredPairs(sessionServer()?.id ?? getActiveId() ?? '', sessionName));
   let picked = $state<string[]>([]);   // MULTI-select: marca N sessões e pareia de uma vez
   let task = $state('');
 
@@ -101,6 +113,7 @@
     feedError = null;
     contract = null;
     contractError = null;
+    liberar = [];
     if (members.length) {
       loadFeed(members, my);
       getPairContract(sessionName, sessionServer())
@@ -112,7 +125,11 @@
         });
     }
     getSessions(sessionServer())
-      .then((all) => { if (my === epoch) sessions = all.filter((s) => s.name !== sessionName && s.state !== 'dead'); })
+      .then((all) => {
+        if (my !== epoch) return;
+        self = all.find((s) => s.name === sessionName) ?? null;
+        sessions = all.filter((s) => s.name !== sessionName && s.state !== 'dead');
+      })
       .catch(() => { if (my === epoch) error = m.forward_nao_listou(); });
   });
 
@@ -126,8 +143,11 @@
     try {
       // Mesmo endpoint pra criar grupo e pra ADICIONAR membro (o backend une os grupos).
       const res = await pairSession(sessionName, picked, task.trim(), false, sessionServer());
+      const falhas = await grantFull(liberar.flatMap((alias) => picked.map((name) => ({ name, alias }))), sessionServer());
       onChanged();
-      if (res.warning) {
+      if (falhas.length) {
+        error = falhas.join('\n');
+      } else if (res.warning) {
         // Falha PARCIAL de aviso (membro sem o prompt): mostra em vez de fechar mudo. O warning
         // pode ser envelope {code, params, msg} — o formataErro traduz; string crua passa direto.
         error = formataErro(res.warning) ?? String(res.warning);
@@ -149,6 +169,8 @@
     if (busy) return;
     busy = true;
     error = null;
+    // A ponta saindo desfaz os pares dela: o sumiço deles não é a outra pessoa saindo.
+    const desfazer = pontaDe.map((p) => sessionsStore.markLeavingPair(p.alias, p.session));
     try {
       const res = await unpairSession(sessionName, sessionServer());
       onChanged();
@@ -158,6 +180,7 @@
         onClose();
       }
     } catch (e) {
+      for (const d of desfazer) d();
       error = e instanceof Error && e.message ? `${m.par_falhou_saida()} ${e.message}` : m.par_falhou_saida();
     } finally {
       busy = false;
@@ -197,9 +220,11 @@
       <!-- Tudo que ROLA fica aqui; o rodape com "Sair do grupo" fica preso embaixo. -->
       <div class="pair-scroll">
       <h2 class="title"><GroupGlyph size={18} /> {m.par_grupo_titulo({ n: peers.length + 1 })}</h2>
+      {#if parCabecalho}<p class="pair-fora">{parCabecalho}</p>{/if}
       <p class="hint">
         {m.par_membros_hint()}
       </p>
+      {#if temFora}<p class="hint">{m.pair_not_transitive()}</p>{/if}
 
       <!-- Membros: estado vivo + abrir lado a lado (desktop) por membro. -->
       <div class="list">
@@ -265,6 +290,15 @@
             {/each}
           {/if}
         </div>
+        {#if picked.length}
+          {#each liberacoes as l (l.alias)}
+            <label class="liberar">
+              <input type="checkbox" checked={liberar.includes(l.alias)} disabled={busy}
+                     onchange={(e) => { liberar = e.currentTarget.checked ? [...liberar, l.alias] : liberar.filter((x) => x !== l.alias); }} />
+              <span><b>{m.pair_release({ dono: l.owner })}</b> {m.pair_full_confirm({ sessao: picked.join(', '), dono: l.owner })}</span>
+            </label>
+          {/each}
+        {/if}
         <button class="primary-btn" onclick={doPair} disabled={!picked.length || busy}>
           {busy ? m.par_adicionando() : picked.length ? m.par_adicionar_nomes({ nomes: picked.join(', ') }) : m.par_escolha_sessoes()}
         </button>
@@ -308,6 +342,7 @@
 
       <!-- Rodape FIXO: "Sair do grupo" e destrutivo e nao pode fugir com o scroll do contrato. -->
       <div class="pair-foot">
+        {#each [...new Set(pontaDe.map((p) => p.owner))] as dono (dono)}<p class="error">{m.pair_undo_anchor_body({ dono })}</p>{/each}
         {#if error}<p class="error">{error}</p>{/if}
         <button class="danger-btn" onclick={doLeave} disabled={busy}>
           {busy ? m.par_saindo() : m.par_sair_grupo()}
@@ -363,7 +398,9 @@
 
   .hint { font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.5; }
 
-  .error { font-size: var(--text-sm); color: #e5484d; }
+  .error { font-size: var(--text-sm); color: #e5484d; white-space: pre-line; }
+  .pair-fora { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+  .liberar { display: flex; gap: var(--space-2); align-items: flex-start; font-size: var(--text-sm); color: var(--text-secondary); }
   .empty { font-size: var(--text-sm); color: var(--text-muted); padding: var(--space-3) 0; }
 
   .list { display: flex; flex-direction: column; }

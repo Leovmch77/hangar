@@ -62,6 +62,30 @@ impl Config {
     }
 }
 
+/// Porta do convidado e convites. Fora do `Config` porque nenhum teste do dono precisa delas.
+#[derive(Clone, Debug, Default)]
+pub struct GuestEnv {
+    /// Ausente = sem porta do convidado.
+    pub listen: Option<SocketAddr>,
+    /// `shares.json` do Python; ausente = sem convites no Rust.
+    pub shares_file: Option<PathBuf>,
+}
+
+impl GuestEnv {
+    pub fn from_env() -> Result<GuestEnv, String> {
+        GuestEnv::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<GuestEnv, String> {
+        let var = |k: &str| get(k).filter(|v| !v.is_empty());
+        let listen = match var("HANGAR_SERVER_GUEST_LISTEN") {
+            Some(v) => Some(v.parse().map_err(|_| format!("HANGAR_SERVER_GUEST_LISTEN inválido: {v}"))?),
+            None => None,
+        };
+        Ok(GuestEnv { listen, shares_file: var("HANGAR_SHARES_FILE").map(PathBuf::from) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,7 +3,7 @@ from fastapi import Depends, FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app import guest_user_gate, guest_users, share_gate
+from app import guest_user_gate, guest_users
 from app.auth import require_auth
 from app.config import settings
 
@@ -15,7 +15,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "auth_token", "secret")
     monkeypatch.setattr(guest_users, "_path_override", tmp_path / "guests.json")
     monkeypatch.setattr(guest_users, "session_life", lambda n: LIVES.get(n))
-    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr(guest_user_gate, "WATCH_INTERVAL", 0.05)
     guest_users._reset()
     (tmp_path / "p").mkdir()
     ana, ana_tok = guest_users.create("ana", str(tmp_path / "p"), False, True)
@@ -132,6 +132,12 @@ def test_guest_port_with_clash_is_still_gated(env, monkeypatch):
     monkeypatch.setattr(guest_user_gate, "GUEST_PORT", 80)
     monkeypatch.setattr(guest_user_gate, "port_clash", lambda: True)
     assert client.get("/api/config", headers=_h(tok)).status_code == 403
+
+
+def test_guest_blocked_from_owner_share_and_pair_routes(env):
+    client, _, tok = env
+    for rota in ("share", "pair-invite", "pair-accept", "pair-access"):
+        assert client.post(f"/api/sessions/minha/{rota}", headers=_h(tok)).status_code == 403, rota
 
 
 def test_guest_blocked_from_remote_browser(env):

@@ -22,6 +22,7 @@ import * as m from '../paraglide/messages';
   import LiveVoiceButton from '../components/LiveVoiceButton.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
+  import PairAcceptSheet from '../components/PairAcceptSheet.svelte';
   import { abrirConfig } from '../lib/configNav';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota } from '../lib/cota';
@@ -83,6 +84,19 @@ import * as m from '../paraglide/messages';
   // Passar o bastão pelo toque longo: a mesma folha de criar, travada na máquina da origem.
   let bastaoAlvo = $state<{ name: string; cwd: string; serverId: string } | null>(null);
   let shareAlvo = $state<{ name: string; serverId: string } | null>(null);
+  let pairAlvo = $state<{ name: string; serverId: string } | null>(null);
+  // Sessões locais do mesmo grupo: o convite de par com acesso completo abre todas.
+  function grupoDe(alvo: { name: string; serverId: string } | null): string[] {
+    const s = alvo ? sessions.find((x) => x.serverId === alvo.serverId && x.name === alvo.name) : null;
+    if (!s?.pair_gid) return [];
+    return model.pairMembers(s.pair_gid).filter((x) => !x.outside && x.serverId === s.serverId && x.name !== s.name).map((x) => x.name);
+  }
+  // Par aceito numa sessão própria, viva; a linha de fora e o orquestrador não pareiam.
+  const paraParear = $derived(sessions.filter((x) => !x.serverInvite && x.state !== 'dead' && x.provider !== 'orq'));
+  $effect(() => {
+    const dono = sessionsStore.takePairLeft();
+    if (dono) showActionMsg(m.pair_left_notice({ dono }));
+  });
   $effect(() => liveVoiceStore.registerActions({ 'new-session': () => { searchOpen = false; showCreateSheet = true; return true; } }));
   let drawerOpen = $state(false);    // menu lateral (hamburger): navegação + conta
   let searchOpen = $state(false);    // Buscar conversas (switcher em modo so-busca)
@@ -92,7 +106,8 @@ import * as m from '../paraglide/messages';
 
   // Lista de servidores (gerenciada no menu de conta: adicionar/remover). Sem "ativo" fixo — a lista é
   // agregada; o servidor-alvo de uma sessão é o dela, escolhido ao abrir/criar. Vem do store (derived).
-  const servers = $derived(sessionsStore.servers);
+  // A entrada temporária de par externo não é máquina desta pessoa: fica fora da conta e do menu.
+  const servers = $derived(sessionsStore.servers.filter((x) => !x.ephemeral));
   // Só `error`, SEM o portão `!loaded` do `serverErrors` acima: aquele existe pra o BANNER não
   // gritar num piscar, mas aqui a pergunta é outra — "dá pra criar sessão nessa máquina agora?" —, e
   // quem respondeu há 5 minutos e calou não dá. Piscar não gera vaivém do chip: o erro só é marcado
@@ -327,7 +342,8 @@ import * as m from '../paraglide/messages';
     const origemChave = arrastarGrupo.origem;   // capturado 1x: origem é getter, não estreita sozinho
     const decisao = resolveDrop(hit, origemChave, model.flatRows);
     if (decisao.kind === 'pair') arrastarGrupo.soltar(decisao.chave);
-    else if (decisao.kind === 'leave' && origemChave) arrastarGrupo.pedirSaida(origemChave);
+    // A linha de fora não sai do grupo por arrasto: quem a tira é o "Sair do pareamento".
+    else if (decisao.kind === 'leave' && origemChave && !sessionByKey(origemChave)?.outside) arrastarGrupo.pedirSaida(origemChave);
     else arrastarGrupo.cancelar();
   }
 
@@ -587,6 +603,7 @@ import * as m from '../paraglide/messages';
                 {#each groupItems(g) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
                   {#if item.kind === 'header'}
                     {@const rep = groupRep(item.gid)}
+                    {@const rotulo = model.pairLabel(item.gid, item.label)}
                     {@const dropAlvoAtual = !!rep && arrastarGrupo.alvo === dragChave(rep)}
                     {@const dropResultado = dropAlvoAtual && rep ? avaliarDrop(rep) : null}
                     {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
@@ -598,9 +615,9 @@ import * as m from '../paraglide/messages';
                             class:drop-alvo={dropResultado?.ok === true}
                             class:drop-recusado={dropRecusa !== null}
                             data-session-key={rep ? dragChave(rep) : undefined}
-                            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: item.label })}>
+                            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: rotulo })}>
                       <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
-                      <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto"> {pairResto(item.label)}</span>{/if}</span></span>
+                      <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(rotulo)}</b>{#if pairResto(rotulo)}<span class="pair-resto"> {pairResto(rotulo)}</span>{/if}</span></span>
                 {#if pairAwaiting(item.gid) > 0}
                   <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
                 {/if}
@@ -632,6 +649,7 @@ import * as m from '../paraglide/messages';
                         {showFolder}
                         peers={allSessions}
                         onShare={() => (shareAlvo = { name: session.name, serverId: session.serverId })}
+              onPairAccept={() => (pairAlvo = { name: session.name, serverId: session.serverId })}
                         onBastao={() => { bastaoAlvo = { name: session.name, cwd: session.cwd ?? '', serverId: session.serverId }; showCreateSheet = true; }}
                         onOpenArbiter={arbiterOf(session)}
                       />
@@ -650,6 +668,7 @@ import * as m from '../paraglide/messages';
           {#each clusterByPair(model.flatRows) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
             {#if item.kind === 'header'}
               {@const rep = groupRep(item.gid)}
+                    {@const rotulo = model.pairLabel(item.gid, item.label)}
               {@const dropAlvoAtual = !!rep && arrastarGrupo.alvo === dragChave(rep)}
               {@const dropResultado = dropAlvoAtual && rep ? avaliarDrop(rep) : null}
               {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
@@ -658,9 +677,9 @@ import * as m from '../paraglide/messages';
                       class:drop-alvo={dropResultado?.ok === true}
                       class:drop-recusado={dropRecusa !== null}
                       data-session-key={rep ? dragChave(rep) : undefined}
-                      title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: item.label })}>
+                      title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: rotulo })}>
                 <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
-                <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto"> {pairResto(item.label)}</span>{/if}</span></span>
+                <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(rotulo)}</b>{#if pairResto(rotulo)}<span class="pair-resto"> {pairResto(rotulo)}</span>{/if}</span></span>
                 {#if pairAwaiting(item.gid) > 0}
                   <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
                 {/if}
@@ -691,6 +710,7 @@ import * as m from '../paraglide/messages';
               {showFolder}
               peers={allSessions}
               onShare={() => (shareAlvo = { name: session.name, serverId: session.serverId })}
+              onPairAccept={() => (pairAlvo = { name: session.name, serverId: session.serverId })}
               onBastao={() => { bastaoAlvo = { name: session.name, cwd: session.cwd ?? '', serverId: session.serverId }; showCreateSheet = true; }}
               onOpenArbiter={arbiterOf(session)}
             />
@@ -849,7 +869,10 @@ import * as m from '../paraglide/messages';
   />
 
   <ShareSessionSheet open={shareAlvo !== null} name={shareAlvo?.name ?? ''} serverId={shareAlvo?.serverId ?? ''}
-                     onClose={() => (shareAlvo = null)} />
+                     groupSessions={grupoDe(shareAlvo)} onClose={() => (shareAlvo = null)} />
+  {#if pairAlvo}
+    <PairAcceptSheet sessions={paraParear} initial={pairAlvo} fallbackFocus={hamEl} onFechar={() => (pairAlvo = null)} />
+  {/if}
 
   <!-- Caso ambíguo do resume: várias sessões no mesmo cwd -> o usuário confirma QUAL conversa retomar. -->
   <BottomSheet open={model.resumeCandidates !== null} onClose={() => (model.resumeCandidates = null)} ariaLabel={m.sessao_retomar()}>

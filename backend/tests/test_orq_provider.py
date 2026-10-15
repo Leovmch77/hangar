@@ -205,14 +205,6 @@ def test_panel_route_without_a_live_run_is_404(root, monkeypatch):
     assert r.status_code == 404 and r.json()["detail"]["code"] == "erro_nao_encontrado"
 
 
-def test_panel_route_is_closed_to_shared_session_guests():
-    from app import share_gate, share_store
-    guest = share_store.Guest([share_store.Share(
-        id="s", session="g1-orq", life="L", created_at=0.0, code_expires_at=0.0, code_hash="",
-        token_hash="t", redeemed_at=1.0)])
-    assert share_gate.guest_allowed("GET", "/api/sessions/g1-orq/orq/panel", guest) is False
-
-
 def test_a_parecer_cited_in_the_timeline_opens_through_the_file_route(root, tmp_path, monkeypatch):
     d = _run(root, "2026-09-28-g1", "g1")
     parecer = tmp_path / "task-4-r1-revisor.md"

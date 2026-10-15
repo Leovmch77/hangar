@@ -938,6 +938,61 @@ e resgata cada convite novo mandando o token que já tem: o backend acrescenta a
 token (01/10/2026, pedido do usuário; antes o mais novo substituía o anterior). Endereço que já é
 servidor próprio recusa o resgate. PWA e app Expo seguem com um convite por endereço.
 
+**A 8766 passou para o Rust (12/10/2026, par externo parte 2).** Convites (`shares.json`), chaves,
+porteiro, Funnel, varredura e par externo moram em `crates/hangar-server/src/share/`, com o mesmo
+formato em disco, os mesmos caminhos, códigos e fechamentos (1013, 1008, 4410). Motivo: a regra
+"backend novo nasce no Rust" e a porta exposta à internet num processo só, sem a volta Rust →
+Python → Rust a cada pedido de convidado. A troca foi num commit só (`c50f97dc9`): dois escritores
+no `shares.json`, ou uma janela com a 8766 vazia, perderiam revogações e tokens. O que mudou:
+
+- Rust fora (modo `python`) = 8766 fechada. O Funnel responde 502, e os clientes tratam 502 e
+  conexão recusada vindos de servidor de convite como o 503: tentar de novo, nunca "encerrado".
+  Cliente antigo não sabe disso até atualizar.
+- O porteiro conta tentativas de chave por conexão, sem isenção de loopback (o Funnel chega como
+  `127.0.0.1`), e recusa da 8766 nunca entra no bloqueio do dono.
+- Rota que o Python ainda atende (navegador, Pi/omp/Kimi, globais do chat) recebe o convidado já
+  decidido no cabeçalho `x-hangar-guest`, HMAC com o segredo interno sobre método, caminho,
+  sessões e validade (30 s). O Rust apaga esse cabeçalho de toda entrada; o Python só o aceita de
+  loopback e com segredo (`guest_header.py`).
+- O Python avisa pela ponte privada `/__hangar_server/share` o que só ele vê (fechar, renomear,
+  troca de modo, transferência); falha da ponte vai ao diário e volta como aviso na resposta.
+- `share_life.py` fica no Python: `guest_users`, transferência e `registry` ainda o usam.
+
+## Link de convite só aparece conferido de fora
+
+(11/10/2026, pedido do usuário.) O link de convite e o de par saíam assim que o Funnel era ligado.
+Quem recebia abria antes de o nome `*.ts.net` existir no DNS público, não conseguia acessar, e o
+DNS do provedor dele guardava a resposta "não existe" por mais um tempo. O dono só descobria
+quando a outra pessoa reclamava.
+
+Regra: os clientes (nativo e PWA) só mostram um link `https://…:8443/(convite|par)/…` depois que a
+rota do Rust `POST /api/share/reachability` responde `ok`. A rota espera no servidor, conferindo a
+cada 5 s por até 3 min:
+
+1. O nome do link no DNS público, por DNS-over-HTTPS (Cloudflare e Google; basta um). O DNS da
+   máquina não serve: na tailnet o MagicDNS sempre responde.
+2. A página do link pedida pelo IP público, com o nome no TLS e certificado conferido, sem seguir
+   redirecionamento, com 200 e corpo idêntico ao da mesma página pedida em `127.0.0.1:8766`. O
+   Funnel também chega por loopback, então a página só sai igual se quem respondeu foi esta
+   máquina.
+
+A rota só aceita link com o nome Tailscale desta máquina (`tailscale status --json`), para não virar
+cliente HTTP genérico. Link local (`http://<ip>:8766`) não é conferido. Sem o Rust (modo `python`),
+o Python responde 404 (ou 405, quando serve o `frontend/dist` na raiz) e o cliente diz que a conferência precisa do servidor Rust, sem mostrar o link.
+Pelo Hangar Connect (8768), o Python só repassa o pedido do dono à rota privada do Rust
+`/__hangar_server/share/reachability`, sem decidir nada; sem o Rust, responde 404
+`share_needs_rust_server`.
+
+Limite: DNS de provedor que já guardou "não existe" ainda atrasa do outro lado. A conferência
+garante que o link só nasce com o nome já público, que era o caso real.
+
+**A criação já espera (12/10/2026, par externo parte 2).** Com o convite no Rust, `POST
+/api/sessions/{name}/share` e `pair-invite` só devolvem o link do Funnel depois da mesma
+conferência; não abriu no prazo, o convite é revogado e a resposta é 409 `share_reach_failed` com
+`{stage, detail}`. Nativo e PWA deixaram de chamar `/api/share/reachability` (a rota continua) e
+mostram a etapa com as mesmas frases `share_reach_*`. Criar com 404/405 é backend sem o Rust:
+`share_create_needs_rust`. O prazo do cliente na criação passou a 220–240 s.
+
 ## Par externo: sessões de pessoas diferentes
 
 (01/10/2026, pedido do usuário.) Duas pessoas, cada uma no seu Hangar e na sua tailnet, pareiam
@@ -1000,6 +1055,59 @@ terminais de atalho, modos de permissão).
 **Limite conhecido.** Codex, Pi e Kimi perdem o protocolo externo depois de `/clear`: quem o
 reinjeta é o hook de SessionStart, que só existe no Claude (o protocolo de par comum já se
 comporta assim).
+
+### Nível por lado, grupo misto e sessão de fora dentro do grupo (12/10/2026)
+
+Pedido do usuário: acesso completo como no compartilhamento, cada lado escolhendo o que dá,
+valendo para o grupo inteiro (inclusive quem entrar depois), vários pares e grupo misto, nos três
+clientes, e sem nada novo no Python.
+
+**O nível é um filho por sessão, não um campo do par.** Sob a raiz do par, cada sessão local do
+grupo ganha um registro com `parent_id` = raiz e o MESMO token: `Kind::Share` = acesso completo,
+`Kind::Pair` = ver e recado. O porteiro já resolvia acesso por `(token, sessão, kind)`, então
+escrever, terminal e as recusas saem sem código novo; `revoke(raiz)` derruba os filhos. Variante
+nova de `Kind` está proibida porque o leitor antigo poria o `shares.json` inteiro em quarentena.
+`grant`/`ungrant` também mexem nas cópias de `attach` da mesma raiz, senão o "Liberar" não chega
+ao token que o app do outro lado usa. Filho vindo de par fica fora de "Encerrar todos", da lista
+de convites e das rotas globais do chat (TTS, ditado, pensamento), que gastam crédito do dono.
+
+**O nível só viaja para mostrar.** Cada lado aplica o que ELE dá; o outro lado recebe o valor só
+para exibir. Resgate ou resposta sem `level` vem de Hangar antigo e vira `view`: dar escrita a
+quem não mostra que recebeu seria surpresa para o dono.
+
+**Entrar no grupo dá `view`; `full` só pelo clique.** Só a entrada pelo cliente é distinguível de
+entrada por agente (`hangar-send --pair`, MCP, executores da `orq` usam a mesma rota). Por isso
+toda entrada dá ver e recado e o acesso completo vem de `POST /api/sessions/{n}/pair-access`, que
+os clientes chamam depois da confirmação ("terá o terminal desta máquina") ou no "Liberar". Isso
+é garantia de interface, não fronteira de segurança: acesso completo é o shell do dono, como no
+compartilhamento.
+
+**A âncora não é trocada.** A sessão que fez o par sair do grupo ou morrer desfaz o par nos dois
+lados (a tela avisa antes); outro membro local saindo só perde o acesso. Reancorar exigiria
+renomear o registro dos dois lados no meio de recados em trânsito, sem pedido que o justifique.
+Grupo `orq` recusa membro de fora: executores entram e saem o tempo todo.
+
+**Aviso de grupo atravessa com um salto.** Local → cada par de fora pela chave de saída; de fora →
+todos os locais do grupo e para aí. `group_message` recusa texto que começa com `[de fora:`, e o
+remetente de fora vem do registro, com a sessão de origem validada. Sem o salto único, dois pares
+no mesmo grupo fariam o recado bater e voltar entre as máquinas.
+
+**Um apelido por máquina de fora.** Segundo par com o mesmo endereço reusa o apelido; par repetido
+(mesmo endereço e mesma sessão de fora) é recusado com `erro_par_repetido`.
+
+**Sessão de fora dentro do grupo.** A linha traz `pair_externals` (todos os pares do grupo, com
+`level` e `pending`); `pair_external` (o primeiro) fica por compatibilidade. Os clientes montam a
+sessão de fora a partir da entrada temporária do convite e a põem no grupo local, sem seção
+"Par · dono": duas aparições da mesma sessão confundiam com quem ela estava pareada. No menu dela
+não existe "Fechar" (era ambíguo: fecharia a sessão de outra pessoa); existe "Sair do pareamento
+com <dono>".
+
+**No Rust (12/10/2026, par externo parte 2).** `external_pairs.json` e as rotas do par passaram
+para o `hangar-server` junto com a 8766; só ele grava o arquivo (`backend/hooks/pair_hook.py` e a
+lista do Python só leem). Dois pares de fora na mesma chave agora se resolvem pela sessão (antes
+valia "o primeiro"): com mais de um, recado e saída exigem a sessão e respondem 409
+`erro_par_sessao_ambigua` sem ela. Recado do MCP para o par externo de outra sessão cai no
+`peers.call` e falha como servidor desconhecido, em vez da recusa específica de antes.
 
 ## Rede local antes do Tailscale: `baseUrl` é identidade, a rota é `baseOf`
 
@@ -1255,6 +1363,9 @@ mais nova, e uma máquina atrasada pode baixar um binário que fala outro contra
 Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
 dele sempre inclui esse endereço, senão a LAN passaria por loopback e escaparia do limite de
 tentativas. O Rust põe no `X-Forwarded-For` o cliente já resolvido, nunca o que veio de fora.
+
+A porta do convidado (8766) também é do Rust desde 12/10/2026: o Python não a abre em modo
+nenhum, e a 8768 do Connect é a única que segue no Python (ver "Compartilhar sessão").
 
 Os binários vêm da release `server-latest` para `~/.hangar/bin/`, pelo instalador, pelo botão
 Atualizar (`_preparar`) e pelo passo `2026-10-02-hangar-server-binarios`; falha vira aviso.

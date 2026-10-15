@@ -65,6 +65,8 @@ fn accepted(row: &SessionRow, field: &str, py_state: Option<&str>) -> bool {
         || (absent && ["last_reply", "last_reply_at"].contains(&field) && py_state != Some(row.state.as_str()))
         // A descoberta não sabe a credencial de Kimi/Pi/omp (Task 7); só o fato a preenche (Task 14).
         || (["kimi", "pi", "omp"].contains(&row.provider.as_str()) && field == "conta" && row.conta.is_none())
+        // Par externo (Parte 3): todo membro do grupo traz os pares; o Python só a ponta, sem nível.
+        || field == "pair_external"
 }
 
 /// Kimi, Pi e omp têm nome de `sanitize_session_name`, que no Rust só desfaz os acentos do
@@ -349,6 +351,10 @@ mod tests {
                             "problema": RUNTIME_ABSENT}));
         sigs = py(&[row(json!({"name": "hl", "headless": true, "state": "awaiting_input"}))]);
         assert!(compare(&[hl], &sigs).is_empty());
+        // Membro que não é a ponta traz o par de fora; o Python só o dá à ponta.
+        let member = row(json!({"name": "m", "pair_external": {"alias": "x", "owner": "o", "session": "s"}}));
+        sigs = py(&[row(json!({"name": "m"}))]);
+        assert!(compare(&[member], &sigs).is_empty());
         // A última resposta só existe na linha parada: com o estado divergindo por falta do retrato, ela
         // diverge junto; com o mesmo estado, é comparada.
         let hl = row(json!({"name": "hl", "headless": true, "state": "idle", "last_reply": "r", "last_reply_at": 1.0,

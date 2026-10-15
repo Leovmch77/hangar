@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  parseInviteLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError,
+  parseInviteLink, parsePairLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError, ShareReachError,
 } from './share';
+import * as m from './paraglide/messages';
 import { configureApi, type ApiEnv } from './apiEnv';
-import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs } from './api';
+import {
+  getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs,
+  createPairInvite, acceptPair, listExternalPairs, setPairAccess, leavePair, attachGuest,
+} from './api';
 import type { Server } from './servers';
 
 const CONVITE: Server = { id: 'srv-i', label: 'Convite · J', baseUrl: 'https://dono.ts.net:8443', token: 'tg', invite: true };
@@ -149,6 +153,20 @@ describe('trava do servidor de convite em apiFetchRes', () => {
     expect(await checkInviteForServer(CONVITE)).toBe(false);
     expect(onInviteEnded).not.toHaveBeenCalled();
   });
+  it('502 (Funnel com o servidor Rust reiniciando) também é tentar de novo, nunca fim do convite', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 502 }));
+    expect(await checkInviteForServer(CONVITE)).toBe(false);
+    expect(onInviteEnded).not.toHaveBeenCalled();
+  });
+  it('conexão recusada num servidor de convite não encerra o convite', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+    await expect(checkInviteForServer(CONVITE)).rejects.toThrow('Failed to fetch');
+    expect(onInviteEnded).not.toHaveBeenCalled();
+  });
 });
 
 describe('createShare', () => {
@@ -181,6 +199,24 @@ describe('createShare', () => {
     const e = await createShare('s1').catch((x: unknown) => x);
     expect((e as SharePrerequisiteError).enableUrl).toBeNull();
   });
+  it('409 share_reach_failed diz a etapa em que o link não abriu de fora', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(409, { detail: {
+      code: 'share_reach_failed', msg: 'o link não abriu pela internet: sem nome',
+      params: { stage: 'dns', detail: 'sem nome' },
+    } }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ShareReachError);
+    expect((e as ShareReachError).stage).toBe('dns');
+    expect((e as ShareReachError).detail).toBe('sem nome');
+    expect((e as ShareReachError).message).toBe(m.share_reach_failed_dns());
+  });
+  it.each([404, 405])('%i na criação = servidor sem o Rust', async (status) => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"Not Found"}', { status }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect(e).toMatchObject({ status, code: 'share_create_needs_rust', message: m.share_create_needs_rust() });
+  });
 });
 
 describe('sharePrereqs', () => {
@@ -202,5 +238,121 @@ describe('sharePrereqs', () => {
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBe(ok);
+  });
+});
+
+describe('parsePairLink', () => {
+  it('aceita só o link https do Funnel na 8443, com /par/CÓDIGO', () => {
+    expect(parsePairLink('  https://Casa.tail1.ts.net:8443/par/AB12cd/ \n')).toBe('https://casa.tail1.ts.net:8443/par/AB12cd');
+  });
+  it('recusa outro host, porta, esquema, caminho, credencial, query e código torto', () => {
+    for (const bad of [
+      'https://casa.example.com:8443/par/AB12', 'https://.ts.net:8443/par/AB12', 'https://casa.ts.net/par/AB12',
+      'https://casa.ts.net:443/par/AB12', 'http://casa.ts.net:8443/par/AB12', 'https://casa.ts.net:8443/convite/AB12',
+      'https://u@casa.ts.net:8443/par/AB12', 'https://casa.ts.net:8443/par/AB12?x=1', 'https://casa.ts.net:8443/par/AB12#x',
+      'https://casa.ts.net:8443/par/AB-12', 'https://casa.ts.net:8443/par/', `https://casa.ts.net:8443/par/${'a'.repeat(65)}`,
+      'https://casa.ts.net:8443/par/AB12/mais', 'lixo',
+    ]) expect(parsePairLink(bad), bad).toBeNull();
+  });
+});
+
+const DONO: Server = { id: 'srv-1', label: 'note', baseUrl: 'https://note.ts.net', token: 'td' };
+
+describe('createPairInvite', () => {
+  it('posta o nível e devolve o link', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, { id: 'p1', link: 'https://note.ts.net:8443/par/X', expires_at: 1 }));
+    expect(await createPairInvite('s 1', 'full', DONO)).toEqual({ id: 'p1', link: 'https://note.ts.net:8443/par/X', expires_at: 1 });
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://note.ts.net/api/sessions/s%201/pair-invite');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ level: 'full' });
+  });
+  it('409 de pré-requisito e de alcance saem como no compartilhar', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(resposta(409, { detail: { code: 'erro_compartilhar_pre_requisito', params: { missing: ['funnel'], fix: 'f' }, msg: 'x' } }))
+      .mockResolvedValueOnce(resposta(409, { detail: { code: 'share_reach_failed', params: { stage: 'funnel', detail: 'd' }, msg: 'x' } }));
+    expect(await createPairInvite('s', 'view', DONO).catch((x: unknown) => x)).toBeInstanceOf(SharePrerequisiteError);
+    const e = await createPairInvite('s', 'view', DONO).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ShareReachError);
+    expect((e as ShareReachError).stage).toBe('funnel');
+  });
+  it.each([404, 405])('%i = servidor sem o Rust', async (status) => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"Not Found"}', { status }));
+    expect(await createPairInvite('s', 'view', DONO).catch((x: unknown) => x)).toMatchObject({ status, code: 'share_create_needs_rust' });
+  });
+});
+
+describe('acceptPair', () => {
+  it('posta link e nível; resposta sem level é Hangar antigo = ver e recado', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(resposta(200, { ok: true, alias: 'casa', owner: 'Ana', session: 'hangar', level: 'full' }))
+      .mockResolvedValueOnce(resposta(200, { ok: true, alias: 'casa', owner: 'Ana', session: 'hangar' }));
+    expect(await acceptPair('s', ' https://casa.ts.net:8443/par/AB12 ', 'full', DONO))
+      .toEqual({ alias: 'casa', owner: 'Ana', session: 'hangar', level: 'full' });
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://note.ts.net/api/sessions/s/pair-accept');
+    expect(JSON.parse(String(init?.body))).toEqual({ link: 'https://casa.ts.net:8443/par/AB12', level: 'full' });
+    expect((await acceptPair('s', 'https://casa.ts.net:8443/par/AB12', 'view', DONO)).level).toBe('view');
+  });
+  it('pré-requisito do Funnel deste lado sai como no compartilhar', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(409, { detail: {
+      code: 'erro_compartilhar_pre_requisito', params: { missing: ['funnel'], fix: 'f' }, msg: 'x' } }));
+    expect(await acceptPair('s', 'https://casa.ts.net:8443/par/AB12', 'view', DONO).catch((x: unknown) => x))
+      .toBeInstanceOf(SharePrerequisiteError);
+  });
+  it('link torto nem sai daqui', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch');
+    expect(await acceptPair('s', 'https://casa.ts.net:8443/convite/AB12', 'view', DONO).catch((x: unknown) => x))
+      .toMatchObject({ code: 'erro_par_link_invalido', message: m.erro_par_link_invalido() });
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it('erro do servidor sai com o código', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(502, { detail: { code: 'erro_par_incerto', params: {}, msg: 'x' } }));
+    expect(await acceptPair('s', 'https://casa.ts.net:8443/par/AB12', 'view', DONO).catch((x: unknown) => x))
+      .toMatchObject({ status: 502, code: 'erro_par_incerto' });
+  });
+});
+
+describe('pares externos: lista, liberar, sair e attach', () => {
+  it('lista os pares do servidor', async () => {
+    ambiente();
+    const par = { local_session: 's', alias: 'casa', owner: 'Ana', session: 'h', address: 'https://casa.ts.net:8443', token: 't', level_given: 'full' };
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, [par]));
+    expect(await listExternalPairs(DONO)).toEqual([par]);
+    expect(spy.mock.calls[0][0]).toBe('https://note.ts.net/api/external-pairs');
+  });
+  it('liberar posta alias e nível na rota do dono', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, { ok: true }));
+    await setPairAccess('s', 'casa', 'full', DONO);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://note.ts.net/api/sessions/s/pair-access');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ alias: 'casa', level: 'full' });
+  });
+  it('sair/desfazer o par: DELETE na rota do dono do MEU servidor', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, { ok: true }));
+    await leavePair('casa', 'han gar', DONO);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://note.ts.net/api/external-pairs/casa?session=han%20gar');
+    expect(init?.method).toBe('DELETE');
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer td');
+  });
+  it('attach liga o token do par à entrada que já existe', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, { ok: true }));
+    await attachGuest({ id: 'e', label: 'x', baseUrl: 'https://casa.ts.net:8443', token: 'tconvite', invite: true }, 'tpar');
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://casa.ts.net:8443/api/guest/attach');
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer tconvite');
+    expect(JSON.parse(String(init?.body))).toEqual({ token: 'tpar' });
   });
 });

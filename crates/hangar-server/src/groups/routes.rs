@@ -6,7 +6,7 @@
 //! `/pair` e `DELETE /pair` seguram a porta de entrada da sessão até gravar o grupo (um rename não
 //! grava o nome velho por cima) e a soltam antes dos avisos: o aviso à própria sessão passa pela
 //! porta de novo e, com o passe na mão, travaria contra um fechamento que espera esse passe.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -39,8 +39,8 @@ pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão lo
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
 /// `_group_unavailable` do Python.
 const UNAVAILABLE_MSG: &str = "os grupos estão indisponíveis agora";
-const STORM_MAX: usize = 5;
-const STORM_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const STORM_MAX: usize = 5;
+pub(crate) const STORM_WINDOW: Duration = Duration::from_secs(60);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -145,7 +145,7 @@ impl Asked {
 
 /// Provedor de cada sessão viva (`registry.list()`): o retrato de até 2 s e, faltando alguém de
 /// `wanted`, uma descoberta nova (como o `_cached_info_sync`).
-pub(super) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
+pub(crate) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
     let failed = |e: crate::list::bridge::ListError| list_unavailable(e.code);
     let rows = st.list.snapshot().await.map_err(failed)?.rows;
     let mut found: BTreeMap<String, String> = rows.iter().map(|r| (r.name.clone(), r.provider.clone())).collect();
@@ -170,6 +170,17 @@ fn failures_text(errs: &[Value]) -> String {
 
 pub(super) fn envelope(code: &str, msg: String, params: Value) -> Value { json!({"code": code, "params": params, "msg": msg}) }
 
+/// Endereços dos pares externos; sem as lojas de convite, nenhum (todo remoto é máquina própria).
+pub(crate) fn outside_addresses(st: &AppState) -> HashSet<String> {
+    st.share.as_ref().map(|s| s.pairs.addresses()).unwrap_or_default()
+}
+
+pub(crate) const ORQ_OUTSIDE_CODE: &str = "erro_grupo_orq_par_externo";
+pub(crate) const ORQ_OUTSIDE_MSG: &str = "grupo de orquestração não aceita sessão de fora: os executores entram e saem o tempo todo";
+/// Árbitro sozinho no `orq`: recusa com aviso próprio, e o grupo dele fica.
+pub(crate) const ORQ_ARBITER_CODE: &str = "erro_par_externo_orq";
+pub(crate) const ORQ_ARBITER_MSG: &str = "a sessão é árbitra de uma orquestração e não pareia com outra máquina";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairBody {
@@ -188,6 +199,9 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let raw = if !body.peers.is_empty() { body.peers } else if !body.peer.is_empty() { vec![body.peer] } else { Vec::new() };
     let mut others: Vec<String> = Vec::new();
     for p in raw.into_iter().filter(|p| !p.is_empty()) {
+        // Membro de fora não tem sidecar aqui: entrar com ele é entrar no grupo da ponta daqui.
+        // Assim ele nunca chega ao `pair_cross`, que é só de máquina própria.
+        let p = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(&p)).map_or(p, |r| r.local_session);
         if !others.contains(&p) { others.push(p); }
     }
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
@@ -211,10 +225,13 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     if !missing.is_empty() {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing}));
     }
-    let joined = asked.groups.join(JoinOwned { name, others, task: body.task, replace_task: body.replace_task, harness: harness.clone(), orq: body.orq }).await;
+    let outside = outside_addresses(&asked.st);
+    let joined = asked.groups.join(JoinOwned { name, others, task: body.task, replace_task: body.replace_task, harness: harness.clone(),
+        orq: body.orq, outside }).await;
     let JoinOutcome { members, gid, task, orq, newcomers, before } = match joined {
         Ok(outcome) => outcome,
         Err(GroupError::Refused(JoinRefusal::Mix)) => return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_mistura_cross", MIX_MSG, json!({})),
+        Err(GroupError::Refused(JoinRefusal::OrqOutside)) => return asked.refuse(StatusCode::CONFLICT, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, json!({})),
         Err(GroupError::Refused(JoinRefusal::TaskConflict { existing })) => return asked.refuse(StatusCode::CONFLICT, "erro_pareamento_tarefa_existente",
             &format!("o grupo já tem tarefa: {} — repita com --substituir-tarefa pra trocar", py_repr(&json!(existing))), json!({"existente": existing})),
         Err(GroupError::Orq(PromoteError::Conflict(text))) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),
@@ -242,6 +259,12 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         if let Err(failed) = asked.restore(before).await { return failed; }
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({})", failures_text(&errs));
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": errs}));
+    }
+    // Falhar aqui só deixa o membro novo invisível para quem é de fora: o lado seguro.
+    if let Some(share) = &asked.st.share {
+        for failed in crate::share::pair_routes::grant_members(share, &members).await {
+            tracing::warn!(code = "groups_outside_grant_failed", session = %asked.name, error = %failed, "groups: acesso de fora ao membro novo não gravado");
+        }
     }
     let warning = if errs.is_empty() { Value::Null } else {
         envelope("erro_pareamento_aviso_parcial", format!("aviso falhou em: {}", failures_text(&errs)), json!({"avisos": errs}))
@@ -278,7 +301,7 @@ struct GroupMessageBody {
 
 /// `_group_estourou`: 5 avisos por grupo em 60 s; o pedido recusado também conta.
 // ponytail: mapa do processo que só cresce, um gid por grupo, como o `_group_envios` do Python.
-fn storm(gid: &str) -> bool {
+pub(crate) fn storm(gid: &str) -> bool {
     static SENT: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> = LazyLock::new(Mutex::default);
     let now = Instant::now();
     let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());
@@ -297,7 +320,8 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
     if head.starts_with('/') {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_group_message_slash", "group-message não suporta slash-commands", json!({}));
     }
-    if head.starts_with("[grupo:") || head.starts_with("[de:") {
+    // `[de fora:` é recado que já atravessou o par: reespalhar faria bate-volta entre máquinas.
+    if head.starts_with("[grupo:") || head.starts_with("[de:") || head.starts_with("[de fora:") {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_group_message_resposta",
             "aviso de grupo não pode reencaminhar um [grupo:]/[de:] — responda 1:1", json!({}));
     }
@@ -310,17 +334,22 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
             json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()}));
     }
-    // Membro de outra máquina falha com "sessão não encontrada", como no Python: aqui ninguém o
-    // procura na lista.
+    // Máquina própria falha com "sessão não encontrada", como no Python: aqui ninguém a procura na
+    // lista. Membro de fora recebe pela chave de saída do próprio par.
     let local: Vec<String> = link.peers.iter().filter(|p| !is_remote(p)).cloned().collect();
     let live = match providers(&asked.st, &local).await {
         Ok(live) => live,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
     };
     let text = format!("[grupo: {}] {}", asked.name, body.text);
+    // Um id por aviso: dois pares com a mesma máquina mandam dois POSTs e lá cada sessão o recebe uma vez.
+    let notice = crate::mods::state::random_hex(8);
     let mut failed = Vec::new();
     for p in &link.peers {
-        let sent = if live.contains_key(p) { deliver_text(&asked.st, p, &text).await }
+        let outside = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(p).map(|rec| (s, rec)));
+        let sent = if let Some((share, rec)) = outside {
+            crate::share::pair_routes::notify_outside(&asked.st, share, &crate::share::pair_routes::Direct, &rec, &asked.name, &body.text, &notice).await
+        } else if live.contains_key(p) { deliver_text(&asked.st, p, &text).await }
             else { Err(envelope("erro_sessao_inexistente", "sessão não encontrada".into(), json!({}))) };
         if let Err(e) = sent { failed.push(json!({"sessao": p, "erro": e})); }
     }

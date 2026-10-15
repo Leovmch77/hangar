@@ -688,8 +688,10 @@ pub struct Hangar {
     pending_remote: Option<(String, String)>,
     /// Pares externos lidos de cada servidor próprio (chave dele, par).
     external_pairs: Vec<(String, api::ExternalPairDto)>,
+    /// Sessões de fora por máquina (`servers::norm`), refeito no `apply_external_pairs`: a barra o lê a cada quadro.
+    outside_names: HashMap<String, HashSet<String>>,
     /// Sessões com par externo na última lista vista: a releitura dos pares só sai quando isto muda.
-    external_seen: Option<Vec<(String, String, Option<PairExternal>)>>,
+    external_seen: Option<Vec<(String, String, Vec<api::dto::PairExternalEntry>)>>,
     /// Attach já feitos ou em voo (endereço, token da entrada, token do par).
     attached: HashSet<(String, String, String)>,
     external_seq: u64,
@@ -943,7 +945,7 @@ impl Hangar {
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
-            external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
+            external_pairs: Vec::new(), outside_names: HashMap::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
             voice: voice_ui::VoiceUi { a11y_dump: Self::watch_a11y_dump(window, cx), ..Default::default() },
             player: Default::default(),
@@ -5025,23 +5027,27 @@ impl Hangar {
         let mut children: Vec<AnyElement> = Vec::new();
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
-            let session = match row {
+            let (session, remote) = match row {
                 grouping::ListRow::Header { gid, label, members } => {
                     children.push(self.render_pair_header(&gid, &label, &members, remote, window, cx));
                     continue;
                 }
                 grouping::ListRow::External { gid, .. } if self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) => continue,
-                grouping::ListRow::External { gid, owner, session, alias } => {
-                    children.push(self.render_external_pair_row(&gid, &owner, &session, &alias, remote, window, cx));
-                    continue;
-                }
+                // A sessão de fora é a linha de verdade, lida da entrada de convite da máquina dela; antes da lista dela chegar,
+                // fica a linha simples que abre por lá.
+                grouping::ListRow::External { gid, pair } => match self.outside_row(&gid, &pair, remote) {
+                    Some(found) => found,
+                    None => {
+                        children.push(self.render_external_pair_row(&gid, &pair.owner, &pair.session, &pair.alias, remote, window, cx));
+                        continue;
+                    }
+                },
                 grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
-                grouping::ListRow::Session(session) => session,
+                grouping::ListRow::Session(session) => (session.clone(), remote.map(str::to_owned)),
             };
-            let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
-            let remote = remote.map(str::to_owned);
-            children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
-                else { self.render_session_row(session.clone(), selected, remote, window, cx) });
+            let selected = selected_name == Some(session.name.as_str()) && self.open_key() == remote;
+            children.push(if conversations { self.render_conversation_row(session, selected, remote, window, cx) }
+                else { self.render_session_row(session, selected, remote, window, cx) });
         };
         let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
             if !layout.waiting.is_empty() {
@@ -5064,7 +5070,8 @@ impl Hangar {
         if self.multi_server() {
             // Como o web com mais de uma máquina: um bloco por servidor, na ordem da lista.
             let active = self.active_key();
-            for entry in self.servers.iter().filter(|s| !s.disabled) {
+            // Entrada só de par não vira seção: a sessão de fora mora dentro do grupo.
+            for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
                 let key = servers::norm(&entry.address);
                 if key == active {
                     let error = self.invite_ended.contains(&key).then(|| tr_shared("convite_encerrado", &[])).or(self.list_error.clone());
@@ -5307,6 +5314,7 @@ impl Hangar {
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
             .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
             .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
+            .children(pair_badges(&session))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_target, click_target) = (target.clone(), target.clone(), target.clone());
@@ -5441,6 +5449,7 @@ impl Hangar {
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr_shared("sessao_compartilhada", &[])).build(window, cx))
                     .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
                 .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
+                .children(pair_badges(&session))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
@@ -5567,6 +5576,13 @@ fn place(session: &SessionInfo, host: &str) -> String {
 fn badge(text: String, color: Hsla) -> Div {
     div().flex_shrink_0().px(px(5.)).py(px(1.)).rounded(px(6.)).bg(theme::raised()).border_1().border_color(theme::border())
         .text_size(px(10.)).text_color(color).child(text)
+}
+
+/// Selos do par externo na linha: "de <dono>" na sessão de fora e o acesso completo que espera o "Liberar".
+fn pair_badges(session: &SessionInfo) -> impl Iterator<Item = Div> {
+    let outside = session.outside.as_ref().map(|o| badge(tr_shared("pair_from_owner", &[("dono", &o.owner)]), theme::accent()));
+    let pending = session.outside_pairs().iter().any(|p| p.pending).then(|| badge(tr_shared("pair_full_pending", &[]), theme::warning()));
+    outside.into_iter().chain(pending)
 }
 
 fn agent_name(provider: &str) -> &'static str {

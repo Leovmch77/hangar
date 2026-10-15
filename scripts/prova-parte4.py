@@ -64,11 +64,8 @@ async def _sem_poda():
     return None
 _api._prune_loop = _sem_poda
 from app import runtime_coordinator as _rc, state as _state, preview as _prev, termsock as _ts
-from app import share_api as _sa, share_tunnel as _stun
-# Convite "na mesma rede" pela porta isolada do convite em 127.0.0.1, sem Tailscale.
-_sa.detect_lan_ip = lambda: "127.0.0.1"
-_sa.resolve_bind_ip = lambda s: "0.0.0.0"
-_stun.host = lambda: "prova.invalid"
+# O convite agora é do Rust: os casos 27 e 28 precisam de IP de rede local na máquina, sem
+# substituto aqui como havia para o Python.
 _cont = {{"sm": _col.Counter(), "pb": _col.Counter(), "pty": _col.Counter()}}
 _sm0 = _state.StateMonitor.__init__
 def _sm(self, name, *a, **k):

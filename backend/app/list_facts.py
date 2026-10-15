@@ -7,7 +7,7 @@ linhas, nunca troca a lista pela do Python."""
 import asyncio
 import logging
 
-from app import guest_users, registry, runtime_config, share_store, sse
+from app import guest_users, registry, runtime_config, sse
 from app.internal_pool import internal_thread
 from app.models import SessionInfo
 
@@ -97,14 +97,13 @@ def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[
     overrides, frozen = _transfers(infos)
     orq, orq_error = _orq_rows()
     names = {i.name for i in infos} | {r["name"] for r in overrides} | {r["name"] for r in orq}
-    shared, owners, hidden = _access(names)
+    owners, hidden = _access(names)
     return {
         "states": states,
         "overrides": overrides,
         "frozen": frozen,
         "orq": orq,
         "orq_error": orq_error,
-        "shared": shared,
         "owners": owners,
         "hidden": hidden,
         "problems": _problems(infos),
@@ -160,13 +159,13 @@ def _orq_rows() -> tuple[list[dict], str | None]:
     return out, None
 
 
-def _access(names: set[str]) -> tuple[list[str], dict[str, str], list[str]]:
-    shared = sorted(share_store.active_sessions() & names)
+def _access(names: set[str]) -> tuple[dict[str, str], list[str]]:
+    # "Compartilhada" o Rust tira da loja de convites dele.
     if not guest_users.has_claims():
-        return shared, {}, []
+        return {}, []
     owners = {n: o for n in names if (o := guest_users.owner_name(n))}
     hidden = sorted(n for n in names if not guest_users.visible_to(None, n))
-    return shared, owners, hidden
+    return owners, hidden
 
 
 def _problems(infos: list[SessionInfo]) -> dict[str, str]:

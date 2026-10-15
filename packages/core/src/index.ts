@@ -56,6 +56,7 @@ export * from './slashCommands';
 export * from './credenciais';
 export * from './pairDrop';
 export * from './pairGroups';
+export * from './externalPairs';
 export * from './configSync';
 export * from './sessionOptions';
 export * from './firstConversation';

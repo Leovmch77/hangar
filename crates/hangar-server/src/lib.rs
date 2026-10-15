@@ -26,7 +26,9 @@ mod plugin_listener;
 pub mod routes;
 pub mod runtime;
 pub mod session_write;
+pub mod share_reach;
 pub mod side;
+pub mod share;
 pub mod state;
 pub mod subagents;
 pub mod tail;
@@ -52,7 +54,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 68;
+pub const INTERNAL_PROTOCOL: u32 = 69;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -86,6 +88,16 @@ pub async fn serve_until(
 pub async fn serve_until_with_state(
     listener: tokio::net::TcpListener,
     state: routes::AppState,
+    stop: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    serve_until_with_guest(listener, state, None, stop).await
+}
+
+/// `guest`: porta do convidado (`HANGAR_SERVER_GUEST_LISTEN`), ligada sem segurar a principal.
+pub async fn serve_until_with_guest(
+    listener: tokio::net::TcpListener,
+    state: routes::AppState,
+    guest: Option<std::net::SocketAddr>,
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
     let cfg = state.cfg.clone();
@@ -145,14 +157,14 @@ pub async fn serve_until_with_state(
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
-            result = routes::serve_with_state(listener,state) => result,
+            result = routes::serve_with_guest(listener,state,guest) => result,
             result = gateway => result,
             () = stop => Ok(()),
         };
         return result;
     }
     tokio::select! {
-        r = routes::serve_with_state(listener, state) => r,
+        r = routes::serve_with_guest(listener, state, guest) => r,
         () = stop => Ok(()),
     }
     }.await;

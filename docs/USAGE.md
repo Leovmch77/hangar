@@ -439,8 +439,12 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   operador; no web o comando aparece com "Copiar". **"Liberar no Tailscale"** abre a página do
   Tailscale que libera o Funnel e fica conferindo por 5 min: liberou, o aviso some e o "Gerar link de
   convite" volta.
-- **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
+- **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". Enquanto o
+  servidor confere que o link já abre pela internet (até ~3 min), aparece "Preparando o acesso de
+  fora…"; se não abrir, o diálogo diz em que etapa parou (DNS ou Funnel) e você gera de novo. O link
   `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
+  Compartilhar precisa do servidor Rust do Hangar rodando na máquina: sem ele a porta do convite
+  fica fechada e o diálogo avisa.
   Na mesma rede, sem Tailscale: "Gerar link local" dá `http://<ip-da-rede>:8766/convite/<código>`,
   que só abre de quem está naquela rede (a máquina precisa de `CP_LAN_BIND_IP=0.0.0.0`). No PWA
   aberto por `https` o navegador bloqueia o link `http`; use o app nativo ou o desktop.
@@ -452,8 +456,32 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   em cerca de 5 s. Sem convite ativo o Funnel da porta 8443 desliga sozinho.
 - **O que o convidado não faz:** ele não conta como o seu app aberto (você segue recebendo as
   notificações) e a lista dele não mostra o nome das suas outras sessões. Servidor de convite que
-  responde "encerrado" (ou 401) vira "compartilhamento encerrado"; erro 503 é passageiro (você trocando
-  o modo da sessão, tmux ou túnel fora) e ele tenta de novo, o código não foi gasto.
+  responde "encerrado" (ou 401) vira "compartilhamento encerrado"; erro 503, 502 ou conexão recusada
+  é passageiro (você trocando o modo da sessão, tmux ou túnel fora, o servidor do Hangar
+  reiniciando) e ele tenta de novo, o código não foi gasto.
+
+### Parear com a sessão de outra pessoa
+
+Junta uma sessão sua com a de outra pessoa que usa o Hangar: as duas trocam recados e cada um vê a
+sessão do outro dentro do próprio grupo. Usa os mesmos pré-requisitos do compartilhamento.
+
+- **Convidar:** menu da sessão → "Compartilhar sessão" → "Convidar para parear" (no app do
+  celular, "Convidar para parear" direto no menu) → escolha o acesso que a outra pessoa terá:
+  **"Ver e mandar recado"** (lê a conversa e manda recados) ou **"Acesso completo"** (escreve nas
+  sessões do grupo, inclusive o terminal desta máquina). O link
+  `…ts.net:8443/par/…` só aparece depois de conferido pela internet, como no compartilhamento.
+- **Aceitar:** "Parear por convite…" no menu da sessão (ou em Máquinas, no PWA e no app; no nativo,
+  basta clicar no link), cole o link, escolha a sua sessão e o acesso que VOCÊ dá. O aviso diz o que a outra pessoa te
+  deu. Nos dois lados, a sessão de fora aparece dentro do grupo, marcada "de <dono>", com o
+  cabeçalho `sua-sessão ↔ apelido::sessão (dono)`.
+- **O nível vale para o grupo inteiro.** Quem você puser no grupo pela tela, com par em acesso
+  completo, pede confirmação e já entra liberado. Quem entrar por agente (`hangar-send --pair`,
+  MCP) fica com "ver e mandar recado" e a linha mostra "Acesso completo pendente" com o botão
+  "Liberar para <dono>". Grupo de orquestração não aceita sessão de fora.
+- **Sair:** na sessão de fora, "Sair do pareamento com <dono>" (a sessão dela continua rodando;
+  vocês param de se ver). Na sua sessão, "Desfazer par com <dono>". Tirar do grupo a sessão que
+  fez o par, ou fechá-la, desfaz o par para o grupo inteiro; tirar outra só corta o acesso a ela.
+- Do outro lado com Hangar antigo, o par funciona com "ver e mandar recado" dos dois lados.
 
 ### Opções do Claude Code
 

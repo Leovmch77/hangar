@@ -285,7 +285,13 @@ pub async fn deliver_text(st: &AppState, name: &str, text: &str) -> Result<(), V
 
 /// O mesmo recado, com a resposta inteira do `/input` (o broadcast a devolve por sessão).
 pub async fn deliver_reply(st: &AppState, name: &str, text: &str) -> (StatusCode, Value) {
-    let body = json!({"text": text, "steer": false}).to_string();
+    write_input(st, name, text, false).await
+}
+
+/// O `/input` do dono feito por dentro, com a resposta inteira (o recado do par externo devolve
+/// o que a entrega respondeu).
+pub async fn write_input(st: &AppState, name: &str, text: &str, steer: bool) -> (StatusCode, Value) {
+    let body = json!({"text": text, "steer": steer}).to_string();
     let route = match st.state.runtime.get() {
         Some(runtime) => route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
         None => Write::Python,
@@ -298,7 +304,7 @@ pub async fn deliver_reply(st: &AppState, name: &str, text: &str) -> (StatusCode
             result
         }
         Write::Rust(held, target) => {
-            let result = send(st, name, &target, text, false).await;
+            let result = send(st, name, &target, text, steer).await;
             drop(held);
             result
         }
@@ -351,7 +357,7 @@ pub async fn broadcast(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
         let body = json!({"names": rest, "text": text}).to_string();
         let Ok(forwarded) = Request::post("/api/broadcast").header(header::AUTHORIZATION, format!("Bearer {}", st.cfg.auth_token))
             .header(header::CONTENT_TYPE, "application/json").body(Body::from(body)) else { return super::forward_whole(&st, parts, bytes, &fwd).await };
-        let response = pass(&st, forwarded, &Forward { client_ip: "127.0.0.1".into(), https: false }).await;
+        let response = pass(&st, forwarded, &Forward { client_ip: "127.0.0.1".into(), https: false, guest: None }).await;
         if !response.status().is_success() { return response; }
         let reply = to_bytes(response.into_body(), RELAY_REPLY_LIMIT).await.unwrap_or_default();
         if let Some(results) = serde_json::from_slice::<Value>(&reply).ok().and_then(|v| v["results"].as_object().cloned()) { python = results; }
@@ -386,7 +392,7 @@ async fn relay_as_owner(st: &AppState, name: &str, body: String) -> (StatusCode,
     let path = format!("/api/sessions/{}/input", utf8_percent_encode(name, SEGMENT));
     let Ok(req) = Request::post(path).header(header::AUTHORIZATION, format!("Bearer {}", st.cfg.auth_token))
         .header(header::CONTENT_TYPE, "application/json").body(Body::from(body)) else { return (StatusCode::BAD_REQUEST, Value::Null) };
-    let fwd = Forward { client_ip: "127.0.0.1".into(), https: false };
+    let fwd = Forward { client_ip: "127.0.0.1".into(), https: false, guest: None };
     let response = pass(st, req, &fwd).await;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), RELAY_REPLY_LIMIT).await.unwrap_or_default();

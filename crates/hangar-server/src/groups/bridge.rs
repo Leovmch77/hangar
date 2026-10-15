@@ -1,7 +1,6 @@
 //! Ponte privada dos grupos (`/__hangar_server/groups`): no modo `rust`/`pending` só o Rust grava
-//! `.hangar-pair`. Registry, par externo, MCP e as rotas que chegam pelas portas do Python pedem
+//! `.hangar-pair`. Registry, MCP e as rotas que chegam pelas portas do Python pedem
 //! aqui, com o envelope das outras pontes (`{op, args}` → `{ok, result}` | `{ok: false, error}`).
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,10 +31,6 @@ enum Operation {
     Leave { name: String },
     #[serde(rename = "group.rename")]
     Rename { old: String, new: String },
-    #[serde(rename = "group.external_link")]
-    ExternalLink { local: String, address: String, #[serde(default)] harness: BTreeMap<String, String> },
-    #[serde(rename = "group.external_unlink")]
-    ExternalUnlink { local: String, address: String },
     #[serde(rename = "group.orq_associate")]
     OrqAssociate { name: String, gid: String, mtime: f64 },
 }
@@ -47,9 +42,10 @@ fn fail(code: &str, detail: impl Into<String>) -> Failed { Failed { code: code.t
 /// Recusa do plano vira o código que o Python já traduz; disco é `groups_store_failed`.
 fn group_failed(e: GroupError) -> Failed {
     match e {
-        GroupError::Refused(JoinRefusal::Mix | JoinRefusal::AlreadyGrouped) => fail("erro_pareamento_mistura_cross", super::routes::MIX_MSG),
+        GroupError::Refused(JoinRefusal::Mix) => fail("erro_pareamento_mistura_cross", super::routes::MIX_MSG),
+        GroupError::Refused(JoinRefusal::OrqOutside) => fail(super::routes::ORQ_OUTSIDE_CODE, super::routes::ORQ_OUTSIDE_MSG),
         GroupError::Refused(JoinRefusal::TaskConflict { existing }) => fail("erro_pareamento_tarefa_existente", existing),
-        GroupError::Refused(JoinRefusal::Orq) => fail("erro_par_externo_orq", "a sessão é árbitra de uma orquestração e não pareia com outra máquina"),
+        GroupError::Refused(JoinRefusal::Orq) => fail(super::routes::ORQ_ARBITER_CODE, super::routes::ORQ_ARBITER_MSG),
         GroupError::Orq(PromoteError::Conflict(text)) => fail("erro_orq_arquivo_mudou", text),
         GroupError::Orq(PromoteError::Unavailable(code)) => fail("erro_grupo_indisponivel", code),
         GroupError::Store(e) => fail("groups_store_failed", e.to_string()),
@@ -89,10 +85,6 @@ async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) ->
             Ok(json!({"ex_peers": ex, "warnings": warnings}))
         }
         Operation::Rename { old, new } => groups.rename(&old, &new).await.map(|()| json!({})).map_err(group_failed),
-        Operation::ExternalLink { local, address, harness } =>
-            groups.external_link(&local, &address, harness).await.map(|gid| json!({"gid": gid})).map_err(group_failed),
-        Operation::ExternalUnlink { local, address } =>
-            groups.external_unlink(&local, &address).await.map(|()| json!({})).map_err(group_failed),
         Operation::OrqAssociate { name, gid, mtime } => {
             // Sob o lock: um join ou uma saída concorrente não vê o time meio associado.
             let python = PythonOrq::from_state(&st);

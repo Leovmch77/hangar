@@ -56,7 +56,20 @@ export class SharePrerequisiteError extends Error {
   }
 }
 
-// Espelho de `_GLOBAL_ROUTES`/`_GLOBAL_PREFIXES` em backend/app/share_gate.py. `/api/config`
+// A criação espera no servidor até o link do Funnel abrir de fora; não abriu, o convite já foi
+// revogado lá e o erro diz em que etapa parou.
+export class ShareReachError extends Error {
+  readonly stage: 'dns' | 'funnel';
+  readonly detail: string;
+  constructor(stage: 'dns' | 'funnel', detail: string, message: string) {
+    super(message);
+    this.stage = stage;
+    this.detail = detail;
+  }
+}
+
+// Espelho de `GLOBAL_ROUTES`/`GLOBAL_PREFIXES` em crates/hangar-server/src/share/caller.rs (um
+// teste de lá lê este arquivo e compara). `/api/config`
 // fica de fora de propósito: o `getConfig()` do Chat já tem `.catch(() => {})` e cai no padrão.
 export const INVITE_GLOBAL_PATHS: readonly string[] = [
   '/api/model-options', '/api/engines', '/api/harness/codex/opcoes',
@@ -100,6 +113,17 @@ export function parseInviteLink(text: string): { address: string; code: string }
   if (web?.[1] === 'http' && !local) return null;
   const esquema = web ? web[1] : local ? 'http' : 'https';
   return { address: `${esquema}://${hostPorta}`, code };
+}
+
+// Só `https://host.ts.net:8443/par/CÓDIGO` do Funnel (regra do `parse_pair_link` do nativo): outro
+// host ou porta nunca recebe o resgate, que leva o token desta máquina.
+export function parsePairLink(text: string): string | null {
+  let u: URL;
+  try { u = new URL(text.trim()); } catch { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || text.includes('?') || text.includes('#')) return null;
+  if (!u.hostname.endsWith('.ts.net') || u.hostname.length <= '.ts.net'.length || u.port !== '8443') return null;
+  const m = /^\/par\/([A-Za-z0-9]{1,64})\/?$/.exec(u.pathname);
+  return m ? `https://${u.hostname}:8443/par/${m[1]}` : null;
 }
 
 // Forma mínima do corpo de erro do resgate: envelope `{detail:{params:{reason}}}` ou `{reason}` cru.
