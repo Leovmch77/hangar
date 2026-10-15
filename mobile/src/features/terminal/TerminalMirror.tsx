@@ -5,10 +5,12 @@ import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
 import { getPane, sendKey, sendTermInput } from '@hangar/core';
 import type { NavKey } from '@hangar/core';
 import { usePanePoll } from './usePanePoll';
+import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 import { superficie } from '../../theme/superficie';
 
 interface Props {
+  serverId: string;
   name: string;
   aviso?: string;
 }
@@ -16,7 +18,8 @@ interface Props {
 const BOTTOM_SLOP = 24;
 const LINES_MAX = 1200;
 
-export function TerminalMirror({ name, aviso }: Props) {
+export function TerminalMirror({ serverId, name, aviso }: Props) {
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const { theme } = useUnistyles();
   const [lines, setLines] = useState(200);
   const [draft, setDraft] = useState('');
@@ -24,8 +27,8 @@ export function TerminalMirror({ name, aviso }: Props) {
   const [localErr, setLocalErr] = useState(aviso ?? '');
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const { text, scrollback, err: pollErr, pending, refresh, setAtBottom } = usePanePoll(name, lines);
-  const err = localErr || pollErr;
+  const { text, scrollback, err: pollErr, pending, refresh, setAtBottom } = usePanePoll(name, server, lines);
+  const err = !server ? m.servidor_nao_existe() : localErr || pollErr;
 
   const listRef = useRef<LegendListRef>(null);
   const [atBottomLocal, setAtBottomLocal] = useState(true);
@@ -51,10 +54,11 @@ export function TerminalMirror({ name, aviso }: Props) {
 
   const loadMore = useCallback(async () => {
     if (loadingMore || !canLoadMore) return;
+    if (!server) { setLocalErr(m.servidor_nao_existe()); return; }
     setLoadingMore(true);
     const next = lines === 200 ? 600 : 1200;
     try {
-      await getPane(name, next);
+      await getPane(name, next, server);
       setLines(next);
       await refresh();
       setLocalErr('');
@@ -63,18 +67,19 @@ export function TerminalMirror({ name, aviso }: Props) {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, canLoadMore, lines, name, refresh]);
+  }, [loadingMore, canLoadMore, lines, name, server, refresh]);
 
   const press = useCallback(
     async (key: NavKey | 'C-c') => {
       if (busy) return;
+      if (!server) { setLocalErr(m.servidor_nao_existe()); return; }
       setBusy(true);
       setLocalErr('');
       try {
         if (key === 'C-c') {
-          await sendTermInput(name, { key: 'C-c' });
+          await sendTermInput(name, { key: 'C-c' }, server);
         } else {
-          await sendKey(name, key as NavKey);
+          await sendKey(name, key as NavKey, server);
         }
         await refresh();
         toBottom();
@@ -84,20 +89,21 @@ export function TerminalMirror({ name, aviso }: Props) {
         setBusy(false);
       }
     },
-    [busy, name, refresh, toBottom],
+    [busy, name, server, refresh, toBottom],
   );
 
   const submitDraft = useCallback(
     async (withEnter: boolean) => {
       const value = draft;
       if (!value || busy) return;
+      if (!server) { setLocalErr(m.servidor_nao_existe()); return; }
       setBusy(true);
       setLocalErr('');
       try {
         if (withEnter) {
-          await sendTermInput(name, { text: value, key: 'Enter' });
+          await sendTermInput(name, { text: value, key: 'Enter' }, server);
         } else {
-          await sendTermInput(name, { text: value });
+          await sendTermInput(name, { text: value }, server);
         }
         setDraft('');
         await refresh();
@@ -108,7 +114,7 @@ export function TerminalMirror({ name, aviso }: Props) {
         setBusy(false);
       }
     },
-    [draft, busy, name, refresh, toBottom],
+    [draft, busy, name, server, refresh, toBottom],
   );
 
   // linhas para render — trim só fim, como Svelte

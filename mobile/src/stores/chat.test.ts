@@ -408,6 +408,30 @@ test('(e) user_msg da fila (queued-) sai quando o real chega com o mesmo texto',
   expect(events[0]?.id).toBe('a:9');
 });
 
+test.each([false, true])('real já conhecido: %s — remover a fila dona preserva os vizinhos no replay SSE', async (known) => {
+  const before = ev({ id: 'a:1', kind: 'assistant_msg', text: 'antes' });
+  const neighbor = ev({ id: 'a:2', kind: 'assistant_msg', text: 'vizinho' });
+  const otherQueue = ev({ id: 'queued-other', text: 'outra mensagem' });
+  const real = ev({ id: 'a:3', text: 'mensagem confirmada' });
+  historyResponses = [[before, ev({ id: 'queued-owner', text: real.text }), neighbor, otherQueue,
+    ...(known ? [{ ...real, text: 'texto parcial' }] : [])]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+
+  created[0].trigger('message', JSON.stringify(real));
+  expect(chat.use.getState().events).toEqual([before, neighbor, otherQueue, real]);
+
+  const updatedNeighbor = { ...neighbor, text: 'vizinho atualizado' };
+  created[0].trigger('message', JSON.stringify(updatedNeighbor));
+  expect(chat.use.getState().events).toEqual([before, updatedNeighbor, otherQueue, real]);
+  created[0].trigger('message', JSON.stringify(otherQueue));
+  created[0].trigger('message', JSON.stringify(before));
+  created[0].trigger('message', JSON.stringify(real));
+  expect(chat.use.getState().events).toEqual([before, updatedNeighbor, otherQueue, real]);
+  chat.release();
+});
+
 test('(f) filaCount conta só queued-* (o eco em voo não é fila) e zera quando o real chega', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');

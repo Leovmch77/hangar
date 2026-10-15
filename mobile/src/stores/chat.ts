@@ -378,6 +378,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         if (dono >= 0) {
           const qi = filas[dono].i;
           events = [...events.slice(0, qi), ...events.slice(qi + 1)];
+          rebuildIndex(events);
         }
       }
     }

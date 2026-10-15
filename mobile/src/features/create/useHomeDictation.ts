@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { transcribeDictationForServer } from '@hangar/core';
 import type { Server } from '@hangar/core';
 import { useDitado } from '../ditado/useDitado';
-import { useDitadoEstiloStore } from '../ditado/ditadoEstiloStore';
+import { dictationStyleStore } from '../ditado/ditadoEstiloStore';
 import * as m from '../../paraglide/messages';
 
 // Ditado antes de a sessão existir: o servidor só transcreve e limpa (rota sem sessão), e o texto
@@ -13,7 +13,7 @@ export function useHomeDictation(server: Server, onText: (text: string) => void)
   const [failed, setFailed] = useState<File | null>(null);
   const mounted = useRef(true);
   const busy = useRef(false);
-  const estilo = useRef<string | undefined>(undefined);
+  const estilo = useRef<{ serverId: string; value: string | undefined } | null>(null);
   const onTextRef = useRef(onText);
   onTextRef.current = onText;
 
@@ -29,7 +29,9 @@ export function useHomeDictation(server: Server, onText: (text: string) => void)
     setError('');
     setFailed(null);
     try {
-      const { text, aviso } = await transcribeDictationForServer(server, file, estilo.current);
+      const style = dictationStyleStore(server).getState();
+      const value = estilo.current?.serverId === server.id ? estilo.current.value : style.pronto ? style.valor : undefined;
+      const { text, aviso } = await transcribeDictationForServer(server, file, value);
       const trimmed = text.trim();
       if (!trimmed) throw new Error(m.composer_transcricao_vazia());
       if (!mounted.current) return;
@@ -50,6 +52,7 @@ export function useHomeDictation(server: Server, onText: (text: string) => void)
   // Cancelar para o microfone e joga o áudio fora, sem transcrever nem guardar para "de novo".
   const discard = useRef(false);
   const { gravando, rms, iniciar, parar } = useDitado({
+    server,
     onFim: (file) => {
       if (discard.current) { discard.current = false; return; }
       void transcribe(file);
@@ -66,15 +69,15 @@ export function useHomeDictation(server: Server, onText: (text: string) => void)
     setFailed(null);
     discard.current = false;
     // O estilo que a pílula mostra na hora de falar é o que o servidor aplica.
-    const style = useDitadoEstiloStore.getState();
-    estilo.current = style.pronto ? style.valor : undefined;
+    const style = dictationStyleStore(server).getState();
+    estilo.current = { serverId: server.id, value: style.pronto ? style.valor : undefined };
     try {
       await iniciar();
     } catch (e) {
       const msg = e instanceof Error ? e.message : '';
       setError(msg === 'permission_denied' ? m.composer_sem_acesso_mic() : msg || m.composer_falha_gravacao());
     }
-  }, [gravando, iniciar, parar]);
+  }, [gravando, iniciar, parar, server]);
 
   const retry = useCallback(() => { if (failed) void transcribe(failed); }, [failed, transcribe]);
   const dismiss = useCallback(() => { setError(''); setFailed(null); }, []);

@@ -61,7 +61,7 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
   const isCodex = provider === 'codex';
   const isClaude = !provider || provider === 'claude';
   const permission = usePermissionControl({ serverId, name, provider: isCodex ? 'codex' : isClaude ? 'claude' : null });
-  const approval = useCodexApproval({ name, headless, enabled: isCodex });
+  const approval = useCodexApproval({ serverId, name, headless, enabled: isCodex });
   const model = useModelControl({ serverId, name, provider, chosen, onChosen: setChosen, close });
   const effort = useEffortControl({ serverId, name, provider, chosen, onChosen: setChosen, close });
 

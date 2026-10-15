@@ -282,7 +282,8 @@ impl Api {
         let r = self.client.post(url)
             .header(header::CONTENT_TYPE, crate::composer::mime_for(filename))
             .header("X-Filename", crate::composer::encode_component(filename))
-            .body(bytes).timeout(Duration::from_secs(UPLOAD_SECONDS))
+            // 30 min de ditado dão ~58 MB: em 180 s só passariam acima de ~2,6 Mbit/s, abaixo de uma VPN em relay.
+            .body(bytes).timeout(Duration::from_secs(600))
             .send().await.map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
     }
@@ -354,7 +355,8 @@ impl Api {
     }
 
     async fn transcribed(request: reqwest::RequestBuilder) -> Result<Value, Failure> {
-        let r = request.timeout(Duration::from_secs(360)).send().await.map_err(|_| Failure::transport(true))?;
+        // Cobre o ditado mais longo (30 min de áudio) mais a organização: o servidor responde só no fim.
+        let r = request.timeout(Duration::from_secs(35 * 60)).send().await.map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
     }
 

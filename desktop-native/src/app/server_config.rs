@@ -92,7 +92,7 @@ struct Field { key: &'static str, label: &'static str, help: &'static str, icon:
 const AUX_MODEL: &str = "jev_aux_modelo";
 
 /// Na ordem do `CAMPOS` do web, filtrada por página.
-const FIELDS: [Field; 33] = [
+const FIELDS: [Field; 34] = [
     Field { key: "upload_retention_days", label: "server_keep_attachments", help: "server_keep_attachments_help", icon: IconName::Paperclip,
         kind: Kind::Number("server_days"), page: Page::Attachments },
     Field { key: "notify_finished", label: "server_notify_finished", help: "server_notify_finished_help", icon: IconName::CircleCheck,
@@ -130,6 +130,8 @@ const FIELDS: [Field; 33] = [
         kind: Kind::Text, page: Page::Voice },
     Field { key: "ditado_vocabulario", label: "voice_vocabulary", help: "voice_vocabulary_help", icon: IconName::BookOpen, kind: Kind::Text,
         page: Page::Voice },
+    Field { key: "dictation_max_minutes", label: "voice_dictation_max", help: "voice_dictation_max_help", icon: IconName::Clock,
+        kind: Kind::Number("voice_minutes"), page: Page::Voice },
     Field { key: "llm_base_url", label: "voice_llm_endpoint", help: "voice_llm_endpoint_help", icon: IconName::Globe, kind: Kind::Text, page: Page::Voice },
     Field { key: "dictation_include_recent_messages", label: "voice_recent_messages", help: "voice_recent_messages_help", icon: IconName::MessageSquare, kind: Kind::Toggle, page: Page::Voice },
     Field { key: "llm_api_key", label: "voice_llm_key", help: "voice_llm_key_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Voice },
@@ -1827,7 +1829,8 @@ impl Hangar {
             .when(s.open[0], |el| el.child(div().mt(px(8.)).child(rows(SECTIONS[0], cx))))
             .children(self.render_providers(cx))
             .child(div().mt(px(28.)).mb(px(10.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tr("voice_after")))
-            .child(settings_box().child(self.hands_free_row(cx)).child(self.config_row(field("ditado_vocabulario"), cx)))
+            .child(settings_box().child(self.hands_free_row(cx)).child(self.config_row(field("ditado_vocabulario"), cx))
+                .child(self.config_row(field("dictation_max_minutes"), cx)))
             .when_some(self.appearance_note.clone(), |el, note| el.child(div().id("voice-hands-free-save-error").role(Role::Alert)
                 .mt_2().text_sm().text_color(theme::danger()).whitespace_normal().child(note)))
             .child(self.voice_head("voice_cleanup", "voice_cleanup_help", s.cleanup_status()))

@@ -61,8 +61,13 @@ impl TranscriptionService {
             return Err(TranscriptionError { status: 400, code: "transcription_audio_empty".into(),
                 detail: "A gravação não contém áudio.".into() });
         }
-        let (per_provider, budget) = profile.limits();
+        let (per_provider, budget) = match profile {
+            Profile::Dictation => super::model::dictation_limits(snapshot.dictation_max_minutes),
+            _ => profile.limits(),
+        };
         let legacy = snapshot.providers.is_empty();
+        // O antigo tinha 120 s fixos; o ditado longo precisa do prazo dele também ali.
+        let (per_provider, budget) = if legacy && !matches!(profile, Profile::Dictation) { (120, 120) } else { (per_provider, budget) };
         let providers = if legacy { snapshot.legacy.into_iter().collect::<Vec<_>>() } else { snapshot.providers };
         if providers.is_empty() {
             return Err(TranscriptionError { status: 503, code: "transcription_not_configured".into(),
@@ -73,13 +78,13 @@ impl TranscriptionService {
             providers.iter().filter(|p| quota.wait(&p.id).is_none()).cloned().collect()
         };
         let queue = if free.is_empty() { providers } else { free };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(if legacy { 120 } else { budget });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(budget);
         let mut first: Option<TranscriptionError> = None;
         let mut reasons = Vec::new();
         for provider in queue {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining < Duration::from_secs(5) { break; }
-            let timeout = remaining.min(Duration::from_secs(if legacy { 120 } else { per_provider }));
+            let timeout = remaining.min(Duration::from_secs(per_provider));
             let name = cloud::display_name(&provider);
             let result = if matches!(provider.kind.as_str(), "openai" | "elevenlabs") {
                 cloud::transcribe(&self.client, &provider, content.clone(), filename.as_deref(), &snapshot.vocabulary, timeout).await

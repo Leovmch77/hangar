@@ -4,11 +4,13 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { getBastaoDossie } from '@hangar/core';
 import { mkMarkdownStyle } from './AssistantBubble';
+import { useServers } from '../stores/servers';
 import * as m from '../paraglide/messages';
 
 // O dossiê que ESTA sessão recebeu. 404 é resposta, não falha: a sessão simplesmente não veio de
 // uma passagem de bastão.
-export function BastaoSheet({ name }: { name: string }) {
+export function BastaoSheet({ serverId, name }: { serverId: string; name: string }) {
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const { theme } = useUnistyles();
   const md = useMemo(() => mkMarkdownStyle(theme), [theme]);
   const [texto, setTexto] = useState<string | null>(null);
@@ -22,7 +24,8 @@ export function BastaoSheet({ name }: { name: string }) {
     setCarregando(true);
     setErro('');
     setVazio(false);
-    getBastaoDossie(name)
+    if (!server) { setErro(m.chat_servidor_removido()); setCarregando(false); return; }
+    getBastaoDossie(name, server)
       .then((t) => {
         if (vivo) setTexto(t);
       })
@@ -37,7 +40,7 @@ export function BastaoSheet({ name }: { name: string }) {
     return () => {
       vivo = false;
     };
-  }, [name, tentativa]);
+  }, [name, server, tentativa]);
 
   const tentarDeNovo = useCallback(() => setTentativa((n) => n + 1), []);
 

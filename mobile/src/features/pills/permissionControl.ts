@@ -97,7 +97,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
   // Diz se a troca pegou: o painel só fecha no sucesso, para o aviso de falha ficar à vista.
   const select = useCallback(async (mode: string): Promise<boolean> => {
     if (applying || mode === current) return false;
-    if (!server) { setNotice(m.servidor_nao_existe()); return false; }
+    if (!server) { setNotice(m.chat_servidor_removido()); return false; }
     setApplying(true);
     setNotice(null);
     try {

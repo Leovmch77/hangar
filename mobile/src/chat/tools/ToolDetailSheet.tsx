@@ -5,6 +5,7 @@ import { extractEdits, extractFilePath, getBashOutput, summarizeToolInput, summa
 import { Sheet, type SheetRef } from '../../ui/Sheet';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
+import { useServers } from '../../stores/servers';
 import { EditDiff } from './EditDiff';
 import { toolIcon } from './toolIcon';
 import * as m from '../../paraglide/messages';
@@ -20,9 +21,10 @@ export interface ToolDetailHandle { abrir: (use: ChatEvent) => void }
 // PROCURA uma ScrollView descendente pra fixar (TrueSheetContentView.findScrollView) — sem ela o
 // flag não faz nada e o conteúdo longo não rola. Não é rolagem aninhada: não há outra no caminho.
 // `sessionName` liga a saída ao vivo do comando que ainda roda (sem ele, só o comando).
-export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: ChatEvent) => ChatEvent | null; sessionName?: string }>(
-  function ToolDetailSheet({ resultOf, sessionName }, ref) {
+export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: ChatEvent) => ChatEvent | null; sessionName?: string; serverId?: string }>(
+  function ToolDetailSheet({ resultOf, sessionName, serverId }, ref) {
     const { theme } = useUnistyles();
+    const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
     const sheet = useRef<SheetRef>(null);
     const [use, setUse] = useState<ChatEvent | null>(null);
     const [aberto, setAberto] = useState(false);
@@ -56,11 +58,14 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
     const pendente = fase === 'pending';
     useEffect(() => {
       if (!aberto || !pendente || !comando || !sessionName) return;
+      setSaidaViva(null);
+      setErroVivo(null);
+      if (!server) { setErroVivo(m.chat_servidor_removido()); return; }
       let vivo = true;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const ler = async () => {
         try {
-          const t = await getBashOutput(sessionName, comando);
+          const t = await getBashOutput(sessionName, comando, server);
           if (vivo) setSaidaViva(t);
         } catch (e) {
           // 401/404 não se curam sozinhos: repetir a cada 2 s só enchia o log. Para e diz na folha.
@@ -72,7 +77,7 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
       };
       void ler();
       return () => { vivo = false; clearTimeout(timer); };
-    }, [aberto, pendente, comando, sessionName]);
+    }, [aberto, pendente, comando, sessionName, serverId, server]);
     return (
       <Sheet ref={sheet} sizes={['medium', 'large']} scrollable onDismiss={() => setAberto(false)}>
         {use ? (
