@@ -27,7 +27,7 @@ import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
 import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
 import { PlanActions } from '../../../../src/chat/PlanActions';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode, currentQueuePanel } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -106,6 +106,9 @@ export default function ChatScreen() {
   const olderFailed = chat.use((s) => s.olderFailed);
   const sseRecusado = chat.use((s) => s.sseRecusado);
   const pending = chat.use((s) => s.pending);
+  // O mesmo painel que o Composer desenha: as mensagens dele saem da conversa enquanto esperam.
+  const serverQueue = chat.use((s) => s.queuePanel) ?? null;
+  const queuePanel = useMemo(() => currentQueuePanel(serverQueue, events), [serverQueue, events]);
   const askOpen = chat.use((s) => s.askOpen);
   const askPayload = chat.use((s) => s.askPayload);
   const askPiId = chat.use((s) => s.askPiId);
@@ -517,6 +520,7 @@ export default function ChatScreen() {
                 ferramenta={ferramenta}
                 agentesRodando={agentesRodando}
                 onAbrirAgentes={() => router.push(`/s/${serverId}/${name}/activity` as never)}
+                queuePanel={queuePanel}
               />
             )}
           </View>

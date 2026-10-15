@@ -14,8 +14,18 @@ import {
   queuedMessages,
   registrarDiag,
   parsePluginToast,
+  parseQueuePanel,
+  currentQueuePanel,
+  beginQueueEdit,
+  canUpdateQueueEdit,
+  moveTarget,
+  editQueuedMessage,
+  cancelQueuedMessage,
+  steerQueuedMessage,
+  reorderQueuedMessage,
+  formataErro,
 } from '@hangar/core';
-import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server } from '@hangar/core';
+import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server, QueuePanel, QueueEdit } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { reconcilePending, type PendingMsg } from '../chat/pending';
 import { useServers } from './servers';
@@ -70,14 +80,21 @@ export interface ChatState {
   sseRecusado: boolean;
   // Ecos locais pendentes — já enviados mas ainda sem user_msg real no transcript.
   pending: PendingMsg[];
+  // Fila do Hangar pelo evento `queue` (Claude e Codex); null = sem ele, o painel sai das bolhas.
+  queuePanel: QueuePanel | null;
+  // Mensagem da fila aberta no composer; o rascunho de antes dela fica em `savedDraft`.
+  queueEdit: QueueEdit | null;
+  // Uma ação da fila por vez: os botões do painel ficam desativados enquanto ela está em voo.
+  queueBusy: boolean;
+  queueError: string | null;
 }
 
-// Quantas bolhas estão "na fila" (translúcidas): ecos locais + sintéticos queued-* da fila durável.
-// Só conta onde a fila pode ser mandada agora (Kimi, Codex, Claude), como no PWA.
-export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null, headless = false): number {
-  if (provider !== 'kimi' && provider !== 'codex' && provider !== 'claude' && !headless) return 0;
+// Quantas mensagens o chip "mandar agora" conta: só no Kimi, cuja fila é a da TUI (promovida inteira).
+// Claude e Codex (com ou sem terminal) mostram a fila no painel "Na fila", que substitui o chip.
+export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null): number {
+  if (provider !== 'kimi') return 0;
   // O eco local é o envio em voo, não fila: em idle ele acendia "1 na fila" até o POST voltar.
-  return queuedMessages(state.events, provider, headless).length;
+  return queuedMessages(state.events, provider, false).length;
 }
 
 export interface ChatApi {
@@ -96,6 +113,15 @@ export interface ChatApi {
   markAskDismissed: () => void;
   // Resposta do "mandar agora": marca as entregues e, com a fila já baixada, tira as bolhas na hora.
   applySteer: (result: { promoted?: boolean; queued_ids?: string[] }) => void;
+  // Painel "Na fila". Entrar na edição devolve o texto do composer; cancelar devolve o rascunho guardado.
+  startQueueEdit: (id: string, draft: string) => string;
+  cancelQueueEdit: () => string;
+  dropQueueEdit: () => void;
+  // Rascunho guardado de volta quando a edição foi gravada; null = falhou ou não havia o que gravar.
+  submitQueueEdit: (text: string) => Promise<string | null>;
+  removeQueued: (id: string) => Promise<void>;
+  steerQueued: (id: string) => Promise<void>;
+  moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
 
 // Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
@@ -125,6 +151,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     olderFailed: '',
     sseRecusado: false,
     pending: [],
+    queuePanel: null,
+    queueEdit: null,
+    queueBusy: false,
+    queueError: null,
   }));
 
   // internos — fora do set() para não virar proxy
@@ -154,6 +184,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
+  let queueErrorTimer: ReturnType<typeof setTimeout> | undefined;
   const pluginToastsSeen = new Set<string>();
 
   function limparPreview(): void {
@@ -510,6 +541,15 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       }
     });
 
+    // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
+    es.addEventListener('queue', (e) => {
+      try {
+        useChatStore.setState({ queuePanel: parseQueuePanel(JSON.parse(e.data as string)) });
+      } catch {
+        quadroFalhou('queue');
+      }
+    });
+
     es.addEventListener('stats', (e) => {
       try {
         useChatStore.setState({ stats: JSON.parse(e.data as string) as StatsEvent });
@@ -565,6 +605,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         askOpen: false,
         askPiId: null,
         askPiDismissed: null,
+        queuePanel: null,
+        queueEdit: null,
         loading: true,
       });
       void loadHistory();
@@ -595,8 +637,79 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     };
   }
 
+  // Aviso de falha da fila: some sozinho, como o aviso do PWA, sem ficar sobre uma fila que já mudou.
+  function showQueueError(message: string): void {
+    clearTimeout(queueErrorTimer);
+    useChatStore.setState({ queueError: message });
+    queueErrorTimer = setTimeout(() => useChatStore.setState({ queueError: null }), 6000);
+  }
+
+  // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
+  async function queueAction(run: (target: Server) => Promise<unknown>): Promise<boolean> {
+    const target = destino();
+    if (!target || useChatStore.getState().queueBusy) return false;
+    clearTimeout(queueErrorTimer);
+    useChatStore.setState({ queueBusy: true, queueError: null });
+    try {
+      await run(target);
+      return true;
+    } catch (err) {
+      showQueueError(formataErro(err) ?? (err instanceof Error ? err.message : String(err)));
+      return false;
+    } finally {
+      useChatStore.setState({ queueBusy: false });
+    }
+  }
+
+  const queueEntries = () => {
+    const s = useChatStore.getState();
+    return currentQueuePanel(s.queuePanel, s.events).entries;
+  };
+
   return {
     use: useChatStore,
+    startQueueEdit(id: string, draft: string): string {
+      const entry = queueEntries().find((e) => e.id === id);
+      if (!entry) return draft;
+      const next = beginQueueEdit(entry, draft, useChatStore.getState().queueEdit);
+      useChatStore.setState({ queueEdit: next.edit });
+      return next.composerText;
+    },
+    cancelQueueEdit(): string {
+      const saved = useChatStore.getState().queueEdit?.savedDraft ?? '';
+      useChatStore.setState({ queueEdit: null });
+      return saved;
+    },
+    dropQueueEdit() {
+      useChatStore.setState({ queueEdit: null });
+    },
+    async submitQueueEdit(text: string): Promise<string | null> {
+      const edit = useChatStore.getState().queueEdit;
+      if (!edit || !canUpdateQueueEdit(text)) return null;
+      const next = text.trim();
+      // Texto igual ao da fila: só sai da edição, sem pedido.
+      const unchanged = queueEntries().find((e) => e.id === edit.entryId)?.text.trim() === next;
+      if (!unchanged && !(await queueAction((t) => editQueuedMessage(name, edit.entryId, next, t)))) return null;
+      if (useChatStore.getState().queueEdit === edit) useChatStore.setState({ queueEdit: null });
+      return edit.savedDraft;
+    },
+    async removeQueued(id: string) {
+      const ok = await queueAction((t) => cancelQueuedMessage(name, id, t));
+      if (!ok) return;
+      // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
+      const events = useChatStore.getState().events.filter((e) => e.id !== `queued-${id}`);
+      rebuildIndex(events);
+      useChatStore.setState({ events });
+    },
+    // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
+    async steerQueued(id: string) {
+      await queueAction((t) => steerQueuedMessage(name, id, t));
+    },
+    async moveQueued(id: string, delta: -1 | 1) {
+      const before = moveTarget(queueEntries(), id, delta);
+      if (before === undefined) return;
+      await queueAction((t) => reorderQueuedMessage(name, id, before, t));
+    },
     retain() {
       refs++;
       if (refs === 1) {

@@ -3,8 +3,8 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado } from '@hangar/core';
-import type { CommandInfo, MotivoFim, Provider, Server } from '@hangar/core';
+import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, currentQueuePanel, queueEditLeft, queueSteerable } from '@hangar/core';
+import type { CommandInfo, MotivoFim, Provider, QueueEdit, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
@@ -27,6 +27,7 @@ import { CommandSheet, useSessionCommands } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
+import { QueuePanel } from './QueuePanel';
 import type { PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 import { AttachmentPreview } from '../ui/AttachmentPreview';
@@ -154,7 +155,15 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const pairPeersKey = pairPeers?.join('\u0000') ?? '';
   const isCodex = provider === 'codex';
   const isClaude = !provider || provider === 'claude';
-  const filaCount = filaCountOf({ events, pending }, provider, headless);
+  const filaCount = filaCountOf({ events, pending }, provider);
+  // Painel "Na fila": a lista do servidor (evento `queue`) ou, sem ele, a derivada das bolhas.
+  // Um seletor por campo: objeto novo por render faz o zustand renderizar sem parar.
+  const serverQueue = chat.use((s) => s.queuePanel) ?? null;
+  const queueEdit = chat.use((s) => s.queueEdit) ?? null;
+  const queueBusy = chat.use((s) => s.queueBusy) ?? false;
+  const queueError = chat.use((s) => s.queueError) ?? null;
+  const queueList = useMemo(() => currentQueuePanel(serverQueue, events), [serverQueue, events]);
+  const editing = queueEdit !== null;
 
   const [sendToPair, setSendToPair] = useState(false);
   useEffect(() => {
@@ -186,6 +195,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Só texto novo avança a revisão: é ela que decide se o ACK pode limpar o campo.
   const persistDraft = useCallback((patch: { text?: string; attachment?: DraftAttachment | null }): boolean => {
     if (blockedRef.current) return false;
+    // Em edição o campo tem o texto da fila, não o rascunho: o guardado continua o de antes da edição.
+    if (patch.text !== undefined && patch.attachment === undefined && chat.use.getState().queueEdit) return true;
     let current: ConversationDraft | null;
     try { current = readDraft(origin.serverId, origin.name) ?? draftRef.current; } catch (e) {
       // Formato inválido não tem o que salvar: a edição nova grava por cima, como no boot.
@@ -215,7 +226,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setSubmission(value.submission);
     setDraftIssue('');
     return true;
-  }, [origin]);
+  }, [origin, chat]);
   const persistText = useCallback((next: string) => persistDraft({ text: next }), [persistDraft]);
 
   // ACK do primeiro input depois do handoff: some o texto entregue, nunca uma edição nova.
@@ -370,7 +381,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [error, setError] = useState('');
   const steeringRef = useRef(false);
   const [steering, setSteering] = useState(false);
-  const [steerFeedback, setSteerFeedback] = useState('');
+  // Aviso do painel da fila (a mensagem em edição saiu dela); some sozinho.
+  const [queueNotice, setQueueNotice] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const transcribingRef = useRef(false);
   const mountedRef = useRef(true);
@@ -522,6 +534,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   }, [serverId, name, firstInputId, draft, chat, persistText]);
 
   const handleSend = useCallback(async () => {
+    // Em edição o botão é o Atualizar: troca o texto da mensagem na fila, sem enviar nada.
+    if (queueEdit) {
+      if (canUpdateQueueEdit(text)) await chat.submitQueueEdit(text);
+      return;
+    }
     const trimmed = text.trim();
     const hasAttach = pendingAttach !== null;
     if (!trimmed && !hasAttach) return;
@@ -624,7 +641,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -974,15 +991,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (steeringRef.current) return;
     steeringRef.current = true;
     setSteering(true);
-    setSteerFeedback('');
     setError('');
     try {
-      const result = await steerSession(name);
-      chat.applySteer(result);
-      if ((isCodex || headless) && chat.use.getState().stateEvent?.state === 'working') {
-        const sent = result.promoted || (result.confirmed ?? 0) > 0;
-        setSteerFeedback(!sent ? m.codex_orientar_sem_envio() : isCodex ? m.codex_orientar_recebido() : m.headless_orientar_recebido());
-      }
+      chat.applySteer(await steerSession(name));
     } catch (e) {
       const status = (e as { status?: number } | null)?.status;
       setError(status === 409 ? m.composer_fila_erro() : e instanceof Error ? e.message : m.composer_fila_erro());
@@ -990,16 +1001,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       steeringRef.current = false;
       setSteering(false);
     }
-  }, [name, isCodex, headless, chat]);
+  }, [name, chat]);
 
   const isKimi = provider === 'kimi';
-  // Fila que dá para mandar agora: Kimi (ctrl-s), Codex (turn/steer), Claude sem terminal (stdin)
-  // e Claude com terminal (ctrl+x ctrl+s da fila do Claude Code).
-  const queuePromotable = isKimi || isCodex || headless || isClaude;
-  const showSteer = queuePromotable && state === 'working' && (filaCount > 0 || steering);
-  useEffect(() => {
-    if (state !== 'working') setSteerFeedback('');
-  }, [state]);
+  // Só o Kimi fica com o chip "mandar agora" (a fila dele é a da TUI, promovida inteira por ctrl-s);
+  // Claude e Codex orientam por mensagem no painel "Na fila".
+  const showSteer = isKimi && state === 'working' && (filaCount > 0 || steering);
 
   const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
   const dictationPlayer = dictation ? dictationAudio(originServer, origin.name, dictation.audio, dictation.serverPath) : null;
@@ -1017,8 +1024,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Campo vazio: o Parar ocupa o lugar do Enviar (como no PC). Com texto ou fila os dois ficam,
   // porque a mensagem entra na fila.
   // Com texto a linha é Orientar + Enviar, como no PWA; parar pede o campo vazio.
-  const showStop = !!onStop && canInterrupt && !hasContent;
-  const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
+  const showStop = !!onStop && canInterrupt && !hasContent && !editing;
+  const showSend = editing || !showStop || hasContent || sending || uploading || filaCount > 0;
+  // Em edição o botão é o Atualizar: só o texto conta, e uma ação da fila por vez.
+  const canSubmit = editing ? canUpdateQueueEdit(text) && !queueBusy : canSend;
+  const queueFeedback = queueNotice ?? queueError;
 
   const confirmStop = useCallback(() => {
     Alert.alert(m.composer_interromper_claude(), m.composer_interromper_msg(), [
@@ -1045,6 +1055,45 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setText(next);
     setSelection({ start: cursor, end: cursor });
   }, [persistText]);
+
+  // Toda saída da edição devolve o campo aqui: Cancelar, Atualizar e o reset da conversa trazem o
+  // rascunho de antes dela (o store não alcança o campo); a saída da fila diz o texto em `exitTextRef`.
+  const exitTextRef = useRef<string | null>(null);
+  const lastEditRef = useRef<QueueEdit | null>(null);
+  useEffect(() => {
+    const prev = lastEditRef.current;
+    lastEditRef.current = queueEdit;
+    if (!prev || queueEdit) return;
+    const next = exitTextRef.current ?? prev.savedDraft;
+    exitTextRef.current = null;
+    replaceText(next, next.length);
+  }, [queueEdit, replaceText]);
+
+  // A mensagem saiu da fila durante a edição (entregue, orientada ou apagada noutro aparelho).
+  useEffect(() => {
+    if (!queueEdit) return;
+    const left = queueEditLeft(queueEdit, queueList, textRef.current);
+    if (!left) return;
+    exitTextRef.current = left.composerText;
+    chat.dropQueueEdit();
+    setQueueNotice(m.queue_entry_gone());
+  }, [queueList, queueEdit, chat]);
+
+  // Sair da conversa no meio da edição: o rascunho guardado é o de antes dela e volta na próxima abertura.
+  useEffect(() => () => {
+    if (chat.use.getState().queueEdit) chat.dropQueueEdit();
+  }, [chat]);
+
+  useEffect(() => {
+    if (!queueNotice) return;
+    const timer = setTimeout(() => setQueueNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [queueNotice]);
+
+  const handleQueueEdit = useCallback((id: string) => {
+    const next = chat.startQueueEdit(id, textRef.current);
+    replaceText(next, next.length);
+  }, [chat, replaceText]);
 
   // Preenche `/nome ` para a pessoa digitar o argumento. Texto já escrito (que não é o próprio
   // comando sendo digitado) fica como argumento, em vez de sumir.
@@ -1158,8 +1207,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const bordaFoco = focado && acento ? { borderColor: `rgba(${acento.join(',')},0.45)` } : null;
 
   return (
+    <>
+    {/* Colado no topo da caixa: o que espera a vez no Hangar, com as ações por mensagem. */}
+    <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy} steerable={queueSteerable(provider)}
+      onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
+      onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
     <Glass variant="chrome" style={[styles.glass, bordaFoco]}>
-        {/* Fila esperando o turno: diz quantas e dá a saída de mandar agora (como o chip do PWA). */}
+        {/* Fila da TUI do Kimi esperando o turno: diz quantas e dá a saída de mandar agora. */}
         {showSteer ? (
           <Pressable
             onPress={handleSteer}
@@ -1183,7 +1237,21 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </Pressable>
         ) : null}
 
-        {steerFeedback && state === 'working' ? <Text style={[styles.hint, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
+        {queueFeedback ? <Text style={[styles.hint, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{queueFeedback}</Text> : null}
+
+        {/* Como o T3: a linha diz que o campo tem a mensagem da fila, e Cancelar devolve o rascunho. */}
+        {editing ? (
+          <View style={styles.undoRow}>
+            <Icon name="Pencil" size={13} color={theme.tokens.accent.base} />
+            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">
+              {m.queue_panel_editing()}
+            </Text>
+            <Pressable onPress={chat.cancelQueueEdit} disabled={queueBusy} hitSlop={7} style={styles.editCancel} accessibilityRole="button"
+              accessibilityState={{ disabled: queueBusy }}>
+              <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.comum_cancelar()}</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {/* Mandar pro grupo liga e desliga no +; aqui só fica à vista enquanto está ligado, porque
             muda para quem a mensagem vai. */}
@@ -1204,7 +1272,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </Pressable>
         ) : null}
 
-        {pendingAttach ? (
+        {/* A edição troca só o texto: o anexo do rascunho espera a volta dele. */}
+        {pendingAttach && !editing ? (
           <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
         ) : null}
 
@@ -1252,10 +1321,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         <View style={styles.row}>
           <Pressable
             onPress={() => setAttachMenuOpen(true)}
-            disabled={uploading || sending || gravando}
+            disabled={uploading || sending || gravando || editing}
             hitSlop={5}
-            accessibilityState={{ disabled: uploading || sending || gravando, busy: uploading }}
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (uploading || sending || gravando) && styles.iconBtnDisabled]}
+            accessibilityState={{ disabled: uploading || sending || gravando || editing, busy: uploading }}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (uploading || sending || gravando || editing) && styles.iconBtnDisabled]}
             accessibilityLabel={m.composer_adicionar_ao_chat()}
             accessibilityRole="button"
           >
@@ -1268,13 +1337,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
           <Pressable
               onPress={handleMicPress}
-              disabled={transcribing || sending || (!!dictation && !gravando)}
+              disabled={transcribing || sending || (!!dictation && !gravando) || editing}
               hitSlop={5}
-              accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: busyVoice }}
+              accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando) || editing, busy: busyVoice }}
               style={({ pressed }) => [
                 styles.iconBtn,
                 pressed && styles.iconBtnPressed,
-                (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
+                (transcribing || sending || (!!dictation && !gravando) || editing) && styles.iconBtnDisabled,
               ]}
               accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
               accessibilityRole="button"
@@ -1321,19 +1390,19 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           {showSend ? (
             <Pressable
               onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(); }}
-              disabled={!canSend}
+              disabled={!canSubmit}
               hitSlop={5}
-              accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
+              accessibilityState={{ disabled: !canSubmit, busy: editing ? queueBusy : sending || uploading }}
               style={({ pressed }) => [
                 styles.roundBtn,
-                { backgroundColor: canSend ? theme.tokens.text.primary : theme.tokens.border.default },
-                pressed && canSend && styles.sendBtnPressed,
+                { backgroundColor: canSubmit ? theme.tokens.text.primary : theme.tokens.border.default },
+                pressed && canSubmit && styles.sendBtnPressed,
               ]}
-              accessibilityLabel={m.composer_enviar_mensagem()}
+              accessibilityLabel={editing ? m.queue_panel_update_aria() : m.composer_enviar_mensagem()}
               accessibilityHint={filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined}
               accessibilityRole="button"
             >
-              <Icon name="ArrowUp" size={18} color={canSend ? theme.tokens.bg.base : theme.tokens.text.muted} />
+              <Icon name={editing ? 'Check' : 'ArrowUp'} size={18} color={canSubmit ? theme.tokens.bg.base : theme.tokens.text.muted} />
               {/* Fila (pending local + queued-* do SSE): selo no canto, dentro do botão para o Android não cortar. */}
               {filaCount > 0 ? (
                 <View style={[styles.queueBadge, { backgroundColor: theme.tokens.status.warning }]} pointerEvents="none">
@@ -1370,7 +1439,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </View>
         ) : null}
 
-        {dictation && !busyVoice ? (
+        {/* Recuperar ditado, envio ou rascunho mexe no rascunho guardado: espera a edição da fila acabar. */}
+        {dictation && !busyVoice && !editing ? (
           <View style={styles.errorRow}>
             <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
               {dictation.status === 'applied' ? m.composer_ditado_aplicado()
@@ -1431,7 +1501,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </View>
         ) : null}
 
-        {submission ? (
+        {submission && !editing ? (
           <View style={styles.undoRow}>
             <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
               {submission.status === 'rejected' ? m.composer_submission_rejected()
@@ -1450,7 +1520,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </View>
         ) : null}
 
-        {recoverable ? (
+        {recoverable && !editing ? (
           <View style={styles.undoRow}>
             <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} numberOfLines={2}>
               {m.composer_draft_previous({ text: recoverable.text.trim().slice(0, 80) })}
@@ -1496,6 +1566,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             : undefined}
         />
     </Glass>
+    </>
   );
 }
 
@@ -1635,6 +1706,11 @@ const styles = StyleSheet.create((theme) => ({
   undoText: {
     fontSize: theme.base.text.xs,
     fontWeight: '600',
+  },
+  editCancel: {
+    minHeight: 30,
+    justifyContent: 'center',
+    paddingHorizontal: theme.base.space[1],
   },
   error: {
     flexShrink: 1,

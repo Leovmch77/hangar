@@ -441,6 +441,85 @@ test('(f) filaCount conta só queued-* (o eco em voo não é fila) e zera quando
   vi.stubGlobal('fetch', origFetch as never);
 });
 
+test('evento queue alimenta o painel e o reset o limpa', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['a']);
+  created[0].trigger('reset', '{}');
+  expect(chat.use.getState().queuePanel).toBeNull();
+});
+
+test('editar guarda o rascunho uma vez e cancelar o devolve', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }, { id: 'b', text: 'tchau', ts: 2 }], actions: true }));
+  expect(chat.startQueueEdit('a', 'meu rascunho')).toBe('oi');
+  expect(chat.startQueueEdit('b', 'oi mudado')).toBe('tchau');
+  expect(chat.use.getState().queueEdit?.entryId).toBe('b');
+  expect(chat.cancelQueueEdit()).toBe('meu rascunho');
+  expect(chat.use.getState().queueEdit).toBeNull();
+});
+
+test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da edição e apagar tira a bolha', async () => {
+  historyResponses = [[ev({ id: 'queued-a', text: 'primeira', queued_delivered: false })]];
+  const chat = chatStore('srv2', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'primeira', ts: 1 }, { id: 'b', text: 'segunda', ts: 2 }], actions: true }));
+  const calls: { url: string; method?: string; body?: unknown }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method, body: init?.body ? JSON.parse(init.body as string) : undefined });
+    return new Response('{"ok":true,"steered":true}', { status: 200 });
+  }));
+
+  chat.startQueueEdit('a', 'rascunho');
+  expect(await chat.submitQueueEdit(' primeira ')).toBe('rascunho');
+  expect(calls).toHaveLength(0);
+  expect(chat.use.getState().queueEdit).toBeNull();
+
+  chat.startQueueEdit('a', 'rascunho');
+  expect(await chat.submitQueueEdit('primeira mudada')).toBe('rascunho');
+  await chat.moveQueued('a', 1);
+  await chat.moveQueued('a', -1); // já é a primeira: nada a pedir
+  await chat.steerQueued('b');
+  await chat.removeQueued('a');
+  expect(calls.map((c) => [c.method, c.url.replace('http://10.0.0.2:8765', ''), c.body])).toEqual([
+    ['PATCH', '/api/sessions/sess/queue/a', { text: 'primeira mudada' }],
+    ['POST', '/api/sessions/sess/queue/reorder', { id: 'a', before_id: null }],
+    ['POST', '/api/sessions/sess/queue/b/steer', undefined],
+    ['DELETE', '/api/sessions/sess/queue/a?only_waiting=true', undefined],
+  ]);
+  expect(chat.use.getState().events.some((e) => e.id === 'queued-a')).toBe(false);
+  expect(chat.use.getState().queueBusy).toBe(false);
+});
+
+test('recusa da fila vira aviso traduzido e a edição continua aberta', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(
+    JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'x' } }), { status: 409 })));
+  chat.startQueueEdit('a', '');
+  expect(await chat.submitQueueEdit('oi de novo')).toBeNull();
+  expect(chat.use.getState().queueEdit?.entryId).toBe('a');
+  expect(chat.use.getState().queueError).toBe(m.queue_entry_gone());
+  expect(chat.use.getState().queueBusy).toBe(false);
+});
+
+test('filaCount só conta o Kimi: Claude e Codex usam o painel', () => {
+  const state = { events: [ev({ id: 'queued-1', text: 'oi', queued_delivered: false })], pending: [] };
+  expect(filaCount(state, 'kimi')).toBe(1);
+  expect(filaCount(state, 'claude')).toBe(0);
+  expect(filaCount(state, 'codex')).toBe(0);
+});
+
 test('onerror fecha e reconecta com backoff crescente', async () => {
   vi.useFakeTimers();
   const registrar = vi.fn();

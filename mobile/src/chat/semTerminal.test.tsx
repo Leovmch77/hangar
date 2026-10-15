@@ -117,6 +117,9 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
     .concat(' native_par_so_leitura')
+    // Painel "Na fila" e a edição da mensagem da fila no Composer.
+    .concat(' queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down queue_panel_remove queue_panel_steer_unavailable atalhos_editar comum_apagar')
+    .concat(' queue_panel_update queue_panel_update_aria queue_panel_editing queue_entry_gone')
     .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_toks_now stats_toks_recent stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
@@ -179,7 +182,9 @@ vi.mock('../stores/chat', async (original) => {
   });
   return { ...actual,
     chatStore: (serverId: string, name: string) => realFirstInput.enabled ? actual.chatStore(serverId, name)
-      : { use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} },
+      : { use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {},
+        startQueueEdit: (_id: string, draft: string) => draft, cancelQueueEdit: () => '', dropQueueEdit: () => {},
+        submitQueueEdit: async () => null, removeQueued: async () => {}, steerQueued: async () => {}, moveQueued: async () => {} },
     filaCount: (...args: Parameters<typeof actual.filaCount>) => realFirstInput.enabled ? actual.filaCount(...args) : 0,
     isSubmitting: (serverId: string, name: string) => realFirstInput.enabled && actual.isSubmitting(serverId, name),
   };
