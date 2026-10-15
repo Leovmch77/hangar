@@ -369,6 +369,7 @@ def transcription_config():
         organization.update(llm_base_url="", llm_api_key="", llm_briefing_base_url="", llm_briefing_api_key="")
     return {"providers": providers, "legacy": legacy, "organization": organization,
             "user_vocabulary": runtime_config.get("ditado_vocabulario") or "",
+            "dictation_max_minutes": int(runtime_config.get("dictation_max_minutes") or 0),
             "state_path": str(Path.home() / ".hangar" / "transcription-wait.json")}
 
 

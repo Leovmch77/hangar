@@ -10,8 +10,8 @@ import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio
 import type { SharedObject } from 'expo';
 import { novoEstadoVad, passoVad } from '@hangar/core';
 import type { EstadoVad, MotivoFim } from '@hangar/core';
+import { useDitadoEstiloStore } from './ditadoEstiloStore';
 
-const TETO_MS = 180_000;
 const STOP_STATUS_TIMEOUT_MS = 5_000;
 
 // O tipo do áudio não resolve a base quando o core do Expo fica aninhado no SDK.
@@ -181,9 +181,10 @@ export function useDitado({ onFim, onErroParada }: Opts) {
       setGravando(true);
       setRms(0);
 
+      const ceilingMs = useDitadoEstiloStore.getState().ceilingMs;
       tetoRef.current = setTimeout(() => {
         void finishRecording(recording, 'teto');
-      }, TETO_MS);
+      }, ceilingMs);
 
       intervaloRef.current = setInterval(() => {
         const st = recorder.getStatus();
@@ -206,7 +207,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
           rmsVal = 0;
         }
         setRms(rmsVal);
-        if (Date.now() - inicioRef.current >= TETO_MS) {
+        if (Date.now() - inicioRef.current >= ceilingMs) {
           void finishRecording(recording, 'teto');
         }
       }, 55);

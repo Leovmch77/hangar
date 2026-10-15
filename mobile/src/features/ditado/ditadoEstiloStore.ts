@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, ehEstilo } from '@hangar/core';
+import { dictationCeilingMs, getConfig, getConfigForServer, patchConfig, patchConfigForServer, ehEstilo } from '@hangar/core';
 import type { EstiloDitado, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
@@ -10,6 +10,8 @@ interface DitadoEstiloState {
   pronto: boolean;
   // A leitura falhou: o valor local não confirma a escolha salva no servidor.
   falhou: boolean;
+  // Teto da gravação, lido na mesma consulta do estilo; até lá vale o padrão do core.
+  ceilingMs: number;
   carregar: () => Promise<void>;
   revalidar: () => Promise<void>;
   trocar: (novo: EstiloDitado) => Promise<void>;
@@ -25,6 +27,7 @@ function createDictationStyleStore(server?: Server | null) {
     valor: PADRAO,
     pronto: false,
     falhou: false,
+    ceilingMs: dictationCeilingMs(undefined),
 
     carregar: async () => {
       if (target === null) return;
@@ -38,7 +41,7 @@ function createDictationStyleStore(server?: Server | null) {
           if (ehEstilo(v) && escritas === escritasNoInicio) {
             set({ valor: v });
           }
-          set({ pronto: true, falhou: false });
+          set({ pronto: true, falhou: false, ceilingMs: dictationCeilingMs(cfg.campos) });
         })
         .catch(() => {
           // `pronto` mesmo assim: sem ele a tela fica esperando para sempre. O que muda é que
@@ -76,7 +79,7 @@ function createDictationStyleStore(server?: Server | null) {
     _zerarParaTeste: () => {
       escritas = 0;
       carregando = null;
-      set({ valor: PADRAO, pronto: false, falhou: false });
+      set({ valor: PADRAO, pronto: false, falhou: false, ceilingMs: dictationCeilingMs(undefined) });
     },
   }));
 

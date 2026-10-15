@@ -648,6 +648,10 @@ function queryArquivo(opts: OpcoesTranscribe | undefined, arquivo: string): stri
 // nome solto na pasta da sessão, ou o caminho absoluto devolvido antes (depois de `/clear` o áudio
 // fica na pasta do transcript anterior). O ditado sobe o áudio antes por `uploadFile*`: o caminho
 // fica guardado mesmo que a transcrição nunca volte.
+/** Rede contra pendurar, acima do prazo do servidor para o maior teto de gravação (30 min de áudio
+ *  mais a organização); quem estoura ainda tem o áudio guardado para tentar de novo. */
+export const TRANSCRIBE_TIMEOUT_MS = 35 * 60_000;
+
 export async function transcribeUploadedForServer(
   s: Server,
   name: string,
@@ -658,7 +662,7 @@ export async function transcribeUploadedForServer(
     method: 'POST',
     // Corpo vazio: o `apiFetchRes` poria `application/json` por padrão, e não há JSON nenhum aqui.
     headers: { 'Content-Type': 'application/octet-stream' },
-    signal: AbortSignal.timeout(300_000),   // mesmo teto do transcribeFile (ver o comentário lá)
+    signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),   // mesmo teto do transcribeFile (ver o comentário lá)
   }, s);
   if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
   return res.json() as Promise<TranscribeResult>;
@@ -683,7 +687,7 @@ export async function transcribeFileForServer(
       'X-Filename': encodeURIComponent(file.name || 'audio.webm'),
     },
     body: file,
-    signal: AbortSignal.timeout(300_000),   // mesmo teto do transcribeFile (ver o comentário lá)
+    signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),   // mesmo teto do transcribeFile (ver o comentário lá)
   }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
   return res.json() as Promise<TranscribeResult>;
@@ -704,7 +708,7 @@ export async function transcribeDictationForServer(
       'X-Filename': encodeURIComponent(file.name || 'audio.m4a'),
     },
     body: file,
-    signal: AbortSignal.timeout(300_000),
+    signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
   }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
   return res.json() as Promise<{ text: string; raw?: string; aviso?: string | null }>;
@@ -2502,7 +2506,7 @@ export async function transcribeFile(
     // trabalho ainda em curso — a pessoa perdia o ditado inteiro por causa do relógio do navegador.
     // Continua havendo teto: sem ele, rede caída deixa o composer preso em "transcrevendo…" pra
     // sempre. Quem estourar aqui ainda tem o áudio guardado pra tentar de novo (Composer).
-    signal: AbortSignal.timeout(300_000),
+    signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
   });
   await ensureOk(res, server);
   return res.json() as Promise<TranscribeResult>;
@@ -2519,7 +2523,7 @@ export async function transcribeUploaded(
   const res = await fetch(`${base}/api/sessions/${encodeURIComponent(name)}/transcribe${queryArquivo(opts, arquivo)}`, {
     method: 'POST',
     headers: fileAuthHeader(server ?? undefined),
-    signal: AbortSignal.timeout(300_000),
+    signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
   });
   await ensureOk(res, server);
   return res.json() as Promise<TranscribeResult>;

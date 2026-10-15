@@ -2,7 +2,9 @@ use super::*;
 use std::{io::Read, sync::Mutex};
 
 const STYLES: [&str; 3] = ["limpar", "prosa", "briefing"];
-const PCM_LIMIT: usize = 16_000 * 2 * 180;
+/// Teto da configuração `dictation_max_minutes` (30 min): o WAV de teste não passa disso.
+const PCM_LIMIT: usize = pcm_limit(30 * 60);
+const fn pcm_limit(seconds: u64) -> usize { 16_000 * 2 * seconds as usize }
 const SILENCE: Duration = Duration::from_secs(2);
 const COUNTDOWN: Duration = Duration::from_secs(3);
 
@@ -21,6 +23,7 @@ struct OrganizationSelection {
     codex_model: String,
     supported: bool,
     include_recent_messages: bool,
+    max_seconds: u64,
 }
 impl OrganizationSelection {
     /// Modo desconhecido volta como `Err(modo)`: tratá-lo como "none" mandaria o ditado sem organizar calado.
@@ -31,7 +34,12 @@ impl OrganizationSelection {
         Ok(Self{mode:if mode.is_empty(){"none".into()}else{mode},
             claude_model:field("dictation_claude_model"),codex_model:field("dictation_codex_model"),
             include_recent_messages:value["campos"]["dictation_include_recent_messages"]["valor"].as_bool().unwrap_or(false),
-            supported:value["campos"].get("dictation_organization_mode").is_some()})
+            supported:value["campos"].get("dictation_organization_mode").is_some(),
+            max_seconds:Self::max_minutes(&value["campos"]["dictation_max_minutes"]["valor"])*60})
+    }
+    /// 0, ausente ou ilegível vale 5 min, como no servidor; acima de 30 o servidor não aceita.
+    fn max_minutes(value:&Value)->u64 {
+        value.as_u64().or_else(||value.as_str().and_then(|s|s.trim().parse().ok())).filter(|m|*m>0).unwrap_or(5).min(30)
     }
     fn options(&self,session:Option<&SessionInfo>)->api::DictationOptions {
         api::DictationOptions{mode:if self.mode.is_empty(){"none".into()}else{self.mode.clone()},
@@ -72,11 +80,12 @@ struct Downmix {
     sum: f32,
     count: u32,
     last: f32,
+    limit: usize,
 }
 
 impl Downmix {
-    fn new(channels: u16, rate: u32) -> Self {
-        Self { channels: channels.max(1) as usize, step: rate as f64 / 16_000., phase: 0., sum: 0., count: 0, last: 0. }
+    fn new(channels: u16, rate: u32, limit: usize) -> Self {
+        Self { channels: channels.max(1) as usize, step: rate as f64 / 16_000., phase: 0., sum: 0., count: 0, last: 0., limit }
     }
 
     fn push<T: Copy>(&mut self, data: &[T], sample: impl Fn(T) -> f32, out: &mut Vec<u8>) {
@@ -88,7 +97,7 @@ impl Downmix {
             while self.phase >= self.step {
                 self.phase -= self.step;
                 if self.count > 0 { self.last = self.sum / self.count as f32; self.sum = 0.; self.count = 0; }
-                if out.len() + 2 > PCM_LIMIT { return; }
+                if out.len() + 2 > self.limit { return; }
                 out.extend_from_slice(&((self.last.clamp(-1., 1.) * 32767.) as i16).to_le_bytes());
             }
         }
@@ -106,7 +115,7 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn start() -> Result<Self, Failure> {
+    fn start(limit: usize) -> Result<Self, Failure> {
         let mut recorder = Self { stream: None, failed: Default::default(), pcm: Default::default(), playback: None,
             sampled: 0, last_signal: (0., 0.), last_pcm_at: None };
         if let Some(path) = std::env::var_os("HANGAR_NATIVE_DICTATION_WAV") {
@@ -123,10 +132,10 @@ impl Recorder {
             eprintln!("dictation config: {error}");
             Failure::local("dictation_recorder_error")
         })?;
-        // Reserva os 180 s de uma vez: crescer o Vec dentro da função de áudio copiaria megabytes em tempo real.
-        *recorder.pcm.lock().unwrap() = Vec::with_capacity(PCM_LIMIT);
+        // Reserva o teto inteiro de uma vez: crescer o Vec dentro da função de áudio copiaria megabytes em tempo real.
+        *recorder.pcm.lock().unwrap() = Vec::with_capacity(limit);
         let (pcm, failed) = (recorder.pcm.clone(), recorder.failed.clone());
-        let mut mix = Downmix::new(config.channels(), config.sample_rate());
+        let mut mix = Downmix::new(config.channels(), config.sample_rate(), limit);
         let on_error = move |error: cpal::Error| {
             eprintln!("dictation stream: {error}");
             // Estouro de buffer perde um pedaço e segue; o resto é microfone sumido ou captura parada.
@@ -289,6 +298,8 @@ pub(super) struct Dictation {
     recorder: Option<Recorder>,
     request: Option<JoinHandle<()>>,
     started: Option<Instant>,
+    /// Teto da gravação em curso, lido da máquina dela ao começar.
+    max_seconds: u64,
     level: f32,
     /// Nível de cada passo da gravação, o mais novo no fim: vira a onda que desliza, como no web.
     bars: std::collections::VecDeque<f32>,
@@ -725,9 +736,12 @@ impl Hangar {
 
     /// `None` sem a seleção lida desta máquina: quem grava recusa em vez de mandar sem organizar.
     fn dictation_options(&self, cx: &App)->Option<api::DictationOptions> {
+        self.dictation_selection(cx).map(|selection|selection.options(self.selected.as_ref()))
+    }
+
+    fn dictation_selection(&self, cx: &App)->Option<&OrganizationSelection> {
         let identity=self.dictation_target(cx).map(|(api,_)|api.identity());
-        self.dictation.organization.as_ref().filter(|(owner,_)|Some(owner)==identity.as_ref())
-            .map(|(_,selection)|selection.options(self.selected.as_ref()))
+        self.dictation.organization.as_ref().filter(|(owner,_)|Some(owner)==identity.as_ref()).map(|(_,selection)|selection)
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -749,7 +763,8 @@ impl Hangar {
         self.cancel_dictation();
         self.dictation.snapshot=Some(options);
         self.dictation.snapshot_style=self.dictation.style(self.connection);
-        match Recorder::start() {
+        let max_seconds=self.dictation_selection(cx).map_or(5*60,|selection|selection.max_seconds);
+        match Recorder::start(pcm_limit(max_seconds)) {
             Ok(recorder) => {
                 self.silence_voice_for_dictation();
                 self.dictation.owner = self.dictation_owner(cx);
@@ -757,6 +772,7 @@ impl Hangar {
                 self.dictation.hands_free = appearance::get().hands_free;
                 self.dictation.recorder = Some(recorder);
                 self.dictation.started = Some(Instant::now());
+                self.dictation.max_seconds = max_seconds;
                 let seq = self.dictation.seq;
                 cx.spawn_in(window, async move |this, cx| {
                     loop {
@@ -787,7 +803,7 @@ impl Hangar {
                                 return false;
                             }
                             this.redraw(panes::Area::Bottom, cx);
-                            if this.dictation.started.is_some_and(|start| start.elapsed() >= Duration::from_secs(180)) {
+                            if this.dictation.started.is_some_and(|start| start.elapsed() >= Duration::from_secs(this.dictation.max_seconds)) {
                                 this.stop_dictation(false, this.dictation.hands_free, cx);
                             }
                             true
@@ -1330,7 +1346,7 @@ mod tests {
     use std::time::{Duration, Instant};
     #[test]
     fn downmix_turns_48k_stereo_into_16k_mono() {
-        let mut mix = Downmix::new(2, 48_000);
+        let mut mix = Downmix::new(2, 48_000, super::PCM_LIMIT);
         let mut out = Vec::new();
         let frames: Vec<f32> = (0..480).flat_map(|_| [0.5, -0.5]).chain((0..480).flat_map(|_| [1., 1.])).collect();
         mix.push(&frames, |v: f32| v, &mut out);
@@ -1567,6 +1583,17 @@ mod tests {
         assert_eq!(read("future_mode").err().as_deref(),Some("future_mode"));
         assert_eq!(read("").unwrap().mode,"none");
         assert_eq!(read("external_api").unwrap().mode,"external_api");
+    }
+
+    #[test]
+    fn dictation_max_minutes_defaults_to_five_and_caps_at_thirty() {
+        let max=|value:serde_json::Value|super::OrganizationSelection::max_minutes(&value);
+        assert_eq!(max(serde_json::Value::Null),5);
+        assert_eq!(max(serde_json::json!(0)),5);
+        assert_eq!(max(serde_json::json!("x")),5);
+        assert_eq!(max(serde_json::json!(12)),12);
+        assert_eq!(max(serde_json::json!("12")),12);
+        assert_eq!(max(serde_json::json!(90)),30);
     }
 
     #[test]
