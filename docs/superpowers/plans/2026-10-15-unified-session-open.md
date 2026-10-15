@@ -78,7 +78,7 @@ Status: ready-for-agent
   `AgentProvider` e os enums fechados; o `Provider { Claude, Codex }` do `session_write` passa a
   derivar do `AgentProvider`. Desserialização estrita, `erro_corpo_invalido`. `account_source` no
   fio com os valores de hoje.
-- [ ] **Step 2: `resolve_open()`**
+- [x] **Step 2: `resolve_open()`**
   Ordem: provider padrão → herança (D-001, `inherit`) → conta Codex padrão → 95% (D-003) → padrão
   completo da matriz (D-012) → validação (modelo, esforço, tier, motor, permissão, customizações,
   nome). "+" sem modo = padrão da conta (D-010). Recusas com os códigos de hoje

@@ -1,0 +1,426 @@
+//! `resolve_open()`: o pedido vira o spec, na ordem do `create_session` do Python: provedor padrão →
+//! herança da criadora (D-001) → conta Codex padrão → regra dos 95% (D-003) → padrões da sessão
+//! completa (D-012) → validação. Os fatos entram por `OpenFacts`; nada aqui escreve em disco.
+use std::sync::LazyLock;
+
+use regex::Regex;
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use super::{Account, AccountSource, AgentProvider, OpenError, PermissionMode, SPEC_VERSION, ServiceTier, SessionOpenRequest,
+    SessionSpec, Surface, WorktreeSpec};
+
+/// O que decide o provedor padrão (`_session_provider_catalog` + `choose_provider`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProviderCatalog {
+    /// Na ordem de preferência (`AgentProvider::ALL`).
+    pub available: Vec<AgentProvider>,
+    pub connected: Vec<AgentProvider>,
+    pub disconnected: Vec<AgentProvider>,
+    /// `last_session_provider` cru do `runtime-config.json`.
+    pub remembered: Option<String>,
+}
+
+/// `headless_default` e `jev_padrao` do servidor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerDefaults { pub headless: bool, pub jev: bool }
+
+/// A sessão que pediu a criação.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatorFacts {
+    pub provider: AgentProvider,
+    pub headless: bool,
+    /// `Ok(None)` = conta padrão; `Err` = não deu para confirmar (pane sem pid, ambiente ilegível).
+    pub config_dir: Result<Option<String>, ()>,
+    /// Modo fora de `plan`, cru: do sidecar ou do transcript (Claude), do sidecar (Codex).
+    pub permission_mode: Option<String>,
+    pub codex_account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexLogin { pub id: String, pub is_default: bool }
+
+/// Como cada falha do catálogo do Codex sobe (`codex_models._call`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodexCatalogError {
+    /// A escolha não existe no catálogo.
+    Invalid(String),
+    /// Catálogo fora do ar ou `codex` ausente: só o Fast depende dele para abrir.
+    Unavailable(String),
+    /// O Codex recusou ou respondeu fora do formato.
+    Refused(String),
+}
+
+pub trait OpenFacts {
+    fn providers(&self) -> ProviderCatalog;
+    fn creator(&self, name: &str) -> Option<CreatorFacts>;
+    fn defaults(&self) -> ServerDefaults;
+    /// Contas Codex com login conectado.
+    fn codex_logins(&self) -> Vec<CodexLogin>;
+    /// Linhas Claude do cache de cotas, sem ler a rede.
+    fn claude_quotas(&self) -> Vec<Value>;
+    /// A pasta com `~` expandido, se ela existe.
+    fn existing_dir(&self, cwd: &str) -> Option<String>;
+    /// Caminhos de conta Claude aceitos (`list_config_dirs`), comparados como texto.
+    fn config_dirs(&self) -> Result<Vec<String>, OpenError>;
+    /// Nomes válidos do `engines.json`.
+    fn engines(&self) -> Vec<String>;
+    fn supports_fast(&self, engine: Option<&str>, model: Option<&str>) -> bool;
+    /// Conta ChatGPT fixa do motor: confere conta e modelos e devolve o modelo sem o prefixo da conta.
+    fn fixed_engine_model(&self, engine: &str, account: &str, model: Option<&str>) -> Result<String, OpenError>;
+    /// Janela do modelo no catálogo do motor; desconhecida sobe sem a variável, como no Python.
+    fn engine_window(&self, engine: &str, model: &str, account: Option<&str>) -> Option<u64>;
+    /// Pasta da conta Codex pelo id (`resolve_account`).
+    fn codex_home(&self, account_id: &str) -> Result<String, OpenError>;
+    fn codex_choice(&self, home: Option<&str>, model: Option<&str>, effort: Option<&str>, tier: Option<ServiceTier>)
+        -> Result<(), CodexCatalogError>;
+    /// `permissions.defaultMode` cru da conta; `Err` = settings ilegível.
+    fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String>;
+    /// Terminal, sidecar Codex ou sidecar sem terminal com este nome.
+    fn name_in_use(&self, name: &str) -> bool;
+    fn new_key(&self) -> String;
+    fn now(&self) -> f64;
+}
+
+/// O spec e o que é só da abertura: avisos para a tela, a primeira mensagem e o lembrar provedor.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Resolved {
+    pub spec: SessionSpec,
+    pub warnings: Vec<String>,
+    pub initial_prompt: Option<String>,
+    pub remember_provider: bool,
+}
+
+/// `model_args.ID_OK`, com o `\Z` do Python: quebra de linha no fim é recusada.
+static MODEL_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9._:~/\[\]-]{1,128}\z").unwrap());
+static CODEX_EFFORT_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[a-z]{2,32}\z").unwrap());
+const EFFORT_CLAUDE: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const EFFORT_PI: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/// Uso da janela mais cheia a partir do qual a conta que ninguém escolheu não recebe sessão nova.
+const QUOTA_LIMIT: f64 = 95.0;
+/// `tmux` troca `.` por `_`, e o Rust já recusa nome maior que isso ao reabrir (S-53).
+const NAME_MAX: usize = 64;
+
+fn truthy(value: &Option<String>) -> bool { value.as_deref().is_some_and(|v| !v.is_empty()) }
+
+fn conflict(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_criacao_sessao", msg) }
+
+pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
+    let mut warnings = Vec::new();
+    // Provedor omitido: opção exclusiva de um provedor decide; senão o padrão do servidor.
+    let provider = match &request.provider {
+        Some(name) => AgentProvider::parse(name)
+            .ok_or_else(|| OpenError::new(400, "erro_provider_sessao_invalido", "provider invalido"))?,
+        None if request.config_dir.is_some() || truthy(&request.engine) || request.subagent_model.is_some() => AgentProvider::Claude,
+        None if request.codex_account.is_some() => AgentProvider::Codex,
+        None if truthy(&request.omp_profile) => AgentProvider::Omp,
+        None => choose_provider(&facts.providers()),
+    };
+    let explicit_account = request.config_dir.is_some();
+    let mut config_dir = request.config_dir.clone();
+    let mut codex_account = request.codex_account.clone();
+    let mut headless = request.headless;
+    let mut permission = request.permission_mode.clone();
+    let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
+
+    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta.
+    if let Some(creator) = request.creator.as_deref().filter(|_| request.inherit != Some(false)) {
+        match facts.creator(creator) {
+            None => warnings.push(format!("sessão criadora '{creator}' não encontrada; nada foi herdado")),
+            Some(info) => {
+                // Perfil do omp já define a conta; a criadora Codex não tem conta Claude.
+                if config_dir.is_none() && matches!(provider, AgentProvider::Claude | AgentProvider::Pi | AgentProvider::Omp)
+                    && !truthy(&request.omp_profile) && info.provider != AgentProvider::Codex
+                {
+                    // Nascer na padrão calado gastaria a cota de quem ninguém escolheu.
+                    config_dir = info.config_dir.clone().map_err(|()| OpenError::new(409, "erro_conta_criadora", format!(
+                        "não consegui confirmar a conta da sessão '{creator}' — escolha a conta (`conta` no MCP, `--conta` no hangar-send)")))?;
+                    source = AccountSource::Inherited;
+                }
+                // D-001 para o Codex: a conta Codex da criadora Codex.
+                if provider == AgentProvider::Codex && codex_account.is_none() && info.provider == AgentProvider::Codex {
+                    codex_account = Some(info.codex_account.clone().unwrap_or_else(|| "default".into()));
+                    source = AccountSource::Inherited;
+                }
+                if headless.is_none() && matches!(provider, AgentProvider::Claude | AgentProvider::Codex) && !request.read_only {
+                    headless = Some(info.headless);
+                }
+                // O 1º recado de uma criadora em bypass para uma irmã em Manual fica retido no receptor.
+                if permission.is_none() && provider == AgentProvider::Claude
+                    && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
+                {
+                    match creator_mode(&info) {
+                        Some(mode) => permission = Some(mode.name().to_owned()),
+                        None => warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta")),
+                    }
+                }
+            }
+        }
+    }
+
+    if provider == AgentProvider::Codex && codex_account.is_none() {
+        let connected = facts.codex_logins();
+        if let Some(first) = connected.first().filter(|_| !connected.iter().any(|login| login.is_default)) {
+            codex_account = Some(first.id.clone());
+            warnings.push(format!("A conta Codex padrão não está conectada; a sessão usa a conta {}.", first.id));
+        }
+    }
+
+    // D-003: a conta que ninguém escolheu (herdada ou padrão) não recebe sessão acabando.
+    if !explicit_account && provider == AgentProvider::Claude && !truthy(&request.engine)
+        && let Some((switched, warning)) = quota_switch(config_dir.as_deref(), &facts.claude_quotas())
+    {
+        config_dir = Some(switched);
+        warnings.push(warning);
+        source = AccountSource::Quota;
+    }
+
+    let headless = headless.unwrap_or_else(|| {
+        !request.read_only && matches!(provider, AgentProvider::Claude | AgentProvider::Codex) && facts.defaults().headless
+    });
+    let model = validate(request, provider, headless, config_dir.as_deref(), codex_account.as_deref(), permission.as_deref(), facts)?;
+    let name = validate_name(&request.name, provider, headless, request, facts)?;
+
+    let permission_mode = match provider {
+        AgentProvider::Claude => Some(match permission.as_deref() {
+            // `validate` já recusou o modo fora da lista.
+            Some(mode) => PermissionMode::claude(mode).unwrap_or(PermissionMode::BypassPermissions),
+            // D-010: sem escolha nem criadora vale o modo da conta.
+            None => account_mode(config_dir.as_deref(), facts, &mut warnings),
+        }),
+        // O lançador do Codex sem modo abre em Full Access (`sem_terminal.MODO_PADRAO`).
+        AgentProvider::Codex => Some(permission.as_deref().and_then(PermissionMode::codex).unwrap_or(PermissionMode::FullAccess)),
+        _ => None,
+    };
+    let cwd = facts.existing_dir(&request.cwd).unwrap_or_else(|| request.cwd.clone());
+    let account = match (provider, request.engine.as_deref().filter(|e| !e.is_empty())) {
+        (AgentProvider::Codex, _) => Account::Codex { account_id: codex_account.unwrap_or_else(|| "default".into()) },
+        (_, Some(engine)) => Account::Engine {
+            name: engine.into(), account: request.engine_account.clone(), config_dir: config_dir.clone(),
+            context_window: model.as_deref().and_then(|m| facts.engine_window(engine, m, request.engine_account.as_deref())),
+        },
+        (AgentProvider::Omp, _) if truthy(&request.omp_profile) => Account::Omp {
+            profile: request.omp_profile.clone().unwrap_or_default(), config_dir: config_dir.clone(),
+        },
+        (_, None) => config_dir.clone().map_or(Account::Default, |config_dir| Account::Claude { config_dir }),
+    };
+    let spec = SessionSpec {
+        version: SPEC_VERSION, key: facts.new_key(), name, cwd, provider,
+        surface: if headless { Surface::Headless } else { Surface::Terminal },
+        account, account_source: source, model, effort: request.effort.clone(), service_tier: request.service_tier,
+        permission_mode, subagent_model: request.subagent_model.clone(), customizations: request.claude_customizations.clone(),
+        jev: request.jev.unwrap_or_else(|| facts.defaults().jev), read_only: request.read_only,
+        worktree: request.branch.clone().map(|branch| WorktreeSpec { branch, new_branch: request.new_branch, base: request.base.clone(), path: None }),
+        creator: request.creator.clone(), created_at: facts.now(),
+    };
+    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider })
+}
+
+/// `session_defaults.choose_provider`.
+pub fn choose_provider(catalog: &ProviderCatalog) -> AgentProvider {
+    let remembered = catalog.remembered.as_deref().and_then(AgentProvider::parse)
+        .filter(|p| catalog.available.contains(p) && (!catalog.disconnected.contains(p) || catalog.connected.is_empty()));
+    remembered
+        .or_else(|| catalog.available.iter().copied().find(|p| catalog.connected.contains(p)))
+        .or_else(|| catalog.available.first().copied())
+        .unwrap_or(AgentProvider::Claude)
+}
+
+/// `_creator_permission_mode` / `_codex_as_claude_mode`: o modo da criadora no nome do `--permission-mode`.
+fn creator_mode(info: &CreatorFacts) -> Option<PermissionMode> {
+    let raw = info.permission_mode.as_deref()?;
+    if info.provider == AgentProvider::Codex {
+        // Chave exata do `PERMISSION_POLICIES`, sem a tolerância de maiúscula da abertura.
+        return Some(match PermissionMode::CODEX.into_iter().find(|m| m.name() == raw)? {
+            PermissionMode::FullAccess => PermissionMode::BypassPermissions,
+            PermissionMode::ApproveForMe => PermissionMode::AcceptEdits,
+            _ => PermissionMode::Manual,
+        });
+    }
+    PermissionMode::claude(if raw == "default" { "manual" } else { raw }).filter(|m| *m != PermissionMode::Plan)
+}
+
+/// `modo_da_conta`: `default` vira `manual`; ausente ou desconhecido, o padrão do app (bypass).
+fn account_mode(config_dir: Option<&str>, facts: &dyn OpenFacts, warnings: &mut Vec<String>) -> PermissionMode {
+    match facts.account_mode(config_dir) {
+        Ok(Some(mode)) => PermissionMode::claude(if mode == "default" { "manual" } else { &mode }).unwrap_or(PermissionMode::BypassPermissions),
+        Ok(None) => PermissionMode::BypassPermissions,
+        Err(reason) => {
+            // Cair no modo mais permissivo por arquivo quebrado não pode parecer escolha de quem abriu.
+            warnings.push(format!("não consegui ler o modo padrão da conta ({reason}); a sessão nasce em bypassPermissions"));
+            PermissionMode::BypassPermissions
+        }
+    }
+}
+
+/// `cotas.conta_com_cota`: a conta que ninguém escolheu, a 95% ou mais, troca pela de mais folga.
+fn quota_switch(config_dir: Option<&str>, rows: &[Value]) -> Option<(String, String)> {
+    let same = |row: &Value| match config_dir {
+        None => row["ativa"] == true,
+        Some(dir) => row["id"].as_str().and_then(|id| id.strip_prefix("claude:")).is_some_and(|path| same_dir(path, dir)),
+    };
+    let current = rows.iter().find(|row| row["provedor"] == "claude" && same(row))?;
+    let usage = current["janelas"].as_array()?.iter().filter_map(|w| w["pct"].as_f64()).reduce(f64::max)?;
+    if current["estado"] != "lida" || usage < QUOTA_LIMIT {
+        return None;
+    }
+    let best = crate::accounts::quotas::suggestion(rows)?;
+    if best["id"] == current["id"] || best["folga"].as_f64()? <= 100.0 - usage {
+        return None;
+    }
+    let label = |row: &Value| row["label"].as_str().unwrap_or_default().to_owned();
+    Some((best["path"].as_str()?.to_owned(), format!("conta {} com {usage:.0}% de uso; a sessão nasceu em {}", label(current), label(&best))))
+}
+
+/// `Path(a).resolve() == Path(b).resolve()`, sem exigir que existam.
+fn same_dir(a: &str, b: &str) -> bool {
+    let resolve = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    a == b || resolve(a) == resolve(b)
+}
+
+/// Validação na ordem do `_create_session_owned` (o primeiro erro vence), tudo antes de qualquer
+/// efeito. Devolve o modelo efetivo (a conta ChatGPT fixa tira o prefixo dela).
+fn validate(request: &SessionOpenRequest, provider: AgentProvider, headless: bool, config_dir: Option<&str>,
+            codex_account: Option<&str>, permission: Option<&str>, facts: &dyn OpenFacts) -> Result<Option<String>, OpenError> {
+    let claude = provider == AgentProvider::Claude;
+    if request.claude_customizations.is_some() && !claude {
+        return Err(OpenError::new(400, "claude_customizations_invalid", "plugins e skills por sessão só valem para Claude"));
+    }
+    if request.service_tier.is_some() && provider != AgentProvider::Codex
+        && !(claude && facts.supports_fast(request.engine.as_deref(), request.model.as_deref()))
+    {
+        return Err(OpenError::new(400, "erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"));
+    }
+    if facts.existing_dir(&request.cwd).is_none() {
+        return Err(OpenError::new(400, "erro_cwd_inexistente", format!("a pasta {} não existe", request.cwd))
+            .with_params(json!({"cwd": request.cwd})));
+    }
+    let mut model = request.model.clone();
+    if let Some(account) = &request.engine_account {
+        let Some(engine) = request.engine.as_deref().filter(|e| claude && !e.is_empty()) else {
+            return Err(OpenError::new(400, "erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"));
+        };
+        model = Some(facts.fixed_engine_model(engine, account, model.as_deref())?);
+    }
+    if codex_account.is_some() && provider != AgentProvider::Codex {
+        return Err(OpenError::new(400, "codex_account_so_codex", "codex_account só vale para provider codex"));
+    }
+    let codex_home = match provider {
+        AgentProvider::Codex => Some(facts.codex_home(codex_account.unwrap_or("default"))?),
+        _ => None,
+    };
+    if let Some(dir) = config_dir && !facts.config_dirs()?.iter().any(|known| known == dir) {
+        return Err(OpenError::new(400, "erro_config_dir_invalido", "config_dir invalido"));
+    }
+    if let Some(engine) = &request.engine {
+        if !claude {
+            return Err(OpenError::new(400, "erro_motor_sem_claude", "motor so vale para provider claude"));
+        }
+        if !facts.engines().contains(engine) {
+            return Err(OpenError::new(400, "erro_motor_invalido", "motor invalido"));
+        }
+    }
+    // O Codex sem terminal aceita o modo dele (vira sandbox e aprovação).
+    if permission.is_some() && !claude && !(provider == AgentProvider::Codex && headless) {
+        return Err(OpenError::new(409, "erro_permissao_so_claude", "modo de permissao so vale para claude"));
+    }
+    if truthy(&request.omp_profile) && provider != AgentProvider::Omp {
+        return Err(OpenError::new(400, "erro_perfil_so_omp", "perfil so vale para provider omp"));
+    }
+    if let Some(subagent) = &request.subagent_model {
+        if !claude || truthy(&request.engine) {
+            return Err(OpenError::new(400, "erro_subagente_so_claude", "modelo dos subagentes so vale para claude sem motor"));
+        }
+        validate_choice(AgentProvider::Claude, Some(subagent), None, None)
+            .map_err(|e| OpenError::plain(400, e.msg.replacen("model:", "subagent_model:", 1)))?;
+    }
+    validate_choice(provider, model.as_deref(), request.effort.as_deref(), permission.filter(|_| provider != AgentProvider::Codex))?;
+    if provider == AgentProvider::Codex && (truthy(&request.model) || truthy(&request.effort) || request.service_tier.is_some()) {
+        // O nível do Codex varia por modelo: só o catálogo cruza modelo × nível × Fast.
+        // Conta nomeada (pedida, herdada ou a conectada no lugar da padrão) lê o catálogo dela.
+        let home = codex_home.as_deref().filter(|_| codex_account.is_some());
+        match facts.codex_choice(home, request.model.as_deref(), request.effort.as_deref(), request.service_tier) {
+            Ok(()) => {}
+            Err(CodexCatalogError::Invalid(e)) => return Err(OpenError::new(422, "erro_codex_escolha_invalida", e.clone()).with_params(json!({"erro": e}))),
+            Err(CodexCatalogError::Unavailable(e)) if request.service_tier == Some(ServiceTier::Priority) => {
+                return Err(OpenError::new(502, "erro_codex_catalogo_invalido", format!("Fast não pôde ser conferido: {e}")).with_params(json!({"erro": e})));
+            }
+            // Catálogo fora do ar não impede abrir: a escolha segue e o CLI decide.
+            Err(CodexCatalogError::Unavailable(e)) => tracing::warn!("codex: catalogo indisponivel, escolha nao conferida: {e}"),
+            Err(CodexCatalogError::Refused(e)) => return Err(OpenError::new(502, "erro_codex_catalogo_invalido", e.clone()).with_params(json!({"erro": e}))),
+        }
+    }
+    if request.new_branch && request.branch.is_none() {
+        return Err(OpenError::new(400, "erro_criacao_sessao", "branch nova sem nome"));
+    }
+    Ok(model)
+}
+
+/// `model_args.validar`: a regex é a barreira do shell, e cada binário tem a própria flag de esforço.
+fn validate_choice(provider: AgentProvider, model: Option<&str>, effort: Option<&str>, permission: Option<&str>) -> Result<(), OpenError> {
+    let name = provider.name();
+    if let Some(model) = model && (!MODEL_OK.is_match(model) || model.starts_with('-')) {
+        return Err(OpenError::plain(400, "model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)"));
+    }
+    if let Some(effort) = effort {
+        let levels: &[&str] = match provider {
+            AgentProvider::Codex if CODEX_EFFORT_OK.is_match(effort) => &[],
+            AgentProvider::Codex => return Err(OpenError::plain(400,
+                "effort: use letras minúsculas (2 a 32) — os níveis do Codex variam por modelo e vêm do provedor")),
+            AgentProvider::Claude => &EFFORT_CLAUDE,
+            AgentProvider::Pi | AgentProvider::Omp => &EFFORT_PI,
+            AgentProvider::Kimi => return Err(OpenError::plain(400, format!("provider '{name}' não aceita escolha de esforço aqui"))),
+        };
+        if !levels.is_empty() && !levels.contains(&effort) {
+            return Err(OpenError::plain(400, format!("effort: use um de {}", levels.join(", "))));
+        }
+    }
+    if let Some(mode) = permission && PermissionMode::claude(mode).is_none() {
+        let names: Vec<_> = PermissionMode::CLAUDE.iter().map(|m| m.name()).collect();
+        return Err(OpenError::new(409, "erro_permissao_invalida", format!("permission_mode: use um de {}", names.join(", "))));
+    }
+    Ok(())
+}
+
+/// O que o `registry.create` confere antes de qualquer efeito: nome, sem terminal, perfil do omp e
+/// nome em uso. Devolve o nome sanitizado.
+fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &SessionOpenRequest, facts: &dyn OpenFacts)
+    -> Result<String, OpenError> {
+    let name = crate::list::discover_other::sanitize_session_name(raw);
+    // Um status só para o nome inválido, com ou sem `branch` (S-35).
+    if name.is_empty() {
+        return Err(conflict("nome invalido"));
+    }
+    if name.len() > NAME_MAX {
+        return Err(conflict(format!("nome invalido: use até {NAME_MAX} caracteres")));
+    }
+    if headless {
+        if !matches!(provider, AgentProvider::Claude | AgentProvider::Codex) {
+            return Err(conflict("sessao sem terminal so vale para provider claude ou codex"));
+        }
+        // S-40: o prompt inicial é entregue em todo provedor; só leitura continua exigindo terminal.
+        if request.read_only {
+            return Err(conflict("sessao sem terminal nao aceita read_only"));
+        }
+    }
+    if provider == AgentProvider::Omp && let Some(profile) = request.omp_profile.as_deref().filter(|p| !p.is_empty()) {
+        // A mesma regra do omp: o valor vai para o ambiente do pane como `OMP_PROFILE`.
+        let profile = profile.trim();
+        if !(profile.is_empty() || profile == "default" || crate::list::discover_other::valid_omp_profile(profile)) {
+            return Err(conflict("Nome de perfil OMP inválido"));
+        }
+    }
+    if facts.name_in_use(&name) {
+        return Err(OpenError::new(409, "erro_nome_em_uso", "ja existe uma sessao com esse nome"));
+    }
+    if provider == AgentProvider::Codex && headless && let Some(mode) = request_permission(request)
+        && PermissionMode::codex(mode).is_none()
+    {
+        let names: Vec<_> = PermissionMode::CODEX.iter().map(|m| m.name()).collect();
+        return Err(conflict(format!("permission_mode: use um de {}", names.join(", "))));
+    }
+    Ok(name)
+}
+
+/// O Codex nunca herda o modo da criadora: só o pedido conta.
+fn request_permission(request: &SessionOpenRequest) -> Option<&str> { request.permission_mode.as_deref() }
