@@ -59,9 +59,13 @@ fn main() -> ExitCode {
         };
         let port = server.get("CP_PORT").map_or("8765", String::as_str);
         match runtime.block_on(ask_server(&format!("http://127.0.0.1:{port}"), token, &body)) {
-            Ask::Answered(status, text) => {
+            Ask::Answered(status, text) if (200..300).contains(&status) => {
                 println!("{text}");
-                return if (200..300).contains(&status) { ExitCode::SUCCESS } else { ExitCode::from(1) };
+                return ExitCode::SUCCESS;
+            }
+            Ask::Answered(_, text) => {
+                eprintln!("{text}");
+                return ExitCode::from(1);
             }
             // Sem resposta a sessão pode estar nascendo lá: resolver aqui abriria uma segunda.
             Ask::Uncertain(reason) => {

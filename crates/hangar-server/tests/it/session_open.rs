@@ -106,6 +106,28 @@ async fn the_command_refuses_with_the_open_error() {
     assert_eq!(hangar_open(&bin, dir.path(), &["abrir"], &[]).await.0, 2);
 }
 
+/// A recusa do servidor sai em stderr, como a recusa local; stdout fica só com a sessão criada.
+#[tokio::test]
+async fn a_server_refusal_goes_to_stderr() {
+    let refusal = r#"{"detail":{"code":"erro_nome_em_uso","params":{},"msg":"ja existe uma sessao com esse nome"}}"#;
+    let app = axum::Router::new().route("/api/sessions", axum::routing::post(move || async move {
+        (axum::http::StatusCode::CONFLICT, refusal)
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let bin = install(dir.path(), &format!("CP_AUTH_TOKEN=t\nCP_PORT={port}\n"));
+    let out = {
+        let mut command = Command::new(&bin);
+        command.args(["open", r#"{"name":"dup","cwd":"/x"}"#]).env_clear().env("HOME", dir.path());
+        tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap()
+    };
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), refusal);
+}
+
 /// Token e porta vêm do `backend/.env`, como no `hangar-send`; sem token nada é enviado.
 #[tokio::test]
 async fn the_env_file_gives_token_and_port_and_no_token_sends_nothing() {
