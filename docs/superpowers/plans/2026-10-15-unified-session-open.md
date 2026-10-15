@@ -101,8 +101,8 @@ Status: ready-for-agent
   Por provider × com/sem terminal; o que ainda não migrou responde 421 e segue ao Python só durante
   a branch. Sai na Task 11.
 - [ ] **Step 6: Modo `python` e atualização**
-  `session_open_needs_rust_server` no app e no diário; a atualização compila o Rust antes de
-  reiniciar o backend.
+  `session_open_needs_rust_server` no app e no diário (feito em 99ddc16d5). A parte da atualização
+  passou para a Task 5b (D-015).
 
 ### Task 4: Lançador de terminal único + criar Claude com terminal (R2)
 
@@ -126,15 +126,36 @@ Status: ready-for-agent
 
 ### Task 5: Registro de sessões e recuperação no Rust
 
-Status: needs-info (decisão do usuário: o que acontece com as sessões quando o Rust cai de vez)
+Status: ready-for-agent (D-014: o Rust volta sozinho; se ficar trabalhoso demais, cai para o erro
+claro pedindo reiniciar, e isso é avisado ao usuário antes)
 
-- [ ] **Step 1: Pergunta curta ao usuário sobre a recuperação**
-  Hoje o coordenador Python assume as sessões quando o Rust desiste (`runtime_coordinator.py:377-395,
-  1659`) e lança processos na subida (`:407-466`, `:791-833`). Mexer nisso exige decisão dele.
-- [ ] **Step 2: Registro e travas de troca no Rust**
-  O que o coordenador guarda (registro das sessões, travas de troca) passa para o Rust, conforme a
-  resposta do Step 1.
-- [ ] **Step 3: Apagar o Python substituído**
+- [x] **Step 1: Decisão do usuário sobre a recuperação (D-014)**
+  Hoje, 3 quedas em 60 s (`rust_server.py:526-531`) → `hand_to_python` → o Python assume a 8765
+  até alguém reiniciar o backend.
+- [ ] **Step 2: Religar o Rust sozinho e devolver a ele**
+  Depois da desistência, o Supervisor segue tentando subir o Rust com espera crescente; quando ele
+  responde com o protocolo certo, o Python solta a porta e as sessões, e tudo volta ao Rust
+  (`pending` → `rust`, como nas quedas 1–2). Nunca as duas portas ao mesmo tempo; nunca uma sessão
+  com dois donos. Diário registra cada tentativa e a volta.
+- [ ] **Step 3: Registro e travas de troca no Rust**
+  O que o coordenador guarda (registro das sessões, travas de troca, `runtime_coordinator.py:377-395,
+  407-466, 791-833, 1659`) passa para o Rust.
+- [ ] **Step 4: Apagar o Python substituído**
+
+### Task 5b: Atualizar só com Python e Rust no mesmo contrato (D-015)
+
+Status: ready-for-agent
+
+- [ ] **Step 1: Achar por que a trava de hoje falha**
+  `pinned_target` (`atualizar.py:686`) já deveria segurar o checkout no último commit com o contrato
+  do binário publicado. Suspeita a provar: com o manifesto publicado e o build deste sistema ainda
+  não pronto, ele devolve o topo (`:719-720`) e o Python passa à frente do Rust. Provar com o diário
+  de atualizações e um caso reproduzido; ler antes "Regras vigentes" de `docs/decisoes/instalacao.md`.
+- [ ] **Step 2: Atualização atômica**
+  Só troca o checkout quando há binário do Rust com o mesmo contrato para este sistema; senão fica
+  onde está e mostra "atualização aguardando o build". Inclui `git pull` manual no aviso do
+  `verificar-local`/instalador quando aplicável.
+- [ ] **Step 3: Verificação manual: atualizar com o build do Rust ainda em andamento no CI**
 
 ### Task 6: Claude sem terminal pelo spec (R1)
 
@@ -202,7 +223,10 @@ Status: ready-for-agent
   passa pelas guardas da criação (S-08). Itens RET.
 - [ ] **Step 2: Restore do reboot pelo Rust, na subida**
   O Rust reabre as sessões a partir dos specs gravados; o resurrect pula as sessões do Hangar
-  (`tmux-claude-resume.sh:29-31,286`). Volta com tudo (S-68, S-69, S-70).
+  (`tmux-claude-resume.sh:29-31,286`). Volta com tudo (S-68, S-69, S-70). O comando nunca é
+  digitado no shell interativo do pane: com zsh e `CORRECT_ALL`, o `env CLAUDE_CONFIG_DIR=… claude
+  --resume …` que o script digita (`:285`) para no "correct 'claude' to '.claude' [nyae]?" e a
+  sessão não volta (relato do Júnior, 2026-10-15). O Rust lança o comando direto no `new-session`.
 - [ ] **Step 3: Consertos desta parte**
   S-08, S-16, S-17, S-19, S-22, S-23, S-36, S-68, S-69, S-70.
 - [ ] **Step 4: Apagar o Python substituído**
