@@ -259,10 +259,11 @@ export function SessionList({ onClose, onOpenServers }: Props) {
 
   const ativo = servers.find((s) => s.id === activeId) ?? null;
   const baldeAtivo = byServer.find((b) => b.server.id === activeId);
+  const activeError = baldeAtivo?.error && baldeAtivo.error !== 'offline' ? baldeAtivo.error : null;
   const corAtivo = baldeAtivo?.error ? theme.tokens.status.error : baldeAtivo?.loaded ? theme.tokens.status.success : theme.tokens.text.muted;
   const rotuloAtivo = ativo
     ? baldeAtivo?.error
-      ? m.lista_servidor_offline({ label: ativo.label })
+      ? baldeAtivo.error === 'offline' ? m.lista_servidor_offline({ label: ativo.label }) : `${ativo.label}, ${baldeAtivo.error}`
       : baldeAtivo?.loaded
         ? `${ativo.label}, ${m.native_connected()}`
         : ativo.label
@@ -339,7 +340,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
       {ativo ? (
         <Pressable onPress={onOpenServers} style={styles.ativo} accessibilityRole="button" accessibilityLabel={rotuloAtivo}>
           <View style={[styles.ponto, { backgroundColor: corAtivo }]} />
-          <Text style={[styles.ativoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{ativo.label}</Text>
+          <Text style={[styles.ativoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={activeError ? undefined : 1}>{activeError ? `${ativo.label}: ${activeError}` : ativo.label}</Text>
         </Pressable>
       ) : <View style={styles.ativo} />}
       <Pressable onPress={abrirConfig} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()}>

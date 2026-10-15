@@ -176,11 +176,11 @@ export function MessageList({
           if (ev.id.startsWith('queued-')) {
             return (
               <View style={working && waitsInQueue(ev, session?.provider, session?.headless) ? styles.pending : undefined}>
-                <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} />
+                <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />
               </View>
             );
           }
-          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} />;
+          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} />;
         }
         if (ev.kind === 'assistant_msg') {
           return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
@@ -278,7 +278,7 @@ export function MessageList({
           {/* O eco que o painel da fila já mostra some: a mesma mensagem não aparece duas vezes. */}
           {pending.filter((p) => !(queuePanel && echoInQueuePanel(p.text, queuePanel))).map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
-              <UserBubble text={p.text} sessionName={sessionName} />
+              <UserBubble text={p.text} sessionName={sessionName} serverId={serverId} />
             </View>
           ))}
           {optionsSlot ?? null}
@@ -298,7 +298,7 @@ export function MessageList({
         {temNovas ? <View style={[styles.novasDot, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.bg.base }]} /> : null}
       </Pressable>
     ) : null}
-    <ToolDetailSheet ref={detail} resultOf={resultDe} sessionName={sessionName} />
+    <ToolDetailSheet ref={detail} resultOf={resultDe} sessionName={sessionName} serverId={serverId} />
     </View>
   );
 }
