@@ -1603,7 +1603,7 @@ impl Hangar {
     }
 
     /// "Abrir no painel" do site da conversa: o mesmo endereço no navegador desta sessão, à frente.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn open_in_browser_panel(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
         let browser = self.browser_for(key, window, cx);

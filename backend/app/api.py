@@ -2915,12 +2915,57 @@ async def recarregar_sessao(name: str):
         except TransferError as exc:
             raise HTTPException(exc.status, detail=public_error(exc)) from None
     from app.conversation_transfer import transfer_operation, require_available
+    info = await _cached_info(name)
+    if info and info.provider == "claude" and not _headless(name):
+        return await _durante_troca(name, _reload_terminal(name))
     try:
         async with transfer_operation(name):
             await asyncio.to_thread(require_available, name)
             return await _reload_session(name)
     except TransferError as exc:
         raise HTTPException(exc.status, detail=public_error(exc)) from None
+
+
+def _pane_came_up(name: str) -> bool:
+    """`new-session` volta 0 mesmo quando o comando morre ao nascer: conta o pane vivo após o boot."""
+    from app.terminal_input import _wait_input_ready
+    _wait_input_ready(name, timeout=10.0)
+    return tmux.has_session(name)
+
+
+async def _reload_terminal(name: str):
+    """Claude com terminal: o pane fecha e reabre na mesma conversa com o comando montado agora (plugin,
+    nome e token do lançador), pelas duas metades da troca de modo, sem subir o processo sem terminal."""
+    hl = get_adapter(CLAUDE_HEADLESS)
+    async with hl.delivery_lock(name):
+        motivo = await _motivo_ocupada(name, False)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        modo = await asyncio.to_thread(perm_mode.ler_modo, name)
+        try:
+            sidecar = await asyncio.to_thread(registry.para_headless, name, modo)
+        except KillFailed as e:
+            raise HTTPException(500, str(e))
+        except ValueError as e:
+            raise HTTPException(409, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
+        except OSError as e:
+            # O `para_headless` já tentou devolver o pane; o texto diz se a sessão sobreviveu.
+            raise HTTPException(500, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
+        # Daqui em diante o processo antigo já saiu: falha nenhuma pode deixar a sessão sem processo.
+        try:
+            await asyncio.to_thread(registry.para_terminal, name)
+            if await asyncio.to_thread(_pane_came_up, name):
+                return {"ok": True}
+            problema = "o terminal fechou logo depois de abrir"
+        except Exception as e:
+            problema = str(e) or type(e).__name__
+        _log.warning("recarregar: o terminal de %s não reabriu (%s); segue sem terminal", name, problema)
+        if not await asyncio.to_thread(headless_sessions.exists, name):
+            await asyncio.to_thread(headless_sessions.restaurar, sidecar)
+        hl.acordar(name)
+        raise HTTPException(502, detail=erro("erro_recarregar_sem_terminal",
+                                             f"o terminal não reabriu ({problema}); a sessão seguiu sem terminal",
+                                             erro=problema))
 
 
 async def _reload_session(name: str):

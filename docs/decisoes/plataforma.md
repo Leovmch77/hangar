@@ -868,8 +868,14 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   alfa de superfície `Rgba8Unorm`, com alfa puro: o `blend_color` já multiplica, e pré-multiplicar
   aplicaria o alfa duas vezes; a superfície XRGB do WPE continua opaca. Navegação bloqueada responde
   `Aborted`: `BlockedByClient` troca a página pela tela de erro do Chrome.
-- **Windows:** cartão estático, como o macOS, até a prova na VM DELPHI-02 de que a WebView2 fora
-  da tela continua mandando quadros por CDP. A prova (Task 9) está pendente; não há resultado.
+- **Windows:** viva, como no Linux. Cada página é uma WebView2 própria estacionada fora da área da
+  janela (visível para o Chromium: `SW_HIDE` para os quadros), com o documento posto pelo CDP, quadro
+  por `Page.startScreencast` em PNG no dobro da tela e entrada por `Input.*`. O DirectX do GPUI
+  vendorizado pinta a textura (`SurfaceTexture`, escrita na thread da janela porque o contexto
+  imediato do D3D11 é dela). Documento em pasta de perfil própria (`pages`), site com o perfil do
+  painel. A prova da WebView2 escondida e minimizada está em
+  [frontend.md](frontend.md#página-da-conversa-no-windows-webview2-fora-da-tela-14102026). O macOS
+  segue no cartão estático.
 
 ## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
 

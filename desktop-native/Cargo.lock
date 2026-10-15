@@ -3739,6 +3739,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-wgpu",
+ "gpui-pre-windows",
  "hangar-api",
  "hangar-workspace",
  "image",

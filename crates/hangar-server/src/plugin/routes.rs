@@ -14,6 +14,9 @@ use crate::interactions::InteractionBinding;
 use crate::mods::bridge::{machine_key_ok, mint_keyed, session_token_ok};
 use super::{AgentState, Ask, PermissionGate, PluginMode, Pull, Receipt, ServiceError, Store};
 
+/// Curto o bastante para a troca chegar ao app logo; o plugin rearma o `/pull` em 50 ms, então não gira em laço.
+const MIRROR_MISSING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub type SourceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ServiceError>> + Send + 'a>>;
 
 #[derive(Clone, Debug)]
@@ -141,8 +144,13 @@ async fn admit<T>(state: &RouteState, envelope: &Envelope<T>) -> Result<Identity
     if !session_token_ok(&state.secret, &envelope.sessao, &envelope.token) { return Err(ServiceError("plugin_token_invalid")); }
     // O liga/desliga (`claude_function_hooks`) vale para o processo que nasce (`whoami`); a sessão já aberta
     // com o plugin segue atendida, como no Python, que só conferia o token aqui.
-    let key = envelope.token.split_once('.').map(|(key, _)| key);
-    let identity = state.sources.resolve(&envelope.sessao, key).await?;
+    let mut key = envelope.token.split_once('.').map(|(key, _)| key);
+    let identity = match state.sources.resolve(&envelope.sessao, key).await {
+        // Chave que nenhuma sessão conhece (emitida pelo Python ou por um servidor anterior) cai no nome, que o token
+        // assina; chave de outra sessão continua vencendo o nome.
+        Err(ServiceError("plugin_identity_missing")) if key.is_some() => { key = None; state.sources.resolve(&envelope.sessao, None).await? }
+        resolved => resolved?,
+    };
     if identity.binding.key.is_empty() || identity.binding.conversation.is_empty() || identity.plugin_key.is_empty()
         || key.is_none() && identity.name != envelope.sessao
         || key.is_some_and(|key| key != identity.plugin_key && key != identity.binding.key) {
@@ -207,6 +215,8 @@ async fn pull(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Pull>
     let present = match st.sources.band_present(&identity).await { Ok(present) => present, Err(error) => return fail(error) };
     let instance = body.body.instance.clone();
     let poll = match st.store.begin_pull(&identity.binding, body.body, Instant::now()) { Ok(poll) => poll, Err(error) => return fail(error) };
+    // Sem o espelho (servidor reiniciado), o plugin só reenvia o `/ui` ao ler `faixa:false`: não espera o long-poll.
+    let poll = if present { poll } else { poll.cap(MIRROR_MISSING_POLL) };
     // A conversa conferida acima tem esta vida desde o nascimento da instância.
     crate::state::ask::life_started(&identity.binding.conversation, &instance);
     let mut result = poll.wait().await;

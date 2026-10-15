@@ -163,6 +163,18 @@ fn bridge_finds_the_session_by_the_key_of_the_process() {
 }
 
 #[test]
+fn bridge_falls_back_to_the_name_when_no_process_has_the_key() {
+    // Chave de um servidor anterior: o `/pull` admite pelo nome assinado, e o `/ui` precisa cair na mesma
+    // sessão, senão o espelho nunca chega e o `/pull` pede o reenvio sem parar. Chave de outra sessão vence.
+    let mods = Mods::default();
+    mods.attach_process("a", "p1:10:x", 1, Arc::new(NoLink));
+    mods.attach_process("b", "p2:11:x", 2, Arc::new(NoLink));
+    assert_eq!(mods.bridge_session("a", "velha.mac").as_deref(), Some("a"));
+    assert_eq!(mods.bridge_session("a", "p2.mac").as_deref(), Some("b"));
+    assert_eq!(mods.bridge_session("z", "velha.mac"), None);
+}
+
+#[test]
 fn a_new_session_with_an_old_name_inherits_nothing_and_shares_no_bridge() {
     let mods = Mods::default();
     mods.attach_process("a", "p1", 1, Arc::new(NoLink));

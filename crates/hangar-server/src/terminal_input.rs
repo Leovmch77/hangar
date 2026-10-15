@@ -78,8 +78,9 @@ pub trait TerminalServices: Send + Sync {
     fn abandon_publication<'a>(&'a self, _publication_id: &'a str) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
 
-/// O Claude grava `queue-operation`/`enqueue` ao aceitar o Enter, antes dos hooks `UserPromptSubmit`
-/// da conta; o composer só esvazia depois deles.
+/// O Claude grava a entrada ao aceitar o Enter, antes dos hooks `UserPromptSubmit` da conta; o composer
+/// só esvazia depois deles. Com turno em curso é o `enqueue` com `content`; parado, o `enqueue` vem sem
+/// texto e a prova é a linha `user` com o texto, gravada logo em seguida.
 pub(crate) fn enqueued_since(path: &std::path::Path, mark: u64, text: &str) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else { return false };
@@ -87,9 +88,20 @@ pub(crate) fn enqueued_since(path: &std::path::Path, mark: u64, text: &str) -> b
     let mut tail = Vec::new();
     if file.take(4 << 20).read_to_end(&mut tail).is_err() { return false; }
     let want = compact(text);
-    String::from_utf8_lossy(&tail).lines().any(|line| line.contains("\"enqueue\"")
-        && serde_json::from_str::<Value>(line).is_ok_and(|v| v["type"] == "queue-operation" && v["operation"] == "enqueue"
-            && v["content"].as_str().is_some_and(|content| compact(content) == want)))
+    String::from_utf8_lossy(&tail).lines().any(|line| {
+        if !line.contains("\"enqueue\"") && !line.contains("\"user\"") { return false; }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+        let written = match v["type"].as_str() {
+            Some("queue-operation") if v["operation"] == "enqueue" => v["content"].as_str().map(str::to_owned),
+            Some("user") => match &v["message"]["content"] {
+                Value::String(content) => Some(content.clone()),
+                Value::Array(blocks) => Some(blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()),
+                _ => None,
+            },
+            _ => None,
+        };
+        written.is_some_and(|content| !content.is_empty() && compact(&content) == want)
+    })
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1731,4 +1743,38 @@ pub fn review_matches(screen: &str, answers: &[QuestionAnswer]) -> bool {
         let expected: BTreeSet<_> = a.labels.iter().map(String::as_str).collect();
         !expected.is_empty() && expected == row.split(',').map(str::trim).collect()
     })
+}
+
+#[cfg(test)]
+mod enqueued_tests {
+    use super::enqueued_since;
+
+    fn transcript(lines: &[&str]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        file
+    }
+
+    #[test]
+    fn idle_prompt_is_proved_by_its_user_line_before_the_hooks() {
+        let file = transcript(&[
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-14T22:13:09.577Z"}"#,
+            r#"{"type":"queue-operation","operation":"dequeue","timestamp":"2026-10-14T22:13:09.589Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"tem um espaço ai — 📎 imagem: /tmp/a.png"}}"#,
+        ]);
+        assert!(enqueued_since(file.path(), 0, "tem um espaço ai — 📎 imagem: /tmp/a.png"));
+        assert!(!enqueued_since(file.path(), 0, "outra mensagem"));
+    }
+
+    #[test]
+    fn mid_turn_prompt_is_proved_by_the_enqueue_content() {
+        let file = transcript(&[r#"{"type":"queue-operation","operation":"enqueue","content":"nao e a faixa"}"#]);
+        assert!(enqueued_since(file.path(), 0, "nao e a faixa"));
+    }
+
+    #[test]
+    fn a_tool_result_with_the_same_text_proves_nothing() {
+        let file = transcript(&[r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"oi"}]}}"#]);
+        assert!(!enqueued_since(file.path(), 0, "oi"));
+    }
 }

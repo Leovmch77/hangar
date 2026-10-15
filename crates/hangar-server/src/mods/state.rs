@@ -384,6 +384,8 @@ impl Mods {
         }).map(|(name, _)| name.clone());
         match (found.next(), found.next()) {
             (Some(name), None) => Some(name),
+            // Chave que nenhum processo tem (servidor anterior): o nome, como no `admit` do `/pull`.
+            (None, _) => inner.sessions.contains_key(sessao).then(|| sessao.to_owned()),
             _ => None,
         }
     }
@@ -603,6 +605,11 @@ impl Mods {
 
     pub fn is_terminal(&self, name: &str) -> bool {
         self.inner.lock().unwrap().sessions.get(name).is_some_and(|session| session.terminal.is_some())
+    }
+
+    /// Sessão com terminal: se o espelho do plugin já chegou nesta vida. None fora do terminal.
+    pub fn terminal_mirrored(&self, name: &str) -> Option<bool> {
+        self.inner.lock().unwrap().sessions.get(name).and_then(|session| session.terminal.as_ref()).map(|terminal| terminal.view.is_some())
     }
 
     /// O espelho da sessão com terminal só na vida `life`: o clique de uma sessão substituída não lê o da nova.
@@ -860,6 +867,25 @@ mod tests {
     struct Quiet;
     impl SurfaceLink for Quiet {
         fn call(&self, _: ModsCall, _: Instant) -> CallFuture { Box::pin(async { Ok(Value::Null) }) }
+    }
+    impl TerminalProbe for Quiet {
+        fn read_shown(&self) -> ShownFuture { Box::pin(async { None }) }
+        fn stop(&self) {}
+        fn anchor(&self, _: Option<String>) {}
+    }
+
+    /// Reiniciado, o servidor começa sem o espelho: só o `/ui` que chega nesta vida o devolve, mesmo sem faixa
+    /// (`above` nulo), porque é ele que traz o que o plugin atende (`caps`).
+    #[test]
+    fn terminal_mirror_counts_from_the_first_ui_even_without_a_band() {
+        let mods = Mods::default();
+        assert_eq!(mods.terminal_mirrored("s"), None, "sessão desconhecida");
+        mods.attach_terminal("s", "key:%1:1", 1, Arc::new(Quiet));
+        assert_eq!(mods.terminal_mirrored("s"), Some(false), "aberta, sem o /ui do plugin");
+        mods.terminal_ui("s", TerminalView { above: Value::Null, caps: vec!["btw".into()], ..Default::default() });
+        assert_eq!(mods.terminal_mirrored("s"), Some(true), "o /ui sem faixa já é o espelho");
+        mods.attach("u", 2, Arc::new(Quiet));
+        assert_eq!(mods.terminal_mirrored("u"), None, "sem terminal");
     }
 
     /// Com uma publicação entregando, outra da mesma sessão nem grava: a que grava por último é também a última a

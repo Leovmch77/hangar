@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/MODIFICADO.md gpui-pre-windows-0.3.7/MODIFICADO.md
 --- gpui-pre-windows-0.3.7/MODIFICADO.md
 +++ gpui-pre-windows-0.3.7/MODIFICADO.md
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,46 @@
 +# Cópia do gpui-pre-windows 0.3.7
 +
 +Origem: crate `gpui-pre-windows` 0.3.7 do crates.io, checksum `f05592a6f9e3e6bb7a9f2a0d4779271cf747a948db1c07b02448de777ffff8f3`, licença Apache-2.0.
@@ -42,6 +42,12 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +
 +Tecla física: `physical_digit(lparam)` (`src/events.rs`) mapeia os códigos de varredura 0x02 a 0x0B (sem o bit de
 +tecla estendida) para `KeyDownEvent::physical_digit`.
++
++Superfície externa (página da conversa): `SurfaceTexture` (`src/directx_devices.rs`) é uma textura RGBA no device em que
++o GPUI desenha, criada de qualquer thread (`new`) e escrita na thread da janela (`write`, pelo contexto imediato).
++`DirectXDevices::new` guarda o device atual para isso, trocado na perda do device; `is_current` avisa o dono para criar
++outra. `draw_surfaces` (`src/directx_renderer.rs`) desenha cada `PaintSurface` como um sprite policromático cuja peça é a
++textura inteira, num pipeline próprio (`surface_sprites`), e pula a textura de um device perdido.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/NOTICE gpui-pre-windows-0.3.7/NOTICE
 --- gpui-pre-windows-0.3.7/NOTICE
 +++ gpui-pre-windows-0.3.7/NOTICE
@@ -588,7 +594,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      render_target: Option<ID3D11Texture2D>,
      render_target_view: Option<ID3D11RenderTargetView>,
  
-@@ -98,6 +117,9 @@
+@@ -92,12 +111,17 @@
+     mono_sprites: PipelineState<MonochromeSprite>,
+     subpixel_sprites: PipelineState<SubpixelSprite>,
+     poly_sprites: PipelineState<PolychromeSprite>,
++    /// Hangar: one polychrome sprite per `PaintSurface`, sampling the surface's own texture.
++    surface_sprites: PipelineState<PolychromeSprite>,
+ }
+ 
+ struct DirectXGlobalElements {
      global_params_buffer: Option<ID3D11Buffer>,
      batch_params_buffer: Option<ID3D11Buffer>,
      sampler: Option<ID3D11SamplerState>,
@@ -598,7 +612,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  struct Annotation<'a>(&'a ID3DUserDefinedAnnotation);
-@@ -138,6 +160,9 @@
+@@ -138,6 +162,9 @@
              Some(device.cast().context("Creating DXGI device")?)
          };
          let annotation = device_context.cast().ok();
@@ -608,7 +622,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          Ok(Self {
              adapter: adapter.clone(),
-@@ -146,6 +171,7 @@
+@@ -146,6 +173,7 @@
              device_context: device_context.clone(),
              dxgi_device,
              annotation,
@@ -616,7 +630,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          })
      }
  }
-@@ -194,6 +220,9 @@
+@@ -194,6 +222,9 @@
              width: 1,
              height: 1,
              skip_draws: false,
@@ -626,7 +640,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          })
      }
  
-@@ -220,14 +249,20 @@
+@@ -220,14 +251,20 @@
                  _pad: [0; 3],
              }],
          )?;
@@ -654,7 +668,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              device_context
                  .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
              device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
-@@ -241,14 +276,44 @@
+@@ -241,14 +278,44 @@
          Ok(())
      }
  
@@ -705,7 +719,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          };
          result.ok().context("Presenting swap chain failed")
      }
-@@ -324,6 +389,7 @@
+@@ -324,6 +391,7 @@
          self.pipelines = pipelines;
          self.direct_composition = direct_composition;
          self.skip_draws = true;
@@ -713,7 +727,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          Ok(())
      }
  
-@@ -332,13 +398,82 @@
+@@ -332,13 +400,82 @@
          scene: &Scene,
          background_appearance: WindowBackgroundAppearance,
      ) -> Result<()> {
@@ -798,7 +812,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      }
  
      /// Clear the render target for `background_appearance` and encode every
-@@ -350,6 +485,24 @@
+@@ -350,6 +487,24 @@
          &mut self,
          scene: &Scene,
          background_appearance: WindowBackgroundAppearance,
@@ -823,7 +837,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      ) -> Result<()> {
          self.pre_draw(&match background_appearance {
              WindowBackgroundAppearance::Opaque => [1.0f32; 4],
-@@ -357,12 +510,30 @@
+@@ -357,12 +512,30 @@
          })?;
          self.upload_scene_buffers(scene)?;
  
@@ -854,7 +868,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              let _annotation = annotation
                  .as_ref()
                  .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
-@@ -401,9 +572,23 @@
+@@ -401,9 +574,23 @@
                  )
              })?;
          }
@@ -878,7 +892,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Render `scene` to an offscreen CPU image **without presenting** so
      /// the window need never be shown or visible (the macOS headless path
      /// goes through MetalRenderer; this is the Windows analogue). Draws into
-@@ -422,7 +607,9 @@
+@@ -422,7 +609,9 @@
              !self.skip_draws,
              "render_to_image unavailable while recovering from a lost device"
          );
@@ -889,7 +903,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          let devices = self.devices.as_ref().context("devices missing")?;
          let device = &devices.device;
-@@ -490,11 +677,14 @@
+@@ -490,11 +679,14 @@
          }
          self.width = width;
          self.height = height;
@@ -904,7 +918,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          resources.render_target.take();
          resources.render_target_view.take();
  
-@@ -619,12 +809,16 @@
+@@ -619,12 +811,16 @@
  
          let devices = self.devices.as_ref().context("devices missing")?;
          let resources = self.resources.as_ref().context("resources missing")?;
@@ -926,7 +940,68 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              // Set intermediate MSAA texture as render target
              devices.device_context.OMSetRenderTargets(
                  Some(slice::from_ref(&resources.path_intermediate_msaa_view)),
-@@ -890,6 +1084,7 @@
+@@ -813,9 +1009,58 @@
+         )
+     }
+ 
++    /// Hangar: each surface is a polychrome sprite whose tile is the whole external texture.
+     fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
+-        if surfaces.is_empty() {
+-            return Ok(());
++        let devices = self.devices.as_ref().context("devices missing")?;
++        let batch_params = self
++            .globals
++            .batch_params_buffer
++            .as_ref()
++            .context("batch params buffer missing")?;
++        for surface in surfaces {
++            let Some(texture) = surface.texture.downcast_ref::<SurfaceTexture>() else {
++                continue;
++            };
++            if texture.device != devices.device {
++                continue;
++            }
++            let sprite = PolychromeSprite {
++                order: surface.order,
++                pad: 0,
++                grayscale: false.into(),
++                opacity: 1.0,
++                bounds: surface.bounds,
++                content_mask: surface.content_mask.clone(),
++                corner_radii: Corners::default(),
++                tile: AtlasTile {
++                    texture_id: AtlasTextureId {
++                        index: 0,
++                        kind: AtlasTextureKind::Polychrome,
++                    },
++                    tile_id: TileId(0),
++                    padding: 0,
++                    bounds: Bounds {
++                        origin: point(DevicePixels(0), DevicePixels(0)),
++                        size: size(
++                            DevicePixels(texture.width as i32),
++                            DevicePixels(texture.height as i32),
++                        ),
++                    },
++                },
++            };
++            self.pipelines.surface_sprites.update_buffer(
++                &devices.device,
++                &devices.device_context,
++                slice::from_ref(&sprite),
++            )?;
++            self.pipelines.surface_sprites.draw_range_with_texture(
++                &devices.device_context,
++                slice::from_ref(&Some(texture.view.clone())),
++                batch_params,
++                slice::from_ref(&self.globals.sampler),
++                0,
++                1,
++            )?;
+         }
+         Ok(())
+     }
+@@ -890,6 +1135,7 @@
          };
  
          let (
@@ -934,7 +1009,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              render_target,
              render_target_view,
              path_intermediate_texture,
-@@ -901,7 +1096,9 @@
+@@ -901,7 +1147,9 @@
          set_rasterizer_state(&devices.device, &devices.device_context)?;
  
          Ok(Self {
@@ -944,7 +1019,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              render_target: Some(render_target),
              render_target_view,
              path_intermediate_texture,
-@@ -920,6 +1117,7 @@
+@@ -920,6 +1168,7 @@
          height: u32,
      ) -> Result<()> {
          let (
@@ -952,7 +1027,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              render_target,
              render_target_view,
              path_intermediate_texture,
-@@ -928,6 +1126,7 @@
+@@ -928,6 +1177,7 @@
              path_intermediate_msaa_view,
              viewport,
          ) = create_resources(devices, &self.swap_chain, width, height)?;
@@ -960,7 +1035,30 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          self.render_target = Some(render_target);
          self.render_target_view = render_target_view;
          self.path_intermediate_texture = path_intermediate_texture;
-@@ -1014,7 +1213,9 @@
+@@ -998,6 +1248,14 @@
+             create_blend_state(device)?,
+         )?;
+ 
++        let surface_sprites = PipelineState::new(
++            device,
++            "surface_sprite_pipeline",
++            ShaderModule::PolychromeSprite,
++            4,
++            create_blend_state(device)?,
++        )?;
++
+         Ok(Self {
+             shadow_pipeline,
+             quad_pipeline,
+@@ -1007,6 +1265,7 @@
+             mono_sprites,
+             subpixel_sprites,
+             poly_sprites,
++            surface_sprites,
+         })
+     }
+ }
+@@ -1014,7 +1273,9 @@
  impl DirectComposition {
      pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
          let comp_device = get_comp_device(dxgi_device)?;
@@ -971,7 +1069,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          let comp_visual = unsafe { comp_device.CreateVisual() }?;
  
          Ok(Self {
-@@ -1061,6 +1262,8 @@
+@@ -1061,6 +1322,8 @@
              global_params_buffer,
              batch_params_buffer,
              sampler,
@@ -980,7 +1078,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          })
      }
  }
-@@ -1360,6 +1563,7 @@
+@@ -1360,6 +1623,7 @@
      height: u32,
  ) -> Result<(
      ID3D11Texture2D,
@@ -988,7 +1086,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      Option<ID3D11RenderTargetView>,
      ID3D11Texture2D,
      Option<ID3D11ShaderResourceView>,
-@@ -1367,7 +1571,7 @@
+@@ -1367,7 +1631,7 @@
      Option<ID3D11RenderTargetView>,
      D3D11_VIEWPORT,
  )> {
@@ -997,7 +1095,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          create_render_target_and_its_view(swap_chain, &devices.device)?;
      let (path_intermediate_texture, path_intermediate_srv) =
          create_path_intermediate_texture(&devices.device, width, height)?;
-@@ -1382,6 +1586,7 @@
+@@ -1382,6 +1646,7 @@
          MaxDepth: 1.0,
      };
      Ok((
@@ -1005,7 +1103,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          render_target,
          render_target_view,
          path_intermediate_texture,
-@@ -1392,15 +1597,40 @@
+@@ -1392,15 +1657,40 @@
      ))
  }
  
@@ -1049,7 +1147,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  #[inline]
-@@ -1469,6 +1699,13 @@
+@@ -1469,6 +1759,13 @@
  
  #[inline]
  fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Result<()> {
@@ -1063,7 +1161,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      let desc = D3D11_RASTERIZER_DESC {
          FillMode: D3D11_FILL_SOLID,
          CullMode: D3D11_CULL_NONE,
-@@ -1477,17 +1714,191 @@
+@@ -1477,17 +1774,191 @@
          DepthBiasClamp: 0.0,
          SlopeScaledDepthBias: 0.0,
          DepthClipEnable: true.into(),
@@ -1260,7 +1358,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  // https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_blend_desc
-@@ -1708,6 +2119,8 @@
+@@ -1708,6 +2179,8 @@
  
      #[derive(Copy, Clone, Debug, Eq, PartialEq)]
      pub(crate) enum ShaderModule {
@@ -1269,7 +1367,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          Quad,
          Shadow,
          Underline,
-@@ -1758,6 +2171,14 @@
+@@ -1758,6 +2231,14 @@
          #[cfg(not(debug_assertions))]
          fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
              let bytes = match module {
@@ -1284,7 +1382,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  ShaderModule::Quad => match target {
                      ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                      ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
-@@ -1872,6 +2293,8 @@
+@@ -1872,6 +2353,8 @@
      impl ShaderModule {
          pub fn as_str(self) -> &'static str {
              match self {
@@ -1441,3 +1539,105 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      #[cfg(any(test, feature = "test-support"))]
      fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
          self.state
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/directx_devices.rs gpui-pre-windows-0.3.7/src/directx_devices.rs
+--- gpui-pre-windows-0.3.7/src/directx_devices.rs
++++ gpui-pre-windows-0.3.7/src/directx_devices.rs
+@@ -35,6 +35,79 @@
+         .context("DirectXRenderer failed to recover from lost device after multiple attempts")
+ }
+ 
++/// Hangar: the device GPUI draws with, for textures painted with `Window::paint_surface`. Replaced on device loss.
++static SHARED_DEVICE: std::sync::Mutex<Option<SharedDevice>> = std::sync::Mutex::new(None);
++
++#[derive(Clone)]
++struct SharedDevice(ID3D11Device);
++// SAFETY: `ID3D11Device` is free-threaded; only resource creation goes through it here.
++unsafe impl Send for SharedDevice {}
++unsafe impl Sync for SharedDevice {}
++
++fn shared_device() -> Option<ID3D11Device> {
++    SHARED_DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|d| d.0.clone())
++}
++
++/// Hangar: an external texture for `Window::paint_surface`, straight-alpha RGBA on the device GPUI draws with. One made
++/// on a device that was since lost is skipped by the renderer, and `is_current` tells the owner to make a new one.
++pub struct SurfaceTexture {
++    pub(crate) view: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
++    texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
++    pub(crate) device: ID3D11Device,
++    pub(crate) width: u32,
++    pub(crate) height: u32,
++}
++// SAFETY: the texture is only written through `write`, on the thread that draws, like every other use of the context.
++unsafe impl Send for SurfaceTexture {}
++unsafe impl Sync for SurfaceTexture {}
++
++impl SurfaceTexture {
++    /// An RGBA texture of this size on the device GPUI draws with, filled with `write`.
++    pub fn new(width: u32, height: u32) -> Result<Self> {
++        use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*};
++        anyhow::ensure!(width > 0 && height > 0, "empty surface");
++        let device = shared_device().context("no DirectX device yet")?;
++        let desc = D3D11_TEXTURE2D_DESC {
++            Width: width,
++            Height: height,
++            MipLevels: 1,
++            ArraySize: 1,
++            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
++            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
++            Usage: D3D11_USAGE_DEFAULT,
++            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
++            CPUAccessFlags: 0,
++            MiscFlags: 0,
++        };
++        let mut texture = None;
++        // SAFETY: plain descriptor, no initial data.
++        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.context("creating surface texture")?;
++        let texture = texture.context("surface texture missing")?;
++        let mut view = None;
++        // SAFETY: `texture` was just created on `device` with a shader-resource binding.
++        unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }.context("creating surface view")?;
++        Ok(Self { view: view.context("surface view missing")?, texture, device, width, height })
++    }
++
++    /// Replaces the contents with `pixels` (RGBA, `width * 4` bytes per row). Only on the thread that draws the windows:
++    /// it goes through the device's immediate context, which the renderer also uses.
++    pub fn write(&self, pixels: &[u8]) -> Result<()> {
++        let needed = (self.width as usize).checked_mul(self.height as usize).and_then(|n| n.checked_mul(4)).context("surface too large")?;
++        anyhow::ensure!(pixels.len() >= needed, "surface pixels too short");
++        // SAFETY: the immediate context of the device that owns the texture.
++        let context = unsafe { self.device.GetImmediateContext() }.context("no immediate context")?;
++        // SAFETY: `pixels` holds `height` rows of `width * 4` bytes and outlives the call.
++        unsafe { context.UpdateSubresource(&self.texture, 0, None, pixels.as_ptr().cast(), self.width * 4, 0) };
++        Ok(())
++    }
++
++    pub fn width(&self) -> u32 { self.width }
++    pub fn height(&self) -> u32 { self.height }
++
++    /// Made on the device GPUI draws with now (false after a device loss).
++    pub fn is_current(&self) -> bool { shared_device().is_some_and(|d| d == self.device) }
++}
++
+ #[derive(Clone)]
+ pub(crate) struct DirectXDevices {
+     pub(crate) adapter: IDXGIAdapter1,
+@@ -63,6 +136,7 @@
+             _ => unreachable!(),
+         }
+ 
++        *SHARED_DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SharedDevice(device.clone()));
+         Ok(Self {
+             adapter,
+             dxgi_factory,
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/gpui_windows.rs gpui-pre-windows-0.3.7/src/gpui_windows.rs
+--- gpui-pre-windows-0.3.7/src/gpui_windows.rs
++++ gpui-pre-windows-0.3.7/src/gpui_windows.rs
+@@ -38,6 +38,7 @@
+ pub(crate) use window::*;
+ pub(crate) use wrapper::*;
+ 
++pub use directx_devices::SurfaceTexture;
+ pub use platform::WindowsPlatform;
+ 
+ pub(crate) use windows::Win32::Foundation::HWND;

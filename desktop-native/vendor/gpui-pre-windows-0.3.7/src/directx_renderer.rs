@@ -111,6 +111,8 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    /// Hangar: one polychrome sprite per `PaintSurface`, sampling the surface's own texture.
+    surface_sprites: PipelineState<PolychromeSprite>,
 }
 
 struct DirectXGlobalElements {
@@ -1007,9 +1009,58 @@ impl DirectXRenderer {
         )
     }
 
+    /// Hangar: each surface is a polychrome sprite whose tile is the whole external texture.
     fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
-        if surfaces.is_empty() {
-            return Ok(());
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let batch_params = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        for surface in surfaces {
+            let Some(texture) = surface.texture.downcast_ref::<SurfaceTexture>() else {
+                continue;
+            };
+            if texture.device != devices.device {
+                continue;
+            }
+            let sprite = PolychromeSprite {
+                order: surface.order,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.0,
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.clone(),
+                corner_radii: Corners::default(),
+                tile: AtlasTile {
+                    texture_id: AtlasTextureId {
+                        index: 0,
+                        kind: AtlasTextureKind::Polychrome,
+                    },
+                    tile_id: TileId(0),
+                    padding: 0,
+                    bounds: Bounds {
+                        origin: point(DevicePixels(0), DevicePixels(0)),
+                        size: size(
+                            DevicePixels(texture.width as i32),
+                            DevicePixels(texture.height as i32),
+                        ),
+                    },
+                },
+            };
+            self.pipelines.surface_sprites.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                slice::from_ref(&sprite),
+            )?;
+            self.pipelines.surface_sprites.draw_range_with_texture(
+                &devices.device_context,
+                slice::from_ref(&Some(texture.view.clone())),
+                batch_params,
+                slice::from_ref(&self.globals.sampler),
+                0,
+                1,
+            )?;
         }
         Ok(())
     }
@@ -1197,6 +1248,14 @@ impl DirectXRenderPipelines {
             create_blend_state(device)?,
         )?;
 
+        let surface_sprites = PipelineState::new(
+            device,
+            "surface_sprite_pipeline",
+            ShaderModule::PolychromeSprite,
+            4,
+            create_blend_state(device)?,
+        )?;
+
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
@@ -1206,6 +1265,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surface_sprites,
         })
     }
 }

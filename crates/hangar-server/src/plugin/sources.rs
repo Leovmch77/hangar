@@ -84,6 +84,11 @@ pub fn last_call_ts(jsonl: &std::path::Path, conversation: &str) -> Option<f64> 
 
 pub struct NativeSources { state: Weak<AppState>, io: Arc<dyn TerminalIo> }
 
+/// Sessão aberta fora do app não traz a chave do lançamento: o `whoami` entrega a chave do terminal, como na sem terminal.
+fn terminal_plugin_key(launched: Option<String>, terminal_key: &str) -> String {
+    launched.filter(|key| !key.is_empty()).unwrap_or_else(|| terminal_key.to_owned())
+}
+
 impl NativeSources {
     pub fn new(state: &Arc<AppState>) -> Self { Self { state: Arc::downgrade(state), io: Arc::new(ProcessIo::default()) } }
     fn state(&self) -> Result<Arc<AppState>, ServiceError> { self.state.upgrade().ok_or(ServiceError("plugin_source_unbound")) }
@@ -98,7 +103,7 @@ impl NativeSources {
                 if target.key != binding.key || target.generation != binding.generation || target.binding.conversation != binding.conversation {
                     return Err(ServiceError("plugin_conversation_mismatch"));
                 }
-                target.plugin_key.filter(|key| !key.is_empty()).ok_or(ServiceError("plugin_identity_missing"))?
+                terminal_plugin_key(target.plugin_key, &binding.key)
             }
             None => binding.key.clone(),
         };
@@ -171,7 +176,15 @@ impl Sources for NativeSources {
                 // Sem entrada de terminal no runtime (aberta à mão, em troca de vida) a linha não é candidata;
                 // falhar aqui deixaria todo plugin sem identidade por causa de uma sessão alheia.
                 let Some(target) = registry.terminal_target(&row.name).await.map_err(|_| ServiceError("plugin_identity_ambiguous"))? else { continue };
-                let identity = self.identity(&row.name).await?;
+                let identity = match self.identity(&row.name).await {
+                    Ok(identity) => identity,
+                    Err(ServiceError(code)) => {
+                        if crate::warn_limit::allow(Some(&row.name), code) {
+                            tracing::warn!(session = %row.name, code, "whoami: sessão sem identidade do plugin fica de fora da descoberta");
+                        }
+                        continue;
+                    }
+                };
                 let raw = self.command(&target.binding, vec!["display-message".into(), "-p".into(), "-t".into(), target.binding.pane.clone(),
                     "#{session_name}\t#{session_created}\t#{pane_id}\t#{socket_path}\t#{session_id}\t#{pid}".into()]).await?;
                 let fields: Vec<_> = raw.trim_end_matches(['\r', '\n']).split('\t').collect();
@@ -218,8 +231,9 @@ impl Sources for NativeSources {
         Box::pin(async move {
             let state = self.state()?;
             if self.identity(&identity.name).await?.binding != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
-            Ok(state.mods.replay(&identity.name).iter().any(|(event, data)| *event == "plugin_ui" && serde_json::from_str::<Value>(data)
-                .ok().is_some_and(|view| !view["above"].is_null())))
+            // Falta só o espelho da sessão com terminal já ligada: sem faixa (`above` nulo) ele ainda traz os `caps`,
+            // e fora do terminal o `/ui` não teria onde cair.
+            Ok(state.mods.terminal_mirrored(&identity.name) != Some(false))
         })
     }
     fn context<'a>(&'a self, identity: &'a Identity, context: MeasuredContext) -> SourceFuture<'a, ()> {
@@ -262,6 +276,15 @@ mod tests {
 
     fn binding(generation: u64) -> InteractionBinding {
         InteractionBinding { key: "k".into(), conversation: "sid".into(), generation }
+    }
+
+    /// Sessão com terminal aberta fora do app (restauração do boot, wrapper do shell): sem a chave do lançamento,
+    /// o plugin se acha pelo `whoami` com a chave do terminal.
+    #[test]
+    fn terminal_without_launch_key_uses_the_terminal_key() {
+        assert_eq!(terminal_plugin_key(Some("lancamento".into()), "terminal"), "lancamento");
+        assert_eq!(terminal_plugin_key(None, "terminal"), "terminal");
+        assert_eq!(terminal_plugin_key(Some(String::new()), "terminal"), "terminal");
     }
 
     #[test]
