@@ -5367,6 +5367,8 @@
   "native_sidebar_awaiting": "Aguardando você",
   "native_side_repository": "Repositório",
   "native_side_actions": "Ações",
+  "native_side_voice": "Voz",
+  "native_side_voice_session": "Na sessão {name}",
   "native_settings": "Configurações",
   "native_settings_open": "Configurações…",
   "native_settings_terminal_font": "Fonte do terminal",
