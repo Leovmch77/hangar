@@ -620,6 +620,13 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   estacionado (linha de status, modo de permissão, `dead` sem sidecar nem troca), tudo no Rust. Só
   o modo `python` volta a produzi-los. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-do-claude-sem-terminal-no-feed-do-runtime).
+- **A fila durável ao vivo do chat é do hub do Rust no modo `rust`/`pending`, em qualquer porta.**
+  Um produtor por hub e por geração (`queue_feed.rs`) lê a projeção da fila e publica
+  `message`/`queue_confirmed` pelo retrato; o canal privado os leva à 8768 e ao convidado com login.
+  A conexão interna não abre o `follow`, nem confirma ou segue o Codex: a baixa da fila do Codex sem
+  terminal é pedida pelo hub ao ator, em processo. O `follow` do Python fica com Pi/omp/Kimi e o modo
+  `python`. Contrato e diferenças em
+  [plataforma.md](docs/decisoes/plataforma.md#fila-durável-ao-vivo-no-hub-do-rust).
 - **Com o Rust de pé, o Python não lê o arquivo de estado da fila (`runtime/<chave>.json`).** No
   Windows a leitura no meio da troca do Rust falha e faz a troca falhar. O que precisava dele é do
   Rust (`patch_meta`/`clear_cano` do Claude, `native_message`, recibos na caixa do Rust). O sidecar do

@@ -1794,8 +1794,9 @@ para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md))
   (parada, encerrada, abrindo) é `idle` sem problema, como no Python. O `close` de uma vida que
   acabou com erro e a abertura que falhou deixam o erro até a próxima abertura.
 - Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
-  (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
-  não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
+  (`_estado_do_rust(provider, name)`) e não alimenta as fontes de prévia do Codex
+  (`_push_channels`). A confirmação da fila saiu do `tail_pump` da conexão interna para o hub
+  (ver [Fila durável ao vivo no hub do Rust](#fila-durável-ao-vivo-no-hub-do-rust)). Trocar de modo é troca de provider
   no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
 - A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
   Python. Claude sem terminal entrou no mesmo feed na C1 (seção abaixo).
@@ -1832,6 +1833,32 @@ Limites conhecidos:
 - O problema da última vida vem só do sidecar durável; erro que não chegou ao sidecar não aparece.
 - O retrato dos fatos é lido dentro do laço do feed, antes de publicar: um Python travado atrasa
   o estado ao vivo em até 1 s (o prazo do pedido) a cada 25 s, ou a cada 5 s depois de uma falha.
+
+## Fila durável ao vivo no hub do Rust
+
+(15/10/2026, contrato 70.) As bolhas `queued-`/`local-` do chat aberto (`message` e
+`queue_confirmed`) saem de um produtor por hub e por geração (`queue_feed.rs`), no lugar do
+`PromptQueue.follow` que a conexão interna abria no Python. Ele lê a projeção
+`<conta Claude>/.hangar-queue/<nome>.jsonl`, acorda pelo observador da pasta e por um batimento de
+5 s, pula a rodada com a mesma marca de arquivo e publica pelo retrato do hub. O canal privado leva
+as bolhas a quem entrou pelo Python (Connect 8768, convidado com login próprio); a conexão interna
+não abre o `follow`, não chama `_confirm_codex_queue` nem segue o rollout do Codex. A baixa da fila do
+Codex sem terminal é pedida pelo hub ao ator, em processo, ao nascer e a cada `user_msg` do rollout.
+O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
+
+- Motivo: a confirmação do Codex fazia a volta Rust → Python → Rust (`op confirm`), e uma linha
+  ruim na fila derrubava a conexão interna inteira (estatísticas, mods, navegador).
+- Prova de paridade: `backend/tests/fixtures/contract/golden/queue_follow.json` (40 cenários) e
+  `queue_start_ts.json` (19 inícios de conversa), gravados do `follow` real por
+  `gen_queue_follow.py`; o teste do Rust compara nome e `data` byte a byte. O serde_json do projeto
+  já escreve o número como o pydantic (`1e+20`, `1.5e-7`, `1000000000000000.0`).
+- Diferenças aceitas, todas defeito do Python: a troca de conversa esvazia a fila do retrato e
+  descarta quadro da geração anterior; o retrato não entrega nota local com mais de 30 s; o teto de
+  32 só descarta confirmada ou nota local; linha que não é objeto, `text` que não é texto, `ts` que o
+  `float()` recusa, `NaN`/`Infinity` e `id` objeto ou lista pulam só aquela linha (um aviso
+  `queue_line_skipped` por minuto e sessão); U+2028, U+2029 e U+0085 crus não quebram a linha; no
+  início da conversa, `time` bool não conta; dono que entra num hub só de convidados não recebe a
+  fila de novo.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 

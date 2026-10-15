@@ -715,8 +715,10 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
 
 
 # Com o Rust de pé, estes saem do hub: os quatro primeiros do `Monitor` (Claude com terminal), os
-# seis do feed do Claude e do Codex sem terminal, e a faixa dos mods, que o hub junta das duas fontes.
-_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta", "plugin_ui")
+# seis do feed do Claude e do Codex sem terminal, a faixa dos mods, que o hub junta das duas fontes,
+# e as bolhas da fila durável, que o produtor do hub lê da projeção.
+_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta", "plugin_ui",
+                      "message", "queue_confirmed")
 # O hub pinga o canal a cada 10 s: três calados = conexão morta.
 _RUST_CHANNEL_IDLE_S = 30.0
 _RUST_CHANNEL_LINE = 1 << 20
@@ -811,8 +813,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                         start_offset: int | None = None, count_app: bool = True,
                         side: bool = False):
     # side=True: conexão interna do hangar-server (internal_api.side_events). O transcript é o que
-    # o Rust escolheu, e a troca ele faz religando esta conexão; aqui ele só é seguido para a
-    # supressão da prévia e a baixa da fila do Codex.
+    # o Rust escolheu, e a troca ele faz religando esta conexão. As bolhas da fila são do hub, e a
+    # baixa dela no Codex também quando o Rust é dono do estado.
     # count_app=False: conexao de convidado. Contar como app do dono aberto calaria as push dele.
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
     # (api.py so passa quando uma tarefa futura ligar o seletor de provider no endpoint).
@@ -943,7 +945,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                     ev = await asyncio.to_thread(live_event, record, path, ev)
                     if ev is None:
                         continue
-                if current_provider == "codex" and ev.kind == "user_msg":
+                if current_provider == "codex" and ev.kind == "user_msg" and not rust_state:
                     await asyncio.to_thread(_confirm_codex_queue, name, path)
                 if ev.kind == "assistant_msg" and ev.text:
                     committed["text"] = _norm(ev.text)
@@ -1104,12 +1106,16 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         if not rust:
             fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))
             fontes["ferramenta"] = asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name)))
+        # Fila durável: user_msg sintéticos (id "queued-") pras msgs enfileiradas; o front faz o dedup
+        # cruzado com o transcript por texto. Na conexão interna e no canal do hub ela vem do Rust.
+        if not (side or rust):
+            fontes["fila"] = asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True)))
         return fontes
 
-    def _segue_transcript(prov, rust):
-        """A conexão interna de sessão do Rust só seguia o transcript para a prévia, que é do hub; a do
-        Codex continua, porque o `user_msg` confirma a fila dele."""
-        return not (side and rust and prov != "codex")
+    def _segue_transcript(rust):
+        """A conexão interna de sessão do Rust só seguia o transcript para a prévia e a baixa da fila do
+        Codex, que são do hub."""
+        return not (side and rust)
 
     em_voo_slots = {"pensamento": {"text": "", "pending": False},
                     "ferramenta": {"text": "", "pending": False}}
@@ -1178,11 +1184,10 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
 
     # start_offset so vale pro tail INICIAL (veio do Last-Event-ID desta conexao). O rebind do
     # /clear abaixo recria sem ele: o transcript e outro arquivo, o offset antigo nao significa nada.
-    if provider == "codex":
-        # Confirma antigas antes de o follow republicar a fila na reconexão.
+    if provider == "codex" and not rust_state:
+        # Confirma antigas antes de a fila ser republicada na reconexão.
         await asyncio.to_thread(_confirm_codex_queue, name, jsonl)
-    # A conexão interna só seguia o transcript para a supressão da prévia, que agora é do hub.
-    tail_task = asyncio.create_task(tail_pump(jsonl, start_offset)) if _segue_transcript(provider, rust_state) else None
+    tail_task = asyncio.create_task(tail_pump(jsonl, start_offset)) if _segue_transcript(rust_state) else None
     stats_task = asyncio.create_task(stats_pump(jsonl))
     # Nomeadas porque sao refeitas quando o provider muda no meio do stream (__reprovider__): cada
     # uma carrega o adapter antigo dentro de si (parser do transcript, fold das estatisticas,
@@ -1192,9 +1197,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     tasks = [
         *([tail_task] if tail_task else []),
         stats_task,
-        # Fila duravel: user_msg sinteticos (id "queued-") pras msgs enfileiradas. O front faz o
-        # dedup cruzado (queued- vs real) por texto.
-        asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
         asyncio.create_task(band_pump()),
@@ -1265,7 +1267,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 if broker is not None:
                     broker.reset()
                 ask_q_emitted = False
-                tail_task = asyncio.create_task(tail_pump(novo_jsonl)) if _segue_transcript(novo_prov, rust_state) else None
+                # A fila renasce com as fontes do estado: corte e baixa da conversa nova, como na abertura.
+                start_ts = await asyncio.to_thread(_transcript_start_ts, novo_jsonl) or 0.0
+                if novo_prov == "codex" and not rust_state:
+                    await asyncio.to_thread(_confirm_codex_queue, name, novo_jsonl)
+                tail_task = asyncio.create_task(tail_pump(novo_jsonl)) if _segue_transcript(rust_state) else None
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
                 state_tasks = _fontes_do_estado(novo_prov, rust_state)
                 tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]
