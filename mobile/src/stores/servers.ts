@@ -79,7 +79,7 @@ export const useServers = create<ServersState>((set, get) => ({
     try {
       const raw = await SecureStore.getItemAsync(KEY);
       const p: unknown = raw === null ? { servers: [], activeId: null } : JSON.parse(raw);
-      if (!isPersisted(p)) throw new Error('Dados inválidos no cofre de servidores');
+      if (!isPersisted(p)) throw new Error('invalid_server_vault');
       lastOwnActive = p.activeId;
       set({ servers: p.servers, activeId: p.activeId, ready: true, vaultReadable: true, aviso: null });
     } catch {
