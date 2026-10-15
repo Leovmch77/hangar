@@ -23,6 +23,7 @@ export default function Maquinas() {
   const activeId = useServers((s) => s.activeId);
   const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
   const rows = useSessions((s) => s.rows);
+  const byServer = useSessions((s) => s.byServer);
   // A folha escolhe entre as sessões vivas da máquina: a lista precisa estar aberta enquanto ela está.
   useEffect(() => (aceite ? useSessions.getState().retain() : undefined), [aceite]);
   const alvo = aceite ? { ...aceite, sessions: rows.filter((r) => r.serverId === aceite.server.id) } : null;
@@ -58,8 +59,9 @@ export default function Maquinas() {
       {servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
       {servers.length > 0 ? (
         <SectionCard icon="Server" title={m.native_machines_others()}>
-          {servers.map((s) => (
-            <SettingsRow
+          {servers.map((s) => {
+            const error = byServer.find((bucket) => bucket.server.id === s.id)?.error;
+            return <SettingsRow
               key={s.id}
               icon="Monitor"
               title={s.label}
@@ -70,11 +72,12 @@ export default function Maquinas() {
               // vermelho ali leria como máquina fora do ar, que ninguém mediu.
               right={s.id === activeId ? <StateDot state="idle" /> : null}
             >
+              {error && error !== 'offline' ? <InfoNotice text={error} /> : null}
               <View style={styles.pills}>
                 <Pill icon="Plug" label={m.config_maquinas_testar()} onPress={() => testar(s)} />
               </View>
-            </SettingsRow>
-          ))}
+            </SettingsRow>;
+          })}
         </SectionCard>
       ) : null}
       <PairAcceptSheet target={alvo} onClose={() => setAceite(null)} />

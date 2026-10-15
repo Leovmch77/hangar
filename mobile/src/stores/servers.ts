@@ -7,6 +7,23 @@ const KEY = 'cp_servers_v1';
 
 type Persisted = { servers: Server[]; activeId: string | null };
 
+function isPersisted(value: unknown): value is Persisted {
+  if (!value || typeof value !== 'object') return false;
+  const p = value as Record<string, unknown>;
+  return (p.activeId === null || typeof p.activeId === 'string')
+    && Array.isArray(p.servers)
+    && p.servers.every((s: unknown) => {
+      if (!s || typeof s !== 'object') return false;
+      const server = s as Record<string, unknown>;
+      if (!['id', 'label', 'baseUrl', 'token'].every((key) => typeof server[key] === 'string')) return false;
+      if (!['disabled', 'invite', 'inviteEnded', 'removed', 'ephemeral'].every((key) => server[key] === undefined || typeof server[key] === 'boolean')) return false;
+      if (server.lan === undefined) return true;
+      if (!server.lan || typeof server.lan !== 'object') return false;
+      const lan = server.lan as Record<string, unknown>;
+      return typeof lan.url === 'string' && typeof lan.id === 'string';
+    });
+}
+
 const hostLabel = (u: string) => {
   try {
     return new URL(u).hostname.split('.')[0] || u;
@@ -22,12 +39,14 @@ const hostLabel = (u: string) => {
 // "o token desta máquina não vale mais".
 export type AvisoServidores =
   | { tipo: 'persistencia' }
+  | { tipo: 'vault_unread' }
   | { tipo: 'token'; label: string };
 
 export interface ServersState {
   servers: Server[];
   activeId: string | null;
   ready: boolean;
+  vaultReadable: boolean;
   aviso: AvisoServidores | null;
   load(): Promise<void>;
   add(s: Omit<Server, 'id' | 'label'> & { label?: string }): Server;
@@ -53,16 +72,18 @@ export const useServers = create<ServersState>((set, get) => ({
   servers: [],
   activeId: null,
   ready: false,
+  vaultReadable: false,
   aviso: null,
   async load() {
+    set({ vaultReadable: false });
     try {
       const raw = await SecureStore.getItemAsync(KEY);
-      const p: Persisted = raw ? JSON.parse(raw) : { servers: [], activeId: null };
+      const p: unknown = raw === null ? { servers: [], activeId: null } : JSON.parse(raw);
+      if (!isPersisted(p)) throw new Error('Dados inválidos no cofre de servidores');
       lastOwnActive = p.activeId;
-      set({ ...p, ready: true });
+      set({ servers: p.servers, activeId: p.activeId, ready: true, vaultReadable: true, aviso: null });
     } catch {
-      // JSON corrompido ou SecureStore falhou: reseta pra vazio e libera a tela
-      set({ servers: [], activeId: null, ready: true });
+      set({ ready: true, vaultReadable: false, aviso: { tipo: 'vault_unread' } });
     }
   },
   add({ baseUrl, token, label }) {
@@ -73,18 +94,18 @@ export const useServers = create<ServersState>((set, get) => ({
       ? { ...existing, token }
       : { id: `s_${Date.now().toString(36)}`, label: label ?? hostLabel(base), baseUrl: base, token };
     const servers = existing ? get().servers.map((x) => (x.id === s.id ? s : x)) : [...get().servers, s];
-    void persistir(set, { servers, activeId: s.id });
+    void persistir(set, get, { servers, activeId: s.id });
     set({ servers, activeId: s.id });
     return s;
   },
   remove(id) {
     const servers = get().servers.filter((s) => s.id !== id);
     const activeId = get().activeId === id ? (ownServers(servers)[0]?.id ?? null) : get().activeId;
-    void persistir(set, { servers, activeId });
+    void persistir(set, get, { servers, activeId });
     set({ servers, activeId });
   },
   setActive(id) {
-    void persistir(set, { servers: get().servers, activeId: id });
+    void persistir(set, get, { servers: get().servers, activeId: id });
     set({ activeId: id });
   },
   active() {
@@ -122,7 +143,7 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   rememberLan(id, lan) {
     const servers = get().servers.map((s) => (s.id === id ? { ...s, lan } : s));
-    void persistir(set, { servers, activeId: get().activeId });
+    void persistir(set, get, { servers, activeId: get().activeId });
     set({ servers });
   },
 }));
@@ -131,7 +152,11 @@ export const useServers = create<ServersState>((set, get) => ({
 // keystore. O que mudou é que a falha vira estado, em vez de sumir num catch vazio: o estado em
 // memória segue certo, a pessoa é avisada de que aquilo não sobreviveu a fechar o app, e não
 // descobre isso só no próximo boot com a lista vazia.
-function persistir(set: (p: Partial<ServersState>) => void, p: Persisted): Promise<void> {
+function persistir(set: (p: Partial<ServersState>) => void, get: () => ServersState, p: Persisted): Promise<void> {
+  if (!get().vaultReadable) {
+    set({ aviso: { tipo: 'vault_unread' } });
+    return Promise.resolve();
+  }
   const servers = p.servers.filter((s) => !s.ephemeral);
   if (servers.some((s) => s.id === p.activeId) || p.activeId === null) lastOwnActive = p.activeId;
   const salvo: Persisted = { servers, activeId: servers.some((s) => s.id === lastOwnActive) ? lastOwnActive : (servers[0]?.id ?? null) };
