@@ -424,6 +424,31 @@ impl Api {
         r.json().await.map_err(|_| Failure::transport(true))
     }
 
+    /// Troca o texto da entrada que espera na fila; 409 `queue_entry_gone` se ela já saiu.
+    pub async fn queue_edit(&self, name: &str, id: &str, text: &str) -> Result<Value, Failure> {
+        let mut url = self.endpoint(Some(name), None);
+        url.path_segments_mut().expect("validated HTTP base").extend(["queue", id]);
+        let r = self.client.patch(url).json(&json!({"text": text})).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(true))?;
+        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
+    }
+
+    /// O X do painel: só tira a que espera (`only_waiting`); entrega incerta nunca vira desistência por ele.
+    pub async fn queue_cancel(&self, name: &str, id: &str) -> Result<Value, Failure> {
+        let mut url = self.endpoint(Some(name), None);
+        url.path_segments_mut().expect("validated HTTP base").extend(["queue", id]);
+        url.query_pairs_mut().append_pair("only_waiting", "true");
+        let r = self.client.delete(url).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(true))?;
+        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
+    }
+
+    /// Manda a entrada ao turno em curso; `{"steered": false}` = não havia turno e ela foi entregue (ou foi à frente).
+    pub async fn queue_steer(&self, name: &str, id: &str) -> Result<Value, Failure> { self.act(name, &["queue", id, "steer"], None, false, 30).await }
+
+    /// `before`: id da entrada que passa a vir depois; `None` é o fim da fila.
+    pub async fn queue_reorder(&self, name: &str, id: &str, before: Option<&str>) -> Result<Value, Failure> {
+        self.act(name, &["queue", "reorder"], Some(json!({"id": id, "before_id": before})), false, 30).await
+    }
+
     /// Junta `name` e `peers` num grupo (funde os grupos de todos). 409 = o grupo já tem outra tarefa; `replace_task` troca.
     pub async fn pair(&self, name: &str, peers: &[String], task: &str, replace_task: bool) -> Result<PairResult, Failure> {
         let body = json!({"peers": peers, "task": task, "replace_task": replace_task});
@@ -1137,5 +1162,47 @@ mod tests {
             server.await.unwrap();
             assert_eq!(result, response, "a falha da organização conserva o cru e sua causa");
         }
+    }
+
+    #[tokio::test]
+    async fn queue_panel_actions_send_method_path_and_body_of_the_owner_routes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    head.push_str(&line);
+                    if line == "\r\n" { break; }
+                }
+                assert!(head.to_ascii_lowercase().contains("authorization: bearer fixture-token\r\n"));
+                let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                let line = head.lines().next().unwrap().to_owned();
+                let body = (!body.is_empty()).then(|| serde_json::from_slice::<Value>(&body).unwrap());
+                seen.push((line.split_whitespace().take(2).collect::<Vec<_>>().join(" "), body));
+                let reply = r#"{"ok":true,"steered":true}"#;
+                stream.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        let api = Api::new(&format!("http://{address}"), "fixture-token").unwrap();
+        api.queue_edit("a b", "e 1", "novo").await.unwrap();
+        api.queue_cancel("a b", "e 1").await.unwrap();
+        assert_eq!(api.queue_steer("a b", "e 1").await.unwrap()["steered"], true);
+        api.queue_reorder("a b", "e 1", None).await.unwrap();
+        assert_eq!(server.await.unwrap(), vec![
+            ("PATCH /api/sessions/a%20b/queue/e%201".to_owned(), Some(json!({"text": "novo"}))),
+            ("DELETE /api/sessions/a%20b/queue/e%201?only_waiting=true".to_owned(), None),
+            ("POST /api/sessions/a%20b/queue/e%201/steer".to_owned(), None),
+            ("POST /api/sessions/a%20b/queue/reorder".to_owned(), Some(json!({"id": "e 1", "before_id": null}))),
+        ]);
     }
 }

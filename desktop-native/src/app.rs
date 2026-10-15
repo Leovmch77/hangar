@@ -48,6 +48,7 @@ mod orq_timeline;
 mod panes;
 mod page_card;
 mod page_fullscreen;
+mod queue;
 mod popup;
 mod rail;
 mod rows;
@@ -479,6 +480,8 @@ pub struct Hangar {
     drafts: HashMap<SessionKey, String>,
     flight: InFlight,
     action_feedback: HashMap<SessionKey, (String, bool)>,
+    /// Painel "Na fila": edição em curso, recolhido e arrasto.
+    queue: queue::QueueUi,
     /// Terminais de atalho vivos da máquina ativa (evento `shortcut_terminals`); as outras máquinas guardam no `RemoteList`.
     live_terms: Vec<terminal::LiveTerm>,
     /// Cartão da pergunta aberto: (máquina, dono — vazio = No Hangar, terminal) e o diálogo que o mostra.
@@ -929,7 +932,7 @@ impl Hangar {
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
-            flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
+            flight: InFlight::default(), action_feedback: HashMap::new(), queue: Default::default(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             plan_review: Default::default(),
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), conversation: Default::default(), row_assets: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
@@ -1181,7 +1184,7 @@ impl Hangar {
         };
         // Como o `cp_active` do web: a máquina que abriu vira a da próxima abertura.
         self.unsaved_connection = Some((address, token.clone()));
-        if let Some(key) = self.selected_key() { self.drafts.insert(key, self.composer.read(cx).value().to_string()); }
+        if let Some(key) = self.selected_key() { let draft = self.composer_draft(cx); self.drafts.insert(key, draft); }
         let reopen = self.selected.clone().zip(self.session_server().map(|s| servers::norm(&s)));
         // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
         let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
@@ -1351,7 +1354,7 @@ impl Hangar {
         if !same_server || self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
         }
-        if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        if let Some(old) = self.selected_key() { let draft = self.composer_draft(cx); self.drafts.insert(old, draft); }
         self.keep_expanded();
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
@@ -1411,6 +1414,7 @@ impl Hangar {
         self.new_chat_folders.set(None);
         self.suggest_dismissed = None;
         self.side.on_select();
+        self.queue.on_select();
         self.dossier = None;
         self.controls.on_select();
         self.reset_subagent_count();
@@ -1460,7 +1464,7 @@ impl Hangar {
     pub(super) fn close_open_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_none() { return; }
         self.close_terminal(false, window, cx);
-        if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        if let Some(old) = self.selected_key() { let draft = self.composer_draft(cx); self.drafts.insert(old, draft); }
         self.keep_expanded();
         self.selection += 1;
         if let Some(task) = self.session_task.take() { task.abort(); }
@@ -1982,7 +1986,8 @@ impl Hangar {
         if let Some(batch) = self.uploading.remove(&from) { self.uploading.insert(to.clone(), batch); }
         if let Some((on, _)) = self.sidebar.grouping.send_to_group.as_mut().filter(|(on, _)| *on == from) { *on = to.clone(); }
         self.drafts.remove(&from);
-        self.drafts.insert(to, self.composer.read(cx).value().to_string());
+        let draft = self.composer_draft(cx);
+        self.drafts.insert(to, draft);
         Some(from)
     }
 
@@ -2075,6 +2080,16 @@ impl Hangar {
                 self.plugin_draws += 1;
                 self.keep_plugin_hovered();
                 return (true, Changed::Screen);
+            }
+            "queue" => {
+                // A fila inteira do Hangar, na ordem de entrega; quadro sem `entries` em lista não vale.
+                let Some(panel) = crate::queue_panel::parse(&data) else {
+                    self.error = Some(tr("invalid_response"));
+                    return (false, Changed::Screen);
+                };
+                self.chat.set_queue_panel(Some(panel));
+                self.queue_panel_changed(window, cx);
+                return (true, Changed::Rows);
             }
             "plugin_toast" => {
                 self.show_plugin_toast(&data, window, cx);
@@ -2221,6 +2236,8 @@ impl Hangar {
                 self.plugin_fields.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
+                // A troca de conversa esvazia a fila: a mensagem em edição saiu dela.
+                self.queue_panel_changed(window, cx);
                 self.turn_seen = None;
                 self.stats = None;
                 self.controls.clear_plan_preview();
@@ -2419,6 +2436,8 @@ impl Hangar {
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_dictation_send(steer, cx) { return; }
+        // Em edição, o Enter e o Enviar atualizam a mensagem da fila em vez de mandar outra.
+        if self.selected.is_some() && self.queue_edit_active() { self.submit_queue_edit(window, cx); return; }
         if self.selected.is_none() && self.reopen.is_some() { self.send_reopen(window, cx); return; }
         if self.selected.is_none() {
             let text = self.composer.read(cx).value().to_string();
@@ -2947,14 +2966,15 @@ impl Hangar {
         crate::status::parse(raw, Some(session))
     }
 
+    /// O Kimi conta a fila da TUI, que o chip promove inteira; os outros, o que espera no painel.
     fn queued_count(&self) -> usize {
         let (provider, headless) = self.provider();
-        self.chat.waiting(provider, headless)
+        if provider == "kimi" { self.chat.waiting(provider, headless) } else { self.chat.queue_panel().entries.len() }
     }
 
+    /// O chip "N na fila · mandar agora" ficou só para o Kimi: nos outros, o painel orienta por mensagem.
     fn steer_offered(&self) -> bool {
-        let (provider, headless) = self.provider();
-        self.chat.state.state == "working" && self.queued_count() > 0 && (headless || matches!(provider, "codex" | "kimi" | "claude"))
+        self.chat.state.state == "working" && self.provider().0 == "kimi" && self.queued_count() > 0
     }
 
     // Implementar pelo menu da TUI: só Codex com terminal, e só o plano da última resposta.
@@ -2977,6 +2997,9 @@ impl Hangar {
             Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}")
                 && (e.desistiu == Some(true) || holds_queue(e, self.chat.state.problema.as_deref()))).then(|| id.clone()),
             Action::Cancel | Action::Steer => Some(String::new()),
+            // O instantâneo é o id: a entrada ainda tem de estar no painel.
+            Action::QueueCancel(id) | Action::QueueEdit(id, _) | Action::QueueSteer(id) | Action::QueueReorder(id, _) =>
+                self.chat.queue_panel().entries.iter().any(|e| &e.id == id).then(|| id.clone()),
         }
     }
 
@@ -3000,7 +3023,8 @@ impl Hangar {
         if self.connection_dialog || !self.chat_online || !self.history_installed { return; }
         let (Some(api), Some(session), Some(key)) = (self.session_api(), self.selected.clone(), self.selected_key()) else { return; };
         if self.current_snapshot(&action).as_deref() != Some(snapshot.as_str()) {
-            self.action_feedback.insert(key, (tr("request_changed"), true));
+            let note = if action.queue_entry().is_some() { tr_shared("queue_entry_gone", &[]) } else { tr("request_changed") };
+            self.action_feedback.insert(key, (note, true));
             cx.notify();
             return;
         }
@@ -3018,8 +3042,14 @@ impl Hangar {
         self.action_feedback.remove(&key);
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = if action == Action::Cancel { api.interrupt(&session.name, false).await.map(|_| Value::Null) }
-                else { api.act(&session.name, &action.path(), body, matches!(action, Action::Discard(_)), action.seconds()).await };
+            let result = match &action {
+                Action::Cancel => api.interrupt(&session.name, false).await.map(|_| Value::Null),
+                Action::QueueCancel(id) => api.queue_cancel(&session.name, id).await,
+                Action::QueueEdit(id, text) => api.queue_edit(&session.name, id, text).await,
+                Action::QueueSteer(id) => api.queue_steer(&session.name, id).await,
+                Action::QueueReorder(id, before) => api.queue_reorder(&session.name, id, before.as_deref()).await,
+                _ => api.act(&session.name, &action.path(), body, matches!(action, Action::Discard(_)), action.seconds()).await,
+            };
             let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, snapshot, result) }).await;
         });
         cx.notify();
@@ -3032,10 +3062,14 @@ impl Hangar {
         let note = match result {
             Err(error) => {
                 if current && self.chat_auth_lost(&error) { self.open_connection(window, cx); }
+                // Recusa do painel da fila: a frase do app pelo código (o `detail` é a do servidor, só em português).
+                let queue_refusal = action.queue_entry().and(error.code.as_deref()).filter(|code| code.starts_with("queue_"))
+                    .and_then(|code| crate::i18n::tr_web(code, &HashMap::new()));
                 // 5xx pode ter agido lá: mostra o motivo do servidor e a incerteza juntos.
-                let text = match (error.uncertain, error.status) {
-                    (true, Some(_)) => format!("{} {}", tr(&error.detail), tr("action_uncertain")),
-                    (true, None) => tr("action_uncertain"),
+                let text = match (queue_refusal, error.uncertain, error.status) {
+                    (Some(text), ..) => text,
+                    (None, true, Some(_)) => format!("{} {}", tr(&error.detail), tr("action_uncertain")),
+                    (None, true, None) => tr("action_uncertain"),
                     _ => Self::failure(&error),
                 };
                 (text, true)
@@ -3068,6 +3102,18 @@ impl Hangar {
                     else if steered.confirmed > 0 { (tr("queue_confirmed").replace("{n}", &steered.confirmed.to_string()), false) }
                     else { (tr("queue_not_promoted"), true) }
                 }
+                Action::QueueEdit(id, _) => {
+                    if current { self.queue_edit_done(id, window, cx); }
+                    return;
+                }
+                // Sem turno em curso a mensagem foi entregue como envio comum: a conversa já mostra.
+                Action::QueueSteer(_) if value["steered"] == true => (tr("queue_panel_steered"), false),
+                // Apagada não vira bolha ao sair do painel; a lista nova chega pelo evento `queue`.
+                Action::QueueCancel(id) => {
+                    if current { self.chat.retire(&format!("queued-{id}")); }
+                    return;
+                }
+                Action::QueueSteer(_) | Action::QueueReorder(..) => return,
             },
         };
         self.action_feedback.insert(key, note);
@@ -3109,11 +3155,14 @@ impl Hangar {
         let from = rebuilt.map_or(items, |delta| delta.from).min(self.row_ids.len());
         let stable = rebuilt.map_or(self.chat.events.len(), |delta| delta.stable_events);
         let opening = self.opening_row_shown();
+        let queue = self.chat.queue_panel();
         let events = &self.chat.events;
         let (mut ids, mut signatures): (Vec<String>, Vec<String>) = self.conversation.items[from..].iter().map(|item| {
             let id = item.id(events);
             let day = matches!(item, Item::Event(_)) && self.orq_days.contains(&id);
             let signature = if day { format!("day{}", signature(item, events)) } else { signature(item, events) };
+            // Entrar ou sair do painel muda a altura da linha sem mudar o evento.
+            let signature = if crate::queue_panel::hidden(&id, &queue) { format!("queued{signature}") } else { signature };
             (id, signature)
         }).unzip();
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
@@ -3334,6 +3383,10 @@ impl Hangar {
 
     fn render_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = self.row_ids.get(index).cloned() else { return div().into_any_element(); };
+        // A mensagem que espera no painel "Na fila" não é bolha da conversa: a linha fica sem altura.
+        if id.starts_with("queued-") && crate::queue_panel::hidden(&id, &self.chat.queue_panel()) {
+            return div().id(SharedString::from(id)).into_any_element();
+        }
         self.tree_motion = false;
         let inner = match (id.as_str(), self.conversation.items.get(index).cloned()) {
             (PREVIEW, _) => self.render_message(index, &id, cx),
@@ -4315,7 +4368,8 @@ impl Hangar {
             self.composer_placeholder = placeholder.clone();
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
         }
-        let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
+        let editing = readable && self.queue_edit_active();
+        let steer_text = readable && has_input && !editing && (provider == "codex" || headless) && self.chat.state.state == "working"
             && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
         // Só o anexo espera o envio em voo; texto sai do campo e vai na vez dele.
         let blocked = self.dictation.send_pending() || if reopen { resuming || self.reopen_blocked(cx) } else if new_chat { !can_create } else { sending && attached || uploading.is_some() || !self.chat_online || !self.history_installed };
@@ -4348,7 +4402,8 @@ impl Hangar {
                 .child("⏳").child(div().font_weight(FontWeight::SEMIBOLD).child(tr("queue_count").replace("{n}", &queued.to_string())))
                 .child("·").child(div().underline().child(tr("queue_send_action"))))
             .on_click(cx.listener(|this, _, _, cx| this.act(Action::Steer, String::new(), cx))));
-        // Fila acima do cartão, como a linha "Na fila" do mock.
+        // O painel "Na fila" acima do cartão; o Kimi segue também com o chip (a fila dele é a da TUI).
+        let queue_panel = if readable { self.render_queue_panel(provider, window, cx) } else { None };
         let queue_row = queue_chip.map(|chip| div().mb(px(8.)).px(px(12.)).py(px(4.)).flex().items_center().gap_2().rounded(px(10.))
             .border_1().border_color(theme::border_strong()).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::List, 14., theme::faint())).child(chip));
@@ -4415,7 +4470,10 @@ impl Hangar {
         });
 
         let send_label = tr(if creating { "create_creating" } else if sending && attached || uploading.is_some() || resuming { "sending" } else { "send" });
-        let action = if can_stop && !has_input {
+        let action = if editing {
+            let enabled = crate::queue_panel::can_update(&text) && !busy && self.chat_online && self.history_installed;
+            self.queue_update_button(enabled, cx)
+        } else if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
                 .tooltip(tr("stop_hint")).accessibility_label(tr("stop")).disabled(stopping)
@@ -4455,6 +4513,7 @@ impl Hangar {
             .when_some(tray, |el, tray| el.child(tray))
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
                 .child(tr("attach_progress").replace("{done}", &done.to_string()).replace("{total}", &total.to_string()))))
+            .children(self.queue_editing_note())
             .child(field)
             .children(dictation_strip)
             .child(control_row);
@@ -4467,6 +4526,7 @@ impl Hangar {
             .child(popup::anchor(frame.relative().flex().flex_col(), "composer")
                 .when(!floating.is_empty(), |el| el.child(div().absolute().left_0().right_0().bottom(relative(1.)).pb_2().flex().flex_col().gap_2()
                     .occlude().children(floating)))
+                .children(queue_panel)
                 .children(queue_row)
                 .child(chrome::glass_panel(card, px(18.)))
                 .children(footer))
@@ -4509,6 +4569,8 @@ impl Hangar {
             // Fechadas pelo Esc: reaparecer ao digitar conta como nova abertura e revalida a lista.
             self.slash_open = false;
         }
+        // Esc sai da edição da mensagem da fila sem mudar nada.
+        else if self.queue_edit_active() { self.finish_queue_edit(window, cx); }
         else if self.close_popups() {}
         else if self.side_menu_escape(cx) {}
         else if self.can_interrupt() {
