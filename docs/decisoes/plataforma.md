@@ -2514,6 +2514,14 @@ mensagem sai da fila.
 - O evento leva `removed`: os ids que esperavam na publicação anterior e sumiram da projeção
   (apagados noutro aparelho). Todo aparelho retira a bolha `queued-<id>` deles; a entregue continua
   na projeção e não entra. Sem isso a bolha da apagada ficava nos outros aparelhos.
+- O retrato do hub também esquece a apagada: ao gravar o `queue`, as bolhas `queued-<id>` de
+  `removed` saem da lista que repete `message`/`queue_confirmed` a quem chega depois, e o id fica
+  lembrado (os últimos 256) para um quadro atrasado do `pqueue.follow` não voltar a gravá-la. Na
+  prova de ponta a ponta (14/10/2026), o aparelho que abriu o chat depois de um
+  `DELETE ?only_waiting=true` recebia o `queue` com `entries: []` e, atrás dele, as bolhas das
+  apagadas com `queued_delivered: false`: "2 na fila" sem botões no nativo. O `removed` do
+  retrato não resolvia, porque a publicação seguinte o zera e o retrato repete o `queue` antes das
+  bolhas.
 - A vigia da fila nunca pergunta a descoberta: o caminho da fila chega ao hub por quem já leu a
   sessão (rota `/events`, canal privado, vigia da ligação, troca de conversa do ciclo de vida).
   Perguntando por conta própria, o `/events` sem o token do dono fazia uma consulta a mais.
