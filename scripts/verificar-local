@@ -361,6 +361,11 @@ passo_mobile_rapido() {
     local app f rel=()
     app="$(mudados '^mobile/')"
     npm run i18n:compile --prefix mobile > /dev/null || return 1
+    # Dependência ou configuração do app mudou: não há "relacionado", vale tudo.
+    if [[ -n "$(mudados '^mobile/(package(-lock)?\.json|tsconfig[^/]*\.json|vitest[^/]*\.ts|babel\.config\.js|metro\.config\.js|app\.json)$')" ]]; then
+        (cd mobile && npx tsc --noEmit && npx vitest run)
+        return
+    fi
     if grep -qE '\.(ts|tsx)$' <<< "$app"; then (cd mobile && npx tsc --noEmit) || return 1; fi
     while IFS= read -r f; do [[ -n "$f" && -f "$f" ]] && rel+=("$PWD/$f"); done <<< "$app"
     (( ${#rel[@]} )) || return 0
