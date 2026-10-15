@@ -824,6 +824,7 @@ async fn events(
     // O app que sabe juntar a diferença da vista dos mods anuncia; app antigo segue com a vista inteira.
     let deltas = auth::query_param(req.uri().query(), "ui_delta").as_deref() == Some("1");
     let lease = st.side.hubs.acquire_as(&name, binding, &st.side, guest);
+    if let Some(info) = &info { lease.hub.learn_queue(info); }
     let hub = lease.hub.clone();
     let (tx, rx) = mpsc::channel::<Queued>(64);
     tokio::spawn(client_loop(lease, resume, tx));

@@ -27,11 +27,12 @@ fn strings<'a>(attachment: &'a Map<String, Value>, key: &str) -> impl Iterator<I
     attachment.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
 }
 
-/// O servidor de um bloco `## <nome>\n<instrução>` quando a instrução é a do servidor de um plugin.
+/// O servidor de um bloco `## <nome>\n<instrução>` quando a instrução é a do servidor de um plugin. Só a
+/// primeira linha é a fixa: o Claude Code acrescenta parágrafos depois dela (o aviso do modo de permissão).
 fn plugin_block(block: &str) -> Option<&str> {
     let (head, body) = block.split_once('\n')?;
-    let body = body.trim();
-    (body.starts_with(PREFIX) && body.ends_with(SUFFIX)).then_some(head.strip_prefix("## ")?)
+    let first = body.trim_start().lines().next()?.trim_end();
+    (first.starts_with(PREFIX) && first.ends_with(SUFFIX)).then_some(head.strip_prefix("## ")?)
 }
 
 /// Um anexo `mcp_instructions_delta`: o que saiu ou foi trocado deixa de contar; o que entrou conta se for de plugin.
@@ -71,11 +72,12 @@ fn read_from(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
 /// só o que ele ganhou. Arquivo menor que o já lido foi trocado e é relido do começo.
 pub fn plugin_tool_servers(path: &Path) -> Vec<String> {
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else { return Vec::new() };
-    let cached = SCANS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned();
-    let mut scan = cached.filter(|s| s.offset <= len).unwrap_or_default();
+    let cached = SCANS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned().filter(|s| s.offset <= len);
+    let mut scan = cached.clone().unwrap_or_default();
     if scan.offset < len {
-        // Fora do cadeado: a primeira leitura de um transcript grande não segura as outras linhas.
-        if read_from(path, &mut scan).is_err() { return scan.servers; }
+        // Fora do cadeado: a primeira leitura de um transcript grande não segura as outras linhas. Leitura que
+        // falhou no meio aplicou parte dos anexos: vale o que o cache já tinha.
+        if read_from(path, &mut scan).is_err() { return cached.map(|s| s.servers).unwrap_or_default(); }
         SCANS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), scan.clone());
     }
     scan.servers
@@ -106,6 +108,15 @@ mod tests {
         let mut servers = Vec::new();
         apply(&mut servers, &delta(&[("ai-memory", "Long-term memory for the current project."), ("pmedico", PLUGIN)], &[]));
         assert_eq!(servers, vec!["pmedico".to_owned()]);
+    }
+
+    #[test]
+    fn only_the_first_line_of_the_block_is_the_plugin_instruction() {
+        let mut servers = Vec::new();
+        let extra = format!("{PLUGIN}\n\nWhile bypass permissions mode is active: use Bash.");
+        let fake = format!("Servidor comum.\n{PLUGIN}");
+        apply(&mut servers, &delta(&[("pmedico", &extra), ("outro", &fake)], &[]));
+        assert_eq!(servers, vec!["pmedico".to_owned()], "parágrafo depois conta; instrução no meio de outra não");
     }
 
     #[test]

@@ -412,11 +412,16 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
         crate::runtime::gateway::EntryHandle::Terminal { handle, .. } => {
-            // Só o Kimi promove com texto; no Claude com terminal o corpo é ignorado e promove a fila.
-            let control = handle.control(operation_id, "steer".into(), json!({})).await;
-            match steer_terminal_control(&control) {
-                Err(refused) => refused,
-                Ok(promoted) => steer_terminal_done(promoted, &handle.confirm().await),
+            // Só o Kimi promove com texto; no Claude com terminal o corpo é ignorado. Com mensagem esperando no
+            // Hangar, ela é orientada (a primeira); sem nenhuma, promove a fila do Claude Code.
+            let control = handle.control(operation_id, "steer_first".into(), json!({})).await;
+            if control.as_ref().is_ok_and(|reply| reply.payload.get("entry_id").is_some()) {
+                super::control::queue_steer_terminal(&control)
+            } else {
+                match steer_terminal_control(&control) {
+                    Err(refused) => refused,
+                    Ok(promoted) => steer_terminal_done(promoted, &handle.confirm().await),
+                }
             }
         }
         headless => {

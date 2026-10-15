@@ -357,8 +357,11 @@ pub struct Hub {
     owners: std::sync::atomic::AtomicUsize,
     /// Vigia da fila desta sessão (`queue_panel::watch`); sai no `close`.
     queue_watch: Mutex<Option<tokio::task::AbortHandle>>,
-    /// Acorda a vigia da fila: arquivo da fila mudou ou a troca de conversa limpou o retrato.
+    /// Acorda a vigia da fila: arquivo da fila mudou, a troca de conversa limpou o retrato ou o caminho chegou.
     queue_wake: Arc<Notify>,
+    /// Arquivo da fila que a descoberta deu, avisado por quem já tem a `InternalInfo` (rota, canal privado,
+    /// vigia da ligação): a vigia da fila nunca pergunta a descoberta por conta própria.
+    queue_path: Mutex<Option<PathBuf>>,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -417,6 +420,7 @@ impl Hub {
                 owners: std::sync::atomic::AtomicUsize::new(owners),
                 queue_watch: Mutex::new(None),
                 queue_wake: Arc::new(Notify::new()),
+                queue_path: Mutex::new(None),
             }
         });
         hub.ensure_monitor();
@@ -490,6 +494,19 @@ impl Hub {
             self.wake.notify_one();
         }
     }
+
+    /// A descoberta leu a sessão: o arquivo da fila que ela traz passa à vigia, que acorda se ele mudou.
+    pub(crate) fn learn_queue(&self, info: &InternalInfo) {
+        let path = info.history.get("queue").and_then(serde_json::Value::as_str).map(PathBuf::from);
+        let mut slot = self.queue_path.lock().unwrap();
+        if *slot != path {
+            *slot = path;
+            drop(slot);
+            self.queue_wake.notify_one();
+        }
+    }
+
+    pub(crate) fn queue_path(&self) -> Option<PathBuf> { self.queue_path.lock().unwrap().clone() }
 
     pub(crate) fn source_binding(&self) -> Option<(u64, Binding)> {
         self.bound.lock().unwrap().as_ref().map(|bound| (bound.generation, bound.binding.clone()))
@@ -623,6 +640,9 @@ impl Hub {
             }
             if let Some(Some(b)) = &seen {
                 self.learn_life(b);
+            }
+            if let Some(info) = &info {
+                self.learn_queue(info);
             }
             let gone = seen.is_none();
             let had_pending = pending.is_some();
@@ -1115,6 +1135,7 @@ pub async fn private_events(
     let guest = req.headers().get("x-hangar-app").is_some_and(|value| value == "0");
     // Quem lê daqui é o Python, que conta o próprio app: o canal nunca é aparelho do dono.
     let lease = st.side.hubs.acquire_with(&name, binding, &st.side, guest, false);
+    if let Some(info) = &info { lease.hub.learn_queue(info); }
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     tokio::spawn(private_loop(lease, tx));
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -1267,6 +1288,7 @@ impl Hubs {
         let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
         let hub=self.0.lock().map_err(|_|crate::runtime::protocol::RuntimeError::new("lifecycle_hub_unavailable","hub da sessão indisponível"))?.get(name).map(|(hub,_)|hub.clone());
         if let Some(hub)=hub {
+            hub.learn_queue(&info);
             // A mesma conversa (reabertura em bypass): nada a religar; o `reset` faria o chat sumir e voltar
             // em todos os aparelhos. Como o Python, só o transcript novo reseta.
             if hub.bound.lock().unwrap().as_ref().is_some_and(|bound|bound.binding.same_conversation(&binding)) {return Ok(());}
@@ -1979,11 +2001,14 @@ mod tests {
         };
         write(&[serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":false}),
                 serde_json::json!({"id":"sent","text":"entregue","ts":start + 2.0,"delivered":true})]);
-        let info = serde_json::json!({"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {"queue": queue}});
-        let ctx = SideCtx { locate: Arc::new(crate::locate::Fixed(Some(serde_json::from_value(info).unwrap()))), ..idle_ctx() };
+        let info: InternalInfo = serde_json::from_value(serde_json::json!({"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {"queue": queue}})).unwrap();
+        // Descoberta fora do ar: a vigia da fila anda só com o caminho que o hub recebeu.
+        let ctx = SideCtx { locate: Arc::new(crate::locate::Unavailable), ..idle_ctx() };
         let binding = Binding { provider: Provider::Claude, jsonl: jsonl.clone(), key: "k".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         let mut rx = lease.hub.tx.subscribe();
+        // A rota que abriu o chat já leu a descoberta e passa o caminho; a vigia não pergunta de novo.
+        lease.hub.learn_queue(&info);
         let queue_frames = |hub: &Hub| hub.cache.lock().unwrap().replay().into_iter()
             .filter(|f| f.starts_with(b"event: queue\r\n")).map(|f| String::from_utf8_lossy(&f).into_owned()).collect::<Vec<_>>();
         tokio::time::timeout(Duration::from_secs(5), async { while queue_frames(&lease.hub).is_empty() { tokio::time::sleep(Duration::from_millis(20)).await } })
@@ -2010,6 +2035,31 @@ mod tests {
             }
         }).await.expect("a mudança chega");
         assert_eq!(changed, ["b", "a"]);
+        async fn next_queue(rx: &mut broadcast::Receiver<Out>) -> serde_json::Value {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                loop {
+                    match rx.recv().await {
+                        Ok(Out::Side(f)) if f.starts_with(b"event: queue\r\n") => {
+                            let data = String::from_utf8_lossy(&f).lines().nth(1).unwrap_or("").trim_start_matches("data: ").to_owned();
+                            return serde_json::from_str::<serde_json::Value>(&data).unwrap();
+                        }
+                        Ok(_) => {}
+                        Err(error) => panic!("canal do hub: {error}"),
+                    }
+                }
+            }).await.expect("o painel republica")
+        }
+        // Apagada noutro aparelho: some da projeção e vai em `removed`; a entregue fica como linha entregue.
+        write(&[serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":true})]);
+        let gone = next_queue(&mut rx).await;
+        assert_eq!(gone["entries"], serde_json::json!([]));
+        assert_eq!(gone["removed"], serde_json::json!(["b"]), "{gone}");
+        // A troca de conversa republica mesmo igual, sem perguntar a descoberta.
+        let other = dir.path().join("t2.jsonl");
+        std::fs::write(&other, "").unwrap();
+        lease.hub.rebind(Binding { provider: Provider::Claude, jsonl: other, key: "k2".into(), headless: false, life: None });
+        let again = next_queue(&mut rx).await;
+        assert_eq!(again["removed"], serde_json::json!([]), "{again}");
         close_hub(&lease.hub);
         assert!(lease.hub.queue_watch.lock().unwrap().is_none(), "a vigia sai com o hub");
     }

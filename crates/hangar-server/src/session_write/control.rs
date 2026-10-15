@@ -269,7 +269,7 @@ fn parse_term_input(bytes: &Bytes) -> Option<(Option<String>, Option<String>)> {
 const MSG_QUEUE_GONE: &str = "A mensagem já saiu da fila.";
 const MSG_QUEUE_TEXT: &str = "A mensagem da fila precisa de texto e não pode começar com /.";
 const MSG_STEER_QUESTION: &str = "Responda a permissão ou pergunta pendente antes de orientar.";
-const MSG_STEER_NOT_DELIVERED: &str = "O terminal não aceitou agora; a mensagem continua na fila.";
+const MSG_STEER_NOT_DELIVERED: &str = "A sessão não aceitou agora; a mensagem continua na fila.";
 const MSG_STEER_UNCERTAIN: &str = "Não deu para confirmar se a mensagem chegou; confira a conversa antes de repetir.";
 
 fn queue_gone() -> Answer { (StatusCode::CONFLICT, detail_body("queue_entry_gone", MSG_QUEUE_GONE, json!({}))) }
@@ -463,6 +463,9 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
         Some(_) => return invalid_body(ctx.headers()),
     };
     let cancelled = ctx.target.handle.queue(random_hex(16), Action::Cancel { entry_id: entry_id.clone() }).await;
+    if let (false, Err(failure)) = (only_waiting, &cancelled) {
+        tracing::warn!(session = %ctx.name, code = %failure.code, "descarte: o cancelamento falhou; tenta tirar a linha");
+    }
     if only_waiting || matches!(cancelled, Ok(ref done) if *done == json!("cancelled")) {
         return answer(&ctx, queue_change_answer(&cancelled, "cancelled"));
     }
@@ -531,6 +534,8 @@ pub async fn queue_steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 /// Claude e Codex sem terminal, e Codex com terminal: o turno é do processo. Com turno, `SteerQueue` só desta
 /// entrada; sem turno (ou ele acabou no meio), ela vai para a frente e sai na entrega comum.
 async fn queue_steer_runtime(handle: &EntryHandle, entry_id: &str) -> Answer {
+    // A orientação aceita que voltou à fila: ela vai para a frente, mas não entrou no turno.
+    let mut returned = false;
     if handle.view().await.is_ok_and(|view| view["in_progress"] == true) {
         let sent = handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::SteerQueue,
             payload: json!({"entry_id": entry_id}) }).await;
@@ -538,6 +543,7 @@ async fn queue_steer_runtime(handle: &EntryHandle, entry_id: &str) -> Answer {
             Ok(reply) if reply.disposition == Disposition::Accepted => {
                 // Fora de `ids`: ou ela já não esperava, ou a orientação dela voltou à fila; o `Promote` separa os dois.
                 if reply.payload["ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == entry_id)) { return steered(true); }
+                returned = true;
             }
             Ok(reply) if payload_code(reply) == Some("steer_question_open") => return queue_refused("queue_steer_question_open", MSG_STEER_QUESTION),
             Ok(reply) if payload_code(reply) == Some("steer_no_turn") => {}
@@ -555,6 +561,7 @@ async fn queue_steer_runtime(handle: &EntryHandle, entry_id: &str) -> Answer {
     if let Err(error) = handle.drain().await {
         tracing::warn!(code = %error.code, "orientar sem turno: a drenagem não rodou; a entrada ficou na frente");
     }
+    if returned { return queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED); }
     steered(false)
 }
 

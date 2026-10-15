@@ -220,6 +220,11 @@ async fn claude_bridge_serves_only_answer_and_select_of_a_rust_claude() {
     assert_eq!(post("s/input", json!({"text": "oi"}).to_string()).await.0, 421);
     assert_eq!(call(reqwest::Method::GET, "s/answer", "", true).await.0, 421);
     assert_eq!(post("nada/answer", json!({"answers": [option()]}).to_string()).await.0, 421);
+    // O painel da fila: corpo fora de forma é do Rust (422); id com barra e leitura não são rotas dele.
+    let (status, reply) = call(reqwest::Method::PATCH, "s/queue/a", r#"{"text":1}"#, true).await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{reply}");
+    assert_eq!(post("s/queue/a/b/steer", String::new()).await.0, 421);
+    assert_eq!(call(reqwest::Method::GET, "s/queue/a", "", true).await.0, 421);
     assert_eq!(call(reqwest::Method::POST, "s/answer", "{}", false).await.0, 404, "sem o segredo a ponte não existe");
     // Parity M1: o modo pedido pelo convidado ou pelo Connect é do Rust, como o do dono.
     let (status, reply) = call(reqwest::Method::GET, "s/permission-modes", "", true).await;

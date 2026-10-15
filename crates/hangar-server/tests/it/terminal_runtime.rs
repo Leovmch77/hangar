@@ -645,6 +645,27 @@ async fn terminal_runtime_steer_entry_when_idle_is_a_plain_delivery() {
     h.stop().await.unwrap();
 }
 #[tokio::test]
+async fn terminal_runtime_steer_without_body_steers_the_first_waiting_entry() {
+    // O chip de app antigo (`/steer` sem corpo) com mensagens esperando no Hangar: orienta a primeira.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap(); h.command(f.command("two","Dois")).await.unwrap();
+    f.io.send_now_hint.store(true,std::sync::atomic::Ordering::Release);
+    let reply=h.control("steer-old".into(),"steer_first".into(),json!({})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["entry_id"].clone(),reply.payload["steered"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Accepted,json!("one"),json!(true)),"{}",reply.payload);
+    let calls=f.io.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c|c.args.contains(&"-l".into()) && c.args.last().is_some_and(|t|t=="Um")),"a primeira foi digitada");
+    assert_eq!(f.state()["rows"].as_array().unwrap().iter().find(|r|r["id"]=="two").unwrap()["delivered"],false,"a outra segue esperando");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_without_body_and_empty_queue_promotes_as_before() {
+    let f=Fixture::new().await; let h=f.start();
+    let reply=h.control("steer-old".into(),"steer_first".into(),json!({})).await.unwrap();
+    assert!(reply.payload.get("entry_id").is_none(),"sem fila esperando, o caminho de antes: {}",reply.payload);
+    h.stop().await.unwrap();
+}
+#[tokio::test]
 async fn terminal_runtime_steer_entry_of_a_gone_entry_is_refused_without_keys() {
     let f=Fixture::new().await; let h=f.start();
     let reply=h.control("steer-x".into(),"steer_entry".into(),json!({"entry_id":"nada"})).await.unwrap();

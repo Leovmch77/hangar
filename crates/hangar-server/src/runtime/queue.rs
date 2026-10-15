@@ -515,9 +515,10 @@ fn waiting_index(state:&State,entry:&str)->Result<usize,&'static str> {
     }
 }
 
-/// As que esperam, na ordem de entrega.
-pub(crate) fn waiting_ids(state:&State)->Vec<String> {
-    state.rows.iter().filter(|row|waiting_row(state,row)).map(|row|row_id(row).to_owned()).collect()
+/// As que esperam, na ordem de entrega, com o mesmo corte de idade do `Claim`: linha de vida anterior que a
+/// drenagem nunca levaria não segura comando nem Orientar.
+pub(crate) fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
+    state.rows.iter().filter(|row|current(row,min_ts) && waiting_row(state,row)).map(|row|row_id(row).to_owned()).collect()
 }
 
 /// Texto que a fila aceita como mensagem: comando de barra não tem linha na fila, e controle quebraria a digitação.
@@ -1491,8 +1492,17 @@ mod panel_tests {
         let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
         append(&mut store,"a"); append(&mut store,"b");
         assert_eq!(exec(&mut store,"cancel-a",Action::Cancel { entry_id:"a".into() }),json!("cancelled"));
-        assert_eq!(waiting_ids(store.state()),vec!["b".to_string()]);
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["b".to_string()]);
         assert_eq!(exec(&mut store,"cancel-x",Action::Cancel { entry_id:"x".into() }),json!("absent"));
+    }
+
+    #[test]
+    fn waiting_ids_cut_rows_older_than_the_life_like_the_claim() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"old");
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["old".to_string()]);
+        // A vida começou depois dela (ts 10): a drenagem nunca a levaria, e ela não segura comando nem Orientar.
+        assert!(waiting_ids(store.state(),50.0).is_empty());
     }
 
     #[test]
@@ -1502,7 +1512,7 @@ mod panel_tests {
         append(&mut store,"a");
         let command=json!({"operation_id":"a","kind":"input","payload":{"text":"texto a","pre_transcript":false,"_terminal_generation":0}});
         exec(&mut store,"prepare",Action::Prepare { id:"a".into(),payload:command,entry_id:Some("a".into()) });
-        assert_eq!(waiting_ids(store.state()),vec!["a".to_string()]);
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["a".to_string()]);
         assert_eq!(exec(&mut store,"move",Action::Promote { entry_id:"a".into() }),json!("moved"));
     }
 
@@ -1550,11 +1560,11 @@ mod panel_tests {
         let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
         for id in ["a","b","c"] { append(&mut store,id); }
         assert_eq!(exec(&mut store,"r1",Action::Reorder { entry_id:"c".into(),before_id:Some("a".into()) }),json!("moved"));
-        assert_eq!(waiting_ids(store.state()),vec!["c","a","b"]);
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["c","a","b"]);
         assert_eq!(exec(&mut store,"r2",Action::Reorder { entry_id:"c".into(),before_id:None }),json!("moved"));
-        assert_eq!(waiting_ids(store.state()),vec!["a","b","c"]);
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["a","b","c"]);
         assert_eq!(exec(&mut store,"r3",Action::Promote { entry_id:"b".into() }),json!("moved"));
-        assert_eq!(waiting_ids(store.state()),vec!["b","a","c"]);
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["b","a","c"]);
         // A drenagem segue a ordem nova.
         let claimed=exec(&mut store,"claim",Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None });
         assert_eq!(claimed[0]["id"],"b");
@@ -1573,7 +1583,7 @@ mod panel_tests {
         let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
         exec(&mut store,"reserve",Action::ReserveAsyncAnswer { entry_id:"ans".into(),text:"resposta".into(),payload:json!({"kind":"dispatch_async_answer"}) });
         assert_eq!(store.state().rows[0]["reserved"],true);
-        assert!(waiting_ids(store.state()).is_empty());
+        assert!(waiting_ids(store.state(),0.0).is_empty());
         assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"ans".into() }),json!("not_waiting"));
     }
 
@@ -1597,8 +1607,10 @@ mod panel_tests {
         let intent=json!({"operation_id":"t","kind":"input","payload":{"text":"oi","pre_transcript":false,"_terminal_generation":1}});
         exec(&mut store,"prepare",Action::Prepare { id:"t".into(),payload:intent,entry_id:Some("t".into()) });
         store.exec(1,"append",clock(10.0),Action::Append { text:"oi".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("t".into()) }).unwrap();
+        // Adiada como a mensagem do turno em curso, antes de ser apagada no painel.
+        exec(&mut store,"finish",Action::Finish { id:"t".into(),status:Status::Deferred,result:json!({"operation_id":"t","disposition":"deferred","payload":{"code":"queue_ahead"}}) });
         assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"t".into() }),json!("cancelled"));
-        exec(&mut store,"recover",Action::Recover);
+        assert!(store.exec(1,"recover",clock(20.0),Action::Recover).is_ok());
         assert!(store.state().rows.is_empty());
     }
 }

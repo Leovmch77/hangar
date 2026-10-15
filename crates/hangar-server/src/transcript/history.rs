@@ -398,9 +398,11 @@ fn merge_queue(path: &Path, p: &mut Parsed) -> io::Result<()> {
 
 /// O painel da fila: as entradas que esperam a vez no Hangar, na ordem da fila. A regra de esperar é a da fila
 /// (`row_waits`); o recorte de conversa é o do `/history` (texto vazio fora, de antes da conversa atual fora).
-pub(crate) fn queue_panel_entries(queue: &Path, jsonl: &Path) -> io::Result<Vec<Value>> {
+pub(crate) fn queue_panel_entries(queue: &Path, jsonl: &Path) -> io::Result<QueuePanel> {
     let start_ts = transcript_start_ts(jsonl);
-    Ok(load_queue(queue)?
+    let rows = load_queue(queue)?;
+    let present = rows.iter().map(|entry| entry.get("id").map_or_else(|| "None".to_string(), py::py_str)).collect();
+    let entries = rows
         .into_iter()
         .filter(|entry| {
             let ts = entry.get("ts").and_then(py::number).unwrap_or(0.0);
@@ -416,7 +418,15 @@ pub(crate) fn queue_panel_entries(queue: &Path, jsonl: &Path) -> io::Result<Vec<
                 "ts": entry.get("ts").and_then(py::number),
             })
         })
-        .collect())
+        .collect();
+    Ok(QueuePanel { entries, present })
+}
+
+/// As entradas do painel e os ids que a projeção ainda tem, em qualquer estado: a que esperava e sumiu
+/// daqui foi apagada (a entregue continua como linha entregue), e os aparelhos retiram a bolha dela.
+pub(crate) struct QueuePanel {
+    pub entries: Vec<Value>,
+    pub present: std::collections::HashSet<String>,
 }
 
 fn stamp(path: &Path) -> Option<String> {
@@ -467,16 +477,31 @@ mod tests {
             serde_json::json!({"id":"blank","text":"  ","ts":start + 7.0,"delivered":false}),
         ];
         std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
-        let entries = queue_panel_entries(&queue, &jsonl).unwrap();
-        let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        let panel = queue_panel_entries(&queue, &jsonl).unwrap();
+        let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["b", "a"], "a ordem é a da fila, não a do relógio");
-        assert_eq!(entries[0], serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0}));
+        assert_eq!(panel.entries[0], serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0}));
+        assert!(panel.present.contains("sent") && panel.present.contains("old"), "a projeção conta toda linha, não só as do painel");
+    }
+
+    #[test]
+    fn queue_panel_leaves_out_local_output_even_when_it_looks_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, jsonl) = (dir.path().join("q.jsonl"), dir.path().join("t.jsonl"));
+        let rows = [
+            serde_json::json!({"id":"local","text":"saída do comando","ts":5.0,"delivered":false,"papel":"assistant"}),
+            serde_json::json!({"id":"a","text":"primeira","ts":6.0,"delivered":false}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let panel = queue_panel_entries(&queue, &jsonl).unwrap();
+        let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a"], "a saída local não é mensagem esperando");
     }
 
     #[test]
     fn queue_panel_of_a_missing_queue_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), &dir.path().join("t.jsonl")).unwrap().is_empty());
+        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), &dir.path().join("t.jsonl")).unwrap().entries.is_empty());
     }
 
     #[test]

@@ -528,6 +528,7 @@ impl Executor {
                     let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
                         // Fora do `execute`: o Orientar entrega pela drenagem, que já chama o `execute`.
                         else if kind=="steer_entry" {self.steer_entry(&id,&payload).await}
+                        else if kind=="steer_first" {self.steer_first(&id).await}
                         else {self.execute(&id,&kind,payload,None,false).await};
                     let _=response.send(result);},
                 Some(Message::Queue {id,action,response})=>{
@@ -991,7 +992,7 @@ impl Executor {
         }
         // Comando de barra com mensagens esperando no Hangar: não passa à frente delas nem as perde num `/clear`
         // (a troca de conversa esvazia a fila). Recusado na tela, como todo comando de barra adiado.
-        if slash && !super::queue::waiting_ids(&state).is_empty() {
+        if slash && !super::queue::waiting_ids(&state,self.target.created).is_empty() {
             let result=reply(id,Disposition::Deferred,json!({"code":"queue_waiting","queued":false,"cleanup":"not_needed"}));
             self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
             return Ok(result);
@@ -1305,7 +1306,7 @@ impl Executor {
         // cima, e o recado com socket nativo também, porque esse canal o Claude Code atende no meio do turno.
         if !steer && self.turn_busy(facts.idle) {
             // Os fatos da manutenção não sabem do socket (ele depende do texto): o recado candidato relê com o dele.
-            let waiting=super::queue::waiting_ids(&state);
+            let waiting=super::queue::waiting_ids(&state,self.target.created);
             let candidate=state.rows.iter().filter_map(|r|Some((r["id"].as_str()?,r["text"].as_str()?)))
                 .find(|(id,text)|waiting.iter().any(|w|w==id) && entry.as_deref().is_none_or(|e|e==*id) && input::message_prefix(text).is_some())
                 .map(|(id,text)|(id.to_owned(),text.to_owned()));
@@ -1357,7 +1358,7 @@ impl Executor {
             .ok_or_else(||error("terminal_payload"))?.to_owned();
         // A que já saiu (ou nunca esteve) responde antes de ler a tela: nenhuma tecla.
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
-        if !super::queue::waiting_ids(&state).contains(&entry) {
+        if !super::queue::waiting_ids(&state,self.target.created).contains(&entry) {
             return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_entry_gone","cleanup":"not_needed"})));
         }
         let services=self.services("maintenance","maintenance","");
@@ -1383,9 +1384,11 @@ impl Executor {
         }
         let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
         // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o Claude estava parado
-        // (ou o turno acabou no meio) e já levou a mensagem: entregue igual, sem promover.
+        // (ou o turno acabou no meio) e já levou a mensagem: entregue igual, sem promover. Parado, a entrega abriu
+        // o turno com ela: uma leitura basta, sem as esperas.
         let mut steered=driver.steer().await;
-        for _ in 1..STEER_HINT_TRIES {
+        let tries=if idle {1} else {STEER_HINT_TRIES};
+        for _ in 1..tries {
             if steered.disposition!=input::Disposition::Deferred {break;}
             tokio::time::sleep(self.options.limits.settle).await;
             steered=driver.steer().await;
@@ -1394,6 +1397,18 @@ impl Executor {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"a mensagem entrou na fila do Claude Code, mas o ctrl+x ctrl+s não se comprovou");
         }
         Ok(reply(id,Disposition::Accepted,json!({"steered":steered.disposition==input::Disposition::Accepted,"drained":1})))
+    }
+    /// `/steer` sem corpo (chip de app antigo): com mensagem esperando no Hangar, é o Orientar da primeira, que não
+    /// pode ficar para trás da fila interna; sem nenhuma, promove a fila do Claude Code como antes. A resposta da
+    /// entrada leva `entry_id`.
+    async fn steer_first(&mut self,id:&str)->Result<RuntimeReply,RuntimeError> {
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        let Some(first)=super::queue::waiting_ids(&state,self.target.created).into_iter().next() else {
+            return self.execute(id,"steer",json!({}),None,false).await;
+        };
+        let mut answer=self.steer_entry(id,&json!({"entry_id":first})).await?;
+        answer.payload["entry_id"]=json!(first);
+        Ok(answer)
     }
     async fn confirm_rows(&mut self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
