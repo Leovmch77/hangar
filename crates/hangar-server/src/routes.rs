@@ -70,6 +70,8 @@ pub struct AppState {
     pub plugin: Arc<crate::plugin::Store>,
     /// Páginas HTML publicadas pelas sessões (`~/.hangar/paginas`); o teste troca por uma pasta temporária.
     pub pages: Arc<crate::pages::store::Store>,
+    /// Diagramas Mermaid já desenhados (`~/.hangar/mermaid`); o teste troca por uma pasta temporária.
+    pub mermaid: Arc<crate::mermaid::cache::Cache>,
     /// Metadados passivos dos artefatos Claude, com leitura incremental por conversa.
     pub artifacts: Arc<crate::artifacts::Catalogs>,
     /// Onde está o Chromium do servidor, perguntado a cada medição; o teste força "ausente".
@@ -156,6 +158,7 @@ impl AppState {
             term: Arc::default(),
             mods,
             pages: Arc::new(crate::pages::store::Store::new(crate::pages::store::Store::default_root())),
+            mermaid: Arc::new(crate::mermaid::cache::Cache::new(crate::mermaid::cache::Cache::default_root())),
             artifacts: Arc::default(),
             chromium: crate::pages::chrome::find,
             write_gate_wait: std::time::Duration::from_secs(30),
@@ -473,6 +476,9 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         // Páginas HTML da conversa: só o dono; o convidado recebe o 404 de hoje.
         .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
+        // Diagramas Mermaid desenhados no Chromium do servidor: só o dono; o resto segue ao Python, que repassa
+        // o dono do Connect pela ponte (`forwarded`) e recusa os demais.
+        .route(crate::mermaid::PATH, axum::routing::post(crate::mermaid::route).fallback(pass_any))
         // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
         .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
         // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.

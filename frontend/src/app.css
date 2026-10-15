@@ -928,6 +928,22 @@ html:is([data-bg='image'], [data-bg='desktop']) .code-block {
 }
 html:is([data-bg='image'], [data-bg='desktop']) .code-block pre { background: none; }
 
+/* Fonte do diagrama Mermaid já desenhado: sai da vista, mas fica no DOM para a busca da página e
+   para leitores de tela. A `.assistant-msg` é relative, então o absoluto não vaza para a rolagem. */
+.code-block.mermaid-src-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Trecho reencontrado ao tocar numa citação (lib/citeSelection.ts). */
+::highlight(cite-jump) { background-color: var(--accent-dim); color: var(--text-primary); }
+.cite-flash { animation: cite-flash 2.5s var(--ease-out, ease-out); }
+@keyframes cite-flash { 0%, 30% { background-color: var(--accent-dim); } 100% { background-color: transparent; } }
+
 /* ── Reduced Motion ──────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

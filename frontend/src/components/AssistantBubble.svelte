@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
@@ -14,6 +15,9 @@
   import { tableChartPref } from '../lib/tableChartPref.svelte';
   import { Typewriter } from '../lib/typewriter.svelte';
   import { toolLook } from '../lib/toolLook.svelte';
+  import { enhanceMermaid } from '../lib/mermaidMount';
+  import { desktop } from '../lib/desktop.svelte';
+  import { useSessionServer } from '../lib/sessionServer';
 
   interface Props {
     text: string;
@@ -28,8 +32,11 @@
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade/slide
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
     onRunCommand?: ((command: string, language?: string) => void) | null;
+    /** `ChatEvent.id` da resposta: com ele a seleção dentro da bolha pode ser citada. */
+    sourceId?: string | null;
   }
-  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, vivo = false, animate = true, onForward = null, onRunCommand = null }: Props = $props();
+  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, vivo = false, animate = true, onForward = null, onRunCommand = null, sourceId = null }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Previa em texto PLANO era consequencia da FONTE, nao escolha: raspada do pane, ela ja vinha
   // pintada pela TUI e renderizar de novo estragaria. Quando o proprio agente publica o texto
@@ -144,6 +151,15 @@
     if (tableChartPref.ativo) void enhanceTables(el);
   });
 
+  // Mermaid só na vista do celular (o desktop web não ganha recurso novo) e só fora da prévia: este
+  // ramo já é a resposta terminada. Roda junto do Shiki sem disputar o bloco (ver mermaidMount).
+  $effect(() => {
+    html;
+    const el = proseEl;
+    if (!el || desktop.atual) return;
+    return untrack(() => enhanceMermaid(el, sessionServer()));
+  });
+
   // Copiar a MENSAGEM inteira (markdown cru). Botao aparece no hover (desktop).
   let msgCopied = $state(false);
   function copyMessage() {
@@ -219,7 +235,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-    <div class="prose" bind:this={proseEl} onclick={runCodeClick}>{@html html}</div>
+    <div class="prose" bind:this={proseEl} onclick={runCodeClick} data-cite-source={sourceId || undefined}>{@html html}</div>
     {#if fileRefs.length}<FileAttachment {sessionName} refs={fileRefs} />{/if}
     {#if mediaRefs.length}<FileAttachment {sessionName} refs={mediaRefs} />{/if}
     <div class="msg-actions">

@@ -37,6 +37,8 @@
   import { transcriptImageUrl, uploadUrl } from '@hangar/core';
   import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim, nextAtBottom, renovarGesto } from '../lib/window';
   import * as diag from '../lib/diag';
+  import { splitContextRefs, type QuoteRef } from '@hangar/core';
+  import { findQuoteRange, flashQuote } from '../lib/citeSelection';
 
   interface Props {
     events: ChatEvent[];
@@ -198,6 +200,23 @@
     if (tecla === 'Home') listEl.scrollTop = 0;
     else listEl.scrollBy({ top: tecla === 'PageUp' ? -pagina : pagina });
   }
+  // Modal da citação: enquanto ele está aberto a lista não segue o fim (o teclado e a bandeja mudam
+  // a altura do dock), e ao fechar ela volta exatamente para onde a pessoa estava lendo.
+  export function freezeReading(): { top: number; atEnd: boolean } {
+    // "No fim" pela geometria também: rolagem que não foi gesto (ir à citação, busca) deixa `atBottom` de pé.
+    const gap = listEl ? listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight : 0;
+    const p = { top: listEl?.scrollTop ?? 0, atEnd: atBottom && gap < 80 };
+    atBottom = false;
+    return p;
+  }
+  export function restoreReading(p: { top: number; atEnd: boolean }) {
+    if (!listEl) return;
+    if (p.atEnd) { atBottom = true; scrollToBottom(); return; }
+    atBottom = false;
+    listEl.scrollTop = p.top;
+    lastTop = listEl.scrollTop;
+  }
+
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
@@ -496,20 +515,40 @@
     tick().then(() => { scrollToBottom(); preencherTela(); });
   });
 
-  // Abre no trecho da busca: alarga a janela até a mensagem e solta o fim, senão o auto-scroll
-  // puxaria a tela de volta pra cauda.
+  // Alarga a janela até o evento e solta o fim, senão o auto-scroll puxaria a tela de volta pra
+  // cauda; `then` roda no quadro seguinte, com o evento já montado. `false` = fora do carregado.
+  function revealEvent(id: string, then: () => void): boolean {
+    const i = events.findIndex((e) => e.id === id);
+    if (i < 0) return false;
+    atBottom = false;
+    if (i < windowStart) extra += windowStart - i + 10;
+    tick().then(() => requestAnimationFrame(then));
+    return true;
+  }
+
+  // Abre no trecho da busca.
   let alvoEl: HTMLElement | undefined = $state();
   let focoAplicado: string | null = null;
   $effect(() => {
     const id = focoId;
     if (!id || id === focoAplicado || !windowEnd) return;
-    const i = events.findIndex((e) => e.id === id);
-    if (i < 0) return;
-    focoAplicado = id;
-    atBottom = false;
-    if (i < windowStart) extra += windowStart - i + 10;
-    tick().then(() => requestAnimationFrame(() => alvoEl?.scrollIntoView({ block: 'start' })));
+    if (revealEvent(id, () => alvoEl?.scrollIntoView({ block: 'start' }))) focoAplicado = id;
   });
+
+  // Toque numa citação: rola até a resposta de origem e realça o trecho. Origem fora do histórico
+  // carregado (ou de outra conversa): nada acontece.
+  function goToQuote(ref: QuoteRef) {
+    if (!ref.source || !listEl) return;
+    revealEvent(ref.source, () => {
+      const target = [...(listEl?.querySelectorAll<HTMLElement>('[data-cite-source]') ?? [])]
+        .find((el) => el.dataset.citeSource === ref.source);
+      if (!target) return;
+      // Rola até o parágrafo do trecho, não até a bolha: resposta mais alta que a tela o deixaria fora.
+      const range = findQuoteRange(target, ref);
+      (range?.startContainer.parentElement ?? target).scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (range) flashQuote(target, range);
+    });
+  }
 
   // Página viva mudou de altura: quem estava no fim continua no fim.
   provideFollowTail(() => { if (atBottom) tick().then(scrollToBottom); });
@@ -600,7 +639,7 @@
                         onForward={onForward ? () => onForward(forwardText) : null}
                         onOpenPeer={onOpenSession ? () => onOpenSession(peer.from) : null} />
           {:else}
-            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} {thumbs} />
+            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} {thumbs} onQuoteClick={goToQuote} />
           {/if}
         {:else if ev.id.startsWith('queued-') || ev.id.startsWith('held:')}
           <!-- Msg da fila durável ("queued-") ou recado preso em entrega bloqueada ("held:", o
@@ -613,7 +652,7 @@
           <div class="queued-row" class:dim={working && !ev.desistiu
             && (ev.id.startsWith('held:') || waitsInQueue(ev, codex ? 'codex' : null, headless))}>
             {#if imgFotos}
-              <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+              <ImageBubble caption={imgFotos.caption} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
             {:else if bastao}
               <!-- O kick-off da passagem chega SEMPRE por aqui: quem o entrega é a fila durável, e
@@ -621,7 +660,7 @@
               <BastaoCard recado={bastao} cru={ev.text ?? ''} ts={ev.ts} {sessionName}
                           onAbrirOrigem={onOpenSession ? () => onOpenSession(bastao.origem) : null} />
             {:else}
-              <UserBubble text={shownText} ts={ev.ts} from={peer?.from} scope={peer?.scope}
+              <UserBubble text={shownText} ts={ev.ts} from={peer?.from} scope={peer?.scope} onQuoteClick={goToQuote}
                           onForward={onForward ? () => onForward(forwardText) : null}
                           onOpenPeer={peer && onOpenSession ? () => onOpenSession(peer.from) : null} />
             {/if}
@@ -653,7 +692,7 @@
         {:else if sub}
           <SubagenteCard {sub} cru={ev.text ?? ''} ts={ev.ts} />
         {:else if imgFotos}
-          <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+          <ImageBubble caption={imgFotos.caption} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else if bastao}
           <!-- Passagem de bastão: cartão com os dois passos e os dois avisos do kick-off. O recado
@@ -665,17 +704,18 @@
                continua no bloco fechado do cartão — o parse é leitura, não substituição. -->
           <OrqPainelCard recado={orq} cru={shownText} ts={ev.ts} onAbrirPainel={onOpenOrq ?? null} />
         {:else}
-          <UserBubble text={shownText} ts={ev.ts} animate={!histIds.has(ev.id)} from={peer?.from} scope={peer?.scope}
+          <UserBubble text={shownText} ts={ev.ts} animate={!histIds.has(ev.id)} from={peer?.from} scope={peer?.scope} onQuoteClick={goToQuote}
                       onForward={onForward ? () => onForward(forwardText) : null}
                       onOpenPeer={peer && onOpenSession ? () => onOpenSession(peer.from) : null} />
-          {#if forwardText}{@const fr = parseFilePaths(forwardText)}{#if fr.length}<FileAttachment {sessionName} refs={fr} />{/if}{/if}
+          <!-- Caminho citado DENTRO de uma citação é da resposta de origem, não anexo desta mensagem. -->
+          {#if forwardText}{@const fr = parseFilePaths(splitContextRefs(forwardText)?.typed ?? forwardText)}{#if fr.length}<FileAttachment {sessionName} refs={fr} />{/if}{/if}
         {/if}
       {:else if ev.kind === 'assistant_msg' && ev.text}
         {@const ctxUso = parseContextoUso(ev.text)}
         {#if ctxUso}
           <ContextCard dados={ctxUso} texto={ev.text} />
         {:else}
-        <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
+        <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName} sourceId={ev.id}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
                          onForward={onForward ? () => onForward(ev.text ?? '') : null} {onRunCommand} />
         {/if}
@@ -748,10 +788,10 @@
       {@const pimg = pimg0 && pimg0.filenames.length ? pimg0 : null}
       <div class="pending-bubble" class:solid={p.solid}>
         {#if pimg}
-          <ImageBubble caption={pimg.caption} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+          <ImageBubble caption={pimg.caption} onQuoteClick={goToQuote} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                        thumbs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else}
-          <UserBubble text={p.text} ts={undefined} />
+          <UserBubble text={p.text} ts={undefined} onQuoteClick={goToQuote} />
         {/if}
       </div>
     {/each}

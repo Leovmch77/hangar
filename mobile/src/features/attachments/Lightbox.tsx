@@ -11,7 +11,7 @@ import * as m from '../../paraglide/messages';
 import { Icon } from '../../ui/Icon';
 import { localCopy } from './mediaCache';
 
-interface Props {
+export interface LightboxProps {
   visible: boolean;
   uri: string;
   headers?: Record<string, string>;
@@ -22,11 +22,13 @@ interface Props {
   counter?: string;
   /** Presente = galeria: arrastar de lado (sem zoom) e as setas passam de mídia. */
   onStep?: (dir: 1 | -1) => void;
+  /** Fundo sólido atrás da imagem: PNG transparente (diagrama) deixaria a tela de trás aparecer. */
+  imageBackground?: string;
 }
 
 const ARRASTO_PASSA = 60;
 
-export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'image', counter, onStep }: Props) {
+export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'image', counter, onStep, imageBackground }: LightboxProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const scale = useSharedValue(1);
@@ -120,7 +122,7 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
         ) : (
           <GestureDetector gesture={composed}>
             <Animated.View style={[styles.imgWrap, animatedStyle]}>
-              <Image source={{ uri, headers }} style={styles.img} contentFit="contain" transition={200} />
+              <Image source={{ uri, headers }} style={[styles.img, imageBackground ? { backgroundColor: imageBackground } : null]} contentFit="contain" transition={200} />
             </Animated.View>
           </GestureDetector>
         )}

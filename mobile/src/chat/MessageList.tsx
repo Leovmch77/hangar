@@ -14,6 +14,10 @@ import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
+import { locateInMarkdown, type QuoteRef } from '@hangar/core';
+import { useCiteDialog } from '../stores/citeDialog';
+import { contextRefsKey } from '../stores/contextRefs';
+import { flashQuoteSource } from '../stores/quoteFlash';
 import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
@@ -52,6 +56,9 @@ interface Props {
   onAbrirAgentes?: () => void;
   // Mensagens que esperam a vez no painel "Na fila": a bolha delas sai da conversa até a entrega.
   queuePanel?: QueuePanel;
+  // A tela tem campo de mensagem: só então o menu da seleção oferece "Citar" (sem campo, a citação
+  // iria para uma bandeja que ninguém envia).
+  canQuote?: boolean;
 }
 
 const SEM_AGENTES: AgentRun[] = [];
@@ -107,6 +114,7 @@ export function MessageList({
   agentesRodando = SEM_AGENTES,
   onAbrirAgentes,
   queuePanel,
+  canQuote = false,
 }: Props) {
   const codex = session?.provider === 'codex';
   const visiblePreview = codex ? planDisplayText(preview) : preview;
@@ -153,6 +161,46 @@ export function MessageList({
     return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
   }, [events, results, sessionName, pref, look, tarefasLigadas, tasks.length, rodandoIds, queuePanel]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
+  // Toque numa citação: rola até a resposta de origem pelo índice da linha (a lista é virtualizada,
+  // então não há nó para procurar). Origem fora do histórico carregado: nada acontece.
+  const lista = useRef<LegendListRef>(null);
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  // Medidas lidas na hora do toque, por referência: como dependência, cada mudança de altura do
+  // campo de mensagem recriava o `goToQuote` e, com ele, o `renderItem` de todas as linhas.
+  const layoutRef = useRef({ quoteGap: theme.base.space[3], bottomInset });
+  useEffect(() => { layoutRef.current = { quoteGap: theme.base.space[3], bottomInset }; }, [theme.base.space, bottomInset]);
+  const goToQuote = useCallback((ref: QuoteRef) => {
+    const rows = dataRef.current;
+    const { quoteGap } = layoutRef.current;
+    const i = ref.source ? rows.findIndex((r) => r.type === 'event' && r.ev.id === ref.source) : -1;
+    const row = rows[i];
+    if (i < 0 || row?.type !== 'event' || !lista.current) return;
+    const source = row.ev.text ?? '';
+    flashQuoteSource(ref.source);
+    // Começo da resposta no topo (viewPosition 0): com 0.3, resposta mais alta que a tela ficava
+    // com o começo, e o trecho, acima da vista.
+    void lista.current.scrollToIndex({ index: i, animated: false, viewPosition: 0, viewOffset: quoteGap }).then(() => {
+      // Resposta mais alta que a tela: desce até onde o trecho está. Sem o layout do texto, a
+      // posição sai da proporção do trecho na fonte, o que basta para deixá-lo à vista.
+      setTimeout(() => {
+        const list = lista.current;
+        if (!list) return;
+        const st = list.getState();
+        const size = st.sizeAtIndex(i);
+        // A lista passa por baixo do campo de mensagem: o que se vê é a altura menos essa faixa.
+        // Com a altura inteira, o trecho no fim de uma resposta alta parava atrás do campo.
+        const visible = st.scrollLength - layoutRef.current.bottomInset;
+        if (!(size > visible * 0.6)) return;
+        const at = locateInMarkdown(source, ref.text, ref.before, ref.after);
+        if (!at || !source.length) return;
+        const top = st.scroll + quoteGap;
+        const target = top + size * (at.start / source.length) - visible * 0.25;
+        const offset = Math.min(Math.max(target, st.scroll), top + size - visible);
+        if (offset > st.scroll + 1) void list.scrollToOffset({ offset, animated: true });
+      }, 80);
+    });
+  }, []);
   const working = stateEvent?.state === 'working';
   const desde = useMemo(() => (working ? turnStart(events, turnSeen) : null), [working, events, turnSeen]);
   const ferramentaEv = useMemo<ChatEvent | null>(
@@ -176,14 +224,14 @@ export function MessageList({
           if (ev.id.startsWith('queued-')) {
             return (
               <View style={working && waitsInQueue(ev, session?.provider, session?.headless) ? styles.pending : undefined}>
-                <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />
+                <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} onQuoteClick={goToQuote} />
               </View>
             );
           }
-          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} />;
+          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} onQuoteClick={goToQuote} />;
         }
         if (ev.kind === 'assistant_msg') {
-          return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
+          return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} canQuote={canQuote} />;
         }
         if (ev.kind === 'notice') {
           // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
@@ -204,22 +252,62 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless, goToQuote, canQuote]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
-  const lista = useRef<LegendListRef>(null);
   const [longeDoFim, setLongeDoFim] = useState(false);
   const vistoAte = useRef(events.length);
   useEffect(() => {
     if (!longeDoFim) vistoAte.current = events.length;
   }, [longeDoFim, events.length]);
   const temNovas = longeDoFim && events.length > vistoAte.current;
+  // Ponto de leitura atual, para o modal da citação devolver a conversa onde estava e para a lista
+  // seguir colada no fim quando o rodapé muda de altura.
+  const reading = useRef({ y: 0, atEnd: true });
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     const falta = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    reading.current = { y: contentOffset.y, atEnd: falta < 64 };
     setLongeDoFim(falta > layoutMeasurement.height);
   }, []);
+  // A caixa de baixo muda de altura (a bandeja some no envio, o campo encolhe) e a bolha enviada
+  // entra no rodapé: quem estava no fim continua no fim. Sem isto, com o teclado aberto, a bolha e
+  // a resposta ficavam atrás do campo. De novo depois da medida da bolha formatada. Linha nova e
+  // prévia que aparece também: com o teclado aberto, a resposta chegava atrás do campo.
+  const pendingCount = pending.length;
+  const rowCount = data.length;
+  const hasPreview = !!visiblePreview;
+  useEffect(() => {
+    if (!reading.current.atEnd) return;
+    const keepAtEnd = () => { if (reading.current.atEnd) void lista.current?.scrollToEnd({ animated: false }); };
+    const frame = requestAnimationFrame(keepAtEnd);
+    const later = setTimeout(keepAtEnd, 250);
+    return () => { cancelAnimationFrame(frame); clearTimeout(later); };
+  }, [bottomInset, pendingCount, rowCount, hasPreview]);
+  // Modal "Responder ao trecho" desta conversa: guarda o ponto ao abrir (o teclado e a bandeja mudam
+  // a altura da lista enquanto ele está aberto) e volta a ele ao fechar; "Finalizar" vai ao fim.
+  useEffect(() => {
+    if (!sessionName) return;
+    const ownKey = contextRefsKey(serverId, sessionName);
+    let saved: { y: number; atEnd: boolean } | null = null;
+    return useCiteDialog.subscribe((s, prev) => {
+      if (s.request?.draftKey === ownKey && !prev.request) { saved = { ...reading.current }; return; }
+      if (s.request || prev.request?.draftKey !== ownKey || !saved) return;
+      const point = saved;
+      saved = null;
+      // Sem animação também no "Finalizar": o campo ganha foco logo depois e o teclado encolhe a
+      // lista; com a rolagem ainda andando, a lista não estava no fim e a última mensagem ficava
+      // atrás do campo de mensagem.
+      const restore = () => {
+        if (s.finished || point.atEnd) void lista.current?.scrollToEnd({ animated: false });
+        else void lista.current?.scrollToOffset({ offset: point.y, animated: false });
+      };
+      requestAnimationFrame(restore);
+      // De novo depois que o teclado baixa e o campo de mensagem é medido com a bandeja nova.
+      setTimeout(restore, 350);
+    });
+  }, [serverId, sessionName]);
   const irProFim = useCallback(() => {
     setLongeDoFim(false);
     void lista.current?.scrollToEnd({ animated: true });
@@ -252,6 +340,10 @@ export function MessageList({
       maintainScrollAtEnd
       maintainVisibleContentPosition
       keyboardShouldPersistTaps="handled"
+      // Android: o toque longo que seleciona texto foca o TextView, e o ScrollView do RN rolava até
+      // ele (requestChildFocus → scrollToChild); numa resposta mais alta que a tela a lista pulava
+      // centenas de px e a seleção se estendia pelo que passou sob o dedo.
+      scrollsChildToFocus={false}
       // Sem isto o teclado aberto não tinha como fechar no chat.
       keyboardDismissMode="on-drag"
       onStartReached={onLoadOlder}
@@ -278,7 +370,7 @@ export function MessageList({
           {/* O eco que o painel da fila já mostra some: a mesma mensagem não aparece duas vezes. */}
           {pending.filter((p) => !(queuePanel && echoInQueuePanel(p.text, queuePanel))).map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
-              <UserBubble text={p.text} sessionName={sessionName} serverId={serverId} />
+              <UserBubble text={p.text} sessionName={sessionName} serverId={serverId} onQuoteClick={goToQuote} />
             </View>
           ))}
           {optionsSlot ?? null}

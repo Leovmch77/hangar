@@ -445,6 +445,14 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
 - **HTML servido como arquivo executa isolado e sem o token na URL do documento interno.**
   Arquivos citados e uploads usam `file_response`; SVG/XML mantêm o MIME com scripts bloqueados.
+- **Citação e elemento escolhido vão no texto da mensagem, como blocos `<hangar-ref>`.** O transcript
+  é a única fonte. Três leitores seguem os mesmos casos (`packages/core/src/contextRefs.fixtures.json`):
+  `packages/core`, `desktop-native/src/context_refs.rs` e `plugins/hangar`; formato novo muda os três e
+  os casos no mesmo commit. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#citação-e-elemento-no-texto-da-mensagem-15102026).
+- **Mermaid é desenhado pelo `hangar-server` (`POST /api/mermaid`), em PNG, num Chromium sem rede**,
+  com a biblioteca embutida no binário; os clientes só exibem a imagem. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#mermaid-desenhado-no-servidor-15102026).
 - **Página da conversa mora no Rust e some com a sessão.** `html_render` publica só pela ponte
   privada (`/__hangar_server/pages`); lê o dono, convidado não vê. Link e URL do rascunho nunca
   levam token ao transcript; o documento da página nunca tem `allow-same-origin` nem token na URL

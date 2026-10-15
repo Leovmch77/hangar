@@ -51,6 +51,9 @@ describe('queuePanel', () => {
   it('texto vazio ou comando não atualiza', () => {
     expect(canUpdateQueueEdit('  ')).toBe(false);
     expect(canUpdateQueueEdit('/clear')).toBe(false);
+    // Mensagem só com citação: o campo fica vazio na edição, e a citação basta para gravar.
+    const cit = { kind: 'quote' as const, source: 'ev', before: '', after: '', text: 'trecho', comment: '' };
+    expect(canUpdateQueueEdit('  ', [cit])).toBe(true);
     expect(canUpdateQueueEdit('ok')).toBe(true);
   });
   it('a entrada que saiu da fila durante a edição vira rascunho só com o rascunho vazio', () => {

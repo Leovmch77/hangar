@@ -2,7 +2,8 @@ import { memo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ImageThumb, type MediaItem } from './ImageThumb';
-import { parseImageMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader } from '@hangar/core';
+import { hasContextRefs, parseImageMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader, type QuoteRef } from '@hangar/core';
+import { ContextRefView } from './ContextRefView';
 import * as m from '../paraglide/messages';
 import { BubbleActions } from './BubbleActions';
 import { superficie } from '../theme/superficie';
@@ -11,7 +12,7 @@ import { useServers } from '../stores/servers';
 // Bolha do usuário: pequena, à direita, no fundo superficie(0.8) — o mesmo degrau da bolha do nativo,
 // e por isso acompanha Transparência e Solidez. Se parseImageMessage(text) não nulo → legenda +
 // miniaturas. As ações (copiar, compartilhar) não ficam à mostra: o toque longo abre a linha embaixo.
-export const UserBubble = memo(function UserBubble({ text, sessionName, serverId, ts, eventId, imageCount = 0 }: {
+export const UserBubble = memo(function UserBubble({ text, sessionName, serverId, ts, eventId, imageCount = 0, onQuoteClick }: {
   text: string;
   sessionName?: string;
   serverId?: string;
@@ -19,6 +20,8 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
   eventId?: string;
   /** Imagens coladas no TERMINAL: vêm do transcript por /transcript-image, não do texto. */
   imageCount?: number;
+  /** Toque numa citação: rola até a resposta de origem. */
+  onQuoteClick?: (ref: QuoteRef) => void;
 }) {
   const { theme } = useUnistyles();
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
@@ -42,6 +45,10 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     })) : []),
   ] : [];
   const alternar = () => setAcoes((v) => !v);
+  // Legenda com citação ou elemento (bloco <hangar-ref>): segmentos no lugar do texto cru.
+  const renderCaption = (t: string) => (hasContextRefs(t)
+    ? <ContextRefView text={t} onQuoteClick={onQuoteClick} />
+    : <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{t}</Text>);
 
   // O texto não é `selectable`: no Android a seleção come o toque longo que abre as ações, e copiar
   // já está lá.
@@ -85,11 +92,11 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
     if (galeria.length === 0) {
       const display = caption || text;
-      return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{display}</Text>, display);
+      return bolha(renderCaption(display), display);
     }
     return bolha(
       <>
-        {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
+        {caption ? renderCaption(caption) : null}
         <View style={styles.thumbs}>
           {galeria.map((g, i) => <ImageThumb key={g.uri} items={galeria} index={i} style={styles.thumb} />)}
         </View>
@@ -98,7 +105,7 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     );
   }
 
-  return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{text}</Text>, text);
+  return bolha(renderCaption(text), text);
 });
 
 const styles = StyleSheet.create((theme) => ({

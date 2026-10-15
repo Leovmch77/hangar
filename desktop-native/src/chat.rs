@@ -320,12 +320,9 @@ fn claim(real: &ChatEvent, queued: &ChatEvent) -> Option<(u8, usize)> {
     if needle.is_empty() { return None; }
     let size = needle.chars().count();
     if text == needle || text.lines().any(|line| line.trim() == needle) { return Some((3, size)); }
-    let caption = |s: &str| -> String {
-        let index = ["📎 imagem:", "📎 arquivo:"].iter().filter_map(|m| s.find(m)).min();
-        index.map(|i| s[..i].trim_end().trim_end_matches('—').trim_end().to_owned()).unwrap_or_else(|| s.to_owned())
-    };
-    let q = caption(needle);
-    if !q.is_empty() && caption(text) == q { return Some((2, size)); }
+    // A legenda sem os marcadores de anexo, que só valem depois dos blocos de referência.
+    let q = crate::composer::caption(needle);
+    if !q.is_empty() && crate::composer::caption(text) == q { return Some((2, size)); }
     if size >= 8 && text.lines().any(|line| line.trim().starts_with(needle)) { return Some((1, size)); }
     None
 }

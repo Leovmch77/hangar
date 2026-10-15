@@ -62,7 +62,7 @@ impl Hangar {
             let lit = (start..end).contains(&active);
             let hovered = hover == Some(ix);
             let (row, event) = rows[if lit { active } else { start }];
-            let text = display_body(&events[event]);
+            let text = super::quotes::summary(&display_body(&events[event]));
             let text = if text.trim().is_empty() { activity::web("anexos_imagem_enviada") } else { text };
             let prompt = preview(&text, PREVIEW_PROMPT_CHARS);
             // Cartão do Zeron: título de uma linha, o começo da resposta em até três e, num trecho, quantas perguntas junta.

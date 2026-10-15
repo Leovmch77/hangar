@@ -4022,3 +4022,14 @@ export function getHarnessInstallForServer(s: Server, signal?: AbortSignal): Pro
 export function startHarnessInstallForServer(s: Server, cli: string): Promise<HarnessInstall> {
   return apiFetchForServer(s, `/api/harness/instalar/${encodeURIComponent(cli)}`, { method: 'POST' }, 30_000);
 }
+
+// Diagrama Mermaid desenhado pelo servidor (só do dono). Devolve a resposta crua: status, cabeçalhos
+// de tamanho e corpo binário são lidos pelo `mermaid.ts`, que também faz a fila e o cache. Não conta
+// como queda do servidor: o desenho espera o Chromium e um prazo estourado aqui não diz que a máquina caiu.
+export function requestMermaid(
+  body: { source: string; theme: 'dark' | 'light'; width: number },
+  server?: Server | null,
+  signal?: AbortSignal,
+): Promise<Response> {
+  return apiFetchRes('/api/mermaid', { method: 'POST', body: JSON.stringify(body), signal }, server ?? undefined, false, false);
+}

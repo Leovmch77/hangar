@@ -68,6 +68,8 @@ import { cachePrazo } from '../lib/cachePrazo';
   import { desktop } from '../lib/desktop.svelte';
   import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
   import type { UploadFile } from '@hangar/core';
+  import { composeWithContextRefs, contextRefLabel, refsForMessage, type ContextRef } from '@hangar/core';
+  import { contextRefsDraft, contextRefsKey, type DraftContextRef } from '../lib/contextRefsDraft.svelte';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '@hangar/core';
   import type { StatusFields } from '@hangar/core';
@@ -144,6 +146,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     queuePanel?: Snippet;
     // Edição de uma mensagem da fila: o envio vira "Atualizar" e Esc sai sem mudar nada.
     queueEditing?: boolean;
+    /** Citações da mensagem da fila em edição: com elas o Atualizar vale mesmo sem texto. */
+    queueEditRefs?: readonly ContextRef[];
     // Ação da fila em voo: o Atualizar espera, como os botões do painel.
     queueBusy?: boolean;
     onQueueEditSubmit?: (text: string) => void;
@@ -168,13 +172,17 @@ import { cachePrazo } from '../lib/cachePrazo';
     sessionJsonl = null,
     sessionCwd = null, sessionBranch = null,
     accountLabel = null, accountPct = null, accountWindow = null, onOpenAccounts,
-    queuePanel, queueEditing = false, queueBusy = false, onQueueEditSubmit, onQueueEditCancel,
+    queuePanel, queueEditing = false, queueEditRefs = [], queueBusy = false, onQueueEditSubmit, onQueueEditCancel,
   }: Props = $props();
   const placeFolder = $derived(status?.repo || (sessionCwd ? sessionCwd.replace(/\/+$/, '').split('/').pop() || '' : ''));
   const placeBranch = $derived(status?.branch || sessionBranch || '');
   const sessionServer = useSessionServer();
   // O Composer é remontado por sessão ({#key} do Chat): servidor e nome não mudam nesta instância.
   const dictationServerId = sessionServer()?.id ?? '';
+  // Citações da bandeja (lib/contextRefsDraft): entram no texto só na hora do envio.
+  const refsKey = $derived(contextRefsKey(dictationServerId, sessionName));
+  const refs = $derived(contextRefsDraft.get(refsKey));
+  let editingRef = $state<number | null>(null);
 
   // OU, não `??`: a janela estreita (celular) manda sozinha, e a coluna estreita no desktop soma.
   const compacto = $derived(estreito || !desktop.atual);
@@ -511,7 +519,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   );
 
   // hasInput: tem texto OU anexo. Usado tb pro botao stop/send (ver control-right).
-  const hasInput = $derived(inputText.trim().length > 0 || attachments.length > 0 || recording || transcribing);
+  const hasInput = $derived(inputText.trim().length > 0 || attachments.length > 0 || (refs.length > 0 && !queueEditing) || recording || transcribing);
   const canSend = $derived(hasInput && !uploading && !sending && !recording && !transcribing);
   const canRequestSend = $derived(hasInput && !uploading && !sending && !pendingSend);
   const isWorking = $derived(sessionState === 'working');
@@ -1987,7 +1995,7 @@ import { cachePrazo } from '../lib/cachePrazo';
 
   async function submit(steer = false): Promise<boolean> {
     if (queueEditing) {
-      if (!canUpdateQueueEdit(inputText) || queueBusy) return false;
+      if (!canUpdateQueueEdit(inputText, queueEditRefs) || queueBusy) return false;
       onQueueEditSubmit?.(inputText);
       return true;
     }
@@ -2003,6 +2011,10 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (!canSend) return false;
     cancelarContagem();   // envio manual torna a contagem sem sentido
     const caption = inputText.trim();
+    // Comando de barra não leva citação: o bloco na frente faria o agente ler o comando como texto.
+    const sentRefs: DraftContextRef[] = refsForMessage(refs, caption);
+    const message = composeWithContextRefs(sentRefs, caption);
+    const sentRefsKey = refsKey;
     sendError = '';
     steerFeedback = '';
     fecharDitado();   // enviou -> o texto saiu do campo, nao ha mais versao pra trocar
@@ -2038,11 +2050,12 @@ import { cachePrazo } from '../lib/cachePrazo';
           if (transcript) parts.push(m.composer_fala_video({ texto: transcript }));
         }
         const attachPart = parts.join(' ');
-        const msg = (caption ? caption + ' — ' : '') + attachPart;
+        const msg = (message ? message + ' — ' : '') + attachPart;
         await onSend(msg, steer);
         inputText = '';
         if (textareaEl) textareaEl.style.height = 'auto';
         clearAttachments();
+        contextRefsDraft.removeSent(sentRefsKey, sentRefs);
         forgetSent(sentName, sentDraftKey, caption, sentFiles);
       } catch (err) {
         // upload OU envio falhou -> mantem as fotos e o texto, mostra o erro.
@@ -2061,7 +2074,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (textareaEl) textareaEl.style.height = 'auto';
     let ok = true;
     try {
-      await onSend(caption, steer);
+      await onSend(message, steer);
+      contextRefsDraft.removeSent(sentRefsKey, sentRefs);
     } catch (err) {
       // falhou -> devolve o texto, MAS so se a caixa segue vazia (nao pisa no que o usuario digitou
       // na janela do envio em voo).
@@ -2265,6 +2279,33 @@ import { cachePrazo } from '../lib/cachePrazo';
        ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
     {#if arrastando}
       <div class="solte-anexo" aria-hidden="true">{m.composer_soltar_anexo()}</div>
+    {/if}
+    {#if refs.length && !queueEditing}
+      <!-- Citações esperando envio: mesma faixa dos anexos, uma linha por citação (o rótulo é texto,
+           não cabe num tile). O comentário abre no lápis; o X tira da bandeja. -->
+      <ul class="cref-tray" aria-label={m.cite_tray_aria()}>
+        {#each refs as ref, idx (ref.draftId)}
+          {@const label = contextRefLabel(ref)}
+          <li class="cref-item" in:scale={{ duration: 180, start: 0.9, easing: cubicOut }}>
+            <div class="cref-row">
+              <span class="cref-ico" aria-hidden="true">{ref.kind === 'quote' ? '❝' : '⌖'}</span>
+              <span class="cref-label" title={label}>{label}</span>
+              <button type="button" class="cref-btn" aria-label={m.cite_edit_comment()} title={m.cite_edit_comment()}
+                      aria-expanded={editingRef === idx}
+                      onclick={() => (editingRef = editingRef === idx ? null : idx)}>✎</button>
+              <button type="button" class="cref-btn" aria-label={m.cite_remove()} title={m.cite_remove()}
+                      onclick={() => { if (editingRef === idx) editingRef = null; contextRefsDraft.remove(refsKey, idx); }}>×</button>
+            </div>
+            {#if editingRef === idx}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input class="cref-comment" type="text" value={ref.comment} autofocus
+                     placeholder={m.cite_comment_placeholder()} aria-label={m.cite_comment_aria()}
+                     oninput={(e) => contextRefsDraft.setComment(refsKey, idx, e.currentTarget.value)}
+                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); editingRef = null; } }} />
+            {/if}
+          </li>
+        {/each}
+      </ul>
     {/if}
     {#if attachments.length}
       <!-- Tiles quadrados com o anel do envio em volta (referência: BoardUI Composer Attachments).
@@ -2683,9 +2724,9 @@ import { cachePrazo } from '../lib/cachePrazo';
           <!-- Edição da fila: o envio troca o texto da entrada, sem mandar nada; nunca vira Parar. -->
           <button
             class="send-btn send-btn--update"
-            class:send-btn--disabled={!canUpdateQueueEdit(inputText) || queueBusy}
+            class:send-btn--disabled={!canUpdateQueueEdit(inputText, queueEditRefs) || queueBusy}
             onclick={() => submit()}
-            disabled={!canUpdateQueueEdit(inputText) || queueBusy}
+            disabled={!canUpdateQueueEdit(inputText, queueEditRefs) || queueBusy}
             aria-label={m.queue_panel_update_aria()}
             title={m.queue_panel_update()}
           >{m.queue_panel_update()}</button>
@@ -3601,6 +3642,62 @@ import { cachePrazo } from '../lib/cachePrazo';
     font-size: 14px;
   }
   .attach-error { font-size: var(--text-xs); color: var(--error); }
+
+  /* ── Bandeja de citações ───────────────────────────────────────────────── */
+  /* Mesma superfície dos tiles de anexo (inset + contorno sutil), em linhas: rola por dentro quando
+     são muitas, para o dock não empurrar a conversa. */
+  .cref-tray {
+    position: relative;
+    list-style: none;
+    margin: 0;
+    padding: 7px 2px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    max-height: 9.5rem;
+    overflow-y: auto;
+  }
+  .cref-item {
+    border-radius: var(--radius-md);
+    background: var(--surface-inset);
+    border: 1px solid var(--border-subtle);
+    padding: 2px var(--space-1) 2px var(--space-2);
+  }
+  .cref-row { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+  .cref-ico { color: var(--accent); flex-shrink: 0; line-height: 1; }
+  .cref-label {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cref-btn {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    line-height: 1;
+  }
+  .cref-btn:active { background: var(--bg-hover); }
+  .cref-comment {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 2px 0 var(--space-1);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 16px;
+  }
 
   .attach-btn {
     width: 44px; height: 44px; flex-shrink: 0;

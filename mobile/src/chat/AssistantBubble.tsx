@@ -10,7 +10,12 @@ import { toast } from '../ui/Toast';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText } from '@hangar/core';
+import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText, splitMermaidBlocks, buildQuoteRef, quoteAffixesInMarkdown, quoteTooLong } from '@hangar/core';
+import type { TextContextMenuItem, TextSelectionMenuConfig } from 'react-native-enriched-markdown';
+import { MermaidBlock } from './MermaidBlock';
+import { contextRefsKey } from '../stores/contextRefs';
+import { openCiteDialog } from '../stores/citeDialog';
+import { useQuoteFlash } from '../stores/quoteFlash';
 import * as m from '../paraglide/messages';
 import { TableChart } from './TableChart';
 import { ArquivoChip } from './ArquivoChip';
@@ -97,16 +102,28 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
   };
 }
 
+// Markdown secundário (prévia em voo, trecho citado): o mesmo estilo com o parágrafo esmaecido.
+export function mkMutedMarkdownStyle(t: TemaApp): MarkdownStyle {
+  const base = mkMarkdownStyle(t);
+  return { ...base, paragraph: { ...base.paragraph, color: t.tokens.text.secondary } };
+}
+
 export const AssistantBubble = memo(function AssistantBubble({
   text,
   sessionName,
   serverId,
   ts,
+  eventId,
+  canQuote = false,
 }: {
   text: string;
   sessionName?: string;
   serverId?: string;
   ts?: number | null;
+  /** `ChatEvent.id` da resposta: com ele, e `canQuote`, o menu da seleção oferece "Citar". */
+  eventId?: string;
+  /** A tela tem campo de mensagem para enviar a citação. */
+  canQuote?: boolean;
 }) {
   const { theme } = useUnistyles();
   const router = useRouter();
@@ -136,7 +153,37 @@ export const AssistantBubble = memo(function AssistantBubble({
   const podeAbrirArquivo = !!sessionName && !!serverId;
   // Citação `caminho:linha` vira link no markdown (a lib só devolve toque em link); o toque abre a
   // aba Arquivos. URL de verdade sai pro sistema.
-  const markdown = useMemo(() => (podeAbrirArquivo ? linkCodeReferences(display) : display), [display, podeAbrirArquivo]);
+  // A biblioteca não intercepta bloco por linguagem: a resposta é partida nos ```mermaid e cada
+  // diagrama vira imagem entre dois trechos de texto. Esta bolha já é a resposta pronta (a do
+  // streaming é a PreviewBubble), então nenhum diagrama é pedido pela metade.
+  const parts = useMemo(() => splitMermaidBlocks(display).map((p) => ('markdown' in p
+    ? { markdown: p.markdown, shown: podeAbrirArquivo ? linkCodeReferences(p.markdown) : p.markdown }
+    : p)), [display, podeAbrirArquivo]);
+  // "Citar" no menu da seleção: abre o modal de resposta ao trecho; a bandeja só recebe ao confirmar.
+  // A seleção é do texto desenhado (sem `**`); prefixo e sufixo saem da fonte, achada sem os marcadores.
+  const quotable = !!eventId && canQuote;
+  const cite = useCallback((selected: string, source: string, near?: number) => {
+    if (!eventId) return;
+    if (quoteTooLong(selected)) {
+      toast.erro(m.cite_too_long_aria());
+      return;
+    }
+    const ref = buildQuoteRef({ source: eventId, text: selected, ...quoteAffixesInMarkdown(source, selected, near) });
+    if (ref) openCiteDialog(contextRefsKey(serverId, sessionName), ref);
+  }, [eventId, serverId, sessionName]);
+  const menus = useMemo(() => parts.map((p): TextContextMenuItem[] | undefined => (quotable && 'markdown' in p
+    ? [{ text: m.cite_action(), icon: 'quote.opening', onPress: ({ text: sel, selection }) => cite(sel, p.markdown, selection?.start) }]
+    : undefined)), [parts, quotable, cite]);
+  // Os itens da biblioteca no menu da seleção ("Copy", "Copy as Markdown") no idioma da tela.
+  const selectionMenu = useMemo<TextSelectionMenuConfig>(() => ({
+    copy: { label: m.selection_copy() },
+    copyAsMarkdown: { label: m.selection_copy_markdown() },
+    copyImageUrl: {
+      label: m.selection_copy_image_url(),
+      pluralLabels: { other: m.selection_copy_image_urls({ count: '{count}' }) },
+    },
+  }), []);
+  const flashing = useQuoteFlash((st) => !!eventId && st.eventId === eventId);
   const onLinkPress = useCallback(({ url }: { url: string }) => {
     const arquivo = parseFileLink(url);
     // ponytail: a aba Arquivos ainda não rola até a linha; o arquivo abre no topo.
@@ -163,9 +210,12 @@ export const AssistantBubble = memo(function AssistantBubble({
   }, [tabelas.length, colIndices.length]);
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, flashing && { backgroundColor: theme.tokens.accent.dim, borderRadius: theme.base.radius.md }]}>
       {proposed ? <Text style={styles.planLabel}>{m.chat_plan_proposto()}</Text> : null}
-      <EnrichedMarkdownText markdown={markdown} markdownStyle={md} flavor="github" onLinkPress={onLinkPress} />
+      {parts.map((p, i) => ('mermaid' in p
+        ? <MermaidBlock key={i} source={p.mermaid} serverId={serverId} md={md} />
+        : <EnrichedMarkdownText key={i} markdown={p.shown} markdownStyle={md} flavor="github" onLinkPress={onLinkPress}
+                                contextMenuItems={menus[i]} selectionMenuConfig={selectionMenu} />))}
       {grafico && tabelas.length > 0 ? (
         <View style={styles.tableBlock}>
           <Pressable

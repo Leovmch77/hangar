@@ -539,6 +539,7 @@ export default function ChatScreen() {
                 agentesRodando={agentesRodando}
                 onAbrirAgentes={() => router.push(`/s/${serverId}/${name}/activity` as never)}
                 queuePanel={queuePanel}
+                canQuote={!servidorSumiu && fetchedSession !== null && !dead && !orq && !soLeitura}
               />
             )}
           </View>

@@ -10,7 +10,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     uploadFileForServer, transcribeFileForServer,
   } from '@hangar/core';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
-  import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag, isOrq } from '@hangar/core';
+  import { relativeTime, bubblesFromTail, contextRefsPlainText, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag, isOrq } from '@hangar/core';
   import { parseStatusLine } from '@hangar/core';
   import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
   import { loopBadge, LOOP_TONE_COLOR, type ChatEvent } from '@hangar/core';
@@ -548,13 +548,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
               <p class="bc-peer-text">{peer.text}</p>
             </div>
           {:else}
-            <p class="bc-user">{e.text}</p>
+            <p class="bc-user">{contextRefsPlainText(e.text ?? '')}</p>
           {/if}
         {/if}
       {/each}
       <!-- Meio-apagado enquanto o POST está EM VOO; sólido assim que o backend aceita (ackAt). -->
       {#each pending as p (p.id)}
-        <p class="bc-user" class:bc-pending={!p.ackAt}>{p.text}</p>
+        <p class="bc-user" class:bc-pending={!p.ackAt}>{contextRefsPlainText(p.text)}</p>
       {/each}
       {#if tailError}
         <div class="bc-recovery" role="alert">

@@ -32,6 +32,7 @@ export function resetsIn(ts: number | null | undefined): string {
 import type { State, ChatEvent, SessionInfo } from './types';
 import { intlLocale } from './i18n';
 import * as m from './paraglide/messages';
+import { contextRefsEnd } from './contextRefs';
 
 export function formatElapsed(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
@@ -456,8 +457,12 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // sozinho no fim). Com o indexOf da string exata nada disso casava e a bolha real caia no texto
   // cru: o usuario via os paths escritos no chat em vez das miniaturas (medido em 03/08/2026).
   const marker = /📎\s*imagem:\s*/g;
-  const first = text.search(marker);
-  if (first < 0) return null;
+  // Marcador dentro de um bloco `<hangar-ref>` (trecho citado, comentário) é texto: só vale depois do
+  // último bloco lido.
+  const tail = contextRefsEnd(text);
+  const found = text.slice(tail).search(marker);
+  if (found < 0) return null;
+  const first = tail + found;
   const filenames = text
     .slice(first)
     .split(marker)

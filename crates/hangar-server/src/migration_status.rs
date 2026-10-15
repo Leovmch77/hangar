@@ -127,7 +127,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
     if *method == Method::POST {
-        if matches!(path, "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat" | "/api/jev/aux/models") {
+        if matches!(path, "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat" | "/api/jev/aux/models" | "/api/mermaid") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
@@ -386,6 +386,7 @@ mod tests {
         assert!(get("/api/sessions/a/history") && get("/api/sessions") && get("/api/uso"));
         assert!(get("/api/sessions/a/git/log") && get("/api/worktrees"), "Git e worktrees vêm dos matches");
         assert!(get("/api/sessions/a/pages/p1") && get("/api/sessions/a/pages/p1/shot") && !get("/api/sessions/a/pages"));
+        assert!(rust_route(&Method::POST, "/api/mermaid") && !get("/api/mermaid"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/input") && rust_route(&Method::DELETE, "/api/sessions/a/queue/e1")
             && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && rust_route(&Method::POST, "/api/sessions/a/queue/e1/steer")
             && rust_route(&Method::PATCH, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));

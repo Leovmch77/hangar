@@ -185,7 +185,7 @@ impl PageFullscreen {
             crate::browser::Event::Host(raw) => if let Some(HostMsg::Link(url)) = parse_host(&raw)
                 && self.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) { cx.open_url(&url) },
             crate::browser::Event::State(state) => running.at = state.url,
-            crate::browser::Event::UserInput => {}
+            crate::browser::Event::UserInput | crate::browser::Event::Escape => {}
         }
     }
 

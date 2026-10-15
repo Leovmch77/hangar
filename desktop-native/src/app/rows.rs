@@ -455,17 +455,29 @@ impl Hangar {
     /// gráfico aberto e mais de uma coluna numérica, a escolha da coluna.
     pub(super) fn render_charted(&mut self, id: &str, markdown: &str, tables: &[Table], cx: &mut Context<Self>) -> Vec<AnyElement> {
         let lines: Vec<&str> = markdown.lines().collect();
+        // Começo de cada linha na fonte: a citação de um trecho volta à posição dele na resposta inteira.
+        let starts: Vec<usize> = std::iter::once(0).chain(markdown.match_indices('\n').map(|(at, _)| at + 1)).collect();
+        // O pedaço é recortado da fonte, não remontado das linhas: com CRLF, `lines()` tira o `\r` e o pedaço deixaria
+        // de ser um trecho da fonte (a citação não acharia onde ele começa).
+        let piece = |from: usize, to: usize| -> String {
+            let start = starts.get(from).copied().unwrap_or(markdown.len()).min(markdown.len());
+            let end = starts.get(to).map_or(markdown.len(), |&at| at - 1).max(start);
+            let slice = &markdown[start..end];
+            slice.strip_suffix('\r').unwrap_or(slice).to_owned()
+        };
         let mut out = Vec::new();
         let mut cursor = 0;
         let decimal = tr("decimal").chars().next().unwrap_or(',');
-        fn text(this: &mut Hangar, key: String, row: &str, source: String, out: &mut Vec<AnyElement>, cx: &mut Context<Hangar>) {
+        let text = |this: &mut Hangar, key: String, first: usize, source: String, out: &mut Vec<AnyElement>, cx: &mut Context<Hangar>| {
             if source.trim().is_empty() { return; }
-            let view = this.text_view(&key, row, source, cx);
+            let view = this.text_view(&key, id, source, cx);
+            if let Some(rich) = this.rich.get_mut(&key) { rich.offset = starts.get(first).copied(); }
+            let extensions = this.answer_extensions(&key, cx);
             out.push(chat_text_runnable(&view, cx, Some(cx.weak_entity()), &key).on_link_click(open_web_link)
-                .markdown_extensions(citation_extensions(&key, cx.weak_entity())).into_any_element());
-        }
+                .markdown_extensions(extensions).into_any_element());
+        };
         for (n, table) in tables.iter().enumerate() {
-            text(self, format!("{id}#s{n}"), id, lines[cursor..table.start].join("\n"), &mut out, cx);
+            text(self, format!("{id}#s{n}"), cursor, piece(cursor, table.start), &mut out, cx);
             cursor = table.end;
             let key = format!("{id}#t{n}");
             let chart = self.expanded.contains(&key);
@@ -506,10 +518,10 @@ impl Hangar {
                         .fill(move |_, _, _, _| accent).corner_radii(Corners::all(px(4.))))
                     .into_any_element());
             } else {
-                text(self, key.clone(), id, lines[table.start..table.end].join("\n"), &mut out, cx);
+                text(self, key.clone(), table.start, piece(table.start, table.end), &mut out, cx);
             }
         }
-        text(self, format!("{id}#tail"), id, lines[cursor.min(lines.len())..].join("\n"), &mut out, cx);
+        text(self, format!("{id}#tail"), cursor.min(lines.len()), piece(cursor.min(lines.len()), lines.len()), &mut out, cx);
         out
     }
 

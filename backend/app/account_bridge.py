@@ -449,10 +449,12 @@ ACCOUNT_PREFIXES = ("/api/claude-configs", "/api/codex-contas", "/api/cotas", "/
 NEED_RUST = erro("accounts_need_rust_server", "contas e cotas precisam do servidor Rust")
 
 
-async def forward_public(request, target: str = "/__hangar_server/accounts/public"):
+async def forward_public(request, target: str = "/__hangar_server/accounts/public", *,
+                         keep: tuple[str, ...] = (), limit: int = 8 * 1024 * 1024):
     """Leva ao Rust o pedido de conta que entrou pelas portas do Python, já autenticado, e devolve
     a resposta dele como veio. Em pending, sem transporte, recusa: nunca abre um segundo
-    escritor. Quem chama já respondeu NEED_RUST no modo python."""
+    escritor. Quem chama já respondeu NEED_RUST no modo python. `keep` são os cabeçalhos da
+    resposta do Rust que voltam ao cliente além do tipo."""
     import asyncio
     from starlette.responses import JSONResponse, Response
     config = _preparation_transport
@@ -469,15 +471,17 @@ async def forward_public(request, target: str = "/__hangar_server/accounts/publi
     def send():
         try:
             with _opener.open(forwarded, timeout=330) as response:
-                return response.status, response.headers.get("content-type"), response.read(8 * 1024 * 1024)
+                return response.status, response.headers, response.read(limit)
         except urllib.error.HTTPError as error:
-            return error.code, error.headers.get("content-type"), error.read(8 * 1024 * 1024)
+            return error.code, error.headers, error.read(limit)
 
     try:
-        status, kind, content = await asyncio.to_thread(send)
+        status, headers, content = await asyncio.to_thread(send)
     except OSError:
         return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
-    return Response(content, status_code=status, media_type=kind or "application/json")
+    kept = {name: headers[name] for name in keep if headers.get(name) is not None}
+    return Response(content, status_code=status, media_type=headers.get("content-type") or "application/json",
+                    headers=kept)
 
 
 preparation_jobs = PreparationJobs()
