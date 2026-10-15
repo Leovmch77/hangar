@@ -691,6 +691,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`turn/interrupt`) e o resumo não é repetido por `appendSpeech`. O resumo de outra sessão abre com
   "Chegou um resultado da X, não da Y". Sem `delegationAckFiller` ("um segundo" a cada delegação). Medição
   em "Voz: resultado de outra sessão tomando a vez (14/10/2026)".
+- **Voz: aceitar ouvir uma sessão vale para os próximos resultados dela.** O aceite (`quiet` com `on: false`)
+  e o `follow_session` põem a sessão em `Results::listening`; o resultado seguinte dela, inclusive o que chega
+  durante a leitura ou no "ok" dele, espera o fim da fala e sai sem novo aviso. Outra sessão continua
+  avisada à parte. Encerram: `quiet` ligado, `unfollow_session`, a fala dele cortando a leitura daquela
+  sessão e `LISTEN_IDLE` (10 min) sem resultado dela. Motivo em "Voz: escuta contínua e retorno curto (15/10/2026)".
+- **Voz: pedido completo tem uma confirmação curta.** Ao encaminhar pedido completo, sobretudo longo ou
+  demorado, a voz diz numa frase o que entendeu e aguarda; nunca a cada pedaço de fala nem narrando passos.
+  O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação.
 - **Voz: tela vazia não apaga a conversa.** Sem sessão na tela, a chamada segue com a última sessão real:
   a nota diz que a tela está vazia e de qual sessão a conversa trata, e `read_session`, `send_to_session`
   e `ask_session` sem nome vão para ela. Fechada essa sessão (pela voz ou no app, visto na lista seguinte
@@ -3772,6 +3780,21 @@ embrulham tudo em `except` e saem com 0). O aviso cobre script sumido, Python su
 - **Não verificado em chamada real:** se a voz agora mantém a abertura "Chegou um resultado da X" ao
   parafrasear, e se o `turn/interrupt` sempre chega antes de a mensagem ficar pronta (a mensagem pronta antes
   da fala dele já foi à voz e não é cortada).
+
+## Voz: escuta contínua e retorno curto (15/10/2026)
+
+(`organizer.rs`, `call.rs`, `controller/tools.rs`.) Relato do usuário no uso real, sem medição de diário.
+
+- **Pergunta repetida.** A voz avisou três resultados da hangar, ele disse sim, e a quarta da mesma sessão
+  chegou com ele ainda dentro dos 5 s do "sim": o `push` marcava a fila como guardada na conversa, o fim do
+  primeiro resumo só soltava respostas de `ask_session` e o aviso voltava ("quatro resultados… quer
+  ouvir?"), segurando inclusive as três já aceitas. O aceite valia só para o próximo `flush`
+  (`mem::take(accepted)`). O teste `fourth_result_arriving_mid_reading_continues_the_reading` reproduz.
+- **Silêncio que parecia travamento.** A regra "Encaminhe e fique em silêncio", posta junto com a saída do
+  `delegationAckFiller`, tirou também o retorno de que o pedido foi entendido. O ruído medido era o aviso a
+  cada delegação (fragmentos inclusos), não uma confirmação por pedido completo.
+- **Não verificado em chamada real:** se a voz obedece à confirmação única e se 10 min de `LISTEN_IDLE`
+  cabem no uso.
 
 ## Progresso de MCP no Claude sem terminal
 

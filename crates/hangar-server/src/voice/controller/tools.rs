@@ -264,6 +264,7 @@ impl Controller {
         } else {
             format!("A sessão {name} não estava sendo acompanhada.")
         };
+        self.voice.listen(name, on);
         log(format!("follow on={on} count={}", self.followed.len()));
         self.voice.reply(call, tool_reply(text, true));
         self.dirty = true;

@@ -169,8 +169,9 @@ Escuta
 - Tosse, ruído, música ou conversa ao fundo não são pedidos. 'Eh', 'hum' e palavras soltas não são tarefas.
 
 Quando encaminhar ao organizador
-- Tudo que depende de sessão, conversa, tela, código, internet, plano ou ação no Hangar. Encaminhe e fique em silêncio:
-  nada de 'um segundo', 'deixa eu ver' ou 'vou verificar'.
+- Tudo que depende de sessão, conversa, tela, código, internet, plano ou ação no Hangar.
+- Pedido completo, longo ou demorado: diga numa frase curta o que entendeu e aguarde. Uma por pedido, nunca a cada
+  pedaço de fala nem narrando passos ('vou ver'); não é frase de espera.
 - 'O que a sessão está falando, fazendo ou respondeu' é a conversa da sessão: encaminhe. Nunca diga que não consegue ler a tela.
 - Pedido de análise, opinião ou planejamento ('o que você acha', 'me ajuda a planejar', 'lê você o código') também vai ao
   organizador: é conversa com o assistente, não trabalho para a sessão.
@@ -1465,9 +1466,12 @@ impl SpokenTurns {
 /// só sai quando ele mesmo pedir (`set_quiet(false)`), nunca pelo tempo. `talking`: conversa em curso (fala dele dentro de
 /// `RESULT_SILENCE` ou turno do organizador para ela); nenhum resumo abre nela. O que chegou ou foi cortado durante a conversa
 /// não é despejado depois: vira um aviso de quantos chegaram (`take_offer`) e sai quando ele quiser ouvir.
+/// `listening`: sessões que ele aceitou ouvir, com a última leitura; o resultado seguinte delas espera o fim da fala e sai sem
+/// novo aviso. Pausa (`quiet`), cortar a leitura falando ou `LISTEN_IDLE` sem resultado dela encerram.
 #[derive(Default)]
 pub struct Results { queue: VecDeque<(String, String)>, last: Option<(String, String)>, busy: bool, summaries: HashSet<String>, quiet: bool,
-    talking: bool, held_in_talk: bool, offered: usize, offer: Option<String>, accepted: bool, screen: String }
+    talking: bool, held_in_talk: bool, offered: usize, offer: Option<String>, accepted: bool, screen: String,
+    listening: HashMap<String, Instant> }
 
 /// O aviso sai do Hangar, não do modelo: a origem de cada resultado não depende de paráfrase.
 pub fn offer_text(count: usize, sessions: &[String]) -> String {
@@ -1484,6 +1488,9 @@ pub fn offer_text(count: usize, sessions: &[String]) -> String {
 /// Silêncio contínuo que encerra a fala para os avisos das sessões. Nas chamadas de 11 a 14/10, depois que o Codex fechou a
 /// fala dele, 93% das retomadas sem a voz no meio vieram em menos de 5 s (77% em menos de 2 s).
 pub const RESULT_SILENCE: Duration = Duration::from_secs(5);
+/// Quanto tempo sem resultado de uma sessão aceita encerra a escuta dela.
+// ponytail: prazo fixo; vira configuração se 10 min se mostrar curto ou longo no uso.
+pub const LISTEN_IDLE: Duration = Duration::from_secs(600);
 
 impl Results {
     pub fn turn_started(&mut self) { self.busy = true; }
@@ -1491,14 +1498,18 @@ impl Results {
     /// dentro da janela, com o organizador ocioso; ocupado, sai no fim do turno.
     pub fn set_quiet(&mut self, on: bool) -> Option<Value> {
         self.quiet = on;
-        if !on { (self.held_in_talk, self.offered, self.offer, self.accepted) = (false, 0, None, true); }
+        if on { self.listening.clear(); } else {
+            let now = Instant::now();
+            for session in self.held_sessions() { self.listening.insert(session, now); }
+            (self.held_in_talk, self.offered, self.offer, self.accepted) = (false, 0, None, true);
+        }
         if on || self.busy { None } else { self.flush() }
     }
     pub fn quiet(&self) -> bool { self.quiet }
     /// Quantos esperam na fila (os guardados pelo silêncio inclusive).
     pub fn held(&self) -> usize { self.queue.len() }
     pub fn push(&mut self, session: String, text: String) -> Option<Value> {
-        if self.talking { self.held_in_talk = true; }
+        if self.talking && !self.listening_to(&session) { self.held_in_talk = true; }
         self.queue.push_back((session, text));
         if self.busy { None } else { self.flush() }
     }
@@ -1511,8 +1522,13 @@ impl Results {
     }
     /// O resumo em curso foi cortado pela fala dele: volta para a frente da fila e entra no aviso do fim da conversa.
     pub fn interrupted(&mut self) {
-        if let Some(item) = self.last.take() { self.queue.push_front(item); self.held_in_talk = true; }
+        if let Some(item) = self.last.take() { self.listening.remove(&item.0); self.queue.push_front(item); self.held_in_talk = true; }
     }
+    /// Acompanhar uma sessão é pedir os resultados dela: conta como aceite, com o mesmo prazo; parar de acompanhar encerra.
+    pub fn listen(&mut self, session: &str, on: bool) {
+        if on { self.listening.insert(session.to_owned(), Instant::now()); } else { self.listening.remove(session); }
+    }
+    fn listening_to(&self, session: &str) -> bool { self.listening.get(session).is_some_and(|at| at.elapsed() < LISTEN_IDLE) }
     /// Sessão na tela: o resumo de outra sessão diz que não é ela, para a voz não encaixar um assunto no outro.
     pub fn set_screen(&mut self, name: &str) { name.clone_into(&mut self.screen); }
     /// Aviso pronto para falar, uma vez por aumento da fila guardada.
@@ -1534,13 +1550,17 @@ impl Results {
         let accepted = std::mem::take(&mut self.accepted);
         if self.talking && !accepted { return None; }
         if self.held_in_talk && !self.quiet {
-            let count = self.queue.iter().filter(|(s, _)| !s.is_empty()).count();
-            if count > self.offered { self.offered = count; self.offer = Some(offer_text(count, &self.held_sessions())); }
+            let mut sessions = self.held_sessions();
+            sessions.retain(|s| !self.listening_to(s));
+            let count = self.queue.iter().filter(|(s, _)| !s.is_empty() && !self.listening_to(s)).count();
+            if count > self.offered { self.offered = count; self.offer = Some(offer_text(count, &sessions)); }
         }
-        // Em silêncio, ou com o aviso à espera da resposta dele, só passa a resposta de ask_session (sessão vazia): foi o
-        // usuário quem perguntou.
-        let at = if self.quiet || self.held_in_talk { self.queue.iter().position(|(s, _)| s.is_empty())? } else { 0 };
+        // Em silêncio só passa a resposta de ask_session (sessão vazia): foi o usuário quem perguntou. Com o aviso à espera
+        // da resposta dele, passam também as sessões que ele já aceitou ouvir.
+        let at = if self.quiet { self.queue.iter().position(|(s, _)| s.is_empty())? }
+            else if self.held_in_talk { self.queue.iter().position(|(s, _)| s.is_empty() || self.listening_to(s))? } else { 0 };
         let (session, text) = self.queue.remove(at)?;
+        if self.listening_to(&session) { self.listening.insert(session.clone(), Instant::now()); }
         self.busy = true;
         self.last = Some((session.clone(), text.clone()));
         // Resposta longa demais não cabe na fala; o meio sai e o chat continua com a íntegra.
@@ -1559,6 +1579,10 @@ impl Results {
     pub fn take_summary(&mut self, turn_id: &str) -> bool { self.summaries.remove(turn_id) }
     /// Turno de resumo cuja mensagem ainda não saiu.
     pub fn running_summary(&self) -> Option<String> { self.summaries.iter().next().cloned() }
+    #[cfg(test)]
+    fn age_listening(&mut self, by: Duration) {
+        for at in self.listening.values_mut() { *at = at.checked_sub(by).expect("relógio cedo demais para envelhecer"); }
+    }
 }
 
 #[cfg(test)]
@@ -2611,6 +2635,124 @@ mod tests {
         assert!(results.set_quiet(false).unwrap()["input"][0]["text"].as_str().unwrap().contains("TK-2"), "nada se perdeu");
     }
 
+    /// Aceitou ouvir a deploy: o resultado seguinte dela, chegado durante o "ok" dele, sai no fim da fala sem perguntar de novo.
+    #[test]
+    fn accepted_session_keeps_being_read_without_asking_again() {
+        let text = |v: Value| v["input"][0]["text"].as_str().unwrap().to_owned();
+        let mut results = Results::default();
+        results.set_user_talking(true);
+        results.push("deploy".into(), "Criei a TK-2.".into());
+        results.set_user_talking(false);
+        assert!(results.take_offer().unwrap().contains("da deploy"));
+        assert!(text(results.set_quiet(false).expect("ele quis ouvir")).contains("TK-2"));
+        assert!(results.set_user_talking(true).is_none(), "ele comenta o resultado");
+        assert!(results.push("deploy".into(), "Serviços no ar.".into()).is_none(), "falando: espera");
+        assert!(results.turn_completed().is_none(), "ainda na conversa");
+        assert!(text(results.set_user_talking(false).expect("fim da fala: lê sem perguntar")).contains("Serviços no ar"));
+        assert!(results.take_offer().is_none(), "sem repetir a pergunta");
+    }
+
+    /// O caso real (15/10): três da hangar avisados, ele disse sim, e a quarta chegou no meio da leitura (ele ainda dentro da
+    /// janela do "sim"); a voz perguntou tudo de novo. Agora as quatro saem em sequência, sem aviso novo.
+    #[test]
+    fn fourth_result_arriving_mid_reading_continues_the_reading() {
+        let text = |v: Value| v["input"][0]["text"].as_str().unwrap().to_owned();
+        let mut results = Results::default();
+        results.set_user_talking(true);
+        for n in ["um", "dois", "três"] { results.push("hangar".into(), format!("resultado {n}")); }
+        results.set_user_talking(false);
+        assert!(results.take_offer().unwrap().contains("três resultados da hangar"));
+        results.set_user_talking(true);
+        assert!(text(results.set_quiet(false).expect("o sim dele")).contains("resultado um"));
+        assert!(results.push("hangar".into(), "resultado quatro".into()).is_none(), "lendo: entra na fila");
+        assert!(results.set_user_talking(false).is_none(), "a leitura em curso termina primeiro");
+        assert!(text(results.turn_completed().expect("segue lendo")).contains("resultado dois"));
+        assert!(text(results.turn_completed().unwrap()).contains("resultado três"));
+        assert!(text(results.turn_completed().unwrap()).contains("resultado quatro"));
+        assert!(results.take_offer().is_none(), "nenhum aviso no meio da leitura");
+    }
+
+    #[test]
+    fn following_a_session_counts_as_wanting_its_results() {
+        let mut results = Results::default();
+        results.listen("hangar", true);
+        results.set_user_talking(true);
+        results.push("hangar".into(), "Build passou.".into());
+        assert!(results.set_user_talking(false).is_some() && results.take_offer().is_none(), "ele pediu para acompanhar");
+        results.listen("hangar", false);
+        assert!(asks_again_for_deploy_named(results, "hangar"), "parou de acompanhar: volta a perguntar");
+    }
+
+    #[test]
+    fn listening_to_one_session_does_not_open_the_others() {
+        let mut results = Results::default();
+        results.set_user_talking(true);
+        results.push("deploy".into(), "a".into());
+        results.set_user_talking(false);
+        results.take_offer();
+        results.set_quiet(false);
+        results.turn_completed();
+        results.set_user_talking(true);
+        results.push("hangar".into(), "Build passou.".into());
+        results.push("deploy".into(), "b".into());
+        assert!(results.set_user_talking(false).unwrap()["input"][0]["text"].as_str().unwrap().contains("deploy"), "a aceita sai");
+        let offer = results.take_offer().expect("a outra pergunta");
+        assert!(offer.contains("um resultado da hangar") && !offer.contains("deploy"), "{offer}");
+        results.turn_started();
+        assert!(results.turn_completed().is_none(), "a hangar espera o sim dele");
+    }
+
+    fn listening_to_deploy() -> Results {
+        let mut results = Results::default();
+        results.set_user_talking(true);
+        results.push("deploy".into(), "a".into());
+        results.set_user_talking(false);
+        results.take_offer();
+        results.set_quiet(false);
+        results.turn_completed();
+        results
+    }
+
+    fn asks_again_for_deploy(results: Results) -> bool { asks_again_for_deploy_named(results, "deploy") }
+
+    fn asks_again_for_deploy_named(mut results: Results, session: &str) -> bool {
+        results.turn_completed();
+        results.set_user_talking(true);
+        results.push(session.into(), "b".into());
+        results.set_user_talking(false);
+        results.take_offer().is_some_and(|o| o.contains(session))
+    }
+
+    #[test]
+    fn pause_ends_the_listening() {
+        let mut results = listening_to_deploy();
+        results.set_quiet(true);
+        results.set_quiet(false);
+        assert!(asks_again_for_deploy(results), "depois de pausar, pergunta de novo");
+    }
+
+    #[test]
+    fn cutting_the_reading_ends_the_listening() {
+        let mut results = listening_to_deploy();
+        results.set_user_talking(true);
+        results.push("deploy".into(), "b".into());
+        results.set_user_talking(false);
+        results.turn_started();
+        results.set_user_talking(true);
+        results.interrupted();
+        assert!(results.turn_completed().is_none());
+        assert!(results.set_user_talking(false).is_none(), "ele cortou a leitura: nada sai sozinho");
+        assert!(results.take_offer().unwrap().contains("da deploy"), "volta a perguntar");
+    }
+
+    #[test]
+    fn listening_expires_when_the_session_goes_quiet() {
+        let mut results = listening_to_deploy();
+        results.age_listening(LISTEN_IDLE);
+        assert!(asks_again_for_deploy(results));
+        assert!(!asks_again_for_deploy(listening_to_deploy()), "dentro do prazo, não pergunta");
+    }
+
     #[test]
     fn explicit_quiet_wins_over_the_offer() {
         let mut results = Results::default();
@@ -2644,7 +2786,8 @@ mod tests {
         assert!(VOICE_PROMPT.contains("Chegou um resultado da"), "a voz mantém a origem");
         assert!(VOICE_PROMPT.contains("nunca como resposta"));
         assert!(VOICE_PROMPT.contains("Não transforme afirmação em pergunta"));
-        assert!(VOICE_PROMPT.contains("fique em silêncio"));
+        assert!(VOICE_PROMPT.contains("Pedido completo, longo ou demorado: diga numa frase curta o que entendeu"), "pedido completo tem retorno");
+        assert!(VOICE_PROMPT.contains("Uma por pedido, nunca a cada\n  pedaço de fala nem narrando passos"), "sem retorno a cada fragmento nem narração");
         assert!(VOICE_PROMPT.contains("'pode continuar'"), "retomada depois de interrompida");
         assert!(VOICE_PROMPT.contains("fale todas, com a"), "opções A/B chegam inteiras à fala");
         assert!(ORGANIZER_PROMPT.contains("diga cada uma com a consequência"), "e saem inteiras do organizador");

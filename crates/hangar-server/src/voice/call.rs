@@ -92,7 +92,7 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
 
-enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Listen(String, bool), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
     Sessions(Vec<String>), Jev { turn: String, speech: Option<String>, note: Option<String> },
     /// Número da oferta, SDP e a nota da sessão na tela do aparelho que ofereceu.
     Offer(u64, String, String), Live, Level(f32), Detached }
@@ -119,6 +119,8 @@ impl Voice {
     /// `cwd`: pasta da nova sessão neste disco (`None` se for de outra máquina).
     pub fn retarget(&self, name: String, context: String, cwd: Option<PathBuf>) { let _ = self.commands.send(Command::Retarget(name, context, cwd)); }
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
+    /// Ele pediu (ou deixou de pedir) os resultados desta sessão.
+    pub fn listen(&self, session: String, on: bool) { let _ = self.commands.send(Command::Listen(session, on)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
     /// Pares editados no cartão durante a chamada: o do modo atual vale já no próximo turno.
@@ -547,6 +549,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     log(format!("session result bytes={} quiet={}", text.len(), results.quiet()));
                     if let Some(input) = results.push(session, text) { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                 }
+                Some(Command::Listen(session, on)) => results.listen(&session, on),
                 None => break Ok(()),
             },
             item = incoming.recv() => match item {
