@@ -826,6 +826,7 @@ impl RuntimeRegistry {
                     if let Err(stop) = queue.shutdown().await {
                         tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois de não achar o claude do cano");
                     }
+                    if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&target,&cano,sidecar_dir).await; }
                     return Err(error);
                 },
             };
