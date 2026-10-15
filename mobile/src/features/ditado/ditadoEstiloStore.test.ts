@@ -52,7 +52,7 @@ describe('ditadoEstiloStore', () => {
   it('leitura confirma o padrão do estilo e o teto configurado juntos', async () => {
     vi.mocked(core.getConfigForServer).mockResolvedValue({ campos: {
       dictation_max_minutes: { valor: 12, definido: true, origem: 'app' },
-    } } as core.ConfigServidor);
+    }, somente_leitura: {} });
     await dictationStyleStore(a).getState().carregar();
     expect(dictationStyleStore(a).getState()).toMatchObject({ valor: 'prosa', pronto: true, falhou: false, ceilingMs: 720_000 });
   });
