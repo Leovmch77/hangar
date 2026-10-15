@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ReactNode } from 'react';
+import { act, createElement, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, recarregarSessao, setPermissionMode, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
@@ -54,7 +54,10 @@ const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBac
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
-const voiceInput = vi.hoisted(() => ({ recording: false, onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>) }));
+const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false, delayStop: false, stop: vi.fn(),
+  stopPending: null as Promise<void> | null, finishStop: null as null | (() => void), finished: null as Promise<void> | null,
+  onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>),
+  finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
 vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, canGoBack: () => navigation.canGoBack }),
@@ -136,6 +139,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
     .concat(' native_par_so_leitura chat_plan_implementar chat_plan_iniciando chat_plan_continuar chat_plan_erro chat_plan_indisponivel chat_plan_pedido native_plan_send_failed_stuck')
+    .concat(' native_delivery_failed native_delivery_unproved native_queue_held native_no_safe_delivery native_delivering native_queued native_queue_discard msg_nao_chegou_reenvie')
     // Painel "Na fila" e a edição da mensagem da fila no Composer.
     .concat(' queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down queue_panel_remove atalhos_editar comum_apagar')
     .concat(' queue_panel_update queue_panel_update_aria queue_panel_editing queue_entry_gone')
@@ -158,7 +162,7 @@ vi.mock('react-native-mmkv', () => ({
     getNumber: () => undefined, getBoolean: () => undefined, contains: (key: string) => storage.memory.has(key),
   }),
 }));
-beforeEach(() => { storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; });
+beforeEach(() => { storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; voiceInput.simulateRecorder = false; });
 
 const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {} }));
 
@@ -179,9 +183,37 @@ vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText,
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
 vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
-vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
+vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
+  onFim: NonNullable<typeof voiceInput.onFim>; onErroParada?: (e: Error) => void;
+}) => {
+  const [recording, setRecording] = useState(false);
   voiceInput.onFim = callbacks.onFim;
-  return { gravando: voiceInput.recording, rms: 0, iniciar: () => {}, parar: () => {} };
+  voiceInput.onStopError = callbacks.onErroParada ?? null;
+  const finishRecording = (reason: MotivoFim) => {
+    setRecording(false);
+    voiceInput.finished = callbacks.onFim(new File(['audio'], 'ditado.m4a', { type: 'audio/m4a' }), reason, 'file:///cache/ditado.m4a');
+  };
+  voiceInput.finishRecording = finishRecording;
+  return { gravando: voiceInput.recording || recording, rms: 0,
+    iniciar: async () => { if (voiceInput.simulateRecorder) setRecording(true); },
+    parar: async (reason: MotivoFim) => {
+      voiceInput.stop(reason);
+      if (!voiceInput.simulateRecorder || !recording) return;
+      if (voiceInput.stopPending) return voiceInput.stopPending;
+      if (voiceInput.delayStop) {
+        voiceInput.stopPending = new Promise<void>((resolve) => {
+          voiceInput.finishStop = () => {
+            finishRecording(reason);
+            voiceInput.stopPending = null;
+            resolve();
+          };
+        });
+        return voiceInput.stopPending;
+      }
+      // Como o gravador real: parar termina sem aguardar a transcrição de onFim.
+      finishRecording(reason);
+    },
+  };
 } }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: false }) }) }));
 vi.mock('./CommandSheet', () => ({
@@ -275,7 +307,7 @@ import { AccessibilityInfo, Alert } from 'react-native';
 import { retainDraftAttachment } from './draftAttachments';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import { useServers } from '../stores/servers';
-import { readDraft, setDictationInFlight, writeDictation, writeDraft } from '../stores/drafts';
+import { readDictation, readDraft, setDictationInFlight, writeDraft } from '../stores/drafts';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -1146,17 +1178,11 @@ describe('Orientar texto do composer com os stores reais', () => {
     act(() => root.unmount());
   });
 
-  it.each(['anexo', 'gravação', 'transcrição', 'edição da fila'])('bloqueia Orientar com %s sem perder texto', async (blocked) => {
+  it.each(['anexo', 'edição da fila'])('bloqueia Orientar com %s sem perder texto', async (blocked) => {
     const panel = blocked === 'edição da fila'
       ? { entries: [{ id: 'q1', text: 'mensagem da fila', ts: null }], actions: true } : noQueue;
     writeDraft('s1', 'sess', { version: 1, text: 'rascunho', revision: 1, transcript: null, submission: null,
       attachment: blocked === 'anexo' ? { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } : null });
-    voiceInput.recording = blocked === 'gravação';
-    if (blocked === 'transcrição') {
-      setDictationInFlight('s1', 'sess', 'steer-voice', true);
-      writeDictation('s1', 'sess', { version: 1, id: 'steer-voice', audio: null, transcript: null,
-        draftRevision: 1, before: 'rascunho', motivo: 'botao', status: 'pending', text: '', raw: '', issue: '' });
-    }
     if (blocked === 'edição da fila') {
       const chat = chatStore('s1', 'sess');
       chat.use.setState({ queuePanel: panel });
@@ -1199,6 +1225,310 @@ describe('Orientar texto do composer com os stores reais', () => {
     expect(readDraft('s1', 'sess')?.text).toBe('ainda no campo');
     expect(container.querySelector('textarea')!.value).toBe('ainda no campo');
     act(() => root.unmount());
+  });
+});
+
+describe('Enviar encerra o ditado e aguarda o texto completo', () => {
+  const props = { serverId: 's1', name: 'sess', sessionProvider: 'codex', queuePanel: noQueue, onStop: () => {} };
+  const roots = new Set<ReturnType<typeof createRoot>>();
+  const send = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
+  const steer = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="codex_orientar"]')!;
+  const type = (container: HTMLElement, value: string) => act(() => {
+    const field = container.querySelector('textarea')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const answer = { path: '/up/sess/ditado.m4a', text: 'texto organizado', raw: 'texto cru', aviso: null as string | null };
+  const pendingTranscription = () => {
+    let done!: (value: typeof answer) => void;
+    let fail!: (e: Error) => void;
+    realFirstInput.transcribe.mockImplementationOnce(() => new Promise((resolve, reject) => { done = resolve; fail = reject; }));
+    return { done: (value = answer) => done(value), fail: (e: Error) => fail(e) };
+  };
+  const mount = async (before = '') => {
+    const mounted = await render(createElement(Composer, props));
+    roots.add(mounted.root);
+    if (before) type(mounted.container, before);
+    return mounted;
+  };
+  const start = async (before = '') => {
+    const mounted = await mount(before);
+    await act(async () => button(mounted.container, 'composer_gravar_audio')!.click());
+    expect(button(mounted.container, 'composer_parar_gravacao')).toBeDefined();
+    return mounted;
+  };
+  const close = (root: ReturnType<typeof createRoot>) => act(() => { root.unmount(); roots.delete(root); });
+  const complete = async (request: ReturnType<typeof pendingTranscription>, value = answer) => {
+    await act(async () => { request.done(value); await voiceInput.finished; });
+  };
+  beforeEach(() => {
+    vi.useFakeTimers();
+    _resetChatsForTests();
+    realFirstInput.enabled = true;
+    realFirstInput.send.mockReset().mockResolvedValue(undefined);
+    realFirstInput.steer.mockReset().mockResolvedValue({ ok: true });
+    realFirstInput.upload.mockReset().mockResolvedValue({ path: answer.path });
+    realFirstInput.transcribe.mockReset().mockResolvedValue(answer);
+    voiceInput.simulateRecorder = true;
+    voiceInput.recording = false;
+    voiceInput.delayStop = false;
+    voiceInput.stopPending = null;
+    voiceInput.finishStop = null;
+    voiceInput.finished = null;
+    voiceInput.stop.mockReset();
+    appLifecycle.currentState = 'active';
+    focusNavigation.focused = true;
+    firstInput.attempt = null;
+    useServers.getState().activeId = 's2';
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl' }];
+    chatStore('s1', 'sess').use.setState({ stateEvent: { session: 'sess', state: 'working' } });
+  });
+  afterEach(() => {
+    act(() => { for (const root of roots) root.unmount(); roots.clear(); });
+    voiceInput.simulateRecorder = false;
+    voiceInput.delayStop = false;
+    voiceInput.stopPending = null;
+    voiceInput.finishStop = null;
+    focusNavigation.focused = true;
+    appLifecycle.currentState = 'active';
+    _resetChatsForTests();
+    vi.useRealTimers();
+  });
+
+  it.each(['', 'rascunho anterior'])('gravando com campo "%s": Enviar aparece e espera upload e organização', async (before) => {
+    let uploaded!: (result: { path: string }) => void;
+    realFirstInput.upload.mockImplementationOnce(() => new Promise((resolve) => { uploaded = resolve; }));
+    const request = pendingTranscription();
+    const { container } = await start(before);
+    expect(send(container)).not.toBeNull();
+    expect(send(container).disabled).toBe(false);
+    expect(button(container, 'composer_parar')).toBeUndefined();
+    const source = useServers.getState().servers.find((s) => s.id === 's1')!;
+    await act(async () => { send(container).click(); send(container).click(); });
+    expect(voiceInput.stop).toHaveBeenCalledExactlyOnceWith('botao');
+    expect(realFirstInput.upload).toHaveBeenCalledExactlyOnceWith(source, 'sess', expect.any(File), { audioOnly: true });
+    expect(realFirstInput.transcribe).not.toHaveBeenCalled();
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(readDraft('s1', 'sess')?.text).toBe(before);
+    await act(async () => uploaded({ path: answer.path }));
+    expect(realFirstInput.transcribe).toHaveBeenCalledExactlyOnceWith(source, 'sess', 'ditado.m4a', { limpar: true, estilo: undefined });
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(send(container).disabled).toBe(true);
+    await complete(request);
+    const full = before ? `${before} ${answer.text}` : answer.text;
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith(source, 'sess', full);
+    expect(chatStore('s1', 'sess').use.getState().pending).toMatchObject([{ text: full }]);
+    expect(readDraft('s1', 'sess')?.text).toBe('');
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(realFirstInput.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('Enviar durante a transcrição arma uma intenção sem antecipar nem também iniciar os 3 segundos', async () => {
+    const request = pendingTranscription();
+    const { container } = await start();
+    await act(async () => voiceInput.finishRecording!('silencio'));
+    expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+    expect(send(container).disabled).toBe(false);
+    act(() => { send(container).click(); send(container).click(); });
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    await complete(request);
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith(useServers.getState().servers.find((s) => s.id === 's1'), 'sess', answer.text);
+    expect(container.textContent).not.toContain('composer_enviando_cancelar');
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(realFirstInput.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('Orientar com voz conserva o modo e não chama Enviar ao concluir', async () => {
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    expect(steer(container).disabled).toBe(false);
+    await act(async () => { steer(container).click(); send(container).click(); });
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    await complete(request);
+    expect(realFirstInput.steer).toHaveBeenCalledExactlyOnceWith('sess', `antes ${answer.text}`, useServers.getState().servers.find((s) => s.id === 's1'));
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['falha', 'vazio', 'aviso'])('%s cancela o envio e conserva texto e áudio para recuperar', async (result) => {
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    await act(async () => send(container).click());
+    if (result === 'falha') await act(async () => { request.fail(new Error('transcrição indisponível')); await voiceInput.finished; });
+    else await complete(request, result === 'vazio' ? { ...answer, text: '' } : { ...answer, aviso: 'organização falhou: texto cru', text: answer.raw });
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(readDraft('s1', 'sess')?.text).toBe(result === 'aviso' ? `antes ${answer.raw}` : 'antes');
+    if (result !== 'aviso') expect(readDictation('s1', 'sess')).toMatchObject({ status: 'failed', serverPath: answer.path, audio: { uri: 'file:///cache/ditado.m4a' } });
+    expect(container.textContent).toContain(result === 'falha' ? 'transcrição indisponível' : result === 'vazio' ? 'composer_transcricao_vazia' : 'organização falhou');
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it('erro da parada cancela a intenção mesmo se um resultado tardio chegar', async () => {
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    await act(async () => send(container).click());
+    act(() => voiceInput.onStopError!(new Error('ditado_parada_falhou')));
+    await complete(request);
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('composer_falha_gravacao');
+    expect(readDraft('s1', 'sess')?.text).toBe(`antes ${answer.text}`);
+  });
+
+  it.each(['edição', 'revisão', 'blur', 'background', 'unmount', 'transcript'])('%s durante a espera cancela sem descartar o resultado', async (change) => {
+    const request = pendingTranscription();
+    const { container, root } = await start('antes');
+    await act(async () => send(container).click());
+    if (change === 'edição') { type(container, 'outro'); type(container, 'antes'); }
+    if (change === 'revisão') act(() => {
+      const latest = readDraft('s1', 'sess')!;
+      writeDraft('s1', 'sess', { ...latest, revision: latest.revision + 1 });
+      chatStore('s1', 'sess').use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+    });
+    if (change === 'blur') act(() => {
+      focusNavigation.focused = false;
+      focusNavigation.listeners.get('blur')?.forEach((listener) => listener({ data: { closing: false } }));
+    });
+    if (change === 'background') act(() => {
+      appLifecycle.currentState = 'background';
+      appLifecycle.listeners.forEach((listener) => listener('background'));
+    });
+    if (change === 'unmount') close(root);
+    if (change === 'transcript') {
+      sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/recreated.jsonl' }];
+      await act(async () => root.render(createElement(Composer, props)));
+    }
+    await complete(request);
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: answer.text, serverPath: answer.path });
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'steer', 'discard'] as const)('Cancelar com parada nativa atrasada (%s) preserva só o áudio de uma intenção de envio', async (mode) => {
+    voiceInput.delayStop = true;
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    if (mode !== 'discard') {
+      await act(async () => (mode === 'send' ? send(container) : steer(container)).click());
+      expect(voiceInput.stop).toHaveBeenCalledExactlyOnceWith('botao');
+      expect(voiceInput.stopPending).not.toBeNull();
+      expect(voiceInput.finished).toBeNull();
+      expect(realFirstInput.upload).not.toHaveBeenCalled();
+    }
+    await act(async () => button(container, 'native_dictation_cancel')!.click());
+    expect(voiceInput.finished).toBeNull();
+    expect(realFirstInput.transcribe).not.toHaveBeenCalled();
+    const stopping = voiceInput.stopPending;
+    await act(async () => { voiceInput.finishStop!(); await stopping; });
+    if (mode === 'discard') {
+      expect(realFirstInput.upload).not.toHaveBeenCalled();
+      expect(readDictation('s1', 'sess')).toBeNull();
+      expect(readDraft('s1', 'sess')?.text).toBe('antes');
+    } else {
+      expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+      expect(readDictation('s1', 'sess')).toMatchObject({ status: 'pending', serverPath: answer.path,
+        audio: { uri: 'file:///cache/ditado.m4a' } });
+      await complete(request);
+      expect(readDraft('s1', 'sess')).toMatchObject({ text: `antes ${answer.text}`, dictationId: expect.any(String) });
+      expect(container.querySelector('textarea')!.value).toBe(`antes ${answer.text}`);
+    }
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+  });
+
+  it('Atualizar durante a transcrição faz só PATCH na fila e mantém rascunho e ditado separados', async () => {
+    const panel: QueuePanel = { actions: true, entries: [{ id: 'q1', text: 'texto na fila', ts: null }] };
+    const chat = chatStore('s1', 'sess');
+    chat.use.setState({ queuePanel: panel });
+    const previousServers = useServers.getState().servers;
+    const source: import('@hangar/core').Server = { id: 's1', label: 'A', baseUrl: 'https://a.test', token: 'token-a' };
+    useServers.getState().servers = previousServers.map((s) => s.id === source.id ? source : s);
+    configureApi({ getBaseUrl: () => 'https://b.test', getToken: () => 'token-b', onUnauthorized: () => {}, origin: null,
+      createEventSource: () => { throw new Error('unexpected SSE'); } });
+    const network = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    try {
+      const request = pendingTranscription();
+      const { container, root } = await render(createElement(Composer, { ...props, queuePanel: panel }));
+      roots.add(root);
+      type(container, 'rascunho antes da voz');
+      await act(async () => button(container, 'composer_gravar_audio')!.click());
+      await act(async () => voiceInput.finishRecording!('botao'));
+      const voice = readDictation('s1', 'sess')!;
+      expect(voice.status).toBe('pending');
+      let queuedText = '';
+      act(() => { queuedText = chat.startQueueEdit('q1', 'rascunho antes da voz'); });
+      type(container, queuedText);
+      type(container, 'fila revisada');
+      const update = container.querySelector<HTMLButtonElement>('[aria-label="queue_panel_update_aria"]')!;
+      expect(update.disabled).toBe(false);
+      await act(async () => update.click());
+      const patches = network.mock.calls.filter(([, options]) => options?.method === 'PATCH');
+      expect(patches).toHaveLength(1);
+      expect(patches[0][0]).toBe('https://a.test/api/sessions/sess/queue/q1');
+      expect(JSON.parse(String(patches[0][1]?.body))).toEqual({ text: 'fila revisada' });
+      expect(new Headers(patches[0][1]?.headers).get('Authorization')).toBe('Bearer token-a');
+      expect(chat.use.getState().queueEdit).toBeNull();
+      expect(readDraft('s1', 'sess')).toMatchObject({ text: 'rascunho antes da voz', submission: null });
+      expect(readDictation('s1', 'sess')).toEqual(voice);
+      expect(realFirstInput.send).not.toHaveBeenCalled();
+      expect(realFirstInput.steer).not.toHaveBeenCalled();
+      expect(network.mock.calls.some(([url]) => /\/(input|steer)$/.test(String(url)))).toBe(false);
+      await complete(request);
+      expect(readDraft('s1', 'sess')?.text).toBe('rascunho antes da voz');
+      expect(readDictation('s1', 'sess')).toMatchObject({ id: voice.id, status: 'ready', text: answer.text });
+      expect(realFirstInput.send).not.toHaveBeenCalled();
+      expect(realFirstInput.steer).not.toHaveBeenCalled();
+    } finally {
+      network.mockRestore();
+      useServers.getState().servers = previousServers;
+    }
+  });
+
+  it.each(['anexo', 'grupo', 'pares'])('mudar %s durante a espera cancela a intenção', async (change) => {
+    if (change === 'anexo') writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', submission: null,
+      attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['par'] }];
+    const request = pendingTranscription();
+    const { container, root } = await start(change === 'anexo' ? '' : 'antes');
+    await act(async () => send(container).click());
+    if (change === 'anexo') act(() => button(container, 'board_remover_anexo')!.click());
+    if (change === 'grupo') {
+      act(() => button(container, 'composer_adicionar_ao_chat')!.click());
+      act(() => button(container, 'send-to-group')!.click());
+    }
+    if (change === 'pares') {
+      sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['outro'] }];
+      await act(async () => root.render(createElement(Composer, props)));
+    }
+    await complete(request);
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(readDraft('s1', 'sess')?.text).toBe(`antes ${answer.text}`);
+  });
+
+  it.each([false, true])('transcrição de outra montagem só envia o mesmo resultado aplicado, aviso=%s', async (warning) => {
+    const request = pendingTranscription();
+    const first = await start('antes');
+    await act(async () => voiceInput.finishRecording!('botao'));
+    const finishing = voiceInput.finished;
+    close(first.root);
+    const back = await mount();
+    expect(back.container.querySelector('textarea')!.value).toBe('antes');
+    expect(send(back.container).disabled).toBe(false);
+    act(() => { send(back.container).click(); send(back.container).click(); });
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    await act(async () => { request.done({ ...answer, aviso: warning ? 'organização falhou' : null }); await finishing; });
+    if (warning) {
+      expect(realFirstInput.send).not.toHaveBeenCalled();
+      expect(back.container.querySelector('textarea')!.value).toBe(`antes ${answer.text}`);
+    } else {
+      expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith(useServers.getState().servers.find((s) => s.id === 's1'), 'sess', `antes ${answer.text}`);
+      expect(back.container.querySelector('textarea')!.value).toBe('');
+    }
   });
 });
 
