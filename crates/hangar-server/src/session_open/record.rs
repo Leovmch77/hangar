@@ -50,36 +50,42 @@ fn text(meta: &Value, key: &str) -> Option<String> { meta[key].as_str().filter(|
 /// Spec de uma sessão viva que nasceu antes do registro, montado do sidecar dela. A conta gravada
 /// vale como escolhida (reabrir nunca a troca pela cota). Claude com terminal, Pi, omp, Kimi e o
 /// sidecar sem `key` (Codex com terminal, CDX-9) não dão spec: `None`.
-pub fn from_sidecars(home: &Path, name: &str) -> Option<SessionSpec> {
+/// Sidecar ilegível, que não é objeto ou sem `cwd` é erro, nunca "sessão sem sidecar".
+pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>> {
     let safe = crate::list::discover_other::sanitize_session_name(name);
     let hangar = home.join(".hangar");
-    let read = |path: PathBuf| crate::runtime::codex_sidecar::load(&path).map(Value::Object);
+    let read = |path: &Path| crate::runtime::codex_sidecar::read(path).map(|meta| meta.map(Value::Object));
+    let cwd = |meta: &Value| text(meta, "cwd").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("sidecar de {name} sem cwd")));
     let created = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
     let tier = |meta: &Value| meta["service_tier"].as_str().and_then(|t| serde_json::from_value::<ServiceTier>(Value::from(t)).ok());
     let claude_path = hangar.join("claude-headless").join(format!("{safe}.json"));
-    if let Some(meta) = read(claude_path.clone()) {
+    if let Some(meta) = read(&claude_path)? {
+        let cwd = cwd(&meta)?;
+        let Some(key) = text(&meta, "key") else { return Ok(None) };
         let config_dir = text(&meta, "config_dir");
         let account = match text(&meta, "engine") {
             Some(name) => Account::Engine { name, account: text(&meta, "engine_account"), config_dir,
                 context_window: meta["context_window"].as_u64() },
             None => config_dir.map_or(Account::Default, |config_dir| Account::Claude { config_dir }),
         };
-        return Some(SessionSpec {
-            version: SPEC_VERSION, key: text(&meta, "key")?, name: text(&meta, "name").unwrap_or_else(|| name.into()),
-            cwd: text(&meta, "cwd")?, provider: AgentProvider::Claude, surface: Surface::Headless, account,
+        return Ok(Some(SessionSpec {
+            version: SPEC_VERSION, key, name: text(&meta, "name").unwrap_or_else(|| name.into()),
+            cwd, provider: AgentProvider::Claude, surface: Surface::Headless, account,
             account_source: AccountSource::Explicit, model: text(&meta, "model"), effort: text(&meta, "effort"), service_tier: tier(&meta),
             permission_mode: text(&meta, "permission_mode").as_deref().and_then(PermissionMode::claude),
             // A seleção de plugins e skills mora no registro de customizações do Rust, pelo id da conversa.
             subagent_model: text(&meta, "subagent_model"), customizations: None, jev: meta["jev"] == true,
             read_only: meta["read_only"] == true, worktree: None, creator: None, created_at: created(&claude_path),
-        });
+        }));
     }
     let codex_path = crate::runtime::codex_sidecar::path(&crate::runtime::codex_sidecar::dir(home), name);
-    let meta = read(codex_path.clone())?;
-    Some(SessionSpec {
-        version: SPEC_VERSION, key: text(&meta, "key")?, name: text(&meta, "name").unwrap_or_else(|| name.into()),
-        cwd: text(&meta, "cwd")?, provider: AgentProvider::Codex,
+    let Some(meta) = read(&codex_path)? else { return Ok(None) };
+    let cwd = cwd(&meta)?;
+    let Some(key) = text(&meta, "key") else { return Ok(None) };
+    Ok(Some(SessionSpec {
+        version: SPEC_VERSION, key, name: text(&meta, "name").unwrap_or_else(|| name.into()),
+        cwd, provider: AgentProvider::Codex,
         surface: if meta["headless"] == true { Surface::Headless } else { Surface::Terminal },
         account: Account::Codex { account_id: text(&meta, "codex_account").unwrap_or_else(|| "default".into()) },
         account_source: AccountSource::Explicit, model: text(&meta, "model"), effort: text(&meta, "effort"), service_tier: tier(&meta),
@@ -87,5 +93,5 @@ pub fn from_sidecars(home: &Path, name: &str) -> Option<SessionSpec> {
         permission_mode: text(&meta, "permission_mode").as_deref().and_then(PermissionMode::codex),
         subagent_model: None, customizations: None, jev: meta["jev"] == true, read_only: meta["read_only"] == true,
         worktree: None, creator: None, created_at: created(&codex_path),
-    })
+    }))
 }

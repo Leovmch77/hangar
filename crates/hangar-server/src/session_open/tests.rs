@@ -115,7 +115,7 @@ fn reopen_keeps_what_the_change_does_not_name() {
 
 /// Os fatos do cenário: o estado inicial (`state`) e as respostas das bordas (`fakes`) que o
 /// harness deu ao Python (`session_open_contract.py`), lidos do mesmo jeito que o Python os lê.
-struct FixtureFacts { files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value }
+struct FixtureFacts { files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value, broken_mode: bool }
 
 /// A ponte do ditado com o Rust fora, como o harness a responde (`session_open_contract.py:941`).
 const HARNESS_BRIDGE_DOWN: &str = "O servidor Rust de organização está indisponível.";
@@ -129,6 +129,7 @@ impl FixtureFacts {
             dirs: state["dirs"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
             tmux: state["tmux_sessions"].as_array().cloned().unwrap_or_default(),
             fakes: fixture["scenario"]["fakes"].clone(),
+            broken_mode: false,
         }
     }
 
@@ -146,18 +147,8 @@ impl FixtureFacts {
     }
 
     fn bridge(&self, op: &str) -> Option<&Value> { self.fakes["rust_bridge"].get(format!("dictation.{op}")) }
-}
 
-impl resolve::OpenFacts for FixtureFacts {
-    fn providers(&self) -> resolve::ProviderCatalog {
-        // O harness põe os cinco binários no PATH; login Claude é a credencial gravada.
-        let logged = self.files.keys().any(|path| path.ends_with("/.credentials.json"));
-        resolve::ProviderCatalog { available: AgentProvider::ALL.to_vec(),
-            connected: if logged { vec![AgentProvider::Claude] } else { vec![] }, disconnected: vec![],
-            remembered: self.runtime()["last_session_provider"].as_str().map(str::to_owned) }
-    }
-
-    fn creator(&self, name: &str) -> Option<resolve::CreatorFacts> {
+    fn find_creator(&self, name: &str) -> Option<resolve::CreatorFacts> {
         if let Some(meta) = self.sidecar("claude-headless", name) {
             let mut mode = meta["permission_mode"].as_str().map(str::to_owned);
             if mode.as_deref() == Some("plan") { mode = meta["previous_non_plan"].as_str().map(str::to_owned); }
@@ -180,6 +171,18 @@ impl resolve::OpenFacts for FixtureFacts {
             permission_mode: self.transcript_mode(sid), codex_account: None,
         })
     }
+}
+
+impl resolve::OpenFacts for FixtureFacts {
+    fn providers(&self) -> resolve::ProviderCatalog {
+        // O harness põe os cinco binários no PATH; login Claude é a credencial gravada.
+        let logged = self.files.keys().any(|path| path.ends_with("/.credentials.json"));
+        resolve::ProviderCatalog { available: AgentProvider::ALL.to_vec(),
+            connected: if logged { vec![AgentProvider::Claude] } else { vec![] }, disconnected: vec![],
+            remembered: self.runtime()["last_session_provider"].as_str().map(str::to_owned) }
+    }
+
+    fn creator(&self, name: &str) -> Result<Option<resolve::CreatorFacts>, OpenError> { Ok(self.find_creator(name)) }
 
     fn defaults(&self) -> resolve::ServerDefaults {
         let runtime = self.runtime();
@@ -243,6 +246,7 @@ impl resolve::OpenFacts for FixtureFacts {
     }
 
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> {
+        if self.broken_mode { return Err("settings.json: JSON inválido".into()); }
         let settings = self.file(&format!("{}/settings.json", config_dir.unwrap_or(&format!("{HOME}/.claude"))));
         Ok(settings.and_then(|s| s["permissions"]["defaultMode"].as_str()).map(str::to_owned))
     }
@@ -435,32 +439,10 @@ fn names_longer_than_the_terminal_accepts_are_refused() {
 fn an_unreadable_account_mode_is_a_warning() {
     let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
     let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
-    let facts = BrokenMode(FixtureFacts::of(&fixture));
+    let facts = FixtureFacts { broken_mode: true, ..FixtureFacts::of(&fixture) };
     let resolved = resolve::resolve_open(&request, &facts).unwrap();
     assert_eq!(resolved.spec.permission_mode, Some(PermissionMode::BypassPermissions));
     assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
-}
-
-struct BrokenMode(FixtureFacts);
-
-impl resolve::OpenFacts for BrokenMode {
-    fn providers(&self) -> resolve::ProviderCatalog { self.0.providers() }
-    fn creator(&self, name: &str) -> Option<resolve::CreatorFacts> { self.0.creator(name) }
-    fn defaults(&self) -> resolve::ServerDefaults { self.0.defaults() }
-    fn codex_logins(&self) -> Vec<resolve::CodexLogin> { self.0.codex_logins() }
-    fn claude_quotas(&self) -> Vec<Value> { self.0.claude_quotas() }
-    fn existing_dir(&self, cwd: &str) -> Option<String> { self.0.existing_dir(cwd) }
-    fn config_dirs(&self) -> Result<Vec<String>, OpenError> { self.0.config_dirs() }
-    fn engines(&self) -> Vec<String> { self.0.engines() }
-    fn supports_fast(&self, e: Option<&str>, m: Option<&str>) -> bool { self.0.supports_fast(e, m) }
-    fn fixed_engine_model(&self, e: &str, a: &str, m: Option<&str>) -> Result<String, OpenError> { self.0.fixed_engine_model(e, a, m) }
-    fn engine_window(&self, e: &str, m: &str, a: Option<&str>) -> Option<u64> { self.0.engine_window(e, m, a) }
-    fn codex_home(&self, id: &str) -> Result<String, OpenError> { self.0.codex_home(id) }
-    fn codex_choice(&self, h: Option<&str>, m: Option<&str>, e: Option<&str>, t: Option<ServiceTier>) -> Result<(), resolve::CodexCatalogError> { self.0.codex_choice(h, m, e, t) }
-    fn account_mode(&self, _: Option<&str>) -> Result<Option<String>, String> { Err("settings.json: JSON inválido".into()) }
-    fn name_in_use(&self, name: &str) -> bool { self.0.name_in_use(name) }
-    fn new_key(&self) -> String { self.0.new_key() }
-    fn now(&self) -> f64 { self.0.now() }
 }
 
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
@@ -505,23 +487,62 @@ fn sidecar_home(fixture: &str, kind: &str, name: &str, patch: impl FnOnce(&mut V
 #[test]
 fn live_sessions_without_a_record_get_their_spec_from_the_sidecar() {
     let home = sidecar_home("create_inherit_from_headless_creator", "claude-headless", "mae", |_| {});
-    let spec = record::from_sidecars(home.path(), "mae").unwrap();
+    let spec = record::from_sidecars(home.path(), "mae").unwrap().unwrap();
     assert_eq!((spec.provider, spec.surface, spec.key.as_str()), (AgentProvider::Claude, Surface::Headless, "a".repeat(32).as_str()));
     assert_eq!(spec.account, Account::Claude { config_dir: "<ROOT>/home/.claude-b".into() });
     assert_eq!((spec.account_source, spec.permission_mode, spec.jev), (AccountSource::Explicit, Some(PermissionMode::AcceptEdits), false));
 
     let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |_| {});
-    let spec = record::from_sidecars(home.path(), "mae-codex").unwrap();
+    let spec = record::from_sidecars(home.path(), "mae-codex").unwrap().unwrap();
     assert_eq!((spec.provider, spec.surface), (AgentProvider::Codex, Surface::Headless));
     assert_eq!(spec.account, Account::Codex { account_id: "default".into() });
     assert_eq!(spec.permission_mode, Some(PermissionMode::ApproveForMe));
     // S-05: modo que o Hangar não conhece fica ausente; quem reabre recusa em vez de abrir em Full Access.
     let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| m["permission_mode"] = json!("Tudo"));
-    assert_eq!(record::from_sidecars(home.path(), "mae-codex").unwrap().permission_mode, None);
+    assert_eq!(record::from_sidecars(home.path(), "mae-codex").unwrap().unwrap().permission_mode, None);
     // CDX-9: sidecar Codex sem `key` não dá spec.
     let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| { m.as_object_mut().unwrap().remove("key"); });
-    assert_eq!(record::from_sidecars(home.path(), "mae-codex"), None);
-    assert_eq!(record::from_sidecars(home.path(), "pi-sem-sidecar"), None);
+    assert_eq!(record::from_sidecars(home.path(), "mae-codex").unwrap(), None);
+    assert_eq!(record::from_sidecars(home.path(), "pi-sem-sidecar").unwrap(), None);
+}
+
+/// Sidecar quebrado não é "sessão sem sidecar": quem reabre ou herda precisa saber que não leu.
+#[test]
+fn unreadable_sidecars_are_errors_not_absent() {
+    let cases = [("claude-headless", "{"), ("codex-sessions", "[]"), ("claude-headless", r#"{"key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#)];
+    for (kind, content) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".hangar").join(kind);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.json"), content).unwrap();
+        let read = record::from_sidecars(home.path(), "s");
+        assert_eq!(read.as_ref().map_err(std::io::Error::kind).err(), Some(std::io::ErrorKind::InvalidData), "{kind} {content}: {read:?}");
+    }
+}
+
+/// Os fatos de verdade numa casa de teste, sem tmux nem `/proc` de quem roda o teste.
+fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> facts::LocalFacts {
+    let env = [("HOME", home), ("PATH", &home.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
+    facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
+        .with_terminal(crate::list::mux::Mux::with_program(home.join("bin/tmux"), std::time::Duration::from_secs(2)),
+            std::sync::Arc::new(crate::list::procs::ProcFs::with_root(home.join("proc"))))
+}
+
+fn test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
+}
+
+#[test]
+fn an_unreadable_creator_record_refuses_instead_of_inheriting_nothing() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("work")).unwrap();
+    std::fs::create_dir_all(home.path().join(".hangar/codex-sessions")).unwrap();
+    std::fs::write(home.path().join(".hangar/codex-sessions/mae.json"), "{quebrado").unwrap();
+    let body = json!({"name": "filha", "cwd": home.path().join("work"), "provider": "claude", "creator": "mae"});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let result = resolve::resolve_open(&request, &local_facts(home.path(), &runtime));
+    assert_eq!(result.err().map(|e| (e.status, e.code)), Some((409, Some("erro_criadora_ilegivel"))));
 }
 
 proptest! {

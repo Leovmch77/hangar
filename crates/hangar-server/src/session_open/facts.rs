@@ -24,11 +24,22 @@ pub struct LocalFacts {
     runtime: tokio::runtime::Handle,
     models: crate::dictation::catalog::Models,
     slots: tokio::sync::Semaphore,
+    mux: crate::list::mux::Mux,
+    procs: std::sync::Arc<dyn ProcessView>,
 }
 
 impl LocalFacts {
     pub fn new(env: AccountEnvironment, runtime: tokio::runtime::Handle) -> Self {
-        Self { accounts: AccountService::new(env), runtime, models: Default::default(), slots: tokio::sync::Semaphore::new(4) }
+        Self { accounts: AccountService::new(env), runtime, models: Default::default(), slots: tokio::sync::Semaphore::new(4),
+            mux: Default::default(), procs: std::sync::Arc::new(SystemProcs::default()) }
+    }
+
+    /// Só para teste: multiplexador e `/proc` de mentira, para nunca ler o tmux de quem roda o teste.
+    #[doc(hidden)]
+    pub fn with_terminal(mut self, mux: crate::list::mux::Mux, procs: std::sync::Arc<dyn ProcessView>) -> Self {
+        self.mux = mux;
+        self.procs = procs;
+        self
     }
 
     fn env(&self) -> &AccountEnvironment { &self.accounts.env }
@@ -45,7 +56,7 @@ impl LocalFacts {
 
     fn panes(&self) -> Vec<crate::list::mux::Pane> {
         // Multiplexador fora é "sem sessão de terminal", como o `has_session` do Python.
-        self.runtime.block_on(crate::list::mux::Mux::default().list_panes()).unwrap_or_default()
+        self.runtime.block_on(self.mux.list_panes()).unwrap_or_default()
     }
 
     fn engines_file(&self) -> Value {
@@ -59,7 +70,7 @@ impl LocalFacts {
         let panes = self.panes();
         let pane = panes.iter().find(|p| p.session == name && !p.hidden)?;
         let provider = pane.provider.as_deref().and_then(AgentProvider::parse).unwrap_or(AgentProvider::Claude);
-        let procs = SystemProcs::default();
+        let procs = &*self.procs;
         let pid = pane.pid.filter(|pid| *pid != 0).map(i64::from);
         // `_caller_config_dir`: pane sem pid ou ambiente ilegível não confirmam a conta.
         let config_dir = match pid.map(|pid| procs.env_var(pid, "CLAUDE_CONFIG_DIR")) {
@@ -68,7 +79,7 @@ impl LocalFacts {
         };
         let account = config_dir.clone().ok().flatten().map(PathBuf::from).unwrap_or_else(|| self.env().claude_base.clone());
         let transcript = procs.children(std::time::Duration::ZERO).ok().and_then(|children| {
-            crate::list::discover::resolve_one(&panes, &procs, &children, &account.join("projects"),
+            crate::list::discover::resolve_one(&panes, procs, &children, &account.join("projects"),
                 &mut Default::default(), name, &pane.cwd, pid).jsonl
         });
         let cache = Mutex::new(crate::list::capped::Capped::new(1));
@@ -163,24 +174,22 @@ impl OpenFacts for LocalFacts {
         ProviderCatalog { available, connected, disconnected: Vec::new(), remembered: text(&runtime["last_session_provider"]) }
     }
 
-    fn creator(&self, name: &str) -> Option<CreatorFacts> {
-        let headless = self.headless_sidecar(name);
-        if headless.exists() {
-            let meta = read_json(&headless).ok().flatten().filter(Value::is_object);
-            let Some(meta) = meta else {
-                return Some(CreatorFacts { provider: AgentProvider::Claude, headless: true, config_dir: Err(()), permission_mode: None, codex_account: None });
-            };
+    fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError> {
+        // Registro existente e ilegível não é "criadora não encontrada": herdar nada calado erraria conta e modo.
+        let read = |path: &Path| crate::runtime::codex_sidecar::read(path).map_err(|_| OpenError::new(409, "erro_criadora_ilegivel",
+            format!("não consegui ler o registro da sessão criadora '{name}'; escolha a conta e o modo")));
+        if let Some(meta) = read(&self.headless_sidecar(name))?.map(Value::Object) {
             let mut mode = text(&meta["permission_mode"]);
             if mode.as_deref() == Some("plan") { mode = text(&meta["previous_non_plan"]); }
-            return Some(CreatorFacts { provider: AgentProvider::Claude, headless: true, config_dir: Ok(text(&meta["config_dir"])),
-                permission_mode: mode, codex_account: None });
+            return Ok(Some(CreatorFacts { provider: AgentProvider::Claude, headless: true, config_dir: Ok(text(&meta["config_dir"])),
+                permission_mode: mode, codex_account: None }));
         }
-        if let Some(meta) = crate::runtime::codex_sidecar::load(&self.codex_sidecar(name)) {
-            return Some(CreatorFacts { provider: AgentProvider::Codex, headless: meta.get("headless") == Some(&Value::Bool(true)),
+        if let Some(meta) = read(&self.codex_sidecar(name))? {
+            return Ok(Some(CreatorFacts { provider: AgentProvider::Codex, headless: meta.get("headless") == Some(&Value::Bool(true)),
                 config_dir: Ok(None), permission_mode: meta.get("permission_mode").and_then(text),
-                codex_account: meta.get("codex_account").and_then(text) });
+                codex_account: meta.get("codex_account").and_then(text) }));
         }
-        self.terminal_creator(name)
+        Ok(self.terminal_creator(name))
     }
 
     fn defaults(&self) -> ServerDefaults {

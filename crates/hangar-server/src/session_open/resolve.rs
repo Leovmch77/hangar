@@ -53,7 +53,8 @@ pub enum CodexCatalogError {
 
 pub trait OpenFacts {
     fn providers(&self) -> ProviderCatalog;
-    fn creator(&self, name: &str) -> Option<CreatorFacts>;
+    /// `Ok(None)` = não existe; registro da criadora ilegível é erro, nunca "não encontrada".
+    fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError>;
     fn defaults(&self) -> ServerDefaults;
     /// Contas Codex com login conectado.
     fn codex_logins(&self) -> Vec<CodexLogin>;
@@ -125,7 +126,7 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
 
     // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta.
     if let Some(creator) = request.creator.as_deref().filter(|_| request.inherit != Some(false)) {
-        match facts.creator(creator) {
+        match facts.creator(creator)? {
             None => warnings.push(format!("sessão criadora '{creator}' não encontrada; nada foi herdado")),
             Some(info) => {
                 // Perfil do omp já define a conta; a criadora Codex não tem conta Claude.
