@@ -449,6 +449,17 @@ pub(crate) mod tests {
         assert_eq!(polls, 5, "conferido a cada 100 ms durante a janela");
     }
 
+    /// S-55: todo pane nasce com o provedor dele em `CP_PROVIDER` (o `/resume` do Python o deixava
+    /// vazio); o tipo não tem o vazio, e o `-e` vem antes de qualquer outro da sessão.
+    #[test]
+    fn every_pane_carries_its_provider() {
+        for provider in AgentProvider::ALL {
+            let argv = new_session_argv(&machine(), &PaneSpec { provider, ..claude(Vec::new(), None) });
+            let at = argv.iter().position(|a| a == &format!("CP_PROVIDER={}", provider.name())).unwrap();
+            assert_eq!((argv[at - 1].as_str(), argv[at - 2].as_str()), ("-e", "CP_SESSION_NAME=s1"));
+        }
+    }
+
     #[tokio::test]
     async fn a_refusal_is_an_error_with_the_stderr_tail() {
         let mux = FakeMux::answering(vec![failed("aviso\nduplicate session: s1\n\n")]);
