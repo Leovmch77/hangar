@@ -827,6 +827,31 @@ describe('recusas e recuperação da lista', () => {
   });
 
   test.each([
+    { event: {}, error: 'offline', offline: true },
+    { event: { xhrStatus: 503 }, error: m.sessao_erro_servidor(), offline: false },
+  ])('erro SSE após REST 200 distingue rede de HTTP sem zerar recuo: $error', async ({ event, error, offline }) => {
+    useServers.setState({ activeId: null });
+    fetchMock.mockResolvedValue(response([]));
+    const rel = useSessions.getState().retain();
+    await settle();
+    for (const [index, delay] of [2000, 5000, 30000].entries()) {
+      expect(useSessions.getState().byServer[0].error).toBeNull();
+      created[index].onerror?.(event);
+      expect(useSessions.getState().byServer[0].error).toBe(error);
+      expect(estaDesligado('srv1')).toBe(offline);
+      expect(useSessions.getState().rows).toEqual([]);
+      expect(created[index].close).toHaveBeenCalledTimes(1);
+      await advance(delay - 1);
+      expect(created).toHaveLength(index + 1);
+      expect(fetchMock).toHaveBeenCalledTimes(index + 1);
+      await advance(1);
+      expect(created).toHaveLength(index + 2);
+      expect(fetchMock).toHaveBeenCalledTimes(index + 2);
+    }
+    rel();
+  });
+
+  test.each([
     { xhrStatus: 503 }, { xhrStatus: 200, type: 'close' }, {}, { type: 'close' }, { type: 'timeout' },
   ])('REST 200 e ping não zeram recuo após erro SSE $xhrStatus/$type; só lista SSE válida zera', async (error) => {
     useServers.setState({ activeId: null });
@@ -864,6 +889,7 @@ describe('recusas e recuperação da lista', () => {
   });
 
   test('falha ao abrir EventSource escala mesmo após lista REST válida', async () => {
+    useServers.setState({ activeId: null });
     const open = vi.fn(() => { throw new Error('stream_unavailable'); });
     configureApi({
       getBaseUrl: () => useServers.getState().active()?.baseUrl ?? '',
@@ -875,7 +901,8 @@ describe('recusas e recuperação da lista', () => {
     const rel = useSessions.getState().retain();
     await settle();
     for (const [index, delay] of [2000, 5000, 30000].entries()) {
-      expect(useSessions.getState().byServer[0].error).not.toBeNull();
+      expect(useSessions.getState().byServer[0].error).toBe('offline');
+      expect(estaDesligado('srv1')).toBe(true);
       await advance(delay - 1);
       expect(open).toHaveBeenCalledTimes(index + 1);
       expect(fetchMock).toHaveBeenCalledTimes(index + 1);

@@ -330,7 +330,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       es.close();
       if (http && rejected(status)) return;
       httpFailed();
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: http || countedHttpFailure ? m.sessao_erro_servidor() : 'offline' });
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: http ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
       esquecerRota(s.id);
       scheduleRetry(s.id, get, set);
