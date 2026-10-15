@@ -85,16 +85,18 @@ Status: ready-for-agent
   Ordem: provider padrão → herança (D-001, `inherit`) → conta Codex padrão → 95% (D-003) → padrão
   completo da matriz (D-012) → validação (modelo, esforço, tier, motor, permissão, customizações,
   nome). "+" sem modo = padrão da conta (D-010). Recusas com os códigos de hoje
-  (`erro_motor_invalido`, `erro_nome_em_uso`, `erro_grupo_limpeza_falhou`, …).
+  (`erro_motor_invalido`, `erro_nome_em_uso`, …); as que dependem de efeito (como
+  `erro_grupo_limpeza_falhou`) são do lançamento, na Task 4.
 - [x] **Step 3: Registro gravado**
   Arquivo novo por sessão, indexado pela `key`, atômico, só o Rust grava. Os sidecars de hoje não
   perdem campo nesta entrega (revert seguro). Contrato com o `hangar-codex-tui` (lê e grava
   `permission_mode` do sidecar Codex) e com o rename (Python). Leitura dos sidecars existentes para
   as sessões já vivas.
 - [x] **Step 4: Biblioteca + comando de terminal (D-013)**
-  `resolve_open()` e o plano de lançamento numa biblioteca usada pelo servidor e por um comando
-  (`hangar-open`, nome a fechar). Com o servidor de pé, o comando pede ao servidor; fora do ar, abre
-  igual e o servidor adota depois.
+  `resolve_open()` numa biblioteca usada pelo servidor e por um comando (`hangar-open`). Com o
+  servidor de pé, o comando pede ao servidor; fora do ar, resolve nesta máquina, dos mesmos
+  arquivos, e imprime o spec. Abrir igual com o servidor fora (e o servidor adotar depois) entra na
+  Task 4, junto com o lançador.
 - [x] **Step 5: Despacho provisório do `POST /api/sessions` no Rust**
   Por provider × com/sem terminal; o que ainda não migrou responde 421 e segue ao Python só durante
   a branch. Sai na Task 11.
