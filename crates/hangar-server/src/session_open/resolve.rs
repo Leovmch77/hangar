@@ -187,7 +187,7 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
             // `validate` já recusou o modo fora da lista.
             Some(mode) => PermissionMode::claude(mode).unwrap_or(PermissionMode::BypassPermissions),
             // D-010: sem escolha nem criadora vale o modo da conta.
-            None => account_mode(config_dir.as_deref(), facts, &mut warnings),
+            None => account_mode(config_dir.as_deref(), facts)?,
         }),
         // O lançador do Codex sem modo abre em Full Access (`sem_terminal.MODO_PADRAO`).
         AgentProvider::Codex => Some(permission.as_deref().and_then(PermissionMode::codex).unwrap_or(PermissionMode::FullAccess)),
@@ -242,15 +242,13 @@ fn creator_mode(info: &CreatorFacts) -> Option<PermissionMode> {
 }
 
 /// `modo_da_conta`: `default` vira `manual`; ausente ou desconhecido, o padrão do app (bypass).
-fn account_mode(config_dir: Option<&str>, facts: &dyn OpenFacts, warnings: &mut Vec<String>) -> PermissionMode {
+/// Settings ilegível recusa: cair no modo mais permissivo pareceria escolha de quem abriu.
+fn account_mode(config_dir: Option<&str>, facts: &dyn OpenFacts) -> Result<PermissionMode, OpenError> {
     match facts.account_mode(config_dir) {
-        Ok(Some(mode)) => PermissionMode::claude(if mode == "default" { "manual" } else { &mode }).unwrap_or(PermissionMode::BypassPermissions),
-        Ok(None) => PermissionMode::BypassPermissions,
-        Err(reason) => {
-            // Cair no modo mais permissivo por arquivo quebrado não pode parecer escolha de quem abriu.
-            warnings.push(format!("não consegui ler o modo padrão da conta ({reason}); a sessão nasce em bypassPermissions"));
-            PermissionMode::BypassPermissions
-        }
+        Ok(Some(mode)) => Ok(PermissionMode::claude(if mode == "default" { "manual" } else { &mode }).unwrap_or(PermissionMode::BypassPermissions)),
+        Ok(None) => Ok(PermissionMode::BypassPermissions),
+        Err(reason) => Err(OpenError::new(409, "erro_modo_padrao_ilegivel",
+            format!("não consegui ler o modo padrão da conta ({reason}); escolha o modo de permissão"))),
     }
 }
 

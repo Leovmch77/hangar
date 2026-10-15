@@ -434,15 +434,19 @@ fn names_longer_than_the_terminal_accepts_are_refused() {
     assert!(resolve_fixture(&fixture).is_ok());
 }
 
-/// S-07 e a falha visível: settings ilegível não vira bypass calado.
+/// Settings da conta ilegível sem modo pedido: recusa com código, nunca o modo mais permissivo
+/// calado. Com o modo pedido, abre.
 #[test]
-fn an_unreadable_account_mode_is_a_warning() {
-    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
-    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+fn an_unreadable_account_mode_refuses_unless_a_mode_was_asked() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
     let facts = FixtureFacts { broken_mode: true, ..FixtureFacts::of(&fixture) };
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let result = resolve::resolve_open(&request, &facts);
+    assert_eq!(result.err().map(|e| (e.status, e.code)), Some((409, Some("erro_modo_padrao_ilegivel"))));
+    fixture["scenario"]["steps"][0]["json"]["permission_mode"] = json!("manual");
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
     let resolved = resolve::resolve_open(&request, &facts).unwrap();
-    assert_eq!(resolved.spec.permission_mode, Some(PermissionMode::BypassPermissions));
-    assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
+    assert_eq!((resolved.spec.permission_mode, resolved.warnings.len()), (Some(PermissionMode::Manual), 0));
 }
 
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
