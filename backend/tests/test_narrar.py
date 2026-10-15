@@ -275,6 +275,20 @@ def test_esforco_configurado_vai_no_payload(monkeypatch):
     assert _corpo_enviado(monkeypatch)["reasoning_effort"] == "none"
 
 
+def test_openrouter_pede_o_provedor_mais_rapido(monkeypatch):
+    _config(monkeypatch, {"llm_base_url": "https://openrouter.ai/api/v1", "llm_api_key": "k",
+                          "llm_model": "openai/gpt-oss-120b"})
+    assert _corpo_enviado(monkeypatch)["provider"] == {"sort": "throughput"}
+
+
+def test_sufixo_do_modelo_e_outro_endpoint_nao_ganham_ordem(monkeypatch):
+    _config(monkeypatch, {"llm_base_url": "https://openrouter.ai/api/v1", "llm_api_key": "k",
+                          "llm_model": "openai/gpt-oss-120b:floor"})
+    assert "provider" not in _corpo_enviado(monkeypatch)
+    _config(monkeypatch, {"groq_api_key": "k"})
+    assert "provider" not in _corpo_enviado(monkeypatch)
+
+
 def test_resposta_sem_texto_esperado_levanta_502(monkeypatch):
     _com_chave(monkeypatch)
 
