@@ -30,16 +30,25 @@ async function render(text: string) {
 
 describe('recados na bolha', () => {
   it.each([
-    ['[de: agente] corpo', () => m.board_peer_de({ n: 'agente' })],
-    ['[grupo: agente] corpo', () => m.board_peer_grupo({ n: 'agente' })],
-    ['[de fora: maquina::agente] corpo', () => m.board_peer_fora({ n: 'maquina::agente' })],
-    ['[painel: tarefa] corpo', () => m.board_peer_painel({ n: 'tarefa' })],
-  ] as const)('separa remetente e corpo: %s', async (raw, label) => {
+    ['[de: agente] corpo', () => m.board_peer_de({ n: 'agente' }), () => m.peer_message_sender({ name: 'agente' })],
+    ['[grupo: agente] corpo', () => m.board_peer_grupo({ n: 'agente' }), () => m.peer_message_group_sender({ name: 'agente' })],
+    ['[de fora: maquina::agente] corpo', () => m.board_peer_fora({ n: 'maquina::agente' }), () => m.peer_message_external_sender({ name: 'maquina::agente' })],
+    ['[painel: tarefa] corpo', () => m.board_peer_painel({ n: 'tarefa' }), () => m.peer_message_panel_sender({ name: 'tarefa' })],
+  ] as const)('separa remetente e corpo: %s', async (raw, label, accessibleLabel) => {
     const { container, root } = await render(raw);
     expect(container.textContent).toBe(`${label()}corpo`);
+    expect(container.querySelector('[aria-label]')?.getAttribute('aria-label')).toBe(accessibleLabel());
     act(() => container.querySelector('button')!.click());
     expect(container.querySelector('output')!.textContent).toBe('corpo');
     expect(raw).toContain('] corpo');
+    act(() => root.unmount());
+  });
+
+  it.each(['[de: agente]', '[grupo: agente]   ', '[de fora: maquina::agente]', '[painel: tarefa]'])('recado sem corpo mostra aviso e copia o original: %s', async (raw) => {
+    const { container, root } = await render(raw);
+    expect(container.textContent).toContain(m.peer_message_empty());
+    act(() => container.querySelector('button')!.click());
+    expect(container.querySelector('output')!.textContent).toBe(raw);
     act(() => root.unmount());
   });
 

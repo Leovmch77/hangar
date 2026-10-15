@@ -33,10 +33,14 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
   const peerLabel = peer ? (peer.scope === 'group' ? m.board_peer_grupo({ n: peer.from })
     : peer.scope === 'panel' ? m.board_peer_painel({ n: peer.from })
       : peer.scope === 'external' ? m.board_peer_fora({ n: peer.from }) : m.board_peer_de({ n: peer.from })) : null;
-  const body = peer?.text ?? text;
+  const peerAccessibilityLabel = peer ? (peer.scope === 'group' ? m.peer_message_group_sender({ name: peer.from })
+    : peer.scope === 'panel' ? m.peer_message_panel_sender({ name: peer.from })
+      : peer.scope === 'external' ? m.peer_message_external_sender({ name: peer.from }) : m.peer_message_sender({ name: peer.from })) : undefined;
+  const emptyPeer = !!peer && !peer.text.trim();
+  const body = peer ? (emptyPeer ? m.peer_message_empty() : peer.text) : text;
   const doTerminal = imageCount > 0 && !!sessionName && !!eventId;
   const hasImages = (!!parsed && !!sessionName) || doTerminal;
-  const caption = peer?.text ?? (parsed ? parsed.caption : doTerminal ? text : '');
+  const caption = peer ? body : (parsed ? parsed.caption : doTerminal ? text : '');
   // Como no web: com o caminho escrito pra TODAS as fotos, as últimas `imageCount` já vêm do
   // transcript, e mostrar as duas fontes duplicava cada imagem.
   const filenames = !parsed || !sessionName ? []
@@ -62,12 +66,12 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
         accessibilityActions={[{ name: 'longpress', label: m.navbar_mais_acoes() }]}
         onAccessibilityAction={(e) => { if (e.nativeEvent.actionName === 'longpress') alternar(); }}
       >
-        {peerLabel ? <View style={[styles.peerChip, { borderColor: peerColor }]}>
-          <Text style={[styles.voiceLabel, { color: peerColor }]}>{peerLabel}</Text>
+        {peerLabel ? <View accessible accessibilityLabel={peerAccessibilityLabel} style={[styles.peerChip, { borderColor: peerColor }]}>
+          <Text accessible={false} style={[styles.voiceLabel, { color: peerColor }]}>{peerLabel}</Text>
         </View> : null}
         {conteudo}
       </Pressable>
-      {acoes ? <BubbleActions text={textoAcoes} ts={ts} ouvir={false} defaultOpen align={voz ? 'start' : 'end'} /> : null}
+      {acoes ? <BubbleActions text={emptyPeer ? text : textoAcoes} ts={ts} ouvir={false} defaultOpen align={voz ? 'start' : 'end'} /> : null}
     </View>
   );
 

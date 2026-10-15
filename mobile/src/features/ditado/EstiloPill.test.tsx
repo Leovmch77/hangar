@@ -40,6 +40,19 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); });
 
+it('abrir o menu conserva o rótulo lido enquanto revalida', async () => {
+  calls.config.mockResolvedValueOnce({ campos: { ditado_estilo: { valor: 'limpar', definido: true, origem: 'app' } } });
+  await act(async () => root.render(createElement(Probe, { open: false })));
+  expect(container.querySelector('output')!.textContent).toBe(m.ditado_estilo_limpar());
+  let finish!: (value: unknown) => void;
+  calls.config.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  await act(async () => root.render(createElement(Probe, { open: true })));
+  expect(container.querySelector('output')!.textContent).toBe(m.ditado_estilo_limpar());
+  expect(container.querySelector('progress')).toBeNull();
+  await act(async () => finish({ campos: { ditado_estilo: { valor: 'briefing', definido: true, origem: 'app' } } }));
+  expect(container.querySelector('output')!.textContent).toBe(m.ditado_estilo_briefing());
+});
+
 it('falha não apresenta escolha salva e permite reler o estilo no servidor certo', async () => {
   await act(async () => root.render(createElement(Probe, { open: false })));
   expect(container.querySelector('output')!.textContent).toBe(m.dictation_style_unavailable());

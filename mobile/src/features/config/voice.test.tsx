@@ -21,6 +21,11 @@ vi.mock('@hangar/core', async (original) => ({
 }));
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
+  Pressable: ({ children, onPress, accessibilityRole, accessibilityLabel, accessibilityState, disabled }: {
+    children?: ReactNode; onPress?: () => void; accessibilityRole?: string; accessibilityLabel?: string;
+    accessibilityState?: { selected?: boolean; expanded?: boolean }; disabled?: boolean;
+  }) => createElement('button', { onClick: onPress, role: accessibilityRole, 'aria-label': accessibilityLabel,
+    'aria-selected': accessibilityState?.selected, 'aria-expanded': accessibilityState?.expanded, disabled }, children),
   TextInput: ({ value, onChangeText, accessibilityLabel, editable }: {
     value?: string; onChangeText?: (value: string) => void; accessibilityLabel?: string; editable?: boolean;
   }) => createElement('input', { value, 'aria-label': accessibilityLabel, disabled: editable === false,
@@ -89,7 +94,7 @@ describe('organização do ditado na tela de Voz', () => {
     expect(fields.dictation_organization_mode.valor).toBe('none');
     expect(input(m.native_voice_harness_model_claude())?.value).toBe('claude-old');
     expect(input(m.native_voice_harness_model_codex())?.value).toBe('codex-old');
-    expect(container.textContent).toContain(m.native_voice_organization_harness_hint());
+    expect(container.textContent).toContain(m.native_voice_harness_model_help());
     expect(input(m.native_voice_llm_endpoint())).toBeUndefined();
     expect(container.textContent).not.toContain(m.native_voice_briefing_own());
     await edit(m.native_voice_harness_model_claude(), 'claude-new');
@@ -130,6 +135,175 @@ describe('organização do ditado na tela de Voz', () => {
     expect(container.textContent).toContain(m.native_voice_local_section());
     await click(m.native_server_save());
     expect(calls.patch).toHaveBeenLastCalledWith(server, { dictation_organization_mode: 'none' });
+  });
+
+  it.each([undefined, null, ''])('modo ausente ou vazio (%s) aparece desligado sem gravar o padrão', async (value) => {
+    if (value === undefined) delete fields.dictation_organization_mode;
+    else fields.dictation_organization_mode.valor = value;
+    await render();
+    expect(button(m.native_voice_organization_none()).getAttribute('aria-selected')).toBe('true');
+    expect(container.textContent).not.toContain(m.native_voice_organization_unknown());
+    expect(container.textContent).not.toContain(m.native_voice_style());
+    expect(input(m.native_voice_harness_model_claude())).toBeUndefined();
+    expect(input(m.native_voice_llm_endpoint())).toBeUndefined();
+    await edit(m.native_voice_vocabulary(), 'vocabulário');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { ditado_vocabulario: 'vocabulário' });
+  });
+
+  it('modo desconhecido mantém todos os campos disponíveis sem selecionar nem sobrescrever o modo', async () => {
+    fields.dictation_organization_mode.valor = 'future-mode';
+    fields.llm_briefing_model.valor = 'briefing-saved';
+    await render();
+    expect(container.textContent).toContain(m.native_voice_organization_unknown());
+    expect(container.textContent).toContain(m.native_voice_organization_unknown_hint());
+    for (const label of [m.native_voice_organization_none(), m.native_voice_organization_harness(), m.native_voice_organization_external_api()]) {
+      expect(button(label).getAttribute('aria-selected')).toBe('false');
+    }
+    expect(container.textContent).toContain(m.native_voice_style());
+    expect(button(m.native_voice_recent_messages()).getAttribute('aria-checked')).toBe('false');
+    expect(input(m.native_voice_harness_model_claude())?.value).toBe('claude-old');
+    expect(input(m.native_voice_harness_model_codex())?.value).toBe('codex-old');
+    expect(input(m.native_voice_llm_endpoint())?.value).toBe('https://organization.test');
+    expect(input(m.native_voice_llm_key())).toBeDefined();
+    expect(input(m.native_voice_llm_model())?.value).toBe('api-old');
+    expect(button(m.native_voice_llm_effort_default())).toBeDefined();
+    expect(input(m.native_voice_briefing_model())?.value).toBe('briefing-saved');
+    await edit(m.native_voice_vocabulary(), 'preservar modo');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { ditado_vocabulario: 'preservar modo' });
+    expect(fields.dictation_organization_mode.valor).toBe('future-mode');
+  });
+
+  it.each([undefined, null, '', 'future-style'])('estilo ausente ou desconhecido (%s) seleciona prosa sem gravar o padrão', async (value) => {
+    fields.dictation_organization_mode.valor = 'harness';
+    if (value === undefined) delete fields.ditado_estilo;
+    else fields.ditado_estilo.valor = value;
+    await render();
+    expect(button(m.native_voice_style_prosa())?.getAttribute('aria-selected')).toBe('true');
+    expect(button(m.native_voice_style_prosa())?.disabled).toBe(value === undefined);
+    expect(container.textContent).toContain(m.native_voice_style_prosa_hint());
+    await edit(m.native_voice_vocabulary(), 'não gravar estilo');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { ditado_vocabulario: 'não gravar estilo' });
+  });
+
+  it.each([
+    { mode: 'none', label: m.native_voice_organization_none, expected: { dictation_organization_mode: 'none' } },
+    { mode: 'harness', label: m.native_voice_organization_harness, expected: {
+      dictation_organization_mode: 'harness', dictation_claude_model: 'claude-draft', dictation_codex_model: 'codex-draft',
+      ditado_estilo: 'briefing', dictation_include_recent_messages: true,
+    } },
+    { mode: 'external_api', label: m.native_voice_organization_external_api, expected: {
+      dictation_organization_mode: 'external_api', llm_base_url: 'https://draft.test', llm_api_key: 'key-draft', llm_model: 'api-draft',
+      llm_reasoning_effort: 'high', llm_briefing_base_url: 'https://briefing-draft.test', llm_briefing_api_key: 'briefing-key-draft',
+      llm_briefing_model: 'briefing-draft', ditado_estilo: 'briefing', dictation_include_recent_messages: true,
+    } },
+  ])('escolha explícita de $mode após modo desconhecido descarta só os rascunhos que ficam ocultos', async ({ mode, label, expected }) => {
+    fields.dictation_organization_mode.valor = 'future-mode';
+    await render();
+    expect(input(m.native_voice_harness_model_claude())).toBeDefined();
+    expect(input(m.native_voice_llm_endpoint())).toBeDefined();
+    await edit(m.native_voice_harness_model_claude(), 'claude-draft');
+    await edit(m.native_voice_harness_model_codex(), 'codex-draft');
+    await edit(m.native_voice_llm_endpoint(), 'https://draft.test');
+    await edit(m.native_voice_llm_key(), 'key-draft');
+    await edit(m.native_voice_llm_model(), 'api-draft');
+    await click('high');
+    await click(m.native_voice_briefing_own());
+    await edit(m.native_voice_briefing_endpoint(), 'https://briefing-draft.test');
+    await edit(m.native_voice_briefing_key(), 'briefing-key-draft');
+    await edit(m.native_voice_briefing_model(), 'briefing-draft');
+    await click(m.native_voice_style_briefing());
+    await click(m.native_voice_recent_messages());
+    await click(label());
+    expect(button(label()).getAttribute('aria-selected')).toBe('true');
+    expect(input(m.native_voice_harness_model_claude()) !== undefined).toBe(mode === 'harness');
+    expect(input(m.native_voice_llm_endpoint()) !== undefined).toBe(mode === 'external_api');
+    expect(container.textContent?.includes(m.native_voice_style())).toBe(mode !== 'none');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, expected);
+    if (mode !== 'harness') expect(fields.dictation_claude_model.valor).toBe('claude-old');
+    if (mode !== 'external_api') {
+      expect(fields.llm_model.valor).toBe('api-old');
+      expect(fields.llm_api_key.valor).toBe('masked-key');
+      expect(fields.llm_briefing_model.valor).toBe('');
+    }
+    if (mode === 'none') {
+      expect(fields.ditado_estilo.valor).toBe('limpar');
+      expect(fields.dictation_include_recent_messages.valor).toBe(false);
+    }
+  });
+
+  it('sair de harness descarta modelos e sair de API externa descarta seus campos antes do Salvar', async () => {
+    fields.dictation_organization_mode.valor = 'harness';
+    await render();
+    await edit(m.native_voice_harness_model_claude(), 'hidden-claude');
+    await edit(m.native_voice_harness_model_codex(), 'hidden-codex');
+    await click(m.native_voice_organization_external_api());
+    await edit(m.native_voice_llm_model(), 'hidden-api');
+    await edit(m.native_voice_llm_key(), 'hidden-key');
+    await click(m.native_voice_briefing_own());
+    await edit(m.native_voice_briefing_model(), 'hidden-briefing');
+    await click(m.native_voice_organization_harness());
+    expect(input(m.native_voice_harness_model_claude())?.value).toBe('claude-old');
+    expect(input(m.native_voice_harness_model_codex())?.value).toBe('codex-old');
+    await edit(m.native_voice_vocabulary(), 'visível');
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { dictation_organization_mode: 'harness', ditado_vocabulario: 'visível' });
+    expect(fields.llm_api_key.valor).toBe('masked-key');
+  });
+
+  it('fechar briefing descarta seus rascunhos sem apagar os valores salvos nem reabrir ao Salvar', async () => {
+    fields.dictation_organization_mode.valor = 'external_api';
+    fields.llm_briefing_base_url.valor = 'https://briefing-saved.test';
+    fields.llm_briefing_api_key = { valor: 'masked-briefing', origem: 'app', definido: true };
+    fields.llm_briefing_model.valor = 'briefing-saved';
+    await render();
+    expect(button(m.native_voice_briefing_own()).getAttribute('aria-expanded')).toBe('true');
+    await edit(m.native_voice_briefing_endpoint(), 'https://hidden.test');
+    await edit(m.native_voice_briefing_key(), 'hidden-key');
+    await edit(m.native_voice_briefing_model(), 'hidden-model');
+    await edit(m.native_voice_llm_model(), 'visible-api');
+    await click(m.native_voice_briefing_own());
+    expect(input(m.native_voice_briefing_model())).toBeUndefined();
+    await click(m.native_server_save());
+    expect(calls.patch).toHaveBeenCalledWith(server, { llm_model: 'visible-api' });
+    expect(button(m.native_voice_briefing_own()).getAttribute('aria-expanded')).toBe('false');
+    await click(m.native_voice_briefing_own());
+    expect(input(m.native_voice_briefing_endpoint())?.value).toBe('https://briefing-saved.test');
+    expect(input(m.native_voice_briefing_model())?.value).toBe('briefing-saved');
+    expect(input(m.native_voice_briefing_key())?.value).toBe('');
+    expect(fields.llm_briefing_api_key.valor).toBe('masked-briefing');
+  });
+
+  it('abre cada seção com seus valores salvos e mantém os controles de abertura independentes', async () => {
+    fields.dictation_organization_mode.valor = 'external_api';
+    fields.transcription_model.valor = 'transcription-saved';
+    fields.llm_briefing_model.valor = 'briefing-saved';
+    fields.elevenlabs_api_key = { valor: 'masked-eleven', origem: 'app', definido: true };
+    fields.tts_local_cmd.valor = 'reader-saved';
+    await render();
+    expect(input(m.native_voice_transcription_model())?.value).toBe('transcription-saved');
+    expect(input(m.native_voice_briefing_model())?.value).toBe('briefing-saved');
+    expect(input(m.native_voice_elevenlabs_key())).toBeDefined();
+    expect(input(m.native_voice_local_cmd())?.value).toBe('reader-saved');
+    expect(button(m.native_voice_tune()).getAttribute('aria-expanded')).toBe('false');
+    await click(m.native_voice_tune());
+    expect(button(m.native_voice_tune()).getAttribute('aria-expanded')).toBe('true');
+    await click(m.native_voice_transcribe_other());
+    expect(input(m.native_voice_transcription_model())).toBeUndefined();
+    expect(input(m.native_voice_briefing_model())).toBeDefined();
+    await click(m.native_voice_elevenlabs_section());
+    expect(input(m.native_voice_elevenlabs_key())).toBeUndefined();
+    expect(input(m.native_voice_local_cmd())?.value).toBe('reader-saved');
+    await click(m.native_voice_local_section());
+    expect(input(m.native_voice_local_cmd())).toBeUndefined();
+    await click(m.native_voice_briefing_own());
+    expect(input(m.native_voice_briefing_model())).toBeUndefined();
+    await click(m.native_voice_local_section());
+    expect(input(m.native_voice_local_cmd())?.value).toBe('reader-saved');
+    expect(calls.patch).not.toHaveBeenCalled();
   });
 
   it('não grava campos que um servidor antigo não trouxe', async () => {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Switch, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
-import { listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
+import { ehEstilo, listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
 import { BlockHead, Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage, useInputStyle } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { Segmented } from '../../src/features/config/Segmented';
@@ -26,7 +26,7 @@ const STYLES: { v: Style; label: () => string; hint: () => string }[] = [
   { v: 'briefing', label: m.native_voice_style_briefing, hint: m.native_voice_style_briefing_hint },
 ];
 
-/** Seções que abrem e fecham: outra transcrição, outra organização, briefing, ElevenLabs, ajustes da voz, leitor local. */
+/** Campos de transcrição, API de organização, briefing e leitor local. */
 const SECTIONS = [['transcription_base_url', 'transcription_model'], ['llm_base_url', 'llm_api_key', 'llm_model', 'llm_reasoning_effort'],
   ['llm_briefing_base_url', 'llm_briefing_api_key', 'llm_briefing_model'], [], [], ['tts_local_cmd']];
 
@@ -49,8 +49,11 @@ const tuneValue = (cfg: ServerConfig, t: Tune) => {
 
 export default function Voice() {
   const cfg = useServerConfig();
-  const [open, setOpen] = useState([false, false, false, false, false, false]);
-  const toggle = (n: number) => (v: boolean) => setOpen((o) => o.map((x, i) => (i === n ? v : x)));
+  const [open, setOpen] = useState({ transcription: false, briefing: false, eleven: false, tune: false, local: false });
+  const toggle = (section: keyof typeof open) => (v: boolean) => {
+    setOpen((o) => ({ ...o, [section]: v }));
+    if (section === 'briefing' && !v) SECTIONS[2].forEach(cfg.unstage);
+  };
   const ready = cfg.load.status === 'ready';
 
   // A primeira leitura boa abre as seções que já têm valor; um Salvar depois não reabre o que foi fechado.
@@ -58,19 +61,26 @@ export default function Voice() {
   useEffect(() => {
     if (!ready || openedByRead.current) return;
     openedByRead.current = true;
-    setOpen((o) => o.map((x, i) => x || ((i === 0 || i === 2) && SECTIONS[i].some(cfg.filled))));
+    setOpen((o) => ({ ...o, transcription: o.transcription || SECTIONS[0].some(cfg.filled), briefing: o.briefing || SECTIONS[2].some(cfg.filled) }));
   }, [ready]);
 
   // Seção da ElevenLabs abre quando passa a haver chave; a do leitor, quando o comando passa a ter valor.
   const elevenKey = cfg.keySet('elevenlabs_api_key');
   const localCmd = cfg.filled('tts_local_cmd');
-  useEffect(() => { if (elevenKey) toggle(3)(true); }, [elevenKey]);
-  useEffect(() => { if (localCmd) toggle(5)(true); }, [localCmd]);
+  useEffect(() => { if (elevenKey) toggle('eleven')(true); }, [elevenKey]);
+  useEffect(() => { if (localCmd) toggle('local')(true); }, [localCmd]);
 
   const transcribe = parseTranscriptionProviders(cfg.current(PROVIDERS)).length ? m.native_voice_status_custom()
     : cfg.keySet('groq_api_key') ? (cfg.filled('transcription_base_url') ? m.native_voice_status_custom() : m.native_voice_status_on()) : null;
-  const organization = ORGANIZATION_MODES.find((o) => o.v === cfg.current('dictation_organization_mode')) ?? ORGANIZATION_MODES[0];
-  const organizing = organization.v !== 'none';
+  const mode = cfg.current('dictation_organization_mode');
+  const organization = ORGANIZATION_MODES.find((o) => o.v === (mode == null || mode === '' ? 'none' : mode));
+  const organizing = organization?.v !== 'none';
+  const changeOrganization = (v: string) => {
+    if (!cfg.stage('dictation_organization_mode', v)) return;
+    if (v !== 'harness') ['dictation_claude_model', 'dictation_codex_model'].forEach(cfg.unstage);
+    if (v !== 'external_api') [...SECTIONS[1], ...SECTIONS[2]].forEach(cfg.unstage);
+    if (v === 'none') ['ditado_estilo', 'dictation_include_recent_messages'].forEach(cfg.unstage);
+  };
   const read = elevenKey ? m.native_voice_status_elevenlabs() : localCmd ? m.native_voice_status_local() : null;
   const rows = (keys: string[]) => <Box>{keys.map((k) => <ConfigRow key={k} cfg={cfg} k={k} removable />)}</Box>;
 
@@ -81,55 +91,55 @@ export default function Voice() {
       {rows(['groq_api_key'])}
       <View style={styles.links}>
         <Pill icon="ExternalLink" label={m.native_voice_create_key()} onPress={() => { void Linking.openURL('https://console.groq.com/keys'); }} />
-        <Disclosure open={open[0]} label={m.native_voice_transcribe_other()} onChange={toggle(0)} />
+        <Disclosure open={open.transcription} label={m.native_voice_transcribe_other()} onChange={toggle('transcription')} />
       </View>
-      {open[0] ? rows(SECTIONS[0]) : null}
+      {open.transcription ? rows(SECTIONS[0]) : null}
       <TranscriptionProviders cfg={cfg} />
 
       <BlockHead title={m.native_voice_after()} />
       <Box><ConfigRow cfg={cfg} k="ditado_vocabulario" removable /></Box>
 
       <BlockHead title={m.native_voice_cleanup()} help={m.native_voice_cleanup_help()}
-        right={<Chip text={organization.label()} tone={organizing ? 'success' : 'muted'} />} />
+        right={<Chip text={organization?.label() ?? m.native_voice_organization_unknown()} tone={organization && organizing ? 'success' : 'muted'} />} />
       <Box>
         <RowShell icon="SlidersHorizontal" title={m.native_voice_cleanup()}
-          chips={<ScopeChips cfg={cfg} k="dictation_organization_mode" />} help={organization.hint()}>
+          chips={<ScopeChips cfg={cfg} k="dictation_organization_mode" />} help={organization?.hint() ?? m.native_voice_organization_unknown_hint()}>
           <Segmented options={ORGANIZATION_MODES.map((o) => ({ v: o.v, label: o.label(), aria: `${o.label()}. ${o.hint()}` }))}
-            value={organization.v} label={m.native_voice_cleanup()} disabled={!('dictation_organization_mode' in cfg.fields)}
-            onChange={(v) => cfg.stage('dictation_organization_mode', v)} />
+            value={organization?.v ?? ''} label={m.native_voice_cleanup()} disabled={!('dictation_organization_mode' in cfg.fields)}
+            onChange={changeOrganization} />
         </RowShell>
         {organizing ? <StyleRow cfg={cfg} /> : null}
         {organizing ? <RecentMessagesRow cfg={cfg} /> : null}
       </Box>
-      {organization.v === 'harness' ? (
+      {!organization || organization.v === 'harness' ? (
         <Box>
           <HarnessModelRow cfg={cfg} k="dictation_claude_model" label={m.native_voice_harness_model_claude()} />
           <HarnessModelRow cfg={cfg} k="dictation_codex_model" label={m.native_voice_harness_model_codex()} />
         </Box>
       ) : null}
-      {organization.v === 'external_api' ? (
+      {!organization || organization.v === 'external_api' ? (
         <>
           {rows(SECTIONS[1])}
-          <Disclosure open={open[2]} label={m.native_voice_briefing_own()} onChange={toggle(2)} />
-          {open[2] ? rows(SECTIONS[2]) : null}
+          <Disclosure open={open.briefing} label={m.native_voice_briefing_own()} onChange={toggle('briefing')} />
+          {open.briefing ? rows(SECTIONS[2]) : null}
         </>
       ) : null}
 
       <BlockHead title={m.native_voice_read()} help={m.native_voice_read_help()} right={<Status text={read} />} />
       {!read ? <Muted>{m.native_voice_read_no_reader()}</Muted> : null}
-      <Disclosure open={open[3]} label={m.native_voice_elevenlabs_section()} onChange={toggle(3)} />
-      {open[3] ? (
+      <Disclosure open={open.eleven} label={m.native_voice_elevenlabs_section()} onChange={toggle('eleven')} />
+      {open.eleven ? (
         <>
           <Box>
             <ConfigRow cfg={cfg} k="elevenlabs_api_key" removable />
             {elevenKey ? <VoiceRow cfg={cfg} /> : null}
           </Box>
-          {elevenKey ? <Disclosure open={open[4]} label={m.native_voice_tune()} onChange={toggle(4)} /> : null}
-          {elevenKey && open[4] ? <Box>{TUNES.map((t) => <TuneRow key={t.key} cfg={cfg} t={t} />)}</Box> : null}
+          {elevenKey ? <Disclosure open={open.tune} label={m.native_voice_tune()} onChange={toggle('tune')} /> : null}
+          {elevenKey && open.tune ? <Box>{TUNES.map((t) => <TuneRow key={t.key} cfg={cfg} t={t} />)}</Box> : null}
         </>
       ) : null}
-      <Disclosure open={open[5]} label={m.native_voice_local_section()} onChange={toggle(5)} />
-      {open[5] ? rows(SECTIONS[5]) : null}
+      <Disclosure open={open.local} label={m.native_voice_local_section()} onChange={toggle('local')} />
+      {open.local ? rows(SECTIONS[5]) : null}
       {read ? rows(['tts_max_chars']) : null}
     </ServerConfigPage>
   );
@@ -141,17 +151,14 @@ function Status({ text }: { text: string | null }) {
 
 /** Estilo do ditado: vai pelo rascunho, como no Rust. */
 function StyleRow({ cfg }: { cfg: ServerConfig }) {
-  const current = textOf(cfg.current('ditado_estilo')) as Style;
+  const value = cfg.current('ditado_estilo');
+  const current = ehEstilo(value) ? value : 'prosa';
   const hint = STYLES.find((s) => s.v === current)?.hint();
   return (
     <RowShell icon="Type" title={m.native_voice_style()} chips={<ScopeChips cfg={cfg} k="ditado_estilo" />} help={m.native_voice_style_help()}>
-      {'ditado_estilo' in cfg.fields ? (
-        <>
-          <Segmented options={STYLES.map((s) => ({ v: s.v, label: s.label(), aria: `${s.label()}. ${s.hint()}` }))}
-            value={current} label={m.native_voice_style()} onChange={(v) => cfg.stage('ditado_estilo', v)} />
-          {hint ? <Muted>{hint}</Muted> : null}
-        </>
-      ) : null}
+      <Segmented options={STYLES.map((s) => ({ v: s.v, label: s.label(), aria: `${s.label()}. ${s.hint()}` }))}
+        value={current} label={m.native_voice_style()} disabled={!('ditado_estilo' in cfg.fields)} onChange={(v) => cfg.stage('ditado_estilo', v)} />
+      {hint ? <Muted>{hint}</Muted> : null}
     </RowShell>
   );
 }
@@ -170,7 +177,7 @@ function RecentMessagesRow({ cfg }: { cfg: ServerConfig }) {
 function HarnessModelRow({ cfg, k, label }: { cfg: ServerConfig; k: string; label: string }) {
   const input = useInputStyle();
   return (
-    <RowShell icon="Bot" title={label} chips={<ScopeChips cfg={cfg} k={k} />} help={m.native_voice_organization_harness_hint()}>
+    <RowShell icon="Bot" title={label} chips={<ScopeChips cfg={cfg} k={k} />} help={m.native_voice_harness_model_help()}>
       <TextInput {...input} accessibilityLabel={label} editable={k in cfg.fields} autoCapitalize="none" autoCorrect={false}
         value={textOf(cfg.current(k))} onChangeText={(v) => cfg.stage(k, v)} />
     </RowShell>

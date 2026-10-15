@@ -27,8 +27,11 @@ function createDictationStyleStore(server?: Server | null) {
     falhou: false,
 
     carregar: async () => {
+      if (!get().pronto) return get().revalidar();
+    },
+
+    revalidar: async () => {
       if (target === null) return;
-      if (get().pronto) return;
       if (carregando) return carregando;
       const server = target ? { ...target } : undefined;
       const escritasNoInicio = escritas;
@@ -36,8 +39,7 @@ function createDictationStyleStore(server?: Server | null) {
       carregando = (server ? getConfigForServer(server) : getConfig())
         .then((cfg) => {
           const v = cfg.campos?.ditado_estilo?.valor;
-          if (!ehEstilo(v)) throw new Error('invalid dictation style');
-          if (escritas === escritasNoInicio) set({ valor: v, pronto: true, falhou: false });
+          if (escritas === escritasNoInicio) set({ valor: ehEstilo(v) ? v : PADRAO, pronto: true, falhou: false });
         })
         .catch(() => {
           if (escritas === escritasNoInicio) set({ pronto: false, falhou: true });
@@ -48,15 +50,11 @@ function createDictationStyleStore(server?: Server | null) {
       return carregando;
     },
 
-    revalidar: async () => {
-      set({ pronto: false });
-      return get().carregar();
-    },
-
     trocar: async (novo: EstiloDitado) => {
       if (target === null) throw new Error(m.chat_servidor_removido());
       const server = target ? { ...target } : undefined;
       const antes = get().valor;
+      const wasReady = get().pronto;
       const minha = ++escritas;
       set({ valor: novo });
       try {
@@ -64,7 +62,7 @@ function createDictationStyleStore(server?: Server | null) {
         set({ pronto: true, falhou: false });
       } catch (e) {
         if (escritas === minha) {
-          set({ valor: antes });
+          set({ valor: antes, pronto: wasReady, falhou: !wasReady });
         }
         throw e;
       }

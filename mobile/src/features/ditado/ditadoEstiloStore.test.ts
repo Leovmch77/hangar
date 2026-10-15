@@ -135,10 +135,46 @@ describe('ditadoEstiloStore', () => {
     expect(core.getConfigForServer).toHaveBeenCalledTimes(2);
   });
 
-  it.each([{}, campos('desconhecido')])('resposta sem estilo válido não confirma Prosa: %j', async (response) => {
+  it.each([{}, campos('desconhecido'), { campos: { ditado_estilo: { valor: null } } }])('leitura sem estilo conhecido confirma o padrão Prosa: %j', async (response) => {
     vi.mocked(core.getConfigForServer).mockResolvedValue(response as core.ConfigServidor);
     await dictationStyleStore(a).getState().carregar();
-    expect(dictationStyleStore(a).getState()).toMatchObject({ pronto: false, falhou: true });
+    expect(dictationStyleStore(a).getState()).toMatchObject({ pronto: true, falhou: false, valor: 'prosa' });
+  });
+
+  it.each(['read-first', 'write-first'])('leitura e troca sem valor confirmado terminam em falha visível: %s', async (order) => {
+    const read = deferred<core.ConfigServidor>();
+    const write = deferred<core.RespostaPatchConfig>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockReturnValue(write.promise);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    const failed = expect(store.getState().trocar('briefing')).rejects.toThrow('502');
+    if (order === 'read-first') {
+      read.resolve(campos('limpar') as core.ConfigServidor);
+      await loading;
+    }
+    write.reject(new Error('502'));
+    await failed;
+    if (order === 'write-first') {
+      read.resolve(campos('limpar') as core.ConfigServidor);
+      await loading;
+    }
+    expect(store.getState()).toMatchObject({ pronto: false, falhou: true, valor: 'prosa' });
+  });
+
+  it('revalidar conserva o estilo confirmado durante a leitura e a troca recusada', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValueOnce(campos('limpar') as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockRejectedValue(new Error('502'));
+    const loading = store.getState().revalidar();
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+    await expect(store.getState().trocar('briefing')).rejects.toThrow('502');
+    read.resolve(campos('prosa') as core.ConfigServidor);
+    await loading;
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
   });
 
   it('GET que falha depois da escolha confirmada não invalida o estilo salvo', async () => {
