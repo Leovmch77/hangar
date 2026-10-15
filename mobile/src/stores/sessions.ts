@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, listExternalPairs, attachGuest, createExternalPairSync } from '@hangar/core';
 import type { SessionInfo, Server, AggSession, ExternalPair } from '@hangar/core';
-import { sortSessions } from '@hangar/core';
+import { sortSessions, definirArmazem, definirProtegido, definirSemPrazo, registrarFalha, registrarSucesso, retryAfterMs, estaDesligado, respondeuRecentemente, retentarAgora, esquecerServidor, onServerRecovered, _limparEsfriamentoParaTestes } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
 import { useServers } from './servers';
 import * as m from '../paraglide/messages';
@@ -38,7 +38,9 @@ const slots = new Map<string, Slot>();
 const streams = new Map<string, ReturnType<typeof openSessionsStream>>();
 type ConnectionAttempt = { server: Server; generation: number; abort: AbortController };
 const connecting = new Map<string, ConnectionAttempt>();
-const retryDelays = new Map<string, number>();
+const failures = new Map<string, number>();
+const retryAt = new Map<string, number>();
+const refused = new Map<string, number>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let hidden = new Map<string, string | null>();
 let serversCache: Server[] = [];
@@ -46,6 +48,9 @@ let refs = 0;
 let foreground = true;
 let generation = 0;
 let unsubServers: (() => void) | null = null;
+let unsubRecovered: (() => void) | null = null;
+let activeId: string | null = null;
+let initialKickPending = true;
 let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
 // O aviso de tela vem de fora: o store não carrega o toast (e com ele o nativo) nos testes.
 let pairNotice: (text: string) => void = () => {};
@@ -53,8 +58,24 @@ export function setPairNotice(fn: (text: string) => void) { pairNotice = fn; }
 let storeGet: (() => SessionsState) | null = null;
 let storeSet: ((p: Partial<SessionsState>) => void) | null = null;
 
-const RETRY_MIN_MS = 5_000;
-const RETRY_MAX_MS = 60_000;
+function configureCooldown() {
+  definirProtegido((id) => {
+    const attempt = connecting.get(id);
+    return !foreground || useServers.getState().activeId === id || (attempt !== undefined && !isCurrent(attempt));
+  });
+  definirSemPrazo((id) => useServers.getState().activeId === id);
+}
+configureCooldown();
+
+function retryDelay(id: string) {
+  return useServers.getState().activeId === id
+    ? Math.max(0, (retryAt.get(id) ?? 0) - Date.now())
+    : retryAfterMs(id);
+}
+
+function refusedError(status: number) {
+  return status === 403 ? m.lista_acesso_recusado() : `${m.sessao_erro_servidor()} (${status})`;
+}
 
 function hasServer(server: Server) {
   return serversCache.some((s) => s.id === server.id && s.baseUrl === server.baseUrl && s.token === server.token);
@@ -70,7 +91,6 @@ function disconnect(id: string) {
   stream?.close();
   clearTimeout(retryTimers.get(id));
   retryTimers.delete(id);
-  retryDelays.delete(id);
   connecting.get(id)?.abort.abort();
   esquecerRota(id);
 }
@@ -82,17 +102,16 @@ function pause() {
 
 function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   if (!foreground || refs === 0 || retryTimers.has(id)) return;
-  const delay = retryDelays.get(id) ?? RETRY_MIN_MS;
+  const delay = retryDelay(id) || 1000;
   const servidor = serversCache.find((s) => s.id === id);
   if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista', espera_ms: delay }, servidor.baseUrl);
-  retryDelays.set(id, Math.min(delay * 2, RETRY_MAX_MS));
   clearTimeout(retryTimers.get(id));
   retryTimers.set(
     id,
     setTimeout(() => {
       retryTimers.delete(id);
       if (foreground && refs > 0 && serversCache.some((s) => s.id === id)) {
-        connect(serversCache, get, set);
+        connect(serversCache, get, set, id);
       }
     }, delay),
   );
@@ -116,7 +135,7 @@ function recompute(set: (p: Partial<SessionsState>) => void) {
 
 // Os pares nas linhas próprias dizem quando reler `/api/external-pairs`; o laço é o do core.
 function pairsMaybeChanged() {
-  if (refs === 0 || !storeGet || !storeSet) return;
+  if (!foreground || refs === 0 || !storeGet || !storeSet) return;
   void pairSync.refresh(serversCache.filter((s) => !s.disabled), (id) => slots.get(id)?.sessions);
 }
 
@@ -148,15 +167,25 @@ export function anchoredPairs(serverId: string, name: string): ExternalPair[] {
   return pairSync.anchored(serverId, name);
 }
 
-function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void, onlyId?: string) {
   for (const id of slots.keys()) if (!list.some((s) => s.id === id)) slots.delete(id);
   if (!foreground || refs === 0) { recompute(set); return; }
   for (const s of list) {
-    if (streams.has(s.id)) continue;
-    if (retryTimers.has(s.id)) continue;
-    if (connecting.has(s.id)) continue;
-    // Convite que acabou não é máquina fora do ar: não reconecta.
+    if (onlyId !== undefined && s.id !== onlyId) continue;
+    // Recusa não muda por insistir; só a pessoa ou uma credencial nova liberam a conexão.
+    const status = refused.get(s.id);
+    if (status !== undefined) {
+      slots.set(s.id, { sessions: null, error: refusedError(status) });
+      continue;
+    }
     if (s.inviteEnded) continue;
+    if (streams.has(s.id) || retryTimers.has(s.id) || connecting.has(s.id)) continue;
+    if (retryDelay(s.id) > 0) {
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      scheduleRetry(s.id, get, set);
+      continue;
+    }
+    if (estaDesligado(s.id)) slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
     const attempt = { server: { ...s }, generation, abort: new AbortController() };
     connecting.set(s.id, attempt);
     void synchronize(attempt, get, set);
@@ -166,17 +195,51 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
 
 async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   const s = attempt.server;
+  let countedFailure = false;
+  const failed = (alreadyCounted = false) => {
+    if (countedFailure) return;
+    countedFailure = true;
+    const count = Math.min((failures.get(s.id) ?? 0) + 1, 6);
+    failures.set(s.id, count);
+    retryAt.set(s.id, Date.now() + Math.min(30_000, 1000 * 2 ** (count - 1)));
+    // O probe já contou a falha REST; SSE sem resposta é a mesma tentativa.
+    if (!alreadyCounted) registrarFalha(s.id);
+  };
+  const answered = () => {
+    countedFailure = false;
+    failures.delete(s.id);
+    retryAt.delete(s.id);
+    registrarSucesso(s.id);
+  };
+  const rejected = (status: number) => {
+    if (s.invite && (status === 401 || status === 410)) {
+      useServers.getState().markEnded(s.id);
+      slots.delete(s.id);
+      recompute(set);
+      return true;
+    }
+    if (!s.invite && status === 401) {
+      useServers.getState().markInvalid(s.id);
+      return true;
+    }
+    if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+      refused.set(s.id, status);
+      slots.set(s.id, { sessions: null, error: refusedError(status) });
+      recompute(set);
+      return true;
+    }
+    return false;
+  };
   try {
     if (!rotaDecidida(s.id)) await decidirRota(s);
     if (!isCurrent(attempt)) return;
+    let httpResponse = false;
     try {
       const response = await probeServerResponse(s, '/api/sessions', { signal: comTeto(attempt.abort.signal, 4000) });
-      if (s.invite && (response.status === 401 || response.status === 410)) {
-        useServers.getState().markEnded(s.id);
-        slots.delete(s.id);
-        recompute(set);
-        return;
-      }
+      if (!isCurrent(attempt)) return;
+      httpResponse = true;
+      answered();
+      if (rejected(response.status)) return;
       if (!response.ok) throw new Error(String(response.status));
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
@@ -187,7 +250,8 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       if (!isCurrent(attempt)) return;
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'sincronia',
         detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      if (!httpResponse) failed(true);
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: httpResponse ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
     }
     if (!isCurrent(attempt)) return;
@@ -196,37 +260,45 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     let falhaDados = false;
     // ping mantém o watchdog do adapter vivo (wrap rearma). Sem listener,
     // ping não rearma e o adapter fecharia stream saudável.
-    es.addEventListener('ping', () => {});
+    es.addEventListener('ping', () => { if (active()) answered(); });
     es.addEventListener('sessions', (e) => {
       if (!active()) return;
-      retryDelays.delete(s.id);
+      answered();
       try {
-        slots.set(s.id, { sessions: JSON.parse(e.data) as SessionInfo[], error: null });
+        const sessions: unknown = JSON.parse(e.data);
+        if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
+        slots.set(s.id, { sessions: sessions as SessionInfo[], error: null });
         if (falhaDados) registrarDiag({ evento: 'lista.voltou', tela: 'lista' }, s.baseUrl);
         falhaDados = false;
       } catch {
         falhaDados = true;
         registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'json_invalido' }, s.baseUrl);
-        slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+        slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: m.sessao_erro_servidor() });
       }
       recompute(set);
     });
     es.addEventListener('list_error', () => {
       if (!active()) return;
+      answered();
       falhaDados = true;
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'produtor_falhou' }, s.baseUrl);
       // resposta viva, só list falhou — mantém última lista boa, marca erro distinto
       // mas também consideramos como sinal de vida para não derrubar por watchdog
       // (o adapter já rearmou via wrap)
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: m.sessao_erro_servidor() });
       recompute(set);
     });
-    es.onerror = () => {
+    es.onerror = (event) => {
       if (!active()) return;
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
-      recompute(set);
+      const status = (event as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
+      const http = Number.isInteger(status) && status >= 100 && status <= 599;
+      if (http) answered();
+      else failed();
       streams.delete(s.id);
       es.close();
+      if (http && rejected(status)) return;
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: http ? m.sessao_erro_servidor() : 'offline' });
+      recompute(set);
       esquecerRota(s.id);
       scheduleRetry(s.id, get, set);
     };
@@ -235,6 +307,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     if (!isCurrent(attempt)) return;
     registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'conexao',
       detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
+    failed();
     slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
     recompute(set);
     esquecerRota(s.id);
@@ -251,30 +324,67 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
   }
 }
 
+function refresh(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  const state = useServers.getState();
+  const previous = serversCache;
+  serversCache = state.servers.slice();
+  if (initialKickPending && state.ready && foreground && refs > 0) {
+    initialKickPending = false;
+    for (const s of serversCache) if (respondeuRecentemente(s.id)) retentarAgora(s.id);
+  }
+  for (const s of previous) {
+    if (!hasServer(s)) {
+      disconnect(s.id);
+      esquecerServidor(s.id);
+      failures.delete(s.id);
+      retryAt.delete(s.id);
+      refused.delete(s.id);
+      slots.delete(s.id);
+    } else if (serversCache.find((next) => next.id === s.id)?.inviteEnded) {
+      disconnect(s.id);
+      slots.delete(s.id);
+    }
+  }
+  if (activeId !== state.activeId) {
+    activeId = state.activeId;
+    if (activeId && !streams.has(activeId)) {
+      clearTimeout(retryTimers.get(activeId));
+      retryTimers.delete(activeId);
+      retryAt.delete(activeId);
+    }
+  }
+  connect(serversCache, get, set);
+}
+
 function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   storeGet = get;
   storeSet = set;
-  serversCache = useServers.getState().servers.slice();
-  connect(serversCache, get, set);
-  // observa mudanças de servidores (useServers é zustand)
-  unsubServers = useServers.subscribe((state) => {
-    const next = (state as unknown as { servers: Server[] }).servers;
-    const igual =
-      next.length === serversCache.length &&
-      next.every((s, i) => s.id === serversCache[i]?.id && s.baseUrl === serversCache[i]?.baseUrl && s.token === serversCache[i]?.token);
-    const previous = serversCache;
-    serversCache = next.slice();
-    if (igual) return;
-    for (const s of previous) if (!hasServer(s)) disconnect(s.id);
-    connect(serversCache, get, set);
+  unsubRecovered = onServerRecovered((id) => {
+    failures.delete(id);
+    retryAt.delete(id);
+    clearTimeout(retryTimers.get(id));
+    retryTimers.delete(id);
+    if (!streams.has(id) && !connecting.has(id)) connect(serversCache, get, set, id);
   });
+  unsubServers = useServers.subscribe((state, previousState) => {
+    const same = state.servers.length === serversCache.length && state.servers.every((s, index) => {
+      const old = serversCache[index];
+      return s.id === old?.id && s.baseUrl === old.baseUrl && s.token === old.token && s.inviteEnded === old.inviteEnded;
+    });
+    if (same && state.activeId === activeId && state.ready === previousState.ready) { serversCache = state.servers.slice(); return; }
+    refresh(get, set);
+  });
+  refresh(get, set);
 }
 
 function stop(set: (p: Partial<SessionsState>) => void) {
   unsubServers?.();
   unsubServers = null;
+  unsubRecovered?.();
+  unsubRecovered = null;
   pause();
   slots.clear();
+  for (const [id, status] of refused) slots.set(id, { sessions: null, error: refusedError(status) });
   // hidden mantém? Não — limpa ao parar para próximo retain começar limpo
   hidden = new Map<string, string | null>();
   recompute(set);
@@ -300,19 +410,28 @@ export const useSessions = create<SessionsState>((set, get) => ({
   reconnect() {
     if (refs === 0 || !foreground) return;
     pause();
+    for (const s of serversCache) retentarAgora(s.id);
+    retryAt.clear();
+    refused.clear();
     connect(serversCache, get, set);
   },
   setForeground(active) {
     if (active === foreground) return;
     foreground = active;
     if (!active) pause();
-    else get().reconnect();
+    else {
+      if (refs > 0 && useServers.getState().ready) initialKickPending = false;
+      for (const s of serversCache) {
+        if (s.id === useServers.getState().activeId || respondeuRecentemente(s.id)) {
+          retentarAgora(s.id);
+          retryAt.delete(s.id);
+        }
+      }
+      connect(serversCache, get, set);
+    }
   },
   refreshServers() {
-    const previous = serversCache;
-    serversCache = useServers.getState().servers.slice();
-    for (const s of previous) if (!hasServer(s)) disconnect(s.id);
-    connect(serversCache, get, set);
+    refresh(get, set);
   },
   markDeleting(serverId: string, name: string) {
     hidden.set(`${serverId}::${name}`, jsonlDaSessao(slots, serverId, name));
@@ -330,7 +449,9 @@ export function _resetSessionsForTests() {
   connecting.clear();
   foreground = true;
   retryTimers.clear();
-  retryDelays.clear();
+  failures.clear();
+  retryAt.clear();
+  refused.clear();
   streams.clear();
   slots.clear();
   hidden = new Map<string, string | null>();
@@ -341,7 +462,14 @@ export function _resetSessionsForTests() {
   storeGet = null;
   storeSet = null;
   refs = 0;
+  activeId = null;
+  initialKickPending = true;
   unsubServers?.();
   unsubServers = null;
+  unsubRecovered?.();
+  unsubRecovered = null;
+  _limparEsfriamentoParaTestes();
+  definirArmazem(null);
+  configureCooldown();
   useSessions.setState({ rows: [], byServer: [], byServerRecord: {}, loading: false, servers: [] });
 }

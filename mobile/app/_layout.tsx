@@ -60,7 +60,9 @@ export default function Layout() {
     toast.erro(
       aviso.tipo === 'token'
         ? m.servidores_aviso_token({ label: aviso.label })
-        : m.servidores_aviso_persistencia(),
+        : aviso.tipo === 'vault_unread'
+          ? m.servers_warning_vault_unread()
+          : m.servidores_aviso_persistencia(),
     );
     limparAviso();
   }, [aviso, limparAviso]);
