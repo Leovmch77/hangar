@@ -6440,7 +6440,7 @@ impl Render for Hangar {
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
             // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
             .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation,
-                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown).top(px(rise)))))
+                terminal::conversation_pane_style(self.terminal_docked()).opacity(shown).top(px(rise)))))
             // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca. Sem a
             // conversa na tela, os lugares dela são do último desenho, de outra sessão.
             .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
