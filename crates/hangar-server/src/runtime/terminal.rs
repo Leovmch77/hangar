@@ -267,6 +267,8 @@ struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,ne
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
 /// ilegível) não deve atrasar a mensagem muito além disso.
 const MAX_STALL_WAIT:Duration=Duration::from_secs(8);
+/// Leituras da marca "ctrl+x ctrl+s to send now" depois de digitar a entrada orientada.
+const STEER_HINT_TRIES:usize=3;
 /// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
 /// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila, nem falha do
 /// diário (`write_journal`), que tem aviso próprio.
@@ -483,14 +485,14 @@ impl Executor {
                         if self.last_error.is_none() {self.expire_unproved().await;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.as_deref()==Some("terminal_facts") {
-                            match self.drain_once(None).await {
+                            match self.drain_once(None,false).await {
                                 Ok(value) if value["keyboard_loan"]!=true && value["preserve_binding"]!=true=>self.clear_maintenance_error("terminal_facts").await?,
                                 Ok(_)=>{},Err(failure)=>self.enter_error(failure).await?,
                             }
                             continue;
                         }
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
-                        let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
+                        let result=async {self.confirm_rows().await?;self.drain_once(None,false).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
                         continue;
                     }
@@ -518,7 +520,9 @@ impl Executor {
             match message {
                 Some(Message::Command {id,kind,payload,response})=>{
                     let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
-                        else {self.execute(&id,&kind,payload,None).await};
+                        // Fora do `execute`: o Orientar entrega pela drenagem, que já chama o `execute`.
+                        else if kind=="steer_entry" {self.steer_entry(&id,&payload).await}
+                        else {self.execute(&id,&kind,payload,None,false).await};
                     let _=response.send(result);},
                 Some(Message::Queue {id,action,response})=>{
                     let result=match action {
@@ -544,7 +548,7 @@ impl Executor {
                     let result=if late {Err(error("mods_deadline"))} else {self.pane_op(op).await};
                     let _=response.send(result);},
                 Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
-                Some(Message::Drain(response))=>{let result=self.drain_once(None).await;
+                Some(Message::Drain(response))=>{let result=self.drain_once(None,false).await;
                     // Durante o empréstimo nada foi relido: o erro de manutenção continua valendo.
                     if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}
                     else if result.as_ref().is_ok_and(|v|v["keyboard_loan"]!=true) {self.clear_maintenance_error("terminal_facts").await?;}
@@ -891,7 +895,8 @@ impl Executor {
         Ok(result)
     }
 
-    async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
+    /// `steer`: o "Orientar" de uma entrada, que passa pelo turno em curso em vez de esperar o Claude parar.
+    async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>,steer:bool)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
         if kind=="lifecycle_guard" {
             if self.loaned() || self.held() || self.last_error.is_some() || !self.uncertain.is_empty() || self.unprovable || self.mode_unproved {return Err(error("lifecycle_busy"));}
@@ -1003,7 +1008,11 @@ impl Executor {
         let facts=if prompt {Some(services.facts(&self.target.binding).await)}else{None};
         let current=facts.as_ref().is_none_or(|result|result.as_ref().is_ok_and(|facts|facts.binding==self.target.binding));
         if let Some(facts)=&facts {self.deliverable=facts.as_ref().is_ok_and(|facts|current && facts.ready && !facts.open_question);}
+        // Com o Claude trabalhando a mensagem fica na fila do Hangar, onde o painel a apaga, edita e reordena.
+        // O recado com socket nativo segue: é o canal do próprio Claude Code para o meio do turno.
+        let held=prompt && !slash && !steer && facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|!f.idle && !input::native_message(f,text)));
         let mut result=if !current {reply(id,Disposition::Deferred,json!({"code":"terminal_facts","cleanup":"not_needed"}))}
+            else if held {reply(id,Disposition::Deferred,json!({"code":"turn_hold","queued":true,"cleanup":"not_needed"}))}
             else if prompt && !slash && !facts.as_ref().is_some_and(|result|result.as_ref().is_ok_and(|f|f.ready && !f.open_question || f.native.is_some())) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
             else {
                 let bound=match row_id.is_some() {
@@ -1235,7 +1244,7 @@ impl Executor {
         }
         repeated
     }
-    async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
+    async fn drain_once(&mut self,mut entry:Option<String>,steer:bool)->Result<Value,RuntimeError> {
         if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
@@ -1250,7 +1259,7 @@ impl Executor {
             && self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
         let services=self.services("maintenance","maintenance","");
         let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
-        // Trabalhando não segura a fila: o Claude enfileira o que chega no meio do turno, como no envio direto.
+        // O composer legível e sem pergunta é o que libera a escrita; o turno é conferido logo abaixo.
         self.deliverable=facts.binding==self.target.binding && facts.ready && !facts.open_question;
         // Composer que não se lê (o desenho mudou): não digita às cegas, mas a série de espera aparece na vista.
         if !self.deliverable && facts.binding==self.target.binding && facts.screen.as_deref().is_some_and(input::composer_unreadable) {
@@ -1266,6 +1275,19 @@ impl Executor {
             // Caixa ilegível ou com pergunta é espera normal: o motivo antigo sai da tela.
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
             return Ok(json!({"drained":0}));
+        }
+        // A fila do Hangar espera o turno: o Claude parado leva uma por vez. O "Orientar" (`steer`) passa por
+        // cima, e o recado com socket nativo também, porque esse canal o Claude Code atende no meio do turno.
+        if !steer && !facts.idle {
+            let waiting=super::queue::waiting_ids(&state);
+            let native=state.rows.iter().filter_map(|r|Some((r["id"].as_str()?,r["text"].as_str()?)))
+                .find(|(id,text)|waiting.iter().any(|w|w==id) && entry.as_deref().is_none_or(|e|e==*id) && input::native_message(&facts,text))
+                .map(|(id,_)|id.to_owned());
+            let Some(native)=native else {
+                if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
+                return Ok(json!({"drained":0,"turn_hold":true}));
+            };
+            entry=Some(native);
         }
         // Pergunta aberta que o pane não mostra (o menu rolou para fora da tela): as teclas do recado
         // navegariam o picker. A fila espera a resposta no transcript.
@@ -1292,8 +1314,54 @@ impl Executor {
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
-        let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id)).await?;
+        let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id),steer).await?;
         Ok(json!({"drained":1,"reply":outcome}))
+    }
+    /// "Orientar" de uma entrada do painel. Parado: ela vai para a frente e sai na entrega comum. Trabalhando: é
+    /// digitada (o Claude Code a enfileira) e promovida com `ctrl+x ctrl+s`, o mesmo caminho do chip antigo,
+    /// que leva junto o que já estava na fila interna do Claude Code (limite dele).
+    async fn steer_entry(&mut self,id:&str,payload:&Value)->Result<RuntimeReply,RuntimeError> {
+        if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
+        let entry=payload["entry_id"].as_str().filter(|entry|!entry.is_empty() && payload.as_object().is_some_and(|p|p.len()==1))
+            .ok_or_else(||error("terminal_payload"))?.to_owned();
+        // A que já saiu (ou nunca esteve) responde antes de ler a tela: nenhuma tecla.
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if !super::queue::waiting_ids(&state).contains(&entry) {
+            return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_entry_gone","cleanup":"not_needed"})));
+        }
+        let services=self.services("maintenance","maintenance","");
+        let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
+        if facts.binding!=self.target.binding {return Ok(reply(id,Disposition::Deferred,json!({"code":"queue_steer_not_delivered","cleanup":"not_needed"})));}
+        if facts.open_question {return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_steer_question_open","cleanup":"not_needed"})));}
+        if self.action(Action::Promote {entry_id:entry.clone()}).await?!=json!("moved") {
+            return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_entry_gone","cleanup":"not_needed"})));
+        }
+        self.publish().await?;
+        let working=!facts.idle;
+        // Como no pedido de drenagem: a falha aparece na vista, além de voltar a quem pediu.
+        let drained=match self.drain_once(Some(entry),working).await {Ok(value)=>value,Err(failure)=>{self.enter_error(failure.clone()).await?; return Err(failure);}};
+        let outcome=serde_json::from_value::<RuntimeReply>(drained["reply"].clone()).ok();
+        match outcome.map(|r|r.disposition) {
+            Some(Disposition::Accepted)=>{},
+            Some(Disposition::Unknown)=>return Ok(reply(id,Disposition::Unknown,json!({"code":"queue_steer_uncertain"}))),
+            // Parado e sem entregar agora (caixa ilegível, foco num mod): ficou na frente e sai no próximo tique.
+            None|Some(Disposition::Deferred) if !working=>return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":0}))),
+            _=>return Ok(reply(id,Disposition::Deferred,json!({"code":"queue_steer_not_delivered","cleanup":"not_needed"}))),
+        }
+        if !working {return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":1})));}
+        let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
+        // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o turno acabou no
+        // meio e o Claude Code já levou a mensagem: entregue igual, sem promover.
+        let mut steered=driver.steer().await;
+        for _ in 1..STEER_HINT_TRIES {
+            if steered.disposition!=input::Disposition::Deferred {break;}
+            tokio::time::sleep(self.options.limits.settle).await;
+            steered=driver.steer().await;
+        }
+        if steered.disposition==input::Disposition::Unknown {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"a mensagem entrou na fila do Claude Code, mas o ctrl+x ctrl+s não se comprovou");
+        }
+        Ok(reply(id,Disposition::Accepted,json!({"steered":steered.disposition==input::Disposition::Accepted,"drained":1})))
     }
     async fn confirm_rows(&mut self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;

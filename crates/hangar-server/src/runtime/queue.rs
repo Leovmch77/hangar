@@ -491,7 +491,13 @@ fn waiting_row(state:&State,row:&Value)->bool {
     row["delivered"]==false && row["confirmed"]!=true && row["desistiu"]!=true && row["papel"]!="assistant" && row["reserved"]!=true
         && !state.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref()==Some(id)
             && (op.payload["kind"]=="dispatch_async_answer" || matches!(op.status,Status::Dispatching|Status::Unknown)
-                || op.status==Status::Prepared && !terminal_input(state,op)))
+                || op.status==Status::Prepared && !terminal_input(state,op) && !stale_terminal_intent(op)))
+}
+
+/// Intenção terminal de uma vida anterior que nunca começou a escrever (queda e reabertura no meio):
+/// a linha continua só esperando, e a drenagem desta vida a leva com tentativa nova.
+fn stale_terminal_intent(op:&Operation)->bool {
+    op.payload["payload"].get("_terminal_generation").is_some() && op.wire_attempts.is_empty()
 }
 
 /// Posição da entrada esperando, ou por que ela não pode ser mexida.
@@ -1481,6 +1487,17 @@ mod panel_tests {
         assert_eq!(exec(&mut store,"cancel-a",Action::Cancel { entry_id:"a".into() }),json!("cancelled"));
         assert_eq!(waiting_ids(store.state()),vec!["b".to_string()]);
         assert_eq!(exec(&mut store,"cancel-x",Action::Cancel { entry_id:"x".into() }),json!("absent"));
+    }
+
+    #[test]
+    fn a_never_written_terminal_intent_of_an_older_life_still_waits() {
+        // Queda e reabertura numa vida nova: a intenção preparada antes não escreveu nada.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a");
+        let command=json!({"operation_id":"a","kind":"input","payload":{"text":"texto a","pre_transcript":false,"_terminal_generation":0}});
+        exec(&mut store,"prepare",Action::Prepare { id:"a".into(),payload:command,entry_id:Some("a".into()) });
+        assert_eq!(waiting_ids(store.state()),vec!["a".to_string()]);
+        assert_eq!(exec(&mut store,"move",Action::Promote { entry_id:"a".into() }),json!("moved"));
     }
 
     #[test]
