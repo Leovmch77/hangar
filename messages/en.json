@@ -4605,6 +4605,8 @@
   "native_machines_tray_title": "Machines and guests",
   "native_machines_tray_open": "Open sessions from all machines and guests",
   "native_machines_tray_occupied": "Machines and guests — sessions are open on other machines or invitations",
+  "native_machines_tray_attention": "Machines and guests — sessions on other machines needing attention: {count}",
+  "native_machines_tray_show_remote_tabs": "Show sessions from other machines in the tab bar",
   "native_machines_tray_pair_hint": "Drag a session onto another to pair them, or use the session menu.",
   "native_machines_tray_read_only": "Read-only",
   "native_empty_chat": "No messages yet",

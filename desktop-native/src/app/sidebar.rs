@@ -477,7 +477,7 @@ impl Hangar {
     pub(super) fn visible_order(&self, cx: &App) -> Vec<Target> {
         let active = self.active_key();
         if appearance::get().navigation.tabs() {
-            return self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).map(|s| Target::new(&active, &s.name)).collect();
+            return self.tab_targets();
         }
         // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
         let shown = |key: &str, remote: Option<&str>, l: &Layout| -> Vec<Target> {
@@ -566,8 +566,18 @@ impl Hangar {
         // Cada linha das outras máquinas guarda o próprio foco pela vida da sessão, como as da ativa.
         let rows: HashSet<Target> = self.remote.iter()
             .flat_map(|(key, list)| list.sessions.iter().map(move |s| Target::new(key, &s.name))).collect();
+        let removed_focus = self.sidebar.remote_focus.iter().any(|(target, focus)| !rows.contains(target) && focus.is_focused(window));
         self.sidebar.remote_focus.retain(|t, _| rows.contains(t));
         for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
+        if removed_focus && appearance::get().navigation.tabs() {
+            let targets = self.tab_targets();
+            let next = self.selected_target().and_then(|selected| targets.iter().position(|t| t == &selected))
+                .or_else(|| (!targets.is_empty()).then_some(0));
+            if let Some(index) = next && let Some(focus) = self.row_focus(&targets[index]) {
+                focus.focus(window, cx);
+                self.tabs_scroll.scroll_to_item(index);
+            } else { self.root_focus.focus(window, cx); }
+        }
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
         self.external_pairs_changed(window, cx);
