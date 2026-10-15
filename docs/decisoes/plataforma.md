@@ -2511,6 +2511,14 @@ mensagem sai da fila.
   na entrada que ainda espera; a que a drenagem já reivindicou (ou que sumiu) responde 409
   `queue_entry_gone`, e texto vazio, começado por `/` ou com caractere de controle, 422
   `queue_text_invalid`. Sem o parâmetro, o `DELETE` segue descartando também a bolha desistida.
+- O evento leva `removed`: os ids que esperavam na publicação anterior e sumiram da projeção
+  (apagados noutro aparelho). Todo aparelho retira a bolha `queued-<id>` deles; a entregue continua
+  na projeção e não entra. Sem isso a bolha da apagada ficava nos outros aparelhos.
+- A vigia da fila nunca pergunta a descoberta: o caminho da fila chega ao hub por quem já leu a
+  sessão (rota `/events`, canal privado, vigia da ligação, troca de conversa do ciclo de vida).
+  Perguntando por conta própria, o `/events` sem o token do dono fazia uma consulta a mais.
+- `actions` mantém o último valor quando o retrato do ator não responde em 1 s (ele está entregando):
+  sem isso os botões piscavam a cada entrega. Entrada ausente ou doente desliga na hora.
 - A regra de "esperando" é uma só (`row_waits` em `runtime/queue.rs`): o painel lê a projeção, que
   não tem as operações; por um instante ele pode mostrar a linha que a drenagem acabou de pegar, e a
   ação nela volta 409.

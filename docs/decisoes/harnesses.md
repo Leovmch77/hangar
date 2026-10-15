@@ -520,7 +520,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   aperta `ctrl+x ctrl+s`, que leva junto o que já estava na fila interna do Claude Code e interrompe
   o turno; parado, ela vai para a frente e sai na entrega comum. As ações do painel (apagar,
   editar, reordenar, Orientar) valem só para a entrada que ainda espera e passam pelo ator da
-  sessão; a que a drenagem já reivindicou responde 409 `queue_entry_gone`. Ver
+  sessão; a que a drenagem já reivindicou responde 409 `queue_entry_gone`. O `/steer` sem corpo
+  (chip de app antigo) é o Orientar da primeira que espera; sem nenhuma, promove como antes. Limite:
+  `/clear` ou `/resume` digitados direto no terminal no meio do turno trocam o session-id, e a troca
+  de vínculo descarta as mensagens que o app segurava. Ver
   [segurar a fila no turno](#claude-com-terminal-segura-a-fila-no-turno-14102026).
 
 - **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
@@ -4300,4 +4303,13 @@ O corte do painel de agentes do #137 continua valendo.
 - `ctrl+x ctrl+s` interrompe o turno e manda o que está na fila interna do Claude Code (inclusive
   o que a pessoa digitou direto no terminal): o "Orientar" por item digita só a escolhida antes de
   apertar, mas não separa o que já estava lá. A tecla só sai com a marca `ctrl+x ctrl+s to send now`
-  na tela (até três leituras); sem ela, o Claude já tinha parado e levou a mensagem como envio comum.
+  na tela (até três leituras com o Claude trabalhando, uma com ele parado); sem ela, o Claude já
+  tinha parado e levou a mensagem como envio comum.
+- Limite que fica (15/10/2026, revisão final): o app recusa comando de barra com mensagem
+  esperando, mas `/clear` ou `/resume` digitados direto no terminal no meio do turno não passam
+  pelo app. O Claude Code troca o session-id, o vínculo da sessão muda (`Action::Clear` na troca,
+  `gateway.rs`) e as mensagens seguradas saem da fila sem entrega. Mudar isso exigiria a fila
+  sobreviver à troca de conversa, contra o invariante de que a fila é da conversa; fica documentado.
+- O `/steer` sem corpo, que o chip "mandar agora" de um app antigo ainda manda, vira o Orientar da
+  primeira entrada esperando (`steer_first` no ator): só promover a fila interna do Claude Code
+  deixaria a mensagem do Hangar para trás. Sem entrada esperando, o comportamento é o de antes.
