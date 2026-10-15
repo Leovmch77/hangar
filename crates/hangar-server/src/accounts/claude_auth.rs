@@ -174,7 +174,8 @@ impl AccountService {
         if tree.attach(&child).is_err() {
             crate::terminal_process::finish(&mut tree).await;
             let _ = child.wait().await;
-            return Err("cli_not_started");
+            // O processo já existiu: conta como CLI que rodou.
+            return Err("cli_failed");
         }
         let mut stdout = child.stdout.take().unwrap().take(65537);
         let timeout = if args == ["mcp", "list"] {20} else {10};
