@@ -309,6 +309,8 @@ pub fn user_bubble() -> Hsla { let c = colors(); if floating() { hex(c.float_bub
 /// Véu atrás de diálogos: a cor da janela quase opaca.
 pub fn scrim() -> Hsla { hex(colors().bg, 0.87) }
 pub fn text() -> Hsla { reading(colors().text, 1.) }
+/// Texto corrido de documento: um degrau abaixo do `text`, que ofusca em parágrafo longo; títulos seguem no `text`.
+pub fn body_text() -> Hsla { let c = colors(); reading(mix(c.text, c.muted, 0.35), 0.85) }
 pub fn muted() -> Hsla { reading(colors().muted, 0.7) }
 /// `--text-muted`: um degrau abaixo do secundário.
 pub fn faint() -> Hsla { reading(colors().faint, 0.55) }
@@ -509,22 +511,48 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
         .with_code_language_band(Some(crate::i18n::tr_web("comum_codigo", &Default::default()).unwrap_or_default().into()))
 }
 
+/// Tamanho base do leitor de documentos (o 100% do A−/A+), o do preview de Markdown do VS Code.
+pub const READER_BASE_SIZE: u8 = 14;
+
+/// Primeira fonte de `candidates` instalada, ou `fallback`.
+pub fn first_installed(installed: &[String], candidates: &[&str], fallback: &str) -> SharedString {
+    candidates.iter().copied().find(|name| installed.iter().any(|installed| installed == name)).unwrap_or(fallback).to_owned().into()
+}
+
+/// Fonte do leitor de documentos: a lista do preview de Markdown do VS Code, na ordem dele; a Geist é de interface e cansa
+/// em parágrafo longo. Sem nenhuma instalada, a sans do sistema.
+pub fn reading_font(cx: &App) -> SharedString {
+    static FONT: OnceLock<SharedString> = OnceLock::new();
+    FONT.get_or_init(|| {
+        const SYSTEM: &str = ".SystemUIFont";
+        if cfg!(target_os = "macos") { return SYSTEM.into(); }
+        first_installed(&cx.text_system().all_font_names(),
+            &["Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", "Noto Sans", "DejaVu Sans"], SYSTEM)
+    }).clone()
+}
+
 /// Documento tem escala própria: A−/A+ não alteram a conversa nem o editor.
 pub fn document_markdown(cx: &App, font_size: u8) -> gpui_kit::base::TextViewStyle {
     let mut table = StyleRefinement::default().border_1().border_color(border_strong()).rounded_md().bg(transparent_black());
     table.overflow.x = Some(Overflow::Scroll);
-    let size = font_size as f32;
+    let (size, base) = (font_size as f32, READER_BASE_SIZE as f32);
+    let (body, title, rule) = (body_text(), text(), border_strong());
+    // Medidas do `markdown.css` do VS Code: H1 e H2 com fio embaixo, 24 px antes e 16 px depois de cada título. As margens
+    // de lá se sobrepõem; aqui o espaço do parágrafo anterior soma, e o título só completa até os 24 px.
     conversation_markdown(cx)
-        .with_foreground(text()).with_muted_foreground(muted()).with_link(accent_text())
-        .with_border(border_strong()).with_code_background(inset())
-        .with_paragraph_gap(rems(1.1))
-        .with_heading(move |level| StyleRefinement::default()
-            .text_size(px(size * match level { 1 => 2.1, 2 => 1.45, 3 => 1.2, 4 => 1.1, 5 => 1., _ => 0.92 }))
-            .font_weight(if level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-            .line_height(relative(1.35)).mt(px(if level == 1 { 0. } else { size * 1.5 })).mb(px(size * 0.75)))
+        .with_foreground(body).with_muted_foreground(muted()).with_link(accent_text())
+        .with_border(rule).with_code_background(inset())
+        .with_paragraph_gap(rems(1.))
+        .with_heading(move |level| {
+            let em = size * match level { 1 => 2., 2 => 1.5, 3 => 1.25, 4 => 1., 5 => 0.875, _ => 0.85 };
+            let heading = StyleRefinement::default().text_size(px(em)).font_weight(FontWeight::SEMIBOLD).text_color(title)
+                .line_height(relative(1.25)).mt(px(if level == 1 { 0. } else { size * 8. / base })).mb(px(size * 16. / base));
+            if level <= 2 { heading.pb(px(em * 0.3)).border_b_1().border_color(rule) } else { heading }
+        })
+        .with_inline_code(HighlightStyle { color: Some(body), background_color: Some(title.opacity(0.1)), ..Default::default() })
         .with_table(table)
         .with_table_head(StyleRefinement::default().bg(inset()).font_weight(FontWeight::SEMIBOLD))
-        .with_table_cell(StyleRefinement::default().border_r_1().border_color(border_strong()).px_3().py_2())
+        .with_table_cell(StyleRefinement::default().border_r_1().border_color(rule).px_3().py_2())
 }
 
 /// Leva modo claro/escuro, destaque e fonte para os componentes do gpui-kit (entrada, menus, botão primário).

@@ -14,7 +14,7 @@ impl ReaderMode {
 pub(super) struct ReaderSettings { pub mode: ReaderMode, pub outline: bool, pub font_size: u8 }
 
 impl Default for ReaderSettings {
-    fn default() -> Self { Self { mode: ReaderMode::Reading, outline: true, font_size: 16 } }
+    fn default() -> Self { Self { mode: ReaderMode::Reading, outline: true, font_size: theme::READER_BASE_SIZE } }
 }
 
 impl ReaderSettings {
@@ -176,9 +176,9 @@ impl Hangar {
             .when(doc.editor.read(cx).value().trim().is_empty(), |el| el.child(div().px_4().py_2().text_sm().text_color(theme::faint()).child(tr("file_empty"))))
             .child(div().flex_1().min_h_0().min_w_0().flex().when(stacked, |el| el.flex_col())
                 .when(show_outline, |el| el.child(outline))
-                .child(div().id("file-markdown").flex_1().min_w_0().min_h_0().when(!stacked, |el| el.h_full()).flex().justify_center().px(px(if width < 760. { 16. } else { 32. })).py_6()
-                    .child(div().w_full().h_full().max_w(px(790.)).font_family(theme::SANS)
-                        .text_size(px(tab.reader.font_size as f32)).line_height(relative(1.8)).child(text)))
+                .child(div().id("file-markdown").flex_1().min_w_0().min_h_0().when(!stacked, |el| el.h_full()).flex().px(px(if width < 760. { 16. } else { 26. })).py_6()
+                    .child(div().w_full().h_full().font_family(theme::reading_font(cx))
+                        .text_size(px(tab.reader.font_size as f32)).line_height(relative(22. / theme::READER_BASE_SIZE as f32)).child(text)))
                 .when(tab.reader.mode.source(), |el| el.child(div().min_w_0().min_h_0().flex_shrink_0().border_color(theme::border())
                     .when(stacked, |el| el.w_full().h(relative(0.5)).border_t_1())
                     .when(!stacked, |el| el.w(relative(0.5)).h_full().border_l_1())
@@ -186,7 +186,7 @@ impl Hangar {
             .child(div().h(px(28.)).flex_shrink_0().px_3().border_t_1().border_color(theme::border()).flex().items_center().gap_3()
                 .text_size(px(11.)).text_color(theme::faint())
                 .child(tr(if tab.reader.mode == ReaderMode::Split { "file_split" } else { "file_reading" }))
-                .child(format!("{}%", tab.reader.font_size as u32 * 100 / 16))
+                .child(format!("{}%", tab.reader.font_size as u32 * 100 / theme::READER_BASE_SIZE as u32))
                 .child("Markdown").child(div().flex_1())
                 .children(headings.get(active).map(|heading| div().max_w(relative(0.5)).truncate().child(heading.text.clone()))))
             .into_any_element()

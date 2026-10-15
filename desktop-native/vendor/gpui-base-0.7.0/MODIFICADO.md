@@ -32,6 +32,11 @@ Mudanças, todas marcadas com "Modified for Hangar":
    Motivo: tabela de prosa de 4 colunas passava da coluna do chat (880 px) e a última coluna ficava cortada, sem
    barra que mostrasse que dava para rolar.
 
+4. `src/text/document.rs`: no modo rolável, cada bloco entra no `gpui::list` dentro de um `div` sem estilo.
+   Motivo: a lista mede cada item como raiz de layout, e a raiz perde a própria margem; sem o invólucro, o `mt`/`mb`
+   que o app dá ao título (`with_heading`) não ocupava espaço, e o fio embaixo do título do leitor de documentos
+   encostava no parágrafo seguinte. Estilo sem margem desenha igual.
+
 Removido na 0.7.0: o conserto de `src/text_selection.rs` (participante de view `.cached` reusada varrido no fim do
 quadro). O kit passou a resolver isso com o `RenderedMarker` guardado no estado do elemento
 (`text_selection.rs:206-245`), então o arquivo voltou ao original.
