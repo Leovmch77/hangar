@@ -82,10 +82,16 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   confere o PR inteiro, desde o ponto em que a ponta saiu da base; a trava `pre-push` confere cada
   push, e consulta o PR com prazo de 10 s: sem `gh` ou sem resposta, segue com aviso. PR aberto pelo
   site fica com o CI. O padrão, que as travas exigem, é o rápido: só o ligado aos arquivos mudados
-  (`cargo test` dos crates mexidos, pytest dos testes mudados e dos que importam o módulo mudado,
-  `vitest related` e typecheck só com `.ts`/`.svelte`/mensagens no diff, nativo compilado e filtrado
-  pelos módulos); Windows só com `.ps1`, `procinfo.py` ou `atomico.py` no diff, e a VM nunca passa de
-  10 min (`HANGAR_VERIFICAR_WINDOWS_MAX`). O passo completo gravado cobre o rápido da mesma área.
+  (`cargo test` do `hangar-server`, ou do workspace quando muda crate de base; pytest dos testes
+  mudados e dos que citam o módulo mudado, a suíte inteira quando muda dependência, conftest ou
+  helper; `vitest related` e typecheck só com `.ts`/`.svelte`/mensagens no diff, tudo quando muda
+  dependência ou configuração; o nativo inteiro, num target próprio da árvore fixa, porque o custo é
+  compilar e o target global da máquina fazia o passo esperar a trava dos builds de quem programa);
+  Windows só com `.ps1`, `procinfo.py` ou `atomico.py` no diff, e a VM nunca passa de 10 min
+  (`HANGAR_VERIFICAR_WINDOWS_MAX`). O passo completo gravado cobre o rápido da mesma área; o rápido
+  só vale para base igual ou mais velha que a pedida. Medido no PR da voz (`639c486a79`): 454 s
+  (rust 453 s, sendo 297 s de compilação; nativo 356 s, ~150 s esperando a trava; front 246 s),
+  contra ~33 min do Linux completo.
   `--completo` roda o que o CI rodaria para o que o commit muda, num clone fixo por máquina (`~/.cache/hangar-verificacao/arvore`), em fila
   única (`flock`) e prioridade baixa, com HOME vazio e o `omp` fixo do CI; Windows por SSH na VM
   de `git config hangar.verificarWindows`, com mutex. O registro é pelo tree sha; a trava só o lê.

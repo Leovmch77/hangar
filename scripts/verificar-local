@@ -118,7 +118,7 @@ classificar() {
 
 TODOS_LINUX="rust backend front mobile nativo shell statusline pi"
 TODOS_WINDOWS="rust statusline"
-RAPIDOS="rust_rapido backend_rapido front_rapido mobile_rapido nativo_rapido"
+RAPIDOS="rust_rapido backend_rapido front_rapido mobile_rapido"
 
 # O plano padrão, que as travas exigem: só o ligado aos arquivos mudados (cada passo `*_rapido` lê a
 # lista); a bateria inteira é do CI e do `--completo`. Windows só com arquivo de Windows no diff.
@@ -145,7 +145,7 @@ classificar_rapido() {
     (( back )) && lin+=(backend_rapido)
     (( front )) && lin+=(front_rapido)
     (( mobile )) && lin+=(mobile_rapido)
-    (( nativo )) && lin+=(nativo_rapido)
+    (( nativo )) && lin+=(nativo)
     (( wrap )) && lin+=(shell)
     (( status )) && lin+=(statusline) && win+=(statusline)
     (( pi )) && lin+=(pi)
@@ -298,6 +298,8 @@ passo_rust_rapido() {
                 [[ -n "$nome" && " ${args[*]} " != *" $nome "* ]] && args+=(-p "$nome") ;;
         esac
     done <<< "$(mudados '^crates/')"
+    # Só o hangar-server é folha; crate de base muda quem depende dele.
+    for nome in "${args[@]}"; do [[ "$nome" == -p || "$nome" == hangar-server ]] || todos=1; done
     (( todos )) && args=(--workspace)
     (( ${#args[@]} )) || { echo "nenhum crate mudou"; return 0; }
     (cd crates && cargo test --locked --no-fail-fast "${args[@]}")
@@ -305,17 +307,21 @@ passo_rust_rapido() {
 
 # Os testes que mudaram e os que importam um módulo do app que mudou.
 passo_backend_rapido() {
-    local f m t testes=()
+    local f m t testes=() inteiro=0
     while IFS= read -r f; do
         case "$f" in
             backend/tests/test_*.py) [[ -f "$f" ]] && testes+=("${f#backend/}") ;;
             backend/app/*.py)
                 m="$(basename "$f" .py)"
-                [[ "$m" == __init__ ]] && continue
-                while IFS= read -r t; do testes+=("$t"); done < <(cd backend && \
-                    grep -lE "app(\.[a-z_]+)*\.$m\b|from app(\.[a-z_.]+)? import .*\b$m\b" tests/test_*.py 2>/dev/null) ;;
+                [[ "$m" == __init__ ]] && m="$(basename "$(dirname "$f")")"
+                [[ "$m" == app ]] && { inteiro=1; continue; }
+                # Palavra solta, não só `app.x`: import em várias linhas (`from app import (\n x,`) também conta.
+                while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lw -- "$m" tests/test_*.py 2>/dev/null) ;;
+            # Dependência, conftest e helper de teste valem para a suíte inteira.
+            backend/pyproject.toml|backend/uv.lock|backend/tests/*.py) inteiro=1 ;;
         esac
     done <<< "$(mudados '^backend/')"
+    (( inteiro )) && { echo "mudou o que vale para a suíte inteira: pytest completo"; passo_backend; return; }
     mapfile -t testes < <(printf '%s\n' "${testes[@]}" | grep . | sort -u)
     (( ${#testes[@]} )) || { echo "nenhum teste ligado aos arquivos mudados do backend"; return 0; }
     echo "pytest: ${testes[*]}"
@@ -334,6 +340,12 @@ passo_front_rapido() {
     [[ -n "$(mudados '^(messages|project\.inlang)/')" ]] && msgs=1
     grep -qE '\.(ts|svelte)$' <<< "$web" && tipos=1
     npm run i18n:compile -w frontend > /dev/null || return 1
+    # Dependência ou configuração mudou: não há "relacionado", vale tudo (menos o build, que é do CI).
+    if [[ -n "$(mudados '^(package(-lock)?\.json|(frontend|packages/core)/(package\.json|tsconfig[^/]*\.json|vite[^/]*\.ts|vitest[^/]*\.ts|svelte\.config\.js))$')" ]]; then
+        (cd packages/core && npx tsc --noEmit -p tsconfig.json && npx vitest run) || return 1
+        (cd frontend && npx svelte-check --tsconfig ./tsconfig.app.json --threshold error && npx vitest run)
+        return
+    fi
     if (( tipos || msgs )); then
         (cd packages/core && npx tsc --noEmit -p tsconfig.json) || return 1
         (cd frontend && npx svelte-check --tsconfig ./tsconfig.app.json --threshold error) || return 1
@@ -355,20 +367,6 @@ passo_mobile_rapido() {
     (cd mobile && npx vitest related --run --passWithNoTests "${rel[@]}")
 }
 
-# Compila os testes do nativo e roda só os dos módulos mudados (src/app/dictation.rs → app::dictation).
-passo_nativo_rapido() {
-    local f m filtros=()
-    while IFS= read -r f; do
-        m="${f#desktop-native/src/}"; m="${m%.rs}"; m="${m%/mod}"
-        [[ "$m" == main ]] || filtros+=("${m//\//::}")
-    done <<< "$(mudados '^desktop-native/src/.*\.rs$')"
-    [[ -n "$(mudados '^messages/')" ]] && filtros+=(i18n)
-    cd desktop-native || return 1
-    export CARGO_TARGET_DIR="$PWD/target"
-    (( ${#filtros[@]} )) || { cargo test --locked --no-run; return; }
-    mapfile -t filtros < <(printf '%s\n' "${filtros[@]}" | sort -u)
-    cargo test --locked -- "${filtros[@]}"
-}
 
 # ── execução na árvore fixa (Linux em processo; Windows chega por `bash -s` via SSH) ──────────
 
@@ -446,7 +444,7 @@ rodar_em_faixas() {   # $1 = sha, resto = passos
         else
             # front e mobile juntos: os dois compilam as mensagens do core no mesmo lugar.
             case "$p" in
-                rust|backend|nativo|rust_rapido|backend_rapido|nativo_rapido) faixas+=("$p") ;;
+                rust|backend|nativo|rust_rapido|backend_rapido) faixas+=("$p") ;;
                 front|mobile|front_rapido|mobile_rapido) web+=("$p") ;;
                 *) leves+=("$p") ;;
             esac
@@ -559,16 +557,29 @@ gravar() {   # $1 = sha, $2 = so, $3 = base, resto = passos
     mkdir -p "$ESTADO/resultados"
     arq="$(registro "$sha" "$so")"
     [[ -f "$arq" ]] && read -ra ja <<< "$(sed -n 's/^passos=//p' "$arq")"
+    # O registro guarda uma base só: rápido gravado com outra base deixa de valer junto com ela.
+    if [[ -f "$arq" && "$(sed -n 's/^base=//p' "$arq")" != "$base" ]]; then
+        local manter=()
+        for p in "${ja[@]}"; do [[ "$p" == *_rapido ]] || manter+=("$p"); done
+        ja=("${manter[@]}")
+    fi
     # shellcheck disable=SC2207
-    ja+=($(faltando "$arq" "$@"))
+    ja+=($(BASE_ATUAL="$base" faltando "$arq" "$@"))
     printf 'commit=%s\nbase=%s\npassos=%s\nquando=%s\n' "$sha" "$base" "${ja[*]}" "$(date -Is)" > "$arq"
 }
 
 # Passos de $2.. que o registro $1 não cobre, na ordem dada.
 faltando() {
-    local arq="$1" feitos="" p saida=()
+    local arq="$1" feitos="" p saida=() base_reg
     shift
     [[ -f "$arq" ]] && feitos=" $(sed -n 's/^passos=//p' "$arq") "
+    # O rápido olhou só o diff desde a base dele: vale se ela é a pedida ou mais velha (diff maior).
+    base_reg="$(sed -n 's/^base=//p' "$arq" 2>/dev/null)"
+    if [[ -n "${BASE_ATUAL:-}" && -n "$base_reg" ]] && ! git merge-base --is-ancestor "$base_reg" "$BASE_ATUAL" 2>/dev/null; then
+        local f completos=" "
+        for f in $feitos; do [[ "$f" == *_rapido ]] || completos+="$f "; done
+        feitos="$completos"
+    fi
     # O passo completo cobre o rápido da mesma área; o rápido nunca cobre o completo.
     for p in "$@"; do [[ "$feitos" == *" $p "* || ( "$p" == *_rapido && "$feitos" == *" ${p%_rapido} "* ) ]] || saida+=("$p"); done
     echo "${saida[*]}"
@@ -732,6 +743,7 @@ if [[ -n "$base" ]]; then
 else
     base="$(base_padrao "$sha")"
 fi
+BASE_ATUAL="$base"
 
 if (( tudo )); then
     plano_lin="$TODOS_LINUX"; plano_win="$TODOS_WINDOWS"
@@ -753,6 +765,8 @@ filtrar() {   # $1 = lista, resto = passos aceitos; imprime a lista só com os a
 }
 if [[ -n "$so_passos" ]]; then
     for p in $so_passos; do [[ " $TODOS_LINUX $RAPIDOS " == *" $p "* ]] || erro "passo desconhecido: $p"; done
+    # O rápido precisa da lista de arquivos mudados, que o --tudo não calcula.
+    (( tudo )) && [[ " $so_passos " == *"_rapido "* ]] && erro "--tudo roda passos completos; sem passo rápido"
     # shellcheck disable=SC2086
     plano_lin="$(filtrar "$plano_lin" $so_passos)"
     # shellcheck disable=SC2086

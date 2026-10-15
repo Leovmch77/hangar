@@ -48,14 +48,14 @@ rapido() {   # $1 = arquivos, $2 = linux esperado, $3 = windows esperado
     fi
 }
 rapido "crates/hangar-server/src/main.rs" "rust_rapido" ""
-rapido "crates/hangar-api/src/lib.rs" "rust_rapido nativo_rapido" ""
+rapido "crates/hangar-api/src/lib.rs" "rust_rapido nativo" ""
 rapido "backend/app/registry.py" "backend_rapido" ""
 rapido "backend/app/procinfo.py" "backend_rapido" "runtime"
 rapido "frontend/src/App.svelte" "front_rapido" ""
 rapido "packages/core/src/api.ts" "front_rapido" ""
-rapido "messages/pt.json" "front_rapido nativo_rapido" ""
+rapido "messages/pt.json" "front_rapido nativo" ""
 rapido "mobile/src/App.tsx" "mobile_rapido" ""
-rapido "desktop-native/src/main.rs" "nativo_rapido" ""
+rapido "desktop-native/src/main.rs" "nativo" ""
 rapido "install.ps1" "" "runtime"
 rapido "scripts/shell/claude.fish" "shell" ""
 rapido "scripts/configure-statusline.cjs" "statusline" "statusline"
@@ -65,12 +65,22 @@ rapido $'crates/hangar-server/src/a.rs\nfrontend/src/b.ts\ndocs/x.md' "rust_rapi
 # O passo completo já gravado cobre o rápido da mesma área; o rápido não cobre o completo.
 reg="$(mktemp)"
 printf 'passos=rust nativo\n' > "$reg"
-falta="$("$V" --faltando "$reg" rust_rapido nativo_rapido front_rapido)"
-[[ "$falta" == "front_rapido" ]] || { echo "FALHOU completo não cobriu o rápido: \"$falta\""; falhou=1; }
+falta="$("$V" --faltando "$reg" rust_rapido backend_rapido)"
+[[ "$falta" == "backend_rapido" ]] || { echo "FALHOU completo não cobriu o rápido: \"$falta\""; falhou=1; }
 printf 'passos=rust_rapido\n' > "$reg"
 falta="$("$V" --faltando "$reg" rust)"
 [[ "$falta" == "rust" ]] || { echo "FALHOU rápido cobriu o completo: \"$falta\""; falhou=1; }
+# O rápido olhou o diff desde a base dele: base mais nova que a pedida cobre menos e não vale.
+printf 'base=%s\npassos=rust_rapido\n' "$(git rev-parse HEAD)" > "$reg"
+falta="$(BASE_ATUAL="$(git rev-parse HEAD~1)" "$V" --faltando "$reg" rust_rapido)"
+[[ "$falta" == "rust_rapido" ]] || { echo "FALHOU rápido de base mais nova valeu: \"$falta\""; falhou=1; }
+falta="$(BASE_ATUAL="$(git rev-parse HEAD)" "$V" --faltando "$reg" rust_rapido)"
+[[ -z "$falta" ]] || { echo "FALHOU rápido da mesma base não valeu: \"$falta\""; falhou=1; }
+printf 'base=%s\npassos=rust_rapido\n' "$(git rev-parse HEAD~1)" > "$reg"
+falta="$(BASE_ATUAL="$(git rev-parse HEAD)" "$V" --faltando "$reg" rust_rapido)"
+[[ -z "$falta" ]] || { echo "FALHOU rápido de base mais velha (diff maior) não valeu: \"$falta\""; falhou=1; }
 rm -f "$reg"
+"$V" --plano --tudo --passos rust_rapido >/dev/null 2>&1 && { echo "FALHOU --tudo aceitou passo rápido"; falhou=1; }
 
 # Erro no cálculo do plano nunca vira "nada a verificar".
 "$V" --plano --base ref-que-nao-existe >/dev/null 2>&1 && { echo "FALHOU --plano com base inválida saiu 0"; falhou=1; }
