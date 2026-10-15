@@ -949,9 +949,18 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 steer["expectedTurnId"] = json!(turn);
                                 if let Some(parts) = steer["input"].as_array_mut() { parts.push(json!({"type": "text", "text": OFFER_ACCEPTED_NOTE})); }
                                 match rpc.request("turn/steer", steer).await {
-                                    Ok(_) => { log("offer accepted: result steered into the yes turn"); results.mark_summary(turn.to_owned()); ack.answered(turn); }
-                                    // Volta para a frente da fila; com o aceite já registrado, sai no fim deste turno.
-                                    Err(error) => { log(format!("offer accept steer failed kind={}", rpc_error_kind(&error))); results.turn_start_failed(true); }
+                                    Ok(_) => {
+                                        log("offer accepted: result steered into the yes turn");
+                                        results.mark_summary(turn.to_owned());
+                                        spoken.revoke(turn);
+                                        ack.answered(turn);
+                                    }
+                                    Err(error) => {
+                                        log(format!("offer accept steer failed kind={}", rpc_error_kind(&error)));
+                                        if let Some(input) = results.steer_failed(organizer_busy) {
+                                            start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await;
+                                        }
+                                    }
                                 }
                             }
                             // A troca de sessão ou de modo chega ao organizador no turno desta fala. Nunca pela voz: na v3
