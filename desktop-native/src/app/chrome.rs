@@ -366,6 +366,78 @@ impl RenderOnce for Shimmer {
     }
 }
 
+/// Medidas da linha "brain + Pensando" da pele Terminal: a linha apagada e a cópia acesa usam as mesmas.
+pub const THINKING_ICON: f32 = 14.;
+pub const THINKING_GAP: f32 = 8.;
+pub const THINKING_TEXT: f32 = 12.5;
+pub const THINKING_LINE: f32 = 19.;
+
+/// A linha apagada do raciocínio na pele Terminal: brain e rótulo, na largura do conteúdo (a faixa anda sobre ela,
+/// não sobre a linha inteira). `overlay` é o lugar do brilho, por cima de tudo.
+pub fn thinking_label_row(label: SharedString, overlay: Option<AnyElement>) -> Div {
+    let dim = theme::muted();
+    div().relative().flex().flex_none().items_center().gap(px(THINKING_GAP)).h(px(THINKING_LINE))
+        .font_family(theme::MONO).text_size(px(THINKING_TEXT)).line_height(px(THINKING_LINE)).text_color(dim)
+        .child(small_icon(IconName::Brain, THINKING_ICON, dim))
+        .child(div().flex_none().whitespace_nowrap().child(label))
+        .children(overlay.map(|overlay| div().absolute().inset_0().child(overlay)))
+}
+
+/// Onde a cópia acesa pinta o ícone e o texto, a partir do canto da linha: o mesmo lugar do `thinking_label_row`.
+pub fn thinking_focus_layout(origin: Point<Pixels>) -> (Bounds<Pixels>, Point<Pixels>) {
+    let icon = Bounds { origin: point(origin.x, origin.y + px((THINKING_LINE - THINKING_ICON) / 2.)), size: size(px(THINKING_ICON), px(THINKING_ICON)) };
+    (icon, point(origin.x + px(THINKING_ICON + THINKING_GAP), origin.y))
+}
+
+/// O brilho do "Pensando" como no T3: a linha acesa por cima da apagada, vista só pela faixa que anda em degraus.
+/// Pintada direto, sem elementos: as 24 cópias não entram na árvore de acessibilidade, e a linha da área continua
+/// sendo a única que o leitor de tela lê.
+#[derive(IntoElement)]
+pub struct ThinkingFocus { key: ElementId, label: SharedString }
+
+impl ThinkingFocus {
+    pub fn new(key: impl Into<ElementId>, label: SharedString) -> Self { Self { key: key.into(), label } }
+}
+
+struct ThinkingFocusView { label: SharedString, born: Instant, visible: Rc<Cell<bool>> }
+
+impl Render for ThinkingFocusView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (visible, label, born, still) = (self.visible.clone(), self.label.clone(), self.born, cx.reduce_motion());
+        canvas(move |bounds, window, _| visible.set(window.content_mask().bounds.intersects(&bounds)),
+            move |bounds, _, window, cx| {
+                // Movimento reduzido: só a linha apagada, como o `opacity: 0` do T3.
+                if still { return; }
+                let lit = theme::text();
+                let font = Font { family: theme::MONO.into(), ..window.text_style().font() };
+                let (icon, text_at) = thinking_focus_layout(bounds.origin);
+                let phase = crate::motion::focus_phase(born.elapsed());
+                for (x, w, alpha) in crate::motion::focus_strips(phase, f32::from(bounds.size.width)) {
+                    let color = lit.opacity(alpha);
+                    let run = TextRun { len: label.len(), font: font.clone(), color, ..Default::default() };
+                    let line = window.text_system().shape_line(label.clone(), px(THINKING_TEXT), &[run], None);
+                    let clip = Bounds { origin: point(bounds.origin.x + px(x), bounds.origin.y), size: size(px(w), bounds.size.height) };
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                        let _ = window.paint_svg(icon, IconName::Brain.path(), None, TransformationMatrix::unit(), color, cx);
+                        let _ = line.paint(text_at, px(THINKING_LINE), TextAlign::Left, None, window, cx);
+                    });
+                }
+            }).size_full()
+    }
+}
+
+impl RenderOnce for ThinkingFocus {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let label = self.label;
+        let view = keyed_view(self.key, window, cx, |cx| {
+            pulse(Duration::ZERO, |view: &ThinkingFocusView| view.visible.get(), cx);
+            ThinkingFocusView { label: label.clone(), born: Instant::now(), visible: Rc::new(Cell::new(true)) }
+        });
+        view.update(cx, |view, cx| if view.label != label { view.label = label; cx.notify(); });
+        view.cached(StyleRefinement::default().size_full())
+    }
+}
+
 pub fn format_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     match secs {
@@ -623,4 +695,20 @@ pub fn no_terminal_mark(size: f32, color: Hsla) -> Svg {
 
 pub fn small_icon(icon: IconName, size: f32, color: Hsla) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
+
+    #[test]
+    fn thinking_focus_layout_matches_the_label_row() {
+        // A cópia acesa é pintada à mão: ícone centrado na linha de 19 px e texto depois do ícone e do vão,
+        // exatamente onde o `thinking_label_row` põe os dele.
+        let (icon, text) = thinking_focus_layout(point(px(10.), px(100.)));
+        assert_eq!(icon, Bounds { origin: point(px(10.), px(102.5)), size: size(px(14.), px(14.)) });
+        assert_eq!(text, point(px(32.), px(100.)));
+    }
 }

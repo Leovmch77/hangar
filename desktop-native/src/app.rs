@@ -3738,7 +3738,11 @@ impl Hangar {
         let start = text.char_indices().rev().nth(LIVE_THINKING_TAIL).map(|(i, _)| i).unwrap_or(0);
         let source = safe_markdown(&text[start..]);
         let view = self.text_view(LIVE_THINKING, LIVE_THINKING, source, cx);
-        terminal_look::live_thinking_content(appearance::get().tool_look, &view, cx)
+        let look = appearance::get().tool_look;
+        // Só a pele Terminal tem o brilho; o lugar dele é pintado fora da conversa guardada.
+        let focus = (look == appearance::ToolLook::Terminal)
+            .then(|| self.thinking_focus_slot(panes::Area::Conversation, "live-thinking-focus", tr("thinking_live").into()));
+        terminal_look::live_thinking_content(look, &view, focus, cx)
     }
 
     fn render_live_tool(&self) -> AnyElement {

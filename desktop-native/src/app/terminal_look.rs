@@ -87,23 +87,38 @@ pub(super) fn tool_body_control(
         .on_click(|_, _, cx| cx.stop_propagation()).into_any_element()
 }
 
-fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
+fn thinking_markdown(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView {
     let dim = theme::muted();
     let style = theme::conversation_markdown(cx).with_foreground(dim).with_muted_foreground(dim)
         .with_link(dim).with_list_marker_color(Some(dim))
         .with_inline_code(HighlightStyle { color: Some(dim), ..Default::default() });
-    div().flex().items_start().gap(px(8.)).pl(px(INDENT - 8.)).text_color(dim)
-        .child(div().flex_none().italic().child("∴"))
-        .child(div().flex_1().min_w_0().child(gpui_kit::base::TextView::new(view)
-            .selectable(true).scrollable(false).style(style)))
+    gpui_kit::base::TextView::new(view).selectable(true).scrollable(false).style(style)
+}
+
+/// Raciocínio terminado: o brain no lugar do `∴`, parado, centrado na primeira linha como o ponto do texto.
+fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
+    let dim = theme::muted();
+    div().flex().items_start().gap(px(chrome::THINKING_GAP)).pl(px(INDENT - 8.)).text_color(dim)
+        .child(div().flex_none().h(px(conversation_line(false))).flex().items_center()
+            .child(chrome::small_icon(IconName::Brain, chrome::THINKING_ICON, dim)))
+        .child(div().flex_1().min_w_0().child(thinking_markdown(view, cx)))
+}
+
+/// Raciocínio chegando na pele Terminal: "brain Pensando" com o brilho do T3 e, embaixo, o texto alinhado ao rótulo.
+fn terminal_live_thinking(view: &Entity<TextViewState>, focus: Option<AnyElement>, cx: &App) -> Div {
+    div().flex().flex_col().gap(px(4.))
+        .child(div().flex().pl(px(INDENT - 8.)).child(chrome::thinking_label_row(tr("thinking_live").into(), focus)))
+        .child(div().pl(px(INDENT - 8. + chrome::THINKING_ICON + chrome::THINKING_GAP)).text_color(theme::muted())
+            .child(thinking_markdown(view, cx)))
 }
 
 pub(super) fn live_thinking_content(
     look: appearance::ToolLook,
     view: &Entity<TextViewState>,
+    focus: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
-    if look == appearance::ToolLook::Terminal { return terminal_thinking_text(view, cx).into_any_element(); }
+    if look == appearance::ToolLook::Terminal { return terminal_live_thinking(view, focus, cx).into_any_element(); }
     div().flex().flex_col().gap_1().px_3().py_2()
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent()).child(tr("thinking_live")))
         .child(chat_text(view, cx).text_sm().text_color(theme::muted()))

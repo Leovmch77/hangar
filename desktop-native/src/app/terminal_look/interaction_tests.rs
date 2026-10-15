@@ -10,12 +10,12 @@ struct ThinkingSurface {
 
 impl Render for ThinkingSurface {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        live_thinking_content(self.look, &self.text, cx)
+        live_thinking_content(self.look, &self.text, None, cx)
     }
 }
 
 #[gpui::test]
-fn terminal_thinking_exposes_markdown_once_without_its_own_controls(cx: &mut TestAppContext) {
+fn terminal_thinking_shows_brain_label_once_without_the_old_marker(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_, cx) = cx.add_window_view(|window, cx| {
         window.retain_a11y_tree(true);
@@ -26,7 +26,9 @@ fn terminal_thinking_exposes_markdown_once_without_its_own_controls(cx: &mut Tes
     });
     cx.run_until_parked();
     let snapshot = cx.update(|window, cx| { let _ = window.draw(cx); window.a11y_snapshot(None).unwrap() });
-    assert!(snapshot.contains('∴'), "o pensamento exposto precisa do marcador, não de título sintético");
+    // O `∴` saiu: quem abre o raciocínio agora é o brain, e o rótulo do T3 aparece uma vez só.
+    assert!(!snapshot.contains('∴'));
+    assert_eq!(snapshot.matches(&crate::i18n::tr("thinking_live")).count(), 1);
     assert_eq!(snapshot.matches("Texto sintético já exposto.").count(), 1);
     assert!(!snapshot.lines().any(|line| line.trim_start().starts_with("Button ")));
 }
