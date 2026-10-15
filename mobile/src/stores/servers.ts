@@ -90,7 +90,7 @@ export const useServers = create<ServersState>((set, get) => {
     registrarDiag({
       evento: 'servidores.cofre_falhou', nivel: 'erro', tela: 'servidores',
       codigo: stage === 'write' ? 'servers_vault_write_failed' : stage === 'read' ? 'servers_vault_read_failed' : 'servers_vault_corrupt',
-      operacao: stage, detalhe: error instanceof SyntaxError ? 'SyntaxError' : error instanceof Error ? 'Error' : typeof error,
+      operacao: stage, detalhe: error instanceof SyntaxError ? 'SyntaxError' : error instanceof Error ? 'vault_error' : typeof error,
     });
   }
 
@@ -139,7 +139,7 @@ export const useServers = create<ServersState>((set, get) => {
         stage = 'parse';
         const p: unknown = raw === null ? { servers: [], activeId: null } : JSON.parse(raw);
         stage = 'schema';
-        if (!isPersisted(p)) throw new Error('Dados inválidos no cofre de servidores');
+        if (!isPersisted(p)) throw new Error('vault_schema');
         lastOwnActive = p.activeId;
         const ephemeral = get().servers.filter((s) => s.ephemeral && !p.servers.some((saved) => saved.id === s.id));
         const recovered = pending.reduce((value, { update }) => update(value), { servers: [...p.servers, ...ephemeral], activeId: p.activeId });

@@ -436,10 +436,10 @@ describe('avisos independentes', () => {
 
 describe('diário seguro do cofre', () => {
   test.each([
-    ['read', 'servers_vault_read_failed', 'Error'],
+    ['read', 'servers_vault_read_failed', 'vault_error'],
     ['parse', 'servers_vault_corrupt', 'SyntaxError'],
-    ['schema', 'servers_vault_corrupt', 'Error'],
-    ['write', 'servers_vault_write_failed', 'Error'],
+    ['schema', 'servers_vault_corrupt', 'vault_error'],
+    ['write', 'servers_vault_write_failed', 'vault_error'],
   ] as const)('%s registra etapa, código e tipo, nunca o segredo', async (stage, code, errorType) => {
     const secret = 'token-ultrassecreto-NAO-REGISTRAR';
     const error = new Error(`SecureStore recusou ${secret}`);
