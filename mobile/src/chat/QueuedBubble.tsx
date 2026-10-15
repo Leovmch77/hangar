@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { waitsInQueue, type ChatEvent, type SessionInfo } from '@hangar/core';
@@ -7,20 +7,26 @@ import { UserBubble } from './UserBubble';
 import * as m from '../paraglide/messages';
 
 // A ação vive separada: listas só de leitura não criam um store sem identidade de conversa.
-function DiscardQueued({ id, sessionName, serverId }: { id: string; sessionName: string; serverId: string }) {
+function DiscardQueued({ id, text, sessionName, serverId }: { id: string; text: string; sessionName: string; serverId: string }) {
   const chat = chatStore(serverId, sessionName);
   const busy = chat.use((s) => s.queueBusy);
-  const [{ sending, error }, setAction] = useState({ sending: false, error: null as string | null });
+  const [action, setAction] = useState({ sending: false, error: null as string | null });
+  const { sending, error } = action;
   const { theme } = useUnistyles();
+  useEffect(() => {
+    if (!action.error) return;
+    const timer = setTimeout(() => setAction((current) => ({ ...current, error: null })), 6000);
+    return () => clearTimeout(timer);
+  }, [action]);
   const discard = async () => {
     if (chat.use.getState().queueBusy) return;
     setAction({ sending: true, error: null });
-    await chat.discardQueued(id);
-    setAction({ sending: false, error: chat.use.getState().queueError });
+    const error = await chat.discardQueued(id);
+    setAction({ sending: false, error });
   };
   return (
     <View style={styles.action}>
-      <Pressable accessibilityRole="button" accessibilityLabel={m.native_queue_discard()}
+      <Pressable accessibilityRole="button" accessibilityLabel={m.native_queue_discard_message({ text: text.replace(/\s+/g, ' ').trim().slice(0, 80) })}
         accessibilityState={{ disabled: busy, busy: sending }} disabled={busy}
         onPress={() => void discard()} style={[styles.button, busy && styles.dim]}>
         {sending ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} /> : null}
@@ -31,11 +37,12 @@ function DiscardQueued({ id, sessionName, serverId }: { id: string; sessionName:
   );
 }
 
-export const QueuedBubble = memo(function QueuedBubble({ event, working, problem, session, sessionName, serverId }: {
+export const QueuedBubble = memo(function QueuedBubble({ event, working, problem, provider, headless, sessionName, serverId }: {
   event: ChatEvent;
   working: boolean;
   problem?: string | null;
-  session?: SessionInfo | null;
+  provider?: SessionInfo['provider'];
+  headless?: boolean;
   sessionName?: string;
   serverId?: string;
 }) {
@@ -54,13 +61,13 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
 
   return (
     <View>
-      <View style={working && waitsInQueue(event, session?.provider, session?.headless) ? styles.dim : undefined}>
+      <View style={working && waitsInQueue(event, provider, headless) ? styles.dim : undefined}>
         <UserBubble text={event.text ?? ''} sessionName={sessionName} serverId={serverId} ts={event.ts}
           eventId={event.id} imageCount={event.image_count ?? 0} />
       </View>
       {notes.length ? <Text style={styles.note}>{notes.join(' · ')}</Text> : null}
       {queued && (failed || holdsQueue) && sessionName && serverId
-        ? <DiscardQueued id={event.id.slice('queued-'.length)} sessionName={sessionName} serverId={serverId} /> : null}
+        ? <DiscardQueued id={event.id.slice('queued-'.length)} text={event.text ?? ''} sessionName={sessionName} serverId={serverId} /> : null}
     </View>
   );
 });

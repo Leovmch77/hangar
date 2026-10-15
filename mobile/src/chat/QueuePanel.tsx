@@ -114,7 +114,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
                   <>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={m.codex_orientar()}
+                      accessibilityLabel={m.queue_panel_steer_message({ text: entry.text.replace(/\s+/g, ' ').trim().slice(0, 80) })}
                       accessibilityHint={m.codex_orientar_ajuda()}
                       accessibilityState={{ disabled: busy }}
                       disabled={busy}

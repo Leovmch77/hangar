@@ -129,7 +129,7 @@ export interface ChatApi {
   dropQueueEdit: (text?: string) => void;
   submitQueueEdit: (text: string) => Promise<void>;
   removeQueued: (id: string) => Promise<void>;
-  discardQueued: (id: string) => Promise<void>;
+  discardQueued: (id: string) => Promise<string | null>;
   steerQueued: (id: string) => Promise<void>;
   moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
@@ -670,11 +670,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   }
 
   // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
-  async function queueAction(run: (target: Server) => Promise<unknown>): Promise<boolean> {
+  async function queueAction(run: (target: Server) => Promise<unknown>, onError?: (message: string) => void): Promise<boolean> {
     if (useChatStore.getState().queueBusy) return false;
     const target = destino();
     if (!target) {
-      showQueueError(m.chat_servidor_removido());
+      const message = m.chat_servidor_removido();
+      onError?.(message);
+      showQueueError(message);
       return false;
     }
     clearTimeout(queueErrorTimer);
@@ -683,7 +685,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       await run(target);
       return true;
     } catch (err) {
-      showQueueError(formataErro(err) ?? (err instanceof Error ? err.message : String(err)));
+      const message = formataErro(err) ?? (err instanceof Error ? err.message : String(err));
+      onError?.(message);
+      showQueueError(message);
       return false;
     } finally {
       useChatStore.setState({ queueBusy: false });
@@ -747,9 +751,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
     },
     async discardQueued(id: string) {
-      const ok = await queueAction((t) => descartarDaFila(name, id, t));
-      if (!ok) return;
-      useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+      let error: string | null = null;
+      const ok = await queueAction((t) => descartarDaFila(name, id, t), (message) => { error = message; });
+      if (ok) useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+      return error;
     },
     // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
     async steerQueued(id: string) {

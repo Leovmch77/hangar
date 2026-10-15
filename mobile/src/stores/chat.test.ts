@@ -576,10 +576,10 @@ test('descartar usa ID cru e servidor da rota, espera ACK e recompõe o índice 
   expect(new Headers(requests[0].init?.headers).get('Authorization')).toBe('Bearer tok');
   expect(chat.use.getState().queueBusy).toBe(true);
   expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-raw/id', 'raw/id', 'queued-b']);
-  await chat.discardQueued('b');
+  expect(await chat.discardQueued('b')).toBeNull();
   expect(requests).toHaveLength(1);
   requests[0].responder({ ok: true });
-  await discard;
+  expect(await discard).toBeNull();
   expect(chat.use.getState().queueBusy).toBe(false);
   expect(chat.use.getState().events.map((e) => e.id)).toEqual(['raw/id', 'queued-b']);
   created[0].trigger('message', JSON.stringify(ev({ id: 'queued-b', text: 'outra atualizada' })));
@@ -595,12 +595,12 @@ test('descarte recusado conserva a bolha e mostra a causa; nova tentativa só sa
   chat.retain();
   await tick();
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"entrega ainda em análise"}', { status: 409 })));
-  await chat.discardQueued('a');
+  expect(await chat.discardQueued('a')).toBe('entrega ainda em análise');
   expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-a']);
   expect(chat.use.getState().queueError).toBe('entrega ainda em análise');
   expect(chat.use.getState().queueBusy).toBe(false);
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
-  await chat.discardQueued('a');
+  expect(await chat.discardQueued('a')).toBeNull();
   expect(chat.use.getState().events).toEqual([]);
   expect(chat.use.getState().queueError).toBeNull();
 });
@@ -610,11 +610,38 @@ test('descarte com servidor removido mostra erro e não chama o servidor ativo',
   const lost = ev({ id: 'queued-a', desistiu: true });
   chat.use.setState({ events: [lost] });
   const requests = fetchManual();
-  await chat.discardQueued('a');
+  expect(await chat.discardQueued('a')).toBe(m.chat_servidor_removido());
   expect(requests).toHaveLength(0);
   expect(chat.use.getState().events).toEqual([lost]);
   expect(chat.use.getState().queueError).toBe(m.chat_servidor_removido());
   expect(chat.use.getState().queueBusy).toBe(false);
+});
+
+test('descarte retorna a própria causa formatada mesmo se outro aviso substituir queueError antes do retorno', async () => {
+  const chat = chatStore('srv1', 'sess');
+  const lost = ev({ id: 'queued-a', desistiu: true });
+  chat.use.setState({ events: [lost] });
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(
+    JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'x' } }), { status: 409 })));
+  const unsubscribe = chat.use.subscribe((state, previous) => {
+    if (previous.queueBusy && !state.queueBusy) chat.use.setState({ queueError: 'other-action' });
+  });
+  try {
+    expect(await chat.discardQueued('a')).toBe(m.queue_entry_gone());
+    expect(chat.use.getState().queueError).toBe('other-action');
+    expect(chat.use.getState().events).toEqual([lost]);
+    expect(chat.use.getState().queueBusy).toBe(false);
+  } finally {
+    unsubscribe();
+  }
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"next-error"}', { status: 409 })));
+  expect(await chat.discardQueued('a')).toBe('next-error');
+  expect(chat.use.getState().queueError).toBe('next-error');
+  expect(chat.use.getState().events).toEqual([lost]);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
+  expect(await chat.discardQueued('a')).toBeNull();
+  expect(chat.use.getState().queueError).toBeNull();
+  expect(chat.use.getState().events).toEqual([]);
 });
 
 test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha', async () => {

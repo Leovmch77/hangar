@@ -106,8 +106,10 @@ const VERSION_KEYS = ['cru', 'limpar', 'prosa', 'briefing'];
 const versionOptions = () => [{ v: 'cru', label: m.composer_ditado_cru() },
   ...estilosDitado().map((e) => ({ v: e.valor as string, label: e.rotulo }))];
 
+// Mesmo teto da transcrição no core; expirar desarma só o envio, nunca o ditado.
+const VOICE_SEND_TIMEOUT_MS = 300_000;
 type VoiceSendIntent = { mode: 'send' | 'steer'; draft: ConversationDraft; server: Server; recipients: string;
-  generation: number; dictationId: string | null; cancelled: boolean };
+  generation: number; dictationId: string | null; cancelled: boolean; stopping: boolean };
 // Barra do último ditado inserido (no fim do campo). `field` é o campo logo depois da inserção e
 // `shown` a versão que está nele: como no PC, o texto ditado intacto mantém as versões à vista.
 type DictationBar = { field: string; shown: string; raw: string; applied: string; versions: Record<string, string>; serverPath: string | null };
@@ -125,11 +127,23 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const restoreFocus = useRef(false);
   const stopRecordingRef = useRef<() => void>(() => {});
   const voiceSendRef = useRef<VoiceSendIntent | null>(null);
+  const voiceSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  const [error, setError] = useState('');
   const [waitingVoiceSend, setWaitingVoiceSend] = useState(false);
   const deferVoiceSendRef = useRef<(mode: VoiceSendIntent['mode']) => boolean>(() => false);
-  const cancelVoiceSend = useCallback(() => {
-    if (voiceSendRef.current) voiceSendRef.current.cancelled = true;
+  const cancelVoiceSend = useCallback((notify = true) => {
+    const intent = voiceSendRef.current;
+    const pending = intent && !intent.cancelled;
+    // Conserva a intenção cancelada para não rearmar o autoenvio nesta gravação.
+    if (intent) intent.cancelled = true;
+    if (voiceSendTimerRef.current !== null) {
+      clearTimeout(voiceSendTimerRef.current);
+      voiceSendTimerRef.current = null;
+    }
+    if (!mountedRef.current) return;
     setWaitingVoiceSend(false);
+    if (notify && pending) setError((current) => current || m.composer_voice_send_cancelled());
   }, []);
   useEffect(() => {
     const blur = navigation.addListener('blur', () => {
@@ -389,18 +403,17 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
   const steeringRef = useRef(false);
   const [steering, setSteering] = useState(false);
   // Aviso do painel da fila (a mensagem em edição saiu dela); some sozinho.
   const [queueNotice, setQueueNotice] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const transcribingRef = useRef(false);
-  const mountedRef = useRef(true);
   const activeRef = useRef(AppState.currentState === 'active');
   const activityGenerationRef = useRef(0);
   const recordingTargetRef = useRef<{ server: Server; snapshot: ConversationDraft; generation: number; estilo?: string } | null>(null);
   const micStartingRef = useRef(false);
+  const [micStarting, setMicStarting] = useState(false);
   const [undo, setUndo] = useState<{ before: string; raw: string; revision: number } | null>(null);
   const [bar, setBarState] = useState<DictationBar | null>(null);
   const barRef = useRef<DictationBar | null>(null);
@@ -548,6 +561,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   }, [serverId, name, firstInputId, draft, chat, persistText]);
 
   const handleSend = useCallback(async (voiceReady = false) => {
+    if (voiceReady && (chat.use.getState().queueEdit || submissionBlocksSend || sendingRef.current || sending || uploading
+      || blockedRef.current || (!textRef.current.trim() && !pendingAttach)
+      || !activeRef.current || !navigation.isFocused())) {
+      setError((current) => current || m.composer_voice_send_cancelled());
+      return;
+    }
     // Em edição o botão é o Atualizar: troca o texto da mensagem na fila, sem enviar nada.
     if (queueEdit) {
       if (canUpdateQueueEdit(text)) await chat.submitQueueEdit(text);
@@ -658,7 +677,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -709,7 +728,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     transcribingRef.current = true;
     if (mountedRef.current) {
       setTranscribing(true);
-      setError('');
+      setError((current) => voiceSendRef.current?.cancelled ? current : '');
       setFailed(null);
     }
     try {
@@ -747,7 +766,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           && textRef.current.trim() === voice.before
           && (voice.transcript === null || voice.transcript === transcriptRef.current),
       });
-      if (aviso || !completed.draft) cancelVoiceSend();
+      if (aviso || !completed.draft) cancelVoiceSend(!aviso);
       if (mountedRef.current) {
         setDictation(completed.dictation);
         if (completed.draft) {
@@ -845,6 +864,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     if (autoN !== null) cancelarAuto();
     micStartingRef.current = true;
+    setMicStarting(true);
     try {
       const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
       if (!server) throw new Error(m.chat_servidor_removido());
@@ -869,7 +889,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       } else {
         setError(e instanceof Error ? e.message : m.composer_falha_gravacao());
       }
-    } finally { micStartingRef.current = false; }
+    } finally {
+      micStartingRef.current = false;
+      if (mountedRef.current) setMicStarting(false);
+    }
   }, [gravando, iniciar, parar, autoN, cancelarAuto, dictation, origin, persistText, setBar]);
 
   const handleUndo = useCallback(() => {
@@ -976,7 +999,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     offerUndo(before, voice.raw, voice.text, result.draft.revision);
     setBar(barFor(result.draft.text, voice.text, voice.raw, voice.applied ?? voice.estilo ?? 'cru', voice.serverPath ?? null));
     if (!result.dictation && voice.audio) dropCopy(voice.audio.uri);
-    setError(voice.issue);
+    setError((current) => voice.issue || (voiceSendRef.current?.cancelled ? current : ''));
   }, [offerUndo, setBar]);
 
   const handleRecoverDictation = useCallback(() => {
@@ -1008,7 +1031,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const before = textRef.current.trim();
       const applied = applyReadyDictation(origin.serverId, origin.name, transcriptRef.current);
       if (applied) {
-        if (applied.voice.issue) cancelVoiceSend();
+        if (applied.voice.issue) cancelVoiceSend(false);
         adoptDictation(applied.voice, before, applied);
       }
     } catch (e) {
@@ -1047,15 +1070,22 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const barVersions = barIntact && !!bar?.raw && !organizationOff;
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
-  const voiceActive = gravando || busyVoice;
+  const voiceActive = micStarting || gravando || busyVoice;
   const voiceRecipients = JSON.stringify([sendToPair, [...(pairPeers ?? [])].sort()]);
   // Parar a gravação não aguarda onFim: só a aplicação do mesmo ditado libera o envio.
   deferVoiceSendRef.current = (mode) => {
+    if (micStartingRef.current) {
+      setError((current) => current || m.composer_voice_starting());
+      return true;
+    }
     if (!voiceActive && !transcribingRef.current) return false;
     if (voiceSendRef.current && !voiceSendRef.current.cancelled) return true;
     cancelarAuto();
     if (sendingRef.current || isSubmitting(origin.serverId, origin.name) || uploading || blockedRef.current || submissionBlocksSend || editing
-      || !mountedRef.current || !activeRef.current || !navigation.isFocused()) return true;
+      || !mountedRef.current || !activeRef.current || !navigation.isFocused()) {
+      if (mountedRef.current) setError((current) => current || m.composer_voice_send_cancelled());
+      return true;
+    }
     try {
       const snapshot = readDraft(origin.serverId, origin.name);
       const voice = readDictation(origin.serverId, origin.name);
@@ -1071,12 +1101,20 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       }
       const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
       if (!server) throw new Error(m.chat_servidor_removido());
-      voiceSendRef.current = { mode, draft: snapshot, server: { ...server }, recipients: voiceRecipients,
-        generation: activityGenerationRef.current, dictationId: pendingVoice?.id ?? null, cancelled: false };
+      const intent: VoiceSendIntent = { mode, draft: snapshot, server: { ...server }, recipients: voiceRecipients,
+        generation: activityGenerationRef.current, dictationId: pendingVoice?.id ?? null, cancelled: false, stopping: gravando };
+      voiceSendRef.current = intent;
       setWaitingVoiceSend(true);
-      if (gravando) void parar('botao').catch((e: unknown) => {
-        cancelVoiceSend();
-        setError(e instanceof Error ? e.message : m.composer_falha_gravacao());
+      voiceSendTimerRef.current = setTimeout(() => {
+        if (voiceSendRef.current === intent) cancelVoiceSend();
+      }, VOICE_SEND_TIMEOUT_MS);
+      if (gravando) void parar('botao').then(() => {
+        intent.stopping = false;
+        // onFim marca a transcrição antes de copiar o áudio; a parada sozinha não garante resultado.
+        if (voiceSendRef.current === intent && !intent.cancelled && !transcribingRef.current && !intent.dictationId) cancelVoiceSend();
+      }).catch((e: unknown) => {
+        cancelVoiceSend(false);
+        if (mountedRef.current) setError(e instanceof Error ? e.message : m.composer_falha_gravacao());
       });
     } catch (e) {
       cancelVoiceSend();
@@ -1084,7 +1122,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     return true;
   };
-  const canSend = (hasContent || voiceActive) && !waitingVoiceSend && !sending && !uploading && !readBlocked && !submissionBlocksSend;
+  const canSend = (hasContent || voiceActive) && !micStarting && !waitingVoiceSend && !sending && !uploading && !readBlocked && !submissionBlocksSend;
   const showTextSteer = state === 'working' && (isCodex || (isClaude && headless))
     && (!!text.trim() || voiceActive) && !text.trimStart().startsWith('/') && !editing && !(sendToPair && pairPeers?.length);
   const canSteerText = showTextSteer && canSend && !pendingAttach;
@@ -1092,11 +1130,21 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if ((!voiceReady && !canSteerText) || sendingRef.current || isSubmitting(origin.serverId, origin.name)
       || micStartingRef.current || pendingAttach || chat.use.getState().queueEdit
       || chat.use.getState().stateEvent?.state !== 'working' || !(isCodex || (isClaude && headless))
-      || (sendToPair && pairPeers?.length)) return;
+      || (sendToPair && pairPeers?.length) || !activeRef.current || !navigation.isFocused()) {
+      if (voiceReady) setError((current) => current || m.composer_voice_send_cancelled());
+      else if (micStartingRef.current) setError((current) => current || m.composer_voice_starting());
+      return;
+    }
     if (!voiceReady && deferVoiceSendRef.current('steer')) return;
-    if (transcribingRef.current || voiceActive) return;
+    if (transcribingRef.current || voiceActive) {
+      if (voiceReady) setError((current) => current || m.composer_voice_send_cancelled());
+      return;
+    }
     const value = textRef.current;
-    if (!value.trim() || value.trimStart().startsWith('/') || blockedRef.current || !persistText(value)) return;
+    if (!value.trim() || value.trimStart().startsWith('/') || blockedRef.current || !persistText(value)) {
+      if (voiceReady) setError((current) => current || m.composer_voice_send_cancelled());
+      return;
+    }
     const revision = draftRef.current!.revision;
     sendingRef.current = true;
     setSending(true);
@@ -1112,7 +1160,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       sendingRef.current = false;
       setSending(false);
     }
-  }, [canSteerText, origin, chat, persistText, limparUndo, cancelarAuto, setBar, pendingAttach, isCodex, isClaude, headless, sendToPair, pairPeers, voiceActive]);
+  }, [canSteerText, origin, chat, persistText, limparUndo, cancelarAuto, setBar, pendingAttach, isCodex, isClaude, headless, sendToPair, pairPeers, voiceActive, navigation]);
 
   useEffect(() => {
     const intent = voiceSendRef.current;
@@ -1133,9 +1181,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         cancelVoiceSend();
         return;
       }
-      if (!applied || voiceActive || transcribingRef.current || text !== latest.text) return;
+      if (!applied) {
+        if (!voiceActive && !transcribingRef.current && !intent.stopping) cancelVoiceSend();
+        return;
+      }
+      if (voiceActive || transcribingRef.current || text !== latest.text) return;
       // Consumir antes de chamar o envio: um segundo aviso do mesmo ditado não pode repetir.
-      cancelVoiceSend();
+      cancelVoiceSend(false);
       if (intent.mode === 'steer') void handleSteerText(true);
       else void handleSend(true);
     } catch (e) {
@@ -1154,7 +1206,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const queueFeedback = queueNotice ?? queueError;
   // A edição da fila troca só o texto: anexo e ditado esperam a volta do rascunho.
   const attachBlocked = uploading || sending || gravando || editing;
-  const micBlocked = transcribing || sending || (!!dictation && !gravando) || editing;
+  const micBlocked = micStarting || transcribing || sending || (!!dictation && !gravando) || editing;
 
   const confirmStop = useCallback(() => {
     Alert.alert(m.composer_interromper_claude(), m.composer_interromper_msg(), [
@@ -1522,7 +1574,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               disabled={!canSteerText}
               hitSlop={7}
               accessibilityRole="button"
-              accessibilityLabel={m.codex_orientar()}
+              accessibilityLabel={m.composer_steer_current_text()}
               accessibilityHint={m.codex_orientar_ajuda()}
               accessibilityState={{ disabled: !canSteerText, busy: waitingVoiceSend || sending }}
               style={({ pressed }) => [styles.steerBtn, { backgroundColor: pressed ? theme.tokens.bg.hover : theme.tokens.fillSubtle }, !canSteerText && styles.iconBtnDisabled]}

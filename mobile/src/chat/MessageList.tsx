@@ -174,7 +174,7 @@ export function MessageList({
         if (ev.kind === 'user_msg') {
           if (ev.id.startsWith('queued-') || ev.id.startsWith('held:') || ev.desistiu || ev.hook_error != null) {
             return <QueuedBubble event={ev} working={working} problem={stateEvent?.problema}
-              session={session} sessionName={sessionName} serverId={serverId} />;
+              provider={session?.provider} headless={session?.headless} sessionName={sessionName} serverId={serverId} />;
           }
           return <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} />;
         }
@@ -200,7 +200,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session, stateEvent?.problema]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless, stateEvent?.problema]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.

@@ -55,6 +55,7 @@ const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segmen
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false, delayStop: false, stop: vi.fn(),
+  startPending: null as Promise<void> | null, startError: null as Error | null, stopWithoutResult: false,
   stopPending: null as Promise<void> | null, finishStop: null as null | (() => void), finished: null as Promise<void> | null,
   onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>),
   finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
@@ -121,15 +122,15 @@ vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, T
 vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
-vi.mock('../paraglide/messages', () => Object.fromEntries(
+vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
+    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
-    .concat(' composer_ditado_cru composer_ditado_versao composer_ditado_trocando native_dictation_draft_changed')
+    .concat(' composer_ditado_cru composer_ditado_versao composer_ditado_trocando native_dictation_draft_changed composer_voice_send_cancelled composer_voice_starting native_queue_discard_message')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
     .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
     .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria')
@@ -145,7 +146,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down queue_panel_remove atalhos_editar comum_apagar')
     .concat(' queue_panel_update queue_panel_update_aria queue_panel_editing queue_entry_gone')
     .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_toks_now stats_toks_recent stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
-));
+), queue_panel_steer_message: ({ text }: { text: string }) => `queue_panel_steer_message: ${text}` }));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
 const storage = vi.hoisted(() => ({ memory: new Map<string, string>(), failSet: false, failRemove: false }));
@@ -165,6 +166,7 @@ vi.mock('react-native-mmkv', () => ({
 }));
 beforeEach(() => {
   storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; voiceInput.simulateRecorder = false;
+  voiceInput.startPending = null; voiceInput.startError = null; voiceInput.stopWithoutResult = false;
   realFirstInput.upload.mockReset().mockResolvedValue({ path: '/up/sess/ditado-1.m4a' });
   _limparEsfriamentoParaTestes();
   _resetRotasForTests();
@@ -202,10 +204,15 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
   };
   voiceInput.finishRecording = finishRecording;
   return { gravando: voiceInput.recording || recording, rms: 0,
-    iniciar: async () => { if (voiceInput.simulateRecorder) setRecording(true); },
+    iniciar: async () => {
+      if (voiceInput.startPending) await voiceInput.startPending;
+      if (voiceInput.startError) throw voiceInput.startError;
+      if (voiceInput.simulateRecorder) setRecording(true);
+    },
     parar: async (reason: MotivoFim) => {
       voiceInput.stop(reason);
       if (!voiceInput.simulateRecorder || !recording) return;
+      if (voiceInput.stopWithoutResult) { setRecording(false); return; }
       if (voiceInput.stopPending) return voiceInput.stopPending;
       if (voiceInput.delayStop) {
         voiceInput.stopPending = new Promise<void>((resolve) => {
@@ -314,7 +321,7 @@ import { AccessibilityInfo, Alert } from 'react-native';
 import { retainDraftAttachment } from './draftAttachments';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import { useServers } from '../stores/servers';
-import { readDictation, readDraft, setDictationInFlight, writeDraft } from '../stores/drafts';
+import { readDictation, readDraft, setDictationInFlight, writeDictation, writeDraft } from '../stores/drafts';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -656,7 +663,7 @@ describe('linha de botões do Composer', () => {
   it('trabalhando com texto sem terminal: mostra Orientar, microfone, chip e Enviar', async () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {}, queuePanel: noQueue }));
-    expect(container.querySelector('[aria-label="codex_orientar"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_steer_current_text"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_gravar_audio"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_session_settings"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();
@@ -1059,7 +1066,7 @@ describe('rascunho guardado no Composer', () => {
 
 describe('Orientar texto do composer com os stores reais', () => {
   const props = { serverId: 's1', name: 'sess', sessionProvider: 'codex', queuePanel: noQueue };
-  const steer = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="codex_orientar"]');
+  const steer = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_steer_current_text"]');
   const send = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
   const type = (container: HTMLElement, value: string) => act(() => {
     const field = container.querySelector('textarea')!;
@@ -1239,7 +1246,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
   const props = { serverId: 's1', name: 'sess', sessionProvider: 'codex', queuePanel: noQueue, onStop: () => {} };
   const roots = new Set<ReturnType<typeof createRoot>>();
   const send = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
-  const steer = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="codex_orientar"]')!;
+  const steer = (c: HTMLElement) => c.querySelector<HTMLButtonElement>('[aria-label="composer_steer_current_text"]')!;
   const type = (container: HTMLElement, value: string) => act(() => {
     const field = container.querySelector('textarea')!;
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);
@@ -1326,6 +1333,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
     expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith(source, 'sess', full);
     expect(chatStore('s1', 'sess').use.getState().pending).toMatchObject([{ text: full }]);
     expect(readDraft('s1', 'sess')?.text).toBe('');
+    expect(container.textContent).not.toContain('composer_voice_send_cancelled');
     await act(async () => vi.advanceTimersByTimeAsync(4000));
     expect(realFirstInput.send).toHaveBeenCalledTimes(1);
   });
@@ -1367,6 +1375,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
     expect(readDraft('s1', 'sess')?.text).toBe(result === 'aviso' ? `antes ${answer.raw}` : 'antes');
     if (result !== 'aviso') expect(readDictation('s1', 'sess')).toMatchObject({ status: 'failed', serverPath: answer.path, audio: { uri: 'file:///cache/ditado.m4a' } });
     expect(container.textContent).toContain(result === 'falha' ? 'transcrição indisponível' : result === 'vazio' ? 'composer_transcricao_vazia' : 'organização falhou');
+    expect(container.textContent).not.toContain('composer_voice_send_cancelled');
     await act(async () => vi.advanceTimersByTimeAsync(4000));
     expect(realFirstInput.send).not.toHaveBeenCalled();
   });
@@ -1405,6 +1414,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
       sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/recreated.jsonl' }];
       await act(async () => root.render(createElement(Composer, props)));
     }
+    if (change !== 'unmount') expect(container.textContent).toContain('composer_voice_send_cancelled');
     await complete(request);
     expect(realFirstInput.send).not.toHaveBeenCalled();
     expect(realFirstInput.steer).not.toHaveBeenCalled();
@@ -1511,10 +1521,215 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
       sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['outro'] }];
       await act(async () => root.render(createElement(Composer, props)));
     }
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
     await complete(request);
     expect(realFirstInput.send).not.toHaveBeenCalled();
     expect(realFirstInput.steer).not.toHaveBeenCalled();
     expect(readDraft('s1', 'sess')?.text).toBe(`antes ${answer.text}`);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+  });
+
+  it.each(['turno encerrado', 'anexo', 'edição da fila'])('Orientar pendente com %s avisa sem virar envio comum', async (change) => {
+    const panel: QueuePanel = { actions: true, entries: [{ id: 'q1', text: 'na fila', ts: null }] };
+    const chat = chatStore('s1', 'sess');
+    chat.use.setState({ queuePanel: panel });
+    const request = pendingTranscription();
+    const { container, root } = await start('antes');
+    await act(async () => root.render(createElement(Composer, { ...props, queuePanel: panel })));
+    expect(container.querySelectorAll('[aria-label="composer_steer_current_text"]')).toHaveLength(1);
+    const queuedSteer = container.querySelectorAll('[aria-label="queue_panel_steer_message: na fila"]');
+    expect(queuedSteer).toHaveLength(1);
+    expect(steer(container).getAttribute('aria-label')).not.toBe(queuedSteer[0].getAttribute('aria-label'));
+    expect(steer(container).textContent).toBe('codex_orientar');
+    await act(async () => steer(container).click());
+    let queuedText = '';
+    act(() => {
+      if (change === 'turno encerrado') chat.use.setState({ stateEvent: { session: 'sess', state: 'idle' } });
+      if (change === 'edição da fila') queuedText = chat.startQueueEdit('q1', 'antes');
+      if (change === 'anexo') {
+        writeDraft('s1', 'sess', { ...readDraft('s1', 'sess')!,
+          attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+        chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+      }
+    });
+    if (change === 'edição da fila') type(container, queuedText);
+    await complete(request);
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    const kept = change === 'edição da fila' ? 'antes' : `antes ${answer.text}`;
+    expect(container.querySelector('textarea')!.value).toBe(change === 'edição da fila' ? 'na fila' : kept);
+    expect(readDraft('s1', 'sess')?.text).toBe(kept);
+    if (change === 'anexo') expect(readDraft('s1', 'sess')?.attachment?.uri).toBe('file:///foto.png');
+    if (change === 'edição da fila') expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: answer.text });
+  });
+
+  it.each([false, true])('início do microfone pendente bloqueia Enviar e Orientar sem mandar o texto anterior, falha=%s', async (failed) => {
+    let ready!: () => void;
+    voiceInput.startPending = new Promise<void>((resolve) => { ready = resolve; });
+    if (failed) voiceInput.startError = new Error('permission_denied');
+    const { container } = await mount('antes');
+    await act(async () => button(container, 'composer_gravar_audio')!.click());
+    expect(send(container).disabled).toBe(true);
+    expect(steer(container).disabled).toBe(true);
+    act(() => { send(container).click(); steer(container).click(); });
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(readDraft('s1', 'sess')?.text).toBe('antes');
+    await act(async () => ready());
+    expect(send(container).disabled).toBe(false);
+    if (failed) {
+      expect(container.textContent).toContain('composer_sem_acesso_mic');
+      expect(button(container, 'composer_gravar_audio')).toBeDefined();
+    } else expect(button(container, 'composer_parar_gravacao')).toBeDefined();
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it('editar e sair da tela sem intenção pendente não mostra cancelamento', async () => {
+    const { container } = await mount('antes');
+    type(container, 'editado');
+    act(() => {
+      focusNavigation.focused = false;
+      focusNavigation.listeners.get('blur')?.forEach((listener) => listener({ data: { closing: false } }));
+      appLifecycle.currentState = 'background';
+      appLifecycle.listeners.forEach((listener) => listener('background'));
+    });
+    expect(container.textContent).not.toContain('composer_voice_send_cancelled');
+    expect(readDraft('s1', 'sess')?.text).toBe('editado');
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'steer'] as const)('%s: parada sem onFim solta o botão, avisa e conserva o campo', async (mode) => {
+    voiceInput.stopWithoutResult = true;
+    const { container } = await start('antes');
+    await act(async () => (mode === 'send' ? send(container) : steer(container)).click());
+    expect(voiceInput.stop).toHaveBeenCalledExactlyOnceWith('botao');
+    expect(voiceInput.finished).toBeNull();
+    expect(realFirstInput.upload).not.toHaveBeenCalled();
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(send(container).disabled).toBe(false);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    expect(container.querySelector('textarea')!.value).toBe('antes');
+    expect(readDraft('s1', 'sess')?.text).toBe('antes');
+  });
+
+  it('pending externo órfão solta o botão no teto sem apagar texto nem áudio', async () => {
+    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', attachment: null, submission: null });
+    setDictationInFlight('s1', 'sess', 'orphan', true);
+    try {
+      writeDictation('s1', 'sess', { version: 1, id: 'orphan', transcript: '/t/voice.jsonl', draftRevision: 1, before: 'antes',
+        audio: { uri: 'file:///guardado.m4a', name: 'ditado.m4a', mime: 'audio/m4a', kind: 'file' },
+        status: 'pending', motivo: 'botao', text: '', raw: '', issue: '' });
+      const saved = readDictation('s1', 'sess');
+      const { container } = await mount();
+      act(() => send(container).click());
+      expect(send(container).disabled).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(299_999));
+      expect(send(container).disabled).toBe(true);
+      expect(container.textContent).not.toContain('composer_voice_send_cancelled');
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(send(container).disabled).toBe(false);
+      expect(container.textContent).toContain('composer_voice_send_cancelled');
+      expect(readDraft('s1', 'sess')?.text).toBe('antes');
+      expect(readDictation('s1', 'sess')).toEqual(saved);
+      expect(realFirstInput.send).not.toHaveBeenCalled();
+      expect(realFirstInput.steer).not.toHaveBeenCalled();
+    } finally { setDictationInFlight('s1', 'sess', 'orphan', false); }
+  });
+
+  it('teto durante parada nativa desarma só o envio e aceita o ditado tardio', async () => {
+    voiceInput.delayStop = true;
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    await act(async () => send(container).click());
+    await act(async () => vi.advanceTimersByTimeAsync(300_000));
+    expect(send(container).disabled).toBe(false);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    const stopping = voiceInput.stopPending;
+    await act(async () => { voiceInput.finishStop!(); await stopping; });
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    await complete(request);
+    expect(readDraft('s1', 'sess')?.text).toBe(`antes ${answer.text}`);
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+  });
+
+  it('trocar servidor cancela e avisa sem perder a transcrição da origem', async () => {
+    const previousServers = useServers.getState().servers;
+    try {
+      const request = pendingTranscription();
+      const { container, root } = await start('antes');
+      await act(async () => send(container).click());
+      useServers.getState().servers = previousServers.map((s) => s.id === 's1' ? { ...s, token: 'outro-token' } : s);
+      await act(async () => root.render(createElement(Composer, props)));
+      expect(container.textContent).toContain('composer_voice_send_cancelled');
+      await complete(request);
+      expect(readDraft('s1', 'sess')?.text).toBe(`antes ${answer.text}`);
+      expect(container.textContent).toContain('composer_voice_send_cancelled');
+      expect(realFirstInput.send).not.toHaveBeenCalled();
+    } finally { useServers.getState().servers = previousServers; }
+  });
+
+  it('aviso sobrevive ao começo tardio da transcrição depois da cópia do áudio', async () => {
+    let copied!: (value: import('../stores/drafts').DraftAttachment) => void;
+    vi.mocked(retainDraftAttachment).mockImplementationOnce(() => new Promise((resolve) => { copied = resolve; }));
+    const request = pendingTranscription();
+    const { container, root } = await start('antes');
+    await act(async () => send(container).click());
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['outro'] }];
+    await act(async () => root.render(createElement(Composer, props)));
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    await act(async () => copied({ uri: 'file:///guardado.m4a', name: 'ditado.m4a', mime: 'audio/m4a', kind: 'file' }));
+    expect(realFirstInput.transcribe).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    await complete(request);
+    expect(container.querySelector('textarea')!.value).toBe(`antes ${answer.text}`);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it('voltar ao foco e aplicar ditado pronto não apaga o aviso de cancelamento', async () => {
+    const request = pendingTranscription();
+    const { container } = await start('antes');
+    await act(async () => send(container).click());
+    act(() => {
+      focusNavigation.focused = false;
+      focusNavigation.listeners.get('blur')?.forEach((listener) => listener({ data: { closing: false } }));
+    });
+    await complete(request);
+    expect(readDictation('s1', 'sess')?.status).toBe('ready');
+    act(() => {
+      focusNavigation.focused = true;
+      chatStore('s1', 'sess').use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+    });
+    expect(container.querySelector('textarea')!.value).toBe(`antes ${answer.text}`);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+  });
+
+  it('cancelar envio pendente não rearma os 3 segundos; gravação nova pode autoenviar', async () => {
+    const request = pendingTranscription();
+    const { container, root } = await start();
+    await act(async () => voiceInput.finishRecording!('silencio'));
+    act(() => send(container).click());
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['outro'] }];
+    await act(async () => root.render(createElement(Composer, props)));
+    await complete(request);
+    expect(container.querySelector('textarea')!.value).toBe(answer.text);
+    expect(container.textContent).toContain('composer_voice_send_cancelled');
+    expect(container.textContent).not.toContain('composer_enviando_cancelar');
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    type(container, '');
+    await act(async () => button(container, 'composer_gravar_audio')!.click());
+    await act(async () => { voiceInput.finishRecording!('silencio'); await voiceInput.finished; });
+    expect(container.textContent).toContain('composer_enviando_cancelar');
+    expect(container.textContent).not.toContain('composer_voice_send_cancelled');
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith(useServers.getState().servers.find((s) => s.id === 's1'), 'sess', answer.text);
+    expect(realFirstInput.steer).not.toHaveBeenCalled();
   });
 
   it.each([false, true])('transcrição de outra montagem só envia o mesmo resultado aplicado, aviso=%s', async (warning) => {
