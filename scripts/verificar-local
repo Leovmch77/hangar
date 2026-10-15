@@ -315,6 +315,8 @@ passo_backend_rapido() {
                 m="$(basename "$f" .py)"
                 [[ "$m" == __init__ ]] && m="$(basename "$(dirname "$f")")"
                 [[ "$m" == app ]] && { inteiro=1; continue; }
+                # O teste com o nome do módulo pode chegar a ele por outro (app.api registra o router).
+                [[ -f "backend/tests/test_${m}.py" ]] && testes+=("tests/test_${m}.py")
                 # Palavra solta, não só `app.x`: import em várias linhas (`from app import (\n x,`) também conta.
                 while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lw -- "$m" tests/test_*.py 2>/dev/null) ;;
             # Dependência, conftest e helper de teste valem para a suíte inteira.
