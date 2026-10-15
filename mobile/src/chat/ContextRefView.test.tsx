@@ -10,7 +10,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
   'cite_quoted cite_go_to_source cite_element cite_element_html'.split(' ').map((k) => [k, () => k]),
 ));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
-vi.mock('./AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }) }));
+vi.mock('./AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }), mkMutedMarkdownStyle: () => ({ paragraph: {} }) }));
 vi.mock('react-native-enriched-markdown', () => ({
   EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('pre', null, markdown),
 }));

@@ -328,17 +328,45 @@ export function locateInMarkdown(source: string, selected: string, before = '', 
     index.push(i);
   }
   const needle = stripMarkdownMarks(selected);
-  const at = near === undefined || before || after
-    ? locateQuote(hay, needle, stripMarkdownMarks(before), stripMarkdownMarks(after))
-    : nearestOccurrence(hay, needle, near);
+  if (near !== undefined && !before && !after) {
+    const shown = nearInShownText(source, selected, near);
+    if (shown) return shown;
+  }
+  const at = locateQuote(hay, needle, stripMarkdownMarks(before), stripMarkdownMarks(after));
   if (at < 0) return null;
   return { start: index[at], end: index[at + needle.length - 1] + 1 };
 }
 
-/** A ocorrência de `needle` que começa mais perto de `near`: desempata trecho curto e repetido. */
+// Só os marcadores saem; os espaços ficam, como no texto desenhado, de onde vem a posição `near`.
+const MARKDOWN_MARKS = /[*_`~#>|]/;
+
+/** A ocorrência do trecho mais perto da posição da seleção no texto desenhado: desempata trecho curto e repetido. */
+function nearInShownText(source: string, selected: string, near: number): { start: number; end: number } | null {
+  const index: number[] = [];
+  let shown = '';
+  for (let i = 0; i < source.length; i++) {
+    if (MARKDOWN_MARKS.test(source[i])) continue;
+    shown += source[i];
+    index.push(i);
+  }
+  if (!selected) return null;
+  const at = nearestOccurrence(shown, selected, near);
+  if (at < 0) return null;
+  return { start: index[at], end: index[at + selected.length - 1] + 1 };
+}
+
+/**
+ * A ocorrência de `needle` que começa mais perto de `near`: desempata trecho curto e repetido. Palavra
+ * selecionada inteira prefere as ocorrências que também são palavra inteira (o "e" não cai dentro de "parâmetros").
+ */
 function nearestOccurrence(haystack: string, needle: string, near: number): number {
+  const letter = /[\p{L}\p{N}]/u;
+  const whole = (i: number) => !letter.test(haystack[i - 1] ?? '') && !letter.test(haystack[i + needle.length] ?? '');
+  const hits: number[] = [];
+  for (let i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + 1)) hits.push(i);
+  const words = hits.filter(whole);
   let best = -1;
-  for (let i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + 1)) {
+  for (const i of words.length ? words : hits) {
     if (best < 0 || Math.abs(i - near) < Math.abs(best - near)) best = i;
   }
   return best;

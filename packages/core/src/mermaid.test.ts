@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const requestMermaid = vi.fn();
-vi.mock('./api', () => ({ requestMermaid: (...a: unknown[]) => requestMermaid(...a) }));
+vi.mock('./api', () => ({
+  requestMermaid: (...a: unknown[]) => requestMermaid(...a),
+  isTimeoutError: (e: unknown) => e instanceof Error && e.name === 'TimeoutError',
+}));
 
 const {
   _resetMermaidForTests, MERMAID_MAX_WIDTH, mermaidFailureText, pngDataUri, pngSize, renderMermaid, splitMermaidBlocks,

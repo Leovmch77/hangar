@@ -478,7 +478,7 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
         // Diagramas Mermaid desenhados no Chromium do servidor: só o dono; o resto segue ao Python, que repassa
         // o dono do Connect pela ponte (`forwarded`) e recusa os demais.
-        .route(crate::mermaid::PATH, axum::routing::post(crate::mermaid::route).fallback(pass_any))
+        .route("/api/mermaid", axum::routing::post(crate::mermaid::route).fallback(pass_any))
         // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
         .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
         // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.
