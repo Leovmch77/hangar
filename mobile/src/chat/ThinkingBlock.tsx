@@ -5,6 +5,7 @@ import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { resumoPensamento, type ChatEvent } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { mkMarkdownStyle } from './AssistantBubble';
+import { Icon } from '../ui/Icon';
 
 // Um raciocínio como linha do trecho dobrado: "Raciocínio  <primeira frase>", e o toque abre o texto
 // inteiro embaixo, em markdown (o resumo do raciocínio traz **título**). Vive dentro do fio do
@@ -26,6 +27,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent
         accessibilityLabel={m.pensamento_abrir()}
         accessibilityState={{ expanded: aberto }}
       >
+        <Icon name="Brain" size={14} color={theme.tokens.text.secondary} />
         <Text style={[styles.rotulo, { color: theme.tokens.text.secondary }]}>{m.native_thinking()}</Text>
         {!aberto ? (
           <Text style={[styles.resumo, { color: theme.tokens.text.muted }]} numberOfLines={1}>
