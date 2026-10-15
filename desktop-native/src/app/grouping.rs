@@ -7,6 +7,7 @@ use super::activity::web;
 use super::sidebar::{SidebarReply, Target};
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{WindowExt, menu::PopupMenu};
+use crate::api::dto::PairExternalEntry;
 use std::{cell::RefCell, rc::Rc};
 
 /// Por que soltar a origem sobre o alvo não agrupa (`DropReason` do web).
@@ -28,7 +29,51 @@ impl Refusal {
     }
 }
 
-fn remote_peer(s: &SessionInfo) -> bool { s.peers().iter().any(|p| p.contains("::")) }
+/// Par de outro servidor próprio; o membro de fora (par externo) também vem como `alias::sessao`, mas grupo misto vale.
+fn remote_peer(s: &SessionInfo) -> bool {
+    let outside: Vec<String> = s.outside_pairs().iter().map(|p| format!("{}::{}", p.alias, p.session)).collect();
+    s.peers().iter().any(|p| p.contains("::") && !outside.contains(p))
+}
+
+/// Sessão local que passa a ter o par `alias` com acesso completo ao entrar no grupo.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Grant { pub session: String, pub alias: String, pub owner: String }
+
+/// Juntar `side` (uma sessão e seus membros locais) a um grupo cujo par de fora tem acesso completo: cada sessão que chega
+/// fica aberta para ele, e a tela confirma antes. Pendente fica de fora: só o "Liberar" abre acesso completo.
+pub(super) fn full_grants(group: &SessionInfo, side: &SessionInfo) -> Vec<Grant> {
+    let full: Vec<PairExternalEntry> = group.outside_pairs().iter().filter(|p| p.level == "full" && !p.pending).cloned().collect();
+    let mine = side.outside_pairs();
+    let names = std::iter::once(side.name.clone()).chain(side.peers().iter().filter(|p| !p.contains("::")).cloned());
+    names.flat_map(|session| full.iter().filter(|p| !mine.iter().any(|m| m.alias == p.alias && m.session == p.session))
+        .map(move |p| Grant { session: session.clone(), alias: p.alias.clone(), owner: p.owner.clone() })).collect()
+}
+
+/// Cabeçalho do grupo com par de fora: "tarefa ↔ apelido::sessão (dono)", um por par.
+pub(super) fn pair_header_label(label: &str, pairs: &[PairExternalEntry]) -> String {
+    let mut out = label.to_owned();
+    for (i, p) in pairs.iter().enumerate() {
+        let one = tr_shared("pair_header", &[("local", ""), ("alias", &p.alias), ("sessao", &p.session), ("dono", &p.owner)]);
+        // A frase começa com "{local} ↔ "; os pares seguintes entram depois de vírgula.
+        out.push_str(if i == 0 { &one } else { one.trim_start_matches(|c: char| c == ' ' || c == '↔') });
+        if i + 1 < pairs.len() { out.push_str(", "); }
+    }
+    out
+}
+
+/// Pede o grupo e, aceito, abre cada sessão nova para o par de fora com acesso completo; o que não abriu vira aviso.
+pub(super) async fn pair_and_grant(api: Api, target: String, peers: Vec<String>, task: String, replace: bool, grants: Vec<Grant>)
+    -> Result<PairResult, Failure> {
+    let mut result = api.pair(&target, &peers, &task, replace).await?;
+    let mut failed = Vec::new();
+    for g in grants {
+        if let Err(error) = api.pair_access(&g.session, &g.alias, crate::api::PairLevel::Full).await {
+            failed.push(tr_shared("native_pair_release_failed", &[("sessao", &g.session), ("dono", &g.owner), ("erro", &Hangar::fetch_failure(&error))]));
+        }
+    }
+    if !failed.is_empty() { result.warning = Some(result.warning.into_iter().chain(failed).collect::<Vec<_>>().join("\n")); }
+    Ok(result)
+}
 
 /// `canPair` do web. `same_server`: as duas são da mesma máquina (o grupo é resolvido pelo backend de uma só).
 pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: bool) -> Result<(), Refusal> {
@@ -48,8 +93,8 @@ pub(super) fn can_leave(s: &SessionInfo) -> bool { !s.orq() && (s.pair_gid.is_so
 pub(super) enum ListRow<'a> {
     Header { gid: String, label: String, members: Vec<&'a SessionInfo> },
     Session(&'a SessionInfo),
-    /// A sessão da outra pessoa, logo abaixo dos membros do grupo.
-    External { gid: String, owner: String, session: String, alias: String },
+    /// A sessão da outra pessoa, logo abaixo dos membros do grupo; uma por par de fora.
+    External { gid: String, pair: PairExternalEntry },
 }
 
 /// `clusterByPair` do web: cada grupo vira um cabeçalho no lugar do primeiro membro, seguido dos membros; o resto fica onde
@@ -64,10 +109,15 @@ pub(super) fn cluster<'a>(list: &[&'a SessionInfo]) -> Vec<ListRow<'a>> {
         let members: Vec<&SessionInfo> = list.iter().copied().filter(|m| m.pair_gid.as_deref() == Some(gid)).collect();
         let label = members.iter().filter_map(|m| m.pair_task.as_deref().map(str::trim)).find(|t| !t.is_empty()).map(str::to_owned)
             .unwrap_or_else(|| members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
-        out.push(ListRow::Header { gid: gid.to_owned(), label, members: members.clone() });
-        let external = members.iter().find_map(|m| m.pair_external.clone());
+        let mut outside: Vec<PairExternalEntry> = Vec::new();
+        for m in &members {
+            for p in m.outside_pairs().iter() {
+                if !outside.iter().any(|o| o.alias == p.alias && o.session == p.session) { outside.push(p.clone()); }
+            }
+        }
+        out.push(ListRow::Header { gid: gid.to_owned(), label: pair_header_label(&label, &outside), members: members.clone() });
         out.extend(members.into_iter().map(ListRow::Session));
-        if let Some(e) = external { out.push(ListRow::External { gid: gid.to_owned(), owner: e.owner, session: e.session, alias: e.alias }); }
+        out.extend(outside.into_iter().map(|pair| ListRow::External { gid: gid.to_owned(), pair }));
     }
     out
 }
@@ -120,6 +170,10 @@ struct AskView {
     conflict: Option<String>,
     /// Feito, mas o aviso não chegou a alguém: resta fechar.
     done: bool,
+    /// Entrando: sessões que ficam abertas com acesso completo para um par de fora; confirmar libera.
+    grants: Vec<Grant>,
+    /// Saindo: donos dos pares que esta sessão segura; sair desfaz o par para o grupo inteiro.
+    anchors: Vec<String>,
 }
 
 struct GroupAsk { mode: AskMode, seq: u64, task: Entity<InputState>, view: Rc<RefCell<AskView>>, _events: Subscription }
@@ -402,6 +456,11 @@ impl Hangar {
                         .loading(v.suggesting).disabled(v.busy || v.suggesting || v.block.is_some()))
                     .into_any_element()),
             };
+            // Acesso completo é o terminal desta máquina: a frase fica à vista antes do confirmar, como o desfazer do par.
+            let notices: Vec<String> = v.grants.iter().map(|g| tr_shared("pair_full_confirm", &[("sessao", &g.session), ("dono", &g.owner)]))
+                .chain(v.anchors.iter().map(|dono| tr_shared("pair_undo_anchor_body", &[("dono", dono)]))).collect();
+            let notices = (!notices.is_empty() && !v.done).then(|| div().p_2().rounded_md().bg(theme::warning().opacity(0.12)).flex().flex_col().gap(px(4.))
+                .text_sm().whitespace_normal().children(notices));
             let alert = |id: &'static str, text: String| div().id(id).role(Role::Alert).text_sm().whitespace_normal().text_color(theme::danger()).child(text);
             let alerts = [
                 v.error.clone().map(|t| alert("group-error", t)),
@@ -422,7 +481,7 @@ impl Hangar {
             let close = weak.clone();
             // Com a chamada em voo o diálogo não fecha: a resposta (aviso, 409, erro) cairia no vazio.
             popup::dialog(dialog).w(px(420.)).title(title).keyboard(!v.busy).overlay_closable(!v.busy).close_button(!v.busy)
-                .child(div().flex().flex_col().gap(px(12.)).children(affected).children(task_row).children(alerts.into_iter().flatten()))
+                .child(div().flex().flex_col().gap(px(12.)).children(affected).children(notices).children(task_row).children(alerts.into_iter().flatten()))
                 .footer(footer)
                 .on_ok(super::machines::enter_to_focused)
                 .on_close(move |_, _, cx| { let _ = close.update(cx, |this, _| {
@@ -448,11 +507,15 @@ impl Hangar {
                 // Com a chamada em voo fica o que se via no clique.
                 if !v.busy { v.inherited = existing_group(o, t).map(|g| g.pair_task.clone().unwrap_or_default()); }
                 v.block = match (o, t) { (Some(o), Some(t)) => can_pair(o, t, true).err().map(Refusal::text), _ => Some(Refusal::Dead.text()) };
+                if !v.busy {
+                    v.grants = match (o, t) { (Some(o), Some(t)) => [full_grants(t, o), full_grants(o, t)].concat(), _ => Vec::new() };
+                }
             }
             AskMode::Leave { origin } => {
                 let o = self.target_session(origin);
                 v.affected = o.map(|s| s.peers().to_vec()).unwrap_or_default();
                 v.block = o.is_none().then(|| Refusal::Dead.text());
+                v.anchors = self.anchored_owners(origin);
             }
         }
     }
@@ -470,9 +533,9 @@ impl Hangar {
         (v.busy, v.error) = (true, None);
         match &ask.mode {
             AskMode::Join { origin, target } => {
-                let (origin, target) = (origin.name.clone(), target.clone());
+                let (origin, target, grants) = (origin.name.clone(), target.clone(), v.grants.clone());
                 self.runtime.spawn(async move {
-                    let result = api.pair(&target, &[origin], &task, replace).await;
+                    let result = pair_and_grant(api, target, vec![origin], task, replace, grants).await;
                     tell.send(SidebarReply::Group(seq, GroupReply::Paired(result))).await;
                 });
             }
@@ -566,8 +629,8 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{ListRow, Refusal, SessionInfo, can_leave, can_pair, cluster, existing_group, split_code};
-    use crate::api::dto::{PairExternal, PairResult};
+    use super::{Grant, ListRow, Refusal, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants, pair_header_label, split_code};
+    use crate::api::dto::{PairExternal, PairExternalEntry, PairResult};
 
     fn s(name: &str, gid: Option<&str>, peers: &[&str]) -> SessionInfo {
         SessionInfo { name: name.into(), state: "idle".into(), pair_gid: gid.map(str::to_owned),
@@ -604,7 +667,7 @@ mod tests {
         let shape: Vec<String> = cluster(&list).iter().map(|row| match row {
             ListRow::Header { gid, label, members } => format!("[{gid} {label} {}]", members.len()),
             ListRow::Session(s) => s.name.clone(),
-            ListRow::External { session, .. } => format!("ext {session}"),
+            ListRow::External { pair, .. } => format!("ext {}", pair.session),
         }).collect();
         assert_eq!(shape, ["a", "[g b, d 2]", "b", "d", "c"], "sem tarefa o rótulo são os nomes");
         let tasked = [s("x", Some("g"), &["y"]), SessionInfo { pair_task: Some(" ABC-1 tela ".into()), ..s("y", Some("g"), &["x"]) }];
@@ -617,8 +680,48 @@ mod tests {
         let x = SessionInfo { pair_external: Some(PairExternal { alias: "pc-ana".into(), owner: "pc-ana".into(), session: "Y".into() }),
             ..s("X", Some("g"), &["pc-ana::Y"]) };
         let rows = cluster(&[&x]);
-        assert!(matches!(rows.last(), Some(ListRow::External { gid, session, .. }) if session == "Y" && gid == "g"));
+        assert!(matches!(rows.last(), Some(ListRow::External { gid, pair }) if pair.session == "Y" && gid == "g"));
         assert_eq!(rows.len(), 3, "cabeçalho, membro e a linha da outra pessoa");
+    }
+
+    fn ext(alias: &str, owner: &str, session: &str, level: &str, pending: bool) -> PairExternalEntry {
+        PairExternalEntry { alias: alias.into(), owner: owner.into(), session: session.into(), address: format!("https://{alias}.ts.net:8443"),
+            level: level.into(), pending }
+    }
+
+    #[test]
+    fn cluster_lists_every_outside_pair_once_and_names_them_in_the_header() {
+        let pairs = vec![ext("ana", "Ana", "Y", "view", false), ext("bia", "Bia", "Z", "full", false)];
+        let x = SessionInfo { pair_externals: Some(pairs.clone()), pair_task: Some("ABC-1".into()), ..s("X", Some("g"), &["W", "ana::Y", "bia::Z"]) };
+        let w = SessionInfo { pair_externals: Some(pairs), ..s("W", Some("g"), &["X", "ana::Y", "bia::Z"]) };
+        let rows = cluster(&[&x, &w]);
+        let outside: Vec<&str> = rows.iter().filter_map(|r| match r { ListRow::External { pair, .. } => Some(pair.session.as_str()), _ => None }).collect();
+        assert_eq!(outside, ["Y", "Z"], "um por par, mesmo com dois membros locais o tendo");
+        let ListRow::Header { label, .. } = &rows[0] else { panic!("cabeçalho primeiro") };
+        assert!(label.starts_with("ABC-1 ") && label.contains("ana::Y (Ana)") && label.contains("bia::Z (Bia)"), "{label}");
+        assert_eq!(pair_header_label("t", &[]), "t", "sem par, o rótulo de sempre");
+    }
+
+    #[test]
+    fn outside_member_does_not_make_the_group_cross_server() {
+        let x = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", false)]), ..s("X", Some("g"), &["ana::Y"]) };
+        assert_eq!(can_pair(&s("a", None, &[]), &x, true), Ok(()), "grupo misto aceita sessão local");
+        let both = SessionInfo { pair_peers: Some(vec!["ana::Y".into(), "srv::q".into()]), ..x };
+        assert_eq!(can_pair(&s("a", None, &[]), &both, true), Err(Refusal::CrossServer));
+    }
+
+    #[test]
+    fn joining_a_group_with_a_full_outside_pair_opens_every_newcomer() {
+        let group = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "full", false), ext("bia", "Bia", "Z", "view", false)]),
+            ..s("X", Some("g"), &["ana::Y", "bia::Z"]) };
+        let side = s("a", Some("h"), &["b", "srv::c"]);
+        let got = full_grants(&group, &side);
+        assert_eq!(got, vec![Grant { session: "a".into(), alias: "ana".into(), owner: "Ana".into() },
+            Grant { session: "b".into(), alias: "ana".into(), owner: "Ana".into() }], "só o par completo, só as locais");
+        let pending = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", true), ext("bia", "Bia", "Z", "full", true)]),
+            ..s("X", Some("g"), &["ana::Y", "bia::Z"]) };
+        assert!(full_grants(&pending, &s("a", None, &[])).is_empty(), "pendente só abre pelo Liberar");
+        assert!(full_grants(&s("a", None, &[]), &group).is_empty(), "grupo sem par de fora não pede nada");
     }
 
     #[test]

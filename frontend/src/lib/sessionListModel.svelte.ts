@@ -8,7 +8,7 @@ import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
   clusterByPair, countAwaiting, effectiveGroupBy, groupRemotePairs, groupSelectedByServer, projectKey, projectLabel, providerName,
-  isOrq, sortSessions, type GroupBy, type PairRow,
+  isOrq, sortSessions, type GroupBy, type PairRow, placeExternalRows, pairExternals, pairHeaderLabel,
 } from '@hangar/core';
 import type { AggSession, ResumeCandidate, State } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -65,6 +65,8 @@ interface Rules {
   filterLabel: (s: AggSession, g: Group) => string;
   compareOrder: 'groups' | 'rows';
   restoreServerAfterAction: boolean;
+  // Sessão de fora (par externo) entra no grupo local; a vista desktop web não ganha recurso novo.
+  outsideRows: 'place' | 'hide';
 }
 
 // Onde as duas views divergem, uma regra por linha. Convergir é trocar um valor aqui, de
@@ -77,6 +79,7 @@ const RULES: Record<ListVariant, Rules> = {
     filterLabel: (_s, g) => g.label,
     compareOrder: 'groups',
     restoreServerAfterAction: true,
+    outsideRows: 'hide',
   },
   mobile: {
     // O toggle do celular só conhece Servidor|Projeto: 'none' gravado pelo desktop lê como
@@ -87,6 +90,7 @@ const RULES: Record<ListVariant, Rules> = {
     filterLabel: (s) => s.serverLabel,
     compareOrder: 'rows',
     restoreServerAfterAction: false,
+    outsideRows: 'place',
   },
 };
 
@@ -112,8 +116,15 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   let collapsed = $state<Set<string>>(loadCollapsed());
   let filterText = $state('');
 
-  const rows = $derived(sessionsStore.rows);
-  const servers = $derived(sessionsStore.servers);
+  // Entradas temporárias de par externo nunca viram seção nem contam como servidor.
+  const placed = $derived.by(() => {
+    const agg = placeExternalRows({ rows: sessionsStore.rows, byServer: sessionsStore.byServer });
+    if (rules.outsideRows === 'place') return agg;
+    const local = (r: AggSession) => !r.outside;
+    return { rows: agg.rows.filter(local), byServer: agg.byServer.map((b) => ({ ...b, sessions: b.sessions.filter(local) })) };
+  });
+  const rows = $derived(placed.rows);
+  const servers = $derived(sessionsStore.servers.filter((s) => !s.ephemeral));
   const groupMode = $derived(rules.groupMode(groupBy, servers.length));
 
   const allGroups = $derived.by<Group[]>(() => {
@@ -137,7 +148,7 @@ export function createSessionListModel(opts: SessionListModelOptions) {
         .sort((a, b) => a.label.localeCompare(b.label))];
     }
     const pairedKeys = new Set(paired.flatMap(g => g.sessions.map(selectionKey)));
-    const byServer: Group[] = sessionsStore.byServer.map((b) => ({
+    const byServer: Group[] = placed.byServer.map((b) => ({
       id: b.server.id,
       label: b.server.label,
       color: serverColor(b.server.id),
@@ -176,6 +187,14 @@ export function createSessionListModel(opts: SessionListModelOptions) {
 
   function pairMembers(gid: string): AggSession[] {
     return allGroups.find(g => g.pair?.id === gid)?.sessions ?? allSessions.filter(s => s.pair_gid === gid);
+  }
+
+  // Cabeçalho do grupo com sessão de fora: "hangar ↔ casa::api (Ana)", só com os membros locais.
+  function pairLabel(gid: string, label: string): string {
+    const local = pairMembers(gid).filter((s) => !s.outside);
+    if (!local.some((s) => pairExternals(s).length > 0)) return label;
+    const task = local.map((s) => s.pair_task?.trim()).find(Boolean);
+    return pairHeaderLabel(task || local.map((s) => s.name).join(', '), local);
   }
 
   function setGroupBy(mode: GroupBy) {
@@ -370,6 +389,7 @@ export function createSessionListModel(opts: SessionListModelOptions) {
     setGroupBy,
     toggleGroup,
     pairMembers,
+    pairLabel,
     get selectMode() { return selectMode; },
     get selected() { return selected; },
     get broadcastText() { return broadcastText; },

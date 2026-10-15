@@ -1,0 +1,201 @@
+//! Página da conversa no Windows: uma WebView2 própria, estacionada fora da área da janela, que o app pinta pelo
+//! screencast (`paint_surface`) e dirige por CDP, como o Chromium sem janela do Linux.
+use std::{cell::Cell, future::Future, rc::Rc, sync::Arc};
+
+use gpui_kit::*;
+use serde_json::{Value, json};
+use wry::{NewWindowResponse, Rect, WebContext, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows, dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize}};
+
+use super::{BROWSER_ARGS, Engine, SAME_TAB, Starter};
+use crate::browser::{Event, Pointer, cdp::Cdp, frames::Frames, keys::modifier_bits, model};
+
+/// Fora da área do pai, que recorta a janela filha; longe demais estoura os 16 bits do WM_MOVE em DPI alto.
+const PARKED_X: f64 = -3000.0;
+
+pub(super) struct Page {
+    pub(super) cdp: Rc<Cdp>,
+    pub(super) frames: Arc<Frames>,
+    placed: Cell<Option<(Size<Pixels>, f32)>>,
+    visible: Cell<bool>,
+    pressed: Cell<bool>,
+    _acks: Task<()>,
+}
+
+impl Starter {
+    /// Documento do agente posto direto na página. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
+    pub fn start_page(self, html: Rc<str>, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>)
+        -> impl Future<Output = Result<Engine, String>> + use<> {
+        // O WebView2 nasce aqui, fora de qualquer empréstimo da App (ver `start`).
+        let opened = self.open(None, width, events);
+        async move {
+            let engine = opened?;
+            let cdp = engine.page.as_ref().map(|page| page.cdp.clone()).ok_or("motor da pagina sem CDP")?;
+            // Ponte do script da página (`window.hangarHost`, ver `theme.rs` do servidor): o documento inicial da WebView2
+            // não tem `chrome.webview` nem roda script de inicialização, e o binding do CDP vale em qualquer documento.
+            cdp.call("Runtime.enable", json!({})).await?;
+            cdp.call("Runtime.addBinding", json!({"name": "hangarHost"})).await?;
+            let (r, g, b, a) = background.map_or((0, 0, 0, 0), |(r, g, b)| (r, g, b, 1));
+            cdp.call("Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}})).await?;
+            let tree = cdp.call("Page.getFrameTree", json!({})).await?;
+            let frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
+            cdp.call("Page.setDocumentContent", json!({"frameId": frame, "html": &*html})).await?;
+            Ok(engine)
+        }
+    }
+
+    /// Site de verdade na conversa: o perfil do painel (cookies e login) e navegação livre dentro dele.
+    pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
+        std::future::ready(self.open(Some(url), 728., events))
+    }
+
+    fn open(self, url: Option<String>, width: f32, events: async_channel::Sender<Event>) -> Result<Engine, String> {
+        let site = url.is_some();
+        // O documento tem pasta própria, sem os cookies do painel.
+        let mut context = WebContext::new(crate::appearance::dir().map(|dir| dir.join(if site { "browser" } else { "pages" })));
+        let builder = WebViewBuilder::new_with_web_context(&mut context)
+            .with_visible(false).with_focused(false).with_additional_browser_args(BROWSER_ARGS).with_transparent(true)
+            .with_bounds(Rect {
+                position: LogicalPosition::new(PARKED_X, 0.0).into(),
+                size: LogicalSize::new(width as f64, 600.0).into(),
+            })
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny);
+        let builder = match url {
+            Some(url) => {
+                let loaded = events.clone();
+                builder.with_initialization_script(SAME_TAB).with_url(url)
+                    .with_navigation_handler(|url| model::allowed_request(&url))
+                    // Endereço atual do site, para a faixa do cartão.
+                    .with_on_page_load_handler(move |_, url| {
+                        let _ = loaded.try_send(Event::State(model::PageState { url: Some(url), ..Default::default() }));
+                    })
+            }
+            // O documento já chega pelo CDP: a página não navega para outro (link vai pela ponte).
+            None => builder.with_navigation_handler(|_| false),
+        };
+        let view = builder.build_as_child(&self).map_err(|e| e.to_string())?;
+        // Escondida de verdade (`SW_HIDE`) o WebView2 para de gerar quadros; estacionada visível, ninguém a vê.
+        view.set_visible(true).map_err(|e| e.to_string())?;
+        let cdp = Rc::new(Cdp::new(view.webview()));
+        let (acks, pending) = async_channel::unbounded::<Value>();
+        let frames = Frames::new(events.clone(), Box::new(move |id| { let _ = acks.try_send(id); }));
+        let sink = frames.clone();
+        cdp.on("Page.screencastFrame", move |params| sink.frame(params))?;
+        if !site {
+            let host = events.clone();
+            cdp.on("Runtime.bindingCalled", move |params| {
+                if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
+            })?;
+        }
+        let dead = Rc::new(Cell::new(false));
+        let fell = dead.clone();
+        cdp.on("Inspector.targetCrashed", move |_| fell.set(true))?;
+        cdp.fire("Page.enable", json!({}));
+        cdp.fire("Inspector.enable", json!({}));
+        // Várias páginas abertas não disputam o foco: a página finge estar sempre focada.
+        cdp.fire("Emulation.setFocusEmulationEnabled", json!({"enabled": true}));
+        // A confirmação volta ao WebView2 na thread da interface, dona dele.
+        let weak = Rc::downgrade(&cdp);
+        let acks = self.executor.spawn(async move {
+            while let Ok(id) = pending.recv().await {
+                let Some(cdp) = weak.upgrade() else { break };
+                cdp.fire("Page.screencastFrameAck", json!({"sessionId": id}));
+            }
+        });
+        let page = Page { cdp, frames, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false), _acks: acks };
+        Ok(Engine {
+            view, _context: context, state: Rc::default(), events, placed: Cell::new(None), asleep: Cell::new(false), dead,
+            _watch: None, page: Some(page),
+        })
+    }
+}
+
+impl Page {
+    /// Chamado na pintura do cartão, a cada quadro visível.
+    pub(super) fn place(&self, view: &wry::WebView, bounds: Bounds<Pixels>, window: &mut Window) {
+        let scale = window.scale_factor();
+        // Desenhada no dobro da tela e reduzida pela GPU: em 1x o texto da página sai borrado ao lado do texto do app.
+        let frame_scale = (scale * 2.).ceil();
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let resized = self.placed.get() != Some((bounds.size, scale));
+        let first = !self.visible.replace(true);
+        if resized || first {
+            crate::browser::frames::trace(format_args!("cartão {w}x{h} (primeiro: {first}); screencast reiniciado"));
+            self.placed.set(Some((bounds.size, scale)));
+            // A densidade emulada pelo CDP não chega ao screencast da WebView2: quem desenha no dobro é a escala de
+            // rasterização dela, com a janela no tamanho físico correspondente (a página continua vendo w×h de CSS).
+            rasterize(view, frame_scale);
+            let (pw, ph) = ((w * frame_scale).round().max(1.) as u32, (h * frame_scale).round().max(1.) as u32);
+            if let Err(e) = view.set_bounds(Rect {
+                // Toda à esquerda da área do pai, que recorta a janela filha.
+                position: PhysicalPosition::new(-(pw as i32) - PARK_GAP, 0).into(),
+                size: PhysicalSize::new(pw, ph).into(),
+            }) { eprintln!("[pagina] tamanho da WebView2 nao aplicado: {e}"); }
+            // Reiniciar sem parar o anterior a WebView2 recusa ("The parameter is incorrect").
+            if !first { self.cdp.fire("Page.stopScreencast", json!({})); }
+            self.cdp.fire("Page.startScreencast", json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1}));
+        }
+        self.frames.seen();
+        if let Some(texture) = self.frames.shown() {
+            let bounds = pixel_aligned(bounds, (texture.width(), texture.height()), scale, frame_scale);
+            window.paint_surface(bounds, texture);
+        }
+    }
+
+    /// Fora da tela: sem screencast e sem a textura na GPU.
+    pub(super) fn hide(&self) {
+        if self.visible.replace(false) { self.cdp.fire("Page.stopScreencast", json!({})); }
+        self.frames.clear();
+    }
+
+    /// O `clickCount` da soltura repete o do aperto: sem ele o Chromium não dispara `dblclick`.
+    pub(super) fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
+        let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
+        let left = name == "left";
+        let (kind, button, buttons, clicks) = match kind {
+            Pointer::Down => {
+                crate::browser::frames::trace(format_args!("clique enviado à página"));
+                if left { self.pressed.set(true) }
+                ("mousePressed", name, bit, clicks.max(1))
+            }
+            Pointer::Up => { if left { self.pressed.set(false) } ("mouseReleased", name, 0, clicks.max(1)) }
+            Pointer::Move if self.pressed.get() => ("mouseMoved", "left", 1, 0),
+            Pointer::Move => ("mouseMoved", "none", 0, 0),
+        };
+        self.cdp.fire("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons,
+            "clickCount": clicks, "modifiers": modifier_bits(modifiers)}));
+    }
+
+    /// `delta.y > 0` avança a página; quem chama já inverteu o sinal da GPUI.
+    pub(super) fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
+        self.cdp.fire("Input.dispatchMouseEvent", json!({
+            "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
+            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),
+        }));
+    }
+}
+
+const PARK_GAP: i32 = 200;
+
+/// Escala fixa: a WebView2 não segue o monitor, que a página está fora dele.
+fn rasterize(view: &wry::WebView, scale: f32) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller3;
+    use windows::core::Interface;
+    let result = view.controller().cast::<ICoreWebView2Controller3>().and_then(|c| unsafe {
+        c.SetShouldDetectMonitorScaleChanges(false)?;
+        c.SetRasterizationScale(scale as f64)
+    });
+    if let Err(e) = result { eprintln!("[pagina] escala da WebView2 nao aplicada: {}", e.message()); }
+}
+
+/// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
+/// textura e o texto perde a nitidez. Quadro de outro tamanho (resize em curso) estica até o cartão.
+fn pixel_aligned(bounds: Bounds<Pixels>, (tw, th): (u32, u32), scale: f32, frame_scale: f32) -> Bounds<Pixels> {
+    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
+    let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
+    let fits = (tw as f32 - f32::from(bounds.size.width) * frame_scale).abs() <= 2. * frame_scale
+        && (th as f32 - f32::from(bounds.size.height) * frame_scale).abs() <= 2. * frame_scale;
+    let size = if fits { size(snap(px(tw as f32 / frame_scale)), snap(px(th as f32 / frame_scale))) }
+        else { size(snap(bounds.size.width), snap(bounds.size.height)) };
+    Bounds { origin, size }
+}

@@ -78,11 +78,16 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--refazer') flags.refazer = true;
   else if (args[i] === '--pasta') {
     flags.pasta = args[++i];
-    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta e2e/roteiros');
+    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta automacao/gravacoes');
   }
   else if (args[i] === '--cwd') flags.cwd = args[++i];
-  else if (args[i] === '--cdp') flags.cdp = args[++i];
-  else if (args[i] === '--alvo') flags.alvo = args[++i];
+  else if (args[i] === '--cdp' || args[i] === '--alvo') {
+    // Sem valor, o comando caía calado no navegador da sessão (ou em qualquer página de fora).
+    const flag = args[i];
+    const valor = args[++i];
+    if (!valor || valor.startsWith('--')) erro(`${flag} precisa de um valor: ${flag === '--cdp' ? '--cdp http://127.0.0.1:9222' : '--alvo /agenda'}`);
+    flags[flag.slice(2)] = valor;
+  }
   else pos.push(args[i]);
 }
 // Página de fora do app: quem conecta e confere o loopback é o app nativo; sessão e sidecar não entram.
@@ -132,8 +137,9 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
     --passos <n>          teto de passos (default 15)
     --refazer             ignora o roteiro gravado do mesmo objetivo (o Jev decide tudo e regrava)
-    --pasta <dir>         onde ficam os roteiros (padrão: e2e/roteiros na raiz do git do cwd, lendo
-                          .hangar/roteiros antigo como reserva; fora de repo, ~/.cache/hangar/roteiros)
+    --pasta <dir>         onde ficam as gravações (padrão: automacao/gravacoes na raiz do git do cwd,
+                          lendo e2e/roteiros e .hangar/roteiros antigos como reserva; fora de repo,
+                          ~/.cache/hangar/roteiros)
     --permitir-risco      libera, so nesta chamada, o clique que exclui, compra, envia ou publica
                           (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
@@ -640,7 +646,7 @@ if (cmd === 'objetivo') {
     // O MCP roda este script no cwd do backend: ele manda o da sessão em --cwd.
     // --pasta relativa é relativa ao cwd da sessão, não ao do backend.
     pasta: flags.pasta ? resolve(flags.cwd || process.cwd(), flags.pasta) : roteiro.pastaDe(flags.cwd || process.cwd()),
-    reserva: flags.pasta ? null : roteiro.reservaDe(flags.cwd || process.cwd()),
+    reserva: flags.pasta ? [] : roteiro.reservaDe(flags.cwd || process.cwd()),
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),

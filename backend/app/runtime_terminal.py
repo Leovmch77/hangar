@@ -44,6 +44,10 @@ class TerminalControlError(RuntimeError):
             else 'Não foi possível confirmar o controle; confira a sessão antes de repetir.')
 
 
+
+class ModeClassMissing(RuntimeError):
+    """Recado da reserva sem a classe de modo; o nome da classe é o código do erro."""
+
 def outside_scope(name):
     from app import tmux, registry as registry_mod, procinfo
     panes = tmux.list_panes_all().get(name)
@@ -356,7 +360,6 @@ def facts(payload, metadata):
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.mode != "python":
             # Com o Rust de pé a classe do recado é dele: esta reserva nunca a recalcula.
-            from app.runtime_policy import ModeClassMissing
             raise ModeClassMissing("recado terminal sem a classe de modo do Rust")
         native = dict(socket=endpoint, origin=f'uds:{uds_messaging.INBOX.path}' if uds_messaging.INBOX.path else f'uds:hangar-{os.getpid()}',
             sender=sender, mode=api._classe_modo(sender, current.name, current.meta['config_dir'], current.jsonl),
@@ -549,7 +552,6 @@ def _queue(coordinator, descriptor, action):
 
 
 def _service(coordinator, descriptor, operation_id, request_id, kind, payload):
-    from app import runtime_policy
     phase = 'reserve-policy:' + uuid.uuid4().hex
     _queue(coordinator, descriptor, {'kind':'prepare','id':phase,
         'payload':{'kind':kind,'request_id':request_id,'payload':payload},'entry_id':None})
@@ -558,7 +560,7 @@ def _service(coordinator, descriptor, operation_id, request_id, kind, payload):
         'generation':descriptor['generation'], 'jsonl':descriptor['jsonl'], 'descriptor':descriptor,
         'operation_id':request_id, 'validate':lambda:assert_writer(descriptor['name'])}
     try:
-        result = runtime_policy.run(kind, payload, metadata)
+        result = {'terminal_facts':facts, 'terminal_publish':publish, 'terminal_plugin_control':plugin_control}[kind](payload, metadata)
     except BaseException:
         _queue(coordinator, descriptor, {'kind':'finish','id':phase,'status':'unknown','result':None})
         raise

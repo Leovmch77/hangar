@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Platform, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -8,7 +8,7 @@ import { Pagina } from '../../src/features/config/Pagina';
 import { SettingsMenuGroup, SettingsMenuItem } from '../../src/features/config/SettingsMenu';
 import { useSettingsColors } from '../../src/features/config/colors';
 import { Icon, type IconName } from '../../src/ui/Icon';
-import { useServers } from '../../src/stores/servers';
+import { ownServers, useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
 
 type Page = { route: string; icon: IconName; title: () => string; rows: Array<() => string> };
@@ -109,7 +109,8 @@ export default function ConfigIndex() {
 /** "• nome ⌄" do grupo Servidor: troca a máquina que o grupo configura, como a lista de Servidores. */
 function ServerPicker() {
   const c = useSettingsColors();
-  const servers = useServers((s) => s.servers);
+  const todos = useServers((s) => s.servers);
+  const servers = useMemo(() => ownServers(todos), [todos]);
   const activeId = useServers((s) => s.activeId);
   const active = servers.find((s) => s.id === activeId) ?? null;
   if (!active) return null;

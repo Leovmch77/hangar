@@ -5,6 +5,9 @@ import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
   import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq, worktreeLabel } from '@hangar/core';
   import { getPushSettings, setSessionMute, getBranches, checkoutBranch, gitAction, openEditor, setThenLink, clearThenLink, canPair, canLeave } from '@hangar/core';
+  import { leavePair, pairExternals, setPairAccess, type PairExternal } from '@hangar/core';
+  import { sessionServerFor, type SessionServer } from '../lib/sessionServer';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
   import { listOwnServers, withServer } from '../lib/auth';
   import { copyText } from '../lib/clipboard';
@@ -44,13 +47,15 @@ import { textoProblema } from '../lib/problema';
     // Sessões do mesmo servidor (encadear e agrupar pelo toque longo); lidas só ao abrir o subnível.
     peers?: () => AggSession[];
     onShare?: () => void;
+    // Aceitar um convite de par (link /par/) nesta sessão.
+    onPairAccept?: () => void;
     onBastao?: () => void;
     onOpenArbiter?: () => void;
   }
   let {
     session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onGroupDrag,
     selectMode = false, selected = false, onToggleSelect,
-    showFolder = false, peers, onShare, onBastao, onOpenArbiter,
+    showFolder = false, peers, onShare, onPairAccept, onBastao, onOpenArbiter,
   }: Props = $props();
 
 
@@ -186,7 +191,44 @@ import { textoProblema } from '../lib/problema';
   const readOnly = $derived((session as SessionInfo & { guest_kind?: string | null }).guest_kind === 'pair');
   const hasGit = $derived(!!session.cwd && session.branch != null);
   const leave = $derived(!!serverId && canLeave(session as AggSession));
-  type MenuView = 'main' | 'branch' | 'chain' | 'group';
+  // Par externo: a linha de fora (posta no grupo local) e os pares desta sessão própria.
+  const outside = $derived((session as AggSession).outside ?? null);
+  const pairs = $derived(invite ? [] : pairExternals(session));
+  const pendentes = $derived(pairs.filter((p) => p.pending));
+  type MenuView = 'main' | 'branch' | 'chain' | 'group' | 'confirm';
+  let confirma = $state<{ title: string; body: string; run: () => Promise<unknown> } | null>(null);
+  function pedirConfirmacao(title: string, body: string, run: () => Promise<unknown>) {
+    confirma = { title, body, run };
+    view = 'confirm';
+    say('');
+  }
+  // O par é desfeito no MEU servidor, que avisa o outro lado. A marca vem antes: o par some da
+  // próxima leitura, e isso não é a outra pessoa saindo.
+  async function desfazerAqui(alias: string, peer: string, server: ReturnType<SessionServer>) {
+    const desfazer = sessionsStore.markLeavingPair(alias, peer);
+    try { if (!(await leavePair(alias, peer, server)).ok) desfazer(); }
+    catch (e) { desfazer(); throw e; }
+  }
+  function sairDoPar() {
+    if (!outside) return;
+    const { alias, owner, localServerId } = outside;
+    pedirConfirmacao(m.pair_leave_outside({ dono: owner }), m.pair_leave_outside_body({ dono: owner }), async () => {
+      await desfazerAqui(alias, session.name, sessionServerFor(localServerId)());
+    });
+  }
+  function desfazerPar(p: PairExternal) {
+    pedirConfirmacao(m.pair_undo_own({ dono: p.owner }), m.pair_undo_anchor_body({ dono: p.owner }), async () => {
+      await desfazerAqui(p.alias, p.session, sessionServerFor(serverId)());
+    });
+  }
+  function liberar(p: PairExternal) {
+    pedirConfirmacao(m.pair_release({ dono: p.owner }), m.pair_full_confirm({ sessao: session.name, dono: p.owner }),
+      () => setPairAccess(session.name, p.alias, 'full', sessionServerFor(serverId)()));
+  }
+  function confirmar() {
+    const c = confirma;
+    if (c) void act(async () => { await c.run(); return null; });
+  }
   let view = $state<MenuView>('main');
   let note = $state('');
   let noteError = $state(false);
@@ -420,7 +462,7 @@ import { textoProblema } from '../lib/problema';
         <span>{m.sessao_git()}</span>
       </button>
     {/if}
-    {#if !orq}
+    {#if !orq && !outside}
       <button class="act del" onclick={onDelete} aria-label={m.sessao_aria_excluir_sessao({ n: session.name })}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <polyline points="3 6 5 6 21 6"/>
@@ -492,6 +534,9 @@ import { textoProblema } from '../lib/problema';
           {#if orq}
             <span class="untracked-badge orq-badge">{m.orq_row_badge()}</span>
           {/if}
+          {#if outside}
+            <span class="owner-badge">{m.pair_from_owner({ dono: outside.owner })}</span>
+          {/if}
           {#if session.owner}
             <span class="owner-badge" title={m.sessao_do_convidado({ n: session.owner })}>👤&nbsp;{session.owner}</span>
           {/if}
@@ -529,7 +574,7 @@ import { textoProblema } from '../lib/problema';
           <span class="reply-text">{session.last_reply}</span>
         </span>
       {/if}
-      {#if !orq || serverBadge || branchShown || mostraPasta || loopChip
+      {#if !orq || serverBadge || branchShown || mostraPasta || loopChip || pendentes.length
            || session.git_ahead || session.git_behind || session.git_added || session.git_removed}
         <span class="meta-line">
           {#if !orq}
@@ -573,6 +618,9 @@ import { textoProblema } from '../lib/problema';
           {#if session.git_added || session.git_removed}
             <span class="diff-stats" aria-hidden="true">{#if session.git_added}<span class="diff-add">+{session.git_added}</span>{/if}{#if session.git_removed}<span class="diff-del">−{session.git_removed}</span>{/if}</span>
           {/if}
+          {#if pendentes.length}
+            <span class="pair-pending" title={pendentes.map((p) => p.owner).join(', ')}>{m.pair_full_pending()}</span>
+          {/if}
           {#if loopChip}
             <span class="loop-mark" style="color: {LOOP_TONE_COLOR[loopChip.tone]};" title={m.sessao_loop_runner()}>{loopChip.label}</span>
           {/if}
@@ -615,7 +663,7 @@ import { textoProblema } from '../lib/problema';
           </svg>
         </button>
       {/if}
-      {#if !orq}
+      {#if !orq && !outside}
         <button
           class="kbd-only del"
           inert={offset === OPEN}
@@ -675,6 +723,11 @@ import { textoProblema } from '../lib/problema';
             {@render item(m.ctx_copiar_cwd(), 'M9 9h11v11H9zM5 15H4V4h11v1', copyCwd, {})}
           </div>
         {/if}
+        {#if outside}
+          <div class="card-menu-group">
+            {@render item(m.pair_leave_outside({ dono: outside.owner }), 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10', sairDoPar, { danger: true })}
+          </div>
+        {/if}
       {:else}
         <div class="card-menu-group">
           {#if !untracked}
@@ -683,6 +736,9 @@ import { textoProblema } from '../lib/problema';
           {#if !invite}
             {@render item(muteError ? m.ctx_flash_silenciar({ n: muteError }) : muted ? m.ctx_reativar_notif() : m.ctx_silenciar_notif(),
               'M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2zM10 21h4', toggleMute, { disabled: muted === null })}
+            {#if onPairAccept}
+              {@render item(m.native_par_menu(), 'M8 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM16 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', () => menuPick(() => onPairAccept?.()), {})}
+            {/if}
             {#if onShare}
               {@render item(m.compartilhar_menu(), 'M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1', () => menuPick(() => onShare?.()), {})}
             {/if}
@@ -717,20 +773,39 @@ import { textoProblema } from '../lib/problema';
             {/if}
           </div>
         {/if}
+        {#if pairs.length}
+          <!-- Um item por par, em vez de submenu: costuma ser um só. -->
+          <div class="card-menu-group">
+            {#each pendentes as p (`${p.alias}::${p.session}`)}
+              {@render item(m.pair_release({ dono: p.owner }), 'M12 3l7 4v5c0 4-3 7-7 9-4-2-7-5-7-9V7z', () => liberar(p), {})}
+            {/each}
+            {#each pairs as p (`${p.alias}::${p.session}`)}
+              {@render item(m.pair_undo_own({ dono: pairs.length > 1 ? `${p.owner} · ${p.session}` : p.owner }), 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10', () => desfazerPar(p), { danger: true })}
+            {/each}
+          </div>
+        {/if}
         <div class="card-menu-group">
-          {@render item(invite ? m.convite_parar() : m.sessao_excluir_curto(), 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13', () => menuPick(onDelete), { danger: true })}
+          {#if outside}
+            {@render item(m.pair_leave_outside({ dono: outside.owner }), 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10', sairDoPar, { danger: true })}
+          {:else}
+            {@render item(invite ? m.convite_parar() : m.sessao_excluir_curto(), 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13', () => menuPick(onDelete), { danger: true })}
+          {/if}
         </div>
       {/if}
     {:else}
       <div class="card-menu-head">
         <button class="card-menu-back" onclick={() => { view = 'main'; say(''); }} aria-label={m.comum_voltar()}>‹</button>
         <h2 class="card-menu-title">
-          {view === 'branch' ? m.ctx_trocar_branch()
+          {view === 'confirm' ? (confirma?.title ?? '')
+            : view === 'branch' ? m.ctx_trocar_branch()
             : view === 'group' ? m.sessao_agrupar_com()
             : session.then_target ? m.sessao_chain_encadeado({ n: session.then_target }) : m.sessao_chain_enviar()}
         </h2>
       </div>
-      {#if view === 'branch'}
+      {#if view === 'confirm' && confirma}
+        <p class="card-menu-info">{confirma.body}</p>
+        <button class="card-menu-cta" disabled={busy} onclick={confirmar}>{confirma.title}</button>
+      {:else if view === 'branch'}
         {#if !branches}
           {#if busy}<p class="card-menu-info" role="status">{m.comum_carregando()}</p>{/if}
         {:else if dirtyPick}
@@ -984,6 +1059,7 @@ import { textoProblema } from '../lib/problema';
   .name-end { margin-left: auto; flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
   .conta-no-nome { flex: 0 1 auto; min-width: 0; max-width: 96px; }
   .owner-badge { flex-shrink: 0; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+  .pair-pending { flex-shrink: 0; font-size: 11px; color: var(--warning); white-space: nowrap; }
   /* Input do rename inline (toque longo). Mesmo visual do .server-edit da lista de servidores. */
   .name-edit {
     flex: 1;

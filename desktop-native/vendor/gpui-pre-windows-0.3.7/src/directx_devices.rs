@@ -35,6 +35,79 @@ pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T
         .context("DirectXRenderer failed to recover from lost device after multiple attempts")
 }
 
+/// Hangar: the device GPUI draws with, for textures painted with `Window::paint_surface`. Replaced on device loss.
+static SHARED_DEVICE: std::sync::Mutex<Option<SharedDevice>> = std::sync::Mutex::new(None);
+
+#[derive(Clone)]
+struct SharedDevice(ID3D11Device);
+// SAFETY: `ID3D11Device` is free-threaded; only resource creation goes through it here.
+unsafe impl Send for SharedDevice {}
+unsafe impl Sync for SharedDevice {}
+
+fn shared_device() -> Option<ID3D11Device> {
+    SHARED_DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|d| d.0.clone())
+}
+
+/// Hangar: an external texture for `Window::paint_surface`, straight-alpha RGBA on the device GPUI draws with. One made
+/// on a device that was since lost is skipped by the renderer, and `is_current` tells the owner to make a new one.
+pub struct SurfaceTexture {
+    pub(crate) view: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
+    texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    pub(crate) device: ID3D11Device,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+// SAFETY: the texture is only written through `write`, on the thread that draws, like every other use of the context.
+unsafe impl Send for SurfaceTexture {}
+unsafe impl Sync for SurfaceTexture {}
+
+impl SurfaceTexture {
+    /// An RGBA texture of this size on the device GPUI draws with, filled with `write`.
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*};
+        anyhow::ensure!(width > 0 && height > 0, "empty surface");
+        let device = shared_device().context("no DirectX device yet")?;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        // SAFETY: plain descriptor, no initial data.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.context("creating surface texture")?;
+        let texture = texture.context("surface texture missing")?;
+        let mut view = None;
+        // SAFETY: `texture` was just created on `device` with a shader-resource binding.
+        unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }.context("creating surface view")?;
+        Ok(Self { view: view.context("surface view missing")?, texture, device, width, height })
+    }
+
+    /// Replaces the contents with `pixels` (RGBA, `width * 4` bytes per row). Only on the thread that draws the windows:
+    /// it goes through the device's immediate context, which the renderer also uses.
+    pub fn write(&self, pixels: &[u8]) -> Result<()> {
+        let needed = (self.width as usize).checked_mul(self.height as usize).and_then(|n| n.checked_mul(4)).context("surface too large")?;
+        anyhow::ensure!(pixels.len() >= needed, "surface pixels too short");
+        // SAFETY: the immediate context of the device that owns the texture.
+        let context = unsafe { self.device.GetImmediateContext() }.context("no immediate context")?;
+        // SAFETY: `pixels` holds `height` rows of `width * 4` bytes and outlives the call.
+        unsafe { context.UpdateSubresource(&self.texture, 0, None, pixels.as_ptr().cast(), self.width * 4, 0) };
+        Ok(())
+    }
+
+    pub fn width(&self) -> u32 { self.width }
+    pub fn height(&self) -> u32 { self.height }
+
+    /// Made on the device GPUI draws with now (false after a device loss).
+    pub fn is_current(&self) -> bool { shared_device().is_some_and(|d| d == self.device) }
+}
+
 #[derive(Clone)]
 pub(crate) struct DirectXDevices {
     pub(crate) adapter: IDXGIAdapter1,
@@ -63,6 +136,7 @@ impl DirectXDevices {
             _ => unreachable!(),
         }
 
+        *SHARED_DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SharedDevice(device.clone()));
         Ok(Self {
             adapter,
             dxgi_factory,

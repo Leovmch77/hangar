@@ -97,7 +97,8 @@ npm --prefix frontend run dev              # Vite dev server
 npm --prefix frontend run build            # production build — does NOT typecheck
 npm --prefix frontend run check            # svelte-check + tsc — THIS is the type gate
 
-scripts/verificar-local                    # o que o CI rodaria para o commit (Linux + VM Windows); a trava pre-push exige
+scripts/verificar-local                    # só o ligado aos arquivos mudados (o que a trava pre-push exige)
+scripts/verificar-local --completo         # o que o CI rodaria para o commit (Linux + VM Windows)
 scripts/verificar-local --passos rust      # repete só um passo (o que já passou nesta árvore fica gravado)
 ./scripts/test-wrappers.sh                 # claude-engine (bash/zsh/fish) against a fake `claude`, no tmux
 ./scripts/test-statusline.sh               # statusline.js contract (engine sessions suppress cost), needs node
@@ -111,8 +112,9 @@ arquivos tocados (`cd backend && uv run pytest tests/test_x.py tests/test_y.py`,
 `cd frontend && npx vitest run src/x.test.ts src/y.test.ts`); falhou → repita só o que falhou.
 Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. **`scripts/verificar-local` é exigido ao
 abrir PR e ao subir para a `main` ou para branch com PR aberto**: ele roda, numa árvore fixa da
-máquina e em fila única, o que o CI rodaria para o que o commit muda, no Linux e no Windows da VM
-(`git config hangar.verificarWindows <host>`), e grava pela árvore cada passo que passou. No Linux os
+máquina e em fila única, só o ligado aos arquivos que o commit muda (`--completo`: o que o CI rodaria),
+no Linux e, com arquivo de Windows no diff, na VM (`git config hangar.verificarWindows <host>`, teto de
+10 min), e grava pela árvore cada passo que passou. No Linux os
 passos rodam em faixas paralelas e o pytest em vários processos: `git config hangar.verificarProcessos <n>`
 (padrão 4; `1` = tudo em fila). O Node é o do `.node-version`, o mesmo do CI: com o `fnm` instalado, o
 script e o `ci-gates.sh` trocam sozinhos; sem ele, o aviso diz que front e mobile podem falhar por isso. O hook do
@@ -450,15 +452,28 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;
   hooks e skills do Hangar, MCP `hangar`, credenciais e o login do `.claude.json` são sempre do
   destino. Regras e motivo em [plataforma.md](docs/decisoes/plataforma.md#configuração-compartilhada-leva-o-conteúdo-o-destino-resolve-caminho-e-programa).
-- **Compartilhar sessão: só a porta do convidado (8766, Funnel 8443) vai à internet, e ela recusa
-  o token do dono.** Confiança = usuário do sistema do dono. No servidor de convite, 410 e 401 são
-  "encerrado" (nunca apagar o servidor nem abrir login) e 503 é tentar de novo. Motivo em
+- **Compartilhar sessão: só a porta do convidado (8766, Funnel 8443) vai à internet, ela é do
+  Rust e recusa o token do dono.** Convites, chaves, porteiro e Funnel moram em
+  `crates/hangar-server/src/share/`; Rust fora = 8766 fechada, sem reserva Python. O que o Python
+  ainda atende recebe o convidado já decidido em `x-hangar-guest` assinado. Confiança = usuário
+  do sistema do dono. No servidor de convite, 410 e 401 são "encerrado" (nunca apagar o servidor
+  nem abrir login); 502, 503 e conexão recusada são tentar de novo. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#compartilhar-sessão-a-porta-do-convidado-é-a-única-na-internet).
-- **Par externo: o token de entrada é um `Share` de `kind: "pair"` (só leitura), o de saída mora
-  em `external_pairs.json`.** Só endereço `https://*.ts.net:8443`; quem assina o recado é o token
+- **Link de convite pelo Funnel só aparece conferido de fora.** A criação (Rust) espera o nome no
+  DNS público e a página do Funnel igual à de `127.0.0.1:8766`; não abriu, revoga e responde 409
+  `share_reach_failed` com a etapa. Nativo e PWA não chamam mais `/api/share/reachability`. Evidência em [plataforma.md](docs/decisoes/plataforma.md#link-de-convite-só-aparece-conferido-de-fora).
+- **Par externo: o token de entrada é a raiz `Share` de `kind: "pair"`, o de saída mora
+  em `external_pairs.json`; os dois arquivos são só do Rust.** O Python pede por
+  `/__hangar_server/share` (fechar, renomear, trocar de modo). Só endereço `https://*.ts.net:8443`; quem assina o recado é o token
   (`[de fora: alias::sessao]`), nunca o texto; só 410 desfaz o par; nome de sessão de fora é
   `[A-Za-z0-9._-]{1,64}`; chamada à outra máquina nunca segue redirect. Um token de convidado cobre
-  várias sessões da mesma máquina. Motivo em
+  várias sessões da mesma máquina. Cada lado escolhe o nível que DÁ (`full`/`view`), guardado como
+  filho por sessão do grupo sob a raiz (`Kind::Share` = completo, `Kind::Pair` = ver e recado),
+  nunca variante nova de `Kind`; resposta sem `level` = Hangar antigo = `view`. Toda entrada em
+  grupo dá `view`; `full` só pela rota do dono `pair-access`, chamada pelos clientes (nunca por
+  `hangar-send`/MCP). A âncora sair ou morrer desfaz o par; grupo `orq` recusa membro de fora;
+  aviso de grupo atravessa o par com um salto só. Sessão de fora aparece dentro do grupo, nunca em
+  seção própria. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#par-externo-sessões-de-pessoas-diferentes).
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
@@ -481,8 +496,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
 - **Backend novo nasce no Rust (`crates/`), não em `backend/app/`.** Rota, ponte, poller ou
   integração nova vai para o `hangar-server`. O Python só é tocado quando o Rust precisa de um fato
-  ou rota que ainda mora lá, ou nas portas que são dele (8766 do convidado, 8768 do Connect), e
-  nessas ele só repassa ao Rust, num sentido.
+  ou rota que ainda mora lá, ou na porta que é dele (8768 do Connect), e nela ele só repassa ao
+  Rust, num sentido.
 - **Migrar do Python para o Rust é migrar o caminho inteiro.** Antes de dar a migração por feita,
   procure nos dois lados todo chamador da responsabilidade (rotas `/internal/*`, `*_bridge`,
   `to_thread` que esperam o Rust) e apague o que ficou no Python. O Rust nunca pergunta ao Python o
@@ -503,7 +518,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   cotas são só do Rust: no modo `python` respondem `accounts_need_rust_server`, sem reserva
   Python. Anexos de sessão pertencem ao Rust enquanto o supervisor estiver em `rust` ou
   `pending`; nessa fase, falha da ponte não ativa um segundo escritor Python. O resto, convidado
-  incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário
+  incluído, é repassado com `X-Forwarded-For`. A 8766 é do Rust e a 8768 fica no Python. Sem binário
   (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
   `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3
   quedas em 60 s, um segundo `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo
@@ -587,8 +602,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Evidência em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
 - **Estado ao vivo de Claude com terminal é do `Monitor` do Rust no modo `rust`/`pending`, em
   qualquer porta.** Um por hub (`side.rs`), nascido com o primeiro assinante: o `/events` do dono
-  ou o canal privado `/__hangar_server/state/{name}/events`, que o Python lê para quem entrou pela
-  8766/8768. Ele publica `state`, `preview`, `ask_question` e `suggest` pelo retrato do hub, com o
+  ou o canal privado `/__hangar_server/state/{name}/events`, que o Python lê para quem entrou por
+  ele (login de convidado, 8768). Ele publica `state`, `preview`, `ask_question` e `suggest` pelo retrato do hub, com o
   `interaction_id` da pergunta ou permissão em aberto, e drena a fila direto no `RuntimeRegistry`
   (`LiveSources::deliverable`); o Python não sobe `StateMonitor` nem `PreviewBroker` dessas
   sessões e o hub descarta, registrando uma vez, os quatro que vierem dele. Captura em processo
@@ -605,6 +620,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   estacionado (linha de status, modo de permissão, `dead` sem sidecar nem troca), tudo no Rust. Só
   o modo `python` volta a produzi-los. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-do-claude-sem-terminal-no-feed-do-runtime).
+- **Com o Rust de pé, o Python não lê o arquivo de estado da fila (`runtime/<chave>.json`).** No
+  Windows a leitura no meio da troca do Rust falha e faz a troca falhar. O que precisava dele é do
+  Rust (`patch_meta`/`clear_cano` do Claude, `native_message`, recibos na caixa do Rust). O sidecar do
+  Claude tem dois escritores, sob a trava `<nome>.lock` nos dois lados; leitura de sidecar no Python
+  passa por `atomico.read`, que no Windows compartilha a exclusão. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#o-python-fora-do-arquivo-de-estado-da-fila).
 
 ## tmux + Claude Code truecolor
 

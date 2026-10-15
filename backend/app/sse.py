@@ -9,7 +9,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from app import atomico, diag, guest_users, list_bridge, plugin_bridge, share_store
+from app import atomico, diag, guest_users, list_bridge, plugin_bridge
 from app import registry as registry_mod
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
@@ -20,7 +20,6 @@ from app.models import PreviewEvent, session_key
 from app.live_rate import live_snapshot
 from app.stats import Accumulator as StatsAccumulator
 from app.registry import SessionRegistry
-from app.share_guest_api import guest_safe
 from app.askquestion import read_pending_askq
 
 
@@ -595,15 +594,15 @@ def invalidate_recent_list() -> None:
     _list_invalidated_at = time.monotonic()
 
 
-async def list_events(ping_secs: float = 8.0, only=None, viewer=None, token=None):
+async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
     segue e o front ve a lista velha (stale > desconectado).
 
     `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
-    do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o `Guest` do token:
-    renomear a sessao muda o registro, e o stream aberto tem que acompanhar (`token` o relê).
+    do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o convidado assinado
+    pelo Rust (`guest_header`); a lista do convidado de convite em si é servida pelo Rust.
     `viewer` = convidado com login proprio (ou None = dono): a lista passa pelo mesmo filtro da
     rota `/api/sessions`."""
     queue: asyncio.Queue = asyncio.Queue()
@@ -629,10 +628,10 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None, token=None
             if data is not None:
                 try:
                     if only is not None:
-                        # `only` em str é só o nome (usos internos). Com `token`, o registro é
-                        # relido a cada envio: sessão ligada ao token depois da abertura aparece.
-                        guest = None if isinstance(only, str) else (
-                            (token and share_store.lookup_token(token)) or only)
+                        # `only` em str é só o nome (usos internos); senão é o convidado que o Rust assinou.
+                        # Import tardio: guest_header → internal_api → sse.
+                        from app.guest_header import guest_safe
+                        guest = None if isinstance(only, str) else only
                         sees = (lambda n: n == only) if guest is None else guest.sees
                         data = json.dumps([guest_safe(x, guest) for x in json.loads(data)
                                            if sees(x.get("name"))], ensure_ascii=False)

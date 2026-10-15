@@ -10,8 +10,10 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 import { registrar as registrarDiag, novoReq } from './diag';
 import { dispensaPrazo, retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import {
-  inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
+  inviteAllows, parsePairLink, SharePrerequisiteError, ShareReachError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
+import type { ExternalPair } from './externalPairs';
+import type { PairLevel } from './types';
 import type { CotaContaResumo } from './cotaResumo';
 import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
@@ -257,7 +259,7 @@ async function sessionFetch<T>(server: Server | null | undefined, path: string, 
 // quem precisa do STATUS ou de um header — hoje o histórico condicional (304 + ETag), que não tem
 // corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
-async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false): Promise<Response> {
+async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false, countsOutage = true): Promise<Response> {
   const destino = server?.baseUrl ?? apiEnv().getBaseUrl();
   const base = server ? baseOf(server) : destino;
   // Servidor de convite só atende a sessão compartilhada e as rotas do chat: o resto nem sai
@@ -315,7 +317,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
       }
       if (poll) _semRede.add(`${destino}|${rota}`);
       // Só falha de REDE esfria (o `isAbortError` acima já tirou o cancelamento de quem chamou).
-      if (server) registrarFalha(server.id);
+      if (server && countsOutage) registrarFalha(server.id);
     }
     throw e;
   }
@@ -1327,6 +1329,47 @@ export async function deleteMergedWorktreesForServer(server: Server, repo: strin
     { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;
 }
+export type WorktreeBatchProgress = {
+  total: number;
+  done: number;
+  current: WorktreeStatus | null;
+  removed: WorktreeStatus[];
+  /** `error: null`: o servidor a deixou de fora (mudou depois da confirmação). */
+  failed: { worktree: WorktreeStatus; error: string | null }[];
+  freed: { bytes: number; partial: boolean };
+};
+
+/** Uma por pedido, em fila: o progresso só avança quando o servidor confirma cada uma, e a falha
+ *  de uma não interrompe as outras. O liberado é o tamanho medido das que saíram. */
+export async function runWorktreeBatch(chosen: WorktreeStatus[], removeOne: (w: WorktreeStatus) => Promise<boolean>,
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  const p: WorktreeBatchProgress = { total: chosen.length, done: 0, current: null, removed: [], failed: [],
+                                     freed: { bytes: 0, partial: false } };
+  const report = () => onProgress({ ...p, removed: [...p.removed], failed: [...p.failed] });
+  for (const w of chosen) {
+    p.current = w;
+    report();
+    try {
+      if (await removeOne(w)) p.removed.push(w);
+      else p.failed.push({ worktree: w, error: null });
+    } catch (e) {
+      p.failed.push({ worktree: w, error: e instanceof Error ? e.message : String(e) });
+    }
+    p.done++;
+    p.freed = worktreesSizeTotal(p.removed);
+  }
+  p.current = null;
+  report();
+  return p;
+}
+
+/** O lote pelo servidor: cada pedido leva só uma, com a mesma regra de perda da confirmação. */
+export function deleteWorktreeBatchForServer(server: Server, repo: string, chosen: WorktreeStatus[],
+  onProgress: (p: WorktreeBatchProgress) => void): Promise<WorktreeBatchProgress> {
+  return runWorktreeBatch(chosen, async (w) => (await deleteMergedWorktreesForServer(server, repo, [w])).includes(w.path),
+                          onProgress);
+}
+
 /** Nome curto do chip: a pasta da worktree onde o agente está. */
 export function worktreeLabel(s: SessionInfo): string | null {
   const p = s.worktree_path ?? (s.worktree ? s.cwd : null);
@@ -3779,8 +3822,60 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
 }
 
 // Compartilhar sessão (dono). Todas no servidor ATIVO: a Sidebar usa `withServer`.
-export async function createShare(name: string, local = false, server?: Server | null): Promise<ShareCreated> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`, { method: 'POST' }, server ?? undefined);
+/** O link do Funnel só volta depois de abrir de fora (o servidor confere até 3 min); 404/405 =
+ * backend sem o Rust (em produção o StaticFiles do Python responde 405 ao POST). */
+export async function createShare(name: string, local = false, server?: Server | null, signal?: AbortSignal): Promise<ShareCreated> {
+  return postFunnel(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`, undefined, server, signal, true);
+}
+
+/** Convite de par: `level` é o que a outra pessoa terá nas sessões do grupo. Mesmas recusas do compartilhar. */
+export function createPairInvite(name: string, level: PairLevel, server?: Server | null, signal?: AbortSignal): Promise<ShareCreated> {
+  return postFunnel(`/api/sessions/${encodeURIComponent(name)}/pair-invite`, { level }, server, signal, true);
+}
+
+export interface PairAccepted { alias: string; owner: string; session: string; level: PairLevel }
+/** `level`: o que quem convidou terá aqui. A resposta diz o que eu recebi; sem `level` o outro
+ * lado é um Hangar antigo, e lá o acesso é ver e recado. */
+export async function acceptPair(name: string, link: string, level: PairLevel, server?: Server | null, signal?: AbortSignal): Promise<PairAccepted> {
+  const ok = parsePairLink(link);
+  if (!ok) throw Object.assign(new Error(m.erro_par_link_invalido()), { status: 400, code: 'erro_par_link_invalido' });
+  // 404 aqui é sessão inexistente, com código: não é "servidor sem o Rust".
+  const r = await postFunnel<PairAccepted>(`/api/sessions/${encodeURIComponent(name)}/pair-accept`, { link: ok, level }, server, signal, false);
+  return { alias: r.alias, owner: r.owner, session: r.session, level: r.level === 'full' ? 'full' : 'view' };
+}
+
+export function listExternalPairs(server?: Server | null): Promise<ExternalPair[]> {
+  return sessionFetch(server, '/api/external-pairs');
+}
+
+/** Rota só do dono, chamada pelo clique "Liberar" ou pela confirmação ao pôr no grupo. */
+export function setPairAccess(name: string, alias: string, level: PairLevel, server?: Server | null): Promise<{ ok: boolean }> {
+  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/pair-access`,
+    { method: 'POST', body: JSON.stringify({ alias, level }) });
+}
+
+/** Desfaz o par no MEU servidor (que avisa o outro lado): serve ao "Sair do pareamento" da linha de
+ * fora e ao "Desfazer par" da sessão própria. `peerSession` é a sessão de fora. */
+export function leavePair(alias: string, peerSession: string, server?: Server | null): Promise<{ ok: boolean }> {
+  return sessionFetch(server, `/api/external-pairs/${encodeURIComponent(alias)}?session=${encodeURIComponent(peerSession)}`,
+    { method: 'DELETE' });
+}
+
+/** Liga o token de um par à entrada de convite que já existe na mesma máquina. */
+export function attachGuest(entry: Server, token: string): Promise<{ ok: boolean }> {
+  return sessionFetch(entry, '/api/guest/attach', { method: 'POST', body: JSON.stringify({ token }) });
+}
+
+/** O link do Funnel só volta depois de abrir de fora; 409 diz o que falta ou onde não abriu. */
+async function postFunnel<T>(path: string, body: unknown, server: Server | null | undefined, signal: AbortSignal | undefined,
+  needsRust: boolean): Promise<T> {
+  // Espera minutos no servidor; o iOS mata o fetch em segundo plano. Essa queda não é do
+  // servidor: não esfria, e a nova tentativa não é barrada por esfriamento.
+  const res = await apiFetchRes(path, { method: 'POST', signal: comTeto(signal, 240_000),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, server ?? undefined, true, false);
+  if (needsRust && (res.status === 404 || res.status === 405)) {
+    throw Object.assign(new Error(m.share_create_needs_rust()), { status: res.status, code: 'share_create_needs_rust' });
+  }
   if (res.status === 409) {
     const corpo = (await res.clone().json().catch(() => null)) as { detail?: EnvelopeErro } | null;
     const d = corpo?.detail;
@@ -3792,9 +3887,14 @@ export async function createShare(name: string, local = false, server?: Server |
         tailscaleEnableUrl(d.params?.enable_url),
       );
     }
+    if (d?.code === 'share_reach_failed') {
+      const stage = d.params?.stage === 'dns' ? 'dns' : 'funnel';
+      throw new ShareReachError(stage, typeof d.params?.detail === 'string' ? d.params.detail : '',
+        stage === 'dns' ? m.share_reach_failed_dns() : m.share_reach_failed_funnel());
+    }
   }
   await ensureOk(res, server);
-  return res.json() as Promise<ShareCreated>;
+  return res.json() as Promise<T>;
 }
 
 // Só consulta: não liga o Funnel. Sem tailscale responde 409, e quem confere segue esperando.

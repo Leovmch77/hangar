@@ -25,6 +25,11 @@ on:
       - "backend/tests/test_runtime_terminal_fix*.py"
       - "backend/tests/test_runtime_terminal_failure_policy.py"
       - "backend/tests/test_runtime_final_fixes.py"
+      # Trava e leitura dos sidecars que o Rust também grava: o defeito que elas evitam é do Windows.
+      - "backend/app/atomico.py"
+      - "backend/app/adapters/claude_headless/sessions.py"
+      - "backend/app/adapters/codex/sessions.py"
+      - "backend/tests/test_sidecar_coordination.py"
       - "plugins/hangar/hooks/**"
       - ".github/workflows/server.yml"
   workflow_dispatch:
@@ -173,7 +178,7 @@ jobs:
         run: uv sync
       - name: Contenção e regressões da entrega terminal
         working-directory: backend
-        run: uv run pytest tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py -q
+        run: uv run pytest tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py tests/test_sidecar_coordination.py -q
       - name: Contrato do cano contra o hangar-cano
         if: matrix.platform == 'linux-x86_64' && env.COMPILA == 'true'
         working-directory: backend

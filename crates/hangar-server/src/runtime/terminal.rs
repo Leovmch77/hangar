@@ -141,6 +141,7 @@ impl TerminalServices for NoFacts {
 }
 
 struct Services {
+    lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,
     target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,terms:Option<Arc<crate::term::Terms>>,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,life_proved:AtomicBool,
 }
 impl Services {
@@ -172,7 +173,16 @@ impl TerminalServices for Services {
             }
             failure
         })?;
-        if let Some(native)=&mut facts.native {native.message_id=Some(crate::terminal_facts::message_id(&self.target.key,&self.root));}
+        if let Some(native)=&mut facts.native {
+            // Recado `[de: …]`: a caixa do Rust é o endereço de resposta, e o recibo de recado retido ou
+            // recusado volta a esta entrada. Fora dele (manutenção, clique de mod) não há recado.
+            let route=crate::terminal_input::message_prefix(&self.text).and(self.lifecycle.as_ref()).and_then(std::sync::Weak::upgrade)
+                .map(|registry|registry.native_route(&self.target.key,&self.root));
+            native.message_id=Some(match route {
+                Some((message_id,origin))=>{native.origin=origin;message_id},
+                None=>crate::terminal_facts::message_id(&self.target.key,&self.root),
+            });
+        }
         Ok(facts)
     })}
     fn writing<'a>(&'a self)->ServiceFuture<'a,()> {Box::pin(async move {
@@ -392,7 +402,7 @@ impl Executor {
         state.runtime_state["clear_barrier"]["generation"]==self.target.generation
             && state.runtime_state["clear_barrier"]["conversation"]==self.target.binding.conversation
     }
-    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {target:self.target.clone(),queue:self.queue.clone(),local:self.local.clone(),terms:self.options.terms.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone(),life_proved:AtomicBool::new(false)})}
+    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {lifecycle:self.options.lifecycle.clone(),target:self.target.clone(),queue:self.queue.clone(),local:self.local.clone(),terms:self.options.terms.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone(),life_proved:AtomicBool::new(false)})}
     async fn action(&self,action:Action)->Result<Value,RuntimeError> {self.services("maintenance","maintenance","").action("queue",action).await}
     async fn snapshot(&self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;

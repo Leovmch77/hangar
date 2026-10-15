@@ -181,30 +181,6 @@ def _sem_endereco_do_plugin_real():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _sem_compartilhamento_real(tmp_path_factory):
-    # O lifespan (`with TestClient(app)`) sobe a varredura de convites. Com os sidecars apontando
-    # pra pasta vazia acima, ela veria toda sessão viva da máquina como morta, revogaria os
-    # convites REAIS (~/.claude/shares.json) e desligaria o Funnel de verdade. Sem varredura e
-    # com o registro em tmp, nada no boot de teste toca o registro nem o tailscale reais.
-    from app import share_api, share_store
-    original_loop = share_api.sweep_loop
-    original_path = share_store._path_override
-
-    async def _sem_varredura():
-        return None
-
-    share_api.sweep_loop = _sem_varredura
-    share_store._path_override = tmp_path_factory.mktemp("share") / "shares.json"
-    share_store._reset()
-    try:
-        yield
-    finally:
-        share_api.sweep_loop = original_loop
-        share_store._path_override = original_path
-        share_store._reset()
-
-
-@pytest.fixture(scope="session", autouse=True)
 def _sem_orquestracoes_reais(tmp_path_factory):
     # A lista de sessões lê ~/.hangar/orq: uma orquestração `auto` viva na máquina viraria linha
     # extra em todo teste que conta sessões.

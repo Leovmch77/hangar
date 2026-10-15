@@ -200,3 +200,17 @@ faixa silenciosa no navegador: ICE/DTLS conectados, silenciar desabilitava a tra
 encerrava track e peer; dois turnos de organização com entrada silenciosa devolveram "A sessão
 respondeu: pinguim azul". Saiu porque a voz passou a ser uma só por servidor, seguindo a tela em
 vez de presa a uma sessão Codex.
+
+## Porta do convidado no Python
+
+(28/09/2026 até 12/10/2026 → [compartilhar sessão](plataforma.md#compartilhar-sessão-a-porta-do-convidado-é-a-única-na-internet).)
+O Python abria a 8766 num segundo `uvicorn.Server` (`main._guest_socket`) e servia o convidado
+pelo mesmo app FastAPI: o `ShareGate` (`share_gate.py`) reconhecia o convidado pela porta local,
+lia a chave em `shares.json` (`share_store.py`), aplicava as listas de rotas e o vigia de 5 s que
+fechava streams com 4410. `share_api.py` tinha as rotas do dono e a varredura, `share_guest_api.py`
+a página e o resgate, `share_tunnel.py` o Funnel, e `external_pairs.py`/`external_pair_api.py` o
+par externo. Com o Rust na frente, o pedido do convidado ia do Rust ao Python e, para o que o Rust
+atende, voltava ao Rust. Saiu quando o `hangar-server` passou a ser dono da porta e dos arquivos
+(`crates/hangar-server/src/share/`); os testes do Python foram portados para o Rust antes de
+apagar. Ficaram no Python `share_life.py` (vida da sessão para `guest_users`, transferência e
+`registry`) e, em `guest_user_gate.py`, as listas de rotas do convidado com login próprio.

@@ -659,6 +659,8 @@ pub struct Poll<'a> {
 impl Poll<'_> {
     fn ready(value: Value) -> Self { Self { guard: None, receiver: None, ready: Some(value), timeout: Duration::ZERO, pause: Duration::ZERO } }
     fn later(value: Value, pause: Duration) -> Self { Self { pause, ..Self::ready(value) } }
+    /// Espera no máximo `limit`.
+    pub fn cap(mut self, limit: Duration) -> Self { self.timeout = self.timeout.min(limit); self }
     pub async fn wait(mut self) -> Value {
         if let Some(value) = self.ready.take() {
             if !self.pause.is_zero() { tokio::time::sleep(self.pause).await; }
@@ -745,6 +747,17 @@ mod tests {
         assert_eq!(new.wait().await, json!({"answers":null}));
         assert_eq!(store.pending(&binding, Instant::now()).unwrap().id, "perm:p");
         drop(other);
+    }
+
+    /// Servidor que perdeu o espelho do plugin (reiniciado): o `/pull` volta logo com `faixa:false`, e o plugin
+    /// reenvia o `/ui` sem esperar o long-poll inteiro.
+    #[tokio::test(start_paused = true)]
+    async fn capped_pull_returns_empty_before_the_long_poll() {
+        let (store, binding) = setup();
+        let started = tokio::time::Instant::now();
+        let poll = store.begin_pull(&binding, pull("i"), Instant::now()).unwrap().cap(Duration::from_secs(1));
+        assert_eq!(poll.wait().await, json!({"text":null}));
+        assert!(started.elapsed() <= Duration::from_secs(1), "{:?}", started.elapsed());
     }
 
     /// Parity P22 (`test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll`): depois da

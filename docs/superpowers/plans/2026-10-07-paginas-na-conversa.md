@@ -1711,7 +1711,7 @@ Risk: medium
 **Interfaces:**
 - Produces: decisão registrada (passou / não passou) que destrava ou cancela a Task 10.
 
-- [ ] **Step 41: Verificação manual — screencast da WebView2 estacionada**
+- [x] **Step 41: Verificação manual — screencast da WebView2 estacionada**
 
 Na DELPHI-02 (clone separado, nunca o Hangar vivo de lá; regra da memória `feedback-testar-windows-na-vm`), com o nativo desta branch compilado lá:
 1. Abra o navegador do painel de uma sessão numa página animada (`data:text/html,<div id=c></div><script>setInterval(()=>c.textContent=Date.now(),50)</script>`).
@@ -1720,7 +1720,7 @@ Na DELPHI-02 (clone separado, nunca o Hangar vivo de lá; regra da memória `fee
 4. Mande `Input.dispatchMouseEvent` num botão da página e confira, por `Runtime.evaluate`, que o clique chegou (ouvinte em captura, regra de `frontend.md`).
 5. Minimize o app e repita 3.
 
-- [ ] **Step 42: Registrar a decisão**
+- [x] **Step 42: Registrar a decisão**
 
 Entrada nova em `docs/decisoes/frontend.md` com: data, versão da WebView2, quadros por segundo estacionada e minimizada, se o clique chegou, e a decisão (Task 10 segue ou Windows fica estático). Commit:
 
@@ -1743,11 +1743,11 @@ Só entra se a Task 9 passou. Sem isso, marque `Status: wontfix` e o Windows fic
 - Consumes: `PageView`, `Budget`, `frame_height` (Task 8)
 - Produces: `Engine::start_page` também no Windows, mesma assinatura do Linux
 
-- [ ] **Step 43: Implementar o modo página na WebView2**
+- [x] **Step 43: Implementar o modo página na WebView2**
 
 `Starter::start_page` cria uma WebView2 filha estacionada em x=-3000 com o tamanho do cartão, `NavigateToString(html)` (limite de 2 MB da API: acima disso, grave o HTML num arquivo temporário e use `SetVirtualHostNameToFolderMapping` com um host `hangar-page.invalid` só para essa pasta), `AddHostObjectToScript` não: a ponte usa `window.chrome.webview.postMessage` — acrescente esse caminho ao script de ponte do servidor (`theme.rs`, `HOST`: `else if(window.chrome&&window.chrome.webview)window.chrome.webview.postMessage(s)`) e trate `WebMessageReceived` como `Event::Host`. Quadros por `Page.startScreencast` via `CallDevToolsProtocolMethod`, decodificados para a mesma `wgpu::Texture` do `Surface`; entrada por `Input.dispatchMouseEvent`/`dispatchKeyEvent` como no Linux. Fundo transparente: `DefaultBackgroundColor` com alfa 0 na criação.
 
-- [ ] **Step 44: Verificação manual — DELPHI-02**
+- [x] **Step 44: Verificação manual — DELPHI-02**
 
 Repita a Step 39 na DELPHI-02 (clone separado), com print da janela.
 

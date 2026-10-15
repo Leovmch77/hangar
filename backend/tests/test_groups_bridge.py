@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, external_pair_api, groups_bridge, pair, registry, runtime_coordinator
+from app import api, groups_bridge, pair, registry, runtime_coordinator
 from app.config import settings
 from app.models import SessionInfo
 
@@ -287,7 +287,7 @@ def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, cli
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
     monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: registry.SessionRegistry._clear_pair(n))
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
-    monkeypatch.setattr(api.share_store, "revoke_session", lambda n: False)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
 
     async def boom(*a):
         raise AssertionError("o Rust já avisou")
@@ -407,45 +407,6 @@ def test_registry_rename_does_not_write_groups_in_rust_mode(monkeypatch):
     assert pair.PairLink("a").get()["peers"] == ["b"]
 
 
-def test_external_pair_link_and_unlink_in_rust_mode(monkeypatch):
-    calls = _rust(monkeypatch, reply=lambda op, a: {"gid": "g9"} if op == "group.external_link" else {})
-    undo = asyncio.run(external_pair_api._join_external("a", "casa::b", {"a": "claude", "outra": "codex"}))
-    external_pair_api._restore_external(undo)
-    assert calls == [("group.external_link", {"local": "a", "address": "casa::b", "harness": {"a": "claude"}}),
-                     ("group.external_unlink", {"local": "a", "address": "casa::b"})]
-
-
-def test_external_pair_refusal_in_rust_mode(monkeypatch):
-    _rust(monkeypatch, error="erro_pareamento_mistura_cross")
-    with pytest.raises(pair.PairMixError):
-        asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
-
-
-@pytest.mark.parametrize("code,undone", [("groups_bridge_unavailable", True), ("groups_bridge_invalid", True),
-                                         ("groups_runtime_starting", False)])
-def test_external_link_with_uncertain_outcome_is_undone(monkeypatch, code, undone):
-    """Prazo ou resposta perdida depois do pedido: o Rust pode ter gravado o par sem registro nem token."""
-    def reply(op, a):
-        if op == "group.external_link":
-            raise groups_bridge.GroupsBridgeError(code)
-        return {}
-    calls = _rust(monkeypatch, reply=reply)
-    with pytest.raises(groups_bridge.GroupsBridgeError) as e:
-        asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
-    assert e.value.code == code
-    unlink = ("group.external_unlink", {"local": "a", "address": "casa::b"})
-    assert (unlink in calls) is undone
-
-
-def test_external_teardown_in_rust_mode_unlinks(monkeypatch):
-    calls = _rust(monkeypatch, reply={})
-    monkeypatch.setattr(external_pair_api.external_pairs, "remove", lambda sid: None)
-    monkeypatch.setattr(external_pair_api.share_store, "revoke", lambda sid: None)
-    rec = SimpleNamespace(share_id="s1", local_session="a", address="casa::b")
-    asyncio.run(external_pair_api.teardown(rec, notify=False))
-    assert calls == [("group.external_unlink", {"local": "a", "address": "casa::b"})]
-
-
 def test_child_gets_group_env(monkeypatch, tmp_path):
     from app import list_bridge, peers, rust_server
     monkeypatch.setattr(list_bridge, "dirs_env", lambda: "{}")
@@ -459,4 +420,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 66
+    assert rust_server.RUST_SERVER_PROTOCOL == 69

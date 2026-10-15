@@ -1104,6 +1104,10 @@ test('aviso de sucesso se reconhece pela cor ou pelo texto; o de erro nao', () =
   const { avisoDeSucesso } = require('./jev_objetivo.cjs');
   assert.equal(avisoDeSucesso('Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.', 'border-green-200'), true);
   assert.equal(avisoDeSucesso('Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.'), true);
+  // Recusa por duplicidade usa as mesmas palavras de sucesso: não pode sumir como aviso bom.
+  for (const recusa of ['Este CPF já foi cadastrado', 'Já existe agendamento registrado neste horário', 'Operação sem sucesso', 'Registro duplicado']) {
+    assert.equal(avisoDeSucesso(recusa), false, recusa);
+  }
   assert.equal(avisoDeSucesso('Rascunho não gravado Responda os 6 critérios.', 'border-red-200'), false);
   assert.equal(avisoDeSucesso('Erro ao gravar rascunho Erro interno', 'border-red-200'), false);
 });

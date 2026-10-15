@@ -156,16 +156,31 @@ function migrate(): void {
 }
 migrate();
 
+// Entradas de par externo montadas a partir de `/api/external-pairs`: vivem só na memória (o token
+// é do par, refeito a cada leitura) e nunca passam por writeServers.
+let ephemeral: Server[] = [];
+
+export function setEphemeralServers(list: Server[]): void {
+  if (JSON.stringify(list) === JSON.stringify(ephemeral)) return;
+  ephemeral = list;
+  notifyChanged();
+}
+
+// Gravadas + temporárias: quem resolve um id para chamar o servidor (chat, ações da linha).
+export function findServer(id: string): Server | undefined {
+  return readServers().find((s) => s.id === id) ?? ephemeral.find((s) => s.id === id);
+}
+
 function activeServer(): Server | null {
   const id = localStorage.getItem(ACTIVE_KEY);
   const list = readServers();
-  return list.find((s) => s.id === id) ?? list[0] ?? null;
+  return list.find((s) => s.id === id) ?? ephemeral.find((s) => s.id === id) ?? list[0] ?? null;
 }
 
 // Só as LIGADAS: máquina desligada na tela de Servidores some de todo o app (sessões, custos,
 // uso, seletores). Quem precisa dela também usa listAllServers.
 export function listServers(): Server[] {
-  return readServers().filter((s) => !s.disabled);
+  return [...readServers().filter((s) => !s.disabled), ...ephemeral];
 }
 
 // Todas, desligadas inclusive: a tela de Servidores (para religar), o sync (o cofre não pode
@@ -540,7 +555,7 @@ export function removalStillMatches(
 export function selectServer(id: string): boolean {
   // Devolve false quando o id não existe localmente (push antigo, link de outra máquina) — quem
   // navega usa isso pra NÃO montar um chat contra o servidor ativo errado (cross-wire calado).
-  const s = readServers().find((x) => x.id === id);
+  const s = findServer(id);
   if (!s) return false;
   localStorage.setItem(ACTIVE_KEY, id);
   cookieDaOrigem();

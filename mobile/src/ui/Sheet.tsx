@@ -19,6 +19,8 @@ type Props = {
   onDismiss?: () => void;
   onDidPresent?: () => void;
   scrollable?: boolean;
+  /** `false`: nem arrastar nem o voltar fecham; quem fecha é o botão da própria folha. */
+  dismissible?: boolean;
 };
 
 // true-sheet exige New Arch (ligada: app.json newArchEnabled). Teto de 3 detents: Android trunca em 3.
@@ -29,7 +31,7 @@ type Props = {
 const alphaFolha = (theme: Parameters<typeof alphaDoVidro>[0]) =>
   Platform.OS === 'android' ? 1 : alphaDoVidro(theme, 'modal');
 
-export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, onDidPresent, scrollable }, ref) {
+export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, onDidPresent, scrollable, dismissible }, ref) {
   const { theme, rt } = useUnistyles();
   const reduzir = useReduceTransparency();
   const innerRef = useRef<TrueSheet>(null);
@@ -70,6 +72,7 @@ export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['aut
       grabberOptions={{ topMargin: 8, color: theme.tokens.text.muted }}
       header={<View style={{ height: 16 }} />}
       scrollable={scrollable}
+      dismissible={dismissible}
       onDidPresent={onDidPresent}
       onDidDismiss={() => {
         apresentada.current = false;

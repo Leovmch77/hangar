@@ -37,6 +37,7 @@ const nativeNavigation = {
   },
 };
 const routerPush = vi.hoisted(() => vi.fn());
+const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
@@ -49,7 +50,7 @@ vi.mock('expo-router', () => ({
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
-  fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude' }],
+  fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }],
   sendInputForServer: realFirstInput.send,
   getHistory: realFirstInput.history,
   transcribeUploadedForServer: realFirstInput.transcribe,
@@ -58,7 +59,7 @@ vi.mock('@hangar/core', async (original) => ({
   relimparDitado: realFirstInput.relimpar,
 }));
 vi.mock('../stores/servers', () => {
-  const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true };
+  const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true, ensureOwnActive: () => {} };
   return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
@@ -115,6 +116,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' native_action_uncertain native_ask_fallback native_close native_dictation_active native_dictation_cancel native_dictation_level native_loading native_new_chat_folder native_tasks_all_done native_tasks_completed native_tasks_expand native_tasks_in_progress native_tasks_left native_tasks_left_1 native_tasks_minimize native_tasks_pending native_tasks_untitled native_thinking native_tools_failed native_tools_failed_1 native_tree_thoughts')
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
+    .concat(' native_par_so_leitura')
     .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_toks_now stats_toks_recent stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
@@ -859,6 +861,20 @@ describe('rascunho guardado no Composer', () => {
     expect(container.textContent).toContain('draft_invalid');
     type(container, 'recomeço');
     expect(stored('s1', 'sess')?.text).toBe('recomeço');
+    act(() => root.unmount());
+  });
+});
+
+describe('par externo só leitura', () => {
+  afterEach(() => { chatRow.extra = {}; });
+
+  it('sessão de outra pessoa em ver e mandar recado não tem compositor', async () => {
+    route.params = { server: 's1', name: 'sess' }; route.segments = ['s'];
+    chatRow.extra = { guest_kind: 'pair' };
+    const { container, root } = await render(createElement(ChatScreen));
+    await act(async () => {});
+    expect(container.textContent).toContain('native_par_so_leitura');
+    expect(container.querySelector('textarea')).toBeNull();
     act(() => root.unmount());
   });
 });

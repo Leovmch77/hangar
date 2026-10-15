@@ -434,7 +434,10 @@ impl Hangar {
     /// A lista de outra máquina como a barra a mostra: grupos de projeto com a chave dela, para recolher um não recolher o
     /// de mesmo caminho na outra.
     pub(super) fn remote_layout<'a>(&self, key: &str, sessions: &'a [SessionInfo], cx: &App) -> Layout<'a> {
-        let mut l = layout(sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &self.sidebar.hidden_on(key));
+        // A sessão de fora já aparece dentro do grupo; na seção do convite da mesma máquina ela sairia duas vezes.
+        let mut hidden = self.sidebar.hidden_on(key);
+        hidden.extend(self.outside_names_on(key).into_iter().flatten().cloned());
+        let mut l = layout(sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &hidden);
         for group in &mut l.groups { group.key = format!("{key}::{}", group.key); }
         l
     }
@@ -480,6 +483,8 @@ impl Hangar {
         let shown = |key: &str, remote: Option<&str>, l: &Layout| -> Vec<Target> {
             let rows = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
                 super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => Some(Target::new(key, &s.name)),
+                super::grouping::ListRow::External { gid, pair } if !self.sidebar.is_collapsed(&super::grouping::pair_key(&gid, remote)) =>
+                    self.outside_row(&gid, &pair, remote).map(|(s, at)| Target::new(&at.unwrap_or_else(|| self.active_key()), &s.name)),
                 _ => None,
             }).collect::<Vec<_>>();
             rows(&l.waiting).into_iter()
@@ -488,7 +493,7 @@ impl Hangar {
         };
         if !self.multi_server() { return shown(&active, None, &self.sidebar_layout(cx)); }
         let mut order = Vec::new();
-        for entry in self.servers.iter().filter(|s| !s.disabled) {
+        for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
             let key = servers::norm(&entry.address);
             if self.sidebar.collapsed.contains(&format!("server:{key}")) { continue; }
             if key == active { order.extend(shown(&key, None, &self.sidebar_layout(cx))); }
@@ -522,8 +527,8 @@ impl Hangar {
     pub(super) fn close_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.session_keys_blocked(window, cx) { return; }
         let Some(target) = self.selected_target() else { return };
-        // Orquestrador e sessão do par não têm "Fechar" no menu.
-        if self.target_session(&target).is_none_or(|s| s.orq() || s.read_only()) { return; }
+        // Orquestrador e sessão de fora não têm "Fechar" no menu.
+        if self.outside_of(&target).is_some() || self.target_session(&target).is_none_or(|s| s.orq() || s.read_only()) { return; }
         self.close_target(target, window, cx);
     }
 
@@ -565,7 +570,7 @@ impl Hangar {
         for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
-        self.external_pairs_changed(cx);
+        self.external_pairs_changed(window, cx);
         if self.sidebar.hover.as_ref().is_some_and(|t| !alive(self, t)) { self.hide_preview(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
         if let Some(new) = self.sidebar.focus_tab.clone().filter(|t| alive(self, t)) {
@@ -1005,7 +1010,10 @@ impl Hangar {
     fn confirm_delete(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_origin(&target, window, cx);
         let this = cx.entity().downgrade();
-        chrome::confirm_alert(window, cx, tr("sidebar_close_title"), target.name.clone(), tr("sidebar_close"), ButtonVariant::Danger,
+        // Fechar a ponta de um par externo desfaz o par para o grupo inteiro: a confirmação diz.
+        let body = std::iter::once(target.name.clone())
+            .chain(self.anchored_owners(&target).iter().map(|dono| tr_shared("pair_undo_anchor_body", &[("dono", dono)]))).collect::<Vec<_>>().join("\n\n");
+        chrome::confirm_alert(window, cx, tr("sidebar_close_title"), body, tr("sidebar_close"), ButtonVariant::Danger,
             move |window, cx| { let _ = this.update(cx, |this, cx| {
                     // A linha some na hora e volta se o servidor recusar; sem conexão nada sai, ela não some e o motivo aparece.
                     if this.machine_api(&target.server).is_none() {
@@ -1294,6 +1302,39 @@ fn mute_item(hangar: &WeakEntity<Hangar>, target: &Target, mute: Option<Mute>) -
     }
 }
 
+/// Como a linha sai da lista pelo menu: a sessão de fora nunca se fecha daqui (é da outra pessoa), só se sai do par.
+#[derive(Debug, PartialEq)]
+enum MenuExit { Close, LeavePair(api::dto::OutsideMark), Nothing }
+
+fn menu_exit(session: &SessionInfo) -> MenuExit {
+    match &session.outside {
+        Some(mark) => MenuExit::LeavePair(mark.clone()),
+        None if session.read_only() => MenuExit::Nothing,
+        None => MenuExit::Close,
+    }
+}
+
+/// "Desfazer par com <dono>" da sessão própria, um por par.
+fn undo_items(hangar: &WeakEntity<Hangar>, target: &Target, pairs: &[api::dto::PairExternalEntry]) -> Vec<PopupMenuItem> {
+    pairs.iter().map(|p| {
+        let (hangar, target, p) = (hangar.clone(), target.clone(), p.clone());
+        let label = tr_shared("pair_undo_own", &[("dono", &p.owner)]);
+        PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(label.clone())).on_click(move |_, window, cx| {
+            let mark = api::dto::OutsideMark { own: target.server.clone(), alias: p.alias.clone(), owner: p.owner.clone() };
+            let _ = hangar.update(cx, |this, cx| this.confirm_leave_pair(mark, p.session.clone(), false, window, cx));
+        })
+    }).collect()
+}
+
+/// "Liberar para <dono>": o par tem acesso completo e esta sessão ainda espera o clique.
+fn release_items(hangar: &WeakEntity<Hangar>, target: &Target, pairs: &[api::dto::PairExternalEntry]) -> Vec<PopupMenuItem> {
+    pairs.iter().filter(|p| p.pending).map(|p| {
+        let (hangar, target, alias) = (hangar.clone(), target.clone(), p.alias.clone());
+        PopupMenuItem::new(tr_shared("pair_release", &[("dono", &p.owner)]))
+            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.release_pair(target.clone(), alias.clone(), window, cx)); })
+    }).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, session: &SessionInfo, access: Access, mute: Option<Mute>,
     others: Vec<String>, group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
@@ -1303,11 +1344,22 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     };
     let invite = access.invite;
     let cwd = session.cwd.clone().filter(|c| !c.is_empty());
-    // A sessão da outra pessoa num par: o servidor dela recusa tudo que não é ler.
-    if session.read_only() {
+    // A sessão da outra pessoa (de fora no grupo, ou só leitura): copiar a pasta e, de fora, sair do par; o resto é dela.
+    let leave = match menu_exit(session) {
+        MenuExit::Close => None,
+        MenuExit::Nothing => Some(None),
+        MenuExit::LeavePair(mark) => {
+            let label = tr_shared("pair_leave_outside", &[("dono", &mark.owner)]);
+            let (hangar, name) = (hangar.clone(), session.name.clone());
+            Some(Some(PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(label.clone()))
+                .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.confirm_leave_pair(mark.clone(), name.clone(), true, window, cx)); })))
+        }
+    };
+    if let Some(leave) = leave {
         return menu_style(menu).min_w(px(240.)).label(session.name.clone())
             .when_some(cwd, |menu, cwd| menu.item(PopupMenuItem::new(tr("sidebar_copy_cwd"))
-                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone())))));
+                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone())))))
+            .when_some(leave, |menu, leave| menu.separator().item(leave));
     }
     // No convite o item de fechar vira "Parar de acompanhar": sai só deste aparelho, nunca fecha a sessão do dono. Com o convite
     // como servidor ativo ele não sai daqui (a troca de ativo é das configurações).
@@ -1317,6 +1369,8 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
         PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(label.clone())).disabled(invite && access.active)
             .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.close_target(target.clone(), window, cx)); })
     };
+    let pairs = session.outside_pairs().into_owned();
+    let (undo_weak, undo_target) = (hangar.clone(), target.clone());
     let git = has_git(session);
     let chain_label = match &session.then_target {
         Some(target) => tr("sidebar_chained_to").replace("{n}", target),
@@ -1356,6 +1410,12 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
             // Mesmo diálogo do arrastar, para quem não arrasta (e o teclado).
             .submenu(tr("group_with"), window, cx, move |menu, _, _| super::grouping::fill_group(menu, &group_weak, &group_origin, &group))
             .when(leave, |menu| menu.item(item(tr("group_leave"), |this, target, window, cx| this.request_leave(target, window, cx))))
+            .map(|menu| release_items(hangar, target, &pairs).into_iter().fold(menu, |menu, item| menu.item(item)))
+            // Com vários pares, o desfazer vira submenu, um por dono.
+            .map(|menu| if pairs.len() > 1 {
+                menu.submenu(tr_shared("pair_undo_own", &[("dono", "…")]), window, cx, move |menu, _, _|
+                    undo_items(&undo_weak, &undo_target, &pairs).into_iter().fold(menu_style(menu), |m, i| m.item(i)))
+            } else { undo_items(hangar, target, &pairs).into_iter().fold(menu, |menu, item| menu.item(item)) })
             .separator()
             .when_some(mode, |menu, mode| menu.item(mode))
             .submenu(tr("sidebar_baton"), window, cx, move |menu, window, cx| {
@@ -1697,6 +1757,19 @@ impl Hangar {
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
     use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
+
+    #[test]
+    fn outside_session_menu_leaves_the_pair_and_never_closes() {
+        use super::{MenuExit, menu_exit};
+        use crate::api::dto::OutsideMark;
+        let mark = OutsideMark { own: "k".into(), alias: "ana".into(), owner: "Ana".into() };
+        // Com acesso completo a linha nem é só leitura: quem decide é a marca de fora.
+        let full = SessionInfo { name: "Y".into(), guest_kind: Some("share".into()), outside: Some(mark.clone()), ..Default::default() };
+        assert_eq!(menu_exit(&full), MenuExit::LeavePair(mark.clone()));
+        assert_eq!(menu_exit(&SessionInfo { guest_kind: Some("pair".into()), ..full }), MenuExit::LeavePair(mark));
+        assert_eq!(menu_exit(&SessionInfo { guest_kind: Some("pair".into()), ..Default::default() }), MenuExit::Nothing);
+        assert_eq!(menu_exit(&SessionInfo::default()), MenuExit::Close);
+    }
 
     #[test]
     fn empty_second_line_keeps_the_last_one_of_the_same_conversation() {

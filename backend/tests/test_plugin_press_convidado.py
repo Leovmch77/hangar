@@ -1,27 +1,27 @@
 """O convidado aciona os mods como o dono (issue #74).
 
-O Rust repassa ao Python todo pedido de app que não é do dono, e o convite entra pela porta 8766 sem
-passar por ele: o Python autentica com os dois porteiros e, na sessão que o Rust atende, devolve a
-operação pela ponte privada (`/__hangar_server/mods/{name}/{op}`).
+O Rust repassa ao Python todo pedido de app que não é do dono; o convite entra pela porta 8766 do
+Rust, que o decide e o repassa assinado (`x-hangar-guest`). Na sessão que o Rust atende o Python
+devolve a operação pela ponte privada (`/__hangar_server/mods/{name}/{op}`).
 """
-import dataclasses
+import base64
+import hashlib
+import hmac
 import http.server
 import json
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, guest_users, list_bridge, plugin_click, runtime_coordinator, share_api, share_gate, share_store
+from app import api, guest_users, internal_api, list_bridge, plugin_click, runtime_coordinator
 from app.config import settings
 from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
-from app.share_tunnel import GUEST_PORT
 
 OWNER = "segredo-do-dono"
 INVITE = "token-do-convite"
-SHARE = share_store.Share(
-    id="s1", session="t", life="L1", created_at=0.0, code_expires_at=0.0, code_hash="c",
-    token_hash="h", device="Pixel", redeemed_at=1.0, revoked_at=None)
+SECRET = "segredo-interno-do-teste"
 BODY = {"site": "above-prompt", "key": "mr-a", "plugin": "pm-mock"}
 
 
@@ -43,11 +43,8 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "raiz").mkdir()
     guest, guest_token = guest_users.create("ana", str(tmp_path / "raiz"), False, True)
     guest_users.claim("t", guest.id)
-    # Convite da sessão `t`, vivo.
-    monkeypatch.setattr(share_store, "lookup_token", lambda token: share_store.Guest([SHARE]) if token == INVITE else None)
-    monkeypatch.setattr(share_gate, "session_life", lambda name: "L1" if name == "t" else None)
-    monkeypatch.setattr(share_api, "confirmed_absent", lambda name: False)
-    share_gate._life_cache.clear()
+    # Convite da sessão `t`, vivo: o Rust o decidiu e assina o repasse.
+    internal_api.set_secret(SECRET)
     pressed = []
 
     async def press(name, site, key, plugin):
@@ -67,12 +64,23 @@ def env(tmp_path, monkeypatch):
     yield coordinator, guest_token, pressed
     api.app.dependency_overrides.pop(api._transfer_guard, None)
     guest_users._reset()
+    internal_api.set_secret(None)
+
+
+def _signed(method: str, path: str) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"s": {"t": "share"}, "exp": int(time.time()) + 30},
+                                                  separators=(",", ":")).encode()).rstrip(b"=").decode()
+    mac = hmac.new(SECRET.encode(), f"{method}\n{path}\n{payload}".encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{mac}"
 
 
 def _press(token, *, invite_port=False, route="press", body=BODY):
-    base = f"http://testserver:{GUEST_PORT}" if invite_port else "http://testserver"
-    return TestClient(api.app, base_url=base).post(f"/api/sessions/t/plugin/{route}", json=body,
-                                                   headers={"Authorization": f"Bearer {token}"})
+    path = f"/api/sessions/t/plugin/{route}"
+    if invite_port:
+        # O convite chega pelo Rust: já decidido, assinado, de loopback e sem o token dele.
+        return TestClient(api.app, client=("127.0.0.1", 5)).post(
+            path, json=body, headers={"x-hangar-guest": _signed("POST", path)})
+    return TestClient(api.app).post(path, json=body, headers={"Authorization": f"Bearer {token}"})
 
 
 def test_terminal_in_rust_needs_rust_phase_and_a_claude_terminal(env, tmp_path):
@@ -89,16 +97,6 @@ def test_guests_still_press_without_a_runtime_registry(env, monkeypatch):
     monkeypatch.setattr(runtime_coordinator, "_current", None)
     assert _press(guest_token).status_code == 200
     assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")]
-
-
-def test_revoked_invite_never_reaches_the_refusal(env, tmp_path, monkeypatch):
-    # O porteiro do convite responde antes: o 410 diz "encerrado", não a recusa do mod.
-    coordinator, _, pressed = env
-    _register(coordinator, tmp_path, headless=False).phase = Phase.Rust
-    revoked = dataclasses.replace(SHARE, revoked_at=2.0)
-    monkeypatch.setattr(share_store, "lookup_token", lambda token: share_store.Guest([revoked]) if token == INVITE else None)
-    assert _press(INVITE, invite_port=True).status_code == 410
-    assert pressed == []
 
 
 def test_an_app_without_the_mod_is_still_served(env):

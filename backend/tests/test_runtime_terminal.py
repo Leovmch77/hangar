@@ -866,9 +866,12 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
     asyncio.run(flow())
 
 
-@pytest.mark.parametrize('kind,status', [('share',200),('pair',403),('guest_user',200)])
-def test_public_guest_routes_follow_owner_and_readonly_pair_zero_effect(monkeypatch,tmp_path,kind,status):
-    from app import api, share_store,share_gate,guest_users
+# O nível do convite (`pair` só lê) é do porteiro do Rust; aqui chega o convidado já decidido.
+@pytest.mark.parametrize('kind,status', [('share',200),('guest_user',200)])
+def test_public_guest_routes_follow_owner(monkeypatch,tmp_path,kind,status):
+    import base64,hashlib,hmac
+    from app import api, guest_header, guest_users, internal_api
+    from types import SimpleNamespace
     from app.config import settings
     from fastapi.testclient import TestClient
     gateway=TerminalGateway()
@@ -878,26 +881,30 @@ def test_public_guest_routes_follow_owner_and_readonly_pair_zero_effect(monkeypa
     monkeypatch.setattr(api,'_headless',lambda name:False)
     monkeypatch.setattr(api,'_session_exists',lambda name:True)
     monkeypatch.setattr(api,'_recusa_orq',lambda name:None)
-    share=share_store.Share(id='test',session='session',life='life',created_at=0,code_expires_at=9e9,
-        code_hash='',token_hash='token',redeemed_at=1,kind=kind)
+    headers={'Authorization':'Bearer guest'}
     if kind=='guest_user':
         guest=guest_users.Guest('test','guest','hash',str(tmp_path))
         monkeypatch.setattr(guest_users,'lookup_token',lambda token:guest if token=='guest' else None)
         monkeypatch.setattr(guest_users,'visible_to',lambda guest,name:name=='session')
         client=TestClient(api.app,base_url='http://127.0.0.1:8765')
     else:
-        monkeypatch.setattr(share_store,'lookup_token',lambda token:share_store.Guest([share]))
-        monkeypatch.setattr(share_gate,'session_life',lambda name:'life')
-        share_gate._life_cache.clear()
-        client=TestClient(api.app,base_url='http://127.0.0.1:8766',client=('203.0.113.9',1))
+        internal_api.set_secret('secret')
+        monkeypatch.setattr(guest_header,'time',SimpleNamespace(time=lambda:1000))
+        payload=base64.urlsafe_b64encode(json.dumps({'s':{'session':kind},'exp':1030}).encode()).rstrip(b'=').decode()
+        mac=hmac.new(b'secret',f'POST\n/api/sessions/session/input\n{payload}'.encode(),hashlib.sha256).hexdigest()
+        headers={'x-hangar-guest':f'{payload}.{mac}'}
+        client=TestClient(api.app,base_url='http://127.0.0.1:8765',client=('127.0.0.1',1))
     async def flow():
         await _to_rust(owner,'session')
         result=await asyncio.to_thread(client.post,'/api/sessions/session/input',
-            json={'text':'text'},headers={'Authorization':'Bearer guest'})
+            json={'text':'text'},headers=headers)
         assert result.status_code==status
         assert gateway.calls==(['open','submit'] if status==200 else ['open'])
         await owner.detach('session')
-    asyncio.run(flow())
+    try:
+        asyncio.run(flow())
+    finally:
+        internal_api.set_secret(None)
 
 
 def test_terminal_native_socket_belongs_to_current_agent_not_reused_sid(monkeypatch,tmp_path):

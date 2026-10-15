@@ -54,17 +54,17 @@ function raizDoGit(cwd) {
   } catch { return null; /* fora de repositório git */ }
 }
 
-/** `e2e/roteiros` na raiz do git de `cwd`, para o roteiro ir junto com o projeto; fora de repo, o cache. */
+/** `automacao/gravacoes` na raiz do git de `cwd`, para a gravação ir junto com o projeto; fora de repo, o cache. */
 function pastaDe(cwd) {
   const raiz = raizDoGit(cwd);
-  return raiz ? path.join(raiz, 'e2e', 'roteiros') : PASTA;
+  return raiz ? path.join(raiz, 'automacao', 'gravacoes') : PASTA;
 }
 
-/** A pasta antiga (`.hangar/roteiros`), só para ler: o projeto não pode ter pasta com o nome do Hangar. */
+/** Pastas antigas que existirem, só para ler, da mais recente para a mais antiga. */
 function reservaDe(cwd) {
   const raiz = raizDoGit(cwd);
-  const antiga = raiz && path.join(raiz, '.hangar', 'roteiros');
-  return antiga && fs.existsSync(antiga) ? antiga : null;
+  if (!raiz) return [];
+  return [path.join(raiz, 'e2e', 'roteiros'), path.join(raiz, '.hangar', 'roteiros')].filter((p) => fs.existsSync(p));
 }
 
 /** null só quando ainda não há roteiro; qualquer outra coisa ilegível é erro que o resultado mostra. */
@@ -399,8 +399,8 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
   }
   const arq = arquivo(pasta, tela, objetivo, cofre);
   // Roteiro gravado antes da troca de pasta: lido de lá, regravado na nova quando a corrida passa.
-  const antigo = reserva ? arquivo(reserva, tela, objetivo, cofre) : null;
-  const ler = () => carregar(arq) ?? (antigo ? carregar(antigo) : null);
+  const antigos = [reserva ?? []].flat().map((p) => arquivo(p, tela, objetivo, cofre));
+  const ler = () => [arq, ...antigos].reduce((achado, a) => achado ?? carregar(a), null);
   const avisos = [];
   let gravado = null;
   try {
@@ -418,12 +418,22 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
           // Relido agora: outra corrida pode ter gravado enquanto esta rodava.
           let atuais = [];
           try {
-            atuais = ler()?.variantes ?? [];
+            atuais = carregar(arq)?.variantes ?? null;
           } catch (err) {
             // Versão desconhecida nunca é sobrescrita; JSON quebrado sai do caminho, guardado.
             if (err?.versao !== undefined) throw new Error(`arquivo em versão ${err.versao}`);
             avisos.push(`arquivo ilegível guardado em ${guardarIlegivel(arq)}`);
           }
+          // Sem arquivo na pasta nova, as variantes vêm da reserva; reserva ilegível não impede gravar.
+          for (const a of antigos) {
+            if (atuais) break;
+            try {
+              atuais = carregar(a)?.variantes ?? null;
+            } catch (err) {
+              avisos.push(`roteiro antigo ilegível em ${a}, ignorado (${String(err?.message ?? err).slice(0, 120)})`);
+            }
+          }
+          atuais ??= [];
           // --refazer descarta as variantes antigas.
           salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(refazer ? [] : atuais, variante) });
           avisos.push(`gravado em ${arq}`);

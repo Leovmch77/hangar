@@ -26,7 +26,7 @@ const JEV_TEXT:[(&str,&str);4] = [
     ("jev_texto_cmd","JEV_TEXTO_CMD"),
 ];
 
-/// O que o `launch_env` do Python devolvia, menos `cano_extra` (sempre vazio no Codex).
+/// O comando e o ambiente da subida do Codex sem terminal.
 #[derive(Debug)]
 pub struct Launch { pub program:Vec<String>, pub env:BTreeMap<String,String> }
 

@@ -89,8 +89,8 @@ impl Hangar {
             match row {
                 grouping::ListRow::Header { gid, label, members } => rows.push(self.render_pair_header(&gid, &label, &members, remote, window, cx)),
                 grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => rows.push(self.render_machine_session(s, key, invite, window, cx)),
-                grouping::ListRow::External { gid, owner, session, alias } if !self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) =>
-                    rows.push(self.render_external_pair_row(&gid, &owner, &session, &alias, remote, window, cx)),
+                grouping::ListRow::External { gid, pair } if !self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) =>
+                    rows.push(self.render_external_pair_row(&gid, &pair.owner, &pair.session, &pair.alias, remote, window, cx)),
                 _ => {}
             }
         }

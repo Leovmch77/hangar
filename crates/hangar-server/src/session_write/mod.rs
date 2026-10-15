@@ -3,7 +3,7 @@
 //! Rust; as rotas só do Codex moram em `codex`. Sessão do Rust com corpo que a rota não aceita recebe
 //! `erro_corpo_invalido` (`invalid_body`), nunca o repasse.
 //!
-//! Ordem fixa de `admit`: dono → porta (`enter`) → entrada (`writable`) → decisão → corpo. A entrada
+//! Ordem fixa de `admit`: quem pede (dono, ou convidado na sessão do convite) → porta (`enter`) → entrada (`writable`) → decisão → corpo. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
@@ -29,7 +29,7 @@ use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 
 use crate::proxy::Forward;
-use crate::routes::{AppState, cors, gate, pass};
+use crate::routes::{AppState, cors, pass, who};
 use crate::runtime::gateway::{RuntimeRegistry, WriteTarget};
 use crate::runtime::ingress::{GateClosed, IngressPass};
 pub use table::{Owner, Provider, WriteRoute, decide};
@@ -86,9 +86,10 @@ pub(crate) async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd
 /// Decide quem atende. `Ok`: o Rust atende, com o passe na mão e o corpo já lido. `Err`: a resposta
 /// pronta (repasse ao Python com o corpo intacto, recusa da porta fechada, ou a recusa do Rust).
 pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Result<(Ctx, Bytes), Response> {
-    let (fwd, owner) = gate(st, peer, &req);
+    let (fwd, who) = who(st, peer, &req);
     let runtime = st.state.runtime.get().cloned();
-    let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path())) else {
+    let name = session_name(req.uri().path()).filter(|n| who.as_ref().is_some_and(|c| c.can(n, req.method())));
+    let (Some(runtime), Some(name)) = (runtime, name) else {
         return Err(pass(st, req, &fwd).await);
     };
     let (parts, body) = req.into_parts();

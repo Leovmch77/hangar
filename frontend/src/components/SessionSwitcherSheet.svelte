@@ -272,7 +272,8 @@ import * as m from '../paraglide/messages';
     return partes.filter(Boolean).join(' · ');
   });
 
-  const multiServer = $derived(listServers().length > 1);
+  // A entrada temporária do par externo não é outra máquina: a lista também a esconde.
+  const multiServer = $derived(listServers().filter((s) => !s.ephemeral).length > 1);
 
   // Nome curto da pasta pra exibir no meta do hit (ultimo segmento do cwd real; fallback = projeto).
   function folderShort(h: Hit): string {

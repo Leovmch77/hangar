@@ -132,6 +132,14 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             _ => {}
         }
     }
+    // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
+    if let Some(share) = st.share.clone() {
+        match share.store.revoke_session(&name, None) {
+            Ok(0) => {}
+            Ok(_) => crate::share::owner_routes::sync_tunnel(&share).await,
+            Err(error) => tracing::error!(session = %name, code = "share_store_failed", "convites da sessão encerrada não revogados: {error}"),
+        }
+    }
     st.list.forget(&name);
     st.list.invalidate();
     match axum::http::HeaderValue::from_str(&st.cfg.internal_secret) {

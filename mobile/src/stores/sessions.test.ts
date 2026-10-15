@@ -1,7 +1,9 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureApi, configureDiag, _resetRotasForTests } from '@hangar/core';
 import { useServers } from './servers';
-import { useSessions, _resetSessionsForTests } from './sessions';
+import { useSessions, _resetSessionsForTests, markLeavingPair, setPairNotice } from './sessions';
+
+const avisos: string[] = [];
 
 // mock SecureStore para useServers não quebrar se load for chamado
 vi.mock('expo-secure-store', () => {
@@ -332,4 +334,81 @@ test('REST sem rede permite SSE recuperar e erro repetido agenda somente um retr
   expect(useSessions.getState().rows.map((s) => s.name)).toEqual(['back']);
   expect(useSessions.getState().byServer[0].error).toBeNull();
   rel();
+});
+
+describe('pares de fora', () => {
+  const CASA = 'https://casa.ts.net:8443';
+  const pair = (token = 'tp', session = 'web') => ({ local_session: 'api', alias: 'casa', owner: 'Ana', session, address: CASA, token });
+  const minha = (externals: unknown[]) => [{ name: 'api', state: 'idle', jsonl: '/j/api.jsonl', pair_gid: 'g1',
+    pair_externals: externals }];
+  let pares: unknown[];
+  let deFora: unknown;
+  let encerrado = false;
+
+  beforeEach(() => {
+    avisos.length = 0;
+    setPairNotice((t) => avisos.push(t));
+    encerrado = false;
+    pares = [pair()];
+    deFora = [{ name: 'web', state: 'working', jsonl: '/c/web.jsonl', guest_kind: 'pair' }];
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/api/external-pairs')) return response(pares);
+      if (url.includes('/api/guest/attach')) return response({ ok: true });
+      if (url.startsWith(CASA)) return encerrado ? ({ ok: false, status: 410, json: async () => ({}) } as Response) : response(deFora);
+      return response(minha([{ alias: 'casa', owner: 'Ana', session: 'web', address: CASA, level: 'view', pending: false }]));
+    });
+  });
+
+  test('a sessão de fora entra no grupo do servidor próprio, sem seção da entrada temporária', async () => {
+    const rel = useSessions.getState().retain();
+    for (let i = 0; i < 4; i++) await settle();
+    const { rows, byServer } = useSessions.getState();
+    expect(byServer.map((b) => b.server.id)).toEqual(['srv1']);
+    const web = rows.find((r) => r.name === 'web');
+    expect(web?.outside).toMatchObject({ owner: 'Ana', localServerId: 'srv1', localSession: 'api' });
+    expect(web?.pair_gid).toBe('g1');
+    expect(useServers.getState().servers.find((s) => s.ephemeral)?.token).toBe('tp');
+    rel();
+  });
+
+  test('segundo par na mesma máquina liga o token dele à entrada que já existe', async () => {
+    pares = [pair('t1'), pair('t2', 'docs')];
+    const rel = useSessions.getState().retain();
+    for (let i = 0; i < 4; i++) await settle();
+    const attach = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/guest/attach'));
+    expect(attach?.[0]).toContain(CASA);
+    expect(JSON.parse(String((attach?.[1] as RequestInit).body))).toEqual({ token: 't2' });
+    rel();
+  });
+
+  test('par que some entre duas leituras avisa que o dono saiu', async () => {
+    const rel = useSessions.getState().retain();
+    for (let i = 0; i < 4; i++) await settle();
+    pares = [];
+    created[0].trigger('sessions', JSON.stringify(minha([])));
+    for (let i = 0; i < 4; i++) await settle();
+    expect(avisos.some((t) => t.includes('Ana'))).toBe(true);
+    expect(useServers.getState().servers.some((s) => s.ephemeral)).toBe(false);
+    rel();
+  });
+
+  test('quem saiu pelo próprio menu não recebe o aviso', async () => {
+    const rel = useSessions.getState().retain();
+    for (let i = 0; i < 4; i++) await settle();
+    markLeavingPair('casa', 'web');
+    pares = [];
+    created[0].trigger('sessions', JSON.stringify(minha([])));
+    for (let i = 0; i < 4; i++) await settle();
+    expect(avisos).toEqual([]);
+    rel();
+  });
+
+  test('410 na entrada do par marca encerrado e não fica tentando', async () => {
+    encerrado = true;
+    const rel = useSessions.getState().retain();
+    for (let i = 0; i < 4; i++) await settle();
+    expect(useServers.getState().servers.find((s) => s.ephemeral)?.inviteEnded).toBe(true);
+    expect(created.filter((e) => e.url.startsWith(CASA))).toHaveLength(0);
+    rel();
+  });
 });

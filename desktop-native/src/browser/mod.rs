@@ -15,6 +15,10 @@ pub mod relay;
 pub mod external;
 #[cfg(target_os = "windows")]
 pub mod cdp;
+#[cfg(not(target_os = "macos"))]
+pub mod keys;
+#[cfg(target_os = "windows")]
+pub(crate) mod frames;
 /// Mesmo nome nos dois sistemas: uma sessão CDP no pipe do Chromium faz o papel do CDP do WebView2.
 #[cfg(target_os = "linux")]
 pub mod cdp {

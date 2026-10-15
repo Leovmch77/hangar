@@ -15,6 +15,7 @@
   import { getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import ColarConvite from './ColarConvite.svelte';
+  import PairAcceptSheet from '../PairAcceptSheet.svelte';
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
   import ServerEditSheet from '../ServerEditSheet.svelte';
@@ -70,6 +71,15 @@
     return listAllServers().filter((s) => s.invite);
   });
   let colarAberto = $state(false);
+  let parExternoAberto = $state(false);
+  // A folha de parear escolhe entre as sessões vivas: segura a lista aberta enquanto ela existe.
+  $effect(() => {
+    if (!parExternoAberto) return;
+    sessionsStore.retain();
+    return () => sessionsStore.release();
+  });
+  const paraParear = $derived(sessionsStore.loading ? null
+    : sessionsStore.rows.filter((s) => !s.serverInvite && s.state !== 'dead' && s.provider !== 'orq'));
   function rename(id: string, label: string) {
     renameServer(id, label);
     sessionsStore.refreshServers();
@@ -910,6 +920,7 @@
   <button type="button" class="sv-btn" onclick={() => (showAdd = true)}>+ {sincronizada ? m.servidores_adicionar_lista() : m.servidores_adicionar_aparelho()}</button>
   <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
   <button type="button" class="sv-btn" onclick={() => (colarAberto = true)}>{m.convite_colar()}</button>
+  <button type="button" class="sv-btn" onclick={() => (parExternoAberto = true)}>{m.native_par_menu()}</button>
 </div>
 {#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
 {#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
@@ -990,6 +1001,9 @@
 {/if}
 {#if colarAberto}
   <ColarConvite {fallbackFocus} onFechar={() => (colarAberto = false)} />
+{/if}
+{#if parExternoAberto}
+  <PairAcceptSheet sessions={paraParear} {fallbackFocus} onFechar={() => (parExternoAberto = false)} />
 {/if}
 <div class="ss-acoes">
   <button class="ss-btn" onclick={() => sessionsStore.reconnect()} disabled={logoutInFlight}>{m.maquinas_reconectar()}</button>

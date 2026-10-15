@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -9,13 +10,27 @@ import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { StateDot } from '../../src/ui/StateDot';
 import { toast } from '../../src/ui/Toast';
-import { useServers } from '../../src/stores/servers';
+import { ownServers, useServers } from '../../src/stores/servers';
+import { useSessions } from '../../src/stores/sessions';
+import { PairAcceptSheet, type PairAcceptTarget } from '../../src/features/pair/PairAcceptSheet';
 import * as m from '../../src/paraglide/messages';
 
 export default function Maquinas() {
   const router = useRouter();
-  const servers = useServers((s) => s.servers);
+  const todos = useServers((s) => s.servers);
+  // A entrada do par de fora não é máquina desta pessoa.
+  const servers = useMemo(() => ownServers(todos), [todos]);
   const activeId = useServers((s) => s.activeId);
+  const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
+  const rows = useSessions((s) => s.rows);
+  // A folha escolhe entre as sessões vivas da máquina: a lista precisa estar aberta enquanto ela está.
+  useEffect(() => (aceite ? useSessions.getState().retain() : undefined), [aceite]);
+  const alvo = aceite ? { ...aceite, sessions: rows.filter((r) => r.serverId === aceite.server.id) } : null;
+
+  const parear = () => {
+    const server = servers.find((s) => s.id === activeId) ?? servers[0];
+    if (server) setAceite({ server, name: null, sessions: [] });
+  };
 
   const testar = (s: Server) => {
     getConfigForServer(s)
@@ -35,7 +50,10 @@ export default function Maquinas() {
       <PageHeader
         title={m.maquinas_titulo()}
         subtitle={m.maquinas_intro()}
-        actions={[{ icon: 'Plus', label: m.sessao_adicionar_servidor(), onPress: () => router.push('/login' as never) }]}
+        actions={[
+          { icon: 'Plus', label: m.sessao_adicionar_servidor(), onPress: () => router.push('/login' as never) },
+          ...(servers.length ? [{ icon: 'Link' as const, label: m.native_par_menu(), onPress: parear }] : []),
+        ]}
       />
       {servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
       {servers.length > 0 ? (
@@ -59,6 +77,7 @@ export default function Maquinas() {
           ))}
         </SectionCard>
       ) : null}
+      <PairAcceptSheet target={alvo} onClose={() => setAceite(null)} />
     </Pagina>
   );
 }

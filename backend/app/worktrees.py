@@ -877,7 +877,7 @@ def _stuck_note(stuck: list[Path]) -> str:
 
 
 def delete(repo: str, path: str, sessions, *, confirm: bool = False,
-           delete_branch: bool = False) -> dict:
+           delete_branch: bool = False, keep_branch: bool = False) -> dict:
     main = main_repo_of(repo_root_of(repo) or repo)
     real = os.path.realpath(path)
     # O caminho que o git guarda é o canônico: é ele que a lista mostra e as conversas citam.
@@ -916,7 +916,8 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
     with _sizes_lock:
         _sizes.pop(path, None)
     branch_deleted = False
-    if st["branch"] and (st["merged"] or delete_branch):
+    # `keep_branch`: quem fecha a worktree para abrir a branch em outra pasta precisa dela.
+    if st["branch"] and not keep_branch and (st["merged"] or delete_branch):
         try:
             b = _run(main, "branch", "-D", st["branch"])
             branch_deleted = b.returncode == 0

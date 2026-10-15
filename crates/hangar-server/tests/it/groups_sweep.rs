@@ -61,7 +61,7 @@ fn rig() -> Rig {
 
 async fn join(groups: &GroupService, name: &str, others: &[&str], orq: bool) -> String {
     groups.join(JoinOwned { name: name.into(), others: others.iter().map(|o| o.to_string()).collect(), task: String::new(),
-        replace_task: false, harness: BTreeMap::new(), orq }).await.unwrap().gid
+        replace_task: false, harness: BTreeMap::new(), orq, outside: Default::default() }).await.unwrap().gid
 }
 
 fn live(env: &Env, names: &[&str]) { *env.live.lock().unwrap() = Ok(names.iter().map(|n| n.to_string()).collect()); }
@@ -210,23 +210,37 @@ async fn no_sidecar_no_list_request() {
     assert_eq!(*r.env.list_calls.lock().unwrap(), 1);
 }
 
-/// A varredura só conhece o stem saneado do sidecar; o Python acha o registro pelo nome cru.
+/// A varredura só conhece o stem saneado do sidecar; o registro é achado pelo nome cru, sem o Python.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_session_with_sanitized_name_ends_its_external_pair_by_the_raw_name() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("pair");
     std::fs::create_dir_all(&root).unwrap();
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let other = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let seen = seen.clone();
+        async move { seen.lock().unwrap().push(format!("{} {}", req.method(), req.uri().path())); "{}" }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, other).await.unwrap() });
     std::fs::write(root.join("nome-com-espa-o.json"), serde_json::json!({"peers": ["pc-ana::Y"], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
     std::fs::write(root.join("external_pairs.json"), serde_json::json!([{"share_id": "sh1", "local_session": "nome com espaço", "alias": "pc-ana",
-        "peer_owner": "Ana", "peer_session": "Y", "peer_address": "https://a.tail.ts.net:8443", "peer_token": "tok", "created_at": 1.0}]).to_string()).unwrap();
+        "peer_owner": "Ana", "peer_session": "Y", "peer_address": format!("http://{other_addr}"), "peer_token": "tok", "created_at": 1.0}]).to_string()).unwrap();
     let (python, upstream) = fake::spawn_fake().await;
     let mut state = hangar_server::routes::AppState::new(fake::config(upstream, ""));
     let groups = Arc::new(GroupService::new(PairDir::new(root.clone(), tmp.path().join("arquivo")),
         Arc::new(PythonOrq::from_state(&state)), "casa".into()));
     state.groups = Some(groups.clone());
+    let share = crate::share_pair_routes::share_state(&tmp.path().join("shares.json"), &root, Arc::new(Mutex::new(1_000.0)));
+    state.share = Some(share.clone());
     let (ex, warnings) = leave_and_notify(&state, &groups, "nome-com-espa-o").await.unwrap();
     assert_eq!(ex, ["pc-ana::Y"]);
-    assert_eq!(python.internal_bodies("external-pairs/end"), vec![serde_json::json!({"name": "nome com espaço", "peer": "pc-ana::Y"})]);
+    assert!(python.internal_bodies("external-pairs/end").is_empty(), "o Python não é chamado");
+    assert_eq!(*asked.lock().unwrap(), ["DELETE /api/pair"]);
+    assert!(share.pairs.all().is_empty());
     // Tratado como máquina própria, o aviso falharia (nenhuma máquina cadastrada).
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(!root.join("nome-com-espa-o.json").exists());

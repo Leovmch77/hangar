@@ -487,3 +487,38 @@ describe('Git mira o servidor dono e restaura ao fechar (nas duas)', () => {
     }
   });
 });
+
+describe('par externo: sessão de fora dentro do grupo', () => {
+  const PAR = { alias: 'casa', owner: 'Ana', session: 'api', address: 'https://ana.ts.net:8443', level: 'view', pending: false };
+  function montar() {
+    localStorage.setItem('cp_group_by', 'server');
+    const local = sess('hangar', 'srv-a', { pair_gid: 'g1', pair_peers: ['casa::api'], pair_externals: [PAR] });
+    const fora = sess('api', 'pair-1', { guest_kind: 'pair', serverInvite: true });
+    store.servers = [
+      { id: 'srv-a', label: 'Alfa', baseUrl: 'http://a', token: 't' },
+      { id: 'pair-1', label: 'Par · Ana', baseUrl: 'https://ana.ts.net:8443', token: 'tp', invite: true, ephemeral: true },
+    ];
+    store.byServer = [
+      { server: store.servers[0], sessions: [local], error: null, loaded: true },
+      { server: store.servers[1], sessions: [fora], error: null, loaded: true },
+    ];
+    store.rows = [local, fora];
+  }
+
+  it('celular: a linha de fora entra no grupo local e a entrada temporária não vira seção', () => {
+    montar();
+    const m = createSessionListModel(opts('mobile'));
+    expect(m.groupMode).toBe('none');
+    expect(m.allGroups.flatMap((g) => g.sessions).map((s) => `${s.serverId}:${s.name}`).sort()).toEqual(['pair-1:api', 'srv-a:hangar']);
+    const fora = m.allSessions.find((s) => s.name === 'api')!;
+    expect(fora.pair_gid).toBe('g1');
+    expect(fora.outside).toMatchObject({ owner: 'Ana', localSession: 'hangar', localServerId: 'srv-a' });
+    expect(m.pairLabel('g1', 'hangar, api')).toBe('hangar ↔ casa::api (Ana)');
+  });
+
+  it('desktop web: nada novo, a entrada temporária fica de fora', () => {
+    montar();
+    const m = createSessionListModel(opts('desktop'));
+    expect(m.allSessions.map((s) => s.name)).toEqual(['hangar']);
+  });
+});

@@ -10,18 +10,23 @@ import {
   effectiveGroupBy,
   formataErro,
   renameSession,
+  setPairAccess,
   resumeSession,
   type AggSession,
   type GroupBy,
   type Server,
 } from '@hangar/core';
-import { useServers } from '../../stores/servers';
+import { ownServers, useServers } from '../../stores/servers';
 import { useSessions } from '../../stores/sessions';
 import { useAparencia, ehGroupBy } from '../../stores/aparencia';
 import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
-import { SessionRow } from './SessionRow';
+import { SessionRow, type PairAction } from './SessionRow';
+import { placeOutside } from './outsideRows';
+import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
+import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
+import { leaveExternal } from '../pair/leaveExternal';
 import { ConversationList } from './ConversationList';
 import { splitAttention } from './AttentionStrip';
 import { RenameSheet } from './RenameSheet';
@@ -61,7 +66,9 @@ interface Props {
 export function SessionList({ onClose, onOpenServers }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
-  const servers = useServers((s) => s.servers);
+  const todos = useServers((s) => s.servers);
+  // A entrada do par de fora não é máquina desta pessoa: não conta nem aparece como servidor.
+  const servers = useMemo(() => ownServers(todos), [todos]);
   const ready = useServers((s) => s.ready);
   const rows = useSessions((s) => s.rows);
   const loading = useSessions((s) => s.loading);
@@ -77,6 +84,8 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   // guarda a sessão inteira, não o nome: dois servidores podem ter sessões de mesmo nome
   const [renomeando, setRenomeando] = useState<AggSession | null>(null);
   const [wt, setWt] = useState<{ server: Server; path: string } | null>(null);
+  const [convite, setConvite] = useState<PairTarget | null>(null);
+  const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
 
   // 1 stream por servidor via refcount compartilhado
   useEffect(() => {
@@ -162,6 +171,39 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     [comServidor],
   );
 
+  // O par é desfeito e liberado no servidor PRÓPRIO, por endereço explícito: não troca a ativa.
+  const fazerPar = useCallback((s: AggSession, a: PairAction) => {
+    const own = (id: string) => useServers.getState().servers.find((x) => x.id === id && !x.invite);
+    const server = own(s.outside?.localServerId ?? s.serverId);
+    if (!server) { toast.erro(m.servidor_nao_existe()); return; }
+    const sair = (alias: string, session: string) => leaveExternal(alias, session, server);
+    if (a.kind === 'invite') {
+      setConvite({ server, name: s.name, members: (s.pair_peers ?? []).filter((p) => !p.includes('::')) });
+    } else if (a.kind === 'accept') {
+      setAceite({ server, name: s.name, sessions: useSessions.getState().rows.filter((r) => r.serverId === server.id) });
+    } else if (a.kind === 'leave' && s.outside) {
+      const { alias, owner } = s.outside;
+      Alert.alert(m.pair_leave_outside({ dono: owner }), m.pair_leave_outside_body({ dono: owner }), [
+        { text: m.comum_cancelar(), style: 'cancel' },
+        { text: m.pair_leave_outside({ dono: owner }), style: 'destructive', onPress: () => sair(alias, s.name) },
+      ]);
+    } else if (a.kind === 'undo') {
+      const { alias, owner, session } = a.pair;
+      Alert.alert(m.pair_undo_own({ dono: owner }), m.pair_undo_anchor_body({ dono: owner }), [
+        { text: m.comum_cancelar(), style: 'cancel' },
+        { text: m.pair_undo_own({ dono: owner }), style: 'destructive', onPress: () => sair(alias, session) },
+      ]);
+    } else if (a.kind === 'release') {
+      const { alias, owner } = a.pair;
+      Alert.alert(m.pair_release({ dono: owner }), m.pair_full_confirm({ sessao: s.name, dono: owner }), [
+        { text: m.comum_cancelar(), style: 'cancel' },
+        { text: m.pair_release({ dono: owner }), onPress: () => {
+          setPairAccess(s.name, alias, 'full', server).catch((e: unknown) => toast.erro(mensagemDe(e)));
+        } },
+      ]);
+    }
+  }, []);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     useSessions.getState().reconnect();
@@ -177,12 +219,13 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     const visiveis = busca
       ? rows.filter((r) => r.name.toLowerCase().includes(busca) || (r.cwd ?? '').toLowerCase().includes(busca))
       : rows;
-    const { attention, rest } = splitAttention(visiveis);
+    // A sessão de fora não pede nada a esta pessoa: fica sob a sessão do par, nunca em "Precisa de você".
+    const { attention, rest } = splitAttention(visiveis.filter((r) => !r.outside));
     const out: Section[] = [];
     if (attention.length) {
       out.push({ id: 'attention', label: m.native_sidebar_awaiting(), color: null, attention: true, total: attention.length, collapsed: false, data: attention });
     }
-    for (const g of agruparSessoes(rest, modo)) {
+    for (const g of placeOutside(agruparSessoes(rest, modo), visiveis.filter((r) => r.outside), modo, rows)) {
       if (!g.sessions.length) continue;
       const collapsed = modo !== 'none' && recolhidos.has(`${modo}:${g.id}`);
       out.push({ id: g.id, label: g.label, color: g.color, attention: false, total: g.sessions.length, collapsed, data: collapsed ? [] : g.sessions });
@@ -374,6 +417,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
             onRenomear={setRenomeando}
             onResume={retomar}
             onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
+            onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
           />
         )}
         ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
@@ -396,6 +440,8 @@ export function SessionList({ onClose, onOpenServers }: Props) {
       </View>
       <RenameSheet nome={renomeando?.name ?? null} onConfirmar={renomear} onFechar={() => setRenomeando(null)} />
       <WorktreeSheet server={wt?.server ?? null} path={wt?.path ?? null} onClose={() => setWt(null)} />
+      <PairInviteSheet target={convite} onClose={() => setConvite(null)} />
+      <PairAcceptSheet target={aceite} onClose={() => setAceite(null)} />
     </>
   );
 }

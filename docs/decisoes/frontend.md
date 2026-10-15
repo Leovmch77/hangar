@@ -40,6 +40,13 @@ e 594/661 ao restaurar sem outro evento: só os 67 px do aviso, sem folga artifi
 puras de geometria e compensação ficam em `elements/list_tail.rs`, fonte usada pela lista e
 incluída na suíte do app; isso não equivale a executar a suíte completa do GPUI vendorizado.
 
+## A folga do fim volta quando o fim fica parado (14/10/2026)
+
+A folga do `hold_tail` só era gasta por um crescimento seguinte; sem ele, ficava como um vão de até
+160 px entre a última linha e o compositor (raciocínio ao vivo recolhido em "Raciocínio", linha do
+comando que some), parecendo um bloco que faltou desenhar. Agora a folga parada por 500 ms desliza
+até zero. Durante o streaming ela segue segurando o histórico, porque cada mudança reinicia a espera.
+
 ## Nova sessão: busca entre raízes e seleção de conta (05/10/2026)
 
 Com texto e “Pesquisar em todas as pastas” marcado, o modal nativo procura nos filhos das
@@ -1027,3 +1034,24 @@ também sai no campo `cdp_local` do sidecar da sessão.
 - Risco que fica: qualquer programa local pode dirigir o navegador da sessão enquanto o app roda,
   como uma porta de depuração do Chrome. O `/cdp/browser` com `Authorization` e o `/cdp` do celular
   não mudam.
+
+## Página da conversa no Windows: WebView2 fora da tela (14/10/2026)
+
+Prova da Task 9 de `docs/superpowers/plans/2026-10-07-paginas-na-conversa.md`, na DELPHI-02
+(Windows Server 2025, VM sem GPU, WebView2 155.0.4283.45), pelo navegador da sessão do app nativo
+e pelo `/cdp` da tela remota (os mesmos `Page.startScreencast`/`screencastFrameAck` e
+`Input.dispatchMouseEvent` que o modo página usaria):
+
+| Estado da WebView2 | Quadros em 10 s | Clique chegou à página |
+|---|---|---|
+| painel visível | 193 (19/s) | sim (`mousedown` 1, `click` 1) |
+| estacionada (aba do painel fechada) | 200 (20/s), 1280×800 | sim |
+| app minimizado | 201 (20/s), 1280×800 | sim |
+
+Página animada a cada 50 ms com contador de cliques visível; o clique foi conferido no print do
+próprio screencast, sem `Runtime.evaluate`. **Decisão: a Task 10 segue** — o cartão vivo no
+Windows usa uma WebView2 estacionada por página, quadros por screencast e entrada por CDP.
+
+- Clique vindo da tela remota com o agente agindo pausa o navegador da sessão como "você
+  assumiu" (`user_input` em `app/browser.rs`); a WebView2 do modo página é outra e não passa por
+  essa pausa.

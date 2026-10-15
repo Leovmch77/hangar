@@ -1172,12 +1172,9 @@ def test_focus_publication_without_ack_does_not_hold_the_next(monkeypatch):
         pb._donos.pop("s1", None)
 
 
-def test_publication_wait_stays_below_rust_policy_timeout():
-    # Se o Rust desistir antes do Python, o aviso que chega no intervalo vira entrega incerta.
-    import re
-    actor = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/runtime/actor.rs").read_text()
-    rust_s = int(re.search(r"PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs\((\d+)\)", actor).group(1))
-    assert pb.CONFIRMA_S < pb.PUBLICA_S < rust_s - 5
-    # O `op` do Python espera a entrada inteira no Rust: fatos (15 s) mais a publicação.
+def test_publication_waits_fit_inside_the_rust_op():
+    # A confirmação cabe na publicação, e o `op` do Python espera a entrada inteira no Rust: fatos
+    # (15 s) mais a publicação.
+    assert pb.CONFIRMA_S < pb.PUBLICA_S
     from app import rust_server
-    assert rust_server.OP_TIMEOUT_S > rust_s + 15
+    assert rust_server.OP_TIMEOUT_S > pb.PUBLICA_S + 15

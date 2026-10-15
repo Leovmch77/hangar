@@ -1,12 +1,13 @@
 //! Rotas dos apps para a interface dos mods de uma sessão sem terminal que o Rust atende como
 //! superfície remota: clique (`press`), fechar painel (`close`), troca de aba (`show`) e digitação
-//! (`input`). Sessão que o Rust não atende assim, ou pedido de convidado, segue para o Python, que é o
-//! dono, como no `/events`; a digitação, que o Python não tem, é recusada aqui.
+//! (`input`). Sessão que o Rust não atende assim segue para o Python, que é o dono, como no `/events`;
+//! a digitação, que o Python não tem, é recusada aqui.
 //!
-//! A sessão com terminal que o Rust atende (fase 3) usa as mesmas rotas, com o clique pela tela. O pedido
-//! que não é do dono segue ao Python como nas outras: ele autentica o convidado (inclusive o convite da porta
-//! 8766, que nunca passa por aqui) e devolve o pedido pela ponte privada (`bridge`). A digitação é
-//! recusada logo na entrada, sem esperar a vez da sessão nem entrar na porta da troca de agente.
+//! A sessão com terminal que o Rust atende (fase 3) usa as mesmas rotas, com o clique pela tela. O
+//! convidado de convite da 8766, já liberado pelo porteiro, é atendido aqui como o dono. Quem não é
+//! dono nem convidado de convite (login de convidado, Connect) segue ao Python, que o autentica e
+//! devolve o pedido pela ponte privada (`bridge`). A digitação é recusada logo na entrada, sem
+//! esperar a vez da sessão nem entrar na porta da troca de agente.
 //!
 //! A guarda da troca de agente é a porta de entrada da sessão no Rust (`IngressGates`), a mesma das
 //! escritas do Claude: a troca a fecha retida pela operação exclusiva inteira e enquanto o registro não
@@ -33,7 +34,8 @@ use tokio::time::Instant;
 use super::http::{fits, invalid, reply};
 use super::model::*;
 use super::state::Turn;
-use crate::routes::{AppState, gate, pass, route_failed};
+use crate::routes::{AppState, pass, route_failed, who};
+use crate::share::caller::Caller;
 use crate::runtime::ingress::IngressPass;
 use crate::session_write::busy_body;
 
@@ -69,22 +71,31 @@ fn refused(headers: &HeaderMap, error: &ModsError) -> Response {
 /// viajar no `Err`.
 type Done = Box<Response>;
 
-/// O Rust atende quando o pedido é do dono e a sessão é dele; senão, o Python, que autentica e recusa o
-/// convidado (nenhum token tem tratamento pelo formato aqui). `outside`: a recusa do dono numa sessão sem
+/// O Rust atende quando o pedido é do dono (ou do convidado da 8766 liberado para a sessão) e a sessão
+/// é dele; senão, o Python, que autentica quem sobra (nenhum token tem tratamento pelo formato aqui). `outside`: a recusa do dono numa sessão sem
 /// superfície no Rust, para a rota que o Python não tem (`input`).
 async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, PathRejection>, req: Request,
     outside: Option<fn() -> ModsError>) -> Result<(String, HeaderMap, Body), Done> {
-    let (fwd, owner) = gate(st, peer, &req);
+    let (fwd, who) = who(st, peer, &req);
     let bridged = req.extensions().get::<Bridged>().is_some();
-    let owner = owner || bridged;
+    let owner = matches!(who, Some(Caller::Owner)) || bridged;
+    // O convidado da 8766 é atendido como o que chega pela ponte.
+    let method = req.method().clone();
+    let guest = |name: &str| who.as_ref().is_some_and(|c| c.grant().is_some() && c.can(name, &method));
     match (path, outside) {
-        (Ok(Path(name)), _) if owner && st.mods.owns(&name) => {
+        (Ok(Path(name)), _) if (owner || guest(&name)) && st.mods.owns(&name) => {
             let headers = req.headers().clone();
             Ok((name, headers, req.into_body()))
         }
         (Ok(Path(_)), Some(refusal)) if owner => Err(Box::new(refused(req.headers(), &refusal()))),
         // Da ponte nunca volta ao Python: ele trata a sessão que não é do Rust.
         _ if bridged => Err(Box::new(StatusCode::NOT_FOUND.into_response())),
+        // Terminal no Rust sem a interface dos mods aqui: o clique do Python dirigiria o pane do
+        // executor calado. A digitação o Python nem tem (404 abaixo).
+        (Ok(Path(name)), None) if guest(&name) && match st.state.runtime.get() {
+            Some(runtime) => runtime.is_terminal(&name).await,
+            None => false,
+        } => Err(Box::new(reply(Some(req.headers()), StatusCode::SERVICE_UNAVAILABLE, json!({"detail": no_answer().detail()})))),
         _ => Err(Box::new(pass(st, req, &fwd).await)),
     }
 }

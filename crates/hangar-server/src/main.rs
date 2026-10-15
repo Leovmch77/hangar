@@ -59,6 +59,13 @@ async fn run() {
             std::process::exit(2);
         }
     };
+    let guest = match hangar_server::config::GuestEnv::from_env() {
+        Ok(guest) => guest,
+        Err(e) => {
+            eprintln!("hangar-server: configuração inválida: {e}");
+            std::process::exit(2);
+        }
+    };
     hangar_server::init_log(cfg.log_path.as_deref());
     hangar_server::install_panic_hook();
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
@@ -106,7 +113,8 @@ async fn run() {
             if let Some(count) = swept.filter(|count| *count > 0) { tracing::info!(count, "canos de sessão já encerrada finalizados"); }
         }
     }
-    match hangar_server::serve_until_with_state(listener, state, stop).await {
+    // A porta do convidado não entra no bind fatal acima: o filho anterior pode ainda segurá-la.
+    match hangar_server::serve_until_with_guest(listener, state, guest.listen, stop).await {
         Ok(()) => {
             tracing::info!("stdin fechou: o backend saiu, hangar-server sai junto");
             std::process::exit(0);

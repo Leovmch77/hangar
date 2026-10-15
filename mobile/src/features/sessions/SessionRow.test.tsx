@@ -29,6 +29,14 @@ vi.mock('../../paraglide/messages', () => ({
   sessao_sem_id: () => 'sessao_sem_id',
   sessao_worktree: () => 'sessao_worktree',
   worktree_apagada: () => 'worktree_apagada',
+  native_par_convidar: () => 'native_par_convidar',
+  native_par_menu: () => 'native_par_menu',
+  pair_from_owner: (p: { dono: string }) => `de ${p.dono}`,
+  pair_leave_outside: (p: { dono: string }) => `sair ${p.dono}`,
+  pair_undo_own: (p: { dono: string }) => `desfazer ${p.dono}`,
+  pair_full_pending: () => 'pair_full_pending',
+  pair_release: (p: { dono: string }) => `liberar ${p.dono}`,
+  pair_level_view: () => 'pair_level_view',
 }));
 
 import { useUnistyles } from 'react-native-unistyles';
@@ -103,6 +111,33 @@ describe('SessionRow', () => {
       { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree: undefined });
     expect(container.textContent).toContain('hangar-x');
     expect(container.querySelector('[aria-label^="sessao_worktree"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('sessão de fora: marca do dono e só "Sair do pareamento" no menu', async () => {
+    const onPair = vi.fn();
+    const { container, root } = await render({ ...base, name: 'web', provider: 'claude', cwd: '/r/web', guest_kind: 'pair',
+      outside: { alias: 'casa', owner: 'Ana', localServerId: 's1', localSession: 'api' } }, { onPair });
+    expect(container.textContent).toContain('de Ana');
+    expect(container.querySelector('[data-menu]')?.getAttribute('data-menu')).toBe('leave');
+    act(() => root.unmount());
+  });
+
+  it('sessão própria com par: convidar, aceitar e desfazer um por dono', async () => {
+    const pair = (owner: string, session: string) => ({ alias: owner.toLowerCase(), owner, session, address: 'https://x.ts.net:8443', level: 'view' as const, pending: false });
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude',
+      pair_externals: [pair('Ana', 'web'), pair('Bia', 'docs')] }, { onPair: vi.fn() });
+    expect(container.querySelector('[data-menu]')?.getAttribute('data-menu')).toBe('rename pair-invite pair-accept undo:0 undo:1 delete');
+    act(() => root.unmount());
+  });
+
+  it('acesso completo pendente mostra o selo e o botão Liberar', async () => {
+    const onPair = vi.fn();
+    const pair = { alias: 'casa', owner: 'Ana', session: 'web', address: 'https://x.ts.net:8443', level: 'full' as const, pending: true };
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', pair_externals: [pair] }, { onPair });
+    expect(container.textContent).toContain('pair_full_pending');
+    await act(async () => { (container.querySelector('[aria-label="liberar Ana"]') as HTMLElement).click(); });
+    expect(onPair).toHaveBeenCalledWith(expect.objectContaining({ name: 'api' }), { kind: 'release', pair });
     act(() => root.unmount());
   });
 

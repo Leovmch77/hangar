@@ -331,7 +331,7 @@ async def _autorizado(ws: WebSocket) -> bool:
     if _blocked(host, agora):
         await ws.close(code=1008)
         return False
-    from app.share_gate import guest_of
+    from app.guest_header import guest_of
     if guest_of(ws) is not None:
         return True                               # o porteiro ja conferiu token e sessao
     tok = ws.query_params.get("token", "")

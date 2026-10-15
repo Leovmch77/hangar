@@ -1,4 +1,4 @@
-use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease_within}};
+use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Status,Store,acquire_lease_within}};
 use super::codex_terminal::{Adoption,AdoptionCell,CodexTerminalTarget};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
@@ -93,6 +93,8 @@ pub struct RuntimeRegistry {
     terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
     /// Última reabertura por entrega sem prova, por chave: sobrevive à troca do ator que ela mesma faz.
     heal_attempts:std::sync::Mutex<BTreeMap<String,std::time::Instant>>,
+    /// Caixa de entrada dos recibos dos recados nativos que o Rust escreve, com e sem terminal.
+    native:super::native_message::Inbox,
 }
 /// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
 /// não vira laço de processos mortos.
@@ -143,44 +145,36 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado): o do Codex aqui
-/// mesmo (`codex_launch`), o dos outros pelo Python.
+/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado, `codex_launch`). Só o
+/// Codex sobe por aqui.
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
     if recorded != 0 {
         let key = target.key.clone();
         let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
         if state == process::Liveness::Ours { return Ok(None); }
-        if target.provider=="claude" {return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));}
     }
-    let (program,vars,cano_extra) = if target.provider == "codex" {
-        let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
-        if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
-        let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
-        (launch.program,launch.env,Default::default())
-    } else {
-        let env = launch_policy(policy,target,sidecar_dir,"launch_env",json!({})).await?;
-        if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
-        let shape = ||failure("launch_env_shape");
-        let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
-        let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
-        let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
-        (program,vars,cano_extra)
-    };
+    // O processo do Claude nasce da receita em memória (`claude_relaunch`), nunca por aqui.
+    if target.provider != "codex" {
+        return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));
+    }
+    let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
+    if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
+    let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
-        key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
+        key:target.key.clone(),cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
     let cano = match process::spawn(&spec).await {
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
-            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,sidecar_dir,recorded).await; }
+            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(target,sidecar_dir,recorded).await; }
             let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
-    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await {
+    if let Err(error) = cano_recorded(launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await) {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
         if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
             tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
@@ -191,35 +185,48 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     target.metadata["cano"] = value;
     Ok(Some(cano))
 }
-/// Arquivo da sessão na subida e na religação. O do Codex é gravado aqui (a vida é a chave, a vista
-/// vem do arquivo da fila, como o Python lia), sem passar pelo Python; os outros, pela política dele.
-pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
-    if target.provider == "codex" && matches!(kind,"session.patch_meta" | "session.clear_cano") {
-        let (dir,name,key,state_path,clear) = (sidecar_dir.to_owned(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind == "session.clear_cano");
-        return tokio::task::spawn_blocking(move || if clear { super::codex_sidecar::clear_cano(&dir,&name,&key,&payload) }
-            else { super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved_view(&state_path)?) })
-            .await.map_err(|_|failure("sidecar_job"))?;
+/// A gravação do cano só vale confirmada: recusada como velha (`stale`), o processo novo ficaria sem o
+/// arquivo da sessão apontar para ele.
+fn cano_recorded(result:Result<Value,RuntimeError>) -> Result<(),RuntimeError> {
+    if result?["updated"] == true { Ok(()) }
+    else { Err(RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o processo novo")) }
+}
+/// Arquivo da sessão na subida e na religação, gravado aqui (a vida é a chave, a vista vem do arquivo da
+/// fila, como o Python lia).
+pub(super) async fn launch_sidecar(target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+    let (dir,provider,name,key,state_path,kind) = (sidecar_dir.to_owned(),target.provider.clone(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let saved = if kind == "session.clear_cano" { Value::Null } else { saved_view(&state_path)? };
+        sidecar_service(&provider,&dir,&name,&key,&kind,&payload,&saved)
+    }).await.map_err(|_|failure("sidecar_job"))?
+}
+/// `session.patch_meta`/`session.clear_cano` de uma sessão sem terminal, gravados no sidecar do provedor.
+/// Bloqueante: chamar fora do runtime.
+pub(super) fn sidecar_service(provider:&str,dir:&std::path::Path,name:&str,key:&str,kind:&str,payload:&Value,view:&Value) -> Result<Value,RuntimeError> {
+    match (provider == "claude",kind == "session.clear_cano") {
+        (true,true)=>super::claude_sidecar::clear_cano(dir,name,key,payload),
+        (true,false)=>super::claude_sidecar::patch(dir,name,key,payload,view),
+        (false,true)=>super::codex_sidecar::clear_cano(dir,name,key,payload),
+        (false,false)=>super::codex_sidecar::patch_headless(dir,name,key,payload,view),
     }
-    let phase = format!("launch:{}",crate::mods::state::random_hex(8));
-    policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
 }
 /// `runtime_state.view` do arquivo da fila, lido como o `session.patch_meta` do Python lia.
 fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
     let state:Value = super::queue::read_replaced(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
     Ok(match &state["runtime_state"]["view"] { Value::Null=>json!({}),view=>view.clone() })
 }
-async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
-    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.clear_cano",json!({"pid":pid})).await {
+async fn clear_cano(target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
+    if let Err(error) = launch_sidecar(target,sidecar_dir,"session.clear_cano",json!({"pid":pid})).await {
         tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
     }
 }
 /// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
-pub(super) async fn discard(policy:&PolicyClient,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
+pub(super) async fn discard(target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
     if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
         tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
         return;
     }
-    clear_cano(policy,target,sidecar_dir,cano.pid).await;
+    clear_cano(target,sidecar_dir,cano.pid).await;
 }
 
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
@@ -248,9 +255,9 @@ impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
         Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
+            policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
-            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
+            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default() }
     }
     /// Escrita para sessão doente: o coordenador do Python a reabre, como fazia antes de entregar.
     /// Responde na hora; quem escreveu recebe o 503 e tenta de novo.
@@ -380,6 +387,40 @@ impl RuntimeRegistry {
             .collect()
     }
     pub fn bind_lifecycle(self:&Arc<Self>) {let _=self.self_ref.set(Arc::downgrade(self));}
+    /// O recado nativo da operação `operation` da sessão `key`: seu id, já à espera de recibo, e o
+    /// `from`, a caixa do Rust (ligada no primeiro recado). Cada recibo volta a essa operação.
+    pub(crate) fn native_route(&self,key:&str,operation:&str) -> (String,String) {
+        let message_id=crate::terminal_facts::message_id(key,operation);
+        self.native.expect(&message_id,key,operation);
+        let registry=self.self_ref.get().cloned();
+        let origin=self.native.origin(move |receipt| {
+            match registry.as_ref().and_then(std::sync::Weak::upgrade) {
+                Some(registry)=>{tokio::spawn(async move {registry.native_receipt(receipt).await;});},
+                None=>tracing::warn!(key=%receipt.key,code="native_receipt_unbound","recibo de recado nativo sem o registro do servidor"),
+            }
+        });
+        (message_id,origin)
+    }
+    /// O `native_receipt` do coordenador do Python: retido ou recusado encerra a operação do recado com
+    /// esse estado; entregue ou liberado a confirma.
+    async fn native_receipt(&self,receipt:super::native_message::Receipt) {
+        let super::native_message::Receipt {key,operation,state}=receipt;
+        let (status,disposition)=match state.as_str() {
+            "delivered"|"released"|""=>(Status::Accepted,"accepted"),"rejected"|"refused"=>(Status::Rejected,"rejected"),_=>(Status::Unknown,"unknown"),
+        };
+        let Some(handle)=self.entries.lock().await.get(&key).map(|entry|entry.handle.clone()) else {
+            tracing::warn!(key=%key,state=%state,code="native_receipt_session_gone","recibo de recado nativo de sessão que já não está aberta");
+            return;
+        };
+        let result=json!({"operation_id":operation,"disposition":disposition,"payload":{"native_status":state}});
+        let applied=handle.queue(format!("native-receipt:{key}:{operation}:{state}"),Action::Finish {id:operation.clone(),status,result}).await;
+        let applied=match applied {Ok(_) if status==Status::Accepted=>handle.confirm().await.map(|_|()),other=>other.map(|_|())};
+        if let Err(error)=applied {
+            tracing::warn!(key=%key,state=%state,code=%error.code,"recibo de recado nativo não aplicado");
+        } else if status!=Status::Accepted {
+            tracing::warn!(key=%key,state=%state,code="native_message_not_delivered","recado nativo retido ou recusado pelo receptor");
+        }
+    }
     async fn cancel_lifecycle_name(&self,name:&str) {
         for barrier in self.lifecycle.lock().await.values() {
             if let Ok(operation)=barrier.operation.lock() && let Some((owner,cancel))=operation.as_ref() && owner==name {cancel.store(true,std::sync::atomic::Ordering::Release);}
@@ -487,6 +528,9 @@ impl RuntimeRegistry {
     pub fn with_processes(mut self,processes:Arc<dyn crate::list::procs::ProcessView>)->Self {self.processes=processes;self}
     pub fn with_permissions(mut self,store:Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>)->Self {self.permissions=Some(store);self}
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
+    /// Só testes: a caixa dos recados nativos numa pasta própria, fora do `cc-socks` da máquina.
+    #[doc(hidden)]
+    pub fn with_native_inbox_dir(mut self,dir:std::path::PathBuf) -> Self { self.native=super::native_message::Inbox::in_dir(dir); self }
     /// Só testes: o `codex` falso de cada um vem do PATH deste ambiente, não do processo.
     #[doc(hidden)]
     pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.policy = self.policy.with_codex_environment(env); self }
@@ -746,7 +790,7 @@ impl RuntimeRegistry {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
                 }
                 // Só o cano subido nesta chamada morre: um vivo de antes pode estar no meio de um turno.
-                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&self.policy,&target,&cano,sidecar_dir).await; }
+                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&target,&cano,sidecar_dir).await; }
                 return Err(error);
             },
         };
@@ -1139,7 +1183,7 @@ impl RuntimeRegistry {
         next.metadata=saved["metadata"].clone();next.metadata["lifecycle_pending"]=json!(false);
         // Plugins e skills escolhidos seguem a conversa nova; sem isso, reabri-la viria com tudo ligado.
         let (sid,settings)=(next_sid.to_owned(),next.metadata["claude_settings"].clone());
-        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
+        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings).map_err(|(code,_)|code)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
             tracing::warn!(key=%target.key,session=%target.name,code,"escolhas da conversa não passaram à conversa nova do /clear");
         }
         next.transcript=target.transcript.with_file_name(format!("{next_sid}.jsonl"));
@@ -2464,13 +2508,19 @@ mod tests {
         assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
     }
 
-    /// O Python desta política não atende (porta fechada, repetição curta): o Codex grava o arquivo da
-    /// sessão e monta o comando sem ele; o Claude continua indo ao Python.
+    /// Nada da subida vai ao Python (porta fechada): o Codex grava o arquivo da sessão e monta o comando;
+    /// o Claude grava o arquivo da sessão e nunca sobe por aqui.
+    #[test]
+    fn a_cano_the_session_file_did_not_take_is_a_failure() {
+        assert!(cano_recorded(Ok(json!({"updated":true}))).is_ok());
+        assert_eq!(cano_recorded(Ok(json!({"updated":false,"stale":true}))).unwrap_err().code,"session_patch_stale");
+        assert_eq!(cano_recorded(Err(RuntimeError::new("claude_sidecar_io","x"))).unwrap_err().code,"claude_sidecar_io");
+    }
+
     #[tokio::test]
-    async fn codex_launch_policies_never_reach_python() {
+    async fn sidecar_launch_policies_never_reach_python() {
         let dir = tempfile::tempdir().unwrap();
-        let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into())
-            .with_ready_retry(Duration::from_millis(1),Duration::from_millis(5))
+        let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into())
             .with_codex_environment(crate::accounts::environment::AccountEnvironment::from_map(
                 [("HOME".to_owned(),dir.path().to_string_lossy().into_owned()),("PATH".to_owned(),dir.path().join("bin").to_string_lossy().into_owned())].into()));
         std::fs::write(super::super::codex_sidecar::path(dir.path(),"cx"),json!({"name":"cx","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
@@ -2480,15 +2530,19 @@ mod tests {
             binding:CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 },
             lease_path:dir.path().join("q.lock"),state_path:dir.path().join("q.json"),projection_dir:dir.path().join("projection"),
             transcript:dir.path().join("rollout.jsonl"),created:0.0 };
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap(),json!({"updated":true}));
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
         // Sem `codex` no PATH injetado a subida falha no processo, nunca numa política do Python.
         let failed = launch_if_needed(&policy,&mut target,dir.path()).await.err().expect("a subida sem codex precisa falhar");
         assert!(!failed.code.starts_with("policy_"),"{}",failed.code);
-        let claude = RuntimeTarget { provider:"claude".into(),..target };
-        assert!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap_err().code.starts_with("policy_"),
-            "o Claude segue pelo Python");
+        let claude = RuntimeTarget { provider:"claude".into(),name:"cl".into(),..target };
+        std::fs::write(super::super::codex_sidecar::path(dir.path(),"cl"),json!({"name":"cl","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
+        let mut claude = claude;
+        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("o Claude nunca sobe por aqui").code,"relaunch_recipe_missing");
     }
 
     #[test]

@@ -45,6 +45,8 @@ Não compilados aqui: gpui-pre-apple/-macos (revisados só por leitura).
 | Superfície sempre conta como dano | gpui-pre `scene_damage.rs` (já vinha do PR #62455; teste novo) | a primitiva fica idêntica enquanto os pixels da página mudam; sem isso o quadro seria pulado como igual |
 | Dispositivo Vulkan com `VK_EXT_image_drm_format_modifier` e `WgpuContext::shared_device()` | gpui-pre-wgpu `wgpu_context.rs` | importar o DMA-BUF sem cópia exige o modificador DRM e o mesmo dispositivo que o GPUI usa para desenhar |
 | `PrimitiveBatch::Surfaces` desenhado como sprite policromático, alpha forçado a 1 | gpui-pre-wgpu `wgpu_renderer.rs`/`shaders.wgsl` | o renderer wgpu ignorava superfícies; em XRGB o byte X não é alpha |
+| `PaintSurface::texture`/`paint_surface` também no Windows | gpui-pre `scene.rs`/`window.rs` | a página da conversa chega do screencast da WebView2 como textura externa, como no Linux |
+| `SurfaceTexture` e `draw_surfaces` desenhando a textura como sprite policromático | gpui-pre-windows `directx_devices.rs`/`directx_renderer.rs` | o DirectX ignorava superfícies; a textura é criada no device do GPUI e escrita na thread da janela |
 | `CreateTargetForHwnd(hwnd, false)` | gpui-pre-windows `directx_renderer.rs` | com topmost a composição cobre a janela filha do WebView2; o GPUI deixa de desenhar por cima dela |
 
 ## Bandeja

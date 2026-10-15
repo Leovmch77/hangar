@@ -31,7 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
 
-struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf }
+struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf, share: Arc<hangar_server::share::ShareState> }
 
 type Calls = Arc<Mutex<Vec<Value>>>;
 
@@ -50,13 +50,15 @@ async fn machine(root: &Path, id: &str) -> Machine {
     let pair = home.join(".claude/.hangar-pair");
     state.groups = Some(Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), id.into())));
     state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
+    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(Mutex::new(1_000.0)));
+    state.share = Some(share.clone());
     let state = Arc::new(state);
     let app = router(state)
         .into_make_service_with_connect_info::<SocketAddr>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Machine { addr, python, pair }
+    Machine { addr, python, pair, share }
 }
 
 /// Repasse a `target` que anota `{to, method, path, body}` de cada pedido.
@@ -205,35 +207,42 @@ async fn cross_routes_answer_like_python() {
     assert!(lab.pair.join("s3.json").is_file());
 }
 
-/// Saída de quem tem par externo: o Python desfaz o lado de fora e os avisos dele aparecem.
+/// Saída de quem tem par externo: o Rust desfaz o lado de fora sem o Python e os avisos aparecem.
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_pair_ends_external_pair() {
     let dir = tempfile::tempdir().unwrap();
     let casa = machine(dir.path(), "casa").await;
+    let external = |local: &str, peer: &str| {
+        let (s, _) = casa.share.store.create_redeemed(local, Some("t:1".into()), hangar_server::share::store::Kind::Pair).unwrap();
+        // Porta 1: a outra máquina fora do ar responde na hora.
+        casa.share.pairs.add(hangar_server::share::pairs::ExternalPair { share_id: s.id.clone(), local_session: local.into(),
+            alias: "pc-ana".into(), peer_owner: "Ana".into(), peer_session: peer.into(), peer_address: "http://127.0.0.1:1".into(),
+            peer_token: "tok".into(), created_at: 1.0 }).unwrap();
+        s.id
+    };
     std::fs::create_dir_all(&casa.pair).unwrap();
     std::fs::write(casa.pair.join("s0.json"), json!({"peers": ["pc-ana::Y"], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
-    std::fs::write(casa.pair.join("external_pairs.json"), json!([{"share_id": "sh1", "local_session": "s0", "alias": "pc-ana",
-        "peer_owner": "Ana", "peer_session": "Y", "peer_address": "https://a.tail.ts.net:8443", "peer_token": "tok", "created_at": 1.0}]).to_string()).unwrap();
+    let first = external("s0", "Y");
+    std::fs::write(dir.path().join("peers.json"), json!({"pc-ana": {}}).to_string()).unwrap();
     let skipped = json!({"sessao": "pc-ana::Y", "erro": {"code": "erro_par_endereco_ambiguo", "params": {"peer": "pc-ana::Y"},
         "msg": "'pc-ana' é ao mesmo tempo máquina tua e par externo"}});
-    casa.python.set_internal("external-pairs/end", StatusCode::OK, json!({"errors": [skipped.clone()]}));
     let (status, body) = call(casa.addr, "DELETE", "s0/pair", None).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(casa.python.internal_bodies("external-pairs/end"), vec![json!({"name": "s0", "peer": "pc-ana::Y"})]);
     assert_eq!(body["warning"]["code"], "erro_pareamento_saida_falhou");
     assert_eq!(body["warning"]["params"]["avisos"], json!([skipped]));
     assert_eq!(inputs(&casa), [1, 0, 0, 0], "quem saiu é avisado");
     assert!(!casa.pair.join("s0.json").exists());
+    assert!(casa.share.pairs.all().is_empty() && casa.share.store.all().iter().all(|s| s.id != first || s.revoked_at.is_some()));
 
-    // Python fora: a falha aparece no aviso, a saída vale.
+    // Outro lado fora do ar: a falha aparece no aviso, a saída vale.
+    std::fs::remove_file(dir.path().join("peers.json")).unwrap();
     std::fs::write(casa.pair.join("s1.json"), json!({"peers": ["pc-ana::Z"], "task": "", "gid": "cdcdcdcd", "harness": {}}).to_string()).unwrap();
-    std::fs::write(casa.pair.join("external_pairs.json"), json!([{"share_id": "sh2", "local_session": "s1", "alias": "pc-ana",
-        "peer_owner": "Ana", "peer_session": "Z", "peer_address": "https://a.tail.ts.net:8443", "peer_token": "tok", "created_at": 1.0}]).to_string()).unwrap();
-    casa.python.set_internal("external-pairs/end", StatusCode::INTERNAL_SERVER_ERROR, json!({}));
+    external("s1", "Z");
     let (status, body) = call(casa.addr, "DELETE", "s1/pair", None).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["warning"]["params"]["avisos"][0]["erro"]["code"], "erro_peer_nao_avisado");
     assert!(!casa.pair.join("s1.json").exists());
+    assert!(casa.python.internal_bodies("external-pairs/end").is_empty(), "o Python não é chamado");
 }
 
 /// O temporário da sessão vira pasta: a volta atrás do vínculo não consegue apagá-lo. Cada teste usa

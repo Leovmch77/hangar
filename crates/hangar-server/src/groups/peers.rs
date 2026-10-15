@@ -109,6 +109,9 @@ impl PeerClient {
 
     pub fn enabled_ids(&self) -> Vec<String> { self.book.enabled_ids() }
 
+    /// Todo nome do `peers.json`, com ou sem endereço: apelido de par externo não pode repetir nenhum.
+    pub fn ids(&self) -> std::collections::HashSet<String> { self.book.load().keys().cloned().collect() }
+
     /// Os tokens de peer conhecidos (leitura de arquivo, fora do executor).
     pub async fn tokens(&self) -> Vec<String> {
         let book = self.book.clone();
@@ -131,51 +134,65 @@ impl PeerClient {
         let book = self.book.clone();
         let key = server.to_owned();
         let cfg = tokio::task::spawn_blocking(move || book.get(&key)).await.ok().flatten().ok_or(PeerError::Unknown)?;
-        let transport = |e: &dyn std::error::Error| PeerError::Transport(format!("{server} inacessível: {}", chain(e)));
         let http = match self.http.get() {
             Some(http) => http,
             None => {
-                let built = reqwest::Client::builder().connect_timeout(READ_TIMEOUT).read_timeout(READ_TIMEOUT).timeout(TOTAL_TIMEOUT)
-                    .build().map_err(|e| transport(&e))?;
+                let built = client(reqwest::Client::builder()).map_err(|e| transport(server, &e))?;
                 self.http.get_or_init(|| built)
             }
         };
-        let mut req = http.request(method, format!("{}{path}", cfg.base_url))
-            .header(reqwest::header::CONTENT_TYPE, "application/json").bearer_auth(&cfg.token);
-        if let Some(body) = body { req = req.body(body.to_string()); }
-        let mut resp = req.send().await.map_err(|e| transport(&e))?;
-        let status = resp.status();
-        let mut raw = Vec::new();
-        loop {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => {
-                    raw.extend_from_slice(&chunk);
-                    if raw.len() > MAX_BODY {
-                        // A recusa ainda se lê pelo primeiro 1 MiB; o sucesso grande é incerto.
-                        if !status.is_success() { raw.truncate(MAX_BODY); break; }
-                        return Err(PeerError::Transport(TOO_LARGE.into()));
-                    }
-                }
-                Ok(None) => break,
-                Err(e) if status.is_success() => return Err(transport(&e)),
-                Err(_) => break,
-            }
-        }
-        let text = String::from_utf8_lossy(&raw);
-        if !status.is_success() {
-            let detail = match serde_json::from_str::<Value>(&text) {
-                Ok(Value::Object(mut map)) => map.remove("detail").unwrap_or_else(|| Value::String(text.clone().into_owned())),
-                _ => Value::String(text.into_owned()),
-            };
-            return Err(PeerError::Refused { status: status.as_u16(), detail });
-        }
-        if text.trim().is_empty() { return Ok((status.as_u16(), None)); }
-        serde_json::from_str(&text).map(|v| (status.as_u16(), Some(v))).map_err(|e| PeerError::Transport(format!("{server} respondeu corpo ilegível: {e}")))
+        request(http, server, &format!("{}{path}", cfg.base_url), Some(&cfg.token), method, body).await
     }
 }
 
+/// O cliente com os prazos do `peers.call`: 8 s por leitura e 16 s no total.
+pub(crate) fn client(builder: reqwest::ClientBuilder) -> reqwest::Result<reqwest::Client> {
+    builder.connect_timeout(READ_TIMEOUT).read_timeout(READ_TIMEOUT).timeout(TOTAL_TIMEOUT).build()
+}
+
+pub(crate) fn transport(label: &str, e: &dyn std::error::Error) -> PeerError {
+    PeerError::Transport(format!("{label} inacessível: {}", chain(e)))
+}
+
+/// Pedido JSON a outra máquina, com o corpo até 1 MiB; `label` nomeia a máquina nos erros e o
+/// token vazio não manda `Authorization`.
+pub(crate) async fn request(http: &reqwest::Client, label: &str, url: &str, token: Option<&str>, method: reqwest::Method,
+                            body: Option<&Value>) -> Result<(u16, Option<Value>), PeerError> {
+    let mut req = http.request(method, url).header(reqwest::header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token.filter(|t| !t.is_empty()) { req = req.bearer_auth(token); }
+    if let Some(body) = body { req = req.body(body.to_string()); }
+    let mut resp = req.send().await.map_err(|e| transport(label, &e))?;
+    let status = resp.status();
+    let mut raw = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                raw.extend_from_slice(&chunk);
+                if raw.len() > MAX_BODY {
+                    // A recusa ainda se lê pelo primeiro 1 MiB; o sucesso grande é incerto.
+                    if !status.is_success() { raw.truncate(MAX_BODY); break; }
+                    return Err(PeerError::Transport(TOO_LARGE.into()));
+                }
+            }
+            Ok(None) => break,
+            Err(e) if status.is_success() => return Err(transport(label, &e)),
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    if !status.is_success() {
+        let detail = match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(mut map)) => map.remove("detail").unwrap_or_else(|| Value::String(text.clone().into_owned())),
+            _ => Value::String(text.into_owned()),
+        };
+        return Err(PeerError::Refused { status: status.as_u16(), detail });
+    }
+    if text.trim().is_empty() { return Ok((status.as_u16(), None)); }
+    serde_json::from_str(&text).map(|v| (status.as_u16(), Some(v))).map_err(|e| PeerError::Transport(format!("{label} respondeu corpo ilegível: {e}")))
+}
+
 /// O erro e suas causas numa linha: o do `reqwest` sozinho não diz o que caiu.
-fn chain(e: &dyn std::error::Error) -> String {
+pub(crate) fn chain(e: &dyn std::error::Error) -> String {
     let mut text = e.to_string();
     let mut source = e.source();
     while let Some(cause) = source {

@@ -638,6 +638,15 @@ def test_delete_clean_merged_moves_conversations_and_branch(tmp_path, monkeypatc
     assert "x" not in git_ops.list_branches(main)["branches"]
 
 
+def test_delete_keep_branch_leaves_merged_branch(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "repo-x", "x")
+    out = worktrees.delete(main, wt, [], keep_branch=True)
+    assert out["branch_deleted"] is False
+    assert not (tmp_path / "repo-x").exists()
+    assert "x" in git_ops.list_branches(main)["branches"]
+
+
 def test_delete_refuses_open_session_and_main(tmp_path):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")

@@ -121,3 +121,15 @@ def test_registro_externo_ilegivel_trata_par_com_dois_pontos_como_externo(tmp_pa
     out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "[de fora: pc-ana::Y]" in ctx and "OUTRA pessoa" in ctx and "desconhecido" in ctx
+
+
+def test_par_externo_de_outro_membro_do_grupo_vira_protocolo_externo(tmp_path):
+    # Grupo misto: o par foi feito por 'front', mas 'api' está no mesmo grupo e fala com o de fora.
+    (tmp_path / "api.json").write_text(json.dumps({"peers": ["front", "pc-ana::Y"], "gid": "g1"}))
+    (tmp_path / "external_pairs.json").write_text(json.dumps([{
+        "share_id": "s1", "local_session": "front", "alias": "pc-ana", "peer_owner": "pc-ana",
+        "peer_session": "Y", "peer_address": "https://a.ts.net:8443", "peer_token": "t", "created_at": 1.0}]))
+    bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
+    out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "[de fora: pc-ana::Y]" in ctx and "OUTRA pessoa" in ctx

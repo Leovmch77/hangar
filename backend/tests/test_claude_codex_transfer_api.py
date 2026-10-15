@@ -68,7 +68,7 @@ def scenario(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "registry", reg)
     monkeypatch.setattr(api, "_invalidate_lists", Mock())
     monkeypatch.setattr(api, "session_life", lambda name: "k:source-key")
-    monkeypatch.setattr(api.share_store, "set_life", Mock())
+    monkeypatch.setattr(api.share_bridge, "set_life", Mock())
     monkeypatch.setattr(api.guest_users, "set_life", Mock())
     monkeypatch.setattr(api.settings, "auth_token", "test-secret")
     account = SimpleNamespace(id="chosen", home=tmp_path / ".codex-chosen")
@@ -264,13 +264,13 @@ async def test_http_cancellation_waits_until_operation_converges(scenario, monke
     await entered.wait()
     request.cancel()
     await asyncio.sleep(0)
-    assert not request.done() and "s" in api.share_api.changing_mode
+    assert not request.done() and "s" in api.share_bridge.changing_mode
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await request
     record = store.transfer_for_thread(str(scenario.account.home), scenario.thread_id)
     assert record.phase == store.TransferPhase.COMPLETE
-    assert "s" not in api.share_api.changing_mode
+    assert "s" not in api.share_bridge.changing_mode
 
 
 async def test_duplicate_operation_is_rejected_without_waiting(scenario):
@@ -291,14 +291,14 @@ async def test_terminal_send_lock_is_nonblocking(scenario):
         lock.release()
 
 
-async def test_transfer_rows_keep_shared_and_owner_without_physical_poll(scenario, monkeypatch):
+async def test_transfer_rows_keep_owner_without_physical_poll(scenario, monkeypatch):
     row = SessionInfo(name="s", transfer_id=str(uuid.uuid4()), transfer_phase="restore_failed")
-    monkeypatch.setattr(registry_module.share_store, "active_sessions", lambda: {"s"})
     monkeypatch.setattr(registry_module.guest_users, "has_claims", lambda: True)
     monkeypatch.setattr(registry_module.guest_users, "owner_name", lambda name: "dono")
     monkeypatch.setattr(registry_module.tmux, "capture_pane", Mock(side_effect=AssertionError("não pode ler estado projetado")))
     result = await scenario.reg.list_with_state([row])
-    assert result == [row] and row.shared and row.owner == "dono"
+    # `shared` é marcado pela lista do Rust, dona dos convites.
+    assert result == [row] and row.owner == "dono"
 
 
 def test_prepared_runtime_is_not_discoverable(scenario):

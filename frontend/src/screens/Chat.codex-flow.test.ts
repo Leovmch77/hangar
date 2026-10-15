@@ -35,6 +35,7 @@ vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading:
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   listAllServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
+  findServer: (id: string) => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }].find((s) => s.id === id),
   listOwnServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   getActiveId: () => 'codex-flow',
   getBaseUrl: () => 'http://teste',

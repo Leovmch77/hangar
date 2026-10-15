@@ -119,6 +119,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
 vi.mock('../lib/auth', () => ({
   listServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   listAllServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
+  findServer: (id: string) => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }].find((s) => s.id === id),
   listOwnServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   getActiveId: vi.fn(() => 'srv-test'),
   getBaseUrl: vi.fn(() => 'http://x'),
@@ -785,6 +786,20 @@ it('orquestrador sem árbitro registrado: botão desligado', async () => {
   try {
     await tick(); await tick();
     expect(t.el.querySelector<HTMLButtonElement>('.orq-footer .back-btn')?.disabled).toBe(true);
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+// Sessão da outra pessoa num par "ver e recado": o servidor dela recusa digitar; no lugar do
+// Composer, o aviso de só leitura.
+it('par externo só leitura: sem Composer, com o aviso', async () => {
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', provider: 'claude', guest_kind: 'pair' }];
+  const t = montar();
+  try {
+    await tick(); await tick();
+    expect(t.el.querySelector('.composer-stub')).toBeNull();
+    expect(t.el.textContent).toContain(m.native_par_so_leitura());
   } finally {
     await unmount(t.comp);
   }
