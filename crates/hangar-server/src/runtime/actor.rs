@@ -2220,11 +2220,12 @@ async fn prove_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Receipt
     Ok((confirmed,legacy))
 }
 
-/// Codex com terminal aprende o rollout depois de conectar (thread sem turno não tem arquivo) e segue a
-/// thread que a TUI adotar; caminho vazio é ausência, e o recibo não o abre.
+/// O Codex aprende o rollout depois de conectar (thread sem turno não tem arquivo; o sem terminal é
+/// registrado antes dela) e, com terminal, segue a thread que a TUI adotar; caminho vazio é ausência, e o
+/// recibo não o abre.
 fn transcript_of(target:&RuntimeTarget,view:&Value) -> std::path::PathBuf {
     match view["rollout_path"].as_str().filter(|path|!path.is_empty()) {
-        Some(path) if target.provider == "codex" && view["headless"] == false => path.into(),
+        Some(path) if target.provider == "codex" => path.into(),
         _ => target.transcript.clone(),
     }
 }
@@ -2438,6 +2439,19 @@ mod tests {
     fn commit_target()->RuntimeTarget {
         RuntimeTarget {key:"key".into(),generation:4,name:"s".into(),provider:"claude".into(),metadata:json!({"session_id":"a","lifecycle_pending":false}),
             binding:CanoBinding {pid:42,escuta:"fixture".into(),token:"fixture".into(),versao:2},lease_path:"lease".into(),state_path:"state".into(),projection_dir:"projection".into(),transcript:"a.jsonl".into(),created:1.0}
+    }
+    #[test]
+    fn a_headless_codex_proves_delivery_in_the_rollout_its_thread_reports() {
+        // Registered before the thread existed: the target has no rollout of its own.
+        let target = RuntimeTarget {provider:"codex".into(),transcript:"".into(),..commit_target()};
+        let rollout = json!({"headless":true,"rollout_path":"/r/rollout-1.jsonl"});
+        assert_eq!(transcript_of(&target,&rollout),std::path::PathBuf::from("/r/rollout-1.jsonl"));
+        let terminal = json!({"headless":false,"rollout_path":"/r/rollout-2.jsonl"});
+        assert_eq!(transcript_of(&target,&terminal),std::path::PathBuf::from("/r/rollout-2.jsonl"));
+        let unborn = json!({"headless":true,"rollout_path":null});
+        assert_eq!(transcript_of(&RuntimeTarget {transcript:"t.jsonl".into(),..target},&unborn),std::path::PathBuf::from("t.jsonl"));
+        let claude = json!({"rollout_path":"/r/ignored.jsonl"});
+        assert_eq!(transcript_of(&commit_target(),&claude),std::path::PathBuf::from("a.jsonl"));
     }
     #[test]
     fn metadata_commit_after_a_server_restart_with_the_same_pid_does_not_reuse_a_journaled_id() {
