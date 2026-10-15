@@ -181,8 +181,9 @@ fn share_route(method: &Method, path: &str) -> bool {
     let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
     match method.as_str() {
         "GET" => matches!(path, "/api/share/prereqs" | "/api/external-pairs") || tail == Some("share"),
-        "POST" => path == "/api/external-pairs/send" || matches!(tail, Some("share" | "pair-invite" | "pair-accept")),
-        "DELETE" => tail.is_some_and(|t| t == "share" || t.strip_prefix("share/").is_some_and(|id| !id.is_empty() && !id.contains('/'))),
+        "POST" => path == "/api/external-pairs/send" || matches!(tail, Some("share" | "pair-invite" | "pair-accept" | "pair-access")),
+        "DELETE" => tail.is_some_and(|t| t == "share" || t.strip_prefix("share/").is_some_and(|id| !id.is_empty() && !id.contains('/')))
+            || path.strip_prefix("/api/external-pairs/").is_some_and(|alias| !alias.is_empty() && !alias.contains('/')),
         _ => false,
     }
 }
@@ -420,7 +421,7 @@ mod tests {
             let body = &source[source.find(name).unwrap()..];
             body[..body.find("\n}\n").unwrap()].to_owned()
         };
-        let body = fn_body("pub fn router(") + "\n" + &fn_body("fn session_routes<");
+        let body = fn_body("fn router_with(") + "\n" + &fn_body("fn session_routes<");
         let body = body.as_str();
         let (mut seen, mut api) = (0, 0);
         for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {
@@ -438,6 +439,10 @@ mod tests {
         // Rota quebrada em várias linhas escaparia do filtro acima: a contagem bruta a denuncia.
         assert_eq!(seen, body.matches(".route(").count(), "há `.route(` fora de uma linha `.route(\"…\"`");
         assert!(api >= 10, "o leitor do roteador não achou as rotas ({api})");
+        // Montadas por `share::pair_routes`, fora do texto lido acima.
+        assert!(rust_route(&Method::POST, "/api/sessions/a/pair-access"));
+        assert!(rust_route(&Method::DELETE, "/api/external-pairs/ana"));
+        assert!(!rust_route(&Method::DELETE, "/api/external-pairs/a/b"));
     }
 
     #[test]
