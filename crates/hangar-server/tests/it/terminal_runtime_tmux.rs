@@ -29,19 +29,11 @@ while True:
     let output=Command::new("tmux").args(["-L",&label,"-f","/dev/null","new-session","-d","-s","test","-x","100","-y","40",&cli_command]).env_remove("HANGAR_INTERNAL_SECRET").env_remove("HANGAR_RUNTIME_INSTANCE").env_remove("CP_AUTH_TOKEN").output().await.unwrap(); assert!(output.status.success());
     let meta=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:0.0","#{pane_id}\t#{session_created}"]).output().await.unwrap(); assert!(meta.status.success());
     let meta=String::from_utf8(meta.stdout).unwrap(); let mut fields=meta.trim().split('\t'); let pane=fields.next().unwrap().to_string(); let created=fields.next().unwrap().parse::<u64>().unwrap();
-    let binding=TerminalBinding {name:"test".into(),pane:pane.clone(),conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label.clone()],windows:false,clipboard_lock_path:None};
     for _ in 0..100 {
         let capture=Command::new("tmux").args(["-L",&label,"capture-pane","-p","-t",&pane]).output().await.unwrap();
         if ComposerSnapshot::parse(&String::from_utf8_lossy(&capture.stdout)).is_some(){break;}tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let state_path=dir.path().join("state"); let policy_path=state_path.clone();
-    let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (b,path)=(binding.clone(),policy_path.clone()); async move {
-        let request:Value=serde_json::from_str(&body).unwrap(); let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        // Leitura de fatos não passa pelo diário.
-        assert!(state["operations"][request["phase_id"].as_str().unwrap()].is_null()); assert_eq!(request["kind"],"terminal_facts");
-        ([("content-type","application/json")],json!({"ok":true,"data":{"binding":b,"ready":true,"idle":true,"open_question":false,"plugin_live":false,"plugin_user":false,"native":null}}).to_string())
-    }}));
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap(); let policy_server=tokio::spawn(async move{axum::serve(listener,router).await.unwrap()});
+    let state_path=dir.path().join("state");
     let pid_output=tokio::process::Command::new("tmux").args(["-L",&label,"display-message","-p","-t",&pane,"#{pane_pid}"]).output().await.unwrap();
     let agent_pid=std::str::from_utf8(&pid_output.stdout).unwrap().trim().parse::<u32>().unwrap();
     // Registro nativo do Claude para o agente do pane: os fatos locais provam a conversa por ele.
@@ -50,10 +42,10 @@ while True:
     let target=TerminalTarget {key:"isolated".into(),generation:1,name:"test".into(),binding:TerminalBinding {name:"test".into(),pane,conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label],windows:false,clipboard_lock_path:None},state_path:state_path.clone(),lease_path:dir.path().join("lease"),projection_dir:dir.path().join("projection"),transcript:transcript.clone(),created:created as f64,plugin_key:None,metadata:hangar_server::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid,agent_birth:hangar_server::terminal_facts::agent_birth(agent_pid).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into()}};
     let lease=queue::acquire_lease(&target.lease_path).unwrap(); let store=Store::open(&target.state_path,&target.projection_dir,queue::State::new("isolated",1,"test",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo::default()),limits:InputLimits {settle:Duration::from_millis(10),literal_settle:Duration::from_millis(25),multiline_settle:Duration::from_millis(25),slash_settle:Duration::from_millis(25),proof_attempts:40,ready_attempts:40,cleanup_attempts:4},tick:Duration::from_millis(100),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
-    let handle=TerminalActor::spawn(target,QueueActor::start(store,lease),PolicyClient::new(address,"test".into(),"instance".into()),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let handle=TerminalActor::spawn(target,QueueActor::start(store,lease),PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into()),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
     let command=RuntimeCommand {operation_id:"real-io".into(),kind:OperationKind::Input,payload:json!({"text":"ação 😀 C:\\Users\\test","pre_transcript":false})};
     assert_eq!(handle.command(command.clone()).await.unwrap().disposition,Disposition::Accepted); handle.command(command).await.unwrap(); handle.confirm().await.unwrap();
     let state:Value=serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap(); assert_eq!(state["rows"][0]["confirmed"],true);
     let contents=std::fs::read_to_string(transcript).unwrap(); assert_eq!(contents.lines().count(),1); let received:Value=serde_json::from_str(contents.trim()).unwrap(); assert_eq!(received["message"]["content"],"ação 😀 C:\\Users\\test");
-    handle.stop().await.unwrap(); policy_server.abort();
+    handle.stop().await.unwrap();
 }

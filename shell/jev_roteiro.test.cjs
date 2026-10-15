@@ -117,6 +117,20 @@ test('roteiro da pasta antiga (reserva) repete e passa a morar na pasta nova', a
   assert.equal(lerUnico(nova).variantes.length, 1, 'regravado na pasta nova');
 });
 
+test('roteiro antigo ilegivel na reserva nao impede gravar na pasta nova', async () => {
+  const antiga = pastaNova();
+  const s0 = site();
+  await rodarComRoteiro({ pasta: antiga, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s0.executar, perguntar: jevDoSite(s0) });
+  const [quebrado] = fs.readdirSync(antiga);
+  fs.writeFileSync(path.join(antiga, quebrado), '{ quebrado');
+  const nova = pastaNova();
+  const s = site();
+  const r = await rodarComRoteiro({ pasta: nova, reserva: [antiga], objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /gravado em/);
+  assert.equal(lerUnico(nova).variantes.length, 1);
+});
+
 test('entre gemeos, a repeticao escolhe pela ordem gravada', async () => {
   const pasta = pastaNova();
   const s1 = site();
@@ -228,16 +242,17 @@ test('nome legivel, sem a origem: o mesmo roteiro vale em outra porta', async ()
   assert.match(r.roteiro, /repetidos 3 de 3/);
 });
 
-test('pasta: e2e/roteiros na raiz do git de qualquer subpasta; fora de repo, o cache; .hangar/roteiros só como reserva', () => {
+test('pasta: automacao/gravacoes na raiz do git de qualquer subpasta; fora de repo, o cache; as antigas só como reserva', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'));
   execFileSync('git', ['init', '-q', repo]);
   fs.mkdirSync(path.join(repo, 'src'));
   const raiz = fs.realpathSync(repo);
-  assert.equal(pastaDe(path.join(repo, 'src')), path.join(raiz, 'e2e', 'roteiros'));
+  assert.equal(pastaDe(path.join(repo, 'src')), path.join(raiz, 'automacao', 'gravacoes'));
   assert.equal(pastaDe(fs.mkdtempSync(path.join(os.tmpdir(), 'solto-'))), PASTA);
-  assert.equal(reservaDe(path.join(repo, 'src')), null, 'sem a pasta antiga, nada de reserva');
+  assert.deepEqual(reservaDe(path.join(repo, 'src')), [], 'sem pasta antiga, nada de reserva');
   fs.mkdirSync(path.join(repo, '.hangar', 'roteiros'), { recursive: true });
-  assert.equal(reservaDe(path.join(repo, 'src')), path.join(raiz, '.hangar', 'roteiros'));
+  fs.mkdirSync(path.join(repo, 'e2e', 'roteiros'), { recursive: true });
+  assert.deepEqual(reservaDe(path.join(repo, 'src')), [path.join(raiz, 'e2e', 'roteiros'), path.join(raiz, '.hangar', 'roteiros')]);
 });
 
 /** Grava a corrida boa e devolve o arquivo e a variante dela, para montar outras à mão. */

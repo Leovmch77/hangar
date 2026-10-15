@@ -70,6 +70,8 @@ pub struct AppState {
     pub plugin: Arc<crate::plugin::Store>,
     /// Páginas HTML publicadas pelas sessões (`~/.hangar/paginas`); o teste troca por uma pasta temporária.
     pub pages: Arc<crate::pages::store::Store>,
+    /// Metadados passivos dos artefatos Claude, com leitura incremental por conversa.
+    pub artifacts: Arc<crate::artifacts::Catalogs>,
     /// Onde está o Chromium do servidor, perguntado a cada medição; o teste força "ausente".
     pub chromium: fn() -> Option<std::path::PathBuf>,
     /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
@@ -154,6 +156,7 @@ impl AppState {
             term: Arc::default(),
             mods,
             pages: Arc::new(crate::pages::store::Store::new(crate::pages::store::Store::default_root())),
+            artifacts: Arc::default(),
             chromium: crate::pages::chrome::find,
             write_gate_wait: std::time::Duration::from_secs(30),
             voice: Arc::new(crate::voice::hub::VoiceHub::new()),
@@ -457,6 +460,7 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         .route("/__hangar_server/health", get(health))
         // As rotas privadas não existem nesta porta.
         .route("/__hangar_server/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/api/sessions/{name}/artifacts", get(crate::artifacts::route).fallback(pass_any))
         .route("/api/sessions/{name}/subagents", get(crate::subagents::public).fallback(pass_any))
         .route("/api/sessions/{name}/subagents/{agent_id}", get(crate::subagents::public).fallback(pass_any))
         .route("/api/sessions/{name}/subagents/{agent_id}/message", axum::routing::post(crate::subagents::message).fallback(pass_any))

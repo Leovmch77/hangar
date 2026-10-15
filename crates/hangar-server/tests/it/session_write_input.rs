@@ -225,6 +225,61 @@ async fn headless_input_is_served_in_rust_without_reaching_python() {
     assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
+/// Recado `[de: …]` para sessão sem terminal: o Rust o escreve no socket de mensagens do próprio Claude,
+/// achado pelo registro do CLI na pasta da conta, sem passar pelo Python nem pelo cano.
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_native_message_goes_to_the_claude_socket_without_python() {
+    use tokio::io::AsyncReadExt;
+    // A classe do recado sai da memória de modo: a conversa confirmada em bypass.
+    let memory = Arc::new(std::sync::Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    memory.lock().unwrap().observe("sid-1", "bypassPermissions");
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into())
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))).with_permissions(memory)
+        .with_native_inbox_dir(dir.path().into()));
+    registry.bind_lifecycle();
+    let socket = dir.path().join("claude.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let frames = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).await.unwrap();
+        serde_json::from_str::<Value>(raw.trim()).unwrap()
+    });
+    let sessions = dir.path().join("conta/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("1.json"), json!({"pid": std::process::id(), "sessionId": "sid-1", "messagingSocketPath": socket}).to_string()).unwrap();
+    registry.open(RuntimeTarget { key: "k-s".into(), generation: 1, name: "s".into(), provider: "claude".into(),
+        metadata: json!({"name": "s", "headless": true, "session_id": "sid-1", "initialized": true, "config_dir": dir.path().join("conta")}),
+        binding: CanoBinding { pid: 42, escuta: cano("not_written").await, token: "secret-test".into(), versao: 2 },
+        lease_path: dir.path().join("s.lock"), state_path: dir.path().join("s.queue-state.json"),
+        projection_dir: dir.path().join("s-projection"), transcript: dir.path().join("s.jsonl"), created: 0.0 }).await.unwrap();
+    let (python, server) = serve(registry, Duration::from_secs(5)).await;
+    let (status, body) = post(server, "s", "input", r#"{"text":"[de: par] oi"}"#).await;
+    assert_eq!((status, body["native"].as_bool()), (200, Some(true)), "{body}");
+    let frame = tokio::time::timeout(Duration::from_secs(5), frames).await.unwrap().unwrap();
+    let content = frame["message"]["content"].as_str().unwrap();
+    assert!(content.contains("from-name=\"par\"") && content.contains("from-mode=\"bypass\"") && content.contains("[de: par] oi"), "{content}");
+    assert!(frame["msg_id"].as_str().is_some_and(|id| id.len() == 36), "{frame}");
+    assert!(python.diag().iter().all(|d| d["evento"] != "runtime.send_failed"), "{:?}", python.diag());
+    // O receptor recusa: o recibo volta à caixa do Rust (o `from` do recado) e encerra a operação dele.
+    let inbox = frame["from"].as_str().and_then(|from| from.strip_prefix("uds:")).expect("from é a caixa do Rust").to_owned();
+    assert!(inbox.starts_with(&*dir.path().to_string_lossy()), "{inbox}");
+    let receipt = json!({"type": "peer_message_status", "orig_msg_id": frame["msg_id"], "state": "refused"});
+    let mut stream = tokio::net::UnixStream::connect(&inbox).await.unwrap();
+    stream.write_all(format!("{receipt}\n").as_bytes()).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let state = dir.path().join("s.queue-state.json");
+    for _ in 0..250 {
+        let raw = std::fs::read(&state).unwrap_or_default();
+        if serde_json::from_slice::<Value>(&raw).is_ok_and(|state| state["operations"].as_object().is_some_and(|ops| ops.values()
+            .any(|op| op["status"] == "rejected" && op["result"]["payload"]["native_status"] == "refused"))) { return; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("o recibo de recusa não encerrou a operação do recado: {}", String::from_utf8_lossy(&std::fs::read(&state).unwrap_or_default()));
+}
+
 #[tokio::test]
 async fn headless_input_the_cano_never_confirmed_is_an_error_with_a_code_and_a_diary_line() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);

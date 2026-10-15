@@ -65,7 +65,7 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context, Hangar, Voice, Machines }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context, Hangar, Voice, Machines, Artifacts }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
@@ -83,6 +83,7 @@ impl Hangar {
             return Some(Floating::NewChat(menu));
         }
         if page || !self.selected.as_ref().is_some_and(|s| s.readable()) { return None; }
+        if self.artifacts.open && !self.files_visible() { return Some(Floating::Artifacts); }
         if let Some(open) = self.ctl_snapshot() { return Some(Floating::Controls(open)); }
         if self.command_panel { return Some(Floating::Commands); }
         if self.accounts.card { return Some(Floating::Usage); }
@@ -96,10 +97,11 @@ impl Hangar {
     pub(super) fn close_popups(&mut self) -> bool {
         let folders = self.new_chat_folders.replace(None).is_some();
         let open = folders || self.controls_open() || self.command_panel || self.recent.is_some() || self.accounts.card || self.context_card
-            || self.hangar_open || self.voice.open || self.machines_tray.open;
+            || self.hangar_open || self.voice.open || self.machines_tray.open || self.artifacts.open;
         self.close_controls();
         self.hangar_open = false;
         self.machines_tray.open = false;
+        self.artifacts.open = false;
         self.voice.open = false;
         self.command_panel = false;
         self.accounts.card = false;
@@ -123,6 +125,10 @@ impl Hangar {
                 Some(self.render_usage_card(window, cx))),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
             Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
+            Floating::Artifacts => {
+                placement = Placement::Top;
+                ("artifacts-toggle".to_owned(), Align::Start, true, Some(self.render_artifacts_panel(window, cx)))
+            }
             Floating::Machines => {
                 if appearance::get().navigation == appearance::Navigation::BottomTabs { placement = Placement::Top; }
                 ("machines-tray-toggle".to_owned(), Align::Start, true, Some(self.render_machines_tray(window, cx)))

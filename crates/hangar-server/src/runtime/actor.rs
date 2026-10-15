@@ -10,15 +10,6 @@ use tokio::task::{JoinHandle,JoinSet};
 
 enum Core { Claude(ClaudeEngine),Codex(CodexEngine) }
 
-/// Teto da política no Python. A publicação no terminal espera o aviso do plugin, que só sai depois
-/// dos hooks do UserPromptSubmit: o teto dela fica acima da espera do Python (`PUBLICA_S`).
-const POLICY_TIMEOUT:Duration=Duration::from_secs(15);
-const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
-/// Python subindo depois de um restart (ou parado um instante): a política que só grava o arquivo da
-/// sessão espera por ele em vez de pôr a sessão em erro. Primeira espera e teto da série.
-const READY_FIRST_WAIT:Duration=Duration::from_secs(1);
-const READY_MAX_WAIT:Duration=Duration::from_secs(16);
-const READY_BUDGET:Duration=Duration::from_secs(120);
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
 const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
 const CONFIRM_RETRY:Duration=Duration::from_secs(30);
@@ -27,27 +18,21 @@ const CONFIRM_RETRY:Duration=Duration::from_secs(30);
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
 const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 1);
 
+/// O que os serviços locais do ator precisam do servidor: diário, cotas e o ambiente da subida do Codex.
+/// Nenhum serviço vai mais ao Python (a rota `/internal/runtime/policy` saiu na #145).
 #[derive(Clone)]
 pub struct PolicyClient {
-    upstream:std::net::SocketAddr,
-    secret:String,
-    instance:String,
-    http:crate::proxy::HttpClient,
     /// Dono das cotas; sem ele a linha de status sai sem janelas.
     accounts:Option<crate::accounts::AccountService>,
     diag:crate::diag::DiagClient,
-    /// (primeira espera, teto) da repetição enquanto o Python não está pronto.
-    ready_retry:(Duration,Duration),
     /// Só testes: ambiente-base da subida do Codex por registro. `None` = o do processo, lido a cada subida.
     codex_env:Option<Arc<crate::accounts::environment::AccountEnvironment>>,
 }
 
 impl PolicyClient {
-    pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
-        Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client(),
-            accounts:None,ready_retry:(READY_FIRST_WAIT,READY_BUDGET),codex_env:None }
+    pub fn new(upstream:std::net::SocketAddr,secret:String) -> Self {
+        Self { diag:crate::diag::DiagClient::new(upstream,secret),accounts:None,codex_env:None }
     }
-    pub fn with_ready_retry(mut self,first_wait:Duration,budget:Duration) -> Self { self.ready_retry = (first_wait,budget); self }
     pub(super) fn diag(&self) -> crate::diag::DiagClient { self.diag.clone() }
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
     #[doc(hidden)]
@@ -67,63 +52,6 @@ impl PolicyClient {
             }
         }
     }
-    async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
-        self.run_for(&target.key,target.generation,kind,request_id,payload,phase_id).await
-    }
-    pub async fn run_for(&self,key:&str,generation:u64,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
-        // Só repete o que grava o arquivo da sessão ou calcula o comando (idempotente, e a mesma fase junta
-        // a chamada ainda em curso no Python); recado nativo e terminal escrevem na conversa.
-        let retries = kind.starts_with("session.") || kind == "launch_env";
-        let (mut wait,budget) = self.ready_retry;
-        let started = Instant::now();
-        loop {
-            match self.attempt(key,generation,kind,request_id,payload.clone(),phase_id).await {
-                Ok(value) => return Ok(value),
-                Err((error,detail)) if retries && not_ready(&error.code,&detail) && started.elapsed() + wait <= budget => {
-                    if crate::warn_limit::allow(Some(key),"policy_not_ready") {
-                        tracing::warn!(key=%key,generation,policy=%kind,code=%error.code,detail=%detail,"Python ainda não atende a política; tentando de novo");
-                    }
-                    tokio::time::sleep(wait).await;
-                    wait = (wait * 2).min(READY_MAX_WAIT);
-                }
-                Err((error,detail)) => {
-                    if crate::warn_limit::allow(Some(key),&error.code) {
-                        tracing::warn!(key=%key,generation,policy=%kind,code=%error.code,detail=%detail,"política do Python falhou");
-                    }
-                    return Err(error);
-                }
-            }
-        }
-    }
-    async fn attempt(&self,key:&str,generation:u64,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,(RuntimeError,String)> {
-        let body = json!({"key":key,"generation":generation,"request_id":request_id,"phase_id":phase_id,"kind":kind,"payload":payload});
-        let request = axum::http::Request::post(format!("http://{}/internal/runtime/policy",self.upstream))
-            .header("x-hangar-internal",&self.secret).header("x-hangar-runtime-instance",&self.instance)
-            .header("content-type","application/json").body(axum::body::Body::from(body.to_string()))
-            .map_err(|_|(failure("policy_request"),String::new()))?;
-        // Detalhe só de forma: status, tipo de erro, posição ou nome da exceção; nunca o corpo.
-        let limit = if kind == "terminal_publish" { PUBLISH_POLICY_TIMEOUT } else { POLICY_TIMEOUT };
-        tokio::time::timeout(limit,async {
-            let response = self.http.request(request).await
-                .map_err(|error|(failure("policy_transport"),format!("connect={}",error.is_connect())))?;
-            if !response.status().is_success() { return Err((failure("policy_refused"),format!("status={}",response.status().as_u16()))); }
-            let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()),MAX_ENVELOPE)
-                .await.map_err(|_|(failure("policy_limit"),String::new()))?;
-            let value:Value = serde_json::from_slice(&bytes)
-                .map_err(|error|(failure("policy_json"),format!("line={} column={}",error.line(),error.column())))?;
-            if value["ok"] != true {
-                let kind = value["error_type"].as_str().filter(|kind|kind.len() <= 64 && kind.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'_'));
-                return Err((failure("policy_failed"),format!("error_type={}",kind.unwrap_or("?"))));
-            }
-            Ok(value["data"].clone())
-        }).await.unwrap_or_else(|_|Err((failure("policy_timeout"),String::new())))
-    }
-}
-
-/// O Python ainda não atende: fora do ar, travado, ou 503 (sem coordenador, ou sem o registro da chave,
-/// que ele só grava depois que o `open` do Rust responde). 400 é pedido torto e `ok:false` é recusa: definitivos.
-fn not_ready(code:&str,detail:&str) -> bool {
-    matches!(code,"policy_timeout" | "policy_transport") || code == "policy_refused" && detail == "status=503"
 }
 
 /// Sessão cujo processo o Rust sobe: pasta do arquivo dela e a primeira espera da religação.
@@ -1046,9 +974,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     let queue = queue.clone(); let gate = state_gate.clone(); let sample = clock(start);
                     // Codex com terminal adotado: o sidecar é gravado aqui, nunca pela política do Python.
                     let sidecar = adoption.as_ref().filter(|_|kind == "session.patch_meta").map(|adoption|adoption.cell.sidecar().cloned());
-                    // Codex sem terminal que o Rust sobe: o mesmo, com a vida pela chave.
-                    let headless_dir = engine.launch.as_ref().filter(|_|adoption.is_none() && target.provider == "codex"
-                        && matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano")).map(|launch|launch.sidecar_dir.clone());
+                    // Sem terminal (Codex que o Rust sobe, Claude): o mesmo, com a vida pela chave e sob a trava
+                    // que o Python também segura ao gravar o arquivo.
+                    let headless_dir = matches!(kind.as_str(),"session.patch_meta" | "session.clear_cano").then(|| match target.provider.as_str() {
+                        "claude" => Some(super::lifecycle::claude_sidecar_dir()),
+                        _ => engine.launch.as_ref().filter(|_|adoption.is_none()).map(|launch|Ok(launch.sidecar_dir.clone())),
+                    }).flatten();
                     // Estes serviços não escrevem na CLI (formatar status, carimbo, sidecar, log): repetir é
                     // inofensivo, então não passam pelo diário. Quatro gravações por chamada, a cada mudança de
                     // estado, eram a maior parte do disco gasto por mensagem.
@@ -1064,10 +995,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                     .map_err(|_|failure("sidecar_job"))?;
                             }
                             if let Some(dir) = headless_dir {
-                                let (name,key,clear) = (target.name.clone(),target.key.clone(),kind == "session.clear_cano");
-                                let saved = if clear { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
-                                return tokio::task::spawn_blocking(move || if clear { super::codex_sidecar::clear_cano(&dir,&name,&key,&payload) }
-                                    else { super::codex_sidecar::patch_headless(&dir,&name,&key,&payload,&saved) }).await
+                                let saved = if kind == "session.clear_cano" { Value::Null } else { queue.snapshot().await.map_err(io_failure)?.runtime_state["view"].clone() };
+                                let (dir,provider,name,key,service) = (dir?,target.provider.clone(),target.name.clone(),target.key.clone(),kind.clone());
+                                return tokio::task::spawn_blocking(move||super::gateway::sidecar_service(&provider,&dir,&name,&key,&service,&payload,&saved)).await
                                     .map_err(|_|failure("sidecar_job"))?;
                             }
                             if local_policy::is_local(&kind) {
@@ -1078,10 +1008,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 };
                                 return run_local(kind.clone(),payload,&target,quota).await;
                             }
-                            match policy {
-                                Some(policy) => policy.run(&target,&kind,&request_id,payload,&phase_id).await,
-                                None => Err(failure("policy_unavailable")),
-                            }
+                            let _ = (payload,&request_id,&phase_id);
+                            Err(RuntimeError::new("policy_unknown","serviço do ator sem atendimento no Rust"))
                         }.await;
                         Job::Policy { request_id,kind,phase_id,conversation,result }
                     });
@@ -1672,22 +1600,23 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Ok(payload) => {
                                 for (key,value) in payload.as_object().cloned().unwrap_or_default() { pending.command.payload[key] = value; }
                                 if target.provider == "claude" && pending.command.payload["native_candidate"] == true {
-                                    // O recado nativo sai pelo Python, fora de `attempts`: a partir daqui ele pode ter
+                                    // O recado nativo sai pelo socket, fora de `attempts`: a partir daqui ele pode ter
                                     // sido escrito, e nem o prazo nem uma falha podem devolvê-lo à fila.
                                     native.insert(id.clone());
-                                    let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone().unwrap();
+                                    let queue = queue.clone(); let target = target.clone();
                                     let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
                                     let lifecycle = engine.lifecycle.clone();
                                     jobs.spawn(async move {
                                         let result = async {
                                             // Uma fase por tentativa: a adiada volta pelo drain e não pode reaproveitar os recibos da anterior.
                                             let phase = format!("{id}:native_message:{}",unique());
-                                            // A classe do recado vai pronta: a memória de modo é do Rust, e o Python não volta a ele.
+                                            // A classe do recado sai da memória de modo do Rust.
                                             let text = command.payload["text"].as_str().unwrap_or("");
                                             let sender = crate::terminal_input::message_prefix(text).map(|(sender,_)|sender).filter(|_|!text.starts_with("[painel:"));
                                             // Leitura que falha sobe com o código; sem registro ligado (só fora do servidor) vai sem
-                                            // classe, e o Python recusa com `ModeClassMissing` em vez de recalcular.
-                                            let class = match lifecycle.as_ref().and_then(std::sync::Weak::upgrade) {
+                                            // classe, e o envio recusa com `native_mode_class_missing` em vez de adivinhar.
+                                            let registry = lifecycle.as_ref().and_then(std::sync::Weak::upgrade);
+                                            let class = match &registry {
                                                 Some(registry)=>Some(registry.message_class(sender,&target.name).await?),
                                                 None=>None,
                                             };
@@ -1698,7 +1627,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                             queue.exec(target.generation,&format!("native-cursor:{phase}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
-                                            let result = policy.run(&target,"native_message",&RequestId::String(id.clone()),payload,&phase).await?;
+                                            let route = registry.as_ref().map(|registry|registry.native_route(&target.key,&id));
+                                            let result = super::native_message::send(&target.metadata,text,class,route,&crate::terminal_input::ProcessIo::default()).await?;
                                             let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
                                             let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };
                                             queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase.clone(),status,result:result.clone() }).await.map_err(io_failure)?;
@@ -2147,14 +2077,14 @@ async fn relaunch(policy:PolicyClient,mut target:RuntimeTarget,sidecar_dir:std::
     }
     if let Some((queue,sample,gate,version,view)) = saved { save_view(&queue,target.generation,sample,&gate,version,&view,true).await.map_err(|error|(error,Value::Null))?; }
     if !patch.is_null() {
-        let written = super::gateway::launch_policy(&policy,&target,&sidecar_dir,"session.patch_meta",patch.clone()).await.map_err(|error|(error,Value::Null))?;
+        let written = super::gateway::launch_sidecar(&target,&sidecar_dir,"session.patch_meta",patch.clone()).await.map_err(|error|(error,Value::Null))?;
         if written["updated"] != true { return Err((RuntimeError::new("session_patch_stale","o arquivo da sessão não aceitou o modo novo"),Value::Null)); }
     }
     let spawned = super::gateway::launch_if_needed(&policy,&mut target,&sidecar_dir).await.map_err(|error|(error,patch.clone()))?;
     match super::cano::connect(&target.binding).await {
         Ok(connection)=>Ok(Relaunched { target,spawned:spawned.is_some(),connection,patch }),
         Err(error)=>{
-            if let Some(cano) = spawned { super::gateway::discard(&policy,&target,&cano,&sidecar_dir).await; }
+            if let Some(cano) = spawned { super::gateway::discard(&target,&cano,&sidecar_dir).await; }
             Err((error,patch))
         }
     }
@@ -2724,65 +2654,6 @@ mod tests {
         assert_eq!(drained_count(&reply("async-answer:1:3",Disposition::Accepted)),1);
         assert_eq!(drained_count(&reply("entry",Disposition::Unknown)),0);
         assert_eq!(drained_count(&reply("async-answer:1:3",Disposition::Deferred)),0);
-    }
-
-    /// Python falso da política: cada conexão leva a próxima resposta do roteiro (`None` derruba a conexão).
-    async fn scripted_policy(script:Vec<Option<(u16,Value)>>) -> (std::net::SocketAddr,Arc<AtomicU64>) {
-        use tokio::io::{AsyncBufReadExt,AsyncReadExt,AsyncWriteExt,BufReader};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let calls = Arc::new(AtomicU64::new(0));
-        let counter = calls.clone();
-        tokio::spawn(async move {
-            for reply in script {
-                let Ok((stream,_)) = listener.accept().await else { return };
-                counter.fetch_add(1,Ordering::SeqCst);
-                let mut reader = BufReader::new(stream);
-                let mut length = 0usize;
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" { break; }
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
-                }
-                let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                let Some((status,data)) = reply else { continue };
-                let data = data.to_string();
-                let response = format!("HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{data}",data.len());
-                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        (address,calls)
-    }
-
-    async fn call(script:Vec<Option<(u16,Value)>>,kind:&str) -> (Result<Value,RuntimeError>,u64) {
-        let (address,calls) = scripted_policy(script).await;
-        let client = PolicyClient::new(address,"secret".into(),"instance".into()).with_ready_retry(Duration::from_millis(10),Duration::from_secs(5));
-        let result = client.run_for("key",1,kind,&RequestId::String("phase".into()),json!({"model":"m"}),"phase").await;
-        (result,calls.load(Ordering::SeqCst))
-    }
-
-    #[tokio::test]
-    async fn python_not_ready_is_retried_and_a_definite_refusal_fails_at_once() {
-        let ok = Some((200,json!({"ok":true,"data":{"updated":true}})));
-        // Sem registro da chave ou sem coordenador (503) e conexão caída: o arquivo da sessão espera o Python.
-        let (result,calls) = call(vec![Some((503,json!({}))),Some((503,json!({}))),None,ok.clone()],"session.patch_meta").await;
-        assert_eq!(result.unwrap()["updated"],true);
-        assert_eq!(calls,4);
-        // Pedido torto (400): repetir não muda nada.
-        let (result,calls) = call(vec![Some((400,json!({}))),ok.clone()],"session.patch_meta").await;
-        assert_eq!(result.unwrap_err().code,"policy_refused");
-        assert_eq!(calls,1);
-        // O serviço respondeu e recusou: definitivo, uma chamada só.
-        let (result,calls) = call(vec![Some((200,json!({"ok":false,"error_type":"ValueError"}))),ok.clone()],"session.patch_meta").await;
-        assert_eq!(result.unwrap_err().code,"policy_failed");
-        assert_eq!(calls,1);
-        let (result,calls) = call(vec![Some((500,json!({}))),ok.clone()],"session.patch_meta").await;
-        assert_eq!(result.unwrap_err().code,"policy_refused");
-        assert_eq!(calls,1);
-        // O recado nativo escreve na conversa: não repete nem com o Python subindo.
-        let (result,calls) = call(vec![Some((503,json!({}))),ok],"native_message").await;
-        assert_eq!(result.unwrap_err().code,"policy_refused");
-        assert_eq!(calls,1);
     }
 
     #[tokio::test]

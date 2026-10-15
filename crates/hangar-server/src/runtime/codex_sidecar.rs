@@ -52,7 +52,7 @@ pub fn read(path:&Path) -> io::Result<Option<Meta>> {
     }
 }
 
-fn write(path:&Path,meta:&Meta) -> io::Result<()> { super::queue::atomic_write(path,&serde_json::to_vec(meta)?) }
+pub(super) fn write(path:&Path,meta:&Meta) -> io::Result<()> { super::queue::atomic_write(path,&serde_json::to_vec(meta)?) }
 
 fn text<'a>(meta:&'a Meta,field:&str) -> Option<&'a str> { meta.get(field).and_then(Value::as_str).filter(|s|!s.is_empty()) }
 
@@ -154,9 +154,12 @@ pub fn patch(life:&SidecarLife,payload:&Value,view:&Value) -> Result<Value,Runti
     }).map_err(io_error)?
 }
 
-fn catalog_fields(payload:&Value) -> Result<&Meta,RuntimeError> {
+fn catalog_fields(payload:&Value) -> Result<&Meta,RuntimeError> { catalog_fields_in(payload,CATALOG) }
+
+/// O patch como objeto só com campos de `catalog`; o resto é a recusa `session_patch_field`.
+pub(super) fn catalog_fields_in<'a>(payload:&'a Value,catalog:&[&str]) -> Result<&'a Meta,RuntimeError> {
     let fields = payload.as_object().ok_or_else(||RuntimeError::new("session_patch_field","patch do sidecar não é objeto"))?;
-    if fields.keys().any(|key|!CATALOG.contains(&key.as_str())) {
+    if fields.keys().any(|key|!catalog.contains(&key.as_str())) {
         return Err(RuntimeError::new("session_patch_field","campo fora do catálogo do sidecar"));
     }
     Ok(fields)
@@ -191,7 +194,10 @@ pub fn patch_headless(dir:&Path,name:&str,key:&str,payload:&Value,view:&Value) -
 
 /// O `session.clear_cano` do Python: tira o `cano` só se ele ainda é o processo `pid` desta chave;
 /// arquivo apagado fica apagado.
-pub fn clear_cano(dir:&Path,name:&str,key:&str,payload:&Value) -> Result<Value,RuntimeError> {
+pub fn clear_cano(dir:&Path,name:&str,key:&str,payload:&Value) -> Result<Value,RuntimeError> { clear_cano_with(dir,name,key,payload,io_error) }
+
+/// O mesmo para o sidecar do Claude, que só muda o código da falha de disco.
+pub(super) fn clear_cano_with(dir:&Path,name:&str,key:&str,payload:&Value,io_error:fn(io::Error) -> RuntimeError) -> Result<Value,RuntimeError> {
     let pid = payload.as_object().filter(|fields|fields.len() == 1).and_then(|fields|fields.get("pid")).and_then(Value::as_i64)
         .ok_or_else(||RuntimeError::new("session_clear_cano_pid","pid do cano inválido"))?;
     locked(dir,name,|path| {

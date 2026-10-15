@@ -171,6 +171,29 @@ def test_native_receipt_updates_registered_operation_only(tmp_path, monkeypatch)
         owner.close_python_leases()
 
 
+
+def test_native_receipt_with_rust_up_leaves_the_state_file_alone(tmp_path, monkeypatch):
+    # Com o Rust de pé o recibo volta à caixa dele: o Python não lê o arquivo que o Rust troca.
+    import uuid
+    from pathlib import Path
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    owner = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    slot = owner.register(Binding("session", "key", "claude", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    slot.store.exec(1, "prepare", {"epoch_s":1, "monotonic_s":1},
+        {"kind":"prepare", "id":"entry", "entry_id":None, "payload":{"kind":"input"}})
+    opened = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda path: opened.append(path) or real(path))
+    owner.mode = "rust"
+    mid = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:key:entry"))
+    try:
+        assert asyncio.run(owner.native_receipt(mid, "rejected")) is False
+        assert tmp_path / "state" not in opened
+    finally:
+        owner.close_python_leases()
+
 # --- Sessão sem terminal nasce direto no Rust (dono único, Task 2) ---
 
 SID = "11111111-1111-1111-1111-111111111111"

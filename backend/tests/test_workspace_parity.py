@@ -53,6 +53,19 @@ def test_git_read_contract(repo, operation, args):
     assert rust(operation, cwd=repo, **args) == {"ok":True, "result":json.loads(json.dumps(expected))}
 
 
+def test_list_branches_contract_with_sibling_worktree(repo):
+    sibling = repo.parent / f"{repo.name}-sibling"
+    added = git_ops._run(str(repo), "worktree", "add", "-b", "feat", str(sibling))
+    assert added.returncode == 0, added.stderr
+    for cwd, occupied in (
+        (repo, {"feat": {"path": sibling.resolve().as_posix(), "main": False}}),
+        (sibling, {"main": {"path": repo.resolve().as_posix(), "main": True}}),
+    ):
+        expected = git_ops.list_branches(str(cwd))
+        assert expected["elsewhere"] == occupied
+        assert rust("list_branches", cwd=cwd) == {"ok": True, "result": expected}
+
+
 @pytest.mark.parametrize("operation,args", [
     ("list_dir", {"path":None,"so_modificados":False}),
     ("list_dir", {"path":"sub","so_modificados":True}),

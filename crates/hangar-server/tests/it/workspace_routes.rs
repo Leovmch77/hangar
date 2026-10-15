@@ -61,6 +61,58 @@ async fn owner_reads_and_saves_without_using_python_io() {
     );
 }
 
+fn reader_asset_url(endpoint: &str, path: &str, root: bool) -> reqwest::Url {
+    let mut url = reqwest::Url::parse(endpoint).unwrap();
+    url.query_pairs_mut().append_pair("path", path);
+    if root { url.query_pairs_mut().append_pair("root", "1"); }
+    url
+}
+
+#[tokio::test]
+async fn reader_asset_without_its_own_citation_uses_only_the_authorized_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    std::fs::create_dir_all(root.join("docs/assets")).unwrap();
+    image::RgbaImage::new(2, 2).save(root.join("docs/assets/example.png")).unwrap();
+    let image = std::fs::read(root.join("docs/assets/example.png")).unwrap();
+    std::fs::write(root.join("fixture.jsonl"), json!({"cwd":root,"text":"docs/guide.md"}).to_string()).unwrap();
+    std::fs::write(dir.path().join("outside.png"), &image).unwrap();
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git/private.png"), &image).unwrap();
+    let (addr, hits) = fixture(&root).await;
+    let c = client();
+    let endpoint = format!("http://{addr}/api/sessions/fixture/file");
+    assert_eq!(c.get(reader_asset_url(&endpoint, "docs/assets/example.png", false)).bearer_auth(OWNER).send().await.unwrap().status(), 403);
+    for path in ["docs/assets/example.png".to_owned(), root.join("docs/assets/example.png").to_string_lossy().into_owned()] {
+        let reply = c.get(reader_asset_url(&endpoint, &path, true)).bearer_auth(OWNER).send().await.unwrap();
+        assert_eq!(reply.status(), 200);
+        assert_eq!(reply.headers()["content-type"], "image/png");
+        assert_eq!(reply.bytes().await.unwrap().as_ref(), image.as_slice());
+    }
+    for (path, expected) in [("../outside.png", 400), (".git/private.png", 403)] {
+        assert_eq!(c.get(reader_asset_url(&endpoint, path, true)).bearer_auth(OWNER).send().await.unwrap().status(), expected);
+    }
+    let outside = dir.path().join("outside.png").to_string_lossy().into_owned();
+    assert_eq!(c.get(reader_asset_url(&endpoint, &outside, true)).bearer_auth(OWNER).send().await.unwrap().status(), 400);
+    assert_eq!(hits.load(Ordering::Relaxed), 0);
+    let refused = c.get(reader_asset_url(&endpoint, "docs/assets/example.png", true)).bearer_auth("convidado").send().await.unwrap();
+    assert_eq!(refused.text().await.unwrap(), "python-reserva");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reader_root_asset_cannot_follow_a_symlink_outside_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(dir.path().join("outside.png"), b"private-fixture").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("outside.png"), root.join("alias.png")).unwrap();
+    let (addr, _) = fixture(&root).await;
+    let response = client().get(reader_asset_url(&format!("http://{addr}/api/sessions/fixture/file"), "alias.png", true))
+        .bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(response.status(), 400);
+}
+
 #[tokio::test]
 async fn private_route_is_unreachable_on_the_public_listener() {
     let dir = tempfile::tempdir().unwrap();

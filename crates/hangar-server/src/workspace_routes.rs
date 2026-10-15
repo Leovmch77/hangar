@@ -100,6 +100,15 @@ async fn execute(st: &Arc<AppState>, op: Operation) -> hangar_workspace::Result<
         Err(_) => Err(hangar_workspace::unavailable("pânico na leitura")),
     }
 }
+async fn resolve_root_file(st: &AppState, cwd: &str, path: &str) -> hangar_workspace::Result<hangar_workspace::files::OpenedRootFile> {
+    let permit = st.workspace_read_slots.clone().try_acquire_owned().map_err(|_| hangar_workspace::busy())?;
+    let (cwd, path) = (cwd.to_owned(), path.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hangar_workspace::files::open_root_file(Path::new(&cwd), &path)
+    }).await.map_err(|_| hangar_workspace::unavailable("pânico na leitura"))?
+}
+
 pub async fn private(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -380,6 +389,19 @@ async fn run(
     };
     if method == Method::POST && !body_valid(tail, &payload) {
         return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
+    }
+    if tail == "file" && bool_param(params.get("root"), false) == Some(true) {
+        let Some(path) = params.get("path") else {
+            return Err(hangar_workspace::file_error(400, "erro_arq_caminho_invalido", "caminho ausente"));
+        };
+        let width = match crate::thumbnail::parse_width(params.get("w")) {
+            Ok(width) => width,
+            Err(response) => return Ok(response),
+        };
+        let cwd = ctx["session"]["cwd"].as_str().ok_or_else(|| hangar_workspace::unavailable("raiz indisponível"))?;
+        let opened = resolve_root_file(st, cwd, path).await?;
+        return Ok(crate::thumbnail::serve(tokio::fs::File::from_std(opened.file), &opened.path, &parts.headers,
+            bool_param(params.get("download"), false).unwrap_or(false), None, width).await);
     }
     let Some(op) = map_operation(tail, &method, &params, &payload, &ctx) else {
         return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
