@@ -52,7 +52,7 @@ beforeEach(() => {
     elevenlabs_api_key: '', tts_local_cmd: '', tts_max_chars: 1000,
   }).map(([key, valor]) => [key, { valor, origem: 'app', definido: key === 'llm_api_key' }]));
   calls.get.mockImplementation(async () => ({ campos: fields }));
-  calls.patch.mockImplementation(async (_server, payload: Record<string, unknown>) => {
+  calls.patch.mockImplementation(async (_server, payload: Record<string, CampoConfig['valor']>) => {
     fields = { ...fields, ...Object.fromEntries(Object.entries(payload).map(([key, valor]) => [key, { ...fields[key], valor }])) };
     return { campos: fields };
   });

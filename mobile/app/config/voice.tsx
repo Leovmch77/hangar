@@ -163,7 +163,7 @@ function RecentMessagesRow({ cfg }: { cfg: ServerConfig }) {
     <RowShell icon="MessageSquare" title={m.native_voice_recent_messages()}
       chips={<ScopeChips cfg={cfg} k={key} />} help={m.native_voice_recent_messages_help()}
       right={<Switch accessibilityLabel={m.native_voice_recent_messages()} value={cfg.current(key) === true}
-        disabled={!(key in cfg.fields)} onValueChange={(on) => cfg.stage(key, on)} trackColor={{ true: c.accent }} />} />
+        disabled={!(key in cfg.fields)} onValueChange={(on) => { cfg.stage(key, on); }} trackColor={{ true: c.accent }} />} />
   );
 }
 

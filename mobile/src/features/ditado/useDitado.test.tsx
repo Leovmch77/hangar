@@ -8,7 +8,7 @@ import type { RecordingStatus } from 'expo-audio';
 import { configureDiag, type EventoDiag } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
-const recordDiagnostic = vi.fn<(event: EventoDiag) => void>();
+const recordDiagnostic = vi.fn<(event: EventoDiag, destination?: string) => void>();
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -454,7 +454,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     expect(onErroParada).toHaveBeenCalledTimes(1);
     expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
     expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
-      codigo: 'recording_error', detalhe: 'stop nativo falhou' });
+      codigo: 'recording_error', detalhe: 'stop nativo falhou' }, undefined);
     expect(fetch).not.toHaveBeenCalled();
     expect(removeStatusListener).toHaveBeenCalledTimes(1);
     expect(fakeRec.release).toHaveBeenCalledTimes(1);
@@ -472,7 +472,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     expect(onErroParada).toHaveBeenCalledTimes(1);
     expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
     expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
-      codigo: 'recording_error', detalhe: 'microfone interrompido' });
+      codigo: 'recording_error', detalhe: 'microfone interrompido' }, undefined);
     expect(onFim).not.toHaveBeenCalled();
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     expect(removeStatusListener).toHaveBeenCalledTimes(1);
@@ -517,7 +517,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     expect(onErroParada).toHaveBeenCalledTimes(1);
     expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
     expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
-      codigo: 'recording_error', detalhe: 'erro nativo de preparação' });
+      codigo: 'recording_error', detalhe: 'erro nativo de preparação' }, undefined);
     expect(onFim).not.toHaveBeenCalled();
     expect(fakeRec.record).not.toHaveBeenCalled();
     expect(fakeRec.release).toHaveBeenCalledTimes(1);
