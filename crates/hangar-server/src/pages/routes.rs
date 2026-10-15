@@ -246,7 +246,9 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     path: Result<Path<(String, String)>, axum::extract::rejection::PathRejection>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
     let (name, id) = match path { Ok(Path(p)) if owner => p, _ => return pass(&st, req, &fwd).await };
-    let (headers, raw) = (req.headers().clone(), crate::auth::query_param(req.uri().query(), "raw").is_some());
+    let query = req.uri().query();
+    let (raw, source) = (crate::auth::query_param(query, "raw").is_some(), crate::auth::query_param(query, "source").is_some());
+    let headers = req.headers().clone();
     drop(req);
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let pages = st.pages.clone();
@@ -263,7 +265,8 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let Some(found) = found else { return expired(&headers) };
     let Some((html, meta)) = found else { return no_html(&headers) };
     let mut r = if raw {
-        let mut r = Response::new(Body::from(html));
+        // `source`: a página como o agente a escreveu (Fonte, copiar, salvar), sem o tema e a ponte injetados.
+        let mut r = Response::new(Body::from(if source { theme::source(&html) } else { html }));
         let h = r.headers_mut();
         h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
         h.insert("content-security-policy", "sandbox".parse().unwrap());

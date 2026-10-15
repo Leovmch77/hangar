@@ -361,7 +361,7 @@ impl Engine {
 
     // O painel é janela filha e recebe a entrada direto; só a página da conversa, pintada pelo app, passa por aqui.
     #[cfg(target_os = "windows")]
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) { self.mouse(kind, MouseButton::Left, at, clicks, modifiers) }
     #[cfg(target_os = "windows")]
     pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
     #[cfg(target_os = "windows")]
@@ -399,7 +399,7 @@ impl Engine {
     #[cfg(target_os = "windows")]
     pub fn texture_replaced(&self) -> bool { self.page.as_ref().is_some_and(|page| page.frames.commit()) }
     #[cfg(not(target_os = "windows"))]
-    pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}
+    pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize, _modifiers: &Modifiers) {}
     #[cfg(not(target_os = "windows"))]
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
     #[cfg(not(target_os = "windows"))]

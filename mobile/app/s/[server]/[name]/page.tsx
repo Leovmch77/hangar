@@ -1,9 +1,12 @@
-import { useCallback } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { useCallback, useState } from 'react';
+import { Pressable, ScrollView, Share, Text, View } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
-import { parseHostMessage, type HtmlPageRef } from '@hangar/core';
+import { pageFileName, parseHostMessage, type HtmlPageRef } from '@hangar/core';
+import { canShareFile, shareTextFile } from '../../../../src/features/attachments/mediaCache';
+import { toast } from '../../../../src/ui/Toast';
 import { Screen } from '../../../../src/ui/Screen';
 import { Icon } from '../../../../src/ui/Icon';
 import { onlyInitial, usePageDocument, usePageWebView } from '../../../../src/chat/tools/pageDocument';
@@ -27,7 +30,8 @@ export default function PageScreen() {
     : <Shell title="" serverId={serverId} sessionName={sessionName}><Text style={styles.note}>{m.page_error({ title: '' })}</Text></Shell>;
 }
 
-function Shell({ title, serverId, sessionName, children }: { title: string; serverId: string; sessionName: string; children: React.ReactNode }) {
+function Shell({ title, serverId, sessionName, actions, children }:
+  { title: string; serverId: string; sessionName: string; actions?: React.ReactNode; children: React.ReactNode }) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const back = () => (router.canGoBack() ? router.back() : router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never));
@@ -38,6 +42,7 @@ function Shell({ title, serverId, sessionName, children }: { title: string; serv
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
         </Pressable>
         <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
+        {actions}
       </View>
       <View style={styles.flex}>{children}</View>
     </Screen>
@@ -45,8 +50,58 @@ function Shell({ title, serverId, sessionName, children }: { title: string; serv
 }
 
 function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId: string; sessionName: string }) {
-  const { state, doc, load, params } = usePageDocument(page, sessionName, serverId);
+  const { theme } = useUnistyles();
+  const { state, doc, load, params, loadSource } = usePageDocument(page, sessionName, serverId);
   const { web, applyTheme, touched, openLink } = usePageWebView(params, page.ownTheme);
+  // Fonte: o código da página, para ler, copiar e compartilhar (no iOS como arquivo .html, que a folha salva em Arquivos).
+  const [showingSource, setShowingSource] = useState(false);
+  const [source, setSource] = useState<string | null>(null);
+  const [sourceFailed, setSourceFailed] = useState(false);
+  const fetchSource = useCallback(async () => {
+    setSourceFailed(false);
+    try { setSource(await loadSource()); } catch { setSourceFailed(true); }
+  }, [loadSource]);
+  const toggleSource = () => {
+    setShowingSource((v) => !v);
+    if (!showingSource && source == null) void fetchSource();
+  };
+  const copy = async () => {
+    if (source == null) return;
+    try {
+      await Clipboard.setStringAsync(source);
+      toast.ok(m.toast_copiado());
+    } catch (e) {
+      toast.erro(e instanceof Error ? e.message : String(e));
+    }
+  };
+  // Cancelar resolve com `dismissedAction`; rejeição aqui é falha de verdade.
+  const share = async () => {
+    if (source == null) return;
+    try {
+      if (canShareFile) await shareTextFile(source, pageFileName(page.title));
+      else await Share.share({ title: pageFileName(page.title), message: source });
+    } catch (e) {
+      toast.erro(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const c = theme.tokens.text.secondary;
+  const actions = state === 'ready' ? (
+    <View style={styles.actions}>
+      <Pressable onPress={toggleSource} hitSlop={8} style={styles.action} accessibilityRole="button" accessibilityState={{ selected: showingSource }}>
+        <Text style={[styles.actionText, { color: theme.tokens.accent.base }]}>{showingSource ? m.page_view_page() : m.page_view_source()}</Text>
+      </Pressable>
+      {source != null && (
+        <>
+          <Pressable onPress={() => void copy()} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={m.page_copy_source()}>
+            <Icon name="Copy" size={18} color={c} />
+          </Pressable>
+          <Pressable onPress={() => void share()} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={m.page_share_file()}>
+            <Icon name="Share" size={18} color={c} />
+          </Pressable>
+        </>
+      )}
+    </View>
+  ) : undefined;
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     const msg = parseHostMessage(e.nativeEvent.data);
@@ -68,8 +123,27 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
       </View>
     );
   } else {
+    const code = showingSource && (
+      sourceFailed ? (
+        <View style={styles.center} accessibilityRole="alert">
+          <Text style={styles.note} selectable>{m.page_source_error()}</Text>
+          <Pressable onPress={() => void fetchSource()} style={styles.retry} accessibilityRole="button" hitSlop={8}>
+            <Text style={styles.retryText}>{m.page_retry()}</Text>
+          </Pressable>
+        </View>
+      ) : source == null ? (
+        <View style={styles.center} accessibilityRole="progressbar"><Text style={styles.note}>{m.page_loading({ title: page.title })}</Text></View>
+      ) : (
+        <ScrollView style={styles.flex} contentContainerStyle={styles.codeBox}>
+          <Text style={[styles.code, { color: theme.tokens.text.primary }]} selectable>{source}</Text>
+        </ScrollView>
+      )
+    );
     body = (
-      <View style={styles.flex} onTouchStart={touched}>
+      // A página fica montada atrás da Fonte: voltar a ela não recarrega.
+      <View style={styles.flex}>
+      {code}
+      <View style={[styles.flex, showingSource && styles.hidden]} onTouchStart={touched}>
         <WebView
           ref={web}
           source={{ html: doc }}
@@ -88,9 +162,10 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
           automaticallyAdjustContentInsets={false}
         />
       </View>
+      </View>
     );
   }
-  return <Shell title={page.title} serverId={serverId} sessionName={sessionName}>{body}</Shell>;
+  return <Shell title={page.title} serverId={serverId} sessionName={sessionName} actions={actions}>{body}</Shell>;
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -106,4 +181,11 @@ const styles = StyleSheet.create((theme) => ({
   note: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, textAlign: 'center' },
   retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[2] },
   retryText: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.accent.base },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[2] },
+  actionText: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  icon: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
+  hidden: { display: 'none' },
+  codeBox: { padding: theme.base.space[3] },
+  code: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, lineHeight: theme.base.text.xs * 1.5 },
 }));

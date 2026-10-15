@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 mod activity;
 mod backdrop;
 mod baton;
+mod links;
 mod browser;
 mod accounts;
 pub(crate) mod chrome;
@@ -750,6 +751,7 @@ fn show_system_notification(title: &str, body: &str) {
 
 impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, crash: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.set_global(links::Owner(cx.entity().downgrade()));
         if let Some(error) = crash {
             cx.defer_in(window, move |_, window, cx| {
                 let desc = tr("crash_desc").replace("{error}", &error);
@@ -4803,8 +4805,9 @@ fn with_copy_menu(row: Stateful<Div>, id: String, view: WeakEntity<Hangar>) -> A
     }).into_any_element()
 }
 
-fn open_web_link(url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App) {
-    if url.starts_with("https://") || url.starts_with("http://") { cx.open_url(url); }
+fn open_web_link(url: &SharedString, event: &ClickEvent, window: &mut Window, cx: &mut App) {
+    let modifiers = event.modifiers();
+    links::open_link(url, modifiers.control || modifiers.platform, window, cx);
 }
 
 fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::text::MarkdownExtensions {

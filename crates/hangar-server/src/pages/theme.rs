@@ -21,8 +21,9 @@ const h=Math.ceil(d.scrollHeight>d.clientHeight?d.scrollHeight:Math.max(d.getBou
 if(h!==last){last=h;send({jsonrpc:"2.0",method:"ui/notifications/size-changed",params:{height:h}})}};
 const watch=()=>{const r=new ResizeObserver(size);r.observe(document.documentElement);if(document.body)r.observe(document.body);size()};
 document.readyState==="loading"?document.addEventListener("DOMContentLoaded",watch):watch();addEventListener("load",size);
-document.addEventListener("click",e=>{const a=e.target.closest&&e.target.closest("a[href]");if(!a)return;
-const u=a.href;if(!/^https?:/i.test(u))return;e.preventDefault();send({jsonrpc:"2.0",method:"ui/open-link",params:{url:u}})},true);
+document.addEventListener("click",e=>{if(!e.isTrusted)return;const a=e.target.closest&&e.target.closest("a[href]");if(!a)return;
+const u=a.href;if(!/^https?:/i.test(u))return;e.preventDefault();
+send({jsonrpc:"2.0",method:"ui/open-link",params:{url:u,ctrlKey:e.ctrlKey,metaKey:e.metaKey}})},true);
 const apply=p=>{const v=(p&&p.styles&&p.styles.variables)||{};const t=p&&p.theme==="light"?"light":"dark";
 const css=Object.entries(v).filter(([k])=>/^--[a-z0-9-]+$/.test(k)).map(([k,x])=>k+":"+String(x).replace(/[;{}<]/g,"")).join(";");
 const el=document.getElementById("hangar-theme");if(el)el.textContent=":root{color-scheme:"+t+";"+css+"}"+el.dataset.base};
@@ -53,6 +54,14 @@ fn inert_ranges(html: &str) -> Vec<(usize, usize)> {
 fn first_live(re: &Regex, html: &str, inert: &[(usize, usize)]) -> Option<usize> {
     re.find_iter(html).find(|m| !inert.iter().any(|(a, b)| m.start() >= *a && m.start() < *b)).map(|m| m.end())
 }
+
+static INJECTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<style id="hangar-theme"[^>]*>[^<]*</style>|<script id="hangar-host">.*?</script>"#).unwrap()
+});
+
+/// A página como o agente a escreveu: sem o bloco de tema e a ponte que `inject` pôs, para a Fonte, copiar e salvar. O
+/// `<head>` que o `inject` criou para a página que não tinha fica, vazio.
+pub fn source(html: &str) -> String { INJECTED.replacen(html, 2, "").into_owned() }
 
 pub fn inject(html: &str, follow_app_theme: bool) -> String {
     let inert = inert_ranges(html);
@@ -101,6 +110,28 @@ mod tests {
         let out = inject("<!doctype html><p>oi</p>", true);
         assert!(out.starts_with("<!doctype html><head>"));
         assert!(out.ends_with("</head><p>oi</p>"));
+    }
+
+    #[test]
+    fn link_click_says_ctrl_and_cmd_and_ignores_synthetic_clicks() {
+        // Ctrl/Cmd+clique vai ao navegador do sistema, como no chat; `a.click()` da própria página não abre nada.
+        assert!(HOST.contains("ctrlKey:e.ctrlKey,metaKey:e.metaKey") && HOST.contains("if(!e.isTrusted)return;"));
+    }
+
+    #[test]
+    fn source_is_the_page_without_what_the_server_injected() {
+        for original in ["<!doctype html><html><head><title>t</title></head><body><p>oi</p></body></html>",
+            "<html lang=\"pt\"><head></head><body><script>var a='<head>'</script></body></html>"] {
+            assert_eq!(source(&inject(original, true)), original, "{original}");
+            assert_eq!(source(&inject(original, false)), original, "tema próprio: {original}");
+        }
+        for original in ["<p>oi</p>", "<!doctype html><p>oi</p>"] {
+            // Sem `<head>`, o que o `inject` criou fica vazio.
+            assert_eq!(source(&inject(original, true)).replacen("<head></head>", "", 1), original);
+        }
+        // Página gravada por versão anterior do bloco também sai limpa.
+        let old = "<html><head><style id=\"hangar-theme\" data-base=\":root{}\">:root{--a:1}</style><script id=\"hangar-host\">(()=>{})();</script></head><body>x</body></html>";
+        assert_eq!(source(old), "<html><head></head><body>x</body></html>");
     }
 
     #[test]

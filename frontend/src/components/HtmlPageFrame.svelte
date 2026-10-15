@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { baseOf, fileAuthHeader, frameHeight, pageExpandable, pageFetchState, pageUrls, parseHostMessage, reservedHeight,
+  import { baseOf, fetchPageSource, fileAuthHeader, frameHeight, pageExpandable, pageFetchState, pageUrls, parseHostMessage, reservedHeight,
     themedPageDocument, type HtmlPageRef, type PageFetchState } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
   import { desktop } from '../lib/desktop.svelte';
@@ -34,6 +34,11 @@
   });
 
   let seq = 0;
+
+  function loadSource(): Promise<string> {
+    const server = sessionServer();
+    return fetchPageSource(pageUrls(server ? baseOf(server) : getRouteBaseUrl(), sessionName, page.id).source, fileAuthHeader(server));
+  }
 
   async function load() {
     // Resposta de um pedido antigo (nova tentativa no meio) não sobrescreve a do mais novo.
@@ -119,7 +124,7 @@
   {/if}
 </div>
 {#if expanded && fullscreen}
-  <HtmlPageDialog title={page.title} {doc} ownTheme={page.ownTheme} {scheme} onClose={() => (expanded = false)} />
+  <HtmlPageDialog title={page.title} {doc} ownTheme={page.ownTheme} {scheme} onClose={() => (expanded = false)} {loadSource} />
 {/if}
 {/if}
 

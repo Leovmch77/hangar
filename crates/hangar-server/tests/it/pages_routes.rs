@@ -53,6 +53,12 @@ async fn publish_then_get_raw_and_isolated_shell() {
     assert!(raw.headers()["content-type"].to_str().unwrap().starts_with("text/plain"));
     assert!(raw.text().await.unwrap().contains("hangar-theme"));
 
+    // A Fonte: a página como o agente escreveu, sem o tema e a ponte injetados.
+    let source = owner_get(&s, &format!("/api/sessions/s1/pages/{id}?raw=1&source=1")).await;
+    assert_eq!(source.status(), 200);
+    assert_eq!(source.headers()["content-security-policy"], "sandbox");
+    assert_eq!(source.text().await.unwrap().replacen("<head></head>", "", 1), "<p>oi</p>");
+
     let shell = owner_get(&s, &format!("/api/sessions/s1/pages/{id}")).await;
     assert_eq!(shell.status(), 200);
     assert_eq!(shell.headers()["referrer-policy"], "no-referrer");

@@ -1605,7 +1605,8 @@ impl Hangar {
     /// "Abrir no painel" do site da conversa: o mesmo endereço no navegador desta sessão, à frente.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn open_in_browser_panel(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.browser_key() else { return };
+        // Sem sessão com painel o link não se perde: vai ao navegador do sistema.
+        let Some(key) = self.browser_key() else { return cx.open_url(&url) };
         let browser = self.browser_for(key, window, cx);
         browser.update(cx, |panel, cx| panel.go(url, By::User, window, cx));
         self.show_browser_tab(window, cx);

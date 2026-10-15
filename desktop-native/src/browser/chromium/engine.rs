@@ -691,8 +691,8 @@ impl Engine {
         *lock(&self.surface.shown) = None;
     }
 
-    /// `at` relativo à origem da página, em px lógicos. Botão esquerdo, sem modificador.
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+    /// `at` relativo à origem da página, em px lógicos. Botão esquerdo, com os modificadores do clique.
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) { self.mouse(kind, MouseButton::Left, at, clicks, modifiers) }
 
     /// Qualquer botão, com os modificadores. O `clickCount` da soltura repete o do aperto: sem ele o Chromium não
     /// dispara `dblclick`. Arrasto só se acompanha com o esquerdo.
