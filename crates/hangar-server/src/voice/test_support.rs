@@ -16,7 +16,7 @@ pub fn fake_app_server() -> (Spawn, tokio::sync::mpsc::UnboundedReceiver<Value>,
         let w = write.clone();
         tokio::spawn(async move { while let Some(v) = pushed.recv().await { let _ = w.lock().await.write_all(format!("{v}\n").as_bytes()).await; } });
         let mut lines = BufReader::new(read).lines();
-        let mut starts = 0;
+        let (mut starts, mut turns) = (0, 0);
         while let Ok(Some(line)) = lines.next_line().await {
             let msg: Value = serde_json::from_str(&line).unwrap();
             let _ = seen_tx.send(msg.clone());
@@ -40,6 +40,8 @@ pub fn fake_app_server() -> (Spawn, tokio::sync::mpsc::UnboundedReceiver<Value>,
                     let _ = write.lock().await.write_all(format!("{}\n", json!({"id": msg["id"], "error": {"code": -32600, "message": "no active turn"}})).as_bytes()).await;
                     continue;
                 }
+                // Turno que o Hangar abre (resumo de resultado): `turn-s<n>`.
+                Some("turn/start") => { turns += 1; json!({"turn": {"id": format!("turn-s{turns}")}}) }
                 Some(_) => json!({}),
                 None => continue,
             };
@@ -56,6 +58,11 @@ pub fn push_speech(push: &tokio::sync::mpsc::UnboundedSender<Value>, turn: &str,
     let delegation = format!("<realtime_delegation>\n<input>{text}</input>\n<transcript_delta>user: {text}</transcript_delta>\n</realtime_delegation>");
     let _ = push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": turn,
         "item": {"type": "userMessage", "id": format!("item-{turn}-{}", text.len()), "content": [{"type": "text", "text": delegation}]}}}));
+}
+
+/// Pedaço da transcrição da fala do usuário, como a voz manda enquanto ele fala.
+pub fn push_user_audio(push: &tokio::sync::mpsc::UnboundedSender<Value>, text: &str) {
+    let _ = push.send(json!({"method": "thread/realtime/transcript/delta", "params": {"threadId": "t1", "role": "user", "delta": text}}));
 }
 
 /// Chamada de ferramenta do organizador; a resposta aparece no `seen` com o mesmo `id` e `result`.

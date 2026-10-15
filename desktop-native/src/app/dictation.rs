@@ -316,6 +316,8 @@ pub(super) struct Dictation {
     timed_out: bool,
     vad: Vad,
     countdown: Option<Instant>,
+    /// Com a voz ligada o ditado silencia o microfone dela; aqui fica como ele estava, para voltar ao fim do ditado.
+    voice_hold: Option<bool>,
 }
 
 struct SendIntent { owner: Option<SessionOwner>, draft: String, attachments: Vec<String>, steer: bool, recipients: Option<(bool, Vec<String>)> }
@@ -324,6 +326,17 @@ struct SendIntent { owner: Option<SessionOwner>, draft: String, attachments: Vec
 enum SendPreparation { Ready, Stop, Wait }
 
 impl Dictation {
+    /// O ditado começou com a voz ligada: guarda o estado do microfone dela (só o primeiro) e devolve o que aplicar.
+    fn hold_voice(&mut self, muted: bool) -> bool { self.voice_hold.get_or_insert(muted); true }
+    /// Fim do ditado: o estado que o microfone da voz tinha antes, uma vez só.
+    fn release_voice(&mut self) -> Option<bool> { self.voice_hold.take() }
+    /// O painel da voz trocou o mudo para `muted`: devolve o que aplicar na chamada agora.
+    /// O que o painel escolheu durante o ditado (vale no fim); `None` sem ditado segurando a voz.
+    pub(super) fn voice_wanted(&self) -> Option<bool> { self.voice_hold }
+    pub(super) fn voice_choice(&mut self, muted: bool) -> bool {
+        match &mut self.voice_hold { Some(choice) => { *choice = muted; true } None => muted }
+    }
+
     fn clear_config_error(&mut self) {
         if let Some(shown) = self.config_error.take() && self.error.as_ref() == Some(&shown) { self.error = None; }
     }
@@ -580,6 +593,19 @@ impl Hangar {
     fn cancel_dictation(&mut self) {
         self.dictation.cancel();
         self.stop_audio("dictation");
+        self.give_voice_mic_back();
+    }
+
+    /// Um microfone para dois ouvintes: enquanto ele dita, a voz ligada fica surda, como no silenciar do painel dela.
+    fn silence_voice_for_dictation(&mut self) {
+        let Some(call) = &self.voice.call else { return };
+        self.voice.muted = self.dictation.hold_voice(self.voice.muted);
+        call.set_muted(self.voice.muted);
+    }
+
+    fn give_voice_mic_back(&mut self) {
+        let Some(muted) = self.dictation.release_voice() else { return };
+        if let Some(call) = &self.voice.call { self.voice.muted = muted; call.set_muted(muted); }
     }
 
     fn dictation_ready(&self, cx: &App) -> bool {
@@ -705,8 +731,6 @@ impl Hangar {
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Um microfone só: com a voz ligada, o ditado espera.
-        if self.voice.call.is_some() { return; }
         self.cancel_dictation_countdown(cx);
         if self.dictation.request.is_some() { return; }
         if self.dictation.recorder.is_some() {
@@ -727,6 +751,7 @@ impl Hangar {
         self.dictation.snapshot_style=self.dictation.style(self.connection);
         match Recorder::start() {
             Ok(recorder) => {
+                self.silence_voice_for_dictation();
                 self.dictation.owner = self.dictation_owner(cx);
                 self.dictation.target = self.open_dictation_target();
                 self.dictation.hands_free = appearance::get().hands_free;
@@ -825,6 +850,7 @@ impl Hangar {
 
     fn stop_dictation(&mut self, silence: bool, timed_out: bool, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
+        self.give_voice_mic_back();
         let Some((api, session)) = self.dictation_request(cx) else { self.cancel_dictation(); return; };
         self.dictation.auto_send = silence && self.dictation.hands_free;
         self.dictation.timed_out = timed_out;
@@ -1079,11 +1105,10 @@ impl Hangar {
             Button::new("dictation-toggle").ghost().size_7().rounded_md()
                 .child(div().size_3().rounded_sm().bg(theme::danger()))
         } else { chrome::icon_button("dictation-toggle", IconName::Mic, label.clone(), cx) };
-        let voice = self.voice.call.is_some();
         let mic = mic.accessibility_label(label.clone())
-            .disabled(voice || in_flight || (!recording && (!readable || !self.dictation_ready(cx))))
+            .disabled(in_flight || (!recording && (!readable || !self.dictation_ready(cx))))
             .loading(transcribing)
-            .tooltip(if voice { tr("voice_dictation_blocked") } else { format!("{label} · {}", tr("dictation_shortcut")) })
+            .tooltip(format!("{label} · {}", tr("dictation_shortcut")))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
         let owner = here && self.dictation.owner.is_some();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
@@ -1224,6 +1249,28 @@ fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> S
 
 #[cfg(test)]
 mod tests {
+    /// Ditado com a voz ligada: a voz fica surda enquanto ele dita e volta como estava, inclusive se já estava silenciada.
+    #[test]
+    fn dictation_silences_the_live_voice_and_gives_its_mic_back() {
+        let mut dictation = super::Dictation::default();
+        assert!(dictation.hold_voice(false), "ditando, a voz não ouve");
+        assert!(dictation.hold_voice(true), "segundo início não troca o estado guardado");
+        assert_eq!(dictation.release_voice(), Some(false), "volta a ouvir");
+        assert_eq!(dictation.release_voice(), None, "uma vez só");
+        dictation.hold_voice(true);
+        assert_eq!(dictation.release_voice(), Some(true), "silenciada antes, segue silenciada");
+    }
+
+    /// Desligar o mudo no painel durante o ditado não reabre o microfone da chamada: a escolha fica para o fim.
+    #[test]
+    fn panel_unmute_during_dictation_waits_for_the_end() {
+        let mut dictation = super::Dictation::default();
+        assert!(!dictation.voice_choice(false), "sem ditado, vale o que o painel pede");
+        dictation.hold_voice(true);
+        assert!(dictation.voice_choice(false), "ditando, a chamada segue surda");
+        assert_eq!(dictation.release_voice(), Some(false), "no fim vale a última escolha do painel");
+    }
+
     #[test]
     fn leaving_and_returning_cannot_restore_pending_send() {
         let mut dictation = super::Dictation::default();

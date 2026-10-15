@@ -85,7 +85,9 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
     /// Quanto um comando do organizador pode rodar antes de o turno ser interrompido (`COMMAND_LIMIT` em produção).
     pub command_limit: Duration,
     /// Entrada do MCP `hangar` com a identidade desta chamada; `None` deixa o MCP desligado.
-    pub hangar_mcp: Option<Value> }
+    pub hangar_mcp: Option<Value>,
+    /// Silêncio contínuo que encerra a fala dele para os resultados das sessões (`RESULT_SILENCE` em produção).
+    pub result_silence: Duration }
 
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
@@ -233,10 +235,15 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let memory_file = super::memory::memory_path(&options.voice_dir);
     // Ilegível: abre sem memória e sem convite de perfil; a tela mostra o erro. Vazia (sem arquivo ou sem entrada): a voz
     // convida ao conectar, porque o organizador só fala depois de a pessoa falar.
-    let (note, onboarding) = match super::memory::load(&memory_file) {
-        Some(entries) => (organizer::memory_note(
-            &super::memory::prompt_block(&entries, chrono::Local::now().date_naive()), !entries.is_empty()), entries.is_empty()),
-        None => { log("memory unreadable"); (organizer::memory_note("", true), false) }
+    let today = chrono::Local::now().date_naive();
+    // Quem fala também parafraseia: sem as preferências, ela resumia e enchia a espera apesar do que ele pediu.
+    let (note, onboarding, voice_prefs) = match super::memory::load(&memory_file) {
+        Some(entries) => {
+            let prefs: Vec<_> = entries.iter().filter(|e| e.kind == super::memory::Kind::Preferencia).cloned().collect();
+            (organizer::memory_note(&super::memory::prompt_block(&entries, today), !entries.is_empty()), entries.is_empty(),
+                super::memory::prompt_block(&prefs, today))
+        }
+        None => { log("memory unreadable"); (organizer::memory_note("", true), false, String::new()) }
     };
     log(format!("memory onboarding={onboarding}"));
     let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone(), &note,
@@ -282,9 +289,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             None => return Err(failed("device offer")(VoiceFailure::Closed)),
         }
     };
-    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": organizer::voice_prompt(onboarding, &options.tools, options.hangar_mcp.is_some()),
-        // O aviso curto de que ouviu sai da própria voz; o resumo do raciocínio deixa a voz saber o que o organizador faz.
-        "includeStartupContext": false, "delegationAckFiller": true, "backendReasoningStatus": true, "clientManagedHandoffs": false,
+    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": organizer::voice_prompt(onboarding, &options.tools, options.hangar_mcp.is_some(), &voice_prefs),
+        // Sem aviso de espera a cada delegação ('um segundo'): ele pediu silêncio. O resumo do raciocínio deixa a voz saber o
+        // que o organizador faz.
+        "includeStartupContext": false, "delegationAckFiller": false, "backendReasoningStatus": true, "clientManagedHandoffs": false,
         "realtimeStartInstructions": organizer::REALTIME_START, "initialItems": [{"role": "developer", "text": options.context}]});
     if let Some(voice) = &options.voice { realtime["voice"] = json!(voice); }
     let realtime_start = realtime.clone();
@@ -328,6 +336,18 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut restarting = false;
     let mut detached = false;
     let mut results = Results::default();
+    results.set_screen(&options.target);
+    // Última voz dele (microfone ou transcrição) e se a conversa estava em curso na volta anterior do laço: resultado só
+    // abre resumo depois de `result_silence` contínuo, e a fala que volta corta o resumo ainda sem mensagem.
+    let result_silence = options.result_silence;
+    let mut last_user_voice: Option<Instant> = None;
+    let mut was_talking = false;
+    // O aviso de resultados guardados, para o organizador saber o que o "quero ouvir" responde.
+    let mut offer_note: Option<String> = None;
+    // Turno de resumo que a fala dele cortou: o fim dele não é falha de turno de fala.
+    let mut cut_summary: Option<String> = None;
+    // Preferências gravadas nesta chamada, que o prompt da abertura não tem.
+    let mut new_prefs: Vec<String> = Vec::new();
     // Cada pedido leva o destino falado (vazio = a sessão da tela) e o turno da fala que o pediu.
     let mut gate: SendGate<(Value, Option<String>, String)> = SendGate::default();
     let mut organizer_busy = false;
@@ -384,6 +404,34 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         for text in out.hold.due(Instant::now()) {
             if out.away { out.park(text, "held"); } else { append_speech(&rpc, &thread, &text, "held").await; }
         }
+        // Conversa em curso: fala dele dentro da janela, turno do organizador para a fala dele, ou nenhum aparelho ouvindo.
+        // Só a transcrição conta como fala: ruído no microfone seguraria os avisos para sempre.
+        // O turno da fala dele conta com teto: sem o `turn/completed` dele, os resultados ficariam presos para sempre.
+        let talking = out.away || delegated.as_ref().is_some_and(|(_, at)| at.elapsed() < command_limit * 2)
+            || last_user_voice.is_some_and(|at| at.elapsed() < result_silence);
+        if talking != was_talking {
+            was_talking = talking;
+            if talking {
+                // O Codex repassa à voz a mensagem do resumo assim que ela fica pronta, sem esperar ninguém: cortar o turno
+                // antes é o único jeito de ela não tomar a vez dele.
+                // A delegação que chega com o turno aberto entra nele (`StartOrSteer`): com a fala dele dentro, não corta.
+                if let Some(turn) = results.running_summary().filter(|t| delegated.as_ref().is_none_or(|(d, _)| d != t)) {
+                    let cut = tokio::time::timeout(INTERRUPT_WAIT,
+                        rpc.request("turn/interrupt", json!({"threadId": thread, "turnId": turn}))).await.is_ok_and(|r| r.is_ok());
+                    log(format!("summary cut by user speech ok={cut}"));
+                    if cut { results.take_summary(&turn); results.interrupted(); cut_summary = Some(turn); }
+                }
+                results.set_user_talking(true);
+            } else if let Some(input) = results.set_user_talking(false) {
+                start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await;
+            }
+        }
+        if let Some(offer) = results.take_offer() {
+            log(format!("results offered held={}", results.held()));
+            offer_note = Some(format!("A voz acabou de avisar: \"{offer}\" Se ele quiser ouvir, chame quiet com on false; se não \
+                quiser agora, não chame nada: os resultados continuam guardados."));
+            speak(&rpc, &thread, &mut out, offer, "results offer").await;
+        }
         // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
         let held = speaking.as_ref().filter(|(_, since)| since.elapsed() < organizer::STILL_SPEAKING_CAP).map(|(t, _)| t.clone());
         if planner.mode == Mode::Direct
@@ -434,7 +482,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let mut again = realtime_start.clone();
                     again["transport"] = json!({"type": "webrtc", "sdp": sdp});
                     again["includeStartupContext"] = json!(true);
-                    again["initialItems"] = json!([{"role": "developer", "text": context}]);
+                    // A conversa falada recomeça com o prompt da abertura: as preferências gravadas depois vão junto.
+                    let mut items = vec![json!({"role": "developer", "text": context})];
+                    items.extend(new_prefs.iter().map(|text| json!({"role": "developer", "text": text})));
+                    again["initialItems"] = json!(items);
                     if let Err(error) = rpc.request("thread/realtime/start", again).await {
                         log(format!("handoff realtime/start failed kind={}", rpc_error_kind(&error)));
                         break Err(VoiceFailure::Realtime(String::new()));
@@ -484,6 +535,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         let _ = rpc.respond(old, tool_reply("Cancelado: a sessão mudou; nada foi enviado.", false)).await;
                     }
                     target = name.clone();
+                    results.set_screen(&name);
                     target_cwd = cwd;
                     // Sem anúncio falado: a pessoa vê a tela. O contexto da sessão só entra quando ela voltar a falar; a troca
                     // de sessão substitui a nota da anterior, mas não a do modo.
@@ -653,6 +705,14 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 Some(Ok(entry)) => {
                                     let _ = rpc.respond(id, tool_reply(super::memory::saved_reply(&entry, &said), true)).await;
                                     let _ = events.send(VoiceEvent::MemoryChanged).await;
+                                    // O prompt da voz é fixo desde a abertura: a preferência nova entra como contexto, que não é falado.
+                                    if entry.kind == super::memory::Kind::Preferencia {
+                                        let text = format!("{} {}", organizer::VOICE_PREFERENCE_PREFIX, entry.text);
+                                        let added = rpc.request("thread/realtime/appendText",
+                                            json!({"threadId": thread, "text": text, "role": "developer"})).await;
+                                        log(format!("preference appendText ok={}", added.is_ok()));
+                                        new_prefs.push(text);
+                                    }
                                     "remembered"
                                 }
                                 Some(Err(super::memory::Refusal::Full(list))) => {
@@ -861,6 +921,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             last_input = Some((input, now));
                             // A troca de sessão ou de modo chega ao organizador no turno desta fala. Nunca pela voz: na v3
                             // o texto acrescentado a ela é falado, e o usuário ouvia o caminho da pasta e as regras.
+                            if let Some(offer) = offer_note.take() {
+                                pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{offer}"), None => offer });
+                            }
                             if let Some(note) = pending_context.take() {
                                 let steer = json!({"threadId": thread, "expectedTurnId": params["turnId"],
                                     "input": [{"type": "text", "text": format!("{} {note}", organizer::NOTE_PREFIX)}]});
@@ -922,6 +985,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         "turn/started" => { organizer_busy = true; results.turn_started(); }
                         // A fala que seguiu depois da delegação: o envio desse turno espera a final (com teto).
                         "thread/realtime/transcript/delta" if params["role"] == "user" => {
+                            last_user_voice = Some(Instant::now());
+                            out.hold.heard_voice(Instant::now());
                             if speaking.is_none() && let Some((turn, at)) = &delegated && at.elapsed() >= organizer::CONTINUATION_AFTER {
                                 log("user still speaking after the delegation");
                                 speaking = Some((turn.clone(), Instant::now()));
@@ -929,6 +994,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         }
                         // Fala que fechou depois da delegação sem ser só a final dela: o envio desse turno não sai sem ela.
                         "thread/realtime/transcript/done" if params["role"] == "user" => {
+                            last_user_voice = Some(Instant::now());
                             speaking = None;
                             let heard = params["text"].as_str().unwrap_or_default().trim();
                             // Toda final ouvida: no trecho seguinte ela é fala velha, nunca a fala daquele turno.
@@ -959,12 +1025,19 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             if params["turn"]["id"].as_str().is_some_and(|t| delegated.as_ref().is_some_and(|(d, _)| d == t)) {
                                 delegated = None; continuation.clear(); continuation_cut = false; speaking = None;
                             }
-                            if let Some(turn) = params["turn"]["id"].as_str() { repeated.remove(turn); }
+                            if let Some(turn) = params["turn"]["id"].as_str() {
+                                repeated.remove(turn);
+                                // Resumo que acabou sem mensagem: nada chegou à voz, o resultado volta como aviso.
+                                if results.take_summary(turn) { log("summary turn ended without a message: result kept"); results.interrupted(); }
+                            }
                             organizer_busy = false;
                             let _ = events.send(VoiceEvent::TurnDone).await;
                             spoken.turn_completed(&params);
-                            // Turno interrompido ou falho não pode deixar um envio esperando a janela de 1,5 s.
-                            if params["turn"]["status"] != "completed" {
+                            // Turno interrompido ou falho não pode deixar um envio esperando a janela de 1,5 s. O resumo
+                            // cortado pela fala dele não é turno de fala: o envio pendente de outro turno segue.
+                            let was_cut = cut_summary.is_some() && cut_summary.as_deref() == params["turn"]["id"].as_str();
+                            if was_cut { cut_summary = None; }
+                            if params["turn"]["status"] != "completed" && !was_cut {
                                 for ((id, ..), _) in gate.user_spoke() {
                                     log("gate cancelled: turn interrupted");
                                     let _ = rpc.respond(id, tool_reply("O turno foi interrompido; nada foi enviado.", false)).await;
@@ -977,9 +1050,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             if let Some(input) = results.turn_completed() { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                         }
                         "item/completed" if params["item"]["type"] == "agentMessage" && params["item"]["phase"] != "commentary" => {
+                            // O Codex já repassou esta mensagem à voz (fala o que o organizador escreve); repetir com
+                            // appendSpeech fazia ela falar o resultado duas vezes. Sem aparelho o repasse se perde: fica guardada.
                             if results.take_summary(params["turnId"].as_str().unwrap_or_default())
-                                && let Some(text) = params["item"]["text"].as_str() {
-                                speak(&rpc, &thread, &mut out, text.to_owned(), "summary").await;
+                                && out.away && let Some(text) = params["item"]["text"].as_str() {
+                                out.park(text.to_owned(), "summary");
                             }
                         }
                         "thread/tokenUsage/updated" => if let Some((used, window)) = usage::context_usage(&params) {
@@ -1116,9 +1191,10 @@ async fn start_summary(rpc: &Rpc, thread: &str, first: Value, results: &mut Resu
             Err(error) => {
                 log(format!("summary turn/start failed kind={} organizer_busy={organizer_busy}", rpc_error_kind(&error)));
                 // Ocioso e recusado: nenhum turn/completed virá; fala o começo do texto e drena a fila.
-                if let Some(text) = results.turn_start_failed(organizer_busy) {
+                if let Some((session, text)) = results.turn_start_failed(organizer_busy) {
                     let short: String = text.chars().take(400).collect();
-                    speak(rpc, thread, out, format!("A sessão respondeu: {short}"), "summary fallback").await;
+                    let from = if session.is_empty() { "A sessão respondeu à pergunta".to_owned() } else { format!("Chegou um resultado da {session}") };
+                    speak(rpc, thread, out, format!("{from}: {short}"), "summary fallback").await;
                     next = results.turn_completed();
                 }
             }
@@ -1136,7 +1212,7 @@ mod tests {
         // Nunca o HOME real: a chamada cria a pasta própria e os planos aqui.
         let voice_dir = std::env::temp_dir().join(format!("hangar-voice-call-{}", std::process::id()));
         CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(), tools, handoff_same_thread: true, voice_dir,
-            audio_grace: Duration::from_secs(600), hangar_mcp: None, command_limit: COMMAND_LIMIT }
+            audio_grace: Duration::from_secs(600), hangar_mcp: None, command_limit: COMMAND_LIMIT, result_silence: Duration::from_millis(600) }
     }
 
     async fn next_answer(events: &async_channel::Receiver<VoiceEvent>) -> (u64, String) {
@@ -1170,6 +1246,7 @@ mod tests {
         assert_eq!(start["params"]["includeStartupContext"], false);
         // O ORGANIZER_PROMPT já é a base do organizador: aqui vai só a nota curta da passagem pela voz.
         assert_eq!(start["params"]["realtimeStartInstructions"], organizer::REALTIME_START);
+        assert_eq!(start["params"]["delegationAckFiller"], false, "sem 'um segundo' a cada delegação");
         assert_ne!(start["params"]["realtimeStartInstructions"], organizer::ORGANIZER_PROMPT);
         assert!(start["params"]["prompt"].as_str().unwrap().contains("O que o organizador consegue nesta conversa"));
     }
@@ -1529,6 +1606,122 @@ mod tests {
         until(&mut seen, "resumo do guardado", summary).await;
     }
 
+    fn summary_of(session: &'static str) -> impl Fn(&Value) -> bool {
+        move |m: &Value| m["method"] == "turn/start"
+            && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.starts_with(&format!("[RESULTADO DA SESSÃO {session}]")))
+    }
+
+    fn spoke(m: &Value, part: &str) -> bool {
+        m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"].as_str().is_some_and(|t| t.contains(part))
+    }
+
+    /// O caso real (14/10, 19:41): resultados da deploy chegaram enquanto ele falava da loja e a voz tomou a vez.
+    /// Fala longa com pausa menor que a janela: nada sai; só depois do silêncio inteiro vem o aviso, e o resumo só quando ele
+    /// pedir para ouvir.
+    #[tokio::test]
+    async fn results_during_a_long_speech_wait_for_real_silence_and_become_an_offer() {
+        use crate::voice::test_support::{push_speech, push_user_audio};
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        push_user_audio(&push, "eu tava lendo a loja e");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        push_user_audio(&push, "já fez, não era pra ter feito assim");
+        let last_speech = Instant::now();
+        voice.session_result("hangar".into(), "Build passou.".into());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let during: Vec<Value> = std::iter::from_fn(|| seen.try_recv().ok()).collect();
+        assert!(!during.iter().any(|m| summary_of("deploy")(m) || summary_of("hangar")(m)), "pausa curta não solta resumo");
+        assert!(!during.iter().any(|m| spoke(m, "resultado")), "nem o aviso");
+        let offer = until(&mut seen, "aviso", |m| spoke(m, "resultado")).await;
+        assert!(last_speech.elapsed() >= Duration::from_millis(600), "o aviso esperou a janela inteira");
+        assert_eq!(offer["params"]["text"], "Chegaram dois resultados, da deploy e da hangar. Quer ouvir?");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| summary_of("deploy")(&m)), "aviso não é despejo");
+        push_speech(&push, "turn-9", "pode falar os resultados");
+        quiet(&push, "q9", "turn-9", false);
+        until(&mut seen, "resumo depois do sim", summary_of("deploy")).await;
+    }
+
+    /// Ele voltou a falar enquanto o organizador montava o resumo: o turno cai antes de a mensagem (que o Codex repassa
+    /// sozinho à voz) ficar pronta, e o resultado vira aviso depois da fala.
+    #[tokio::test]
+    async fn speech_while_the_summary_is_written_cuts_it_and_offers_it_later() {
+        use crate::voice::test_support::push_user_audio;
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "resumo em silêncio", summary_of("deploy")).await;
+        push.send(json!({"method": "turn/started", "params": {"threadId": "t1", "turn": {"id": "turn-s1"}}})).unwrap();
+        push_user_audio(&push, "espera, deixa eu terminar");
+        let cut = until(&mut seen, "corte do resumo", |m| m["method"] == "turn/interrupt").await;
+        assert_eq!(cut["params"]["turnId"], "turn-s1");
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-s1", "status": "interrupted"}}})).unwrap();
+        let offer = until(&mut seen, "aviso", |m| spoke(m, "resultado")).await;
+        assert_eq!(offer["params"]["text"], "Chegou um resultado da deploy. Quer ouvir?");
+    }
+
+    /// Turno de resumo que acaba sem mensagem (falhou, vazio): nada foi à voz, então o resultado volta como aviso.
+    #[tokio::test]
+    async fn summary_turn_without_a_message_keeps_the_result() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "resumo", summary_of("deploy")).await;
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-s1", "status": "failed"}}})).unwrap();
+        let offer = until(&mut seen, "aviso", |m| spoke(m, "resultado")).await;
+        assert_eq!(offer["params"]["text"], "Chegou um resultado da deploy. Quer ouvir?");
+    }
+
+    /// O Codex já repassa à voz a mensagem do organizador (`maybe_mirror_event_text_to_realtime`); o Hangar não a fala de novo.
+    #[tokio::test]
+    async fn summary_reaches_the_voice_once() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "resumo", summary_of("deploy")).await;
+        push.send(json!({"method": "item/completed", "params": {"threadId": "t1", "turnId": "turn-s1",
+            "item": {"type": "agentMessage", "id": "m1", "text": "Chegou um resultado da deploy: criou a TK-2."}}})).unwrap();
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-s1", "status": "completed"}}})).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| spoke(&m, "TK-2")), "falado uma vez, pelo repasse do Codex");
+    }
+
+    /// Preferência gravada no meio da chamada chega também a quem fala, sem virar fala.
+    #[tokio::test]
+    async fn preference_saved_mid_call_reaches_the_voice_as_context() {
+        use crate::voice::test_support::{push_speech, push_tool};
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let dir = tempfile::tempdir().unwrap();
+        let voice = Voice::start(CallOptions { voice_dir: dir.path().to_owned(), ..options(json!([])) }, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        push_speech(&push, "turn-1", "guarda que eu não quero frase de espera");
+        push_tool(&push, "r1", "remember", json!({"kind": "preferencia", "text": "Sem frases de espera como 'um segundo'."}), "turn-1");
+        let added = until(&mut seen, "preferência para a voz", |m| m["method"] == "thread/realtime/appendText").await;
+        assert_eq!(added["params"]["role"], "developer");
+        assert!(added["params"]["text"].as_str().unwrap().contains("Sem frases de espera"));
+    }
+
     #[tokio::test]
     async fn commands_before_the_offer_are_kept() {
         let (spawn, mut seen, _push) = fake_app_server();
@@ -1583,6 +1776,19 @@ mod tests {
         assert_eq!(first, "Conectado. Pode falar.");
         assert!(!prompt.contains("Primeira conversa") && !developer.contains("Passo 1"));
         assert!(developer.contains("Desenvolvedor"), "{developer}");
+    }
+
+    /// As preferências iam só ao organizador; quem fala (e parafraseia) nunca as via.
+    #[tokio::test]
+    async fn stored_preferences_reach_the_voice_that_speaks() {
+        let (_, prompt, _) = connect_with_memory(|file| {
+            let today = chrono::Local::now().date_naive();
+            crate::voice::memory::remember(file, crate::voice::memory::Kind::Preferencia,
+                "Preservar as opções A e B com consequências e recomendação.", None, today).unwrap();
+            crate::voice::memory::remember(file, crate::voice::memory::Kind::Projeto, "Prazo da TK-1 sexta.", None, today).unwrap();
+        }).await;
+        assert!(prompt.contains("Preservar as opções A e B"), "{prompt}");
+        assert!(!prompt.contains("TK-1"), "só o jeito de falar vai à voz; fato de projeto fica com o organizador");
     }
 
     #[tokio::test]

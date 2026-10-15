@@ -365,19 +365,29 @@ impl Controller {
         self.talked.insert(key.clone(), Instant::now());
         let ctx = self.ctx();
         tokio::spawn(async move {
-            let mut read = ctx.machines.history(&key.0, &key.1, 0).await;
-            let mut head = head;
-            let mut cut = false;
-            if let Err(error) = &read { log(format!("read_session first read failed: {error}")); }
-            // O cliente de peer recusa corpo acima de 1 MiB: conversa longa de outra máquina cai para um recorte grande.
-            if key.0 != HERE && matches!(&read, Err(error) if error == TOO_LARGE) {
-                read = ctx.machines.history(&key.0, &key.1, PEER_HISTORY).await;
-                head = format!("{head} (histórico recortado nos últimos {PEER_HISTORY} eventos)");
-                cut = true;
-            }
-            match read {
-                Ok(events) => ctx.voice.reply(call, tool_reply(session_context(&head, &events, user_turns, cut), true)),
+            match read_text(&ctx, &key, head, user_turns).await {
+                Ok(text) => ctx.voice.reply(call, tool_reply(text, true)),
                 Err(error) => ctx.fail(call, "read_session", format!("Não consegui ler a sessão {}: {error}", key.1)),
+            }
+        });
+    }
+
+    /// Leitura que o Jev deu como certa: sai em paralelo ao organizador e entra no turno da fala, que responde sem a ida e
+    /// volta do read_session. Falha não diz nada: o organizador lê sozinho, como sem o atalho.
+    fn jev_read(&mut self, turn: String, key: Key) {
+        self.talked.insert(key.clone(), Instant::now());
+        let place = if self.screen_key().as_ref() == Some(&key) { "na tela".to_owned() } else { format!("{}, fora da tela", self.machines.label(&key.0)) };
+        let head = format!("Sessão {} ({place}).", key.1);
+        let ctx = self.ctx();
+        tokio::spawn(async move {
+            match read_text(&ctx, &key, head, 1).await {
+                Ok(text) => {
+                    log(format!("jev act=read bytes={}", text.len()));
+                    let note = format!("O Hangar já leu a conversa da sessão {} a pedido do usuário; não chame read_session para ela de \
+                        novo, a não ser que precise de pedidos anteriores (user_turns maior).\n{text}", key.1);
+                    ctx.voice.jev_verdict(turn, None, Some(note));
+                }
+                Err(error) => log(format!("jev read failed: {error}")),
             }
         });
     }
@@ -520,6 +530,13 @@ impl Controller {
         let intent = decision.intent.clone();
         log(format!("jev intent={:?} p={:.2} session_p={:.2} action_p={:.2} ms={ms}", intent.as_ref().map(|(i, _)| i),
             intent.as_ref().map_or(0., |(_, p)| *p), decision.session.map_or(0., |(_, p)| p), decision.action.map_or(0., |(_, p)| p)));
+        // Ler é seguro e repetível: com intenção e destino certos o Hangar lê já, sem esperar o organizador pedir.
+        if intent.as_ref().is_some_and(|(i, p)| *i == jev::Intent::Read && *p >= jev::SURE)
+            && let Some((at, p)) = decision.session && p >= jev::SURE
+            && let Some(key) = asked.sessions.get(at).cloned() {
+            self.jev_read(asked.turn, key);
+            return;
+        }
         // 'Volta pra lá' não tem nome: com a intenção de troca firme, o destino é o que a voz acabou de oferecer.
         let names: Vec<&str> = asked.sessions.iter().map(|(_, n)| n.as_str()).collect();
         let choice = match jev_switch_choice(&decision) {
@@ -602,6 +619,21 @@ impl Controller {
         };
         self.voice.jev_verdict(turn, speech, Some(note));
     }
+}
+
+/// O histórico inteiro: o pedido do usuário costuma ficar longe do fim, atrás das ferramentas.
+async fn read_text(ctx: &Ctx, key: &Key, head: String, user_turns: usize) -> Result<String, String> {
+    let mut read = ctx.machines.history(&key.0, &key.1, 0).await;
+    let mut head = head;
+    let mut cut = false;
+    if let Err(error) = &read { log(format!("read_session first read failed: {error}")); }
+    // O cliente de peer recusa corpo acima de 1 MiB: conversa longa de outra máquina cai para um recorte grande.
+    if key.0 != HERE && matches!(&read, Err(error) if error == TOO_LARGE) {
+        read = ctx.machines.history(&key.0, &key.1, PEER_HISTORY).await;
+        head = format!("{head} (histórico recortado nos últimos {PEER_HISTORY} eventos)");
+        cut = true;
+    }
+    read.map(|events| session_context(&head, &events, user_turns, cut))
 }
 
 /// Resposta de agrupar/sair: aviso de quem não foi avisado vai junto; falha sem motivo usa a frase do web.

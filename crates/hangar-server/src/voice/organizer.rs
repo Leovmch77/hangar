@@ -44,6 +44,7 @@ pedido no app.
 De quem é o pedido, antes de qualquer ação:
 - Conversa com você: perguntas, opiniões, 'o que você acha', 'me explica', 'analisa', 'lê você', 'me ajuda a entender',
   pensar em voz alta, ideias pela metade. Responda você mesmo, lendo a sessão, o código ou a internet. Nada vai à sessão.
+  Não ofereça mandar trabalho nem pergunte 'pode ser?': ler e entender não é pedido de envio nem de acompanhamento.
 - Planejar junto ('vamos planejar', 'me ajuda a planejar', 'planeja comigo'): chame set_mode planejar e siga as regras dele.
 - Pedido para a sessão: ele quer que a sessão faça um trabalho ('manda a sessão corrigir', 'pede pra ela', 'fala pra
   sessão'). Chame send_to_session com o pedido inteiro: objetivo, restrições e correções da conversa, escrito como ele escreveria.
@@ -58,7 +59,9 @@ De quem é o pedido, antes de qualquer ação:
 Use read_session antes de enviar só quando o pedido depende do que a sessão está fazendo.
 Para explicar o trabalho de uma sessão ('o que ela fez', 'onde parou', 'explica o que a X está fazendo'), parta do pedido do
 usuário a ela: read_session (com session quando não é a da tela) traz a partir do último pedido dele; se a conversa se refere
-a pedidos anteriores, chame de novo com user_turns maior. Explique o que ele pediu e o que a sessão fez a partir dali.
+a pedidos anteriores, chame de novo com user_turns maior. Explique o que ele pediu e o que a sessão fez a partir dali, sem
+cortar achados, erros, pendências e ressalvas. Se a sessão terminou com opções (A, B…), diga cada uma com a consequência e a
+recomendação da sessão, sem escolher por ele e sem reduzi-las a 'falta decidir'.
 Se o usuário disser 'espera', 'não manda ainda', 'segura' ou equivalente, chame hold_request com o
 pedido montado até ali; continue montando com ele e só envie quando ele liberar ('pode mandar', 'manda').
 'Não manda ainda' controla você e não entra no texto do pedido.
@@ -69,8 +72,13 @@ Exemplo: 'e aí eu queria' sozinho é fragmento; responda só com uma frase curt
 Se send_to_session voltar dizendo que o usuário continuou falando, espere a próxima fala e monte o pedido com ela.
 Perguntas sobre o que a sessão fez se respondem com read_session, sem enviar nada.
 Nunca afirme que o trabalho foi feito sem o resultado da sessão. Status queued: a sessão está ocupada e o pedido entrou na fila.
-Quando a entrada começar por [RESULTADO DA SESSÃO <nome>], não use ferramentas: responda com um resumo falado de
-até três frases, começando por 'A sessão <nome> respondeu:'. Preserve erros, pendências e perguntas. Sem código nem Markdown.
+Quando a entrada começar por [RESULTADO DA SESSÃO <nome>], é um aviso que chegou sozinho daquela sessão, não resposta ao
+último comentário dele nem continuação do assunto: não use ferramentas e responda com um resumo falado de até três frases,
+começando por 'Chegou um resultado da <nome>'; se a entrada disser que a sessão na tela é outra, ou se vocês falavam de
+outra sessão, diga 'Chegou um resultado da <nome>, não da <a de que vocês falavam>'. Preserve erros, pendências e perguntas
+da sessão. É informação: não ofereça mandar nada, não peça aprovação e não acrescente pergunta sua. Sem código nem Markdown.
+Resultados guardados: se uma [NOTA DO HANGAR] disser que a voz avisou de resultados guardados e ele quiser ouvir ('quero',
+'pode falar', 'fala'), chame quiet com on false; se ele não quiser agora, não chame nada: eles continuam guardados.
 Acompanhar: quando ele pedir para acompanhar uma sessão ('acompanha a hangar', 'me avisa quando a X responder'), chame
 follow_session; as respostas dela chegam sozinhas como [RESULTADO DA SESSÃO], mesmo fora da tela. unfollow_session para de acompanhar.
 Silêncio: quando ele pedir para não avisar nada das sessões até ele voltar ('vou sair dez minutos, não me fala nada até eu
@@ -149,18 +157,20 @@ pub const ANSWER_PREFIX: &str = "[RESPOSTA DA SESSÃO À PERGUNTA]";
 const MAX_QUESTION: usize = 500;
 
 pub const VOICE_PROMPT: &str = "Você é a assistente de voz do Hangar, o app onde o usuário acompanha e comanda sessões de trabalho (Claude ou
-Codex) em vários projetos. Fale português brasileiro, com calma, direta e curta: uma ou duas frases por vez.
+Codex) em vários projetos. Fale português brasileiro, com calma e direta. Suas falas próprias são curtas; o que o organizador
+manda falar vai inteiro (veja Resultados).
 Você não tem ferramentas: quem age é o organizador (Codex), por trás de você. O que ele consegue está na lista do fim.
 
 Escuta
 - Deixe o usuário terminar a ideia. Pausa para pensar não é o fim da fala: continue ouvindo.
 - Use sinais curtos de escuta, com moderação ('uhum', 'entendi'), sem competir com a fala dele.
-- Se ele falar enquanto você fala, pare e escute.
+- Se ele falar enquanto você fala, pare e escute. Se depois disser 'pode continuar' ou 'pode falar', retome de onde parou,
+  sem frase de espera e sem encaminhar de novo.
 - Tosse, ruído, música ou conversa ao fundo não são pedidos. 'Eh', 'hum' e palavras soltas não são tarefas.
 
 Quando encaminhar ao organizador
-- Tudo que depende de sessão, conversa, tela, código, internet, plano ou ação no Hangar. Encaminhe antes de responder e diga
-  só algo curto, como 'deixa eu ver'.
+- Tudo que depende de sessão, conversa, tela, código, internet, plano ou ação no Hangar. Encaminhe e fique em silêncio:
+  nada de 'um segundo', 'deixa eu ver' ou 'vou verificar'.
 - 'O que a sessão está falando, fazendo ou respondeu' é a conversa da sessão: encaminhe. Nunca diga que não consegue ler a tela.
 - Pedido de análise, opinião ou planejamento ('o que você acha', 'me ajuda a planejar', 'lê você o código') também vai ao
   organizador: é conversa com o assistente, não trabalho para a sessão.
@@ -180,13 +190,19 @@ Quando responder sozinha
 Resultados
 - Enquanto espera, não adivinhe o resultado. Nunca diga que enviou, trocou, abriu ou terminou antes de o organizador
   confirmar. Enviado não significa terminado.
-- Textos que você recebe para falar são resultados reais: fale-os fielmente e curto, sem trocar o sentido nem omitir erros e
-  perguntas. A única exceção é o aviso automático do Codex, em inglês, seguido de um JSON: o que começa por
+- Textos que você recebe para falar são resultados reais: fale-os em fala natural, com outras palavras se quiser, mas sem
+  encurtar nem trocar o sentido: achados, erros, pendências, ressalvas e decisões ficam. Opções (A, B…): fale todas, com a
+  consequência de cada uma e a recomendação, sem escolher por ele. Não transforme afirmação em pergunta nem acrescente pergunta,
+  oferta ('quer que eu mande?') ou 'pode ser?'.
+- 'Chegou um resultado da…' é aviso de outra sessão, nunca como resposta ao que ele disse: fale-o à parte, com o nome da
+  sessão e o 'não da' quando houver, sem emendar no assunto ('É, pois é…').
+- A única exceção à fala fiel é o aviso automático do Codex, em inglês, seguido de um JSON: o que começa por
   'I need your approval to continue' ou por 'I need your input. Please respond in the app'. Ele não é resultado nem pergunta: o Hangar já
   respondeu o pedido sozinho e o trabalho continua. Não fale nada dele, nem traduzido, nem resumido; continue esperando o
   resultado. O que precisar de confirmação o organizador pergunta. Nunca mande o usuário aprovar, aceitar, clicar ou conferir
   algo no app; não existe pedido no app para ele, e o sim dele é falado.
-- Não narre ferramentas, não leia código, tabelas nem caminhos. Não anuncie em que sessão está: o usuário vê a tela.";
+- Não narre ferramentas, não leia código, tabelas nem caminhos. Não anuncie em que sessão está: o usuário vê a tela. O aviso
+  de resultado de outra sessão é a exceção: ele sempre leva o nome dela.";
 
 fn tool(name: &str, description: &str, properties: Value) -> Value {
     let required: Vec<String> = properties.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
@@ -263,7 +279,8 @@ pub fn tools() -> Value {
             json!({"name": {"type": "string"}})),
         tool("unfollow_session", "Para de acompanhar a sessão.", json!({"name": {"type": "string"}})),
         tool("quiet", "Silêncio pedido pelo usuário até ele voltar: on true guarda os resultados das sessões sem falar nada; on false, \
-            quando ele voltar ou pedir o resumo, solta os guardados para resumir. Nunca acaba sozinho.", json!({"on": {"type": "boolean"}})),
+            quando ele voltar, pedir o resumo ou aceitar ouvir os resultados que a voz avisou, solta os guardados para resumir. \
+            Nunca acaba sozinho.", json!({"on": {"type": "boolean"}})),
         tool_with("remember", "Guarda algo para lembrar nas próximas conversas: kind pessoa (quem o usuário é), preferencia (como ele quer \
             as respostas, correções), referencia (onde fica algo, o que cada sessão faz) ou projeto (estado de um trabalho, com prazo). \
             Uma frase. Para corrigir uma memória, passe replaces com o id dela.",
@@ -356,9 +373,16 @@ fn capability_list(tools: &Value, mcp: bool) -> String {
     out
 }
 
-pub fn voice_prompt(onboarding: bool, tools: &Value, mcp: bool) -> String {
-    format!("{VOICE_PROMPT}{}\n\n{}", if onboarding { VOICE_ONBOARDING } else { "" }, capability_list(tools, mcp))
+/// `prefs`: as preferências guardadas (`memory::prompt_block` só das `preferencia`); o resto da memória fica com o organizador.
+pub fn voice_prompt(onboarding: bool, tools: &Value, mcp: bool, prefs: &str) -> String {
+    let prefs = if prefs.trim().is_empty() { String::new() } else {
+        format!("\n\nPreferências que o usuário pediu para guardar, sobre como você fala; valem sobre o padrão acima:\n{prefs}")
+    };
+    format!("{VOICE_PROMPT}{}{prefs}\n\n{}", if onboarding { VOICE_ONBOARDING } else { "" }, capability_list(tools, mcp))
 }
+
+/// Abre a preferência gravada durante a chamada quando ela entra no contexto da voz.
+pub const VOICE_PREFERENCE_PREFIX: &str = "Preferência que o usuário acabou de pedir para guardar, sobre como você fala; vale daqui em diante:";
 
 const MEMORY_SOURCE: &str = "A memória da voz é só a lista que o Hangar entrega aqui, com ids [mN], gravada com remember. Resumo de \
     memória do próprio Codex (MEMORY_SUMMARY, memórias de outras conversas do Codex) não é a memória da voz: não o apresente como \
@@ -1438,35 +1462,84 @@ impl SpokenTurns {
 }
 
 /// Resultados das sessões à espera de virar resumo falado. `quiet`: o usuário pediu silêncio até voltar; tudo fica na fila e
-/// só sai quando ele mesmo pedir (`set_quiet(false)`), nunca pelo tempo.
+/// só sai quando ele mesmo pedir (`set_quiet(false)`), nunca pelo tempo. `talking`: conversa em curso (fala dele dentro de
+/// `RESULT_SILENCE` ou turno do organizador para ela); nenhum resumo abre nela. O que chegou ou foi cortado durante a conversa
+/// não é despejado depois: vira um aviso de quantos chegaram (`take_offer`) e sai quando ele quiser ouvir.
 #[derive(Default)]
-pub struct Results { queue: VecDeque<(String, String)>, last: Option<(String, String)>, busy: bool, summaries: HashSet<String>, quiet: bool }
+pub struct Results { queue: VecDeque<(String, String)>, last: Option<(String, String)>, busy: bool, summaries: HashSet<String>, quiet: bool,
+    talking: bool, held_in_talk: bool, offered: usize, offer: Option<String>, accepted: bool, screen: String }
+
+/// O aviso sai do Hangar, não do modelo: a origem de cada resultado não depende de paráfrase.
+pub fn offer_text(count: usize, sessions: &[String]) -> String {
+    const WORDS: [&str; 10] = ["um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove", "dez"];
+    let n = WORDS.get(count.wrapping_sub(1)).map_or_else(|| count.to_string(), |w| (*w).to_owned());
+    let from = match sessions {
+        [] => String::new(),
+        [only] => format!(" da {only}"),
+        [rest @ .., last] => format!(", da {} e da {last}", rest.join(", da ")),
+    };
+    if count == 1 { format!("Chegou um resultado{from}. Quer ouvir?") } else { format!("Chegaram {n} resultados{from}. Quer ouvir?") }
+}
+
+/// Silêncio contínuo que encerra a fala para os avisos das sessões. Nas chamadas de 11 a 14/10, depois que o Codex fechou a
+/// fala dele, 93% das retomadas sem a voz no meio vieram em menos de 5 s (77% em menos de 2 s).
+pub const RESULT_SILENCE: Duration = Duration::from_secs(5);
 
 impl Results {
     pub fn turn_started(&mut self) { self.busy = true; }
-    /// Liga ou desliga o silêncio. Desligado com o organizador ocioso, devolve já o primeiro guardado; ocupado, sai no fim do turno.
+    /// Liga ou desliga o silêncio. Desligar é ele pedindo para ouvir: o aviso feito vale como aceito e o primeiro sai mesmo
+    /// dentro da janela, com o organizador ocioso; ocupado, sai no fim do turno.
     pub fn set_quiet(&mut self, on: bool) -> Option<Value> {
         self.quiet = on;
+        if !on { (self.held_in_talk, self.offered, self.offer, self.accepted) = (false, 0, None, true); }
         if on || self.busy { None } else { self.flush() }
     }
     pub fn quiet(&self) -> bool { self.quiet }
     /// Quantos esperam na fila (os guardados pelo silêncio inclusive).
     pub fn held(&self) -> usize { self.queue.len() }
     pub fn push(&mut self, session: String, text: String) -> Option<Value> {
+        if self.talking { self.held_in_talk = true; }
         self.queue.push_back((session, text));
         if self.busy { None } else { self.flush() }
     }
     pub fn turn_completed(&mut self) -> Option<Value> { self.busy = false; self.flush() }
+    /// A conversa começou ou acabou (janela de silêncio vencida). Acabando com algo guardado nela, prepara o aviso.
+    pub fn set_user_talking(&mut self, on: bool) -> Option<Value> {
+        if self.talking == on { return None; }
+        self.talking = on;
+        if on || self.busy { None } else { self.flush() }
+    }
+    /// O resumo em curso foi cortado pela fala dele: volta para a frente da fila e entra no aviso do fim da conversa.
+    pub fn interrupted(&mut self) {
+        if let Some(item) = self.last.take() { self.queue.push_front(item); self.held_in_talk = true; }
+    }
+    /// Sessão na tela: o resumo de outra sessão diz que não é ela, para a voz não encaixar um assunto no outro.
+    pub fn set_screen(&mut self, name: &str) { name.clone_into(&mut self.screen); }
+    /// Aviso pronto para falar, uma vez por aumento da fila guardada.
+    pub fn take_offer(&mut self) -> Option<String> { self.offer.take() }
+    /// Sessões com resultado guardado, sem repetir, na ordem de chegada.
+    pub fn held_sessions(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for (session, _) in &self.queue { if !session.is_empty() && !names.contains(session) { names.push(session.clone()); } }
+        names
+    }
     /// `turn/start` recusado: com o organizador ocupado, volta para a frente da fila; ocioso, nenhum
     /// `turn/completed` virá, então o texto sai para ser falado direto e a fila destrava.
     /// Ocioso: quem chama fala o texto e depois chama `turn_completed()` para soltar o próximo da fila.
-    pub fn turn_start_failed(&mut self, organizer_busy: bool) -> Option<String> {
+    pub fn turn_start_failed(&mut self, organizer_busy: bool) -> Option<(String, String)> {
         let item = self.last.take()?;
-        if organizer_busy { self.queue.push_front(item); self.busy = true; None } else { self.busy = false; Some(item.1) }
+        if organizer_busy { self.queue.push_front(item); self.busy = true; None } else { self.busy = false; Some(item) }
     }
     fn flush(&mut self) -> Option<Value> {
-        // Em silêncio só passa a resposta de ask_session (sessão vazia): foi o usuário quem perguntou.
-        let at = if self.quiet { self.queue.iter().position(|(s, _)| s.is_empty())? } else { 0 };
+        let accepted = std::mem::take(&mut self.accepted);
+        if self.talking && !accepted { return None; }
+        if self.held_in_talk && !self.quiet {
+            let count = self.queue.iter().filter(|(s, _)| !s.is_empty()).count();
+            if count > self.offered { self.offered = count; self.offer = Some(offer_text(count, &self.held_sessions())); }
+        }
+        // Em silêncio, ou com o aviso à espera da resposta dele, só passa a resposta de ask_session (sessão vazia): foi o
+        // usuário quem perguntou.
+        let at = if self.quiet || self.held_in_talk { self.queue.iter().position(|(s, _)| s.is_empty())? } else { 0 };
         let (session, text) = self.queue.remove(at)?;
         self.busy = true;
         self.last = Some((session.clone(), text.clone()));
@@ -1477,11 +1550,15 @@ impl Results {
             format!("{head}\n[Trecho intermediário omitido; a íntegra está no chat.]\n{tail}")
         } else { text };
         // Sessão vazia = resposta a ask_session, que tem marca própria.
-        let head = if session.is_empty() { ANSWER_PREFIX.to_owned() } else { format!("[RESULTADO DA SESSÃO {session}]") };
+        let head = if session.is_empty() { ANSWER_PREFIX.to_owned() } else if self.screen.is_empty() || self.screen == session {
+            format!("[RESULTADO DA SESSÃO {session}]")
+        } else { format!("[RESULTADO DA SESSÃO {session}] (aviso de outra sessão; a sessão na tela é {})", self.screen) };
         Some(json!({"input": [{"type": "text", "text": format!("{head}\n{text}")}]}))
     }
     pub fn mark_summary(&mut self, turn_id: String) { self.summaries.insert(turn_id); }
     pub fn take_summary(&mut self, turn_id: &str) -> bool { self.summaries.remove(turn_id) }
+    /// Turno de resumo cuja mensagem ainda não saiu.
+    pub fn running_summary(&self) -> Option<String> { self.summaries.iter().next().cloned() }
 }
 
 #[cfg(test)]
@@ -1570,14 +1647,14 @@ mod tests {
         assert!(greeting(true).contains("deixa eu me apresentar") && greeting(true).contains("perguntar o que eu consigo fazer"),
             "a primeira conversa apresenta o que a voz faz antes das perguntas");
         assert_eq!(greeting(false), "Conectado. Pode falar.");
-        let with = voice_prompt(true, &tools(), false);
+        let with = voice_prompt(true, &tools(), false, "");
         assert!(with.starts_with(VOICE_PROMPT) && with.contains("Primeira conversa"));
-        assert!(!voice_prompt(false, &tools(), false).contains("Primeira conversa"));
+        assert!(!voice_prompt(false, &tools(), false, "").contains("Primeira conversa"));
     }
 
     #[test]
     fn voice_prompt_lists_what_the_organizer_really_has() {
-        let full = voice_prompt(false, &tools(), false);
+        let full = voice_prompt(false, &tools(), false, "");
         for line in ["reabrir uma conversa fechada pelo nome", "a partir do seu último pedido a ela (ou dos últimos N)",
             "abrir sessão nova numa pasta", "ler e clicar na tela do Hangar", "trocar a sessão da tela", "pela API"] {
             assert!(full.contains(line), "{line}");
@@ -1585,8 +1662,8 @@ mod tests {
         assert!(full.contains("Pergunta sobre o que você consegue fazer, se tem acesso a algo") && full.contains("encaminhe"));
         assert!(full.contains("palavras exatas do usuário, entre aspas"));
         assert!(!full.contains("MCP"), "sem a entrada, a voz não promete o MCP");
-        assert!(voice_prompt(false, &tools(), true).contains("pela API e pelo MCP hangar"));
-        let pwa = voice_prompt(false, &tools_for(&["switch_session".into()]), false);
+        assert!(voice_prompt(false, &tools(), true, "").contains("pela API e pelo MCP hangar"));
+        let pwa = voice_prompt(false, &tools_for(&["switch_session".into()]), false, "");
         assert!(!pwa.contains("tela do Hangar") && pwa.contains("trocar a sessão da tela"), "aparelho sem ferramentas de tela");
         // Nada do perfil nem da memória vai à voz; e ela continua curta.
         assert!(!full.contains("Fatos lembrados") && !full.contains("[m"));
@@ -2051,7 +2128,7 @@ mod tests {
     #[test]
     fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
         assert!(VOICE_PROMPT.contains("Trocar, abrir, reabrir, fechar e parear sessão e rodar atalhos sempre vão ao organizador"));
-        let prompt = voice_prompt(false, &tools(), false);
+        let prompt = voice_prompt(false, &tools(), false, "");
         assert!(prompt.contains("reabrir uma conversa fechada") && prompt.contains("atalhos (como a VM)"));
         assert!(VOICE_PROMPT.contains("Nunca diga que enviou, trocou, abriu ou terminou antes de o organizador\n  confirmar"));
         assert!(VOICE_PROMPT.contains("Não anuncie em que sessão está"));
@@ -2497,6 +2574,86 @@ mod tests {
         assert!(second["input"][0]["text"].as_str().unwrap().starts_with("[RESULTADO DA SESSÃO b]"));
     }
 
+    /// O caso real (14/10): resultados da deploy viraram fala no meio do comentário dele sobre a loja. O que
+    /// chega durante a conversa fica guardado; ao fim dela sai só o aviso, e cada resultado sai quando ele quiser ouvir.
+    #[test]
+    fn results_during_talk_become_one_offer_and_are_heard_on_request() {
+        let text = |v: Value| v["input"][0]["text"].as_str().unwrap().to_owned();
+        let mut results = Results::default();
+        assert!(results.set_user_talking(true).is_none());
+        assert!(results.push("deploy".into(), "Criei a TK-2 na VM.".into()).is_none(), "com ele falando, nada abre");
+        assert!(results.push("hangar".into(), "Build passou.".into()).is_none());
+        assert!(results.take_offer().is_none(), "ainda na conversa: nem o aviso");
+        assert!(results.set_user_talking(false).is_none(), "acabou a conversa: não despeja resumo");
+        let offer = results.take_offer().expect("avisa que há resultados");
+        assert!(offer.contains("dois resultados") && offer.contains("deploy") && offer.contains("hangar"), "{offer}");
+        assert!(results.take_offer().is_none(), "um aviso só");
+        assert!(results.set_user_talking(true).is_none());
+        assert!(results.set_user_talking(false).is_none() && results.take_offer().is_none(), "sem resultado novo, não repete o aviso");
+        assert!(results.push("deploy".into(), "Serviços da VM no ar.".into()).is_none(), "avisado: espera o pedido dele");
+        assert!(results.take_offer().unwrap().contains("três resultados"), "chegou mais um: avisa de novo");
+        assert!(text(results.set_quiet(false).expect("ele quis ouvir")).starts_with("[RESULTADO DA SESSÃO deploy]"));
+        results.turn_started();
+        assert!(text(results.turn_completed().expect("e o seguinte")).starts_with("[RESULTADO DA SESSÃO hangar]"));
+    }
+
+    /// Ele voltou a falar enquanto o resumo era montado: o resumo cortado volta para a frente e vira aviso no fim da fala.
+    #[test]
+    fn summary_cut_by_speech_goes_back_first_and_is_offered() {
+        let mut results = Results::default();
+        assert!(results.push("deploy".into(), "Criei a TK-2 na VM.".into()).is_some(), "silêncio: resumo direto");
+        results.turn_started();
+        assert!(results.set_user_talking(true).is_none());
+        results.interrupted();
+        assert!(results.turn_completed().is_none(), "cortado: espera ele terminar");
+        assert!(results.set_user_talking(false).is_none());
+        assert!(results.take_offer().unwrap().contains("um resultado da deploy"));
+        assert!(results.set_quiet(false).unwrap()["input"][0]["text"].as_str().unwrap().contains("TK-2"), "nada se perdeu");
+    }
+
+    #[test]
+    fn explicit_quiet_wins_over_the_offer() {
+        let mut results = Results::default();
+        results.set_quiet(true);
+        results.set_user_talking(true);
+        assert!(results.push("deploy".into(), "x".into()).is_none());
+        assert!(results.set_user_talking(false).is_none());
+        assert!(results.take_offer().is_none(), "silêncio pedido: nem aviso");
+        assert_eq!(results.held(), 1);
+    }
+
+    #[test]
+    fn result_input_says_it_is_not_the_session_on_screen() {
+        let mut results = Results::default();
+        results.set_screen("loja");
+        let input = results.push("deploy".into(), "Criei a TK-2.".into()).unwrap();
+        let text = input["input"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("[RESULTADO DA SESSÃO deploy]"), "{text}");
+        assert!(text.contains("loja"), "a sessão da tela vai junto: {text}");
+        results.turn_started();
+        results.set_screen("deploy");
+        results.push("deploy".into(), "De novo.".into());
+        let same = results.turn_completed().unwrap();
+        assert!(!same["input"][0]["text"].as_str().unwrap().contains("loja"));
+    }
+
+    #[test]
+    fn prompts_keep_the_origin_of_a_result_and_never_fill_the_wait() {
+        assert!(ORGANIZER_PROMPT.contains("'Chegou um resultado da <nome>"), "abertura do aviso");
+        assert!(ORGANIZER_PROMPT.contains("não ofereça mandar"), "leitura não vira oferta de envio");
+        assert!(VOICE_PROMPT.contains("Chegou um resultado da"), "a voz mantém a origem");
+        assert!(VOICE_PROMPT.contains("nunca como resposta"));
+        assert!(VOICE_PROMPT.contains("Não transforme afirmação em pergunta"));
+        assert!(VOICE_PROMPT.contains("fique em silêncio"));
+        assert!(VOICE_PROMPT.contains("'pode continuar'"), "retomada depois de interrompida");
+        assert!(VOICE_PROMPT.contains("fale todas, com a"), "opções A/B chegam inteiras à fala");
+        assert!(ORGANIZER_PROMPT.contains("diga cada uma com a consequência"), "e saem inteiras do organizador");
+        assert!(!VOICE_PROMPT.contains("uma ou duas frases por vez"), "o teto de frases cortava o conteúdo da sessão");
+        let prompt = voice_prompt(false, &tools(), false, "- [m5] preferência Sem frases de espera.");
+        assert!(prompt.contains("Sem frases de espera") && prompt.contains("valem sobre o padrão"), "{prompt}");
+        assert!(!VOICE_PROMPT.contains("diga\n  só algo curto") && !VOICE_PROMPT.contains("diga só algo curto"), "sem frase de espera mandada");
+    }
+
     #[test]
     fn refused_summary_while_busy_is_retried() {
         let mut results = Results::default();
@@ -2509,7 +2666,7 @@ mod tests {
     fn refused_summary_while_idle_is_released_for_direct_speech() {
         let mut results = Results::default();
         assert!(results.push("s".into(), "feito".into()).is_some());
-        assert_eq!(results.turn_start_failed(false).as_deref(), Some("feito"));
+        assert_eq!(results.turn_start_failed(false), Some(("s".into(), "feito".into())));
         assert!(results.push("s".into(), "outro".into()).is_some(), "a fila não ficou travada");
     }
 
@@ -2518,7 +2675,7 @@ mod tests {
         let mut results = Results::default();
         assert!(results.push("s".into(), "A".into()).is_some());
         assert!(results.push("s".into(), "B".into()).is_none(), "fila");
-        assert_eq!(results.turn_start_failed(false).as_deref(), Some("A"));
+        assert_eq!(results.turn_start_failed(false).map(|(_, text)| text).as_deref(), Some("A"));
         let drained = results.turn_completed().expect("sai quando o organizador fica livre");
         assert!(drained["input"][0]["text"].as_str().unwrap().contains("B"));
     }

@@ -656,6 +656,18 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   tempo: `quiet` com `on: false`, na volta pedida por ele, solta os guardados para o resumo, um por vez.
   O pedido temporário vence o padrão de anunciar resultados. Medição em "Voz: silêncio, fala repetida e
   sessão fechada no app".
+- **Voz: resultado de sessão nunca entra na conversa dele.** Conversa em curso = transcrição da fala dele
+  há menos de `RESULT_SILENCE` (5 s contínuos, recomeçando a cada fala; o microfone não conta, ruído
+  seguraria para sempre), turno do organizador para a fala dele, ou nenhum aparelho ouvindo. Nela nenhum
+  resumo abre. O que chegou nela, ou o resumo cortado por ela, sai depois como um aviso do Hangar
+  ("Chegaram dois resultados, da X e da Y. Quer ouvir?", repetido só se a fila crescer), e cada resumo só
+  quando ele aceita (`quiet` com `on: false`); nada é descartado e o `quiet` pedido vence o aviso. O Codex
+  repassa à voz toda mensagem do organizador assim que ela fica pronta
+  (`maybe_mirror_event_text_to_realtime`), inclusive a do resumo que o Hangar abre: segurar a fala do lado
+  do Hangar não segura nada. Por isso a fala dele corta o turno do resumo ainda sem mensagem
+  (`turn/interrupt`) e o resumo não é repetido por `appendSpeech`. O resumo de outra sessão abre com
+  "Chegou um resultado da X, não da Y". Sem `delegationAckFiller` ("um segundo" a cada delegação). Medição
+  em "Voz: resultado de outra sessão tomando a vez (14/10/2026)".
 - **Voz: tela vazia não apaga a conversa.** Sem sessão na tela, a chamada segue com a última sessão real:
   a nota diz que a tela está vazia e de qual sessão a conversa trata, e `read_session`, `send_to_session`
   e `ask_session` sem nome vão para ela. Fechada essa sessão (pela voz ou no app, visto na lista seguinte
@@ -671,7 +683,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Voz: o Jev é atalho, nunca veto.** Ele recebe a fala separada do turno, o trecho anterior e o deste
   (com a oferta da voz) e a lista de sessões de todas as máquinas. Envio com intenção e destino ≥ 0,9 vira
   só uma nota "Atalho: … mandar para a sessão X" no turno da fala; quem envia é o organizador. Abaixo
-  disso, ou com erro, o Jev não faz nada e nada do organizador é recusado por causa dele.
+  disso, ou com erro, o Jev não faz nada e nada do organizador é recusado por causa dele. Ler ou explicar
+  uma sessão (`read`) com intenção e destino ≥ 0,9: o Hangar lê na hora (a mesma leitura do `read_session`,
+  desde o último pedido) e põe a leitura no turno da fala, para o organizador responder sem a ida e volta da
+  ferramenta; falha não diz nada e ele lê sozinho. Só leitura e troca/tela saem pelo atalho: a voz do Codex
+  (v3) não aceita ferramentas próprias e toda delegação vira turno do organizador, então envio, sessão nova,
+  destrutivo, shell, MCP e pesquisa ficam com ele. Medição em "Voz: resultado de outra sessão tomando a vez".
+- **Voz: ditado com a voz ligada silencia a voz.** No nativo, começar o ditado põe o microfone da voz no
+  mesmo silenciar do painel dela e o devolve como estava ao terminar ou cancelar (`Dictation::hold_voice`).
+  Ligar a voz com o ditado gravando continua recusado.
 - **Voz: o organizador roda no Full Access das sessões Codex, sem pedido de aprovação.** `thread/start`
   com `danger-full-access` e `approvalPolicy: "never"`, e a entrada do MCP `hangar` com
   `default_tools_approval_mode: "approve"`. Motivo: todo pedido de aprovação que nasce, respondido ou
@@ -723,7 +743,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `prompt` do `thread/realtime/start` leva a lista gerada por `organizer::voice_prompt` a partir das
   ferramentas que o organizador recebe (`tools_for(caps)`; sem ferramenta de tela no aparelho, sem a
   linha da tela; MCP só com a entrada dele). Ferramenta nova sem linha em `CAPABILITIES` reprova o teste.
-  Perfil e memória ficam fora da voz. Pergunta sobre o que consegue ou se tem acesso vai ao organizador,
+  Perfil e fatos ficam fora da voz; as `preferencia` entram no prompt dela (`voice_prompt(.., prefs)`) e a
+  gravada no meio da chamada entra por `thread/realtime/appendText` com papel `developer`, que não é
+  falado: quem fala também parafraseia, e sem elas a voz resumia e enchia a espera apesar do pedido.
+  A voz não tem teto de frases para o que o organizador manda falar: opções A/B vão inteiras, com a
+  consequência e a recomendação. Medição em "Voz: resultado de outra sessão tomando a vez (14/10/2026)".
+  Pergunta sobre o que consegue ou se tem acesso vai ao organizador,
   que responde pelas ferramentas dele e diz o que falta, nunca "não tenho acesso" havendo ferramenta.
   Todo encaminhamento começa com as palavras exatas do usuário entre aspas. O `ORGANIZER_PROMPT` vai
   uma vez só (`baseInstructions`): `realtimeStartInstructions` leva só `REALTIME_START`, a nota curta
@@ -3627,6 +3652,45 @@ nenhum. Achar a causa dependeu de outra sessão ler o `settings.json` da conta.
 **O que o aviso NÃO pega.** Falha engolida dentro do script (`state_hook.py` e `nav_hook.py`
 embrulham tudo em `except` e saem com 0). O aviso cobre script sumido, Python sumido e crash.
 
+## Voz: resultado de outra sessão tomando a vez (14/10/2026)
+
+(`crates/hangar-server/src/voice/call.rs`, `organizer.rs`; Codex 0.162.1, o mesmo desde 09/10; fonte lida em
+`codex-rs` b17c74c.) Diário `hangar-server.log` da chamada nativa de 19:31 UTC.
+
+- **O caso.** Resultado de uma sessão às 19:41:35.6, com ele calado; ele volta a falar às 19:41:39.7 (sobre outra
+  sessão, a que lia); a mensagem do resumo fica pronta às 19:41:41.36 e o Hangar a segura (`summary speech held`); a
+  voz começa a falar às 19:41:42.11, com ele ainda falando (final dele às 19:41:43.6), e o Hangar só solta a
+  sua cópia às 19:41:44.33. Quem falou por cima foi o repasse do Codex: `session/mod.rs`
+  (`maybe_mirror_event_text_to_realtime`) manda à voz toda mensagem do organizador; sem delegação ativa ela
+  sai como `StandaloneHandoff` no canal falável (`v3_output_writer`, modo padrão `Thinking`), pelo mesmo
+  `send_standalone_handoff` do `appendSpeech`. A retenção de 09/10 (`db8c6f981`) só segurava a cópia do
+  Hangar. Em todo o diário, a voz começou antes da liberação em 7 de 20 retenções (11/10 incluso): o furo é
+  de 09/10, não de 14/10.
+- **Por que piorou em 14/10.** A janela entre o resultado e a mensagem pronta cresceu: turno de resumo com
+  mediana de 3,1 s em 11/10, 3,9 s em 12/10 e 5,7 s em 14/10 (`turn/started` → `item/completed agentMessage`;
+  o `config.json` da voz passou a esforço `high` em 13/10 22:24). Quanto maior a janela, mais vezes ele
+  recomeça a falar dentro dela.
+- **Janela de silêncio.** Depois que o Codex fechou a fala dele (`transcript/done`) e sem a voz falar no meio,
+  ele retomou em menos de 1 s em 55% das vezes, 2 s em 77%, 3 s em 84% e 5 s em 93% (n=69, 11 a 14/10).
+  5 s cobre quase todas as retomadas; aviso assíncrono atrasado custa pouco.
+- **Frases de espera.** `delegationAckFiller: true` (ligado em `7ff8b7618`, 09/10, sem medição) pede ao
+  servidor um aviso curto a cada delegação, e o prompt mandava dizer "deixa eu ver". Delegações com fala da
+  voz antes da primeira ação do organizador: 35% em 11/10, 62% em 12/10, 84% em 14/10. As duas saíram.
+- **Memória desobedecida.** As preferências (m2, m4, m5 de 14/10) iam só ao `developerInstructions` do
+  organizador; o prompt da voz, que parafraseia o que fala, não tinha nenhuma e mandava "uma ou duas frases
+  por vez", o que cortava opções A/B em "falta decidir o formato".
+- **Latência e o atalho de leitura.** Da delegação ao primeiro texto da voz depois da resposta do organizador
+  (`itemAdded` → `agentMessage` → `transcript/delta role=assistant`): mediana de 5,4 s em 11/10, 7,5 s em
+  12/10 e 11,2 s em 14/10. Quase tudo é o organizador: turno sem ferramenta, 2,9 a 6,0 s; com ferramenta
+  leve do Hangar, 2,4 a 4 s a mais; da mensagem à fala, cerca de 1 s. Na fonte do Codex, a v3 manda ao
+  servidor só instruções, voz e `delegation: client`, sem ferramentas (`methods_frameless_bidi.rs`), e
+  `clientManagedHandoffs` só desliga o repasse da resposta (a delegação continua indo ao organizador). O Jev
+  responde em 0,54 s na mediana (p90 0,72 s, n=469). Medir o ganho: o mesmo cálculo, separando os turnos
+  com `jev act=read` no diário.
+- **Não verificado em chamada real:** se a voz agora mantém a abertura "Chegou um resultado da X" ao
+  parafrasear, e se o `turn/interrupt` sempre chega antes de a mensagem ficar pronta (a mensagem pronta antes
+  da fala dele já foi à voz e não é cortada).
+
 ## Progresso de MCP no Claude sem terminal
 
 Em 23/09/2026 o usuário notou que, sem terminal, uma chamada longa de MCP (o `objetivo` do
@@ -3902,6 +3966,18 @@ Na prova com uma sessão Claude real com terminal e o plugin alterado, a primeir
 publicou `72004/1000000`, igual a `72k/1000k` da statusline personalizada. Os testes reproduziram
 200k em vez de 1M, a primeira resposta presa no cache e a escrita entre leitura e armazenamento;
 depois da correção, passaram. `/clear` troca o transcript e não herda a medida da conversa anterior.
+
+## Sessão sem terminal no primeiro turno: janela aprendida por modelo (14/10/2026)
+
+A voz abriu `voz-bugs` (sem terminal) pelo mesmo pedido do app: `model` e `effort` nulos, `bypassPermissions`,
+sem `--model` no processo. A lista mostrou `186979/200000` com o modelo `claude-opus-5-5`, e as outras sessões
+Opus estavam em 1M. Não houve troca de modelo: o transcript inteiro é `claude-opus-5-5`, e um `claude -p` com as
+mesmas configurações devolveu `contextWindow = 1000000`. A sessão sem terminal não tem barra nem
+`.context.json`, e o `context_window` do sidecar só chega no fim do primeiro turno; até lá a inferência
+caía na reserva de 200k, porque o alias `opus` não leva `[1m]`. Agora o `ContextCache` guarda a janela que o
+Claude informou (sidecar ou medida do plugin, nunca a deduzida; motor fora) por modelo respondido, e a sessão
+nova do mesmo modelo a usa. Limite: logo depois de o servidor subir, antes de qualquer sessão desse modelo
+ter informado, a reserva de 200k volta; a reserva em Python segue a regra antiga.
 
 ## Retomada sem o plugin do Hangar
 
