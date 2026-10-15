@@ -88,7 +88,13 @@ pub enum Account {
     Codex { account_id: String },
     Omp { profile: String, config_dir: Option<String> },
     /// Claude num motor do `engines.json`; `account` é a conta ChatGPT fixa do CLIProxyAPI.
-    Engine { name: String, account: Option<String>, config_dir: Option<String>, context_window: Option<u64> },
+    /// `context_window_unknown`: o catálogo do motor não respondeu na abertura (T-004); a janela é
+    /// relida a cada reabertura (`SessionSpec::refresh_engine_window`).
+    Engine {
+        name: String, account: Option<String>, config_dir: Option<String>, context_window: Option<u64>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        context_window_unknown: bool,
+    },
 }
 
 impl Account {
@@ -326,6 +332,17 @@ pub async fn create(
 }
 
 impl SessionSpec {
+    /// T-004: janela do motor que ficou desconhecida é lida de novo; o catálogo ainda fora a deixa
+    /// desconhecida, e a sessão abre sem ela, como na criação.
+    pub fn refresh_engine_window(&mut self, facts: &dyn OpenFacts) {
+        let Account::Engine { name, account, context_window, context_window_unknown: unknown @ true, .. } = &mut self.account else { return };
+        let Some(model) = self.model.as_deref().filter(|m| !m.is_empty()) else { return };
+        if let Ok(window) = facts.engine_window(name, model, account.as_deref()) {
+            *context_window = window;
+            *unknown = false;
+        }
+    }
+
     /// Reabrir = spec gravado ⊕ mudança.
     pub fn with(&self, change: &SessionChange) -> SessionSpec {
         let mut next = self.clone();

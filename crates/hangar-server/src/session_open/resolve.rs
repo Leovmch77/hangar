@@ -71,7 +71,7 @@ pub trait OpenFacts {
     /// Conta ChatGPT fixa do motor: confere conta e modelos e devolve o modelo sem o prefixo da conta.
     fn fixed_engine_model(&self, engine: &str, account: &str, model: Option<&str>) -> Result<String, OpenError>;
     /// Janela do modelo no catálogo do motor (`None` = o catálogo não traz o modelo ou o número).
-    /// Catálogo que não responde é erro: a janela não fica desconhecida para sempre no spec.
+    /// Catálogo que não responde é erro; a abertura segue com a janela desconhecida (T-004).
     fn engine_window(&self, engine: &str, model: &str, account: Option<&str>) -> Result<Option<u64>, OpenError>;
     /// Pasta da conta Codex pelo id (`resolve_account`).
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError>;
@@ -225,14 +225,23 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     };
     let cwd = facts.existing_dir(&request.cwd).unwrap_or_else(|| request.cwd.clone());
     let engine = request.engine.as_deref().filter(|e| !e.is_empty());
-    let context_window = match (engine, model.as_deref().filter(|m| !m.is_empty())) {
-        (Some(engine), Some(model)) => facts.engine_window(engine, model, request.engine_account.as_deref())?,
-        _ => None,
+    let (context_window, context_window_unknown) = match (engine, model.as_deref().filter(|m| !m.is_empty())) {
+        (Some(engine), Some(model)) => match facts.engine_window(engine, model, request.engine_account.as_deref()) {
+            Ok(window) => (window, false),
+            // T-004: provedor fora do ar não impede abrir (escolha do Python); a janela fica
+            // desconhecida no spec e é relida em cada reabertura.
+            Err(error) => {
+                tracing::warn!(code = error.code, "janela do motor não lida na abertura; a sessão abre sem ela");
+                (None, true)
+            }
+        },
+        _ => (None, false),
     };
     let account = match (provider, engine) {
         (AgentProvider::Codex, _) => Account::Codex { account_id: codex_account.unwrap_or_else(|| "default".into()) },
         (_, Some(engine)) => Account::Engine {
             name: engine.into(), account: request.engine_account.clone(), config_dir: config_dir.clone(), context_window,
+            context_window_unknown,
         },
         (AgentProvider::Omp, _) if truthy(&request.omp_profile) => Account::Omp {
             profile: request.omp_profile.clone().unwrap_or_default(), config_dir: config_dir.clone(),

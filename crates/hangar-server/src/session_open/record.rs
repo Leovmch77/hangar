@@ -79,7 +79,7 @@ pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>>
         let config_dir = text(&meta, "config_dir");
         let account = match text(&meta, "engine") {
             Some(name) => Account::Engine { name, account: text(&meta, "engine_account"), config_dir,
-                context_window: meta["context_window"].as_u64() },
+                context_window: meta["context_window"].as_u64(), context_window_unknown: false },
             None => config_dir.map_or(Account::Default, |config_dir| Account::Claude { config_dir }),
         };
         return Ok(Some(SessionSpec {

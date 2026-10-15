@@ -117,9 +117,9 @@ fn reopen_keeps_what_the_change_does_not_name() {
 /// harness deu ao Python (`session_open_contract.py`), lidos do mesmo jeito que o Python os lê.
 struct FixtureFacts {
     files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value,
-    /// Desvios que o teste pede e o cenário não tem: settings ilegível, contas Codex conectadas e
-    /// troca de agente em curso.
-    broken_mode: bool, connected: Vec<resolve::CodexLogin>, busy: bool,
+    /// Desvios que o teste pede e o cenário não tem: settings ilegível, contas Codex conectadas,
+    /// troca de agente em curso e o catálogo do motor (o harness recusa a rede: `Err`).
+    broken_mode: bool, connected: Vec<resolve::CodexLogin>, busy: bool, window: Result<Option<u64>, ()>,
 }
 
 /// A ponte do ditado com o Rust fora, como o harness a responde (`session_open_contract.py:941`).
@@ -138,6 +138,7 @@ impl FixtureFacts {
             broken_mode: false,
             connected: Vec::new(),
             busy: false,
+            window: Err(()),
         }
     }
 
@@ -233,9 +234,8 @@ impl resolve::OpenFacts for FixtureFacts {
         Err(OpenError::new(503, "session_open_fact_unavailable", "sem conta ChatGPT no cenário"))
     }
 
-    // O harness recusa a rede: o catálogo do motor não responde.
     fn engine_window(&self, engine: &str, _model: &str, _account: Option<&str>) -> Result<Option<u64>, OpenError> {
-        Err(OpenError::new(503, "session_open_fact_unavailable", format!("o catálogo do motor '{engine}' não respondeu: rede recusada")))
+        self.window.map_err(|()| OpenError::new(503, "session_open_fact_unavailable", format!("o catálogo do motor '{engine}' não respondeu: rede recusada")))
     }
 
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError> {
@@ -319,10 +319,6 @@ const FIXED: [&str; 2] = [
     "create_inherit_flag_not_supported",
 ];
 
-/// Motor com modelo: o harness recusa a rede, o catálogo do motor não responde e o Rust recusa em vez
-/// de gravar a janela como desconhecida para sempre (o Python abria sem ela).
-const ENGINE_WINDOW_UNREAD: [&str; 2] = ["create_claude_terminal_engine", "create_claude_headless_engine_then_launch"];
-
 fn resolve_fixture(fixture: &Value) -> Result<resolve::Resolved, OpenError> {
     let request = SessionOpenRequest::parse(&request_body(fixture)).unwrap();
     resolve::resolve_open(&request, &OWNER, &FixtureFacts::of(fixture))
@@ -339,11 +335,11 @@ fn expected(name: &str, fixture: &Value, local: bool) -> Expected {
         // A forma do corpo é do `SessionOpenRequest::parse` (teste próprio).
         _ if detail.is_array() && !FIXED.contains(&name) => Expected::Skip,
         _ if LAUNCH_REFUSALS.contains(&name) || FIXED.contains(&name) => Expected::Resolves,
-        _ if ENGINE_WINDOW_UNREAD.contains(&name) => refused(503, "session_open_fact_unavailable"),
-        // O harness injetou o catálogo do Codex na ponte; o `LocalFacts` pergunta ao Codex instalado,
-        // que aqui é um programa que sai com erro: o Fast não é conferido e a escolha sem modelo, sim.
-        "create_codex_catalog_ok" if local => refused(502, "erro_codex_catalogo_invalido"),
-        "create_codex_catalog_refuses_choice" if local => Expected::Resolves,
+        // O catálogo do Codex vem do app-server falso do cenário: a frase da recusa é a do Rust, não
+        // a que o harness inventou para a ponte.
+        "create_codex_catalog_refuses_choice" if local => refused(422, "erro_codex_escolha_invalida"),
+        // Fast sem modelo: o Python recebeu "Rust fora" da ponte que valida (502); o `LocalFacts`
+        // valida aqui mesmo e recusa porque o Fast exige modelo explícito.
         "create_codex_priority_catalog_unavailable" if local => refused(422, "erro_codex_escolha_invalida"),
         _ if status == 200 => Expected::Created,
         _ => Expected::Refused {
@@ -419,7 +415,7 @@ fn every_creation_fixture_resolves_like_python() {
         .filter(|(name, fixture)| !matches!(expected(name, fixture, false), Expected::Skip))
         .map(|(name, fixture)| check(name, fixture, resolve_fixture(fixture), false)).fold((0, 0, 0), sum);
     // Todo 200 tem o que o Python lançou (argv do pane ou o sidecar); recusas antes do lançamento.
-    assert_eq!(total, (41, 41, 31));
+    assert_eq!(total, (43, 43, 29));
 }
 
 /// As mesmas 81 pelo `LocalFacts` de produção, lendo um cenário montado em disco.
@@ -441,8 +437,8 @@ fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
                 std::sync::Arc::new(crate::list::procs::ProcFs::with_root(root.join("proc"))));
         total = sum(total, check(&name, &fixture, unroot(resolve::resolve_open(&request, &OWNER, &facts), &root), true));
     }
-    // O catálogo do Codex: uma criada vira recusa e uma recusa passa a resolver.
-    assert_eq!(total, (40, 40, 31));
+    // As mesmas contas da `FixtureFacts`: o Fast sem modelo recusa com outro status, mas recusa.
+    assert_eq!(total, (43, 43, 29));
 }
 
 /// O caminho da raiz de teste volta a ser `<ROOT>`, como nas fixtures.
@@ -495,6 +491,24 @@ fn materialize(fixture: &Value, root: &std::path::Path) {
     for program in ["claude", "codex", "pi", "omp", "kimi", "hangar-codex-tui", "hangar-engine", "bwrap"] {
         write(&bin.join(program), b"#!/bin/sh\nexit 1\n");
         std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // O catálogo do Codex que o harness deu à ponte vira o `model/list` de um app-server falso; sem
+    // ele no cenário o `codex` segue saindo com erro (catálogo fora do ar).
+    let catalog = &fixture["scenario"]["fakes"]["rust_bridge"]["dictation.catalog_models"]["result"]["models"];
+    if let Some(models) = catalog.as_array() {
+        let efforts: Vec<Value> = ["low", "medium", "high"].iter().map(|e| json!({"reasoningEffort": e})).collect();
+        let rows: Vec<Value> = models.iter().map(|m| json!({"model": m["model"], "serviceTiers": [{"id": "priority"}],
+            "supportedReasoningEfforts": efforts})).collect();
+        let script = format!(concat!("#!/usr/bin/python3\nimport json, sys\n",
+            "if '--version' in sys.argv: print('codex-cli 0.162.1'); sys.exit(0)\n",
+            "if 'app-server' not in sys.argv: sys.exit(1)\n",
+            "for line in sys.stdin:\n",
+            "    msg = json.loads(line)\n",
+            "    if 'id' not in msg: continue\n",
+            "    result = {{'data': {}, 'nextCursor': None}} if msg.get('method') == 'model/list' else {{}}\n",
+            "    print(json.dumps({{'id': msg['id'], 'result': result}}), flush=True)\n"), Value::from(rows));
+        write(&bin.join("codex"), script.as_bytes());
+        std::fs::create_dir_all(root.join("home/.codex")).unwrap();
     }
     let mut panes = String::new();
     for (index, session) in state["tmux_sessions"].as_array().into_iter().flatten().enumerate() {
@@ -730,7 +744,7 @@ fn unlisted_codex_accounts_refuse_instead_of_counting_as_none() {
 }
 
 /// Janela do motor como o Python: `context_length` (ou `context_window`) do catálogo do provedor,
-/// 1M para `gpt-…[1m]`; catálogo fora do ar recusa em vez de gravar a janela desconhecida.
+/// 1M para `gpt-…[1m]`; catálogo fora do ar abre sem a janela, marcada desconhecida (T-004).
 #[test]
 fn the_engine_window_comes_from_the_provider_catalog() {
     let runtime = test_runtime();
@@ -752,15 +766,33 @@ fn the_engine_window_comes_from_the_provider_catalog() {
         let body = json!({"name": "s1", "cwd": home.join("work"), "provider": "claude", "headless": false, "engine": engine, "model": model});
         let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
         resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime))
-            .map(|r| match r.spec.account { Account::Engine { context_window, .. } => context_window, other => panic!("{other:?}") })
-            .map_err(|e| (e.status, e.code, e.msg.contains("chave")))
+            .map(|r| match r.spec.account {
+                Account::Engine { context_window, context_window_unknown, .. } => (context_window, context_window_unknown),
+                other => panic!("{other:?}"),
+            })
+            .map_err(|e| (e.status, e.code))
     };
-    assert_eq!(open("e", "k3"), Ok(Some(262144)));
-    assert_eq!(open("e", "gpt-5.5[1m]"), Ok(Some(1_000_000)));
-    assert_eq!(open("e", "gpt-5.5"), Ok(Some(400000)));
-    assert_eq!(open("e", "sem"), Ok(None), "o catálogo não traz o número");
-    assert_eq!(open("e", "nao-existe"), Ok(None), "o catálogo não traz o modelo");
-    assert_eq!(open("fora", "k3"), Err((503, Some("session_open_fact_unavailable"), false)));
+    assert_eq!(open("e", "k3"), Ok((Some(262144), false)));
+    assert_eq!(open("e", "gpt-5.5[1m]"), Ok((Some(1_000_000), false)));
+    assert_eq!(open("e", "gpt-5.5"), Ok((Some(400000), false)));
+    assert_eq!(open("e", "sem"), Ok((None, false)), "o catálogo não traz o número");
+    assert_eq!(open("e", "nao-existe"), Ok((None, false)), "o catálogo não traz o modelo");
+    assert_eq!(open("fora", "k3"), Ok((None, true)), "provedor fora: abre, janela desconhecida");
+}
+
+/// T-004: a janela desconhecida é lida de novo a cada reabertura e só sai de desconhecida quando o
+/// catálogo responde.
+#[test]
+fn an_unknown_engine_window_is_read_again_on_reopen() {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    for (window, expected) in [(Err(()), (None, true)), (Ok(Some(262144)), (Some(262144), false)), (Ok(None), (None, false))] {
+        let facts = FixtureFacts { window, ..FixtureFacts::of(&fixture) };
+        let mut spec = SessionSpec { model: Some("k3".into()), account: Account::Engine { name: "e".into(), account: None,
+            config_dir: None, context_window: None, context_window_unknown: true }, ..fixture_spec("create_claude_terminal_default") };
+        spec.refresh_engine_window(&facts);
+        let Account::Engine { context_window, context_window_unknown, .. } = spec.account else { unreachable!() };
+        assert_eq!((context_window, context_window_unknown), expected);
+    }
 }
 
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
