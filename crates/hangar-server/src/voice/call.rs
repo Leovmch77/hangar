@@ -92,7 +92,7 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
 
-enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Listen(String, bool), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Listen(String, bool), Heard(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
     Sessions(Vec<String>), Jev { turn: String, speech: Option<String>, note: Option<String> },
     /// Número da oferta, SDP e a nota da sessão na tela do aparelho que ofereceu.
     Offer(u64, String, String), Live, Level(f32), Detached }
@@ -121,6 +121,8 @@ impl Voice {
     pub fn session_result(&self, session: String, text: String) { let _ = self.commands.send(Command::Result(session, text)); }
     /// Ele pediu (ou deixou de pedir) os resultados desta sessão.
     pub fn listen(&self, session: String, on: bool) { let _ = self.commands.send(Command::Listen(session, on)); }
+    /// Ele ouviu a conversa desta sessão: o que dela estava guardado e aparece na leitura deixa a fila.
+    pub fn heard(&self, session: String, read: String) { let _ = self.commands.send(Command::Heard(session, read)); }
     pub fn reply(&self, call: CallId, reply: Value) { let _ = self.commands.send(Command::Reply(call.0, reply)); }
     pub fn set_mode(&self, mode: Mode) { let _ = self.commands.send(Command::SetMode(mode)); }
     /// Pares editados no cartão durante a chamada: o do modo atual vale já no próximo turno.
@@ -150,6 +152,10 @@ fn failure_kind(failure: &VoiceFailure) -> String {
 /// Comando que espera (`--watch`, `tail -f`) prende o turno do organizador e a voz fica sem resposta: passou disto, interrompe.
 pub const COMMAND_LIMIT: Duration = Duration::from_secs(60);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
+/// Final de fala depois disso sem pedaço novo é a de uma fala já encerrada.
+const LATE_FINAL: Duration = Duration::from_millis(1500);
+const OFFER_ACCEPTED_NOTE: &str = "[NOTA DO HANGAR] Ele disse sim ao aviso e o Hangar já soltou os resultados guardados: não chame quiet; \
+    resuma este resultado agora, como manda a regra do [RESULTADO DA SESSÃO]. Os outros chegam depois, um por vez.";
 const COMMAND_LIMIT_NOTE: &str = "O comando demorou mais de 60 s e foi interrompido; não use comando que espera — consulte uma vez e responda.";
 const COMMAND_LIMIT_SPEECH: &str = "Parei o comando porque estava demorando demais.";
 /// Interrupção recusada: nova tentativa enquanto o comando seguir rodando.
@@ -343,6 +349,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     // abre resumo depois de `result_silence` contínuo, e a fala que volta corta o resumo ainda sem mensagem.
     let result_silence = options.result_silence;
     let mut last_user_voice: Option<Instant> = None;
+    // Último pedaço de fala dele: a final só conta como fala se veio logo depois de um.
+    let mut last_user_delta: Option<Instant> = None;
     let mut was_talking = false;
     // O aviso de resultados guardados, para o organizador saber o que o "quero ouvir" responde.
     let mut offer_note: Option<String> = None;
@@ -377,6 +385,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     // Turno cuja fala seguiu em transcrição depois da delegação, e desde quando: o envio dele espera a final.
     let mut speaking: Option<(String, Instant)> = None;
     let mut out = Speech::default();
+    let mut ack = organizer::WaitAck::default();
     // Comandos do organizador em curso, por item: turno e prazo (um turno pode rodar mais de um).
     let mut running_commands: std::collections::HashMap<String, (String, Instant)> = std::collections::HashMap::new();
     let outcome = loop {
@@ -442,12 +451,17 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             let _ = events.send(VoiceEvent::Draft(None)).await;
             let _ = events.send(VoiceEvent::Send { call: CallId(id), request, session, turn }).await;
         }
+        if let Some(text) = ack.due(Instant::now(), last_user_voice) {
+            if out.away { log("wait ack skipped: away"); } else { speak(&rpc, &thread, &mut out, text.to_owned(), "wait ack").await; }
+        }
         // Comando parado não manda evento nenhum: sem este despertar, o prazo dele nunca seria conferido.
         let command_due = running_commands.values().map(|(_, at)| *at).min();
+        let ack_due = ack.next_check(last_user_voice);
         tokio::select! {
             // Comandos antes das notificações: a passagem ou a queda do aparelho já valem quando chega o fim da conversa anterior.
             biased;
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(command_due.unwrap_or_else(Instant::now))), if command_due.is_some() => {}
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(ack_due.unwrap_or_else(Instant::now))), if ack_due.is_some() => {}
             command = async { match early.pop_front() { Some(command) => Some(command), None => inbox.recv().await } } => match command {
                 Some(Command::Live) => {
                     log("phase Live");
@@ -550,6 +564,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     if let Some(input) = results.push(session, text) { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                 }
                 Some(Command::Listen(session, on)) => results.listen(&session, on),
+                Some(Command::Heard(session, read)) => results.heard(&session, &read),
                 None => break Ok(()),
             },
             item = incoming.recv() => match item {
@@ -914,6 +929,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             let speech = spoken.text(&params).unwrap_or_default().to_owned();
                             // O trecho desta delegação já traz o que veio antes dela.
                             delegated = params["turnId"].as_str().map(|t| (t.to_owned(), now));
+                            if let Some(turn) = params["turnId"].as_str() { ack.delegated(turn, now); }
                             continuation.clear();
                             continuation_cut = false;
                             speaking = None;
@@ -922,6 +938,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 let _ = events.send(VoiceEvent::Heard { turn: turn.to_owned(), speech, recent }).await;
                             }
                             last_input = Some((input, now));
+                            // Sim curto ao aviso: o primeiro resultado entra já neste turno, sem esperar o organizador chamar quiet,
+                            // fechar a resposta dele e abrir outro turno para o resumo.
+                            if offer_note.is_some() && results.running_summary().is_none()
+                                && organizer::accepts_offer(organizer::transcript_delta(&text))
+                                && let Some(turn) = params["turnId"].as_str()
+                                && let Some(mut steer) = results.accept_offer() {
+                                offer_note = None;
+                                steer["threadId"] = json!(thread);
+                                steer["expectedTurnId"] = json!(turn);
+                                if let Some(parts) = steer["input"].as_array_mut() { parts.push(json!({"type": "text", "text": OFFER_ACCEPTED_NOTE})); }
+                                match rpc.request("turn/steer", steer).await {
+                                    Ok(_) => { log("offer accepted: result steered into the yes turn"); results.mark_summary(turn.to_owned()); ack.answered(turn); }
+                                    // Volta para a frente da fila; com o aceite já registrado, sai no fim deste turno.
+                                    Err(error) => { log(format!("offer accept steer failed kind={}", rpc_error_kind(&error))); results.turn_start_failed(true); }
+                                }
+                            }
                             // A troca de sessão ou de modo chega ao organizador no turno desta fala. Nunca pela voz: na v3
                             // o texto acrescentado a ela é falado, e o usuário ouvia o caminho da pasta e as regras.
                             if let Some(offer) = offer_note.take() {
@@ -961,13 +993,15 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let kind = params["item"]["type"].as_str().unwrap_or_default();
                     let item_id = params["item"]["id"].as_str().unwrap_or_default();
                     match method.as_str() {
+                        "item/started" if kind == "agentMessage" => ack.answered(params["turnId"].as_str().unwrap_or_default()),
+                        "thread/realtime/transcript/delta" if params["role"] == "assistant" => ack.voice_spoke(),
                         "item/started" if kind == "commandExecution" && !item_id.is_empty() => {
                             if let Some(turn) = params["turnId"].as_str().filter(|t| !t.is_empty()) {
                                 running_commands.insert(item_id.to_owned(), (turn.to_owned(), Instant::now() + command_limit));
                             }
                         }
                         "item/completed" => { running_commands.remove(item_id); }
-                        "turn/completed" => if let Some(done) = params["turn"]["id"].as_str() { running_commands.retain(|_, (t, _)| t != done); },
+                        "turn/completed" => if let Some(done) = params["turn"]["id"].as_str() { running_commands.retain(|_, (t, _)| t != done); ack.answered(done); },
                         _ => {}
                     }
                     let next = match method.as_str() {
@@ -989,6 +1023,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         // A fala que seguiu depois da delegação: o envio desse turno espera a final (com teto).
                         "thread/realtime/transcript/delta" if params["role"] == "user" => {
                             last_user_voice = Some(Instant::now());
+                            last_user_delta = last_user_voice;
                             out.hold.heard_voice(Instant::now());
                             if speaking.is_none() && let Some((turn, at)) = &delegated && at.elapsed() >= organizer::CONTINUATION_AFTER {
                                 log("user still speaking after the delegation");
@@ -997,7 +1032,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         }
                         // Fala que fechou depois da delegação sem ser só a final dela: o envio desse turno não sai sem ela.
                         "thread/realtime/transcript/done" if params["role"] == "user" => {
-                            last_user_voice = Some(Instant::now());
+                            // A final costuma chegar segundos depois da fala, quando a voz responde: sem pedaço recente ela é
+                            // fechamento da fala anterior e não pode segurar nem cortar o resumo.
+                            if last_user_delta.is_some_and(|at| at.elapsed() < LATE_FINAL) { last_user_voice = Some(Instant::now()); }
+                            else { log("user final without recent speech: not counted as talking"); }
                             speaking = None;
                             let heard = params["text"].as_str().unwrap_or_default().trim();
                             // Toda final ouvida: no trecho seguinte ela é fala velha, nunca a fala daquele turno.
@@ -1649,6 +1687,71 @@ mod tests {
         push_speech(&push, "turn-9", "pode falar os resultados");
         quiet(&push, "q9", "turn-9", false);
         until(&mut seen, "resumo depois do sim", summary_of("deploy")).await;
+    }
+
+    /// O caso de 15/10 (18:09 a 18:22, seis vezes): a final atrasada do "sim", sem fala nova, cortava o resumo que acabava de
+    /// começar, e o resultado voltava como aviso repetido. Final sem pedaço de fala recente não é ele falando.
+    #[tokio::test]
+    async fn late_final_of_earlier_speech_does_not_cut_the_summary() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "resumo em silêncio", summary_of("deploy")).await;
+        push.send(json!({"method": "turn/started", "params": {"threadId": "t1", "turn": {"id": "turn-s1"}}})).unwrap();
+        push.send(json!({"method": "thread/realtime/transcript/done", "params": {"threadId": "t1", "role": "user", "text": "sim"}})).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| m["method"] == "turn/interrupt"), "final atrasada não corta");
+    }
+
+    /// O sim ao aviso já leva o resultado ao turno dele: nada de esperar o organizador chamar quiet e abrir outro turno.
+    #[tokio::test]
+    async fn yes_to_the_offer_steers_the_result_into_the_same_turn() {
+        use crate::voice::test_support::push_user_audio;
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        push_user_audio(&push, "tava falando da loja");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        voice.session_result("deploy".into(), "Criei a TK-2 na VM.".into());
+        until(&mut seen, "aviso", |m| spoke(m, "Quer ouvir?")).await;
+        push.send(json!({"method": "turn/started", "params": {"threadId": "t1", "turn": {"id": "turn-9"}}})).unwrap();
+        let delegation = "<realtime_delegation>\n<input>\"sim\" — quer ouvir</input>\n<transcript_delta>assistant: Chegou um resultado da deploy. Quer ouvir?\nuser: sim</transcript_delta>\n</realtime_delegation>";
+        push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "turn-9",
+            "item": {"type": "userMessage", "id": "u9", "content": [{"type": "text", "text": delegation}]}}})).unwrap();
+        let steer = until(&mut seen, "resultado no turno do sim", |m| m["method"] == "turn/steer"
+            && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.starts_with("[RESULTADO DA SESSÃO deploy]"))).await;
+        assert_eq!(steer["params"]["expectedTurnId"], "turn-9");
+        assert!(steer["params"]["input"][1]["text"].as_str().unwrap().contains("não chame quiet"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| summary_of("deploy")(&m)), "sem turno de resumo à parte");
+    }
+
+    /// Pedido respondido logo não ganha confirmação; o que fica pensando calado ganha uma frase curta do Hangar.
+    #[tokio::test]
+    async fn slow_spoken_request_gets_a_wait_acknowledgment_and_a_fast_one_does_not() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        let ack = |m: &Value| organizer::ACKS.iter().any(|a| spoke(m, a));
+        crate::voice::test_support::push_speech(&push, "turn-1", "qual sessão está aberta agora");
+        push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "m1"}}})).unwrap();
+        tokio::time::sleep(organizer::ACK_AFTER + Duration::from_millis(300)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| ack(&m)), "resposta começou: sem confirmação");
+        let asked = Instant::now();
+        crate::voice::test_support::push_speech(&push, "turn-2", "revisa o plano inteiro da migração e me diz o que falta");
+        until(&mut seen, "confirmação da espera", ack).await;
+        assert!(asked.elapsed() >= organizer::ACK_AFTER, "só depois da espera");
     }
 
     /// Ele voltou a falar enquanto o organizador montava o resumo: o turno cai antes de a mensagem (que o Codex repassa

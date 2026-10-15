@@ -15,14 +15,21 @@ const HISTORY_LIMIT: usize = 20;
 /// Peer → até quando fica fora das leituras.
 pub(super) type Backoff = Arc<Mutex<HashMap<String, Instant>>>;
 
-pub(super) async fn read_rows(machines: &Machines, backoff: &Backoff) -> (Vec<(String, SessionRow)>, Vec<String>) {
+/// Peer que falhou fica marcado até responder de novo. Só a vigia (`retry_failed`) volta a tentá-lo, vencida a espera: a
+/// busca de um pedido da voz nunca espera o prazo de um peer caído.
+pub(super) async fn read_rows(machines: &Machines, backoff: &Backoff, retry_failed: bool) -> (Vec<(String, SessionRow)>, Vec<String>) {
     let now = Instant::now();
-    let skip: HashSet<String> = {
-        let mut map = backoff.lock().unwrap_or_else(|e| e.into_inner());
-        map.retain(|_, until| *until > now);
-        map.keys().cloned().collect()
+    let (skip, retried): (HashSet<String>, Vec<String>) = {
+        let map = backoff.lock().unwrap_or_else(|e| e.into_inner());
+        let skip = map.iter().filter(|(_, until)| !retry_failed || **until > now).map(|(k, _)| k.clone()).collect::<HashSet<_>>();
+        let retried = map.keys().filter(|k| !skip.contains(*k)).cloned().collect();
+        (skip, retried)
     };
     let (rows, unreachable, failed) = machines.sessions_except(&skip).await;
+    {
+        let mut map = backoff.lock().unwrap_or_else(|e| e.into_inner());
+        for peer in retried.iter().filter(|p| !failed.contains(p)) { map.remove(peer); }
+    }
     if !failed.is_empty() {
         log(format!("voice peers backed off count={}", failed.len()));
         let until = Instant::now() + PEER_BACKOFF;
@@ -73,7 +80,7 @@ pub(super) async fn watcher(machines: Arc<Machines>, backoff: Backoff, done: mps
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let (rows, unreachable) = read_rows(&machines, &backoff).await;
+        let (rows, unreachable) = read_rows(&machines, &backoff, true).await;
         let fired = edges.update(&rows);
         if done.send(Done::Watch { rows, unreachable, fired }).is_err() { break; }
     }
@@ -152,5 +159,59 @@ impl Controller {
         self.pending_question = None;
         log("ask_session timeout");
         self.voice.session_answer("A sessão não respondeu a tempo.".into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::groups::peers::{PeerBook, PeerClient};
+    use crate::voice::machines::{HERE, SelfApi};
+    use axum::{Router, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn serve(app: Router) -> std::net::SocketAddr {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        addr
+    }
+
+    /// Aceita a conexão e nunca responde: o servidor fora do ar que custava 8 s a cada busca.
+    async fn silent_peer(accepts: Arc<AtomicUsize>) -> std::net::SocketAddr {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = l.accept().await { accepts.fetch_add(1, Ordering::SeqCst); held.push(socket); }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_lookup_never_waits_for_a_peer_that_failed() {
+        let here = serve(Router::new().route("/api/sessions", get(|| async { ([("content-type", "application/json")], "[]") }))).await;
+        let ok = serve(Router::new().route("/api/sessions", get(|| async { ([("content-type", "application/json")], "[]") }))).await;
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let dead = silent_peer(accepts.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("peers.json");
+        std::fs::write(&book, json!({"morto": {"base_url": format!("http://{dead}"), "token": "t"},
+            "volta": {"base_url": format!("http://{ok}"), "token": "t"}}).to_string()).unwrap();
+        let machines = Machines { own: SelfApi::new(here, "t"), peers: Arc::new(PeerClient::new(PeerBook::new(Some(book)))), own_label: "casa".into() };
+        let backoff: Backoff = Arc::default();
+        // Os dois falharam antes e o prazo de espera já venceu: a vigia tentaria de novo; a busca não.
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        backoff.lock().unwrap().extend([("morto".to_owned(), expired), ("volta".to_owned(), expired)]);
+        let started = Instant::now();
+        let (_, unreachable) = read_rows(&machines, &backoff, false).await;
+        assert!(started.elapsed() < Duration::from_secs(2), "a busca não espera o prazo do peer: {:?}", started.elapsed());
+        assert_eq!(accepts.load(Ordering::SeqCst), 0, "nem chega a conectar no que falhou");
+        assert_eq!(unreachable.len(), 2, "os dois contam como sem resposta");
+        backoff.lock().unwrap().remove("morto");
+        read_rows(&machines, &backoff, true).await;
+        assert!(!backoff.lock().unwrap().contains_key("volta"), "a vigia viu responder: volta às buscas");
+        let _ = HERE;
     }
 }
