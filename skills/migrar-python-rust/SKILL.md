@@ -109,29 +109,32 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
 2. O subagente recebe os caminhos absolutos dos arquivos de fase (`.superpowers/` não vai para a
    worktree) e o recorte da rota: as linhas do inventário, o contrato e as decisões que a tocam,
    as armadilhas da fase 4 e as regras abaixo. Devolve cada ID fechado com o teste que o prova e
-   as linhas RED e GREEN. Só a sessão escreve nos arquivos de fase: a linha nova de inventário
-   (regra 2) vem no relato do subagente.
+   as linhas RED e GREEN; ID sem teste ou sem RED volta a ele. Só a sessão escreve nos arquivos
+   de fase: a linha nova de inventário (regra 2) e a diferença que pede classificação do usuário
+   vêm no relato, e a sessão grava ou pergunta antes de apagar a worktree.
 3. Rota que toca concorrência, prazo, repetição ou o contrato entre Python e Rust passa, antes da
    mesclagem, por um revisor de contexto limpo, só leitura, sobre o diff da worktree contra o
    contrato e o recorte do inventário. A correção volta ao subagente que escreveu; a sessão
    confere o diff e os testes dela, sem nova rodada do revisor.
 4. A sessão mescla uma worktree por vez: resolve o conflito, sobe o protocolo (regra 7) e roda
-   `cargo test --workspace` e o pytest da área antes da mesclagem seguinte. Worktree mesclada é
-   apagada; rota que dependia dela abre agora.
+   `cargo test --workspace` e o pytest da área antes da mesclagem seguinte. Nada se mescla sobre
+   branch vermelha: falha volta à rota até ficar verde. Worktree mesclada é apagada; rota que
+   dependia dela abre agora.
 
 **Regras de cada item, para o subagente e para a sessão:**
 
 1. Um teste Rust por item, pela interface pública (rota, ator, fila), com o esperado vindo da
    fixture, do teste Python ou do commit de fix. RED com falha de asserção, depois GREEN.
 2. Diferença achada: primeiro um teste que falha por ela, depois o conserto; então varra a classe
-   inteira (os casos irmãos) e acrescente ao inventário a linha que faltava, com o motivo de não
-   ter sido pega.
+   inteira (os casos irmãos) e registre a linha de inventário que faltava, com o motivo de não
+   ter sido pega (o subagente, no relato).
 3. Fixtures reais (pane capturado, JSONL real, payload medido), nunca inventadas.
 4. Toda entrada externa (JSONL, texto de pane, payload HTTP, sidecar) passa por `proptest` ou
    fuzz sem pânico.
 5. Falha visível com código; nunca sucesso falso; nunca reserva Python com o Rust de pé.
 6. Um escritor por worktree. Cada worktree compila no próprio `crates/target`, nunca
    compartilhado entre checkouts (já rodou binário velho), com `nice -n 19 ionice -c 3` e `-j 3`.
+   Teste e diferencial usam porta e config dir próprios da worktree, nunca o backend real.
 7. Contrato interno mudou (rota `/internal`, evento, variável do filho): a sessão sobe
    `INTERNAL_PROTOCOL` (Rust) e `RUST_SERVER_PROTOCOL` (Python) no mesmo commit, na mesclagem; o
    subagente só avisa que a rota dele muda o contrato.
@@ -162,4 +165,5 @@ Todos passam antes de dizer "migrado":
    Mais lento sem motivo registrado não fecha.
 
 Done when: os arquivos de todas as fases existem, os seis portões passaram, `conferencia.md` não
-tem item aberto e o caminho Python da responsabilidade foi apagado.
+tem item aberto, o caminho Python da responsabilidade foi apagado e `git worktree list` não tem
+worktree de rota sobrando.
