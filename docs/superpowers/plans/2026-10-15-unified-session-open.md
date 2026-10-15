@@ -83,7 +83,7 @@ Status: ready-for-agent
   completo da matriz (D-012) → validação (modelo, esforço, tier, motor, permissão, customizações,
   nome). "+" sem modo = padrão da conta (D-010). Recusas com os códigos de hoje
   (`erro_motor_invalido`, `erro_nome_em_uso`, `erro_grupo_limpeza_falhou`, …).
-- [ ] **Step 3: Registro gravado**
+- [x] **Step 3: Registro gravado**
   Arquivo novo por sessão, indexado pela `key`, atômico, só o Rust grava. Os sidecars de hoje não
   perdem campo nesta entrega (revert seguro). Contrato com o `hangar-codex-tui` (lê e grava
   `permission_mode` do sidecar Codex) e com o rename (Python). Leitura dos sidecars existentes para

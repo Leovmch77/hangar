@@ -463,6 +463,89 @@ impl resolve::OpenFacts for BrokenMode {
     fn now(&self) -> f64 { self.0.now() }
 }
 
+// ── registro ─────────────────────────────────────────────────────────────────────────────────
+
+fn fixture_spec(name: &str) -> SessionSpec {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
+    SessionSpec { key: "0123456789abcdef0123456789abcdef".into(), ..resolve_fixture(&fixture).unwrap().spec }
+}
+
+#[test]
+fn the_record_round_trips_by_key_and_refuses_what_it_cannot_read() {
+    let home = tempfile::tempdir().unwrap();
+    let spec = fixture_spec("create_claude_headless_then_launch");
+    record::write(home.path(), &spec).unwrap();
+    assert_eq!(record::read(home.path(), &spec.key).unwrap(), Some(spec.clone()));
+    // Troca atômica: nada de temporário sobrando ao lado.
+    let files: Vec<_> = std::fs::read_dir(record::dir(home.path())).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(files, [std::ffi::OsString::from(format!("{}.json", spec.key))]);
+    assert_eq!(record::read(home.path(), &"f".repeat(32)).unwrap(), None);
+    assert_eq!(record::read(home.path(), "../x").unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    let path = record::dir(home.path()).join(format!("{}.json", spec.key));
+    let mut newer = serde_json::to_value(&spec).unwrap();
+    newer["version"] = json!(2);
+    std::fs::write(&path, newer.to_string()).unwrap();
+    assert_eq!(record::read(home.path(), &spec.key).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    std::fs::write(&path, "{").unwrap();
+    assert_eq!(record::read(home.path(), &spec.key).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+}
+
+/// O sidecar que o Python grava (o `state` das fixtures) vira spec para a sessão viva sem registro.
+fn sidecar_home(fixture: &str, kind: &str, name: &str, patch: impl FnOnce(&mut Value)) -> tempfile::TempDir {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == fixture).unwrap();
+    let mut meta = fixture["scenario"]["state"]["files"][format!("<ROOT>/home/.hangar/{kind}/{name}.json")].clone();
+    patch(&mut meta);
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".hangar").join(kind);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.json")), meta.to_string()).unwrap();
+    home
+}
+
+#[test]
+fn live_sessions_without_a_record_get_their_spec_from_the_sidecar() {
+    let home = sidecar_home("create_inherit_from_headless_creator", "claude-headless", "mae", |_| {});
+    let spec = record::from_sidecars(home.path(), "mae").unwrap();
+    assert_eq!((spec.provider, spec.surface, spec.key.as_str()), (AgentProvider::Claude, Surface::Headless, "a".repeat(32).as_str()));
+    assert_eq!(spec.account, Account::Claude { config_dir: "<ROOT>/home/.claude-b".into() });
+    assert_eq!((spec.account_source, spec.permission_mode, spec.jev), (AccountSource::Explicit, Some(PermissionMode::AcceptEdits), false));
+
+    let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |_| {});
+    let spec = record::from_sidecars(home.path(), "mae-codex").unwrap();
+    assert_eq!((spec.provider, spec.surface), (AgentProvider::Codex, Surface::Headless));
+    assert_eq!(spec.account, Account::Codex { account_id: "default".into() });
+    assert_eq!(spec.permission_mode, Some(PermissionMode::ApproveForMe));
+    // S-05: modo que o Hangar não conhece fica ausente; quem reabre recusa em vez de abrir em Full Access.
+    let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| m["permission_mode"] = json!("Tudo"));
+    assert_eq!(record::from_sidecars(home.path(), "mae-codex").unwrap().permission_mode, None);
+    // CDX-9: sidecar Codex sem `key` não dá spec.
+    let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| { m.as_object_mut().unwrap().remove("key"); });
+    assert_eq!(record::from_sidecars(home.path(), "mae-codex"), None);
+    assert_eq!(record::from_sidecars(home.path(), "pi-sem-sidecar"), None);
+}
+
+proptest! {
+    /// Sidecar e registro são arquivos de fora: conteúdo qualquer nunca derruba a leitura.
+    #[test]
+    fn records_and_sidecars_never_panic(value in prop_oneof![
+        Just(Value::Null), any::<i64>().prop_map(Value::from), ".{0,12}".prop_map(Value::from),
+        proptest::collection::vec((prop::sample::select(vec!["key", "cwd", "name", "config_dir", "engine", "permission_mode",
+            "headless", "jev", "service_tier", "codex_account", "context_window", "version", "provider"]),
+            prop_oneof![Just(Value::Null), any::<bool>().prop_map(Value::from), "[a-f0-9]{0,40}".prop_map(Value::from),
+                any::<i64>().prop_map(Value::from)]), 0..10)
+            .prop_map(|fields| Value::Object(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())),
+    ]) {
+        let home = tempfile::tempdir().unwrap();
+        for kind in ["claude-headless", "codex-sessions", "session-specs"] {
+            let dir = home.path().join(".hangar").join(kind);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(if kind == "session-specs" { "0123456789abcdef0123456789abcdef.json" } else { "s.json" }), value.to_string()).unwrap();
+        }
+        let _ = record::from_sidecars(home.path(), "s");
+        let _ = record::read(home.path(), "0123456789abcdef0123456789abcdef");
+    }
+}
+
 proptest! {
     /// Pedido qualquer que passa a forma nunca derruba a resolução.
     #[test]
