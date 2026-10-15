@@ -1863,6 +1863,10 @@ O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
 - Diferença do Python, que fixava o corte ao abrir: hub aberto antes da primeira linha do
   transcript procura o início da conversa a cada rodada, como o painel, e a bolha da conversa
   anterior que perde o corte sai do retrato (`queue_cut_arrives_with_the_first_transcript_line`).
+  Também sai a mensagem enviada antes dessa primeira linha (o primeiro prompt da sessão nova): é o
+  corte do painel, do `/history` e do aparelho que abria depois no Python. O aparelho aberto a
+  mantém até o transcript trazê-la. Erro ao abrir o transcript, menos o que ainda não nasceu, vai ao
+  diário (`queue_start_unreadable`) a cada rodada, com limite.
 - Prova de paridade: `backend/tests/fixtures/contract/golden/queue_follow.json` (40 cenários) e
   `queue_start_ts.json` (19 inícios de conversa), gravados do `follow` real por
   `gen_queue_follow.py`; o teste do Rust compara nome e `data` byte a byte. O serde_json do projeto

@@ -139,33 +139,11 @@ pub(crate) async fn run(hub: Weak<Hub>, generation: u64, binding: Binding, path:
     let codex = (binding.provider == Provider::Codex && binding.headless).then(|| h.tx.subscribe());
     let runtime = h.runtime_registry();
     drop(h);
-    let jsonl = binding.jsonl.clone();
-    let start = tokio::task::spawn_blocking(move || {
-        // Transcript que ainda não nasceu é normal; pasta ausente (conta trocada) ou erro de leitura não.
-        let unreadable = match std::fs::File::open(&jsonl) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound || !jsonl.parent().is_some_and(Path::is_dir) => Some(e),
-            _ => None,
-        };
-        (transcript_start_ts(&jsonl), unreadable)
-    });
-    let min_ts = match start.await {
-        Ok((ts, unreadable)) => {
-            if let Some(e) = unreadable {
-                tracing::warn!(session = %name, code = "queue_start_unreadable", kind = ?e.kind(), os_error = ?e.raw_os_error(),
-                    "fila: início da conversa ilegível; segue sem corte");
-            }
-            ts
-        }
-        Err(e) => {
-            tracing::warn!(session = %name, panic = e.is_panic(), code = "queue_start_failed", "fila: leitura do início da conversa caiu; segue sem corte");
-            0.0
-        }
-    };
     let mut tail = codex;
     if tail.is_some() {
         confirm_codex(runtime.as_deref(), &name).await;
     }
-    let mut follow = Some(QueueFollow::new(min_ts, wall_now()));
+    let mut follow = Some(QueueFollow::new(0.0, wall_now()));
     let watch = Watch { watchers, path, wake: Arc::new(Notify::new()) };
     let mut armed = false;
     loop {
@@ -178,14 +156,20 @@ pub(crate) async fn run(hub: Weak<Hub>, generation: u64, binding: Binding, path:
         }
         let (mut current, file, jsonl) = (follow.take().expect("devolvido a cada rodada"), watch.path.clone(), binding.jsonl.clone());
         let polled = match tokio::task::spawn_blocking(move || {
-            current.find_start(&jsonl);
+            let unreadable = current.find_start(&jsonl);
             let polled = current.poll(&file);
-            (current, polled)
+            (current, unreadable, polled)
         })
         .await
         {
-            Ok((current, polled)) => {
+            Ok((current, unreadable, polled)) => {
                 follow = Some(current);
+                if let Some(e) = unreadable
+                    && crate::warn_limit::allow(Some(&name), "queue_start_unreadable")
+                {
+                    tracing::warn!(session = %name, code = "queue_start_unreadable", kind = ?e.kind(), os_error = ?e.raw_os_error(),
+                        "fila: início da conversa ilegível; segue sem corte");
+                }
                 polled
             }
             Err(e) => {
@@ -287,14 +271,22 @@ impl QueueFollow {
     }
 
     /// Sem corte, o início da conversa é procurado de novo a cada rodada, como no painel: o transcript que
-    /// ainda não tinha linha passa a cortar a conversa anterior, e a fila é relida com o corte.
-    pub(crate) fn find_start(&mut self, jsonl: &Path) {
-        if self.min_ts == 0.0 {
-            self.min_ts = transcript_start_ts(jsonl);
-            if self.min_ts > 0.0 {
-                self.marker = None;
-            }
+    /// ainda não tinha linha passa a cortar a conversa anterior, e a fila é relida com o corte. Devolve o
+    /// erro de abrir o transcript, menos o do que ainda não nasceu; pasta ausente (conta trocada) é erro.
+    pub(crate) fn find_start(&mut self, jsonl: &Path) -> Option<io::Error> {
+        if self.min_ts != 0.0 {
+            return None;
         }
+        if let Err(e) = std::fs::File::open(jsonl)
+            && (e.kind() != io::ErrorKind::NotFound || !jsonl.parent().is_some_and(Path::is_dir))
+        {
+            return Some(e);
+        }
+        self.min_ts = transcript_start_ts(jsonl);
+        if self.min_ts > 0.0 {
+            self.marker = None;
+        }
+        None
     }
 
     /// Uma rodada: relê o arquivo se a marca dele mudou desde a última leitura. Erro de leitura não
@@ -446,6 +438,20 @@ mod tests {
         assert!(!confirm_signal(&Ok(Out::Tail(3, answer)), 3));
         assert!(!confirm_signal(&Ok(Out::Side(user)), 3));
         assert!(confirm_signal(&Err(tokio::sync::broadcast::error::RecvError::Lagged(4)), 3));
+    }
+
+    /// Transcript que ainda não nasceu é espera calada; pasta da conversa sumida (conta trocada) é erro
+    /// para o diário; a primeira linha com relógio vira o corte.
+    #[test]
+    fn find_start_reports_an_unreadable_transcript_and_cuts_from_the_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut follow = QueueFollow::new(0.0, 0.0);
+        assert!(follow.find_start(&dir.path().join("sumiu").join("a.jsonl")).is_some(), "pasta da conversa sumida passou calada");
+        let jsonl = dir.path().join("a.jsonl");
+        assert!(follow.find_start(&jsonl).is_none(), "transcript ainda por nascer virou erro");
+        std::fs::write(&jsonl, "{\"timestamp\":\"2026-10-15T12:00:00Z\"}\n").unwrap();
+        assert!(follow.find_start(&jsonl).is_none());
+        assert_eq!(follow.min_ts, 1_792_065_600.0);
     }
 
     fn events(frames: &[QueueFrame]) -> Vec<(String, String)> {
