@@ -9,7 +9,7 @@ import {
   summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
-  parseFilePaths, separarComando, nomeFerramenta, terminalToolName,
+  parseFilePaths, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
 } from './format';
 import type { ChatEvent, State } from './types';
 import { overwriteGetLocale } from './paraglide/runtime';
@@ -1117,6 +1117,11 @@ describe('terminalToolName', () => {
     expect(terminalToolName('mcp__pmedico__progresso')).toBe('pmedico - progresso (MCP)');
     expect(terminalToolName('mcp__hangar-computer-control__objetivo')).toBe('computer-control - objetivo (MCP)');
     expect(terminalToolName('Bash')).toBe('Bash');
+  });
+  it('ferramenta de arquivo na pele terminal: leitura, escrita e edição', () => {
+    for (const t of ['Read', 'NotebookRead', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch']) expect(terminalFileTool(t)).toBe(true);
+    expect(terminalFileTool('Bash')).toBe(false);
+    expect(terminalFileTool(null)).toBe(false);
   });
 });
 

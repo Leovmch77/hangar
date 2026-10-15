@@ -15,6 +15,8 @@ import {
   registrarDiag,
   parsePluginToast,
   parseQueuePanel,
+  queueEditPayload,
+  queueRemovedBubbleIds,
   currentQueuePanel,
   beginQueueEdit,
   canUpdateQueueEdit,
@@ -45,6 +47,8 @@ import { readDraft, writeDraft, type ConversationDraft } from './drafts';
 export const TAIL_FIRST = 400;
 
 const SSE_RETRY_MIN_MS = 3_000;
+// Prazo para o `queue` do retrato chegar depois de a conexão abrir.
+const QUEUE_SNAPSHOT_MS = 3_000;
 const SSE_RETRY_MAX_MS = 30_000;
 
 export interface ChatState {
@@ -165,6 +169,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // Com base carregada a volta pede só a cauda; sem ela (primeira carga falhou, reset) recarrega tudo.
   let baseLoaded = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // Conexão aberta sem o evento `queue` no retrato (a sessão voltou ao Python): a lista antiga do servidor sai.
+  let queueAbsentTimer: ReturnType<typeof setTimeout> | undefined;
   let retryDelay = SSE_RETRY_MIN_MS;
   let alive = false;
   let refs = 0;
@@ -409,6 +415,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
     es = openEventStreamForServer(target, name, undefined, lastEventId);
     const source = es;
+    let queueSeen = false;
 
     // Prova de vida pro watchdog do adapter: SEM listener registrado o wrap do adapter
     // não roda rearmar() e o stream saudável morre aos 25s (mesmo padrão do sessions.ts).
@@ -543,8 +550,17 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
     // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
     es.addEventListener('queue', (e) => {
+      queueSeen = true;
       try {
-        useChatStore.setState({ queuePanel: parseQueuePanel(JSON.parse(e.data as string)) });
+        const data = JSON.parse(e.data as string);
+        // Apagadas noutro aparelho: a bolha delas sai daqui também.
+        const gone = queueRemovedBubbleIds(data);
+        let { events } = useChatStore.getState();
+        if (gone.length) {
+          events = events.filter((x) => !gone.includes(x.id));
+          rebuildIndex(events);
+        }
+        useChatStore.setState(gone.length ? { queuePanel: parseQueuePanel(data), events } : { queuePanel: parseQueuePanel(data) });
       } catch {
         quadroFalhou('queue');
       }
@@ -616,6 +632,11 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es.onopen = () => {
       if (es !== source) return;
       retryDelay = SSE_RETRY_MIN_MS;
+      // O retrato chega logo depois de abrir: sem `queue` nele, o painel volta a sair das bolhas.
+      clearTimeout(queueAbsentTimer);
+      queueAbsentTimer = setTimeout(() => {
+        if (es === source && !queueSeen) useChatStore.setState({ queuePanel: null });
+      }, QUEUE_SNAPSHOT_MS);
     };
     // Fechar a fonte deixa apenas este backoff dono da repetição, sem polling em paralelo.
     es.onerror = (error) => {
@@ -686,10 +707,19 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     async submitQueueEdit(text: string): Promise<string | null> {
       const edit = useChatStore.getState().queueEdit;
       if (!edit || !canUpdateQueueEdit(text)) return null;
-      const next = text.trim();
       // Texto igual ao da fila: só sai da edição, sem pedido.
-      const unchanged = queueEntries().find((e) => e.id === edit.entryId)?.text.trim() === next;
-      if (!unchanged && !(await queueAction((t) => editQueuedMessage(name, edit.entryId, next, t)))) return null;
+      const next = queueEditPayload(text, queueEntries().find((e) => e.id === edit.entryId)?.text);
+      if (next !== null && !(await queueAction(async (t) => {
+        try {
+          await editQueuedMessage(name, edit.entryId, next, t);
+        } catch (err) {
+          // Saiu da fila: a edição fecha já, com o aviso desta recusa; a saída pelo painel não avisa de novo.
+          if ((err as { code?: unknown })?.code === 'queue_entry_gone' && useChatStore.getState().queueEdit === edit) {
+            useChatStore.setState({ queueEdit: null });
+          }
+          throw err;
+        }
+      }))) return null;
       if (useChatStore.getState().queueEdit === edit) useChatStore.setState({ queueEdit: null });
       return edit.savedDraft;
     },
@@ -730,6 +760,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es?.close();
       es = null;
       clearTimeout(retryTimer);
+      clearTimeout(queueAbsentTimer);
       // Soltar a tela fecha leituras; POST, ecos e identidade continuam na origem.
     },
     loadOlder,

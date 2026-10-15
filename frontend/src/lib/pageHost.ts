@@ -21,14 +21,6 @@ export function pageVariables(): Record<string, string> {
   return themeVariables((name) => cs.getPropertyValue(MAP[name] ?? name));
 }
 
-const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/;
-
-// Troca só o conteúdo do bloco de tema injetado pelo servidor; o data-base fica para as trocas seguintes.
-export function themedDoc(html: string, scheme: Scheme, vars: Record<string, string>): string {
-  const css = `:root{color-scheme:${scheme};${Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')}}`;
-  return html.replace(THEME_BLOCK,
-    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
-}
 
 export function postTheme(frame: HTMLIFrameElement | undefined, scheme: Scheme, vars: Record<string, string>): void {
   frame?.contentWindow?.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed',

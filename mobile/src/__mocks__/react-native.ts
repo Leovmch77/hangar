@@ -2,7 +2,9 @@ import * as React from 'react';
 
 function domProps(props: any) {
   const { style, accessibilityRole, accessibilityLabel, numberOfLines, onPress, ...rest } = props;
-  const normalizedStyle = Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style;
+  // O `Pressable` aceita estilo em função do estado: o teste vê o de repouso.
+  const raw = typeof style === 'function' ? style({ pressed: false }) : style;
+  const normalizedStyle = Array.isArray(raw) ? Object.assign({}, ...raw.flat(Infinity).filter(Boolean)) : raw;
   return {
     ...rest,
     ...(normalizedStyle ? { style: normalizedStyle } : {}),

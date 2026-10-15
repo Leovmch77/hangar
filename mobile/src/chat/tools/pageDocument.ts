@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Linking } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import {
-  baseOf, fileAuthHeader, pageFetchState, pageUrls, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
+  baseOf, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
@@ -18,13 +18,6 @@ const tokenVars = (t: ThemeTokens): Record<string, string> => ({
   '--code-background': t.bg.base, '--chart-1': t.chart[0], '--chart-2': t.chart[1], '--chart-3': t.chart[2],
   '--chart-4': t.chart[3],
 });
-
-// Troca só o conteúdo do bloco de tema que o servidor injeta; o data-base fica para as trocas seguintes.
-function themed(html: string, p: ThemeParams): string {
-  const css = `:root{color-scheme:${p.theme};${Object.entries(p.styles.variables).map(([k, v]) => `${k}:${v}`).join(';')}}`;
-  return html.replace(/(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/,
-    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
-}
 
 export const applyScript = (p: ThemeParams) => `window.__hangarApply&&window.__hangarApply(${JSON.stringify(p)});true`;
 
@@ -114,6 +107,6 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
   }, [key, load]);
 
   // Tema próprio: a página fica como foi desenhada, sem as cores do app.
-  const doc = useMemo(() => (raw && !page.ownTheme ? themed(raw, paramsRef.current) : raw), [raw, page.ownTheme]);
+  const doc = useMemo(() => (raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
   return { key, state, doc, reported, setReported, load, params };
 }

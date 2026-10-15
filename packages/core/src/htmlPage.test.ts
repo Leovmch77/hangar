@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   frameHeight, htmlPageFromResult, isHtmlRenderTool, pageExpandable, pageFetchState, pageZoomKey, pageZoomLabel,
-  parseHostMessage, reservedHeight, stepPageZoom, wheelZoom, PAGE_ZOOM_MAX, PAGE_ZOOM_MIN,
+  parseHostMessage, reservedHeight, stepPageZoom, themedPageDocument, wheelZoom, PAGE_ZOOM_MAX, PAGE_ZOOM_MIN,
 } from './htmlPage';
 
 const ref = { id: 'a1', title: 'T', height: null, heights: { '360': 500, '728': 380, '1000': 360 }, ownTheme: false };
 
 describe('htmlPage', () => {
+  it('troca só o bloco de tema e preserva a base', () => {
+    const doc = '<html><head><style id="hangar-theme" data-base=":root{--radius:10px}">velho</style></head></html>';
+    const out = themedPageDocument(doc, 'light', { '--foreground': '#111' });
+    expect(out).toContain(':root{color-scheme:light;--foreground:#111}:root{--radius:10px}');
+    expect(out).not.toContain('velho');
+  });
+
   it('reconhece a tool do hangar e só ela', () => {
     expect(isHtmlRenderTool('mcp__hangar__html_render')).toBe(true);
     for (const n of ['hangar__html_render', 'hangar.html_render', 'hangar/html_render', 'mcp__hangar.html_render']) {

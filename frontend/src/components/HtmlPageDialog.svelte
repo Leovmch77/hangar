@@ -3,8 +3,8 @@
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
   import { PAGE_ZOOM_MAX, PAGE_ZOOM_MIN, pageZoomKey, pageZoomLabel, parseHostMessage, stepPageZoom, wheelZoom,
-    type PageZoomAction } from '@hangar/core';
-  import { pageVariables, postTheme, readFullscreenMessage, themedDoc, withZoomBridge, type Scheme } from '../lib/pageHost';
+    themedPageDocument, type PageZoomAction } from '@hangar/core';
+  import { pageVariables, postTheme, readFullscreenMessage, withZoomBridge, type Scheme } from '../lib/pageHost';
 
   let { title, doc, ownTheme, scheme, onClose }:
     { title: string; doc: string; ownTheme: boolean; scheme: Scheme; onClose: () => void } = $props();
@@ -15,7 +15,7 @@
   let stage: HTMLDivElement | undefined = $state();
   let closeButton: HTMLButtonElement | null = $state(null);
   // O documento do cartão leva o tema da carga dele: a cópia nasce no tema de agora, que pode ter mudado até abrir.
-  const src = untrack(() => withZoomBridge(ownTheme ? doc : themedDoc(doc, scheme, pageVariables())));
+  const src = untrack(() => withZoomBridge(ownTheme ? doc : themedPageDocument(doc, scheme, pageVariables())));
 
   function apply(action: PageZoomAction) { zoom = stepPageZoom(zoom, action); }
 

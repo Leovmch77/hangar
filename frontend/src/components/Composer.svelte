@@ -145,6 +145,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     queuePanelShown?: boolean;
     // Edição de uma mensagem da fila: o envio vira "Atualizar" e Esc sai sem mudar nada.
     queueEditing?: boolean;
+    // Ação da fila em voo: o Atualizar espera, como os botões do painel.
+    queueBusy?: boolean;
     onQueueEditSubmit?: (text: string) => void;
     onQueueEditCancel?: () => void;
   }
@@ -167,7 +169,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     sessionJsonl = null,
     sessionCwd = null, sessionBranch = null,
     accountLabel = null, accountPct = null, accountWindow = null, onOpenAccounts,
-    queuePanel, queuePanelShown = false, queueEditing = false, onQueueEditSubmit, onQueueEditCancel,
+    queuePanel, queuePanelShown = false, queueEditing = false, queueBusy = false, onQueueEditSubmit, onQueueEditCancel,
   }: Props = $props();
   const placeFolder = $derived(status?.repo || (sessionCwd ? sessionCwd.replace(/\/+$/, '').split('/').pop() || '' : ''));
   const placeBranch = $derived(status?.branch || sessionBranch || '');
@@ -1983,7 +1985,7 @@ import { cachePrazo } from '../lib/cachePrazo';
 
   async function submit(steer = false): Promise<boolean> {
     if (queueEditing) {
-      if (!canUpdateQueueEdit(inputText)) return false;
+      if (!canUpdateQueueEdit(inputText) || queueBusy) return false;
       onQueueEditSubmit?.(inputText);
       return true;
     }
@@ -2634,13 +2636,14 @@ import { cachePrazo } from '../lib/cachePrazo';
             </button>
           {/if}
         {/if}
-        <button class="attach-btn" onclick={() => fileInput?.click()} aria-label={m.composer_anexar_arquivo()}>
+        <!-- Em edição da fila o campo é o texto da entrada: anexo e ditado não têm para onde ir, como no app. -->
+        <button class="attach-btn" onclick={() => fileInput?.click()} disabled={queueEditing} aria-label={m.composer_anexar_arquivo()}>
           <IconAttach size={20} />
         </button>
         <button
           class="attach-btn mic-btn"
           class:mic-btn--recording={recording}
-          disabled={transcribing}
+          disabled={transcribing || (queueEditing && !recording)}
           onclick={toggleRecord}
           aria-label={recording ? m.composer_parar_gravacao() : starting ? m.composer_cancelar_prep_mic() : m.composer_gravar_audio()}
         >
@@ -2678,9 +2681,9 @@ import { cachePrazo } from '../lib/cachePrazo';
           <!-- Edição da fila: o envio troca o texto da entrada, sem mandar nada; nunca vira Parar. -->
           <button
             class="send-btn send-btn--update"
-            class:send-btn--disabled={!canUpdateQueueEdit(inputText)}
+            class:send-btn--disabled={!canUpdateQueueEdit(inputText) || queueBusy}
             onclick={() => submit()}
-            disabled={!canUpdateQueueEdit(inputText)}
+            disabled={!canUpdateQueueEdit(inputText) || queueBusy}
             aria-label={m.queue_panel_update_aria()}
             title={m.queue_panel_update()}
           >{m.queue_panel_update()}</button>
@@ -3604,6 +3607,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     color: var(--text-secondary);
   }
   .attach-btn:active { background: var(--bg-hover); }
+  .attach-btn:disabled { opacity: 0.4; cursor: default; background: transparent; }
   .attach-btn :global(svg) { display: block; }
 
 

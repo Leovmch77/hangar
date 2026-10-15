@@ -14,7 +14,7 @@ import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
-import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
+import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -275,7 +275,8 @@ export function MessageList({
           {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} streaming={working} /> : null}
           {working && !pensamento && !ferramenta ? <WorkingLine label={stateEvent?.label} since={desde} /> : null}
           {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} /> : null}
-          {pending.map((p) => (
+          {/* O eco que o painel da fila já mostra some: a mesma mensagem não aparece duas vezes. */}
+          {pending.filter((p) => !(queuePanel && echoInQueuePanel(p.text, queuePanel))).map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
               <UserBubble text={p.text} sessionName={sessionName} />
             </View>

@@ -1,16 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { postTheme, readFullscreenMessage, themedDoc, withZoomBridge } from './pageHost';
+import { postTheme, readFullscreenMessage, withZoomBridge } from './pageHost';
 
 const DOC = '<!doctype html><html><head><style id="hangar-theme" data-base=":root{--radius:10px}">velho</style>'
   + '<script id="hangar-host">/*ponte*/</script></head><body>x</body></html>';
 
 describe('pageHost', () => {
-  it('troca só o bloco de tema e preserva a base', () => {
-    const out = themedDoc(DOC, 'light', { '--foreground': '#111' });
-    expect(out).toContain(':root{color-scheme:light;--foreground:#111}:root{--radius:10px}');
-    expect(out).not.toContain('velho');
-  });
-
   it('a ponte de zoom entra antes da ponte do servidor, e só se ela existir', () => {
     const out = withZoomBridge(DOC);
     expect(out.indexOf('id="hangar-zoom"')).toBeGreaterThan(out.indexOf('<head>'));

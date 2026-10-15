@@ -238,6 +238,12 @@
   .qp-grip { cursor: grab; touch-action: none; padding: 0 2px; }
   .qp-steer { color: var(--accent); }
   .qp-cancel { color: var(--text-primary); }
+  /* Dedo: alvo de 40 px de altura. O botão é transparente sem hover, então o ícone continua do mesmo tamanho; só a
+     linha ganha altura (área invisível transbordando a linha cairia na vizinha). */
+  @media (pointer: coarse) {
+    .qp-row { min-height: 40px; }
+    .qp-row button { height: 40px; min-width: 36px; }
+  }
   @media (hover: hover) {
     .qp-row button:not(:disabled):hover { color: var(--text-primary); background: var(--glass-border); }
     .qp-steer:not(:disabled):hover { color: var(--accent); }

@@ -23,6 +23,13 @@ export function parseQueuePanel(data: unknown): QueuePanel | null {
   return { entries, actions: raw.actions === true };
 }
 
+/** Bolhas `queued-<id>` das entradas apagadas noutro aparelho (`removed` do evento `queue`): saem da conversa aqui também. */
+export function queueRemovedBubbleIds(data: unknown): string[] {
+  const removed = data && typeof data === 'object' ? (data as { removed?: unknown }).removed : undefined;
+  if (!Array.isArray(removed)) return [];
+  return removed.filter((id): id is string => typeof id === 'string' && id !== '').map((id) => PREFIX + id);
+}
+
 /** Sem o evento do servidor: as bolhas `queued-` que ainda esperam, só leitura. */
 export function derivedQueuePanel(events: ChatEvent[]): QueuePanel {
   const entries = events
@@ -50,6 +57,18 @@ export function beginQueueEdit(entry: QueuePanelEntry, draft: string, current: Q
 export function canUpdateQueueEdit(text: string): boolean {
   const trimmed = text.trim();
   return trimmed.length > 0 && !trimmed.startsWith('/');
+}
+
+/** O texto que o Atualizar grava (sem as bordas em branco), ou `null` quando ele não mudou e só sai da edição. */
+export function queueEditPayload(text: string, current: string | undefined): string | null {
+  const next = text.trim();
+  return current !== undefined && current.trim() === next ? null : next;
+}
+
+/** O eco local de um envio (`pending`) que já está no painel: some, senão a mesma mensagem aparece duas vezes. */
+export function echoInQueuePanel(text: string, panel: QueuePanel): boolean {
+  const t = text.trim();
+  return t !== '' && panel.entries.some((e) => e.text.trim() === t);
 }
 
 /** A mensagem saiu da fila durante a edição: com o rascunho vazio a edição fica no composer; senão o rascunho volta. */

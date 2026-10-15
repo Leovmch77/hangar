@@ -842,6 +842,12 @@ function servidorMcpCru(nome: string | null | undefined): string | null {
 }
 
 const TERM_UPDATE = new Set(['edit', 'multiedit', 'notebookedit', 'apply_patch']);
+const TERM_FILE = new Set(['read', 'notebookread', 'write', ...TERM_UPDATE]);
+
+/** Ferramenta de arquivo na pele 'terminal' (a regra `FILE_TOOLS` do nativo): o cabeçalho mostra o nome do arquivo. */
+export function terminalFileTool(nome: string | null | undefined): boolean {
+  return TERM_FILE.has((nome ?? '').toLowerCase());
+}
 
 /** Nome da chamada na pele 'terminal', como o Claude Code: "Update" na edição e "servidor - ferramenta (MCP)". */
 export function terminalToolName(nome: string | null | undefined): string {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatEvent } from './types';
 import {
-  beginQueueEdit, canUpdateQueueEdit, currentQueuePanel, derivedQueuePanel, dropTarget, hiddenByQueuePanel,
-  moveTarget, parseQueuePanel, queueEditLeft, queueSteerable, type QueuePanel,
+  beginQueueEdit, canUpdateQueueEdit, currentQueuePanel, derivedQueuePanel, dropTarget, echoInQueuePanel, hiddenByQueuePanel,
+  moveTarget, parseQueuePanel, queueEditLeft, queueEditPayload, queueRemovedBubbleIds, queueSteerable, type QueuePanel,
 } from './queuePanel';
 
 const q = (id: string, extra: Partial<ChatEvent> = {}): ChatEvent =>
@@ -21,6 +21,21 @@ describe('queuePanel', () => {
     expect(derivedQueuePanel(events)).toEqual({ actions: false, entries: [{ id: 'a', text: 't a', ts: 1 }] });
     expect(currentQueuePanel(null, events).actions).toBe(false);
     expect(currentQueuePanel(panel('z'), events).entries[0].id).toBe('z');
+  });
+  it('as apagadas noutro aparelho viram ids de bolha a retirar', () => {
+    expect(queueRemovedBubbleIds({ entries: [], actions: true, removed: ['a', '', 3, 'b'] })).toEqual(['queued-a', 'queued-b']);
+    expect(queueRemovedBubbleIds({ entries: [] })).toEqual([]);
+    expect(queueRemovedBubbleIds(null)).toEqual([]);
+  });
+  it('Atualizar compara e grava sem as bordas, a mesma regra no web e no app', () => {
+    expect(queueEditPayload('  oi  ', 'oi')).toBeNull();
+    expect(queueEditPayload(' novo ', 'oi')).toBe('novo');
+    expect(queueEditPayload('oi', undefined)).toBe('oi');
+  });
+  it('o eco local que já está no painel some', () => {
+    expect(echoInQueuePanel(' t a ', panel('a'))).toBe(true);
+    expect(echoInQueuePanel('outra', panel('a'))).toBe(false);
+    expect(echoInQueuePanel('  ', { actions: true, entries: [{ id: 'x', text: '', ts: 1 }] })).toBe(false);
   });
   it('esconde da conversa só a bolha que está no painel', () => {
     expect(hiddenByQueuePanel(q('a'), panel('a'))).toBe(true);

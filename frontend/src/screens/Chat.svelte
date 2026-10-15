@@ -88,8 +88,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { formataErro } from '@hangar/core';
   import QueuePanel from '../components/QueuePanel.svelte';
   import {
-    beginQueueEdit, cancelQueuedMessage, currentQueuePanel, editQueuedMessage, hiddenByQueuePanel, parseQueuePanel,
-    queueEditLeft, queueSteerable, reorderQueuedMessage, steerQueuedMessage,
+    beginQueueEdit, cancelQueuedMessage, currentQueuePanel, echoInQueuePanel, editQueuedMessage, hiddenByQueuePanel, parseQueuePanel,
+    queueEditLeft, queueEditPayload, queueRemovedBubbleIds, queueSteerable, reorderQueuedMessage, steerQueuedMessage,
     type QueueEdit, type QueuePanel as QueuePanelModel,
   } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
@@ -415,6 +415,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Última posição recebida do transcript; reenviada no reconnect pra retomar exatamente dali.
   let lastEventId: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // Conexão aberta sem o evento `queue` no retrato (a sessão voltou ao Python): a lista antiga do servidor sai.
+  let queueAbsentTimer: ReturnType<typeof setTimeout> | undefined;
   let screenEl: HTMLElement | undefined = $state();
   let pending = $state<{ id: string; text: string; solid?: boolean }[]>([]);
   // Draft do composer (bindable): o interrupt devolve a msg pendente aqui pra editar e reenviar.
@@ -2188,6 +2190,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Backoff do reconnect por erro (3s -> 30s). Auditoria: sem isto, com a VPN caida, o retry
   // nativo do EventSource + o setTimeout de 3s martelavam ~2 conexoes a cada 3s pra sempre.
   const SSE_RETRY_MIN = 3000;
+  // Prazo para o `queue` do retrato chegar depois do primeiro quadro da conexão.
+  const QUEUE_SNAPSHOT_MS = 3000;
   const SSE_RETRY_MAX = 30000;
   let sseRetryDelay = SSE_RETRY_MIN;
   // CLOSED seguidos com a sessao viva na lista: o teto que impede o laco que a faixa existe pra cortar.
@@ -2216,6 +2220,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const inicio = Date.now();
     const req = diag.novoReq();
     let primeiroQuadro = true;
+    let queueSeen = false;
     const quadroFalhou = (codigo: string) => diag.registrar({ evento: 'sse.quadro_falhou',
       nivel: 'erro', tela: 'chat', sessao: sessionName, req, codigo }, destino);
     // O callback mantém o destino da conexão mesmo se o usuário trocar de servidor.
@@ -2242,6 +2247,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     function noteAlive() {
       if (primeiroQuadro) {
         primeiroQuadro = false;
+        // O retrato chega junto do primeiro quadro: sem `queue` nele, o painel volta a sair das bolhas.
+        clearTimeout(queueAbsentTimer);
+        queueAbsentTimer = setTimeout(() => { if (!queueSeen) serverQueue = null; }, QUEUE_SNAPSHOT_MS);
         diag.registrar({ evento: 'sse.conectou', tela: 'chat', sessao: sessionName,
           req, ms: Date.now() - inicio }, destino);
         if (cairaAntes) {
@@ -2412,7 +2420,18 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
     es.addEventListener('queue', (e) => {
       noteAlive();
-      try { serverQueue = parseQueuePanel(JSON.parse(e.data)); } catch { quadroFalhou('queue'); }
+      queueSeen = true;
+      try {
+        const data = JSON.parse(e.data);
+        serverQueue = parseQueuePanel(data);
+        // Apagadas noutro aparelho: a bolha delas sai daqui também.
+        const gone = queueRemovedBubbleIds(data);
+        if (gone.length) {
+          for (const id of gone) retiredQueuedIds.add(id);
+          events = events.filter((x) => !gone.includes(x.id));
+          rebuildIndex();
+        }
+      } catch { quadroFalhou('queue'); }
     });
 
     // Heartbeat do backend: so prova de vida (reseta o watchdog numa conexao ociosa, sem msgs).
@@ -2726,6 +2745,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     es?.close();
     clearTimeout(watchdog);
     clearTimeout(reconnectTimer);
+    clearTimeout(queueAbsentTimer);
     cancelPreviewDrop();
     document.removeEventListener('visibilitychange', onVisible);
   });
@@ -3242,8 +3262,15 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const edit = queueEdit;
     if (!edit) return;
     // Texto igual ao da fila: só sai da edição, sem pedido.
-    if (text !== queueList.entries.find((e) => e.id === edit.entryId)?.text) {
-      await editQueuedMessage(sessionName, edit.entryId, text, sessionServer());
+    const next = queueEditPayload(text, queueList.entries.find((e) => e.id === edit.entryId)?.text);
+    try {
+      if (next !== null) await editQueuedMessage(sessionName, edit.entryId, next, sessionServer());
+    } catch (err) {
+      // Saiu da fila: a edição fecha já, com o aviso desta recusa; o efeito da saída não avisa de novo.
+      if ((err as { code?: unknown })?.code === 'queue_entry_gone' && queueEdit === edit) {
+        leaveQueueEdit(queueEditLeft(edit, { entries: [], actions: false }, composerText)?.composerText ?? edit.savedDraft);
+      }
+      throw err;
     }
     if (queueEdit === edit) leaveQueueEdit(edit.savedDraft);
   });
@@ -3567,7 +3594,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       plan={planControls}
       footer={chatPlans}
       {stateEvent}
-      {pending}
+      pending={queuePanelShown ? pending.filter((p) => !echoInQueuePanel(p.text, queueList)) : pending}
       {sessionName}
       {pluginServers}
       agentesRodando={activity.agents.filter((a) => a.running)}
@@ -3789,6 +3816,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         onOpenAccounts={() => (accountsOpen = true)}
         {queuePanelShown}
         queueEditing={queueEdit !== null}
+        {queueBusy}
         onQueueEditSubmit={submitQueueEdit}
         onQueueEditCancel={cancelQueueEdit}
       >

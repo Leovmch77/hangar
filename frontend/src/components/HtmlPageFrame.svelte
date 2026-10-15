@@ -2,10 +2,10 @@
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import { baseOf, fileAuthHeader, frameHeight, pageExpandable, pageFetchState, pageUrls, parseHostMessage, reservedHeight,
-    type HtmlPageRef, type PageFetchState } from '@hangar/core';
+    themedPageDocument, type HtmlPageRef, type PageFetchState } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
   import { desktop } from '../lib/desktop.svelte';
-  import { pageVariables, postTheme, readScheme, themedDoc } from '../lib/pageHost';
+  import { pageVariables, postTheme, readScheme } from '../lib/pageHost';
   import HtmlPageDialog from './HtmlPageDialog.svelte';
   import IconMaximize from './icons/IconMaximize.svelte';
   import { getRouteBaseUrl } from '../lib/auth';
@@ -49,7 +49,7 @@
       // Tema próprio: a página fica como foi desenhada, sem as cores do app.
       const html = next === 'ready' ? await r.text() : null;
       if (mine !== seq) return;
-      if (html != null) doc = page.ownTheme ? html : themedDoc(html, scheme, pageVariables());
+      if (html != null) doc = page.ownTheme ? html : themedPageDocument(html, scheme, pageVariables());
       status = next;
     } catch {
       if (mine === seq) status = pageFetchState('network');

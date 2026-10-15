@@ -452,6 +452,39 @@ test('evento queue alimenta o painel e o reset o limpa', async () => {
   expect(chat.use.getState().queuePanel).toBeNull();
 });
 
+test('a apagada noutro aparelho tira a bolha daqui', async () => {
+  historyResponses = [[ev({ id: 'queued-a', text: 'oi', queued_delivered: false }), ev({ id: 'queued-b', text: 'tchau', queued_delivered: false })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'b', text: 'tchau', ts: 2 }], actions: true, removed: ['a'] }));
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-b']);
+  expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['b']);
+});
+
+test('conexão aberta sem o evento queue volta o painel às bolhas', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+    created[0].trigger('open', '{}');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['a']);
+    // Reconectou e o retrato veio sem `queue` (a sessão voltou ao Python).
+    created[0].fail();
+    await vi.advanceTimersByTimeAsync(3_000);
+    created[1].trigger('open', '{}');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(chat.use.getState().queuePanel).toBeNull();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('editar guarda o rascunho uma vez e cancelar o devolve', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
@@ -498,7 +531,7 @@ test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da e
   expect(chat.use.getState().queueBusy).toBe(false);
 });
 
-test('recusa da fila vira aviso traduzido e a edição continua aberta', async () => {
+test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
   chat.retain();
@@ -508,7 +541,8 @@ test('recusa da fila vira aviso traduzido e a edição continua aberta', async (
     JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'x' } }), { status: 409 })));
   chat.startQueueEdit('a', '');
   expect(await chat.submitQueueEdit('oi de novo')).toBeNull();
-  expect(chat.use.getState().queueEdit?.entryId).toBe('a');
+  // Fechada aqui, o Composer não vê a saída pelo painel e não avisa de novo.
+  expect(chat.use.getState().queueEdit).toBeNull();
   expect(chat.use.getState().queueError).toBe(m.queue_entry_gone());
   expect(chat.use.getState().queueBusy).toBe(false);
 });

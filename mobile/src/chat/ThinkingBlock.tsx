@@ -31,7 +31,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent
         <Text style={[styles.rotulo, { color: theme.tokens.text.secondary }]}>{m.native_thinking()}</Text>
         {!aberto ? (
           <Text style={[styles.resumo, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-            {resumoPensamento(texto.replace(/\*\*/g, ''))}
+            {resumoPensamento(texto)}
           </Text>
         ) : null}
       </Pressable>

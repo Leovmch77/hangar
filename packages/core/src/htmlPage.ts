@@ -89,6 +89,16 @@ export function themeVariables(get: (name: string) => string): Record<string, st
   return out;
 }
 
+const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/;
+
+// Troca só o conteúdo do bloco de tema que o servidor injeta; o data-base fica para as trocas seguintes. Uma regra
+// para a PWA e o app.
+export function themedPageDocument(html: string, scheme: 'dark' | 'light', vars: Record<string, string>): string {
+  const css = `:root{color-scheme:${scheme};${Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')}}`;
+  return html.replace(THEME_BLOCK,
+    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
+}
+
 // Tela cheia da página (como o HtmlRenderDialog do T3): zoom de 50% a 200% em degraus de 25%.
 export const PAGE_ZOOM_MIN = 0.5;
 export const PAGE_ZOOM_MAX = 2;
