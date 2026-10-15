@@ -2,13 +2,23 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { estilosDitado, type FirstConversationAttempt, type MotivoFim, type QueuePanel } from '@hangar/core';
+import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, recarregarSessao, setPermissionMode, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const appLifecycle = vi.hoisted(() => ({
+  currentState: 'active' as import('react-native').AppStateStatus,
+  listeners: new Set<(state: import('react-native').AppStateStatus) => void>(),
+}));
 vi.mock('react-native', async (original) => ({
   ...await original<object>(),
-  AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+  AppState: {
+    get currentState() { return appLifecycle.currentState; },
+    addEventListener: (_type: string, listener: (state: import('react-native').AppStateStatus) => void) => {
+      appLifecycle.listeners.add(listener);
+      return { remove: () => { appLifecycle.listeners.delete(listener); } };
+    },
+  },
   AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
   Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref, style }: {
     accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean; selected?: boolean }; accessibilityRole?: string;
@@ -52,7 +62,11 @@ vi.mock('expo-router', () => ({
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
-  fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }],
+  fetchSessionsForServer: vi.fn(async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }]),
+  interrupt: vi.fn(async () => {}),
+  recarregarSessao: vi.fn(async () => ({ ok: true })),
+  implementCodexPlan: vi.fn(async () => {}),
+  setPermissionMode: vi.fn(async () => ({ mode: 'acceptEdits', current: 'acceptEdits', previous_non_plan: 'acceptEdits' })),
   sendInputForServer: realFirstInput.send,
   getHistory: realFirstInput.history,
   transcribeUploadedForServer: realFirstInput.transcribe,
@@ -118,7 +132,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' native_action_uncertain native_ask_fallback native_close native_dictation_active native_dictation_cancel native_dictation_level native_loading native_new_chat_folder native_tasks_all_done native_tasks_completed native_tasks_expand native_tasks_in_progress native_tasks_left native_tasks_left_1 native_tasks_minimize native_tasks_pending native_tasks_untitled native_thinking native_tools_failed native_tools_failed_1 native_tree_thoughts')
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
-    .concat(' native_par_so_leitura')
+    .concat(' native_par_so_leitura chat_plan_implementar chat_plan_iniciando chat_plan_continuar chat_plan_erro chat_plan_indisponivel chat_plan_pedido native_plan_send_failed_stuck')
     // Painel "Na fila" e a edição da mensagem da fila no Composer.
     .concat(' queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down queue_panel_remove atalhos_editar comum_apagar')
     .concat(' queue_panel_update queue_panel_update_aria queue_panel_editing queue_entry_gone')
@@ -166,7 +180,7 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim:
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
 } }));
-vi.mock('../features/ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: false }) } }));
+vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: false }) }) }));
 vi.mock('./CommandSheet', () => ({
   CommandSheet: () => null,
   useSessionCommands: () => ({ commands: [], error: '', retry: () => {} }),
@@ -256,6 +270,8 @@ import { NewConversation } from '../features/create/NewConversation';
 import { _resetNewConversationForTests, recoverAttempt, restoreAttempt, useNewConversation } from '../stores/newConversation';
 import { AccessibilityInfo, Alert } from 'react-native';
 import { retainDraftAttachment } from './draftAttachments';
+import { chatStore, _resetChatsForTests } from '../stores/chat';
+import { useServers } from '../stores/servers';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -286,6 +302,132 @@ it.each([0, 1])('opção %s e cancelar compartilham trava, mantendo índice 1-ba
   await act(async () => buttons[2].click());
   expect(onCancel).toHaveBeenCalledTimes(1);
   act(() => root.unmount());
+});
+
+describe('ações e atualização da conversa na rota', () => {
+  const lifecycle = (state: import('react-native').AppStateStatus) => act(() => {
+    appLifecycle.currentState = state;
+    appLifecycle.listeners.forEach((listener) => listener(state));
+  });
+  beforeEach(() => {
+    _resetChatsForTests();
+    realFirstInput.enabled = true;
+    realFirstInput.history.mockReset().mockResolvedValue([]);
+    realFirstInput.send.mockReset().mockResolvedValue(undefined);
+    route.params = { server: 's1', name: 'sess' };
+    firstInput.attempt = null;
+    appLifecycle.currentState = 'active';
+    chatRow.extra = {};
+    vi.mocked(fetchSessionsForServer).mockClear();
+    vi.mocked(interrupt).mockReset().mockResolvedValue(undefined);
+    vi.mocked(recarregarSessao).mockClear();
+    vi.mocked(implementCodexPlan).mockClear();
+    vi.mocked(setPermissionMode).mockClear();
+    configureApi({ getBaseUrl: () => 'http://unused', getToken: () => '', onUnauthorized: () => {}, origin: null,
+      createEventSource: () => ({ addEventListener: () => {}, removeEventListener: () => {}, close: () => {},
+        onerror: null, onopen: null, readyState: 1 }) });
+  });
+  afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
+
+  it.each([true, false])('cancelar opções só devolve pendente depois de interrupt aceito: %s', async (accepted) => {
+    let finish!: () => void;
+    vi.mocked(interrupt).mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+      finish = () => accepted ? resolve() : reject(Object.assign(new Error('409: recusado'), { status: 409 }));
+    }));
+    const { container, root } = await render(createElement(ChatScreen));
+    const chat = chatStore('s1', 'sess');
+    const pending = [{ id: 'pending-a', text: 'anterior' }, { id: 'pending-b', text: 'devolver' }];
+    act(() => chat.use.setState({ pending, stateEvent: {
+      session: 'sess', state: 'awaiting_input', question: 'permission', options: ['Yes', 'No'], interaction_id: 'perm:1',
+    } }));
+    const field = container.querySelector('textarea')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'digitado');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => [...container.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === '✕comum_cancelar')!.click());
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('sess', true, useServers.getState().servers[0]);
+    expect(field.value).toBe('digitado');
+    expect(chat.use.getState().pending).toEqual(pending);
+    await act(async () => finish());
+    expect(field.value).toBe(accepted ? 'devolver\n\ndigitado' : 'digitado');
+    expect(chat.use.getState().pending).toEqual(accepted ? [pending[0]] : pending);
+    if (!accepted) expect(container.textContent).toContain('409: recusado');
+    act(() => root.unmount());
+  });
+
+  it.each(['recarregar', 'codex', 'claude'])('%s usa o servidor da rota e conserva o destino na reversão', async (action) => {
+    chatRow.extra = { provider: action === 'codex' ? 'codex' : 'claude' };
+    const { container, root } = await render(createElement(ChatScreen));
+    const target = useServers.getState().servers[0];
+    const chat = chatStore('s1', 'sess');
+    act(() => chat.use.setState({ stateEvent: {
+      session: 'sess', state: 'idle', headless: true, claude_permission_mode: 'plan', claude_previous_non_plan: 'acceptEdits',
+    }, events: [{ id: 'plan:1', kind: 'assistant_msg', text: action === 'codex' ? '<proposed_plan>\n# Plano\n</proposed_plan>' : '# Plano' }] }));
+    if (action === 'recarregar') {
+      await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="recarregar_sessao"]')!.click());
+      expect(recarregarSessao).toHaveBeenCalledExactlyOnceWith('sess', target);
+    } else {
+      if (action === 'claude') realFirstInput.send.mockImplementationOnce(async () => {
+        useServers.getState().servers.reverse();
+        throw Object.assign(new Error('409: recusado'), { status: 409 });
+      });
+      try {
+        await act(async () => button(container, 'chat_plan_implementar')!.click());
+        if (action === 'codex') expect(implementCodexPlan).toHaveBeenCalledExactlyOnceWith('sess', target);
+        else expect(vi.mocked(setPermissionMode).mock.calls).toEqual([['sess', 'acceptEdits', target], ['sess', 'plan', target]]);
+      } finally {
+        if (action === 'claude') useServers.getState().servers.reverse();
+      }
+    }
+    act(() => root.unmount());
+  });
+
+  it('polling limpa o timer no fundo, retoma uma vez e remove o listener ao desmontar', async () => {
+    vi.useFakeTimers();
+    chatRow.extra = { provider: 'codex', tracked: true };
+    const listeners = appLifecycle.listeners.size;
+    const { root } = await render(createElement(ChatScreen));
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(1);
+    lifecycle('background');
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(1);
+    lifecycle('active');
+    lifecycle('active');
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(3);
+    act(() => root.unmount());
+    expect(appLifecycle.listeners.size).toBe(listeners);
+  });
+
+  it.each([true, false])('resposta tardia após fundo, com sucesso: %s, não cria segundo polling na volta', async (success) => {
+    vi.useFakeTimers();
+    chatRow.extra = { provider: 'codex', tracked: true };
+    let finish!: () => void;
+    vi.mocked(fetchSessionsForServer).mockImplementationOnce(() => new Promise<SessionInfo[]>((resolve, reject) => {
+      finish = () => success ? resolve([{ name: 'sess', provider: 'codex', tracked: true } as SessionInfo]) : reject(new Error('offline'));
+    }));
+    const { root } = await render(createElement(ChatScreen));
+    lifecycle('background');
+    lifecycle('active');
+    await act(async () => finish());
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(3);
+    act(() => root.unmount());
+  });
+
+  it('montagem no fundo não consulta antes de o app voltar', async () => {
+    appLifecycle.currentState = 'background';
+    const { root } = await render(createElement(ChatScreen));
+    expect(fetchSessionsForServer).not.toHaveBeenCalled();
+    lifecycle('active');
+    await act(async () => {});
+    expect(fetchSessionsForServer).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
 });
 
 describe('terminal escondido', () => {

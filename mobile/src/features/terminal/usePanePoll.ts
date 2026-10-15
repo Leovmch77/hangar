@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getPane } from '@hangar/core';
+import { getPane, type Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 export interface PaneSnapshot {
@@ -9,7 +9,7 @@ export interface PaneSnapshot {
   pending: boolean;
 }
 
-type GetPaneFn = (name: string, lines?: number) => Promise<{ text: string; scrollback: number }>;
+type GetPaneFn = typeof getPane;
 
 // Laço do espelho — porte de TerminalMirror.svelte:75-100. Vive FORA do React (uma implementação só,
 // a mesma que o hook roda e o teste exercita): setTimeout no finally (não setInterval), diff-gate,
@@ -20,6 +20,7 @@ export function criarPanePoller(
   name: string,
   lines: number,
   onSnapshot: (s: PaneSnapshot) => void,
+  server: Server | null,
 ) {
   const snap: PaneSnapshot = { text: '', scrollback: 0, err: '', pending: false };
   let alive = true;
@@ -32,7 +33,8 @@ export function criarPanePoller(
   // Publica SÓ quando algum campo mudou: com `onSnapshot` chamado a cada tick o React re-renderiza
   // de 450 em 450ms e o diff-gate deixa de valer pra quem consome o hook.
   async function ler(forcar: boolean) {
-    const p = await getPaneFn(name, linhas);
+    if (!server) throw new Error(m.servidor_nao_existe());
+    const p = await getPaneFn(name, linhas, server);
     if (!alive) return;
     let mudou = false;
     if (snap.err !== '') { snap.err = ''; mudou = true; }
@@ -67,7 +69,7 @@ export function criarPanePoller(
 
   return {
     estado: () => ({ ...snap }),
-    start: () => { tick(); },
+    start: () => { if (!server) erro(new Error(m.servidor_nao_existe())); else void tick(); },
     stop: () => { alive = false; clearTimeout(timer); },
     setAtBottom: (v: boolean) => {
       atBottom = v;
@@ -80,18 +82,19 @@ export function criarPanePoller(
   };
 }
 
-export function usePanePoll(name: string, lines = 200) {
+export function usePanePoll(name: string, server: Server | null, lines = 200) {
   const [snap, setSnap] = useState<PaneSnapshot>({ text: '', scrollback: 0, err: '', pending: false });
   const poller = useRef<ReturnType<typeof criarPanePoller> | undefined>(undefined);
 
   useEffect(() => {
-    const p = criarPanePoller(getPane, name, lines, setSnap);
+    const p = criarPanePoller(getPane, name, lines, setSnap, server);
+    setSnap(p.estado());
     poller.current = p;
     p.start();
     return () => { p.stop(); poller.current = undefined; };
     // `lines` não reinicia o laço de propósito (setLines abaixo) — porte do untrack da barra.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name]);
+  }, [name, server]);
 
   useEffect(() => { poller.current?.setLines(lines); }, [lines]);
 
