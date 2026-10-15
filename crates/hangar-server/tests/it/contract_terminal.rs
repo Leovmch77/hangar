@@ -11,6 +11,8 @@ fn effort_notice_above_the_composer_is_not_assistant_text() {
     assert_eq!(analyze(&alone).preview, "");
     let ultra = format!("❯ oi\n\n{}● high · ultracode · /effort\n{rule}\n❯ \n{rule}", " ".repeat(40));
     assert_eq!(analyze(&ultra).preview, "");
+    let medium = format!("❯ oi\n\n● Abrindo agora.\n\n{}◐ medium · /effort\n{rule}\n❯ \n{rule}", " ".repeat(60));
+    assert_eq!(analyze(&medium).preview, "Abrindo agora.");
 }
 
 #[test]
