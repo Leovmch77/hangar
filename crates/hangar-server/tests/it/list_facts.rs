@@ -22,7 +22,7 @@ fn state(s: &str) -> Value {
 
 /// Resposta completa do Python, com `extra` por cima.
 fn full(extra: Value) -> Value {
-    let mut v = json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [], "owners": {},
+    let mut v = json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "owners": {},
         "hidden": [], "problems": {}, "held": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null});
     for (k, x) in extra.as_object().unwrap() { v[k] = x.clone(); }
     v
@@ -78,7 +78,7 @@ fn transfer_rows_not_classified() {
     orq.state = "working".into();
     let facts: ListFacts = serde_json::from_value(full(json!({
         "overrides": [troca, fim], "frozen": ["troca"], "orq": [orq],
-        "shared": ["a"], "owners": {"a": "ana"}
+        "owners": {"a": "ana"}
     }))).unwrap();
     let (work, aside) = facts::apply(vec![row("troca", "codex"), row("a", "claude"), row("fim", "codex")], &facts, true);
     let names = |v: &[SessionRow]| v.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
@@ -87,7 +87,8 @@ fn transfer_rows_not_classified() {
     assert_eq!(names(&aside), ["troca", "o1"]);
     assert_eq!(aside[0].provider, "claude", "a linha da troca substitui a descoberta pelo nome");
     assert_eq!(work[1].transfer_phase.as_deref(), Some("complete"));
-    assert!(work[0].shared && work[0].owner.as_deref() == Some("ana"));
+    // `shared` não vem mais do Python: sai da loja de convites do Rust (`share_bridge.rs`).
+    assert!(!work[0].shared && work[0].owner.as_deref() == Some("ana"));
 }
 
 #[test]

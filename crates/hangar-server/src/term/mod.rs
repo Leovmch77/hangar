@@ -1,7 +1,9 @@
 //! Terminal real do dono: `WS /api/sessions/{name}/term` (`?shortcut=`) e
 //! `WS /api/hangar-terminals/{ident}/term`. Um cano de bytes para o `tmux attach` da sessão; o
-//! servidor não interpreta nada. Quem não é o dono pelo `?token=` segue ao Python (convidado,
-//! token errado, bloqueio), que faz a porta de entrada e volta por `/__hangar_server/term`.
+//! servidor não interpreta nada. O convidado de convite da 8766 entra pelo porteiro (sem token do
+//! dono nem Origin) e cai com 4410 quando o acesso acaba. Quem não é dono nem convidado de convite
+//! segue ao Python (login de convidado, token errado, bloqueio, Connect), que volta por
+//! `/__hangar_server/term`.
 pub(crate) mod origin;
 mod pty;
 mod resolve;
@@ -27,8 +29,10 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::auth;
-use crate::proxy::Forward;
 use crate::routes::{AppState, pass};
+use crate::share::caller::{Caller, SessionPath, caller};
+use crate::share::gate::Watcher;
+use crate::share::store::Kind;
 
 const TAKEN_OVER: &str = "outra conexao assumiu";
 
@@ -155,9 +159,9 @@ pub async fn hangar_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     serve(st, peer, req, Want::Hangar(ident)).await
 }
 
-/// `/__hangar_server/term` na porta privada: o Python liga aqui quem entrou pelas portas dele
-/// (convidado, Connect) depois da porta de entrada dele. O alvo já vem conferido; o painel é o
-/// mesmo da 8765, então um dono e um convidado nunca anexam juntos.
+/// `/__hangar_server/term` na porta privada: o Python liga aqui quem ele autenticou (login de
+/// convidado, Connect na 8768) depois da porta de entrada dele. O alvo já vem conferido; o painel é
+/// o mesmo da 8765 e da 8766, então um dono e um convidado nunca anexam juntos.
 pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
         return StatusCode::NOT_FOUND.into_response();
@@ -184,7 +188,7 @@ pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
         st.diag.report("rust.term_failed", &target, "panel_cap", "teto de painéis de terminal atingido");
         return close_after_accept(ws, 1013, "limite de paineis");
     };
-    ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot))
+    ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot, None))
 }
 
 /// `cols`/`rows` da query com o clamp; ausente vale 80x24, inválido é `None`.
@@ -209,21 +213,29 @@ fn close_after_accept(ws: WebSocketUpgrade, code: u16, reason: &'static str) -> 
 }
 
 async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) -> Response {
-    let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    let fwd = Forward { client_ip, https };
+    let fwd = crate::routes::forward_for(&st, peer, &req);
+    // Convidado da 8766: o porteiro já conferiu o token e a sessão; terminal só para o convite.
+    // A sessão é a que o porteiro partiu da rota, a mesma que o `Path` do terminal abre.
+    let session = req.extensions().get::<SessionPath>().map(|p| p.session.as_str());
+    let guest = caller(&req).and_then(Caller::grant).map(|g| match &want {
+        Want::Session { .. } => session.is_some_and(|s| g.sessions.get(s) == Some(&Kind::Share)),
+        Want::Hangar(_) => false,
+    });
     // Só `?token=`, como o termsock: Bearer e cookie não abrem shell.
-    let owner = auth::query_param(req.uri().query(), "token").filter(|t| !t.is_empty())
+    let owner = guest.is_none() && auth::query_param(req.uri().query(), "token").filter(|t| !t.is_empty())
         .is_some_and(|t| st.auth.is_owner(&fwd.client_ip, Some(t.as_bytes())));
-    if !owner || req.method() != Method::GET {
+    if !(owner || guest == Some(true)) || req.method() != Method::GET || (guest.is_some() && matches!(want, Want::Hangar(_))) {
         return pass(&st, req, &fwd).await;
     }
+    let watcher = req.extensions().get::<Watcher>().cloned();
     let (mut parts, body) = req.into_parts();
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
         Ok(ws) => ws,
         Err(_) => return pass(&st, Request::from_parts(parts, body), &fwd).await,
     };
     let label = match &want { Want::Session { name, .. } => name.clone(), Want::Hangar(_) => "hangar".into() };
-    if let Some(origin) = parts.headers.get(header::ORIGIN).filter(|o| !o.is_empty()) {
+    // A Origin do convidado é a do app dele, como no termsock.
+    if let Some(origin) = parts.headers.get(header::ORIGIN).filter(|o| guest.is_none() && !o.is_empty()) {
         // Origin que nem é texto não passa como "sem Origin".
         let Ok(origin) = origin.to_str() else { return refuse("origem recusada") };
         let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok());
@@ -264,7 +276,7 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
         st.diag.report("rust.term_failed", &label, "panel_cap", "teto de painéis de terminal atingido");
         return close_after_accept(ws, 1013, "limite de paineis");
     };
-    ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot))
+    ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot, watcher))
 }
 
 fn mux_down(st: &AppState, ws: WebSocketUpgrade, label: &str) -> Response {
@@ -272,9 +284,10 @@ fn mux_down(st: &AppState, ws: WebSocketUpgrade, label: &str) -> Response {
     close_after_accept(ws, 1013, "multiplexador indisponivel")
 }
 
-enum End { Client, Output, TakenOver, PingTimeout, InputGone }
+enum End { Client, Output, TakenOver, PingTimeout, InputGone, Revoked }
 
-async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, rows: u16, slot: Arc<Slot>) {
+/// `watcher`: o do convidado; o acesso que acaba fecha com 4410, desmontando o painel como sempre.
+async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, rows: u16, slot: Arc<Slot>, watcher: Option<Watcher>) {
     let terms = &st.term;
     let cfg = &terms.cfg;
     let claim = terms.claim(&target, &st.diag).await;
@@ -344,9 +357,12 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
     let mut ping = tokio::time::interval_at(start + cfg.ping_every, cfg.ping_every);
     let mut pong_due: Option<tokio::time::Instant> = None;
     let mut warned = false;
+    let revoked = Watcher::ended(watcher.as_ref());
+    tokio::pin!(revoked);
     let end = loop {
         tokio::select! {
             _ = claim.stop.notified() => break End::TakenOver,
+            _ = &mut revoked => break End::Revoked,
             _ = &mut sender => break End::Output,
             // Fila de controle cheia é o envio parado: cliente que não lê nem um ping no prazo morreu.
             _ = ping.tick() => if pong_due.is_none() {
@@ -388,6 +404,7 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
             st.diag.report("rust.term_failed", &target, "input_write_failed", "a entrada do terminal parou de ser aceita");
             Some(close(1011, "entrada do terminal falhou"))
         }
+        End::Revoked => Some(close(crate::share::gate::CLOSE_ENDED, "")),
         End::Output | End::Client => None,
     };
     if let Some(m) = farewell {

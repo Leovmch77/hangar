@@ -887,6 +887,10 @@ class RuntimeCoordinator:
         return terminals
 
     async def native_receipt(self, message_id, status):
+        # Com o Rust de pé os recados da fila saem pela caixa de entrada dele, e é lá que o recibo volta;
+        # ler o arquivo de estado aqui, enquanto o Rust o troca, falharia no Windows.
+        if self.mode != "python":
+            return False
         for slot in tuple(self.slots.values()):
             if self.names.get(slot.binding.name) != slot.binding.key:
                 continue
@@ -1101,10 +1105,10 @@ class RuntimeCoordinator:
             async def changed():
                 return None
             from app import diag
-            from app.runtime_policy import _sessions
+            from app.adapters.claude_headless import sessions as claude_sessions
             # Religar relê o arquivo da sessão: antes de a conversa chegar nele, a vida nova nasceria sem
             # ela e abriria outra. A vista volta quando o patch grava, e aí religa.
-            current = await asyncio.to_thread(_sessions().load, slot.binding.name)
+            current = await asyncio.to_thread(claude_sessions.load, slot.binding.name)
             if (current or {}).get("session_id") != conversation:
                 return
             # Conversa que muda a cada vida religaria sem parar: teto de 3 religações por minuto.

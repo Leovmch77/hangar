@@ -272,8 +272,9 @@ class Prova:
         subprocess.run(["systemctl", "--user", "reset-failed", self.unit], capture_output=True)
         lancador = (
             f"import sys; sys.path.insert(0, {str(BACKEND)!r})\n"
-            "from app import share_tunnel, connect_port, contas\n"
-            f"share_tunnel.GUEST_PORT = {self.porta_convite}; connect_port.CONNECT_PORT = {self.porta_connect}\n"
+            # Antes de importar o api: a porta do convite vai ao Rust pelo `rust_server`.
+            "from app import config, connect_port, contas\n"
+            f"config.GUEST_PORT = {self.porta_convite}; connect_port.CONNECT_PORT = {self.porta_connect}\n"
             # A conta real não é reconciliada por este backend.
             "contas.e_conta = lambda p: False\n"
             "from app.adapters.claude_headless import adapter\n"

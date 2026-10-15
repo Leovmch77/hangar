@@ -3,7 +3,7 @@ use hangar_server::groups::model::Sidecar;
 use hangar_server::groups::service::{BoxFuture, GroupError, GroupService, JoinOwned, OrqFacts, OrqPhase, PromoteError};
 use hangar_server::groups::store::PairDir;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,8 +20,11 @@ impl Disk {
 fn none() -> BTreeMap<String, String> { BTreeMap::new() }
 fn gid(s: &'static str) -> impl Fn() -> String { move || s.to_owned() }
 fn input<'a>(name: &'a str, others: &'a [String], task: &'a str, h: &'a BTreeMap<String, String>) -> JoinInput<'a> {
-    JoinInput { name, others, task, replace_task: false, harness: h, orq: false }
+    JoinInput { name, others, task, replace_task: false, harness: h, orq: false, outside: &mine }
 }
+fn mine(_: &str) -> bool { false }
+/// `fulano::*` e `bia::*` são pares de fora; qualquer outro `x::y` é máquina própria.
+fn outside(p: &str) -> bool { p.starts_with("fulano::") || p.starts_with("bia::") }
 
 #[test]
 fn two_solo_sessions_become_a_group() {
@@ -80,10 +83,39 @@ fn fusion_keeps_first_gid_and_lists_loser() {
 }
 
 #[test]
-fn external_or_remote_member_never_enters_a_local_group() {
+fn own_machine_remote_never_enters_a_local_group() {
+    let (d, h) = (Disk::new(), none());
+    d.apply(&[("a".into(), Sidecar { peers: vec!["srv::x".into()], task: Some(String::new()), gid: "e1".into(), ..Default::default() })], &[]);
+    assert!(matches!(plan_join(&d.read(), &input("b", &["a".into()], "", &h), &gid("g")), Err(JoinRefusal::Mix)));
+}
+
+#[test]
+fn outside_member_joins_like_a_regular_member() {
     let (d, h) = (Disk::new(), none());
     d.apply(&[("a".into(), Sidecar { peers: vec!["fulano::x".into()], task: Some(String::new()), gid: "e1".into(), ..Default::default() })], &[]);
-    assert!(matches!(plan_join(&d.read(), &input("b", &["a".into()], "", &h), &gid("g")), Err(JoinRefusal::Mix)));
+    let others = ["a".to_owned()];
+    let p = plan_join(&d.read(), &JoinInput { outside: &outside, ..input("b", &others, "", &h) }, &gid("g")).ok().unwrap();
+    assert_eq!((p.members.as_slice(), p.gid.as_str()), (&["b".to_owned(), "a".into(), "fulano::x".into()][..], "e1"));
+    d.apply(&p.writes, &[]);
+    assert_eq!(d.read()("a").unwrap().peers, ["b", "fulano::x"]);
+    assert_eq!(d.read()("b").unwrap().peers, ["a", "fulano::x"]);
+    // Dois pares de fora no mesmo grupo também valem.
+    let others = ["a".to_owned(), "bia::w".to_owned()];
+    assert!(plan_join(&d.read(), &JoinInput { outside: &outside, ..input("c", &others, "", &h) }, &gid("g")).is_ok());
+    // Máquina própria junto de membro de fora continua recusada.
+    let others = ["a".to_owned(), "srv::y".to_owned()];
+    assert!(matches!(plan_join(&d.read(), &JoinInput { outside: &outside, ..input("c", &others, "", &h) }, &gid("g")), Err(JoinRefusal::Mix)));
+}
+
+#[test]
+fn orq_group_refuses_outside_member() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &JoinInput { orq: true, ..input("arb", &["exec".to_owned()], "", &h) }, &gid("o1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    d.apply(&[("solo".into(), Sidecar { peers: vec!["fulano::x".into()], task: Some(String::new()), gid: "e1".into(), ..Default::default() })], &[]);
+    let others = ["solo".to_owned()];
+    let joined = plan_join(&d.read(), &JoinInput { outside: &outside, ..input("arb", &others, "", &h) }, &gid("g"));
+    assert!(matches!(joined, Err(JoinRefusal::OrqOutside)));
 }
 
 #[test]
@@ -142,7 +174,7 @@ fn leave_keeps_remaining_group() {
 #[test]
 fn live_orq_group_keeps_last_member() {
     let (d, h) = (Disk::new(), none());
-    let p = plan_join(&d.read(), &JoinInput { name: "arb", others: &["exec".into()], task: "", replace_task: false, harness: &h, orq: true }, &gid("o1")).ok().unwrap();
+    let p = plan_join(&d.read(), &JoinInput { name: "arb", others: &["exec".into()], task: "", replace_task: false, harness: &h, orq: true, outside: &mine }, &gid("o1")).ok().unwrap();
     d.apply(&p.writes, &[]);
     let l = plan_leave(&d.read(), "exec", true).unwrap();
     d.apply(&l.writes, &l.clears);
@@ -164,14 +196,40 @@ fn rename_rewrites_own_and_peers() {
 }
 
 #[test]
-fn external_link_writes_only_the_local_sidecar() {
+fn external_link_of_solo_session_writes_only_its_sidecar() {
     let d = Disk::new();
-    let w = plan_external_link(&d.read(), "a", "fulano::x", &none(), &gid("e1")).ok().unwrap();
+    let w = plan_external_link(&d.read(), "a", "fulano::x", &none(), &outside, &gid("e1")).ok().unwrap();
     assert_eq!(w.len(), 1);
     assert_eq!((w[0].0.as_str(), w[0].1.gid.as_str(), w[0].1.task.as_deref()), ("a", "e1", Some("")));
     assert_eq!(w[0].1.peers, ["fulano::x"]);
     d.apply(&w, &[]);
-    assert!(matches!(plan_external_link(&d.read(), "a", "outro::y", &none(), &gid("e2")), Err(JoinRefusal::AlreadyGrouped)));
+    // Segundo par de fora na mesma sessão.
+    let w = plan_external_link(&d.read(), "a", "bia::w", &none(), &outside, &gid("e2")).ok().unwrap();
+    assert_eq!((w[0].1.gid.as_str(), w[0].1.peers.as_slice()), ("e1", &["fulano::x".to_owned(), "bia::w".into()][..]));
+}
+
+#[test]
+fn external_link_of_grouped_session_reaches_every_local_member() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &input("a", &["b".into()], "t", &h), &gid("g1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let w = plan_external_link(&d.read(), "a", "fulano::x", &none(), &outside, &gid("e1")).ok().unwrap();
+    d.apply(&w, &[]);
+    for (name, peers) in [("a", ["b", "fulano::x"]), ("b", ["a", "fulano::x"])] {
+        let st = d.read()(name).unwrap();
+        assert_eq!((st.peers.as_slice(), st.gid.as_str(), st.task.as_deref()), (&peers.map(String::from)[..], "g1", Some("t")), "{name}");
+    }
+}
+
+#[test]
+fn external_link_refuses_orq_and_own_machine_groups() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &JoinInput { orq: true, ..input("arb", &["exec".to_owned()], "", &h) }, &gid("o1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    assert!(matches!(plan_external_link(&d.read(), "exec", "fulano::x", &none(), &outside, &gid("e")), Err(JoinRefusal::OrqOutside)));
+    let p = plan_join(&d.read(), &input("c", &["srv::y".into()], "", &h), &gid("g2")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    assert!(matches!(plan_external_link(&d.read(), "c", "fulano::x", &none(), &outside, &gid("e")), Err(JoinRefusal::Mix)));
 }
 
 /// Decisão do usuário (B13): o árbitro sozinho num `orq` recusa o par externo com código próprio; o grupo fica.
@@ -180,7 +238,7 @@ fn lone_orq_arbiter_refuses_an_external_pair() {
     let d = Disk::new();
     let arbiter = Sidecar { peers: vec![], task: Some("t".into()), gid: "o1".into(), harness: none(), orq: true, fed: None };
     d.apply(&[("arb".to_owned(), arbiter.clone())], &[]);
-    assert!(matches!(plan_external_link(&d.read(), "arb", "fulano::x", &none(), &gid("e1")), Err(JoinRefusal::Orq)));
+    assert!(matches!(plan_external_link(&d.read(), "arb", "fulano::x", &none(), &outside, &gid("e1")), Err(JoinRefusal::Orq)));
     assert_eq!(d.read()("arb"), Some(arbiter));
 }
 
@@ -207,8 +265,9 @@ fn service(tmp: &tempfile::TempDir, orq: Arc<FakeOrq>) -> (GroupService, PairDir
     (GroupService::new(make(), orq, "srv".into()), make())
 }
 fn owned(name: &str, others: &[&str], orq: bool) -> JoinOwned {
-    JoinOwned { name: name.into(), others: others.iter().map(|s| (*s).into()).collect(), task: String::new(), replace_task: false, harness: none(), orq }
+    JoinOwned { name: name.into(), others: others.iter().map(|s| (*s).into()).collect(), task: String::new(), replace_task: false, harness: none(), orq, outside: HashSet::new() }
 }
+fn far(addresses: &[&str]) -> HashSet<String> { addresses.iter().map(|a| (*a).to_owned()).collect() }
 
 #[tokio::test]
 async fn join_restores_on_partial_write_failure() {
@@ -298,7 +357,7 @@ async fn every_group_write_tells_the_list() {
     assert_eq!(bumps.load(Ordering::SeqCst), 3, "sair sem grupo não escreve nada");
     svc.restore(out.before).await.unwrap();
     assert_eq!(bumps.load(Ordering::SeqCst), 4, "restore");
-    svc.external_link("b", "m::x", none()).await.unwrap();
+    svc.external_link("b", "m::x", none(), far(&["m::x"])).await.unwrap();
     svc.external_unlink("b", "m::x").await.unwrap();
     assert_eq!(bumps.load(Ordering::SeqCst), 6, "par externo");
 }
@@ -364,13 +423,23 @@ async fn join_refusal_leaves_the_disk_untouched() {
 }
 
 #[tokio::test]
-async fn external_link_refuses_grouped_session() {
+async fn external_link_and_unlink_cover_the_whole_group() {
     let tmp = tempfile::tempdir().unwrap();
     let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
-    svc.join(owned("a", &["b"], false)).await.unwrap();
-    assert!(matches!(svc.external_link("a", "fulano::x", none()).await.err(), Some(GroupError::Refused(JoinRefusal::AlreadyGrouped))));
+    let out = svc.join(owned("a", &["b"], false)).await.unwrap();
+    assert_eq!(svc.external_link("a", "fulano::x", none(), far(&["fulano::x"])).await.unwrap(), out.gid);
+    assert_eq!(dir.sidecar("b").unwrap().unwrap().peers, ["a", "fulano::x"]);
+    // Membro local que entra depois, pela rota de grupo, também vê o de fora.
+    svc.join(JoinOwned { outside: far(&["fulano::x"]), ..owned("c", &["a"], false) }).await.unwrap();
+    assert_eq!(dir.sidecar("c").unwrap().unwrap().peers, ["a", "b", "fulano::x"]);
+    svc.external_unlink("a", "fulano::x").await.unwrap();
+    for (name, peers) in [("a", ["c", "b"]), ("b", ["c", "a"]), ("c", ["a", "b"])] {
+        assert_eq!(dir.sidecar(name).unwrap().unwrap().peers, peers, "{name}");
+    }
+    svc.join(owned("arb", &["exec"], true)).await.unwrap();
+    assert!(matches!(svc.external_link("exec", "fulano::y", none(), far(&["fulano::y"])).await.err(), Some(GroupError::Refused(JoinRefusal::OrqOutside))));
 
-    let gid = svc.external_link("solo", "fulano::x", none()).await.unwrap();
+    let gid = svc.external_link("solo", "fulano::x", none(), far(&["fulano::x"])).await.unwrap();
     let st = dir.sidecar("solo").unwrap().unwrap();
     assert_eq!((st.gid.as_str(), st.peers.as_slice()), (gid.as_str(), &["fulano::x".to_owned()][..]));
     assert_eq!(gid.len(), 8);

@@ -30,7 +30,7 @@ impl Hangar {
         if !self.files_visible() { return false; }
         let tab = &self.files.tabs[self.files.active];
         let Some(Ok(doc)) = &tab.content else { return true; };
-        if tab.preview {
+        if tab.reader.mode.reading() {
             let Some(view) = doc.markdown.clone() else { return true; };
             let id = tab.id;
             let find = &mut self.files.preview_find;
@@ -95,7 +95,7 @@ impl Hangar {
 
     pub(super) fn render_preview_find(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let find = &self.files.preview_find;
-        if !find.open || !self.files.tabs.get(self.files.active).is_some_and(|tab| tab.preview && find.target == Some(tab.id)) { return None; }
+        if !find.open || !self.files.tabs.get(self.files.active).is_some_and(|tab| tab.reader.mode.reading() && find.target == Some(tab.id)) { return None; }
         let count = if find.ranges.is_empty() { tr("find_none") } else {
             tr("find_count").replace("{n}", &(find.active + 1).to_string()).replace("{total}", &find.ranges.len().to_string())
         };

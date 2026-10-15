@@ -509,6 +509,24 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
         .with_code_language_band(Some(crate::i18n::tr_web("comum_codigo", &Default::default()).unwrap_or_default().into()))
 }
 
+/// Documento tem escala própria: A−/A+ não alteram a conversa nem o editor.
+pub fn document_markdown(cx: &App, font_size: u8) -> gpui_kit::base::TextViewStyle {
+    let mut table = StyleRefinement::default().border_1().border_color(border_strong()).rounded_md().bg(transparent_black());
+    table.overflow.x = Some(Overflow::Scroll);
+    let size = font_size as f32;
+    conversation_markdown(cx)
+        .with_foreground(text()).with_muted_foreground(muted()).with_link(accent_text())
+        .with_border(border_strong()).with_code_background(inset())
+        .with_paragraph_gap(rems(1.1))
+        .with_heading(move |level| StyleRefinement::default()
+            .text_size(px(size * match level { 1 => 2.1, 2 => 1.45, 3 => 1.2, 4 => 1.1, 5 => 1., _ => 0.92 }))
+            .font_weight(if level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+            .line_height(relative(1.35)).mt(px(if level == 1 { 0. } else { size * 1.5 })).mb(px(size * 0.75)))
+        .with_table(table)
+        .with_table_head(StyleRefinement::default().bg(inset()).font_weight(FontWeight::SEMIBOLD))
+        .with_table_cell(StyleRefinement::default().border_r_1().border_color(border_strong()).px_3().py_2())
+}
+
 /// Leva modo claro/escuro, destaque e fonte para os componentes do gpui-kit (entrada, menus, botão primário).
 pub fn sync_kit(window: Option<&mut Window>, cx: &mut App) {
     let (original_font, _) = original_code_typography(cx);

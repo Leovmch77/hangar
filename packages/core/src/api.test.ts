@@ -20,7 +20,7 @@ import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEven
 import type { AskQuestionPayload, StateEvent } from './types';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
-import { exportShortcuts } from './api';
+import { createShare, exportShortcuts } from './api';
 import { fileUrl, uploadUrl, uploadUrlNative } from './api';
 import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel, transcriptionProvidersMissingKey, testTranscriptionProvider } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
@@ -1301,4 +1301,13 @@ describe('lista de serviços de transcrição', () => {
 
 it('uploadUrlNative usa o servidor da conversa quando recebe um', () => {
   expect(uploadUrlNative('sessao', 'ditado 1.m4a', server)).toBe('https://a.test/api/sessions/sessao/uploads/ditado%201.m4a');
+});
+
+it('criação de convite que o iOS matou em segundo plano não esfria o servidor, e a nova tentativa sai', async () => {
+  const other = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Load failed'));
+  await expect(createShare('s', false, other)).rejects.toThrow('Load failed');
+  expect(estaDesligado('b')).toBe(false);
+  fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'i', link: 'https://x.ts.net:8443/convite/c', expires_at: 1 })));
+  await expect(createShare('s', false, other)).resolves.toMatchObject({ id: 'i' });
 });

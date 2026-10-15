@@ -1648,7 +1648,7 @@ pub(crate) fn plugin_answer_body(questions: &Value, answers: &Value) -> Result<V
     lines.push("Não repita a pergunta: responda em texto e aguarde a mensagem dele.".into());Ok(json!({"deny":lines.join("\n")}))
 }
 fn escape_attribute(text: &str) -> String { text.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;") }
-fn native_envelope(descriptor: &NativeMessage, text: &str, id: &str) -> Vec<u8> {
+pub(crate) fn native_envelope(descriptor: &NativeMessage, text: &str, id: &str) -> Vec<u8> {
     let content = format!("<cross-session-message from=\"{}\" from-name=\"{}\" from-mode=\"{}\">\n{}\n</cross-session-message>", escape_attribute(&descriptor.origin), escape_attribute(&descriptor.sender), escape_attribute(&descriptor.mode), text.trim_matches('\n'));
     let mut bytes = serde_json::to_vec(&serde_json::json!({"msgV":1,"msg_id":id,"type":"user","message":{"role":"user","content":content},"priority":"next","from":descriptor.origin})).unwrap();
     bytes.push(b'\n'); bytes

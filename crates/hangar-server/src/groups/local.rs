@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 pub type Snapshot = BTreeMap<String, Option<Sidecar>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JoinRefusal { Mix, TaskConflict { existing: String }, AlreadyGrouped, Orq }
+pub enum JoinRefusal { Mix, TaskConflict { existing: String }, OrqOutside, Orq }
 
 pub struct JoinInput<'a> {
     pub name: &'a str,
@@ -16,6 +16,8 @@ pub struct JoinInput<'a> {
     pub replace_task: bool,
     pub harness: &'a BTreeMap<String, String>,
     pub orq: bool,
+    /// Membro remoto que é par externo (`alias::sessao` de outra pessoa), não máquina própria.
+    pub outside: &'a dyn Fn(&str) -> bool,
 }
 
 pub struct JoinPlan {
@@ -72,15 +74,20 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
     let infos: Vec<_> = names.iter().map(|n| members_of(read, n)).collect();
     let members = dedup(infos.iter().flat_map(|(ms, _, _)| ms.iter().cloned()));
 
-    // Par entre máquinas é 1:1 (uma sessão local + um remoto): a união nunca arrasta um remoto
-    // que não passou pelo handshake para dentro de um grupo local.
-    let remotes = members.iter().filter(|m| is_remote(m)).count();
-    let locals = members.len() - remotes;
-    if remotes > 0 && (remotes > 1 || locals != 1) {
+    // Par entre máquinas próprias é 1:1 (uma sessão local + um remoto): a união nunca arrasta um
+    // remoto que não passou pelo handshake para dentro de um grupo. Membro de fora é membro comum.
+    let outsiders = members.iter().filter(|m| is_remote(m) && (input.outside)(m)).count();
+    let own = members.iter().filter(|m| is_remote(m)).count() - outsiders;
+    let locals = members.len() - own - outsiders;
+    if own > 0 && (own > 1 || locals != 1 || outsiders > 0) {
         return Err(JoinRefusal::Mix);
     }
 
     let before = snapshot(read, members.iter().cloned());
+    // Executores entram e saem do grupo `orq` o tempo todo: ninguém de fora acompanha isso.
+    if outsiders > 0 && (input.orq || before.values().flatten().any(|s| s.orq)) {
+        return Err(JoinRefusal::OrqOutside);
+    }
     let existing = infos.iter().map(|(_, t, _)| t.as_str()).find(|t| !t.is_empty()).unwrap_or("");
     let asked = input.task.trim();
     if !asked.is_empty() && !existing.is_empty() && asked != existing && !input.replace_task {
@@ -151,15 +158,48 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
     (clears, writes)
 }
 
-/// Par com sessão de outra pessoa: só o sidecar local existe, com o endereço como único peer.
+/// Por que o grupo de `link` não recebe um par de fora: `orq` (o árbitro sozinho tem aviso próprio),
+/// ou par com máquina própria (1:1).
+pub fn external_link_refusal(link: Option<&Sidecar>, outside: &dyn Fn(&str) -> bool) -> Option<JoinRefusal> {
+    let link = link?;
+    if link.orq { return Some(if link.peers.is_empty() { JoinRefusal::Orq } else { JoinRefusal::OrqOutside }); }
+    link.peers.iter().any(|p| is_remote(p) && !outside(p)).then_some(JoinRefusal::Mix)
+}
+
+/// Par com sessão de outra pessoa: o endereço entra no sidecar de cada membro local do grupo de
+/// `local`; sessão solta ganha grupo novo só com ele.
 pub fn plan_external_link(read: &dyn Fn(&str) -> Option<Sidecar>, local: &str, address: &str,
-    harness: &BTreeMap<String, String>, fresh_gid: &dyn Fn() -> String) -> Result<Vec<(String, Sidecar)>, JoinRefusal> {
-    match read(local) {
-        // Árbitro de uma orquestração: o grupo dela fica, com o aviso próprio.
-        Some(sidecar) if sidecar.orq => return Err(JoinRefusal::Orq),
-        Some(_) => return Err(JoinRefusal::AlreadyGrouped),
-        None => {},
+    harness: &BTreeMap<String, String>, outside: &dyn Fn(&str) -> bool, fresh_gid: &dyn Fn() -> String) -> Result<Vec<(String, Sidecar)>, JoinRefusal> {
+    let Some(link) = read(local) else {
+        let sidecar = Sidecar { peers: vec![address.to_owned()], task: Some(String::new()), gid: fresh_gid(), harness: harness.clone(), orq: false, fed: None };
+        return Ok(vec![(local.to_owned(), sidecar)]);
+    };
+    if let Some(refused) = external_link_refusal(Some(&link), outside) { return Err(refused); }
+    let locals = std::iter::once(local.to_owned()).chain(link.peers.iter().filter(|p| !is_remote(p)).cloned());
+    Ok(locals.filter_map(|m| {
+        let mut st = if m == local { link.clone() } else { read(&m)? };
+        if !st.peers.iter().any(|p| p == address) { st.peers.push(address.to_owned()); }
+        st.harness.extend(harness.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Some((m, st))
+    }).collect())
+}
+
+/// Tira `address` de cada membro local do grupo de `local`; quem fica sem ninguém (e sem `orq`)
+/// sai do grupo. (clears, writes, gid a arquivar quando o grupo acabou.)
+pub fn plan_external_unlink(read: &dyn Fn(&str) -> Option<Sidecar>, local: &str, address: &str) -> (Vec<String>, Vec<(String, Sidecar)>, Option<String>) {
+    let Some(link) = read(local).filter(|l| l.peers.iter().any(|p| p == address)) else { return (Vec::new(), Vec::new(), None) };
+    let (mut clears, mut writes, mut archive) = (Vec::new(), Vec::new(), None);
+    let locals = std::iter::once(local.to_owned()).chain(link.peers.iter().filter(|p| !is_remote(p)).cloned());
+    for m in locals {
+        let Some(mut st) = (if m == local { Some(link.clone()) } else { read(&m) }) else { continue };
+        if !st.peers.iter().any(|p| p == address) { continue; }
+        st.peers.retain(|p| p != address);
+        if st.peers.is_empty() && !st.orq {
+            archive = Some(st.gid.clone());
+            clears.push(m);
+        } else {
+            writes.push((m, st));
+        }
     }
-    let sidecar = Sidecar { peers: vec![address.to_owned()], task: Some(String::new()), gid: fresh_gid(), harness: harness.clone(), orq: false, fed: None };
-    Ok(vec![(local.to_owned(), sidecar)])
+    (clears, writes, archive)
 }

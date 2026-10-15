@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 import tempfile
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 from pathlib import Path
 
 from app import atomico
@@ -65,17 +65,8 @@ def switch_thread(name: str, thread: dict, previous: str, *, endpoint: str, app_
 @contextmanager
 def _locked(*names: str):
     _dir().mkdir(parents=True, exist_ok=True)
-    with _write_lock, ExitStack() as stack:
-        # Origem e destino seguem a mesma ordem em todos os processos; fechar libera as travas.
-        for path in sorted({_path(name).with_suffix(".lock") for name in names}):
-            lock = stack.enter_context(path.open("a+b"))
-            if os.name == "nt":
-                import msvcrt
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(lock, fcntl.LOCK_EX)
+    # A trava de arquivo primeiro: esperar o Rust numa sessão não segura as gravações das outras.
+    with atomico.locked(*(_path(name).with_suffix(".lock") for name in names)), _write_lock:
         yield
 
 
@@ -207,7 +198,7 @@ def update_app_pid(name: str, app_pid: int) -> None:
 def load(name: str) -> dict | None:
     """Le o sidecar de uma sessao (ou None se nao existe / corrompido)."""
     try:
-        return json.loads(_path(name).read_text(encoding="utf-8"))
+        return json.loads(atomico.read(_path(name)))
     except (OSError, ValueError):
         return None
 

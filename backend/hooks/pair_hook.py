@@ -88,10 +88,12 @@ def main() -> None:
     if not peers:
         return
     externos = {}
+    # Grupo misto: o par pode ter sido feito por outro membro local do grupo.
+    locais = {nome, *(p for p in peers if "::" not in p)}
     try:
         with open(os.path.join(pair_dir, "external_pairs.json"), encoding="utf-8") as fh:
             externos = {f'{r["alias"]}::{r["peer_session"]}': r for r in json.load(fh)
-                        if r.get("local_session") == nome}
+                        if r.get("local_session") in locais}
     except FileNotFoundError:
         pass
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:

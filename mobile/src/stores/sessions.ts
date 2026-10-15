@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto } from '@hangar/core';
-import type { SessionInfo, Server, AggSession } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, listExternalPairs, attachGuest, createExternalPairSync } from '@hangar/core';
+import type { SessionInfo, Server, AggSession, ExternalPair } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
 import { useServers } from './servers';
+import * as m from '../paraglide/messages';
 
 // Store vivo da lista de sessões — porte de frontend/src/lib/sessionsStore.svelte.ts
 // para zustand. Um EventSource por servidor, refcount compartilhado, agregação via
@@ -46,6 +47,11 @@ let foreground = true;
 let generation = 0;
 let unsubServers: (() => void) | null = null;
 let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
+// O aviso de tela vem de fora: o store não carrega o toast (e com ele o nativo) nos testes.
+let pairNotice: (text: string) => void = () => {};
+export function setPairNotice(fn: (text: string) => void) { pairNotice = fn; }
+let storeGet: (() => SessionsState) | null = null;
+let storeSet: ((p: Partial<SessionsState>) => void) | null = null;
 
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
@@ -94,7 +100,8 @@ function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<Se
 
 function recompute(set: (p: Partial<SessionsState>) => void) {
   hidden = sweepHidden(hidden, slots);
-  aggCache = aggregateSessions(serversCache, slots, hidden);
+  const agg = aggregateSessions(serversCache, slots, hidden);
+  aggCache = { ...placeExternalRows(agg), loading: agg.loading };
   const byServerRecord: Record<string, AggSession[]> = {};
   for (const b of aggCache.byServer) byServerRecord[b.server.id] = b.sessions;
   set({
@@ -104,6 +111,41 @@ function recompute(set: (p: Partial<SessionsState>) => void) {
     loading: aggCache.loading,
     servers: serversCache,
   });
+  pairsMaybeChanged();
+}
+
+// Os pares nas linhas próprias dizem quando reler `/api/external-pairs`; o laço é o do core.
+function pairsMaybeChanged() {
+  if (refs === 0 || !storeGet || !storeSet) return;
+  void pairSync.refresh(serversCache.filter((s) => !s.disabled), (id) => slots.get(id)?.sessions);
+}
+
+function newPairSync() {
+  return createExternalPairSync({
+    read: listExternalPairs,
+    apply: (all) => useServers.getState().applyPairs(all),
+    attach: (entry, token) => attachGuest(entry, token).catch((error: unknown) => {
+      registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'par_attach',
+        detalhe: error instanceof Error ? error.name : 'erro' }, entry.baseUrl);
+      throw error;
+    }),
+    onLeft: (p) => pairNotice(m.pair_left_notice({ dono: p.owner })),
+    onAttached: (entry) => {
+      disconnect(entry.id);
+      if (storeGet && storeSet) connect(serversCache, storeGet, storeSet);
+    },
+  });
+}
+let pairSync = newPairSync();
+
+/** "Sair"/"Desfazer" pelo próprio menu: o par sumir em seguida não é a outra pessoa saindo. */
+export function markLeavingPair(alias: string, session: string): () => void {
+  return pairSync.markLeaving(alias, session);
+}
+
+/** Pares cuja ponta é esta sessão, pela última leitura: sair do grupo os desfaz para todos. */
+export function anchoredPairs(serverId: string, name: string): ExternalPair[] {
+  return pairSync.anchored(serverId, name);
 }
 
 function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
@@ -113,6 +155,8 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
     if (streams.has(s.id)) continue;
     if (retryTimers.has(s.id)) continue;
     if (connecting.has(s.id)) continue;
+    // Convite que acabou não é máquina fora do ar: não reconecta.
+    if (s.inviteEnded) continue;
     const attempt = { server: { ...s }, generation, abort: new AbortController() };
     connecting.set(s.id, attempt);
     void synchronize(attempt, get, set);
@@ -127,6 +171,12 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     if (!isCurrent(attempt)) return;
     try {
       const response = await probeServerResponse(s, '/api/sessions', { signal: comTeto(attempt.abort.signal, 4000) });
+      if (s.invite && (response.status === 401 || response.status === 410)) {
+        useServers.getState().markEnded(s.id);
+        slots.delete(s.id);
+        recompute(set);
+        return;
+      }
       if (!response.ok) throw new Error(String(response.status));
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
@@ -202,6 +252,8 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
 }
 
 function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  storeGet = get;
+  storeSet = set;
   serversCache = useServers.getState().servers.slice();
   connect(serversCache, get, set);
   // observa mudanças de servidores (useServers é zustand)
@@ -284,6 +336,10 @@ export function _resetSessionsForTests() {
   hidden = new Map<string, string | null>();
   serversCache = [];
   aggCache = { rows: [], byServer: [], loading: false };
+  pairSync.reset();
+  pairSync = newPairSync();
+  storeGet = null;
+  storeSet = null;
   refs = 0;
   unsubServers?.();
   unsubServers = null;

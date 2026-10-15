@@ -19,7 +19,7 @@ from app import guest_users, list_bridge
 from app.auth import _LOOPBACK, _blocked, _record_fail
 from app.config import settings
 from app.connect_port import CONNECT_PEER
-from app.share_gate import guest_of
+from app.guest_header import guest_of
 from app.termsock import _origem_aceita
 
 _log = logging.getLogger(__name__)
@@ -130,11 +130,14 @@ async def voice_ws(ws: WebSocket) -> None:
             await ws.close(code=code, reason=reason)
 
 
-async def forward_settings(request: Request, target: str = "/__hangar_server/voice/settings") -> Response:
-    """Leva o `GET`/`PUT`/`DELETE` do dono à rota privada do Rust e devolve a resposta como veio."""
+async def forward_settings(request: Request, target: str = "/__hangar_server/voice/settings", *,
+                           timeout: float = 30, unavailable=None) -> Response:
+    """Leva o pedido do dono à rota privada do Rust e devolve a resposta como veio."""
+    def down() -> Response:
+        return unavailable() if unavailable else JSONResponse({"error_code": UNAVAILABLE}, status_code=503)
     endpoint = list_bridge.endpoint()
     if endpoint is None:
-        return JSONResponse({"error_code": UNAVAILABLE}, status_code=503)
+        return down()
     address, secret = endpoint
     body = await request.body()
     forwarded = urllib.request.Request(
@@ -144,7 +147,7 @@ async def forward_settings(request: Request, target: str = "/__hangar_server/voi
 
     def send():
         try:
-            with _opener.open(forwarded, timeout=30) as response:
+            with _opener.open(forwarded, timeout=timeout) as response:
                 return response.status, response.headers.get("content-type"), response.read(1024 * 1024)
         except urllib.error.HTTPError as error:
             return error.code, error.headers.get("content-type"), error.read(1024 * 1024)
@@ -152,5 +155,5 @@ async def forward_settings(request: Request, target: str = "/__hangar_server/voi
     try:
         status, kind, content = await asyncio.to_thread(send)
     except OSError:
-        return JSONResponse({"error_code": UNAVAILABLE}, status_code=503)
+        return down()
     return Response(content, status_code=status, media_type=kind or "application/json")

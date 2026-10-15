@@ -33,6 +33,8 @@ livre. (Era o diagnostico errado do `filetree`.)
 """
 import os
 import time
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 # ~0.42s no pior caso (0.02+0.04+...+0.12), em espera crescente. Curto porque quem chama esta num
 # request: o leitor tipico e um CLI que abre e fecha o JSON em milissegundos, e alem disso o que
@@ -60,6 +62,92 @@ def substituir(origem: str | os.PathLike, destino: str | os.PathLike) -> None:
     # Ultima tentativa fora do laco: assim o erro que sobe e o da tentativa final, com o traceback
     # apontando pra ca, e nao um erro guardado de uma tentativa antiga.
     os.replace(origem, destino)
+
+
+# Leitura: a troca de outro processo segura o arquivo por milissegundos (medido na #145); o leitor
+# espera em passos de 1 ms, como o `read_replaced` do Rust, e desiste em 50 ms.
+_LEITURA_PRAZO_S = 0.05
+# Trava no Windows: sondagem curta; o `LK_LOCK` do msvcrt tenta de novo só a cada 1 s e desiste em 10.
+_TRAVA_PASSO_S = 0.002
+_TRAVA_PRAZO_S = 30.0
+
+
+def _open_shared(caminho: str | os.PathLike):
+    """No Windows, abre para leitura com `FILE_SHARE_READ|WRITE|DELETE` (`CreateFileW`), como o
+    `std::fs::read` do Rust: o leitor aberto não impede a troca atômica de outro processo. O `open()`
+    do Python não pede `FILE_SHARE_DELETE`, e com ele aberto o `replace` do `hangar-server` falha."""
+    if os.name != "nt":
+        return Path(caminho).open("rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    generic_read, share_all, open_existing, normal = 0x80000000, 0x7, 3, 0x80
+    handle = k32.CreateFileW(os.fspath(caminho), generic_read, share_all, None, open_existing, normal, None)
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    # Até o `open` ficar dono do descritor, a falha fecha o que já foi aberto.
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle(handle)
+        raise
+    try:
+        return open(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read(caminho: str | os.PathLike) -> bytes:
+    """`Path.read_bytes()` que, no Windows, não atrapalha nem cai na troca atômica de outro processo.
+
+    Abre com compartilhamento total (`_open_shared`) e, se ainda assim cair no meio do `replace` de
+    quem grava (`PermissionError`), tenta de novo por até 50 ms; esgotado o prazo, o erro sobe. No
+    POSIX é o `read_bytes()` de sempre, sem espera.
+    """
+    if not _E_WINDOWS:
+        return Path(caminho).read_bytes()
+    prazo = time.monotonic() + _LEITURA_PRAZO_S
+    while True:
+        try:
+            with _open_shared(caminho) as arquivo:
+                return arquivo.read()
+        except PermissionError:
+            if time.monotonic() >= prazo:
+                raise
+            time.sleep(0.001)
+
+
+@contextmanager
+def locked(*lock_paths: str | os.PathLike):
+    """Trava exclusiva entre processos nos arquivos `lock_paths`, a mesma que o `hangar-server` pega
+    (`File::lock`: `flock` no Unix, `LockFileEx` do arquivo inteiro no Windows, que cobre o byte 0
+    do `msvcrt.locking`). Todos os processos travam na mesma ordem; fechar solta. No Windows a espera
+    é por sondagem de 2 ms, com prazo de 30 s (`TimeoutError`)."""
+    with ExitStack() as stack:
+        for path in sorted({Path(p) for p in lock_paths}):
+            lock = stack.enter_context(path.open("a+b"))
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                prazo = time.monotonic() + _TRAVA_PRAZO_S
+                while True:
+                    try:
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= prazo:
+                            raise TimeoutError(f"trava ocupada: {path}") from None
+                        time.sleep(_TRAVA_PASSO_S)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def em_uso(erro: BaseException) -> bool:

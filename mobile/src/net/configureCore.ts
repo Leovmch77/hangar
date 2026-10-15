@@ -2,6 +2,7 @@ import { baseOf, configureApi, configureLocale } from '@hangar/core';
 import { getLocales } from 'expo-localization';
 import { overwriteGetLocale } from '../paraglide/runtime';
 import { useServers } from '../stores/servers';
+import { setPairNotice } from '../stores/sessions';
 import { useAparencia } from '../stores/aparencia';
 import { createEventSource } from './sse';
 import { iniciarDiag } from './diag';
@@ -27,9 +28,15 @@ export function configureCore() {
       const a = useServers.getState().active();
       if (a) useServers.getState().markInvalid(a.id);
     },
+    // Convite de par recusado (401/410) é par encerrado: a entrada fica marcada, nunca é removida.
+    onInviteEnded: (id) => {
+      const alvo = id ?? useServers.getState().active()?.id;
+      if (alvo) useServers.getState().markEnded(alvo);
+    },
     origin: null,
     createEventSource,
   });
+  setPairNotice((text) => toast.aviso(text));
   configureLocale({ getLocale: locale });
   overwriteGetLocale(locale);
   iniciarDiag();

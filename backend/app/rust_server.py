@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 66
+RUST_SERVER_PROTOCOL = 69
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -133,6 +133,12 @@ def _spawn(binary: Path, env: dict[str, str]) -> subprocess.Popen:
 
 class ProtocolMismatch(ValueError):
     """O binário fala outro contrato: religar não adianta, e o motivo tem de dizer isso."""
+
+
+async def _send_snapshot(stopping) -> None:
+    from app import share_bridge
+    if not await asyncio.to_thread(share_bridge.send_snapshot):
+        await share_bridge.send_snapshot_until_sent(stopping)
 
 
 def _runtime_ready(proc, instance: str) -> dict:
@@ -316,6 +322,12 @@ class Supervisor:
         self.runtime_secret = None
         self.runtime_transport = None
         self.last_transport = None
+        self._snapshot_retry: asyncio.Task | None = None
+
+    def _cancel_snapshot_retry(self) -> None:
+        if self._snapshot_retry is not None:
+            self._snapshot_retry.cancel()
+            self._snapshot_retry = None
 
     def _env(self) -> dict[str, str]:
         # Import tardio: internal_api puxa o app, que o uvicorn interno já carregou a esta altura.
@@ -338,7 +350,15 @@ class Supervisor:
         # Grupos: o id desta máquina, as outras máquinas e o arquivo de contratos são do Python.
         groups = {"HANGAR_SERVER_ID": settings.server_id or "", "HANGAR_PEERS_FILE": str(peers._PEERS_FILE),
                   "HANGAR_PAIR_ARCHIVE": str(pair._arquivo_dir())}
-        return {**os.environ, **lists, **groups,
+        from app.config import GUEST_PORT, _backend_config_base
+        # Convites: o Rust é o único dono do arquivo e da porta. Pela internet quem chega é o Funnel
+        # (127.0.0.1); com o backend aberto para a rede, o convite também vale na casa.
+        guest = {"HANGAR_SHARES_FILE": str(Path(_backend_config_base()) / "shares.json")}
+        if self.port != GUEST_PORT:
+            host = "0.0.0.0" if self.host in ("0.0.0.0", "::") else "127.0.0.1"
+            guest["HANGAR_SERVER_GUEST_LISTEN"] = listen_addr(host, GUEST_PORT)
+        env = {k: v for k, v in os.environ.items() if k != "HANGAR_SERVER_GUEST_LISTEN"}
+        return {**env, **lists, **groups, **guest,
                 "HANGAR_SERVER_LISTEN": listen_addr(self.host, self.port),
                 "HANGAR_SERVER_UPSTREAM": f"127.0.0.1:{self.upstream_port}",
                 "HANGAR_INTERNAL_SECRET": secret,
@@ -363,6 +383,7 @@ class Supervisor:
         transcription_bridge.configure(None, None)
         push.configure_presence(None, None)
         terminal_observer.configure(None, None)
+        self._cancel_snapshot_retry()
         if self.proc is not None:
             from app.runtime_process import cleanup
             await asyncio.to_thread(cleanup, self.proc)
@@ -436,7 +457,11 @@ class Supervisor:
                 # `groups: false` (pastas da lista sem resolver): o Rust repassa as rotas de grupo e
                 # o Python segue dono delas.
                 groups_bridge.set_capable(health.get("groups") is not False)
+                # Pontes ligadas: o Rust recém-subido aprende as trocas de modo e transferências em curso.
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
+                # Sem a fotografia o convidado fica no 503 e a varredura não revoga nada; ela vai
+                # depois das pontes e fora da partida, repetida até o Rust aceitar.
+                self._snapshot_retry = asyncio.create_task(_send_snapshot(self.stopping))
                 return "up"
             await asyncio.sleep(_POLL)
         return "silent"
@@ -523,6 +548,7 @@ class Supervisor:
         pages_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
+        self._cancel_snapshot_retry()
         proc = self.proc
         if proc is None:
             return

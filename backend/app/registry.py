@@ -13,7 +13,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
-from app import atomico, diag, share_store, shortcut_terminals, tmux
+from app import atomico, diag, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
@@ -151,25 +151,29 @@ async def _atualizar_git(cwd: str) -> None:
 
 
 def _pair_external(name: str, peers_: list[str] | None) -> dict | None:
-    from app import external_pairs
-    for r in external_pairs.by_local(name):
-        if r.address in (peers_ or []):
-            return {"alias": r.alias, "owner": r.peer_owner, "session": r.peer_session}
+    # O dono de `external_pairs.json` é o Rust; aqui só se lê, e arquivo torto vale como vazio.
+    if not peers_:
+        return None
+    from app.pair import _pair_dir
+    try:
+        records = json.loads((_pair_dir() / "external_pairs.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        _log.warning("external_pairs.json ilegível: %s", e)
+        return None
+    for r in records if isinstance(records, list) else []:
+        if isinstance(r, dict) and r.get("local_session") == name \
+                and f"{r.get('alias')}::{r.get('peer_session')}" in peers_:
+            return {"alias": r.get("alias"), "owner": r.get("peer_owner"), "session": r.get("peer_session")}
     return None
 
 
 def _encerrar_pares_externos(morta: str) -> None:
-    """Sessão morta fora do app: o par externo dela não tem quem o desfaça. Registro e convite
-    saem na hora; o aviso ao outro lado vai em thread solta, porque isto roda dentro do list()."""
-    from app import external_pairs
-    alvo = [r for r in external_pairs.all() if r.local_session == morta or _sanitize(r.local_session) == morta]
-    for r in alvo:
-        for fn, arg in ((external_pairs.remove, r.share_id), (share_store.revoke, r.share_id)):
-            try:
-                fn(arg)
-            except OSError as e:
-                _log.warning("varredura de pares: par externo '%s' não limpo: %r", r.address, e)
-        threading.Thread(target=_avisar_par_externo, args=(r,), daemon=True).start()
+    """Sessão morta fora do app: o par externo dela não tem quem o desfaça. O Rust, dono do registro
+    e do convite, apaga os dois e avisa o outro lado solto; falha da ponte vai ao diário."""
+    from app import share_bridge
+    share_bridge.session_died(morta)
 
 
 def _log_leave_warnings(name: str, warnings) -> None:
@@ -177,14 +181,6 @@ def _log_leave_warnings(name: str, warnings) -> None:
     if isinstance(warnings, list) and warnings:
         # Só a contagem: o aviso pode trazer texto da outra máquina.
         _log.warning("criação de %s: a saída do grupo antigo deixou %d aviso(s)", name, len(warnings))
-
-
-def _avisar_par_externo(rec) -> None:
-    from app import external_pairs, peers
-    try:
-        external_pairs.call(rec.peer_address, rec.peer_token, "DELETE", "/api/pair")
-    except (peers.PeerError, ValueError) as e:
-        _log.warning("varredura de pares: outro lado de '%s' não avisado: %s", rec.address, e)
 
 
 def _decorate_loop(info) -> None:
@@ -1718,10 +1714,8 @@ class SessionRegistry:
                     i.state, i.last_activity = orq_runs.activity(i.jsonl)
             await asyncio.to_thread(_orq_state)
             infos = [i for i in infos if getattr(i, "provider", "claude") != "orq"]
+        # `shared` é do Rust (a lista dele a marca pela loja de convites); aqui só o dono.
         async def decorate_access(rows):
-            active = share_store.active_sessions()
-            for row in rows:
-                row.shared = row.name in active
             if guest_users.has_claims():
                 def owners():
                     for row in rows:

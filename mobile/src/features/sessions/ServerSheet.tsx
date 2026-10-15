@@ -3,7 +3,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { Sheet } from '../../ui/Sheet';
 import { Icon } from '../../ui/Icon';
-import { useServers } from '../../stores/servers';
+import { ownServers, useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 
 // Trocar a máquina ativa (é ela quem responde às ações da lista) e chegar no pareamento.
@@ -19,7 +19,7 @@ export function ServerSheet({ open, onFechar }: { open: boolean; onFechar: () =>
     <Sheet open={open} onDismiss={onFechar} sizes={['auto']}>
       <View style={styles.inner}>
         <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.maquinas_este_aparelho()}</Text>
-        {servers.map((s) => (
+        {ownServers(servers).map((s) => (
           <Pressable
             key={s.id}
             onPress={() => { useServers.getState().setActive(s.id); onFechar(); }}

@@ -161,7 +161,9 @@ Kimi Code. Setup details, Tailscale, the phone and every feature are in the
                                                ▼
                          hangar-server (Rust, :8765)
                           lists, live state, history, costs, groups,
-                          accounts, session attachments
+                          accounts, session attachments, sharing
+                          (guest port :8766 via Funnel, invites,
+                          external pairs)
                                                │
                          Python backend (loopback, behind it)
                           sessions, adapters, MCP
@@ -180,13 +182,19 @@ still send data according to their own policies.
 
 The backend moves to Rust part by part. With the Rust server up, Claude and Codex accounts
 (catalog, preparation, login, state, logout, quotas, Claude renewal and the guarded Codex reset)
-and the session attachment vault are served by it; Python keeps guest admission, session and
-configuration facts, transcription and the fallback when the supervisor turns Rust off. Contracts
+the session attachment vault, and session sharing (the guest port 8766, invites and external
+pairs) are served by it; Python keeps guest-user logins, session and configuration facts,
+transcription and the fallback when the supervisor turns Rust off. Without the Rust server the
+guest port stays closed. Contracts
 and limits: [accounts and attachments](docs/decisoes/accounts-uploads-rust.md).
 
 Repository map: `crates/` (Rust server), `backend/` (Python, FastAPI), `desktop-native/` (Rust
 desktop app), `frontend/` (Svelte PWA), `mobile/` (Expo app, in development), `packages/core`
 (shared TypeScript), `site/` (hangar.dev.br), `skills/` (agent skills shipped with Hangar).
+
+**API de artefatos (Rust, somente o dono):** `GET /api/sessions/{name}/artifacts` retorna
+`items` com referências de artefatos Claude (`id`, `url`, `title` e `version` opcional).
+A consulta é passiva e não publica conteúdo.
 
 ## Security model
 
@@ -196,8 +204,8 @@ permissions.
 - The server binds to loopback by default. Point `CP_LAN_BIND_IP` only at a trusted LAN or VPN
   address (Tailscale is the easy path). It refuses to bind beyond loopback with the default token.
 - Never expose the main port (8765) through a router port-forward or a public tunnel.
-- Sharing a session uses a separate guest port (8766, published through Tailscale Funnel) that
-  refuses the owner's token and only reaches the shared session.
+- Sharing a session uses a separate guest port (8766, served by the Rust server and published
+  through Tailscale Funnel) that refuses the owner's token and only reaches the shared session.
 - Keep tokens, cookies and provider keys out of screenshots and issues.
 
 ## Development

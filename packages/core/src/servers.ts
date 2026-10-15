@@ -10,6 +10,8 @@ export interface Server {
   lan?: LanInfo;
   // Saiu da lista com um chat dele aberto: toda chamada é recusada, nunca vai ao ativo.
   removed?: boolean;
+  // Entrada montada só para um par externo (`reconcilePairEntries`): não é guardada nem vira seção.
+  ephemeral?: boolean;
 }
 export const SERVER_COLORS = ['#7c6af7', '#3ba55d', '#e0a23b', '#e0563b', '#3b9fe0', '#c43be0'];
 export function serverColor(id: string): string {

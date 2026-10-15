@@ -1691,6 +1691,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Anel da conta na faixa do campo (celular): a janela mais apertada da conta da sessão, como a
   // pílula de cota do topo do nativo (accounts/usage.rs fullest).
   const sessaoAtual = $derived(allSessions.find((s) => s.name === sessionName));
+  // Sessão de outra pessoa num par "ver e recado": o servidor dela recusa toda escrita.
+  const soLeituraPar = $derived(sessaoAtual?.guest_kind === 'pair');
   const contaPior = $derived.by(() => {
     const conta = sessaoAtual?.conta;
     const minha = conta ? faixaDeCota(quotaFeed.contas)?.find((c) => c.id === conta) : null;
@@ -3619,6 +3621,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
             <button class="back-btn" onclick={() => (orqPanelOpen = true)}>{m.orq_tab_title()}</button>
           {/if}
         </div>
+      </div>
+    {:else if soLeituraPar}
+      <div class="dead-footer">
+        <p class="dead-text">{m.native_par_so_leitura()}</p>
       </div>
     {:else}
       <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor

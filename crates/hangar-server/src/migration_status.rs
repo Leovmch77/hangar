@@ -108,8 +108,8 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
-        // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
-        if matches!(tail, Some("history" | "events" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
+        // `term`: o painel abre no Rust; login de convidado e Connect passam pelo Python e voltam ao mesmo PTY.
+        if matches!(tail, Some("history" | "events" | "artifacts" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
         if tail.is_some_and(|t| t == "subagents" || t.strip_prefix("subagents/").is_some_and(|id| !id.is_empty() && !id.contains('/'))) {
@@ -172,8 +172,20 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         return true;
     }
     (*method == Method::GET && path == crate::claude_customizations::CATALOG_PATH)
-        || crate::plans::routes::matches(method, path) || crate::workspace_routes::matches(method, path)
-        || crate::worktree_routes::matches(method, path)
+        || crate::plans::routes::matches(method, path) || crate::share_reach::matches(method, path) || share_route(method, path)
+        || crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
+}
+
+/// Convites e par externo do dono (`share::owner_routes`, `share::pair_routes`).
+fn share_route(method: &Method, path: &str) -> bool {
+    let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
+    match method.as_str() {
+        "GET" => matches!(path, "/api/share/prereqs" | "/api/external-pairs") || tail == Some("share"),
+        "POST" => path == "/api/external-pairs/send" || matches!(tail, Some("share" | "pair-invite" | "pair-accept" | "pair-access")),
+        "DELETE" => tail.is_some_and(|t| t == "share" || t.strip_prefix("share/").is_some_and(|id| !id.is_empty() && !id.contains('/')))
+            || path.strip_prefix("/api/external-pairs/").is_some_and(|alias| !alias.is_empty() && !alias.contains('/')),
+        _ => false,
+    }
 }
 
 /// Um ou mais pedidos reais por área, só para a tabela; a decisão é de `rust_route`.
@@ -377,7 +389,10 @@ mod tests {
             && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/pair") && rust_route(&Method::DELETE, "/api/sessions/a/pair")
             && get("/api/sessions/a/pair/contract") && rust_route(&Method::POST, "/api/sessions/a/unpair-remote")
-            && !get("/api/sessions/a/pair") && !rust_route(&Method::POST, "/api/sessions/a/pair-invite"));
+            && !get("/api/sessions/a/pair") && rust_route(&Method::POST, "/api/sessions/a/pair-invite"));
+        assert!(rust_route(&Method::POST, "/api/sessions/a/share") && rust_route(&Method::DELETE, "/api/sessions/a/share/s1")
+            && get("/api/share/prereqs") && rust_route(&Method::POST, "/api/share/reachability")
+            && !rust_route(&Method::DELETE, "/api/sessions/a/share/s1/x"));
         // O corte: relançar o Codex, modos do Claude, encerrar, broadcast e a ponte do plugin são do Rust.
         let post = |p: &str| rust_route(&Method::POST, p);
         assert!(!post("/api/sessions/a/modo-execucao") && !post("/api/sessions/a/recarregar"), "no Claude são do Python");
@@ -401,8 +416,13 @@ mod tests {
     fn every_route_registered_in_the_router_is_known_to_the_table() {
         // O checkout do Windows pode trazer CRLF; o fim do roteador é procurado por "\n}\n".
         let source = include_str!("routes.rs").replace("\r\n", "\n");
-        let body = &source[source.find("pub fn router(").unwrap()..];
-        let body = &body[..body.find("\n}\n").unwrap()];
+        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `router`.
+        let fn_body = |name: &str| {
+            let body = &source[source.find(name).unwrap()..];
+            body[..body.find("\n}\n").unwrap()].to_owned()
+        };
+        let body = fn_body("fn router_with(") + "\n" + &fn_body("fn session_routes<");
+        let body = body.as_str();
         let (mut seen, mut api) = (0, 0);
         for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {
             seen += 1;
@@ -419,6 +439,10 @@ mod tests {
         // Rota quebrada em várias linhas escaparia do filtro acima: a contagem bruta a denuncia.
         assert_eq!(seen, body.matches(".route(").count(), "há `.route(` fora de uma linha `.route(\"…\"`");
         assert!(api >= 10, "o leitor do roteador não achou as rotas ({api})");
+        // Montadas por `share::pair_routes`, fora do texto lido acima.
+        assert!(rust_route(&Method::POST, "/api/sessions/a/pair-access"));
+        assert!(rust_route(&Method::DELETE, "/api/external-pairs/ana"));
+        assert!(!rust_route(&Method::DELETE, "/api/external-pairs/a/b"));
     }
 
     #[test]

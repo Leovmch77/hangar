@@ -5,6 +5,7 @@
 //! parte. O do diário é por servidor (o Python falso de cada um), e ali os nomes de sessão podem repetir.
 
 mod common;
+mod artifacts;
 mod dictation_routes;
 mod dictation_catalog;
 mod dictation_harness;
@@ -195,6 +196,20 @@ mod session_write_answer;
 mod session_write_control;
 mod session_write_input;
 mod session_write_routes;
+mod share_reach;
+mod share_store;
+mod share_pairs;
+mod share_tunnel;
+mod share_life;
+mod share_gate;
+mod share_listen;
+mod share_owner_routes;
+mod share_guest_routes;
+mod share_guest_serving;
+mod share_forward;
+mod share_pair_routes;
+mod share_pair_access;
+mod share_bridge;
 mod state_monitor_round;
 mod terminal_control;
 mod terminal_input;

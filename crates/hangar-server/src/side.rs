@@ -351,6 +351,9 @@ pub struct Hub {
     runtime_owned: std::sync::atomic::AtomicBool,
     /// Assinantes que entraram pelo convite (não contam como app do dono).
     guests: std::sync::atomic::AtomicUsize,
+    /// Aparelhos do dono no chat: a conexão interna leva `app=1` só com algum (convidado e canal
+    /// privado não calam o push do dono).
+    owners: std::sync::atomic::AtomicUsize,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -380,7 +383,7 @@ impl From<Bytes> for Queued {
 }
 
 impl Hub {
-    fn start(name: &str, binding: Binding, ctx: SideCtx) -> Arc<Hub> {
+    fn start(name: &str, binding: Binding, ctx: SideCtx, owners: usize) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
         let owned = ctx.runtime.get().is_some_and(|registry| registry.owns_codex_terminal(name));
         let hub = Arc::new_cyclic(|weak| {
@@ -406,6 +409,7 @@ impl Hub {
                 python_leaks: AtomicU32::new(0),
                 runtime_owned: std::sync::atomic::AtomicBool::new(owned),
                 guests: std::sync::atomic::AtomicUsize::new(0),
+                owners: std::sync::atomic::AtomicUsize::new(owners),
             }
         });
         hub.ensure_monitor();
@@ -875,9 +879,10 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
     // O Python segue o transcript que o Rust escolheu; a troca religa esta conexão (`restart_side`).
     let Some(binding) = hub.bound.lock().unwrap().as_ref().map(|b| b.binding.clone()) else { return SideEnd::Gone };
     let url = format!(
-        "http://{}/internal/sessions/{}/side-events?app=1&provider={}&jsonl={}",
+        "http://{}/internal/sessions/{}/side-events?app={}&provider={}&jsonl={}",
         hub.ctx.upstream,
         utf8_percent_encode(&hub.name, NON_ALPHANUMERIC),
+        u8::from(hub.owners.load(Ordering::SeqCst) > 0),
         binding.provider.as_str(),
         utf8_percent_encode(&binding.jsonl.to_string_lossy(), NON_ALPHANUMERIC),
     );
@@ -1008,6 +1013,11 @@ fn private_frame(frame: &[u8], events: &[&str]) -> bool {
     state_frame(frame, events) || state_frame(frame, &[LATEST[PLUGIN_UI]])
 }
 
+/// Quadro que só o dono recebe: aviso de mod (texto dele) e pedido de navegador (url com o token).
+pub(crate) fn owner_only(frame: &[u8]) -> bool {
+    state_frame(frame, &["plugin_toast", "nav"])
+}
+
 /// Quadro de um dos eventos do estado dados.
 fn state_frame(frame: &[u8], events: &[&str]) -> bool {
     let Some(rest) = frame.strip_prefix(b"event: ") else { return false };
@@ -1084,7 +1094,8 @@ pub async fn private_events(
     };
     // O Python diz se quem entrou é convidado (`x-hangar-app: 0`); sem o cabeçalho, conta como app do dono.
     let guest = req.headers().get("x-hangar-app").is_some_and(|value| value == "0");
-    let lease = st.side.hubs.acquire_as(&name, binding, &st.side, guest);
+    // Quem lê daqui é o Python, que conta o próprio app: o canal nunca é aparelho do dono.
+    let lease = st.side.hubs.acquire_with(&name, binding, &st.side, guest, false);
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     tokio::spawn(private_loop(lease, tx));
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -1159,6 +1170,8 @@ pub struct Lease {
     pub hub: Arc<Hub>,
     /// Convidado: assina o hub, mas não é o app do dono aberto (nem segura permissão, nem cala push).
     guest: bool,
+    /// Aparelho do dono no chat (`Hub::owners`).
+    owner: bool,
 }
 
 impl Hubs {
@@ -1172,6 +1185,11 @@ impl Hubs {
 
     /// `guest`: assinante que entrou pelo convite.
     pub fn acquire_as(&self, name: &str, binding: Binding, ctx: &SideCtx, guest: bool) -> Lease {
+        self.acquire_with(name, binding, ctx, guest, !guest)
+    }
+
+    /// `owner`: aparelho do dono no chat, o que decide o `app=` da conexão interna.
+    pub fn acquire_with(&self, name: &str, binding: Binding, ctx: &SideCtx, guest: bool, owner: bool) -> Lease {
         let mut map = self.0.lock().unwrap();
         let hub = match map.get_mut(name) {
             Some((hub, n)) => {
@@ -1179,20 +1197,26 @@ impl Hubs {
                 hub.clone()
             }
             None => {
-                let hub = Hub::start(name, binding, ctx.clone());
+                let hub = Hub::start(name, binding, ctx.clone(), usize::from(owner));
                 // O convidado conta sob a mesma trava do `n`: fora dela, `app_present` veria o hub só com ele como do dono.
                 if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
                 map.insert(name.to_string(), (hub.clone(), 1));
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
                 hub.seed(ctx.mods.replay(name));
-                return Lease { hubs: self.clone(), hub, guest };
+                return Lease { hubs: self.clone(), hub, guest, owner };
             }
         };
         if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
+        // Contado sob a trava do mapa: o `Drop` de outro aparelho não cruza o zero no meio.
+        let first_owner = owner && hub.owners.fetch_add(1, Ordering::SeqCst) == 0;
         drop(map);
         hub.ensure_current(&binding);
-        Lease { hubs: self.clone(), hub, guest }
+        if first_owner {
+            // O `app=` da conexão interna só muda religando; os aparelhos seguem no mesmo canal.
+            hub.restart_side();
+        }
+        Lease { hubs: self.clone(), hub, guest, owner }
     }
 
     pub fn downgrade(&self) -> WeakHubs {
@@ -1258,11 +1282,16 @@ impl Drop for Lease {
         }
         if self.guest { self.hub.guests.fetch_sub(1, Ordering::AcqRel); }
         *n -= 1;
+        let last_owner = self.owner && self.hub.owners.fetch_sub(1, Ordering::SeqCst) == 1;
         if *n == 0 {
             let (h, _) = map.remove(&self.hub.name).expect("presente acima");
             drop(map);
             // Último aparelho saiu: fecha a conexão interna (o Python roda app_saiu) e o leitor.
             h.stop();
+        } else if last_owner {
+            drop(map);
+            // Só convidados ficaram: religa com `app=0`.
+            self.hub.restart_side();
         }
     }
 }

@@ -24,7 +24,8 @@ use hangar_server::routes::{AppState, router};
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use serde_json::{Value, json};
 
-struct Server { addr: SocketAddr, python: Arc<fake::Fake>, groups: Arc<GroupService>, pair: PathBuf, runtime: Arc<RuntimeRegistry> }
+struct Server { addr: SocketAddr, python: Arc<fake::Fake>, groups: Arc<GroupService>, pair: PathBuf, runtime: Arc<RuntimeRegistry>,
+    share: Arc<hangar_server::share::ShareState> }
 
 /// `n` sessões Claude (`s0`..) e o roteador de grupo montado na frente do principal.
 async fn server(root: &Path, n: usize) -> Server {
@@ -41,6 +42,8 @@ async fn server(root: &Path, n: usize) -> Server {
     let pair = home.join(".claude/.hangar-pair");
     let groups = Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), "casa".into()));
     state.groups = Some(groups.clone());
+    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(std::sync::Mutex::new(1_000.0)));
+    state.share = Some(share.clone());
     // Sem entrada aberta: só a porta de entrada de cada nome conta. A política nunca é chamada.
     let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
     assert!(state.state.runtime.set(runtime.clone()).is_ok());
@@ -51,7 +54,7 @@ async fn server(root: &Path, n: usize) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { addr, python, groups, pair, runtime }
+    Server { addr, python, groups, pair, runtime, share }
 }
 
 async fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>, token: &str) -> (u16, Value) {
@@ -272,4 +275,110 @@ async fn uncertain_promotion_restores_and_goes_to_the_diary() {
         && d["codigo"] == "groups_orq_promote_status_500")).await;
     assert_eq!(srv.python.diag().iter().filter(|d| d["evento"] == "rust.groups_orq_promote_uncertain").count(), 1,
         "o conflito do Python não é incerteza");
+}
+
+/// Grupo misto: sessão local entra no grupo que tem membro de fora; pedir o de fora pelo nome é
+/// entrar no grupo da ponta daqui; máquina própria continua sem mistura.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_session_joins_a_group_with_an_outside_member() {
+    use hangar_server::share::pairs::ExternalPair;
+    use hangar_server::share::store::Kind;
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 4).await;
+    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
+    let (s, _) = srv.share.store.create_redeemed("s0", Some("t:1".into()), Kind::Pair).unwrap();
+    srv.share.pairs.add(ExternalPair { share_id: s.id, local_session: "s0".into(), alias: "pc-ana".into(), peer_owner: "pc-ana".into(),
+        peer_session: "Y".into(), peer_address: "https://a.tail.ts.net:8443".into(), peer_token: "t".repeat(32), created_at: 1.0 }).unwrap();
+    srv.groups.external_link("s0", "pc-ana::Y", Default::default(), ["pc-ana::Y".to_owned()].into()).await.unwrap();
+
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peers": ["s0"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["members"], json!(["s1", "s0", "pc-ana::Y"]));
+    assert_eq!(srv.groups.link("s1").await.unwrap().unwrap().peers, ["s0", "pc-ana::Y"]);
+
+    let (status, body) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peers": ["pc-ana::Y"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(srv.groups.link("s2").await.unwrap().unwrap().peers, ["s0", "s1", "pc-ana::Y"]);
+
+    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["s0"], "orq": true})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_orq_par_externo")));
+    assert!(srv.groups.link("s3").await.unwrap().is_none());
+    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["lab::x", "s0"]})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_cross_1_1")));
+    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_mistura_cross")));
+}
+
+fn seed_outside(srv: &Server, local: &str, alias: &str, peer: &str, address: &str) {
+    use hangar_server::share::pairs::ExternalPair;
+    use hangar_server::share::store::Kind;
+    let (s, _) = srv.share.store.create_redeemed(local, Some("t:1".into()), Kind::Pair).unwrap();
+    srv.share.pairs.add(ExternalPair { share_id: s.id, local_session: local.into(), alias: alias.into(), peer_owner: alias.into(),
+        peer_session: peer.into(), peer_address: address.into(), peer_token: format!("tok-{alias}-{}", "t".repeat(30)), created_at: 1.0 }).unwrap();
+}
+
+fn write_group(srv: &Server, name: &str, peers: &[&str]) {
+    std::fs::create_dir_all(&srv.pair).unwrap();
+    std::fs::write(srv.pair.join(format!("{name}.json")), json!({"peers": peers, "task": "t", "gid": "abababab", "harness": {}}).to_string()).unwrap();
+}
+
+/// Aviso local num grupo com dois pares de fora: cada máquina de fora recebe uma vez, pela chave
+/// do próprio par, com `session` para o Hangar antigo; os locais recebem como antes.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_notice_reaches_each_outside_pair_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    let (ana, ana_base) = crate::share_pair_routes::other_machine().await;
+    let (bia, bia_base) = crate::share_pair_routes::other_machine().await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", &ana_base);
+    seed_outside(&srv, "s1", "pc-bia", "W", &bia_base);
+    write_group(&srv, "s0", &["s1", "pc-ana::Y", "pc-bia::W"]);
+    write_group(&srv, "s1", &["s0", "pc-ana::Y", "pc-bia::W"]);
+    let (status, body) = call(srv.addr, "POST", "s0/group-message", Some(&json!({"text": "oi"})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"], Value::Null, "{body}");
+    assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [0, 1, 0]);
+    for (other, session, alias) in [(&ana, "Y", "pc-ana"), (&bia, "W", "pc-bia")] {
+        let calls = other.calls();
+        assert_eq!(calls.len(), 1, "{alias}: {calls:?}");
+        assert_eq!(calls[0]["path"], "/api/pair/message");
+        let mut body = calls[0]["body"].clone();
+        assert!(body.as_object_mut().unwrap().remove("notice").is_some_and(|n| n.as_str().is_some_and(|n| !n.is_empty())), "{body}");
+        assert_eq!(body, json!({"text": "oi", "from": "s0", "group": true, "session": session}));
+        assert_eq!(calls[0]["auth"], json!(format!("Bearer tok-{alias}-{}", "t".repeat(30))));
+    }
+}
+
+/// Dois pares com a mesma máquina: um POST por par (os grupos de lá podem ser outros), todos com
+/// o mesmo `notice`, que o outro lado usa para não entregar duas vezes à mesma sessão.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_notice_to_two_pairs_of_one_machine_carries_one_notice_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    let (ana, ana_base) = crate::share_pair_routes::other_machine().await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", &ana_base);
+    seed_outside(&srv, "s1", "pc-ana", "Z", &ana_base);
+    write_group(&srv, "s0", &["s1", "pc-ana::Y", "pc-ana::Z"]);
+    write_group(&srv, "s1", &["s0", "pc-ana::Y", "pc-ana::Z"]);
+    let (status, body) = call(srv.addr, "POST", "s0/group-message", Some(&json!({"text": "oi"})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    let calls = ana.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0]["body"]["notice"].is_string(), "{calls:?}");
+    assert_eq!(calls[0]["body"]["notice"], calls[1]["body"]["notice"]);
+}
+
+/// Recado vindo de fora não volta a ser espalhado como aviso de grupo.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_notice_refuses_outside_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let (ana, ana_base) = crate::share_pair_routes::other_machine().await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", &ana_base);
+    write_group(&srv, "s0", &["s1", "pc-ana::Y"]);
+    write_group(&srv, "s1", &["s0", "pc-ana::Y"]);
+    let (status, body) = call(srv.addr, "POST", "s0/group-message", Some(&json!({"text": "  [de fora: pc-ana::Y] oi"})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_group_message_resposta")));
+    assert!(ana.calls().is_empty());
+    assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
 }

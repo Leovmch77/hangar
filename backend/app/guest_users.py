@@ -30,7 +30,7 @@ _lock = threading.RLock()
 _state: dict | None = None
 # Arquivo existe mas não foi lido: gravar por cima apagaria todos os convidados.
 _unreadable = False
-# ponytail: vida cacheada 2 s por nome, igual ao share_gate; cada consulta é um fork do tmux.
+# ponytail: vida cacheada 2 s por nome; cada consulta é um fork do tmux.
 _LIFE_TTL = 2.0
 _life_cache: dict[str, tuple[float, str | None]] = {}
 

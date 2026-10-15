@@ -875,10 +875,10 @@ fn restricted_settings(settings: &Value) -> Result<()> {
     Ok(())
 }
 /// O `remember` do Python: as escolhas da sessão passam à conversa nova (o `/clear` sem terminal). Vazio não
-/// grava nada.
-pub fn remember(session_id: &str, settings: &Value) -> std::result::Result<(), &'static str> {
+/// grava nada. A falha volta como código e frase.
+pub fn remember(session_id: &str, settings: &Value) -> std::result::Result<(), (&'static str, &'static str)> {
     if settings.is_null() || settings.as_object().is_some_and(|object| object.is_empty()) { return Ok(()); }
-    save_settings(&store_root().map_err(|e| e.code)?, session_id, settings).map_err(|e| e.code)
+    save_settings(&store_root().map_err(|e| (e.code, e.detail))?, session_id, settings).map_err(|e| (e.code, e.detail))
 }
 fn store_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))

@@ -12,7 +12,9 @@ export function iniciarDiag(): void {
   const destinos = new Set<string>();
   const transporte = criarTransporteDiag((destino) => useServers.getState().servers
     .find((s) => s.baseUrl.replace(/\/+$/, '') === destino || baseOf(s) === destino)?.token);
-  const registrar = (evento: EventoDiag, destino = useServers.getState().active()?.baseUrl) => {
+  // O diário fica nas máquinas desta pessoa, nunca na entrada do par de outra pessoa.
+  const ativaPropria = () => { const a = useServers.getState().active(); return a && !a.invite ? a.baseUrl : undefined; };
+  const registrar = (evento: EventoDiag, destino = ativaPropria()) => {
     if (!destino) return;
     const base = destino.replace(/\/+$/, '');
     if (!destinos.has(base)) {

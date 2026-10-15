@@ -4,6 +4,8 @@
 use super::*;
 use gpui_kit::component::input::{Editor, EditorState, Position, RopeExt};
 mod navigation;
+mod reader;
+mod reader_images;
 mod lifecycle;
 pub(crate) mod grammars;
 
@@ -21,6 +23,7 @@ pub(super) struct Files {
     serial: u64,
     /// O visor toma a janela: a lista de sessões e o painel direito saem enquanto ele está à vista.
     expanded: bool,
+    viewport_width: std::rc::Rc<std::cell::Cell<f32>>,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     _focus_lost: Subscription,
@@ -35,8 +38,8 @@ struct FileTab {
     content: Option<Result<Document, String>>,
     /// Imagem: mostrada, não editada.
     picture: Option<Picture>,
-    /// Markdown abre na prévia, como no Zeron; o botão alterna para o código.
-    preview: bool,
+    reader: reader::ReaderSettings,
+    pending_anchor: Option<String>,
 }
 
 impl FileTab {
@@ -53,8 +56,8 @@ pub(super) enum FileReply {
     Read(u64, Result<Content, Failure>),
     Saved(u64, String, Result<Value, Failure>),
     Picture(u64, Result<Arc<RenderImage>, Failure>),
-    /// Link relativo clicado na prévia de Markdown, já resolvido contra a pasta do documento.
-    Open(String),
+    Link(u64, String),
+    ReaderImageReady(u64),
     Refresh(u64, u64, bool, Result<Content, Failure>),
 }
 
@@ -71,8 +74,10 @@ struct Document {
     error: Option<String>,
     poll_error: Option<String>,
     markdown: Option<Entity<TextViewState>>,
+    reader_images: reader_images::ReaderImages,
     _changed: Subscription,
     _cursor: Subscription,
+    _markdown_changed: Option<Subscription>,
     cursor: Position,
     read_seq: u64,
     checking: bool,
@@ -146,7 +151,7 @@ impl Files {
         let focus = cx.focus_handle();
         let lost = cx.on_focus_lost(window, |this, window, cx| this.files_focus_lost(window, cx));
         Self { owner: None, hidden: false, tabs: Vec::new(), active: 0, serial: 0, expanded: false,
-            focus, return_focus: None, _focus_lost: lost, preview_find: navigation::PreviewFind::new(window, cx),
+            viewport_width: std::rc::Rc::new(std::cell::Cell::new(1000.)), focus, return_focus: None, _focus_lost: lost, preview_find: navigation::PreviewFind::new(window, cx),
             _refresh_task: lifecycle::watch_files(window, cx) }
     }
 }
@@ -195,7 +200,7 @@ async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<Str
 }
 
 impl Hangar {
-    fn files_visible(&self) -> bool {
+    pub(super) fn files_visible(&self) -> bool {
         self.files.owner.is_some() && self.files.owner == self.session_owner() && !self.files.tabs.is_empty() && !self.files.hidden
             && (self.settings.is_none() || self.settings_live())
     }
@@ -250,8 +255,9 @@ impl Hangar {
                 .map_or(Picture::Loading, Picture::Disk)) };
         let fetch_picture = matches!(picture, Some(Picture::Loading));
         let is_picture = picture.is_some();
-        let preview = file_language(&path) == "markdown";
-        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None, picture, preview });
+        let mut reader = reader::ReaderSettings::default();
+        if file_language(&path) != "markdown" { reader.set_mode(reader::ReaderMode::Source); }
+        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None, picture, reader, pending_anchor: None });
         self.files.active = self.files.tabs.len() - 1;
         self.focus_file(window, cx);
         let (connection, selection, tx) = (self.connection, None, self.tx.clone());
@@ -315,7 +321,14 @@ impl Hangar {
             FileReply::Read(id, result) => (id, result),
             FileReply::Saved(id, text, result) => { self.file_saved(id, text, result, window, cx); return; }
             FileReply::Refresh(id, seq, reload, result) => { self.file_refreshed(id, seq, reload, result, window, cx); return; }
-            FileReply::Open(path) => { self.open_file(path, None, window, cx); return; }
+            FileReply::Link(id, url) => { self.navigate_reader_link(id, &url, window, cx); return; }
+            FileReply::ReaderImageReady(id) => {
+                if let Some(view) = self.files.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.content.as_ref()?.as_ref().ok()?.markdown.as_ref()) {
+                    view.update(cx, |view, cx| view.invalidate_inline_layout(cx));
+                }
+                cx.notify();
+                return;
+            }
             FileReply::Picture(id, result) => {
                 let slot = self.files.tabs.iter_mut().find(|tab| tab.id == id).and_then(|tab| tab.picture.as_mut());
                 match (slot, result) {
@@ -339,6 +352,10 @@ impl Hangar {
                         if let Some(Ok(doc)) = &mut tab.content {
                             doc.dirty = doc.editor.read(cx).value().as_ref() != doc.base.text;
                             doc.saved = None;
+                            if let Some(view) = &doc.markdown {
+                                let text = doc.editor.read(cx).value().to_string();
+                                view.update(cx, |view, cx| view.set_text(&text, cx));
+                            }
                         }
                     }
                     cx.notify();
@@ -351,8 +368,16 @@ impl Hangar {
                 }
             });
             let markdown = (file_language(path) == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&content.text, cx).scrollable(true)));
+            let markdown_changed = markdown.as_ref().map(|view| {
+                let weak = cx.entity().downgrade();
+                view.read(cx).list_state().set_scroll_handler(move |_, _, cx| { let _ = weak.update(cx, |_, cx| cx.notify()); });
+                cx.observe_in(view, window, move |this: &mut Self, _, window, cx| {
+                    this.reveal_pending_anchor(id, window, cx);
+                    cx.notify();
+                })
+            });
             let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, markdown, _changed: changed,
-                _cursor: cursor, cursor: Position::new(0, 0), poll_error: None,
+                reader_images: Default::default(), _cursor: cursor, _markdown_changed: markdown_changed, cursor: Position::new(0, 0), poll_error: None,
                 read_seq: 0, checking: false, reloading: false, disk_changed: false, close_after_save: false };
             doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx));
             doc
@@ -436,15 +461,9 @@ impl Hangar {
         cx.notify();
     }
 
-    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_reader_mode(&mut self, mode: reader::ReaderMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.files.preview_find.open { self.close_preview_find(window, cx); }
-        let tab = &mut self.files.tabs[self.files.active];
-        tab.preview = !tab.preview;
-        // A prévia mostra o texto do editor, com o que ainda não foi salvo.
-        if let (true, Some(Ok(doc))) = (tab.preview, &tab.content) {
-            let text = doc.editor.read(cx).value().to_string();
-            if let Some(view) = &doc.markdown { view.update(cx, |view, cx| view.set_text(&text, cx)); }
-        }
+        self.files.tabs[self.files.active].reader.set_mode(mode);
         self.focus_file(window, cx);
         cx.notify();
     }
@@ -452,13 +471,13 @@ impl Hangar {
     fn focus_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.files.preview_find.target.is_some_and(|id| {
             let tab = &self.files.tabs[self.files.active];
-            tab.id != id || !tab.preview || tab.line.is_some()
+            tab.id != id || !tab.reader.mode.reading() || tab.line.is_some()
         }) {
             self.close_preview_find(window, cx);
         }
         let tab = &mut self.files.tabs[self.files.active];
-        if tab.line.is_some() { tab.preview = false; }
-        if tab.preview {
+        if tab.line.is_some() { tab.reader.set_mode(reader::ReaderMode::Source); }
+        if tab.reader.mode.reading() {
             self.files.focus.focus(window, cx);
             cx.notify();
             return;
@@ -608,7 +627,7 @@ impl Hangar {
         }
     }
 
-    pub(super) fn render_file_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_file_view(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.files_visible() { return None; }
         let tab = &self.files.tabs[self.files.active];
         let name = composer::basename(&tab.path).to_owned();
@@ -668,7 +687,7 @@ impl Hangar {
             .when_some(doc, |el, doc| el
                 .child(Button::new("file-find").ghost().xsmall().icon(IconName::Search).label(tr("file_find"))
                     .tooltip(tr("file_find_shortcut")).on_click(cx.listener(|this, _, window, cx| { this.find_in_file(window, cx); })))
-                .when(!tab.preview, |el| {
+                .when(!tab.reader.mode.reading(), |el| {
                     let position = doc.editor.read(cx).cursor_position();
                     el.child(Button::new("file-goto-line").ghost().xsmall()
                         .label(tr("file_position").replace("{line}", &(position.line + 1).to_string()).replace("{column}", &(position.character + 1).to_string()))
@@ -683,9 +702,7 @@ impl Hangar {
                     .child(Button::new("file-save").primary().xsmall().label(tr(if doc.saving { "file_saving" } else { "file_save" }))
                         .tooltip(tr("file_save_shortcut")).disabled(doc.saving || doc.reloading)
                         .on_click(cx.listener(|this, _, _, cx| this.save_file(cx)))))
-                .when(doc.markdown.is_some(), |el| el.child(chrome::icon_button("file-preview",
-                        if tab.preview { IconName::FileCode } else { IconName::Eye }, tr(if tab.preview { "file_source" } else { "file_preview" }), cx)
-                    .selected(tab.preview).on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))))))
+                .when(doc.markdown.is_some(), |el| el.child(self.reader_toolbar(tab, cx))))
             .when(tab.zoomable(), |el| el
                 .child(chrome::icon_button("file-zoom", IconName::Plus, tr("file_zoom"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.zoom_picture(window, cx)))))
@@ -713,25 +730,19 @@ impl Hangar {
                 .into_any_element(),
             (Some(Picture::Loading), _) | (None, None) => state(tr("file_loading"), theme::faint()),
             (Some(Picture::Failed(error)), _) | (None, Some(Err(error))) => state(error.clone(), theme::danger()),
-            (None, Some(Ok(doc))) if tab.preview && doc.markdown.is_some() => {
-                let (tx, connection, document) = (self.tx.clone(), self.connection, tab.path.clone());
-                div().id("file-markdown").size_full().flex().justify_center().items_start().px_6().py_4()
-                    .child(conversation_text(div().w_full().h_full().max_w(px(900.)), false).children(doc.markdown.as_ref().map(|view| chat_text(view, cx).scrollable(true)
-                        .on_link_click(move |url, event, window, cx| match link_target(&document, url) {
-                            Some(path) => { let _ = tx.try_send(Envelope { connection, selection: None, payload: Payload::FileView(FileReply::Open(path)) }); }
-                            None => open_web_link(url, event, window, cx),
-                        }))))
-                    .into_any_element()
-            }
-            (None, Some(Ok(doc))) => div().flex().flex_col().size_full().min_h_0()
-                .when(doc.base.truncated, |el| el.child(div().px_4().py_2().text_xs().text_color(theme::warning()).child(tr("file_truncated"))))
-                .when_some(doc.error.as_ref(), |el, error| el.child(div().id("file-save-error").role(Role::Alert)
-                    .flex_shrink_0().px_4().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
-                .child(div().flex_1().min_h_0().overflow_hidden()
-                    .child(Editor::new(&doc.editor).readonly(!doc.editable() || doc.saving || doc.reloading).bordered(false).h_full().font_family(theme::MONO).text_sm()
-                        .line_height(relative(1.7)).aria_label(tab.path.clone())))
-                .into_any_element(),
+            (None, Some(Ok(doc))) if tab.reader.mode.reading() && doc.markdown.is_some() =>
+                self.render_reader(tab, doc, self.files.viewport_width.get(), cx),
+            (None, Some(Ok(doc))) => Self::reader_source(tab, doc).into_any_element(),
         };
+        let viewport_width = self.files.viewport_width.clone();
+        let owner = cx.entity().downgrade();
+        let measure = canvas(move |bounds, _, cx| {
+            let width = f32::from(bounds.size.width);
+            if (viewport_width.get() - width).abs() > 1. {
+                viewport_width.set(width);
+                cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); });
+            }
+        }, |_, _, _, _| {}).absolute().inset_0();
         Some(div().id("file-viewer").absolute().inset_0().occlude().flex().flex_col().min_h_0().bg(theme::surface())
             .border_1().border_color(theme::border()).rounded_lg().overflow_hidden()
             .key_context("FileViewer").track_focus(&self.files.focus)
@@ -743,13 +754,14 @@ impl Hangar {
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
             .on_action(cx.listener(|this, _: &FindFile, window, cx| { this.find_in_file(window, cx); }))
             .on_action(cx.listener(|this, _: &GoToFileLine, window, cx| this.open_file_line(window, cx)))
+            .child(measure)
             .child(strip)
             .child(toolbar)
             .children(doc.filter(|doc| doc.disk_changed).map(|_| div().id("file-disk-changed").role(Role::Alert)
                 .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::warning()).child(tr("file_disk_changed"))))
             .children(doc.and_then(|doc| doc.poll_error.as_ref()).map(|error| div().id("file-poll-error").role(Role::Alert)
                 .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
-            .children(doc.and_then(|doc| doc.error.as_ref()).filter(|_| tab.preview).map(|error| div().id("file-preview-error").role(Role::Alert)
+            .children(doc.and_then(|doc| doc.error.as_ref()).filter(|_| tab.reader.mode.reading()).map(|error| div().id("file-preview-error").role(Role::Alert)
                 .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
             .children(self.render_preview_find(cx))
             .child(div().flex_1().min_h_0().overflow_hidden().child(content)).into_any_element())
@@ -759,6 +771,7 @@ impl Hangar {
 /// Imagem decodificada aqui sai da memória de vídeo junto com a aba.
 fn release(tab: FileTab, window: &mut Window, cx: &mut App) {
     if let Some(Picture::Ready(image)) = tab.picture { cx.drop_image(image, Some(window)); }
+    if let Some(Ok(doc)) = tab.content { doc.reader_images.release(window, cx); }
 }
 
 /// A trilha do Zeron: a pasta da sessão e as partes do caminho. Caminho absoluto (arquivo citado fora da raiz) já diz
@@ -775,7 +788,8 @@ fn trail(root: Option<&str>, path: &str) -> Vec<String> {
 /// Destino de um link da prévia de Markdown dentro da sessão: relativo à pasta do documento, sem sair da raiz. Web,
 /// âncora e caminho absoluto ficam de fora.
 fn link_target(document: &str, url: &str) -> Option<String> {
-    if url.starts_with(['#', '/']) || url.contains([':', '\\']) { return None; }
+    let windows = document.contains('\\');
+    if url.starts_with(['#', '/', '\\']) || url.contains(':') || (!windows && url.contains('\\')) { return None; }
     let target = url.split(['#', '?']).next().filter(|target| !target.is_empty())?;
     let mut decoded = Vec::new();
     let mut bytes = target.bytes();
@@ -785,17 +799,20 @@ fn link_target(document: &str, url: &str) -> Option<String> {
         decoded.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
     }
     let target = String::from_utf8(decoded).ok()?;
+    if target.starts_with(['/', '\\']) || target.contains(':') || (!windows && target.contains('\\')) || target.chars().any(char::is_control) { return None; }
+    let document = document.replace('\\', "/");
+    let target = target.replace('\\', "/");
     let mut parts: Vec<&str> = document.split('/').collect();
     parts.pop();
     for part in target.split('/') {
         match part {
             "" | "." => {}
             // O primeiro pedaço vazio é a raiz de um caminho absoluto: dali não se sobe.
-            ".." => { if parts.last().is_none_or(|last| last.is_empty()) { return None; } parts.pop(); }
+            ".." => { if parts.last().is_none_or(|last| last.is_empty() || last.ends_with(':')) { return None; } parts.pop(); }
             part => parts.push(part),
         }
     }
-    Some(parts.join("/"))
+    Some(parts.join(if windows { "\\" } else { "/" }))
 }
 
 fn is_image(path: &str) -> bool {

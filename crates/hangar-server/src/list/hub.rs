@@ -3,7 +3,8 @@
 //! fatos do Python, classificação, decoração e rebaixamento, tudo pela ponte), assinatura, e JSON
 //! só quando ela muda. Cada conexão só lê o último publicado. Contrato público do `list_events`
 //! (`sse.py`): `sessions`, `list_error` uma vez na transição, `shortcut_terminals`, `nav` uma vez
-//! por conexão, `ping` a cada 8 s e comentário a cada 15 s. Convidado continua no Python.
+//! por conexão, `ping` a cada 8 s e comentário a cada 15 s. O convidado da 8766 lê o mesmo produtor,
+//! recortado ao token dele, e não conta como lista do dono.
 //!
 //! Entre os tiques, o produtor observa as pastas de estado das contas (marcador, registro nativo,
 //! pergunta aberta): escrita nelas reclassifica só a sessão do arquivo e publica na hora, com a
@@ -31,7 +32,9 @@ use super::bridge::{ListBridge, ListError, Partial, Produced};
 use super::facts_files;
 use super::sig;
 use crate::diag::DiagClient;
-use crate::routes::{AppState, cors, gate, pass};
+use crate::routes::{AppState, cors, pass, who};
+use crate::share::ShareState;
+use crate::share::store::{Guest, Kind};
 use crate::tail::{comment_frame, ping_frame, sse_frame};
 
 /// O tique do `_ListRefresher`, contado do fim do trabalho.
@@ -60,6 +63,8 @@ impl HeadlessSource for crate::runtime::gateway::RuntimeRegistry {
 struct Published {
     sessions: Option<Bytes>,
     sessions_seq: u64,
+    /// A produção do quadro `sessions` (só `Arc`s): cada convidado recorta as linhas dele.
+    rows: Option<Produced>,
     /// Código e quadro enquanto a lista está em erro.
     error: Option<(&'static str, Bytes)>,
     error_seq: u64,
@@ -69,8 +74,9 @@ struct Published {
     nav: Arc<Vec<(String, f64, Bytes)>>,
 }
 
+/// `clients`: listas do dono (o que o Python conta como app aberto); `guests`, as da 8766.
 #[derive(Default)]
-struct Refs { clients: u32, running: bool }
+struct Refs { clients: u32, guests: u32, running: bool }
 
 pub struct ListHub {
     tx: watch::Sender<Arc<Published>>,
@@ -81,27 +87,28 @@ impl Default for ListHub {
     fn default() -> Self { Self { tx: watch::channel(Arc::default()).0, refs: Mutex::default() } }
 }
 
-/// Uma lista do dono aberta; solta a contagem ao cair.
-struct Subscription { hub: Arc<ListHub>, rx: watch::Receiver<Arc<Published>> }
+/// Uma lista aberta; solta a contagem ao cair.
+struct Subscription { hub: Arc<ListHub>, rx: watch::Receiver<Arc<Published>>, owner: bool }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
         let mut r = lock(&self.hub.refs);
-        r.clients = r.clients.saturating_sub(1);
+        let n = if self.owner { &mut r.clients } else { &mut r.guests };
+        *n = n.saturating_sub(1);
     }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
 impl ListHub {
-    fn subscribe(self: &Arc<Self>, list: &Arc<ListBridge>, diag: &DiagClient) -> Subscription {
+    fn subscribe(self: &Arc<Self>, list: &Arc<ListBridge>, diag: &DiagClient, owner: bool) -> Subscription {
         let mut r = lock(&self.refs);
-        r.clients += 1;
+        if owner { r.clients += 1 } else { r.guests += 1 }
         if !r.running {
             r.running = true;
             tokio::spawn(supervise(self.clone(), list.clone(), diag.clone()));
         }
-        Subscription { hub: self.clone(), rx: self.tx.subscribe() }
+        Subscription { hub: self.clone(), rx: self.tx.subscribe(), owner }
     }
 }
 
@@ -130,7 +137,7 @@ async fn produce(hub: Arc<ListHub>, list: Arc<ListBridge>, diag: DiagClient) {
     loop {
         let clients = {
             let mut r = lock(&hub.refs);
-            if r.clients == 0 {
+            if r.clients + r.guests == 0 {
                 r.running = false;
                 list.set_owner_clients(0);
                 // Quem abrir depois não recebe primeiro a lista de quando esta fechou.
@@ -369,6 +376,7 @@ fn publish(tx: &watch::Sender<Arc<Published>>, last: &mut Last, outcome: Result<
                     Ok(json) => {
                         next.sessions = Some(sse_frame("sessions", &json, None));
                         next.sessions_seq += 1;
+                        next.rows = Some(p.clone());
                         next.error = None;
                         last.sig = Some(sig);
                         changed = true;
@@ -477,15 +485,80 @@ async fn client_loop(mut sub: Subscription, out: mpsc::Sender<Bytes>) {
     }
 }
 
-/// `GET /api/sessions/events` do dono.
-pub async fn events(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (fwd, owner) = gate(&st, peer, &req);
-    if !owner || req.method() != Method::GET {
-        return pass(&st, req, &fwd).await;
+/// Linhas que o convidado vê (`guest_safe` do Python): só as sessões do token, com o grupo
+/// recortado ao que ele enxerga (nenhum nome de outra sessão do dono), com o tipo de acesso a cada
+/// uma. A tarefa do grupo é texto do dono: só o par, que trabalha nela, a recebe.
+fn guest_rows<'a>(rows: impl IntoIterator<Item = &'a SessionRow>, guest: &Guest) -> Vec<SessionRow> {
+    rows.into_iter().filter(|r| guest.sees(&r.name)).map(|r| {
+        let mut r = r.clone();
+        if let Some(peers) = r.pair_peers.as_mut() { peers.retain(|p| guest.sees(p)); }
+        if guest.invite { r.pair_task = None; }
+        (r.pair_external, r.pair_externals, r.then_target) = (None, None, None);
+        r.guest_kind = guest.kind_of(&r.name).map(|k| match k { Kind::Share => "share", Kind::Pair => "pair" }.to_owned());
+        r
+    }).collect()
+}
+
+/// A lista do convidado: o registro é relido a cada volta (sessão ligada ao token ou renomeada
+/// depois de aberto aparece), e só sai o que mudou no recorte dele. Sem atalhos e sem `nav`.
+async fn guest_loop(mut sub: Subscription, share: Arc<ShareState>, token: String, out: mpsc::Sender<Bytes>) {
+    if !push(&out, ping_frame()).await {
+        return;
     }
-    let sub = st.hub.subscribe(&st.list, &st.diag);
+    let start = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval_at(start + PING_EVERY, PING_EVERY);
+    let mut comment = tokio::time::interval_at(start + COMMENT_EVERY, COMMENT_EVERY);
+    let (mut last, mut error_seq) = (None::<String>, 0);
+    // Lista publicada e recorte do token da última volta: iguais, o quadro sairia igual.
+    let mut seen: Option<(u64, Vec<(String, Option<Kind>)>)> = None;
+    loop {
+        let p = sub.rx.borrow_and_update().clone();
+        if let Some((_, frame)) = p.error.as_ref().filter(|_| p.error_seq != error_seq) {
+            error_seq = p.error_seq;
+            // A volta do erro reemite a lista.
+            (last, seen) = (None, None);
+            if !push(&out, frame.clone()).await { return }
+        } else if let (None, Some(produced), Some(guest)) = (&p.error, &p.rows, share.store.lookup_token(&token)) {
+            let mut view: Vec<(String, Option<Kind>)> = guest.sessions().into_iter().map(|n| { let k = guest.kind_of(&n); (n, k) }).collect();
+            view.sort_by(|a, b| a.0.cmp(&b.0));
+            let key = (p.sessions_seq, view);
+            if seen.as_ref() != Some(&key) {
+                match serde_json::to_string(&guest_rows(visible(produced), &guest)) {
+                    Ok(json) if last.as_deref() != Some(json.as_str()) => {
+                        if !push(&out, sse_frame("sessions", &json, None)).await { return }
+                        last = Some(json);
+                    }
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+                seen = Some(key);
+            }
+        }
+        tokio::select! {
+            _ = out.closed() => return,
+            _ = ping.tick() => if !push(&out, ping_frame()).await { return },
+            _ = comment.tick() => if !push(&out, comment_frame()).await { return },
+            changed = sub.rx.changed() => if changed.is_err() { return },
+        }
+    }
+}
+
+/// `GET /api/sessions/events` do dono e do convidado da 8766.
+pub async fn events(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, who) = who(&st, peer, &req);
+    let grant = match &who {
+        Some(caller) if req.method() == Method::GET => caller.grant().cloned(),
+        _ => return pass(&st, req, &fwd).await,
+    };
     let (tx, rx) = mpsc::channel::<Bytes>(16);
-    tokio::spawn(client_loop(sub, tx));
+    match (grant, st.share.clone()) {
+        (None, _) => { tokio::spawn(client_loop(st.hub.subscribe(&st.list, &st.diag, true), tx)); }
+        (Some(grant), Some(share)) => {
+            tokio::spawn(guest_loop(st.hub.subscribe(&st.list, &st.diag, false), share, grant.token.clone(), tx));
+        }
+        // Convidado sem convites no Rust não existe: o porteiro nem sobe.
+        (Some(_), None) => return pass(&st, req, &fwd).await,
+    }
     let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|b| (Ok::<Bytes, Infallible>(b), rx)) });
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();
@@ -497,19 +570,31 @@ pub async fn events(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     resp
 }
 
-/// `GET /api/sessions` do dono: o retrato de até 2 s (o do tique, com lista aberta).
+/// `GET /api/sessions` do dono e do convidado: o retrato de até 2 s (o do tique, com lista aberta).
 pub async fn list(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (fwd, owner) = gate(&st, peer, &req);
-    if !owner || req.method() != Method::GET {
+    let (fwd, who) = who(&st, peer, &req);
+    if who.is_none() || req.method() != Method::GET {
         return pass(&st, req, &fwd).await;
     }
+    // Relido agora: o grant do porteiro é desta mesma requisição, mas o registro é a fonte.
+    let guest = match who.as_ref().and_then(|c| c.grant()) {
+        None => None,
+        Some(grant) => match st.share.as_ref().and_then(|s| s.store.lookup_token(&grant.token)) {
+            Some(guest) => Some(guest),
+            None => return pass(&st, req, &fwd).await,
+        },
+    };
     let produced = match st.list.snapshot().await {
         // Sem resposta dos fatos, acesso e escondidas são desconhecidos, não vazios.
         Ok(p) if p.facts.unknown => return unavailable(&st, req.headers(), ListError { code: "list_facts_unknown", detail: "" }),
         Ok(p) => p,
         Err(e) => return unavailable(&st, req.headers(), e),
     };
-    let body = match serde_json::to_vec(&visible(&produced)) {
+    let body = match &guest {
+        None => serde_json::to_vec(&visible(&produced)),
+        Some(guest) => serde_json::to_vec(&guest_rows(visible(&produced), guest)),
+    };
+    let body = match body {
         Ok(b) => b,
         Err(_) => return unavailable(&st, req.headers(), ListError { code: "list_unserializable", detail: "" }),
     };

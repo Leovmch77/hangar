@@ -13,11 +13,12 @@ const servers = [
 ];
 const offline = new Set<string>();
 let own = servers;
+let all: Array<(typeof servers)[number] & { ephemeral?: boolean }> = servers;
 type Call = { id: string; q: string; resolve: (h: SearchHit[]) => void; reject: (e: Error) => void };
 let calls: Call[] = [];
 
 vi.mock('../lib/auth', () => ({
-  listServers: () => servers,
+  listServers: () => all,
   listOwnServers: () => own,
   selectServer: vi.fn(),
   serverColor: () => '#fff',
@@ -64,6 +65,7 @@ beforeEach(() => {
   calls = [];
   offline.clear();
   own = servers;
+  all = servers;
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   document.body.innerHTML = '';
 });
@@ -183,6 +185,18 @@ describe('SessionSwitcherSheet: busca de conteúdo', () => {
     expect(calls).toEqual([]);
     expect(text()).toContain(m.busca_sem_servidores());
     expect(text()).not.toContain(nenhum());
+    unmount(comp);
+  });
+
+  it('entrada temporária de par externo não conta como outro servidor', async () => {
+    own = [servers[0]];
+    all = [servers[0], { id: 'pair:x', label: 'Par · Ana', baseUrl: 'https://x', token: 't', ephemeral: true }];
+    const { comp } = await montar();
+    await digitar('foo');
+    calls[0].resolve([hit('s1', 10, 'achou')]);
+    await settle();
+    expect(text()).toContain('achou');
+    expect(document.body.querySelector('.srv-dot')).toBeNull();
     unmount(comp);
   });
 

@@ -509,3 +509,35 @@ describe('servidor de convite', () => {
     expect(convite.listAllServers().map((s) => s.id)).not.toContain('a');
   });
 });
+
+describe('entrada temporária de par externo', () => {
+  const P = { id: 'pair-a', label: 'Par · Ana', baseUrl: 'https://ana.ts.net:8443', token: 'tp', invite: true, ephemeral: true };
+  beforeEach(() => { store.clear(); convite.setEphemeralServers([]); });
+
+  it('lista, seleciona e acha a entrada, mas nunca grava no aparelho nem entra nas máquinas', () => {
+    store.set('cp_servers', JSON.stringify([S('a', 'http://casa:8765')]));
+    store.set('cp_active', 'a');
+    const cb = vi.fn();
+    const off = onServersChanged(cb);
+    convite.setEphemeralServers([P]);
+    off();
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(convite.listServers().map((s) => s.id)).toEqual(['a', 'pair-a']);
+    expect(convite.findServer('pair-a')?.token).toBe('tp');
+    expect(convite.listAllServers().map((s) => s.id)).toEqual(['a']);
+    expect(convite.listOwnServers().map((s) => s.id)).toEqual(['a']);
+    expect(convite.selectServer('pair-a')).toBe(true);
+    expect(convite.isActiveInvite()).toBe(true);
+    renameServer('a', 'casa');
+    expect(store.get('cp_servers')).not.toContain('pair-a');
+  });
+
+  it('mesma lista de novo não avisa ninguém', () => {
+    convite.setEphemeralServers([P]);
+    const cb = vi.fn();
+    const off = onServersChanged(cb);
+    convite.setEphemeralServers([{ ...P }]);
+    off();
+    expect(cb).not.toHaveBeenCalled();
+  });
+});

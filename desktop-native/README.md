@@ -24,6 +24,52 @@ O assistente (Linux e Windows) roda os scripts do repositório. Para ver as tela
 - `HANGAR_SETUP_FAKE_CLAUDE=desktop-native/tools/setup-fake-agent.sh` (e `HANGAR_SETUP_FAKE_CODEX`) troca o agente pelo dublê; `FAKE_AGENT_MODE=fora|dentro|trava`, `FAKE_AGENT_PROMPT=<arquivo>` guarda o prompt recebido. `HANGAR_SETUP_DEMO_AGENT=1` pede ajuda ao primeiro agente assim que o relatório fica pronto.
 - `HANGAR_REPORT_URL=<url>` manda o relatório para outro endereço (um receptor local) em vez do Worker.
 
+## Leitor de Markdown
+
+O visor de arquivos oferece **Leitura**, **Fonte** e **Lado a lado**. A Fonte usa o editor existente:
+rascunhos, busca, salvar, descartar, recarregar e avisos de mudança no disco continuam disponíveis.
+Edições ainda não salvas também atualizam a leitura e o sumário. **A−/A+** mudam apenas o tamanho
+na leitura da aba aberta, sem alterar a conversa, o editor ou o arquivo.
+
+O sumário vem do AST do mesmo renderizador GFM, não de uma busca por linhas que começam com `#`.
+Ele reconhece títulos ATX e setext, acompanha a seção visível e navega por clique ou teclado.
+Pode ser ocultado; em painéis estreitos fica oculto automaticamente, sem perder a preferência.
+Tabelas largas têm rolagem horizontal própria e a largura do documento permanece limitada.
+Em painéis muito estreitos, o modo Lado a lado empilha as vistas, mantendo leitura e fonte acessíveis.
+
+| Conteúdo | Comportamento |
+|---|---|
+| Títulos H1–H6, parágrafos e separadores | Hierarquia tipográfica e espaçamento próprios de documento |
+| Negrito, itálico, tachado e código inline | Formatação do GFM, com seleção de texto |
+| Listas ordenadas, não ordenadas, aninhadas e checklists | Marcadores, numeração e estado das tarefas preservados |
+| Citações e tabelas | Filetes e cabeçalho legíveis, usando as cores do tema |
+| Código cercado ou indentado | Indentação, realce das linguagens disponíveis e cópia do bloco |
+| Links comuns, por referência e autolinks | HTTP/HTTPS abre no navegador externo; arquivos relativos ficam no visor |
+| Âncoras internas | Navegação por título, incluindo acentos e sufixos de títulos repetidos |
+| Imagens comuns e por referência | Caminho relativo à pasta do documento; arquivo remoto pela API autenticada da sessão |
+| Imagens HTTP/HTTPS | Download sem o token do Hangar; nenhuma credencial do Hangar é adicionada à URL |
+
+Imagens dentro da raiz da sessão não precisam ser citadas individualmente na conversa. Fora da
+raiz, a política de arquivo citado continua valendo, inclusive para imagens de um documento externo.
+
+**Limites:** Mermaid e outros diagramas cercados aparecem como código legível, sem gerar um
+diagrama. Fórmulas permanecem como texto ou bloco de código, sem composição matemática. O kit
+aceita um subconjunto de HTML de formatação, não uma página com CSS ou scripts. HTML executável,
+componentes MDX/JSX, JavaScript e motores de extensões arbitrárias não são executados. A extensão
+`.mdx` permite consultar a fonte e o Markdown reconhecido, não executar componentes.
+
+### Artefatos da conversa
+
+O botão **Artefatos** ao lado de pasta/branch mostra o catálogo publicado pela conversa Claude
+selecionada. A lista é lida ao selecionar a conversa e ao abrir ou atualizar o painel. Publicações
+atualizadas da mesma identidade ocupam uma linha só; títulos vazios têm um rótulo próprio.
+
+Cada item abre sua URL real `https://claude.ai/artifact/…` ou
+`https://claude.ai/code/artifact/…` no navegador externo. O Hangar não baixa o conteúdo do artefato,
+não transforma a URL em HTML local e não usa cookies do navegador. Login e permissões do Claude
+continuam sendo responsabilidade desse navegador. O catálogo pertence ao dono, não ao convidado;
+trocar, recriar ou limpar a conversa invalida as respostas em voo e a lista anterior.
+
 ## Ambiente
 
 - Rust 1.98.1, fixado em `rust-toolchain.toml`. `Cargo.lock` fixa as versões usadas nesta worktree.

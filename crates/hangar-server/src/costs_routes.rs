@@ -306,8 +306,8 @@ pub async fn session_cost(
     Path(name): Path<String>,
     request: Request,
 ) -> Response {
-    let (forward, owner) = gate(&state, peer, &request);
-    if !owner || request.method() != Method::GET {
+    let (forward, who) = crate::routes::who(&state, peer, &request);
+    if request.method() != Method::GET || !who.is_some_and(|c| c.can(&name, request.method())) {
         return pass(&state, request, &forward).await;
     }
     let result = match state.info(&name).await {

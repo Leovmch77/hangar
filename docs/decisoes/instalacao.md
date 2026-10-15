@@ -81,8 +81,18 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   aberto; branch sem PR sobe livre.** O hook PreToolUse do `gh pr create` (`.claude/settings.json`)
   confere o PR inteiro, desde o ponto em que a ponta saiu da base; a trava `pre-push` confere cada
   push, e consulta o PR com prazo de 10 s: sem `gh` ou sem resposta, segue com aviso. PR aberto pelo
-  site fica com o CI. Ele roda o que o CI rodaria para o
-  que o commit muda, num clone fixo por máquina (`~/.cache/hangar-verificacao/arvore`), em fila
+  site fica com o CI. O padrão, que as travas exigem, é o rápido: só o ligado aos arquivos mudados
+  (`cargo test` do `hangar-server`, ou do workspace quando muda crate de base; pytest dos testes
+  mudados e dos que citam o módulo mudado, a suíte inteira quando muda dependência, conftest ou
+  helper; `vitest related` e typecheck só com `.ts`/`.svelte`/mensagens no diff, tudo quando muda
+  dependência ou configuração; o nativo inteiro, num target próprio da árvore fixa, porque o custo é
+  compilar e o target global da máquina fazia o passo esperar a trava dos builds de quem programa);
+  Windows só com `.ps1`, `procinfo.py` ou `atomico.py` no diff, e a VM nunca passa de 10 min
+  (`HANGAR_VERIFICAR_WINDOWS_MAX`). O passo completo gravado cobre o rápido da mesma área; o rápido
+  só vale para base igual ou mais velha que a pedida. Medido no PR da voz (`639c486a79`): 454 s
+  (rust 453 s, sendo 297 s de compilação; nativo 356 s, ~150 s esperando a trava; front 246 s),
+  contra ~33 min do Linux completo.
+  `--completo` roda o que o CI rodaria para o que o commit muda, num clone fixo por máquina (`~/.cache/hangar-verificacao/arvore`), em fila
   única (`flock`) e prioridade baixa, com HOME vazio e o `omp` fixo do CI; Windows por SSH na VM
   de `git config hangar.verificarWindows`, com mutex. O registro é pelo tree sha; a trava só o lê.
   Escape nos dois: `HANGAR_SEM_VERIFICACAO=1`. Na VM roda só o que o CI roda no Windows (Rust e os 6
@@ -598,6 +608,14 @@ commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por s
 sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
 
 ## Verificação local antes do push (06/10/2026)
+
+**Rápido por padrão (14/10/2026).** A rodada da bateria do CI virou espera de mais de 40 min por push.
+Numa rodada real de outra sessão (commit `a2c14ee7a6`): preparo 441 s, rust 327 s, backend 813 s,
+nativo 738 s, front 1337 s (vitest do frontend 296 s, do core 54 s), mobile 184 s, com o Linux
+terminado em ~33 min; a VM recusou SSH e o processo ficou mais de 1 h no `WaitOne()` sem prazo, com a
+fila da máquina parada atrás. O front e o mobile ainda entram no `flock` global dos scripts npm, que
+é o das suítes de todas as sessões. O padrão passou a rodar só o ligado aos arquivos mudados, fora
+desse `flock`; a bateria inteira fica no CI e no `--completo`.
 
 Cada tarefa levava ~4 h, ~3 delas esperando CI. A trava `pre-push` só rodava os testes ligados aos
 arquivos quando conseguia perguntar pelo `/dev/tty`; o comando de push de um agente nunca tem esse

@@ -115,9 +115,8 @@ def test_partial_close_failure_reopens_only_what_closed(tmp_path):
 
 def session_file(monkeypatch, record):
     """Arquivo da sessão falso que `_rebind` relê antes de religar."""
-    from app import runtime_policy
-    # Sem argumento, como o de verdade: o fake que aceitava `provider` escondia o `TypeError`.
-    monkeypatch.setattr(runtime_policy, "_sessions", lambda: SimpleNamespace(load=lambda name: dict(record)))
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "load", lambda name: dict(record))
 
 
 def test_rebind_closes_gate_before_marking_frozen(tmp_path, monkeypatch):

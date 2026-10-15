@@ -767,6 +767,15 @@ fn parse_paragraph(
                 cx,
             );
         }
+        Node::ImageReference(raw) => {
+            if let Some(reference) = cx.link_refs.get(&SharedString::from(raw.identifier.clone())) {
+                paragraph.push_image(ImageNode {
+                    url: reference.url.to_string().into(), title: reference.title.clone(), alt: Some(raw.alt.clone().into()),
+                    span: raw.position.as_ref().map(|position| Span { start: cx.offset + position.start.offset, end: cx.offset + position.end.offset }),
+                    ..Default::default()
+                });
+            }
+        }
         Node::Image(raw) => {
             paragraph.push_image(ImageNode {
                 url: raw.url.clone().into(),
@@ -875,6 +884,17 @@ fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> Par
         _ => panic!("expected root node"),
     };
 
+    // A definição pode vir depois da imagem, inclusive numa lista ou citação.
+    fn collect_definitions(node: &Node, cx: &mut NodeContext) {
+        if let Node::Definition(def) = node {
+            cx.link_refs.entry(def.identifier.clone().into()).or_insert_with(|| LinkMark {
+                url: def.url.clone().into(), identifier: Some(def.identifier.clone().into()),
+                title: def.title.clone().map(Into::into),
+            });
+        }
+        if let Some(children) = node.children() { for child in children { collect_definitions(child, cx); } }
+    }
+    for node in &root.children { collect_definitions(node, cx); }
     let blocks = root
         .children
         .into_iter()

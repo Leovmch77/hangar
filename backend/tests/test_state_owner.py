@@ -1,6 +1,6 @@
 """Troca de dono do estado (parte 4, Task 5): com o Rust de pé, o Python não observa Claude com
 terminal em nenhuma porta. A conexão interna do hub fica sem estado, prévia, pergunta e sugestão;
-quem entra pelo Python (convite 8766, Connect 8768) lê esses quatro do canal privado do hub."""
+quem entra pelo Python (login de convidado, Connect 8768) lê esses quatro do canal privado do hub."""
 import asyncio
 import json
 

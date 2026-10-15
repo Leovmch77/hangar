@@ -61,11 +61,9 @@ async fn spawn_listens_and_kill_ends_the_group() {
     env.push(("HANGAR_CANO_OWNER".into(), owner));
     let spec = LaunchSpec { provider: Provider::Codex, key: key.clone(), cwd: dir.path().into(),
         program: vec!["sleep".into(), "300".into()], env,
-        cano_extra: serde_json::Map::from_iter([("config_marca".into(), serde_json::json!("m1"))]),
         sidecar_dir: dir.path().into() };
     let cano = spawn(&spec).await.unwrap();
     assert_eq!(cano.versao, 2);
-    assert_eq!(cano.extra["config_marca"], "m1");
     assert!(cano.escuta.starts_with("unix:"));
     assert!(matches!(liveness(cano.pid, &spec.key), Liveness::Ours));
     let log = dir.path().join(format!("cano-{}.log", &key[..16]));

@@ -342,9 +342,9 @@ def test_api_busy_preflight_closes_unstarted_coroutine_and_clears_life_guard(mon
     monkeypatch.setattr(runtime_coordinator, "_current", Coordinator())
     monkeypatch.setattr(api, "_headless", lambda name: True)
     monkeypatch.setattr(api, "_motivo_ocupada", busy)
-    monkeypatch.setattr(api.share_api, "changing_mode", set())
+    monkeypatch.setattr(api.share_bridge, "changing_mode", set())
     monkeypatch.setattr(api, "session_life", lambda name: "same-life")
-    monkeypatch.setattr(api.share_store, "set_life", lambda *args: None)
+    monkeypatch.setattr(api.share_bridge, "set_life", lambda *args: None)
     monkeypatch.setattr(api.guest_users, "set_life", lambda *args: None)
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
     pending = action()
@@ -352,4 +352,4 @@ def test_api_busy_preflight_closes_unstarted_coroutine_and_clears_life_guard(mon
         asyncio.run(api._during_transfer_life("session", pending, require_idle=True))
     assert caught.value.status_code == 409 and caught.value.detail["code"] == "erro_sessao_trabalhando"
     assert calls == ["preflight"] and pending.cr_frame is None
-    assert "session" not in api.share_api.changing_mode
+    assert "session" not in api.share_bridge.changing_mode
