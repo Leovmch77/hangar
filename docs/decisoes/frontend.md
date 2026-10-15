@@ -1055,3 +1055,24 @@ Windows usa uma WebView2 estacionada por página, quadros por screencast e entra
 - Clique vindo da tela remota com o agente agindo pausa o navegador da sessão como "você
   assumiu" (`user_input` em `app/browser.rs`); a WebView2 do modo página é outra e não passa por
   essa pausa.
+
+## Mensagem esperando mora no painel "Na fila", não na conversa (14/10/2026)
+
+O painel acima do composer (nativo, PWA no celular e app) lista o que espera a vez no Hangar, na
+ordem de entrega, pelo evento `queue` do hub; a bolha `queued-` correspondente não é desenhada
+enquanto a mensagem está no painel e volta como bolha de usuário quando sai, com as notas de
+entrega de sempre. Sem o evento (Pi, omp, Kimi, modo `python`) o painel sai das próprias bolhas e
+fica sem ações. O chip "N na fila · mandar agora" ficou só para o Kimi, cuja fila é a da TUI. A
+vista desktop do web não ganhou o painel: o desktop evolui no nativo. Comportamento copiado do T3
+(`QueuedRunsControl`), com "Orientar" no lugar do "Steer" e Esc saindo da edição.
+
+- A bolha some filtrada antes da janela da lista (web e app) ou com altura zero na linha (nativo):
+  um item vazio deixaria o respiro da linha como buraco na conversa.
+- Apagar com sucesso também retira a bolha `queued-<id>` dos eventos; sem isso, a mensagem apagada
+  voltava como bolha ao sair do painel.
+- Edição: o texto vai ao composer e o rascunho de antes é guardado uma vez; "Atualizar" com o
+  mesmo texto só sai da edição, sem pedido. Se a entrada sai da fila durante a edição, o composer
+  recebe o rascunho guardado (ou o texto editado, com o rascunho vazio) e o aviso "A mensagem já
+  saiu da fila".
+- No celular o arrasto é por eventos de ponteiro na alça (o arrasto HTML5 não segue o dedo); no
+  app, as ações ficam no toque longo e também como ações de acessibilidade da linha.

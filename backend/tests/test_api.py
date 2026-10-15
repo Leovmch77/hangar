@@ -161,6 +161,16 @@ def test_steer_sem_fila_na_tui_nao_confirma_nada(api_client):
     pq.return_value.confirm_delivered.assert_not_called()
 
 
+def test_queue_panel_routes_answer_unavailable_when_rust_does_not_serve(api_client):
+    # As rotas do painel só repassam ao Rust; sem ele (porta do dono no Python), a recusa tem código.
+    for method, path, body in [("patch", "/api/sessions/s/queue/a", {"text": "x"}),
+                               ("post", "/api/sessions/s/queue/reorder", {"id": "a", "before_id": None}),
+                               ("post", "/api/sessions/s/queue/a/steer", None)]:
+        r = getattr(api_client, method)(path, json=body, headers=_h())
+        assert r.status_code == 409, (method, path, r.text)
+        assert r.json()["detail"]["code"] == "queue_action_unavailable"
+
+
 def test_input_defer_on_overlay_marks_pending(api_client):
     with patch("app.api.terminal.send_prompt", return_value="deferred"), \
          patch("app.pqueue.PromptQueue.append") as ap:

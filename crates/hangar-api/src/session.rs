@@ -133,6 +133,10 @@ pub struct SessionRow {
     pub pair_gid: Option<String>,
     #[serde(default)]
     pub pair_task: Option<String>,
+    /// Servidores MCP criados por plugin (`$.tool.register`): o Claude Code mostra as chamadas deles
+    /// sozinhas, e a pele Terminal copia. Só existe no Rust; vazio não vai ao JSON, como no Python.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_tool_servers: Vec<String>,
     #[serde(default)]
     pub orq_arbiter: Option<String>,
     #[serde(default)]

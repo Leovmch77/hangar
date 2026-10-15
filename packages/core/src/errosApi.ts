@@ -335,7 +335,10 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_nao_entregue: () => m.erro_fila_nao_entregue(),
   erro_envio_falhou_desconhecida: () => m.erro_envio_falhou_desconhecida(),
   erro_envio_falhou: (p) => m.erro_envio_falhou({ erro: fmtParam(p.erro) }),
-  erro_comando_nao_executado: (p) => m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
+  // `queue_waiting`: o Rust recusa comando de barra enquanto há mensagens no painel da fila.
+  erro_comando_nao_executado: (p) => p.motivo === 'queue_waiting'
+    ? m.command_refused_queue_waiting()
+    : m.erro_comando_nao_executado({ comando: fmtParam(p.comando), motivo: fmtParam(p.motivo) }),
   erro_aguarde_clear: () => m.erro_aguarde_clear(),
   erro_group_message_slash: () => m.erro_group_message_slash(),
   erro_group_message_resposta: () => m.erro_group_message_resposta(),
@@ -569,6 +572,13 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   close_python_cleanup_skipped: () => m.close_python_cleanup_skipped(),
   relaunch_panicked: () => m.relaunch_panicked(),
   broadcast_reply_unreadable: () => m.broadcast_reply_unreadable(),
+  // Painel da fila (editar, reordenar, orientar e apagar uma mensagem que espera).
+  queue_action_unavailable: () => m.queue_action_unavailable(),
+  queue_entry_gone: () => m.queue_entry_gone(),
+  queue_steer_not_delivered: () => m.queue_steer_not_delivered(),
+  queue_steer_question_open: () => m.queue_steer_question_open(),
+  queue_steer_uncertain: () => m.queue_steer_uncertain(),
+  queue_text_invalid: () => m.queue_text_invalid(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

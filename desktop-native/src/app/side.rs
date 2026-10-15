@@ -1096,7 +1096,7 @@ impl Hangar {
             if !read_only && let Some(project) = self.render_project(status.as_ref(), cx) { content = content.child(section(project)); }
             if !read_only && let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
         }
-        let queued = if readable { self.queued_count() } else { 0 };
+        let queued = if readable { self.pending_count() } else { 0 };
         let orq_body = if orq && tab == Some(SideTab::Context) { self.render_orq_panel(cx) } else { div().into_any_element() };
         let handle = div().id("side-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
             .hover(|el| el.bg(theme::accent_dim()))

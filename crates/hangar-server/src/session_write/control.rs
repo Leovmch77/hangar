@@ -1,5 +1,6 @@
-//! `/interrupt`, `/select`, `/select/submit`, `/keys`, `/term-input` e `DELETE …/queue/{id}` de sessão
-//! Claude e Codex, com a mesma resposta do Python (`api.py`). Daqui para baixo o Rust é o dono: falha é
+//! `/interrupt`, `/select`, `/select/submit`, `/keys`, `/term-input` e as rotas da fila (`DELETE`/`PATCH
+//! …/queue/{id}`, `…/queue/reorder`, `…/queue/{id}/steer`) de sessão Claude e Codex, com a mesma resposta
+//! do Python (`api.py`) onde ela existia. Daqui para baixo o Rust é o dono: falha é
 //! erro com código, nunca repasse. A pergunta que o plugin segura é do Rust: o ator do terminal a
 //! confere e a fecha no próprio Esc.
 use std::net::SocketAddr;
@@ -7,7 +8,8 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::StatusCode;
+use axum::http::request::Parts;
+use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
@@ -22,7 +24,7 @@ use crate::interactions::{ExpectedInteraction, InteractionError};
 use crate::routes::AppState;
 use crate::runtime::gateway::EntryHandle;
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
-use crate::runtime::queue::Action;
+use crate::runtime::queue::{Action, queue_text_ok};
 
 type Answer = (StatusCode, Value);
 
@@ -263,7 +265,94 @@ fn parse_term_input(bytes: &Bytes) -> Option<(Option<String>, Option<String>)> {
     Some((field("text")?, field("key")?))
 }
 
-// ── DELETE …/queue/{id} ─────────────────────────────────────────────────────────────────────────
+// ── fila: DELETE, PATCH, reorder e steer ────────────────────────────────────────────────────────
+
+const MSG_QUEUE_GONE: &str = "A mensagem já saiu da fila.";
+const MSG_QUEUE_TEXT: &str = "A mensagem da fila precisa de texto e não pode começar com /.";
+const MSG_STEER_QUESTION: &str = "Responda a permissão ou pergunta pendente antes de orientar.";
+const MSG_STEER_NOT_DELIVERED: &str = "A sessão não aceitou agora; a mensagem continua na fila.";
+const MSG_STEER_UNCERTAIN: &str = "Não deu para confirmar se a mensagem chegou; confira a conversa antes de repetir.";
+
+fn queue_gone() -> Answer { (StatusCode::CONFLICT, detail_body("queue_entry_gone", MSG_QUEUE_GONE, json!({}))) }
+fn queue_refused(code: &str, msg: &str) -> Answer { (StatusCode::CONFLICT, detail_body(code, msg, json!({}))) }
+fn steered(value: bool) -> Answer { (StatusCode::OK, json!({"ok": true, "steered": value})) }
+
+/// Rota do painel da fila em `tail` (o que vem depois de `/api/sessions/{n}/`), com o id ainda escapado.
+/// `reorder` só é caminho fixo no `POST`: no `DELETE` e no `PATCH` vale como o id de mesmo nome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueueRoute<'a> { Remove(&'a str), Edit(&'a str), Reorder, Steer(&'a str) }
+
+pub(crate) fn queue_route<'a>(method: &Method, tail: &'a str) -> Option<QueueRoute<'a>> {
+    let rest = tail.strip_prefix("queue/")?;
+    let id = |id: &'a str| (!id.is_empty() && !id.contains('/')).then_some(id);
+    match *method {
+        Method::DELETE => id(rest).map(QueueRoute::Remove),
+        Method::PATCH => id(rest).map(QueueRoute::Edit),
+        Method::POST if rest == "reorder" => Some(QueueRoute::Reorder),
+        Method::POST => rest.strip_suffix("/steer").and_then(id).map(QueueRoute::Steer),
+        _ => None,
+    }
+}
+
+/// O handler da rota da fila, para as pontes que já a reconheceram.
+pub(crate) async fn queue_dispatch(route: QueueRoute<'_>, st: Arc<AppState>, peer: SocketAddr, req: Request) -> Response {
+    let (s, c) = (State(st), ConnectInfo(peer));
+    match route {
+        QueueRoute::Remove(_) => queue_remove(s, c, req).await,
+        QueueRoute::Edit(_) => queue_edit(s, c, req).await,
+        QueueRoute::Reorder => queue_reorder(s, c, req).await,
+        QueueRoute::Steer(_) => queue_steer(s, c, req).await,
+    }
+}
+
+/// Id da entrada no caminho do pedido (`…/queue/{id}` ou `…/queue/{id}/steer`), sem o escape.
+fn queue_entry(parts: &Parts) -> Option<String> {
+    let tail = parts.uri.path().strip_prefix("/api/sessions/")?.split_once('/')?.1;
+    let (QueueRoute::Remove(raw) | QueueRoute::Edit(raw) | QueueRoute::Steer(raw)) = queue_route(&parts.method, tail)? else { return None };
+    percent_decode_str(raw).decode_utf8().ok().map(|id| id.into_owned())
+}
+
+/// `{"text": texto}`, só esse campo.
+pub(crate) fn parse_queue_text(bytes: &Bytes) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(&super::input::scrub_lone_surrogates(bytes)).ok()?;
+    let object = value.as_object().filter(|o| o.len() == 1)?;
+    object.get("text")?.as_str().map(str::to_owned)
+}
+
+/// `{"id": texto, "before_id": texto|null}`, os dois presentes; `null` é o fim da fila.
+pub(crate) fn parse_queue_reorder(bytes: &Bytes) -> Option<(String, Option<String>)> {
+    let value = serde_json::from_slice::<Value>(bytes).ok()?;
+    let object = value.as_object().filter(|o| o.len() == 2)?;
+    let id = object.get("id")?.as_str().filter(|id| !id.is_empty())?.to_owned();
+    let before = match object.get("before_id")? {
+        Value::Null => None,
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => return None,
+    };
+    Some((id, before))
+}
+
+/// Resultado da ação da fila: `done` é o sucesso; o resto (`absent`, `not_waiting`) é a mesma frase.
+pub(crate) fn queue_change_answer(outcome: &Result<Value, RuntimeError>, done: &str) -> Answer {
+    match outcome {
+        Ok(value) if value == done => ok(),
+        Ok(_) => queue_gone(),
+        Err(error) => runtime_failed(error),
+    }
+}
+
+/// Resposta do controle `steer_entry` do ator do terminal. O adiamento não tem código estável: todo
+/// `Deferred` sem código conhecido é "não entregue agora".
+pub(crate) fn queue_steer_terminal(reply: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    let reply = match reply { Ok(reply) => reply, Err(error) => return runtime_failed(error) };
+    match (reply.disposition, payload_code(reply)) {
+        (Disposition::Accepted, _) => steered(reply.payload["steered"] == true),
+        (_, Some("queue_entry_gone")) => queue_gone(),
+        (_, Some("queue_steer_question_open")) => queue_refused("queue_steer_question_open", MSG_STEER_QUESTION),
+        (Disposition::Unknown, _) => queue_refused("queue_steer_uncertain", MSG_STEER_UNCERTAIN),
+        _ => queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED),
+    }
+}
 
 pub fn queue_answer(removed: &Result<Value, RuntimeError>) -> Answer {
     match removed {
@@ -394,11 +483,20 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    // `/api/sessions/{name}/queue/{id}`: o id é um segmento só.
-    let path = ctx.parts.uri.path().to_owned();
-    let segments: Vec<&str> = path.trim_start_matches("/api/sessions/").split('/').collect();
-    let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return invalid_body(ctx.headers()) };
-    let entry_id = entry_id.into_owned();
+    let Some(entry_id) = queue_entry(&ctx.parts) else { return invalid_body(ctx.headers()) };
+    // O X do painel só tira a que espera: entrega incerta nunca vira desistência por ele.
+    let only_waiting = match crate::auth::query_param(ctx.parts.uri.query(), "only_waiting").as_deref() {
+        None => false,
+        Some("true" | "1") => true,
+        Some(_) => return invalid_body(ctx.headers()),
+    };
+    let cancelled = ctx.target.handle.queue(random_hex(16), Action::Cancel { entry_id: entry_id.clone() }).await;
+    if !only_waiting && let Err(failure) = &cancelled {
+        tracing::warn!(session = %ctx.name, code = %failure.code, "descarte: o cancelamento falhou; tenta tirar a linha");
+    }
+    if only_waiting || matches!(cancelled, Ok(ref done) if *done == json!("cancelled")) {
+        return answer(&ctx, queue_change_answer(&cancelled, "cancelled"));
+    }
     let mut removed = ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id: entry_id.clone() }).await;
     // A entrega incerta não sai por `Remove` (segura a escrita): descartar é desistir dela e então tirá-la.
     if matches!(removed, Ok(ref done) if *done != json!(true)) {
@@ -418,6 +516,95 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
     answer(&ctx, queue_answer(&removed))
 }
 
+pub async fn queue_edit(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::QueueEdit).await {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
+    let (Some(entry_id), Some(text)) = (queue_entry(&ctx.parts), parse_queue_text(&bytes).filter(|_| json_content_type(ctx.headers())))
+        else { return invalid_body(ctx.headers()) };
+    if !queue_text_ok(&text) {
+        return answer(&ctx, (StatusCode::UNPROCESSABLE_ENTITY, detail_body("queue_text_invalid", MSG_QUEUE_TEXT, json!({}))));
+    }
+    let edited = ctx.target.handle.queue(random_hex(16), Action::Edit { entry_id, text }).await;
+    answer(&ctx, queue_change_answer(&edited, "edited"))
+}
+
+pub async fn queue_reorder(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::QueueReorder).await {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
+    let Some((entry_id, before_id)) = parse_queue_reorder(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let moved = ctx.target.handle.queue(random_hex(16), Action::Reorder { entry_id, before_id }).await;
+    answer(&ctx, queue_change_answer(&moved, "moved"))
+}
+
+pub async fn queue_steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::QueueSteer).await {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
+    let Some(entry_id) = queue_entry(&ctx.parts) else { return invalid_body(ctx.headers()) };
+    // Corpo vazio ou `{}`: nada além do id do caminho.
+    if !bytes.is_empty() && serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.as_object().map(|o| o.is_empty())) != Some(true) {
+        return invalid_body(ctx.headers());
+    }
+    let result = match &ctx.target.handle {
+        // Serial com a drenagem dentro do ator: subir e entregar acontecem sem outra mensagem no meio.
+        EntryHandle::Terminal { handle, .. } =>
+            queue_steer_terminal(&handle.control(random_hex(16), "steer_entry".into(), json!({"entry_id": entry_id})).await),
+        handle => queue_steer_runtime(handle, &entry_id).await,
+    };
+    answer(&ctx, result)
+}
+
+/// Claude e Codex sem terminal, e Codex com terminal: o turno é do processo. Com turno, `SteerQueue` só desta
+/// entrada; sem turno (ou ele acabou no meio), ela vai para a frente e sai na entrega comum.
+async fn queue_steer_runtime(handle: &EntryHandle, entry_id: &str) -> Answer {
+    let mut returned = false;
+    if handle.view().await.is_ok_and(|view| view["in_progress"] == true) {
+        let sent = handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::SteerQueue,
+            payload: json!({"entry_id": entry_id}) }).await;
+        match steer_in_turn(&sent, entry_id) {
+            Ok(answer) => return answer,
+            Err(back) => returned = back,
+        }
+    }
+    let moved = handle.queue(random_hex(16), Action::Promote { entry_id: entry_id.into() }).await;
+    let after = match steer_after_promote(&moved, returned) { Ok(after) => after, Err(answer) => return answer };
+    // Sem entregar agora (pergunta aberta, processo subindo), ela fica na frente: a próxima rodada a leva.
+    if let Err(error) = handle.drain().await {
+        tracing::warn!(code = %error.code, "orientar sem turno: a drenagem não rodou; a entrada ficou na frente");
+    }
+    after
+}
+
+/// A resposta do `SteerQueue` no meio do turno: `Ok` encerra a rota; `Err` segue ao `Promote`, com `true` quando a
+/// orientação foi aceita mas a entrada voltou à fila (fora de `ids`) e `false` quando não havia turno.
+pub fn steer_in_turn(sent: &Result<RuntimeReply, RuntimeError>, entry_id: &str) -> Result<Answer, bool> {
+    match sent {
+        // Fora de `ids`: ou ela já não esperava, ou a orientação dela voltou à fila; o `Promote` separa os dois.
+        Ok(reply) if reply.disposition == Disposition::Accepted =>
+            if reply.payload["ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == entry_id)) { Ok(steered(true)) } else { Err(true) },
+        Ok(reply) if payload_code(reply) == Some("steer_question_open") => Ok(queue_refused("queue_steer_question_open", MSG_STEER_QUESTION)),
+        Ok(reply) if payload_code(reply) == Some("steer_no_turn") => Err(false),
+        Ok(reply) if reply.disposition == Disposition::Unknown => Ok(queue_refused("queue_steer_uncertain", MSG_STEER_UNCERTAIN)),
+        Ok(_) => Ok(queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED)),
+        Err(error) => Ok(runtime_failed(error)),
+    }
+}
+
+/// Depois do `Promote`: `Err` responde já (a entrada sumiu, ou a fila falhou); `Ok` é a resposta depois da drenagem.
+/// A orientação aceita que voltou à fila foi para a frente, mas não entrou no turno: `queue_steer_not_delivered`.
+pub fn steer_after_promote(moved: &Result<Value, RuntimeError>, returned: bool) -> Result<Answer, Answer> {
+    match moved {
+        Ok(moved) if moved == "moved" => Ok(if returned { queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED) } else { steered(false) }),
+        Ok(_) => Err(queue_gone()),
+        Err(error) => Err(runtime_failed(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +618,59 @@ mod tests {
         assert_eq!(parse_clear(Some("clear=talvez")), None);
         assert_eq!(parse_clear(Some("clear=")), None);
         assert_eq!(parse_clear(Some("clear")), None);
+    }
+
+    #[test]
+    fn queue_bodies_are_strict() {
+        let b = |s: &'static str| Bytes::from_static(s.as_bytes());
+        assert_eq!(parse_queue_text(&b(r#"{"text":"oi"}"#)), Some("oi".into()));
+        assert_eq!(parse_queue_text(&b(r#"{"text":"oi","x":1}"#)), None);
+        assert_eq!(parse_queue_reorder(&b(r#"{"id":"a","before_id":null}"#)), Some(("a".into(), None)));
+        assert_eq!(parse_queue_reorder(&b(r#"{"id":"a","before_id":"b"}"#)), Some(("a".into(), Some("b".into()))));
+        assert_eq!(parse_queue_reorder(&b(r#"{"id":"a"}"#)), None);
+        assert_eq!(parse_queue_reorder(&b(r#"{"id":"","before_id":null}"#)), None);
+    }
+
+    #[test]
+    fn queue_entry_comes_from_the_path() {
+        let parts = |method: Method, path: &str| Request::builder().method(method).uri(path).body(()).unwrap().into_parts().0;
+        assert_eq!(queue_entry(&parts(Method::DELETE, "/api/sessions/s/queue/a%2Fb")), Some("a/b".into()));
+        assert_eq!(queue_entry(&parts(Method::POST, "/api/sessions/s/queue/a/steer")), Some("a".into()));
+        assert_eq!(queue_entry(&parts(Method::PATCH, "/api/sessions/s/queue/a/steer")), None);
+        assert_eq!(queue_entry(&parts(Method::DELETE, "/api/sessions/s/queue/")), None);
+        assert_eq!(queue_entry(&parts(Method::POST, "/api/sessions/s/queue/reorder")), None);
+    }
+
+    #[test]
+    fn queue_route_is_strict() {
+        use QueueRoute::*;
+        assert_eq!(queue_route(&Method::DELETE, "queue/e1"), Some(Remove("e1")));
+        assert_eq!(queue_route(&Method::DELETE, "queue/reorder"), Some(Remove("reorder")));
+        assert_eq!(queue_route(&Method::PATCH, "queue/e1"), Some(Edit("e1")));
+        assert_eq!(queue_route(&Method::POST, "queue/reorder"), Some(Reorder));
+        assert_eq!(queue_route(&Method::POST, "queue/e1/steer"), Some(Steer("e1")));
+        for (method, tail) in [(Method::POST, "queue/e1"), (Method::DELETE, "queue/a/b"), (Method::PATCH, "queue/"),
+            (Method::POST, "queue//steer"), (Method::POST, "queue/a/b/steer"), (Method::GET, "queue/e1"), (Method::DELETE, "input")] {
+            assert_eq!(queue_route(&method, tail), None, "{method} {tail}");
+        }
+    }
+
+    #[test]
+    fn queue_change_maps_outcomes() {
+        assert_eq!(queue_change_answer(&Ok(json!("edited")), "edited").0, StatusCode::OK);
+        let gone = queue_change_answer(&Ok(json!("not_waiting")), "edited");
+        assert_eq!((gone.0, gone.1["detail"]["code"].as_str()), (StatusCode::CONFLICT, Some("queue_entry_gone")));
+        assert_eq!(queue_change_answer(&Ok(json!("absent")), "moved").0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn terminal_steer_answers() {
+        let r = |disposition, payload| -> Result<RuntimeReply, RuntimeError> { Ok(RuntimeReply { operation_id: "x".into(), disposition, payload }) };
+        assert_eq!(queue_steer_terminal(&r(Disposition::Accepted, json!({"steered":true}))).1["steered"], true);
+        assert_eq!(queue_steer_terminal(&r(Disposition::Rejected, json!({"code":"queue_entry_gone"}))).1["detail"]["code"], "queue_entry_gone");
+        assert_eq!(queue_steer_terminal(&r(Disposition::Rejected, json!({"code":"queue_steer_question_open"}))).1["detail"]["code"], "queue_steer_question_open");
+        assert_eq!(queue_steer_terminal(&r(Disposition::Unknown, json!({"code":"queue_steer_uncertain"}))).1["detail"]["code"], "queue_steer_uncertain");
+        assert_eq!(queue_steer_terminal(&r(Disposition::Deferred, json!({}))).1["detail"]["code"], "queue_steer_not_delivered");
     }
 
     #[test]

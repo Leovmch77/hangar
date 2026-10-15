@@ -14,7 +14,7 @@ import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
-import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
+import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -50,6 +50,8 @@ interface Props {
   // e fica grudado no fim até acabarem.
   agentesRodando?: AgentRun[];
   onAbrirAgentes?: () => void;
+  // Mensagens que esperam a vez no painel "Na fila": a bolha delas sai da conversa até a entrega.
+  queuePanel?: QueuePanel;
 }
 
 const SEM_AGENTES: AgentRun[] = [];
@@ -104,6 +106,7 @@ export function MessageList({
   ferramenta = null,
   agentesRodando = SEM_AGENTES,
   onAbrirAgentes,
+  queuePanel,
 }: Props) {
   const codex = session?.provider === 'codex';
   const visiblePreview = codex ? planDisplayText(preview) : preview;
@@ -137,8 +140,10 @@ export function MessageList({
     return ts ? ts * 1000 : null;
   }, [events]);
   const data = useMemo(() => {
+    // A bolha escondida sai antes da lista: um item vazio deixaria o respiro dele na conversa.
     const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e))
-      && !(e.kind === 'tool_use' && rodandoIds.has(e.tool_use_id ?? '')));
+      && !(e.kind === 'tool_use' && rodandoIds.has(e.tool_use_id ?? ''))
+      && !(queuePanel && hiddenByQueuePanel(e, queuePanel)));
     // Página só com resultado de sucesso; sem sessão (lista do subagente) não há de onde baixá-la.
     const pageOf = (ev: ChatEvent) => {
       const r = results.get(ev.tool_use_id ?? '');
@@ -146,7 +151,7 @@ export function MessageList({
     };
     const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree', pageOf);
     return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
-  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks.length, rodandoIds]);
+  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks.length, rodandoIds, queuePanel]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
   const working = stateEvent?.state === 'working';
   const desde = useMemo(() => (working ? turnStart(events, turnSeen) : null), [working, events, turnSeen]);
@@ -270,7 +275,8 @@ export function MessageList({
           {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} streaming={working} /> : null}
           {working && !pensamento && !ferramenta ? <WorkingLine label={stateEvent?.label} since={desde} /> : null}
           {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} /> : null}
-          {pending.map((p) => (
+          {/* O eco que o painel da fila já mostra some: a mesma mensagem não aparece duas vezes. */}
+          {pending.filter((p) => !(queuePanel && echoInQueuePanel(p.text, queuePanel))).map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
               <UserBubble text={p.text} sessionName={sessionName} />
             </View>

@@ -21,6 +21,7 @@ import type { AskQuestionPayload, StateEvent } from './types';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { createShare, exportShortcuts } from './api';
+import { cancelQueuedMessage, editQueuedMessage, reorderQueuedMessage, steerQueuedMessage } from './api';
 import { fileUrl, uploadUrl, uploadUrlNative } from './api';
 import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel, transcriptionProvidersMissingKey, testTranscriptionProvider } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
@@ -381,6 +382,7 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/question/skip', body: { request_id: 'req-b', interaction_id: 'form-a' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', 'form-a', s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', null, s) },
+    { path: '/queue/reorder', body: { id: 'e 1', before_id: null }, run: (s?: Server) => reorderQueuedMessage('mesma/sessão', 'e 1', null, s), refused: 'recusado' },
   ];
 
   it.each(mutations)('$path mantém payload e chamada antiga, mas dirige o destino explícito a B', async ({ path, body, run }) => {
@@ -400,6 +402,35 @@ describe('contratos de conversa com servidor explícito', () => {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(init?.body as string)).toEqual(body);
     }
+  });
+
+  // Editar, apagar e orientar do painel da fila não são POST com corpo: ficam fora do `mutations`.
+  it.each([
+    { method: 'PATCH', path: '/queue/e%201', body: { text: 'novo' }, run: (s?: Server) => editQueuedMessage('mesma/sessão', 'e 1', 'novo', s) },
+    { method: 'DELETE', path: '/queue/e%201?only_waiting=true', body: undefined, run: (s?: Server) => cancelQueuedMessage('mesma/sessão', 'e 1', s) },
+    { method: 'POST', path: '/queue/e%201/steer', body: undefined, run: (s?: Server) => steerQueuedMessage('mesma/sessão', 'e 1', s) },
+  ])('$method $path do painel da fila vai ao destino explícito e ao ativo', async ({ method, path, body, run }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true,"steered":true}'));
+    await run(target);
+    await run();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `https://b.test/api/sessions/mesma%2Fsess%C3%A3o${path}`,
+      `https://a.test/api/sessions/mesma%2Fsess%C3%A3o${path}`,
+    ]);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method).toBe(method);
+      expect(init?.body === undefined ? undefined : JSON.parse(init.body as string)).toEqual(body);
+    }
+  });
+
+  it('orientar da fila devolve se a mensagem entrou no turno, e a que já saiu traz o código', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('{"ok":true,"steered":false}'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'A mensagem já saiu da fila' } }), { status: 409 }));
+    expect(await steerQueuedMessage('sessao', 'e1', target)).toEqual({ ok: true, steered: false });
+    await expect(steerQueuedMessage('sessao', 'e1', target)).rejects.toMatchObject({ status: 409, code: 'queue_entry_gone' });
   });
 
   it('aprovação e formulário simultâneos enviam suas próprias identidades', async () => {

@@ -82,6 +82,8 @@ export default function Layout() {
           {/* A borda esquerda do chat abre a gaveta de sessões; voltar fica no botão do cabeçalho
               (e no voltar do Android, que este gesto não desliga). */}
           <Stack.Screen name="s/[server]/[name]/index" options={{ gestureEnabled: false }} />
+          {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}
+          <Stack.Screen name="s/[server]/[name]/page" options={{ headerShown: false }} />
           <Stack.Screen name="s/[server]/[name]/ask" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/activity" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/loop" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />

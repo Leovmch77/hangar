@@ -14,8 +14,21 @@ import {
   queuedMessages,
   registrarDiag,
   parsePluginToast,
+  parseQueuePanel,
+  queueEditPayload,
+  queueEditExitText,
+  queueRemovedBubbleIds,
+  currentQueuePanel,
+  beginQueueEdit,
+  canUpdateQueueEdit,
+  moveTarget,
+  editQueuedMessage,
+  cancelQueuedMessage,
+  steerQueuedMessage,
+  reorderQueuedMessage,
+  formataErro,
 } from '@hangar/core';
-import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server } from '@hangar/core';
+import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server, QueuePanel, QueueEdit } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { reconcilePending, type PendingMsg } from '../chat/pending';
 import { useServers } from './servers';
@@ -35,6 +48,8 @@ import { readDraft, writeDraft, type ConversationDraft } from './drafts';
 export const TAIL_FIRST = 400;
 
 const SSE_RETRY_MIN_MS = 3_000;
+// Prazo para o `queue` do retrato chegar depois de a conexão abrir.
+const QUEUE_SNAPSHOT_MS = 3_000;
 const SSE_RETRY_MAX_MS = 30_000;
 
 export interface ChatState {
@@ -70,14 +85,23 @@ export interface ChatState {
   sseRecusado: boolean;
   // Ecos locais pendentes — já enviados mas ainda sem user_msg real no transcript.
   pending: PendingMsg[];
+  // Fila do Hangar pelo evento `queue` (Claude e Codex); null = sem ele, o painel sai das bolhas.
+  queuePanel: QueuePanel | null;
+  // Mensagem da fila aberta no composer; o rascunho de antes dela fica em `savedDraft`.
+  queueEdit: QueueEdit | null;
+  // Texto que o composer recebe quando a edição fechou por a entrada ter saído da fila (null = o rascunho guardado).
+  queueEditExit: string | null;
+  // Uma ação da fila por vez: os botões do painel ficam desativados enquanto ela está em voo.
+  queueBusy: boolean;
+  queueError: string | null;
 }
 
-// Quantas bolhas estão "na fila" (translúcidas): ecos locais + sintéticos queued-* da fila durável.
-// Só conta onde a fila pode ser mandada agora (Kimi, Codex, Claude), como no PWA.
-export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null, headless = false): number {
-  if (provider !== 'kimi' && provider !== 'codex' && provider !== 'claude' && !headless) return 0;
+// Quantas mensagens o chip "mandar agora" conta: só no Kimi, cuja fila é a da TUI (promovida inteira).
+// Claude e Codex (com ou sem terminal) mostram a fila no painel "Na fila", que substitui o chip.
+export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null): number {
+  if (provider !== 'kimi') return 0;
   // O eco local é o envio em voo, não fila: em idle ele acendia "1 na fila" até o POST voltar.
-  return queuedMessages(state.events, provider, headless).length;
+  return queuedMessages(state.events, provider, false).length;
 }
 
 export interface ChatApi {
@@ -96,6 +120,15 @@ export interface ChatApi {
   markAskDismissed: () => void;
   // Resposta do "mandar agora": marca as entregues e, com a fila já baixada, tira as bolhas na hora.
   applySteer: (result: { promoted?: boolean; queued_ids?: string[] }) => void;
+  // Painel "Na fila". Entrar na edição devolve o texto do composer; toda saída dela passa por `dropQueueEdit`, que
+  // deixa em `queueEditExit` o texto do campo (sem ele, o rascunho guardado).
+  startQueueEdit: (id: string, draft: string) => string;
+  cancelQueueEdit: () => void;
+  dropQueueEdit: (text?: string) => void;
+  submitQueueEdit: (text: string) => Promise<void>;
+  removeQueued: (id: string) => Promise<void>;
+  steerQueued: (id: string) => Promise<void>;
+  moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
 
 // Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
@@ -125,6 +158,11 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     olderFailed: '',
     sseRecusado: false,
     pending: [],
+    queuePanel: null,
+    queueEdit: null,
+    queueEditExit: null,
+    queueBusy: false,
+    queueError: null,
   }));
 
   // internos — fora do set() para não virar proxy
@@ -135,6 +173,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // Com base carregada a volta pede só a cauda; sem ela (primeira carga falhou, reset) recarrega tudo.
   let baseLoaded = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // Conexão aberta sem o evento `queue` no retrato (a sessão voltou ao Python): a lista antiga do servidor sai.
+  let queueAbsentTimer: ReturnType<typeof setTimeout> | undefined;
   let retryDelay = SSE_RETRY_MIN_MS;
   let alive = false;
   let refs = 0;
@@ -154,6 +194,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
+  let queueErrorTimer: ReturnType<typeof setTimeout> | undefined;
   const pluginToastsSeen = new Set<string>();
 
   function limparPreview(): void {
@@ -378,6 +419,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
     es = openEventStreamForServer(target, name, undefined, lastEventId);
     const source = es;
+    let queueSeen = false;
 
     // Prova de vida pro watchdog do adapter: SEM listener registrado o wrap do adapter
     // não roda rearmar() e o stream saudável morre aos 25s (mesmo padrão do sessions.ts).
@@ -510,6 +552,19 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       }
     });
 
+    // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
+    es.addEventListener('queue', (e) => {
+      queueSeen = true;
+      try {
+        const data = JSON.parse(e.data as string);
+        // Apagadas noutro aparelho: a bolha delas sai daqui também.
+        const events = dropQueuedBubbles(useChatStore.getState().events, queueRemovedBubbleIds(data));
+        useChatStore.setState({ queuePanel: parseQueuePanel(data), events });
+      } catch {
+        quadroFalhou('queue');
+      }
+    });
+
     es.addEventListener('stats', (e) => {
       try {
         useChatStore.setState({ stats: JSON.parse(e.data as string) as StatsEvent });
@@ -565,6 +620,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         askOpen: false,
         askPiId: null,
         askPiDismissed: null,
+        queuePanel: null,
+        queueEdit: null,
+        queueEditExit: null,
         loading: true,
       });
       void loadHistory();
@@ -574,6 +632,11 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es.onopen = () => {
       if (es !== source) return;
       retryDelay = SSE_RETRY_MIN_MS;
+      // O retrato chega logo depois de abrir: sem `queue` nele, o painel volta a sair das bolhas.
+      clearTimeout(queueAbsentTimer);
+      queueAbsentTimer = setTimeout(() => {
+        if (es === source && !queueSeen) useChatStore.setState({ queuePanel: null });
+      }, QUEUE_SNAPSHOT_MS);
     };
     // Fechar a fonte deixa apenas este backoff dono da repetição, sem polling em paralelo.
     es.onerror = (error) => {
@@ -595,8 +658,95 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     };
   }
 
+  // Aviso de falha da fila: some sozinho, como o aviso do PWA, sem ficar sobre uma fila que já mudou.
+  function showQueueError(message: string): void {
+    clearTimeout(queueErrorTimer);
+    useChatStore.setState({ queueError: message });
+    queueErrorTimer = setTimeout(() => useChatStore.setState({ queueError: null }), 6000);
+  }
+
+  // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
+  async function queueAction(run: (target: Server) => Promise<unknown>): Promise<boolean> {
+    const target = destino();
+    if (!target || useChatStore.getState().queueBusy) return false;
+    clearTimeout(queueErrorTimer);
+    useChatStore.setState({ queueBusy: true, queueError: null });
+    try {
+      await run(target);
+      return true;
+    } catch (err) {
+      showQueueError(formataErro(err) ?? (err instanceof Error ? err.message : String(err)));
+      return false;
+    } finally {
+      useChatStore.setState({ queueBusy: false });
+    }
+  }
+
+  // Toda saída da edição: o Composer põe `text` no campo, ou o rascunho guardado sem ele.
+  function dropQueueEdit(text?: string) {
+    useChatStore.setState({ queueEdit: null, queueEditExit: text ?? null });
+  }
+
+  // Tira da conversa as bolhas da fila dadas pelo id de bolha (`queued-<id>`); devolve a lista nova.
+  function dropQueuedBubbles(events: ChatEvent[], ids: Iterable<string>): ChatEvent[] {
+    const drop = new Set(ids);
+    if (!drop.size) return events;
+    const next = events.filter((e) => !drop.has(e.id));
+    rebuildIndex(next);
+    return next;
+  }
+
+  const queueEntries = () => {
+    const s = useChatStore.getState();
+    return currentQueuePanel(s.queuePanel, s.events).entries;
+  };
+
   return {
     use: useChatStore,
+    startQueueEdit(id: string, draft: string): string {
+      const entry = queueEntries().find((e) => e.id === id);
+      if (!entry) return draft;
+      const next = beginQueueEdit(entry, draft, useChatStore.getState().queueEdit);
+      useChatStore.setState({ queueEdit: next.edit, queueEditExit: null });
+      return next.composerText;
+    },
+    cancelQueueEdit() {
+      dropQueueEdit();
+    },
+    dropQueueEdit,
+    async submitQueueEdit(text: string): Promise<void> {
+      const edit = useChatStore.getState().queueEdit;
+      if (!edit || !canUpdateQueueEdit(text)) return;
+      // Texto igual ao da fila: só sai da edição, sem pedido.
+      const next = queueEditPayload(text, queueEntries().find((e) => e.id === edit.entryId)?.text);
+      if (next !== null && !(await queueAction(async (t) => {
+        try {
+          await editQueuedMessage(name, edit.entryId, next, t);
+        } catch (err) {
+          // Saiu da fila: a edição fecha já, com o aviso desta recusa; a saída pelo painel não avisa de novo.
+          if ((err as { code?: unknown })?.code === 'queue_entry_gone' && useChatStore.getState().queueEdit === edit) {
+            dropQueueEdit(queueEditExitText(edit, text));
+          }
+          throw err;
+        }
+      }))) return;
+      if (useChatStore.getState().queueEdit === edit) dropQueueEdit();
+    },
+    async removeQueued(id: string) {
+      const ok = await queueAction((t) => cancelQueuedMessage(name, id, t));
+      if (!ok) return;
+      // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
+      useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+    },
+    // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
+    async steerQueued(id: string) {
+      await queueAction((t) => steerQueuedMessage(name, id, t));
+    },
+    async moveQueued(id: string, delta: -1 | 1) {
+      const before = moveTarget(queueEntries(), id, delta);
+      if (before === undefined) return;
+      await queueAction((t) => reorderQueuedMessage(name, id, before, t));
+    },
     retain() {
       refs++;
       if (refs === 1) {
@@ -617,6 +767,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es?.close();
       es = null;
       clearTimeout(retryTimer);
+      clearTimeout(queueAbsentTimer);
       // Soltar a tela fecha leituras; POST, ecos e identidade continuam na origem.
     },
     loadOlder,

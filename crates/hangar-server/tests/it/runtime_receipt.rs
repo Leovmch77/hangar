@@ -60,6 +60,28 @@ fn merged_user_message_confirms_one_entry_per_text_block() {
 }
 
 #[test]
+fn merged_user_message_shows_every_block_and_absorbs_each_entry_in_history() {
+    use hangar_server::transcript::{merged_history, HistoryRequest, Provider, TAIL_WINDOW};
+    let dir = tempfile::tempdir().unwrap();
+    let (jsonl, queue) = (dir.path().join("chat.jsonl"), dir.path().join("fila.jsonl"));
+    // A conversa começa antes do envio: entrada anterior ao começo seria de outra conversa e sairia por isso.
+    let opening = json!({"type":"user","uuid":"u-0","timestamp":"2026-10-13T13:50:00.000Z","message":{"content":"inicio"}});
+    std::fs::write(&jsonl, format!("{opening}\n{}\n", merged_inputs_line("sid","2026-10-13T13:50:29.778Z"))).unwrap();
+    // Entregues e ainda sem a baixa do recibo: o /history as esconde pela linha que cada uma tem na mensagem juntada.
+    let sent = hangar_server::transcript::ts_of_iso("2026-10-13T13:50:20.000Z").unwrap();
+    let rows: String = MERGED_INPUTS.iter().enumerate()
+        .map(|(n,text)| format!("{}\n", json!({"id":format!("m{n}"),"text":text,"ts":sent + n as f64,"delivered":true})))
+        .collect();
+    std::fs::write(&queue, rows).unwrap();
+    let events = merged_history(&HistoryRequest { provider: Provider::Claude, jsonl, queue: Some(queue), limit: None, tail_window: TAIL_WINDOW }).unwrap();
+    let texts: Vec<(&str,&str)> = events.iter().map(|e|(e.id.as_str(),e.text.as_deref().unwrap_or(""))).collect();
+    let expected = MERGED_INPUTS.iter().map(|t|t.trim()).collect::<Vec<_>>().join("\n");
+    assert_eq!(texts, [("u-0", "inicio"), ("17729883-e589-4998-b1ee-45d3e73dcd56", expected.as_str())],
+        "uma mensagem com os três blocos e nenhuma bolha da fila");
+    assert_eq!(events[1].image_count, Some(3));
+}
+
+#[test]
 fn batched_peer_messages_confirm_one_entry_each() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");

@@ -2,6 +2,16 @@ use hangar_server::runtime::{actor::*,cano,protocol::*,queue::*};
 use serde_json::{Value,json};
 use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
 
+/// Lê a próxima linha do ator. Fechar com dado ainda não lido vira reset no macOS (e às vezes no
+/// Windows) em vez de fim de arquivo: para o servidor falso as duas coisas são o ator saindo.
+async fn next_line<R:tokio::io::AsyncBufRead+Unpin>(reader:&mut R,raw:&mut String) -> bool {
+    match reader.read_line(raw).await {
+        Ok(read) => read > 0,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => false,
+        Err(error) => panic!("leitura do ator falhou: {error}"),
+    }
+}
+
 async fn setup(reply_before_ack:bool) -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
     setup_behavior(reply_before_ack,false).await
 }
@@ -37,7 +47,7 @@ async fn setup_recovered(reply_before_ack:bool,blocked_rpc:bool,compound:bool,pr
         let mut sent = 0;
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let wire = envelope["operation_id"].as_str().unwrap();
             let state:State = serde_json::from_slice(&std::fs::read(&state_check).unwrap()).unwrap();
@@ -358,7 +368,7 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
         let mut sent = 0;
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap_or("{}")).unwrap_or_default();
             if frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" { boot_signal.notify_one(); } else { sent += 1; }
@@ -411,7 +421,7 @@ async fn turn_end_confirms_the_delivered_input_without_being_asked() {
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
@@ -468,7 +478,7 @@ async fn transcript_growth_confirms_the_input_before_the_turn_ends() {
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
@@ -537,7 +547,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
@@ -645,7 +655,7 @@ async fn local_command_result_confirms_the_slash_entry() {
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
@@ -758,7 +768,7 @@ async fn echo_from_the_cli_confirms_the_entry_without_the_transcript() {
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
@@ -883,7 +893,7 @@ async fn steer_line_in_the_transcript_confirms_without_waiting_for_the_turn_end(
         reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
@@ -927,7 +937,7 @@ async fn claude_cano(lines:Vec<Value>) -> (std::net::SocketAddr,tokio::task::Joi
         let mut sent = 0;
         loop {
             let mut raw = String::new();
-            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            if !next_line(&mut reader,&mut raw).await { break; }
             let envelope:Value = serde_json::from_str(&raw).unwrap();
             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();

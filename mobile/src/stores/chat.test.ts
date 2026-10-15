@@ -441,6 +441,132 @@ test('(f) filaCount conta só queued-* (o eco em voo não é fila) e zera quando
   vi.stubGlobal('fetch', origFetch as never);
 });
 
+test('evento queue alimenta o painel e o reset o limpa', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['a']);
+  created[0].trigger('reset', '{}');
+  expect(chat.use.getState().queuePanel).toBeNull();
+});
+
+test('a apagada noutro aparelho tira a bolha daqui', async () => {
+  historyResponses = [[ev({ id: 'queued-a', text: 'oi', queued_delivered: false }), ev({ id: 'queued-b', text: 'tchau', queued_delivered: false })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'b', text: 'tchau', ts: 2 }], actions: true, removed: ['a'] }));
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-b']);
+  expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['b']);
+});
+
+test('conexão aberta sem o evento queue volta o painel às bolhas', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+    created[0].trigger('open', '{}');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(chat.use.getState().queuePanel?.entries.map((e) => e.id)).toEqual(['a']);
+    // Reconectou e o retrato veio sem `queue` (a sessão voltou ao Python).
+    created[0].fail();
+    await vi.advanceTimersByTimeAsync(3_000);
+    created[1].trigger('open', '{}');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(chat.use.getState().queuePanel).toBeNull();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('editar guarda o rascunho uma vez e cancelar o devolve', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }, { id: 'b', text: 'tchau', ts: 2 }], actions: true }));
+  expect(chat.startQueueEdit('a', 'meu rascunho')).toBe('oi');
+  expect(chat.startQueueEdit('b', 'oi mudado')).toBe('tchau');
+  expect(chat.use.getState().queueEdit).toMatchObject({ entryId: 'b', savedDraft: 'meu rascunho' });
+  chat.cancelQueueEdit();
+  // Sem texto de saída, o Composer devolve o rascunho guardado.
+  expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
+});
+
+test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da edição e apagar tira a bolha', async () => {
+  historyResponses = [[ev({ id: 'queued-a', text: 'primeira', queued_delivered: false })]];
+  const chat = chatStore('srv2', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'primeira', ts: 1 }, { id: 'b', text: 'segunda', ts: 2 }], actions: true }));
+  const calls: { url: string; method?: string; body?: unknown }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method, body: init?.body ? JSON.parse(init.body as string) : undefined });
+    return new Response('{"ok":true,"steered":true}', { status: 200 });
+  }));
+
+  chat.startQueueEdit('a', 'rascunho');
+  await chat.submitQueueEdit(' primeira ');
+  expect(calls).toHaveLength(0);
+  expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
+
+  chat.startQueueEdit('a', 'rascunho');
+  await chat.submitQueueEdit('primeira mudada');
+  expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
+  await chat.moveQueued('a', 1);
+  await chat.moveQueued('a', -1); // já é a primeira: nada a pedir
+  await chat.steerQueued('b');
+  await chat.removeQueued('a');
+  expect(calls.map((c) => [c.method, c.url.replace('http://10.0.0.2:8765', ''), c.body])).toEqual([
+    ['PATCH', '/api/sessions/sess/queue/a', { text: 'primeira mudada' }],
+    ['POST', '/api/sessions/sess/queue/reorder', { id: 'a', before_id: null }],
+    ['POST', '/api/sessions/sess/queue/b/steer', undefined],
+    ['DELETE', '/api/sessions/sess/queue/a?only_waiting=true', undefined],
+  ]);
+  expect(chat.use.getState().events.some((e) => e.id === 'queued-a')).toBe(false);
+  expect(chat.use.getState().queueBusy).toBe(false);
+});
+
+test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(
+    JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'x' } }), { status: 409 })));
+  chat.startQueueEdit('a', '');
+  await chat.submitQueueEdit('oi de novo');
+  // Fechada aqui, o Composer não vê a saída pelo painel e não avisa de novo.
+  expect(chat.use.getState().queueEdit).toBeNull();
+  // Rascunho guardado vazio: o texto editado fica no campo, não some.
+  expect(chat.use.getState().queueEditExit).toBe('oi de novo');
+  expect(chat.use.getState().queueError).toBe(m.queue_entry_gone());
+  expect(chat.use.getState().queueBusy).toBe(false);
+  // Com rascunho guardado, é ele que volta.
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  chat.startQueueEdit('a', 'meu rascunho');
+  expect(chat.use.getState().queueEditExit).toBeNull();
+  await chat.submitQueueEdit('oi mudado');
+  expect(chat.use.getState().queueEditExit).toBe('meu rascunho');
+});
+
+test('filaCount só conta o Kimi: Claude e Codex usam o painel', () => {
+  const state = { events: [ev({ id: 'queued-1', text: 'oi', queued_delivered: false })], pending: [] };
+  expect(filaCount(state, 'kimi')).toBe(1);
+  expect(filaCount(state, 'claude')).toBe(0);
+  expect(filaCount(state, 'codex')).toBe(0);
+});
+
 test('onerror fecha e reconecta com backoff crescente', async () => {
   vi.useFakeTimers();
   const registrar = vi.fn();

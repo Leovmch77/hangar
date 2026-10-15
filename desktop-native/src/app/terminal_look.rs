@@ -87,25 +87,42 @@ pub(super) fn tool_body_control(
         .on_click(|_, _, cx| cx.stop_propagation()).into_any_element()
 }
 
-fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
+fn thinking_markdown(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView {
     let dim = theme::muted();
     let style = theme::conversation_markdown(cx).with_foreground(dim).with_muted_foreground(dim)
         .with_link(dim).with_list_marker_color(Some(dim))
         .with_inline_code(HighlightStyle { color: Some(dim), ..Default::default() });
-    div().flex().items_start().gap(px(8.)).pl(px(INDENT - 8.)).text_color(dim)
-        .child(div().flex_none().italic().child("∴"))
-        .child(div().flex_1().min_w_0().child(gpui_kit::base::TextView::new(view)
-            .selectable(true).scrollable(false).style(style)))
+    gpui_kit::base::TextView::new(view).selectable(true).scrollable(false).style(style)
+}
+
+/// Raciocínio terminado: o brain no lugar do `∴`, parado, centrado na primeira linha como o ponto do texto.
+fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
+    let dim = theme::muted();
+    div().flex().items_start().gap(px(chrome::THINKING_GAP)).pl(px(INDENT - 8.)).text_color(dim)
+        .child(div().flex_none().h(px(conversation_line(false))).flex().items_center()
+            .child(chrome::small_icon(IconName::Brain, chrome::THINKING_ICON, dim)))
+        .child(div().flex_1().min_w_0().child(thinking_markdown(view, cx)))
+}
+
+/// Raciocínio chegando na pele Terminal: "brain Pensando" com o brilho do T3 e, embaixo, o texto alinhado ao rótulo.
+fn terminal_live_thinking(view: &Entity<TextViewState>, focus: Option<AnyElement>, cx: &App) -> Div {
+    div().flex().flex_col().gap(px(4.))
+        .child(div().flex().pl(px(INDENT - 8.)).child(chrome::thinking_label_row(tr("thinking_live").into(), focus)))
+        .child(div().pl(px(INDENT - 8. + chrome::THINKING_ICON + chrome::THINKING_GAP)).text_color(theme::muted())
+            .child(thinking_markdown(view, cx)))
 }
 
 pub(super) fn live_thinking_content(
     look: appearance::ToolLook,
     view: &Entity<TextViewState>,
+    focus: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
-    if look == appearance::ToolLook::Terminal { return terminal_thinking_text(view, cx).into_any_element(); }
+    if look == appearance::ToolLook::Terminal { return terminal_live_thinking(view, focus, cx).into_any_element(); }
     div().flex().flex_col().gap_1().px_3().py_2()
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent()).child(tr("thinking_live")))
+        .child(div().flex().items_center().gap(px(6.)).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent())
+            .child(chrome::small_icon(IconName::Brain, 14., theme::accent()))
+            .child(tr("thinking_live")))
         .child(chat_text(view, cx).text_sm().text_color(theme::muted()))
         .into_any_element()
 }
@@ -119,11 +136,55 @@ pub(super) const WRITE_SHOWN: usize = 10;
 pub(super) const EDIT_SHOWN: usize = 40;
 pub(super) const INDENT: f32 = 22.;
 
-/// Edit, MultiEdit e o patch do Codex aparecem como "Update", que é o nome que o terminal usa.
+/// O ponto do Claude Code: 7 px, centrado numa linha de `line` px. A coluna tem a altura da linha para o ponto
+/// ficar na primeira, mesmo com o texto quebrando.
+pub(super) fn bullet(color: Hsla, line: f32) -> Div {
+    div().flex_none().w(px(7.)).h(px(line)).flex().items_center().child(div().size(px(7.)).rounded_full().bg(color))
+}
+
+/// Começo da linha dobrada: o ponto enquanto alguma chamada roda; terminada, só o espaço dele, como o Claude Code.
+pub(super) fn fold_lead(live: bool) -> Div {
+    if live { bullet(theme::accent(), 19.).debug_selector(|| "term-fold-dot".into()) }
+    else { div().flex_none().w(px(7.)).h(px(19.)) }
+}
+
+/// Recuo das linhas `⎿` da dobra: o ponto (7 px) e o vão (8 px) da linha de cima, para o `⎿` cair sob o título.
+pub(super) const FOLD_SUB_INDENT: f32 = 7. + 8.;
+
+/// Linha de cima da dobra: o ponto e o título num botão, que foca pelo teclado, ativa com Enter/Espaço e leva o rótulo,
+/// como o cabeçalho da chamada.
+pub(super) fn fold_header(id: SharedString, title: String, open: bool, live: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+    div().flex().gap(px(8.)).child(fold_lead(live))
+        .child(Button::new(id).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
+            .accessibility_label(title.clone())
+            .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
+            .on_click(on_click)).into_any_element()
+}
+
+/// Linha `⎿` da dobra recolhida: o que roda agora ou a saída de uma falha.
+pub(super) fn fold_sub(text: String, color: Hsla) -> AnyElement {
+    div().flex().gap(px(8.)).pl(px(FOLD_SUB_INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+        .child(div().flex_none().text_color(theme::faint()).child("⎿"))
+        .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element()
+}
+
+/// Texto do agente na pele Terminal: o ponto branco antes do primeiro parágrafo, como o "● texto" do Claude Code.
+pub(super) fn assistant_text_row(content: Div, line: f32) -> Div {
+    div().w_full().flex().items_start().gap(px(8.))
+        .child(bullet(theme::text(), line).debug_selector(|| "term-text-dot".into()))
+        .child(content.flex_1().min_w_0())
+}
+
+/// Edit, MultiEdit e o patch do Codex aparecem como "Update", e MCP como "servidor - ferramenta (MCP)": os nomes que
+/// o terminal usa.
 pub(super) fn display_name(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
         "edit" | "multiedit" | "notebookedit" | "apply_patch" => "Update".into(),
-        _ => conversation::tool_display_name(name),
+        _ => match mcp_tool(name) {
+            Some((server, tool)) => format!("{server} - {tool} (MCP)"),
+            None => conversation::tool_display_name(name),
+        },
     }
 }
 
@@ -348,20 +409,19 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
 
 pub(super) fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
 
-/// O servidor de um nome `mcp__<servidor>__<ferramenta>`, sem o prefixo `hangar-`, como o cartão mostra.
-fn mcp_server(name: &str) -> Option<&str> {
-    let mut parts = name.split("__");
-    (parts.next() == Some("mcp")).then_some(())?;
-    let server = parts.next()?;
-    parts.next()?;
-    Some(server.strip_prefix("hangar-").unwrap_or(server))
+/// O servidor de `mcp__<servidor>__<ferramenta>` como está no nome: é o que a lista publica.
+fn mcp_server_raw(name: &str) -> Option<&str> { conversation::mcp_parts(name).map(|(server, _)| server) }
+
+/// Servidor (sem o prefixo `hangar-`, como o cartão mostra) e ferramenta.
+fn mcp_tool(name: &str) -> Option<(&str, &str)> {
+    conversation::mcp_parts(name).map(|(server, tool)| (server.strip_prefix("hangar-").unwrap_or(server), tool))
 }
 
 pub(super) const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
 
 /// Tipo da chamada na linha dobrada, como o Claude Code conta; `None` não dobra (edição, gravação, agente e o carregador
 /// de ferramentas ficam sempre à vista).
-pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
+pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>, plugin_servers: &[String]) -> Option<FoldKind> {
     let name = name.unwrap_or_default();
     if is_any(name, &["read", "notebookread"]) { return Some(FoldKind::Read); }
     if is_any(name, &["grep", "glob", "find", "websearch", "webfetch"]) { return Some(FoldKind::Search); }
@@ -375,7 +435,9 @@ pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<Strin
         };
         return Some(kind);
     }
-    mcp_server(name).map(|_| FoldKind::Mcp)
+    // Servidor criado por plugin fica à vista, com o ponto, como no Claude Code; os outros somam na dobra.
+    let server = mcp_server_raw(name)?;
+    (!plugin_servers.iter().any(|s| s == server)).then_some(FoldKind::Mcp)
 }
 
 /// A linha dobrada, na ordem e no tempo verbal do Claude Code: "Buscou 1 padrão, leu 2 arquivos, rodou 3 comandos de
@@ -388,7 +450,7 @@ pub(super) fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind
         let call = &events[tool.call];
         match kind {
             FoldKind::Read => match editdiff::input_path(call.tool_input.as_ref()) { "" => pathless_reads += 1, path => { files.insert(path); } },
-            FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_server) { if !servers.contains(&server) { servers.push(server); } },
+            FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_tool).map(|(server, _)| server) { if !servers.contains(&server) { servers.push(server); } },
             _ => {}
         }
     }
@@ -454,7 +516,7 @@ impl Hangar {
         let toggle_key = key.clone();
         // Botão sem ícone: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo de acessibilidade, como o `disclosure`.
         let inner = |name: String| div().w_full().flex().items_start().justify_start().gap(px(8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-            .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(dot))
+            .child(bullet(dot, 19.))
             .child(div().min_w_0().flex().flex_wrap()
                 .child(div().font_weight(FontWeight::BOLD).text_color(theme::text()).child(name))
                 .child(div().min_w_0().text_color(theme::text()).child(format!("({arg})"))));
@@ -506,9 +568,10 @@ impl Hangar {
     /// escondida.
     pub(super) fn render_terminal_group(&mut self, row: &str, tools: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         // Uma classificação por chamada e por quadro: o parse do comando não se repete no laço nem no título.
+        let servers: &[String] = self.selected.as_ref().map_or(&[], |s| s.plugin_tool_servers.as_slice());
         let kinds: Vec<Option<FoldKind>> = tools.iter().map(|t| {
             let call = &self.chat.events[t.call];
-            fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref())
+            fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref(), servers)
         }).collect();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut i = 0;
@@ -522,25 +585,19 @@ impl Hangar {
             let live = folded.iter().rev().find(|t| t.result.is_none() && self.running(t.call)).copied();
             let title = fold_title(&self.chat.events, folded, &folded_kinds, live.is_some());
             let toggle_key = key.clone();
-            // Botão: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo, como o cabeçalho da chamada.
-            let mut block = vec![div().pl(px(INDENT - 8.)).child(Button::new(SharedString::from(key)).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
-                .accessibility_label(title.clone())
-                .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element()];
+            let mut block = vec![fold_header(SharedString::from(key), title, open, live.is_some(),
+                cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))];
             if !open {
                 // Recolhida, a linha mostra o que roda agora e a saída de cada falha, como o Claude Code.
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
-                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
                     let call = &self.chat.events[tool.call];
                     let summary = conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref());
                     // Comando em voo com o `$` na frente, como o Claude Code desenha.
                     let shell = call.tool_name.as_deref().is_some_and(|name| is_any(name, SHELL_TOOLS));
-                    block.push(sub(if shell { format!("$ {summary}") } else { summary }, theme::muted()));
+                    block.push(fold_sub(if shell { format!("$ {summary}") } else { summary }, theme::muted()));
                 }
                 for tool in folded.iter().filter(|t| t.result.is_some_and(|r| self.chat.events[r].is_error == Some(true))) {
-                    block.push(sub(self.tool_status(*tool).0, theme::danger()));
+                    block.push(fold_sub(self.tool_status(*tool).0, theme::danger()));
                 }
             }
             rows.push(div().flex().flex_col().children(block).into_any_element());
@@ -553,7 +610,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, fold_kind, fold_title, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
+    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, display_name, fold_kind, fold_title, header_arg, mcp_tool, shell_fold_kind, split_budget, visible_edits};
     use serde_json::json;
 
     #[test]
@@ -597,7 +654,7 @@ mod tests {
 
     #[test]
     fn fold_kind_counts_like_claude_code() {
-        let kind = |name: &str| fold_kind(Some(name), None);
+        let kind = |name: &str| fold_kind(Some(name), None, &[]);
         assert_eq!(kind("Read"), Some(FoldKind::Read));
         assert_eq!(kind("Grep"), Some(FoldKind::Search));
         assert_eq!(kind("mcp__hangar__send"), Some(FoldKind::Mcp));
@@ -608,7 +665,25 @@ mod tests {
         assert_eq!(kind("Write"), None);
         assert_eq!(kind("Agent"), None);
         let codex = json!({"cmd": ["rg", "-n", "x"]});
-        assert_eq!(fold_kind(Some("exec_command"), codex.as_object()), Some(FoldKind::Search));
+        assert_eq!(fold_kind(Some("exec_command"), codex.as_object(), &[]), Some(FoldKind::Search));
+    }
+
+    #[test]
+    fn plugin_mcp_servers_stay_out_of_the_fold() {
+        let plugin = ["pmedico".to_owned()];
+        assert_eq!(fold_kind(Some("mcp__pmedico__progresso"), None, &plugin), None);
+        assert_eq!(fold_kind(Some("mcp__ai-memory__memory_status"), None, &plugin), Some(FoldKind::Mcp));
+        // O conjunto tem o nome cru da ferramenta: o `hangar-` não é tirado na comparação.
+        assert_eq!(fold_kind(Some("mcp__hangar-computer-control__objetivo"), None, &["computer-control".to_owned()]), Some(FoldKind::Mcp));
+        assert_eq!(fold_kind(Some("mcp__hangar-computer-control__objetivo"), None, &["hangar-computer-control".to_owned()]), None);
+    }
+
+    #[test]
+    fn mcp_calls_get_the_claude_code_name() {
+        assert_eq!(display_name("mcp__pmedico__progresso"), "pmedico - progresso (MCP)");
+        assert_eq!(display_name("mcp__hangar-computer-control__objetivo"), "computer-control - objetivo (MCP)");
+        assert_eq!(display_name("Edit"), "Update");
+        assert_eq!(display_name("Bash"), "Bash");
     }
 
     #[test]
@@ -663,9 +738,9 @@ mod tests {
 
     #[test]
     fn mcp_server_drops_the_hangar_prefix_like_the_card() {
-        assert_eq!(mcp_server("mcp__hangar-computer-control__objetivo"), Some("computer-control"));
-        assert_eq!(mcp_server("mcp__pmedico__progresso"), Some("pmedico"));
-        assert_eq!(mcp_server("mcp__x"), None);
-        assert_eq!(mcp_server("Bash"), None);
+        assert_eq!(mcp_tool("mcp__hangar-computer-control__objetivo"), Some(("computer-control", "objetivo")));
+        assert_eq!(mcp_tool("mcp__pmedico__progresso__x"), Some(("pmedico", "progresso__x")));
+        assert_eq!(mcp_tool("mcp__x"), None);
+        assert_eq!(mcp_tool("Bash"), None);
     }
 }

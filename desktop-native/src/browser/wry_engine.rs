@@ -58,6 +58,9 @@ pub struct Starter {
     /// Confirmações de quadro da página da conversa, que voltam ao WebView2 na thread da interface.
     #[cfg(target_os = "windows")]
     executor: ForegroundExecutor,
+    /// Prazos da página da conversa (o reinício do screencast depois do zoom).
+    #[cfg(target_os = "windows")]
+    background: BackgroundExecutor,
 }
 
 impl HasWindowHandle for Starter {
@@ -77,6 +80,8 @@ impl Engine {
             parent: HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw(),
             #[cfg(target_os = "windows")]
             executor: cx.foreground_executor().clone(),
+            #[cfg(target_os = "windows")]
+            background: cx.background_executor().clone(),
         })
     }
 }
@@ -384,6 +389,8 @@ impl Engine {
             None => self.report(self.view.evaluate_script(expression)),
         }
     }
+    #[cfg(target_os = "windows")]
+    pub fn set_zoom(&self, zoom: f32) { if let Some(page) = &self.page { page.set_zoom(zoom); } }
     /// A tela desenhou o último quadro: o próximo já pode ser decodificado.
     #[cfg(target_os = "windows")]
     pub fn frame_seen(&self) { if let Some(page) = &self.page { page.frames.seen(); } }
@@ -403,6 +410,8 @@ impl Engine {
     pub fn key(&self, _down: bool, _keystroke: &Keystroke) {}
     #[cfg(not(target_os = "windows"))]
     pub fn insert_text(&self, _text: &str) {}
+    #[cfg(not(target_os = "windows"))]
+    pub fn set_zoom(&self, _zoom: f32) {}
     /// O WebView nasce sem foco no Windows: sem mover o foco aqui, o que se digita depois do Enter na barra não chega.
     #[cfg(target_os = "windows")]
     pub fn focus(&self, focused: bool) { if focused && self.page.is_none() { self.report(self.view.focus()); } }

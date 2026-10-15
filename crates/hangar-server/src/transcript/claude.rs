@@ -573,23 +573,48 @@ fn user_blocks(obj: &Map<String, Value>, uid: &str, items: &[Value]) -> Vec<Chat
             .collect();
     }
     let img_count = items.iter().filter_map(Value::as_object).filter(|it| is_type(it, "image")).count();
-    let t = first(items, "text").and_then(|b| b.get("text")).and_then(Value::as_str).unwrap_or("");
+    let texts: Vec<&str> = items
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|it| is_type(it, "text"))
+        .map(|b| b.get("text").and_then(Value::as_str).unwrap_or(""))
+        .collect();
+    let t = texts.first().copied().unwrap_or("");
     if is_command_meta(t) {
         return Vec::new();
     }
     if INTERRUPTED.is_match(strip(t)) {
         return vec![text_event(ChatKind::Notice, uid.into(), "interrupted".into())];
     }
-    let cleaned = strip_meta_blocks(t);
-    if IMAGE_SOURCE.is_match(&cleaned) {
-        return Vec::new();
+    // Entradas que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto por entrada.
+    // Todas aparecem, uma por linha: só a primeira sumia da conversa com as outras, que o modelo recebeu.
+    let mut parts = Vec::with_capacity(texts.len());
+    for (k, text) in texts.iter().enumerate() {
+        let cleaned = strip_meta_blocks(text);
+        // Bloco seguinte que, sem os `<system-reminder>`, é marcação do harness (comando, notificação,
+        // skill) não é texto digitado; o que sobra de texto depois do lembrete fica.
+        if k > 0 && is_command_meta(&cleaned) {
+            continue;
+        }
+        if IMAGE_SOURCE.is_match(&cleaned) {
+            if k == 0 {
+                return Vec::new();
+            }
+            continue;
+        }
+        let cleaned = strip(&IMAGE_MARKER.replace_all(&cleaned, "")).to_string();
+        if !cleaned.is_empty() {
+            parts.push(cleaned);
+        }
     }
-    let cleaned = strip(&IMAGE_MARKER.replace_all(&cleaned, "")).to_string();
+    let cleaned = parts.join("\n");
     if cleaned.is_empty() && img_count == 0 {
         return Vec::new();
     }
     vec![ChatEvent {
         image_count: (img_count > 0).then(|| img_count.try_into().ok()).flatten(),
+        // Entrada de várias linhas juntada a outra não é linha da mensagem: o `/history` casa pelo bloco.
+        commit_blocks: (parts.len() > 1).then_some(parts),
         ..text_event(ChatKind::UserMsg, uid.into(), cleaned)
     }]
 }
@@ -689,6 +714,40 @@ mod tests {
             .into_iter().map(|e| e.id).collect::<Vec<_>>();
         assert_eq!(ids(att), vec!["delivery:d-1".to_string()]);
         assert_eq!(ids(rem), vec!["delivery:d-1".to_string()]);
+    }
+
+    #[test]
+    fn merged_queued_inputs_show_every_text_block() {
+        // Duas entradas que chegaram durante o turno: a CLI grava um `user` só, um bloco por entrada.
+        let line = json!({"type": "user", "uuid": "u-merged", "timestamp": "2026-10-14T12:00:00.000Z",
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": "fila A editada\n"},
+                {"type": "text", "text": "<system-reminder>lembrete</system-reminder>"},
+                {"type": "text", "text": "fila C terceira"}]}});
+        let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(line.to_string().as_bytes(), 0))
+            .expect("um evento");
+        assert_eq!((&ev.kind, ev.text.as_deref()), (&ChatKind::UserMsg, Some("fila A editada\nfila C terceira")));
+        assert_eq!(ev.commit_blocks.as_deref(), Some(["fila A editada".to_string(), "fila C terceira".to_string()].as_slice()));
+        assert!(!serde_json::to_string(&ev).unwrap().contains("commit_blocks"));
+        // Bloco seguinte que é marcação do harness não entra na bolha.
+        let meta = json!({"type": "user", "uuid": "u-meta", "message": {"content": [
+            {"type": "text", "text": "pedido"},
+            {"type": "text", "text": "<task-notification><task-id>t-1</task-id></task-notification>"},
+            {"type": "text", "text": "Base directory for this skill: /s"},
+            {"type": "text", "text": "<system-reminder>x</system-reminder>\n<command-name>/y</command-name>"},
+            {"type": "text", "text": "<system-reminder>lembrete</system-reminder>\ndepois do lembrete"}]}});
+        let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(meta.to_string().as_bytes(), 0))
+            .expect("um evento");
+        assert_eq!(ev.text.as_deref(), Some("pedido\ndepois do lembrete"));
+        // A fonte da imagem num bloco seguinte não vira texto; a primeira continua tirando a linha da conversa.
+        let with_source = json!({"type": "user", "uuid": "u-img", "message": {"content": [
+            {"type": "text", "text": "[Image #1] veja"}, {"type": "image"}, {"type": "text", "text": "[Image: source: /tmp/a.png]"}]}});
+        let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(with_source.to_string().as_bytes(), 0))
+            .expect("um evento");
+        assert_eq!((ev.text.as_deref(), ev.image_count), (Some("veja"), Some(1)));
+        let source_first = json!({"type": "user", "uuid": "u-src", "message": {"content": [
+            {"type": "text", "text": "[Image: source: /tmp/a.png]"}, {"type": "text", "text": "outra"}]}});
+        assert!(LineParser::new(Provider::Claude).feed(source_first.to_string().as_bytes(), 0).is_empty());
     }
 
     #[test]

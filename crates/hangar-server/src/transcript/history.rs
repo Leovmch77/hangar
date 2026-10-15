@@ -167,7 +167,7 @@ fn ts_of_obj(obj: &Map<String, Value>) -> f64 {
 }
 
 /// `_transcript_start_ts` (pqueue.py:258) com o `or 0.0` de quem só poda.
-fn transcript_start_ts(path: &Path) -> f64 {
+pub(crate) fn transcript_start_ts(path: &Path) -> f64 {
     let Ok(f) = File::open(path) else { return 0.0 };
     let mut rd = BufReader::new(f);
     let mut raw = Vec::new();
@@ -268,7 +268,8 @@ fn absorb(p: &mut Parsed, ts: f64, i: u64, evs: Vec<ChatEvent>, held_ids: &mut H
         let ets = ev.ts.filter(|t| *t != 0.0).unwrap_or(ts);
         if matches!(ev.kind, ChatKind::UserMsg) {
             if let Some(text) = ev.text.as_deref().filter(|t| !t.is_empty()) {
-                for ln in chaves_de_commit(text) {
+                let blocks = ev.commit_blocks.iter().flatten().flat_map(|block| chaves_de_commit(block));
+                for ln in chaves_de_commit(text).into_iter().chain(blocks) {
                     if ets > p.committed.get(&ln).copied().unwrap_or(0.0) {
                         p.committed.insert(ln, ets);
                     }
@@ -396,7 +397,41 @@ fn merge_queue(path: &Path, p: &mut Parsed) -> io::Result<()> {
     Ok(())
 }
 
-fn stamp(path: &Path) -> Option<String> {
+/// O painel da fila: as entradas que esperam a vez no Hangar, na ordem da fila. A regra de esperar é a da fila
+/// (`row_waits`); o recorte de conversa é o do `/history` (texto vazio fora, de antes da conversa atual fora).
+/// `start_ts` é o `transcript_start_ts` da conversa.
+pub(crate) fn queue_panel_entries(queue: &Path, start_ts: f64) -> io::Result<QueuePanel> {
+    let rows = load_queue(queue)?;
+    let present = rows.iter().map(|entry| entry.get("id").map_or_else(|| "None".to_string(), py::py_str)).collect();
+    let entries = rows
+        .into_iter()
+        .filter(|entry| {
+            let ts = entry.get("ts").and_then(py::number).unwrap_or(0.0);
+            entry.get("text").and_then(Value::as_str).is_some_and(|text| !strip(text).is_empty())
+                && (start_ts == 0.0 || from_current_session(entry, start_ts, ts))
+        })
+        .map(Value::Object)
+        .filter(crate::runtime::queue::row_waits)
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.get("id").map_or_else(|| "None".to_string(), py::py_str),
+                "text": entry["text"],
+                "ts": entry.get("ts").and_then(py::number),
+            })
+        })
+        .collect();
+    Ok(QueuePanel { entries, present })
+}
+
+/// As entradas do painel e os ids que a projeção ainda tem, em qualquer estado: a que esperava e sumiu
+/// daqui foi apagada (a entregue continua como linha entregue), e os aparelhos retiram a bolha dela.
+pub(crate) struct QueuePanel {
+    pub entries: Vec<Value>,
+    pub present: std::collections::HashSet<String>,
+}
+
+/// Tamanho e mtime: muda a cada escrita do arquivo.
+pub(crate) fn stamp(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
     Some(format!("{}.{mtime}", meta.len()))
@@ -423,7 +458,53 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chaves_de_commit, merged_history, merged_history_capped, HistoryRequest, Provider, TAIL_WINDOW};
+    use super::{chaves_de_commit, merged_history, merged_history_capped, queue_panel_entries, transcript_start_ts, HistoryRequest, Provider, TAIL_WINDOW};
+
+    #[test]
+    fn queue_panel_lists_only_waiting_entries_of_the_current_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, jsonl) = (dir.path().join("q.jsonl"), dir.path().join("t.jsonl"));
+        std::fs::write(&jsonl, "{\"type\":\"user\",\"timestamp\":\"2026-10-14T12:00:00Z\",\"message\":{\"content\":\"oi\"}}\n").unwrap();
+        // O relógio da fila parte do próprio transcript: a conversa atual começa nele.
+        let start = transcript_start_ts(&jsonl);
+        assert_eq!(start, 1_791_979_200.0);
+        let rows = [
+            serde_json::json!({"id":"old","text":"antes do /clear","ts":start - 10.0,"delivered":false}),
+            serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0,"delivered":false}),
+            serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":false}),
+            serde_json::json!({"id":"sent","text":"entregue","ts":start + 3.0,"delivered":true}),
+            serde_json::json!({"id":"lost","text":"perdida","ts":start + 4.0,"delivered":false,"desistiu":true}),
+            serde_json::json!({"id":"ans","text":"resposta","ts":start + 5.0,"delivered":false,"reserved":true}),
+            serde_json::json!({"id":"local","text":"saída","ts":start + 6.0,"delivered":true,"confirmed":true,"papel":"assistant"}),
+            serde_json::json!({"id":"blank","text":"  ","ts":start + 7.0,"delivered":false}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let panel = queue_panel_entries(&queue, start).unwrap();
+        let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["b", "a"], "a ordem é a da fila, não a do relógio");
+        assert_eq!(panel.entries[0], serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0}));
+        assert!(panel.present.contains("sent") && panel.present.contains("old"), "a projeção conta toda linha, não só as do painel");
+    }
+
+    #[test]
+    fn queue_panel_leaves_out_local_output_even_when_it_looks_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, jsonl) = (dir.path().join("q.jsonl"), dir.path().join("t.jsonl"));
+        let rows = [
+            serde_json::json!({"id":"local","text":"saída do comando","ts":5.0,"delivered":false,"papel":"assistant"}),
+            serde_json::json!({"id":"a","text":"primeira","ts":6.0,"delivered":false}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let panel = queue_panel_entries(&queue, transcript_start_ts(&jsonl)).unwrap();
+        let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a"], "a saída local não é mensagem esperando");
+    }
+
+    #[test]
+    fn queue_panel_of_a_missing_queue_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), transcript_start_ts(&dir.path().join("t.jsonl"))).unwrap().entries.is_empty());
+    }
 
     #[test]
     fn capped_window_stops_before_reading_the_whole_transcript() {
@@ -442,6 +523,28 @@ mod tests {
         let texts = |evs: Vec<hangar_api::chat::ChatEvent>| evs.into_iter().filter_map(|e| e.text).collect::<Vec<_>>();
         assert_eq!(texts(merged_history(&req).unwrap()), ["antiga"]);
         assert!(texts(merged_history_capped(&req, TAIL_WINDOW).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn multi_line_entry_merged_with_another_is_absorbed_by_its_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jsonl, queue) = (dir.path().join("t.jsonl"), dir.path().join("q.jsonl"));
+        let lines = [
+            serde_json::json!({"type":"user","uuid":"u0","timestamp":"2026-01-01T00:00:00Z","message":{"content":"inicio"}}),
+            serde_json::json!({"type":"user","uuid":"u1","timestamp":"2026-01-01T00:01:40Z","message":{"content":[
+                {"type":"text","text":"linha um\nlinha dois"},{"type":"text","text":"outra entrada"}]}}),
+        ];
+        std::fs::write(&jsonl, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let commit = 1_767_225_700.0;
+        let rows = [
+            serde_json::json!({"id":"e1","text":"linha um\nlinha dois","ts":commit - 5.0,"delivered":true}),
+            serde_json::json!({"id":"e2","text":"outra entrada","ts":commit - 4.0,"delivered":true}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let req = HistoryRequest { provider: Provider::Claude, jsonl, queue: Some(queue), limit: None, tail_window: TAIL_WINDOW };
+        let got: Vec<(String, Option<String>)> = merged_history(&req).unwrap().into_iter().map(|e| (e.id, e.text)).collect();
+        assert_eq!(got, [("u0".to_string(), Some("inicio".to_string())),
+            ("u1".to_string(), Some("linha um\nlinha dois\noutra entrada".to_string()))], "nenhuma bolha da fila repetida");
     }
 
     #[test]

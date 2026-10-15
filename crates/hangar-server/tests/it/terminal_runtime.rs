@@ -7,8 +7,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>>, projection_at_facts:Mutex<Option<(std::path::PathBuf,Vec<String>)>> }
-impl Io { fn new()->Self { Self { projection_at_facts:Mutex::new(None),native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None) } } }
+struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>>, projection_at_facts:Mutex<Option<(std::path::PathBuf,Vec<String>)>>, send_now_hint:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { projection_at_facts:Mutex::new(None),native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None),send_now_hint:std::sync::atomic::AtomicBool::new(false) } } }
 impl Io {
     fn refresh_record(&self) {
         if let Some((path,pid,socket))=&*self.native_record.lock().unwrap() {
@@ -50,7 +50,9 @@ impl TerminalIo for Io {
                 // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
                 // `footer`: o foco no painel de agentes, abaixo do composer, que o Esc não devolve.
                 let footer=if self.footer.load(std::sync::atomic::Ordering::Acquire) {"  ↑/↓ to select\n\n❯ ● main\n  ◯ general-purpose  sleep\n"} else {""};
-                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n{footer}",if text.is_empty(){ghost}else{text}).into_bytes()},
+                // `send_now_hint`: a dica da fila interna do Claude Code, que o Orientar procura antes do ctrl+x ctrl+s.
+                let hint=if self.send_now_hint.load(std::sync::atomic::Ordering::Acquire) {"  ctrl+x ctrl+s to send now\n"} else {""};
+                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n{hint}{footer}",if text.is_empty(){ghost}else{text}).into_bytes()},
             // O `ctrl+x tab` da devolução do foco: com `ring_returns`, o foco volta ao prompt.
             "send-keys" if r.args.iter().any(|a|a=="C-x")=>{
                 self.ring_keys.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
@@ -84,7 +86,7 @@ fn plugin_instance()->String {
     let mut stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     let mut instance=String::new();while stamp>0 {instance.insert(0,char::from_digit((stamp%36) as u32,36).unwrap());stamp/=36;}instance.push_str("-fixture");instance
 }
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, fill_plugin:Arc<std::sync::atomic::AtomicBool>, repull_ms:Arc<AtomicU64>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>,status:StatusSender }
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, fill_plugin:Arc<std::sync::atomic::AtomicBool>, repull_ms:Arc<AtomicU64>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>,status:StatusSender, turn_start_ms:AtomicU64 }
 impl Fixture {
     async fn new()->Self {
         let dir=tempfile::tempdir().unwrap();let io=Arc::new(Io::new());let config=dir.path().join("config");
@@ -98,7 +100,7 @@ impl Fixture {
         let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false));let focus_plugin=Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (fill_plugin,repull_ms)=(Arc::new(std::sync::atomic::AtomicBool::new(false)),Arc::new(AtomicU64::new(0)));
         let plugin=Arc::new(hangar_server::plugin::Store::new(Arc::new(hangar_server::interactions::InteractionStore::default())));
-        Self {_dir:dir,target,policy:PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into()),io,idle,ready,generation,native,unknown,focus_plugin,fill_plugin,repull_ms,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),status:tokio::sync::watch::channel(TerminalStatus::default()).0}
+        Self {_dir:dir,target,policy:PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into()),io,idle,ready,generation,native,unknown,focus_plugin,fill_plugin,repull_ms,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),status:tokio::sync::watch::channel(TerminalStatus::default()).0,turn_start_ms:AtomicU64::new(0)}
     }
     fn owner(&self,receipt:bool) {
         let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&self.target);
@@ -149,16 +151,18 @@ impl Fixture {
         self.start_plugin();
         let lease=crate::lease_when_free(&self.target.lease_path);
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,status:Some(self.status.clone()),..TerminalOptions::default()};
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,status:Some(self.status.clone()),turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn start_give_up(&self,give_up_after:Duration)->hangar_server::runtime::terminal::TerminalHandle {
         self.start_plugin();
         let lease=crate::lease_when_free(&self.target.lease_path);
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,..TerminalOptions::default()};
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
     }
+    /// Espera do turno depois de uma entrega comum: zero por padrão, para os testes de duas mensagens seguidas.
+    fn turn_start_wait(&self)->Duration {Duration::from_millis(self.turn_start_ms.load(std::sync::atomic::Ordering::Acquire))}
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     fn state(&self)->Value {
         serde_json::from_slice(&queue::read_replaced(&self.target.state_path).unwrap_or_else(|error|panic!("estado ilegível: {error}"))).unwrap()
@@ -533,13 +537,140 @@ async fn terminal_runtime_idle_timer_drains_without_sse_and_claims_one() {
     let state=f.state(); assert_eq!(state["rows"].as_array().unwrap().len(),2); h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_queued_row_drains_while_claude_is_working() {
-    // A fila só espera a caixa de digitar voltar; o turno em andamento é do Claude Code enfileirar.
-    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
-    h.command(f.command("queued","Um")).await.unwrap();
-    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
-    f.ready.store(true,std::sync::atomic::Ordering::Release);
-    f.wait_for("sai com a sessão trabalhando",||f.state()["rows"][0]["delivered"]==true).await;
+async fn terminal_runtime_queued_row_waits_for_idle_then_drains_one_by_one() {
+    // Com o Claude trabalhando a mensagem fica no Hangar (painel); parado, sai uma por vez.
+    // A espera do turno é maior que o prazo do teste: B só sai porque o Claude apareceu ocupado e parou de novo.
+    let f=Fixture::new().await; f.turn_start_ms.store(60_000,std::sync::atomic::Ordering::Release);
+    f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    let reply=h.command(f.command("one","Um")).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("terminal_turn_hold")),"{}",reply.payload);
+    h.command(f.command("two","Dois")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"),"nada digitado durante o turno");
+    assert!(f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==false));
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("primeira sai parada",||f.state()["rows"][0]["delivered"]==true).await;
+    // O registro ainda diz parado (a prova chegou antes do `busy`): a segunda não cai no mesmo turno.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(f.state()["rows"][1]["delivered"],false,"a segunda esperou o turno da primeira");
+    assert_eq!(h.command(f.command("three","Três")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred,"o /input novo também espera");
+    // Ocupado até a drenagem ler de fato: cada leitura de fatos captura o pane, e o registro nativo é regravado
+    // com `busy` na primeira chamada depois da troca. Três capturas depois dela incluem uma leitura inteira já
+    // ocupada; o segundo mínimo cobre o runner lento, onde cada leitura leva décimos de segundo.
+    let captures=||f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="capture-pane").count();
+    let before=captures(); let busy_since=std::time::Instant::now();
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    f.wait_for("a drenagem leu a sessão ocupada",||captures()>=before+3 && busy_since.elapsed()>=Duration::from_secs(1)).await;
+    assert_eq!(f.state()["rows"][1]["delivered"],false);
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("segunda sai depois",||f.state()["rows"][1]["delivered"]==true).await;
+    assert_eq!(f.state()["rows"][2]["delivered"],false,"uma por vez");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_direct_input_right_after_a_delivery_waits_for_the_turn() {
+    // A entrega direta com o Claude parado abre um turno; o /input seguinte, antes de ele aparecer ocupado, espera.
+    let f=Fixture::new().await; f.turn_start_ms.store(60_000,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("first","Um")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let reply=h.command(f.command("second","Dois")).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("terminal_turn_hold")),"{}",reply.payload);
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_slash_command_is_refused_while_messages_wait() {
+    // Um `/clear` no meio do turno apagaria as mensagens seguradas (a troca de conversa esvazia a fila).
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap();
+    for (id,text) in [("clear","/clear"),("help","/help")] {
+        let reply=h.command(f.command(id,text)).await.unwrap();
+        assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("queue_waiting")),"{}",reply.payload);
+    }
+    assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"nada digitado");
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_null());
+    assert_eq!(f.state()["rows"].as_array().unwrap().iter().filter(|r|r["delivered"]==false).count(),1,"a mensagem segue esperando");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_native_message_is_not_held_by_the_turn() {
+    // Recado de outra sessão pelo socket nativo: é o canal do próprio Claude Code para o meio do turno.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.native.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    let reply=h.command(f.command("peer","[de: peer] Olá")).await.unwrap();
+    assert_ne!(reply.payload["code"],"terminal_turn_hold","{}",reply.payload);
+    assert_eq!(f.io.socket_calls.lock().unwrap().len(),1);
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_plain_text_is_held_even_with_the_native_socket() {
+    // O socket nativo só leva recado `[de: …]`; a fala da pessoa espera o turno como sempre.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.native.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    let reply=h.command(f.command("mine","Olá")).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("terminal_turn_hold")),"{}",reply.payload);
+    assert!(f.io.socket_calls.lock().unwrap().is_empty());
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_native_message_behind_held_rows_still_goes_mid_turn() {
+    // Recado que chegou atrás de uma fala segurada: a drenagem o leva pelo socket sem esperar o turno.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.native.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("mine","Olá")).await.unwrap();
+    h.command(f.command("peer","[de: peer] Oi")).await.unwrap();
+    f.wait_for("recado saiu pelo socket",||f.io.socket_calls.lock().unwrap().len()==1).await;
+    assert_eq!(f.state()["rows"].as_array().unwrap().iter().find(|r|r["id"]=="mine").unwrap()["delivered"],false,"a fala segue segurada");
+    assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"nada digitado durante o turno");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_entry_types_and_promotes_mid_turn() {
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap(); h.command(f.command("two","Dois")).await.unwrap();
+    f.io.send_now_hint.store(true,std::sync::atomic::Ordering::Release);
+    let reply=h.control("steer-two".into(),"steer_entry".into(),json!({"entry_id":"two"})).await.unwrap();
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{}",reply.payload);
+    assert_eq!(reply.payload["steered"],true);
+    let calls=f.io.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c|c.args.contains(&"-l".into()) && c.args.last().is_some_and(|t|t=="Dois")),"a escolhida foi digitada");
+    assert!(calls.iter().any(|c|c.args.last().is_some_and(|k|k=="C-s")),"ctrl+x ctrl+s promoveu");
+    assert_eq!(f.state()["rows"].as_array().unwrap().iter().find(|r|r["id"]=="one").unwrap()["delivered"],false,"a outra segue esperando");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_entry_when_idle_is_a_plain_delivery() {
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap();
+    // Parado, mas com a caixa ilegível: o tique não a leva antes do pedido, e o Orientar a deixa na frente.
+    f.ready.store(false,std::sync::atomic::Ordering::Release); f.idle.store(true,std::sync::atomic::Ordering::Release);
+    let reply=h.control("steer-one".into(),"steer_entry".into(),json!({"entry_id":"one"})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["steered"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!(false)));
+    assert!(f.io.calls.lock().unwrap().iter().all(|c|!c.args.last().is_some_and(|k|k=="C-s")),"parado não promove");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_without_body_steers_the_first_waiting_entry() {
+    // O chip de app antigo (`/steer` sem corpo) com mensagens esperando no Hangar: orienta a primeira.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap(); h.command(f.command("two","Dois")).await.unwrap();
+    f.io.send_now_hint.store(true,std::sync::atomic::Ordering::Release);
+    let reply=h.control("steer-old".into(),"steer_first".into(),json!({})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["entry_id"].clone(),reply.payload["steered"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Accepted,json!("one"),json!(true)),"{}",reply.payload);
+    let calls=f.io.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c|c.args.contains(&"-l".into()) && c.args.last().is_some_and(|t|t=="Um")),"a primeira foi digitada");
+    assert_eq!(f.state()["rows"].as_array().unwrap().iter().find(|r|r["id"]=="two").unwrap()["delivered"],false,"a outra segue esperando");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_without_body_and_empty_queue_promotes_as_before() {
+    let f=Fixture::new().await; let h=f.start();
+    let reply=h.control("steer-old".into(),"steer_first".into(),json!({})).await.unwrap();
+    assert!(reply.payload.get("entry_id").is_none(),"sem fila esperando, o caminho de antes: {}",reply.payload);
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_entry_of_a_gone_entry_is_refused_without_keys() {
+    let f=Fixture::new().await; let h=f.start();
+    let reply=h.control("steer-x".into(),"steer_entry".into(),json!({"entry_id":"nada"})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("queue_entry_gone")));
+    assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"));
     h.stop().await.unwrap();
 }
 #[tokio::test]
@@ -581,14 +712,6 @@ async fn terminal_runtime_first_prompt_missing_transcript_confirms_without_redel
     h.confirm().await.unwrap(); assert_eq!(f.state()["rows"][0]["confirmed"],true); h.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn terminal_runtime_working_allows_safe_tui_enqueue_without_hiding_pending_row() {
-    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
-    let reply=h.command(f.command("working","Olá")).await.unwrap();
-    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted);
-    assert_eq!(f.state()["rows"][0]["delivered"],true); assert_ne!(f.state()["rows"][0]["confirmed"],true);
-    h.stop().await.unwrap();
-}
 #[tokio::test]
 async fn terminal_runtime_explicit_steer_uses_driver_and_no_prompt_row() {
     let f=Fixture::new().await; let h=f.start();

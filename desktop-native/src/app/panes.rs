@@ -26,7 +26,7 @@ pub(super) struct Panes {
 /// O que se pinta num lugar: a marca animada (com o selo do provider por cima, quando a linha tem um) ou os segundos da
 /// linha "trabalhando".
 #[derive(Clone)]
-pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant, Option<SharedString>), Shimmer(SharedString) }
+pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant, Option<SharedString>), Shimmer(SharedString), ThinkingFocus(SharedString) }
 
 /// Um lugar vazio deixado por uma área guardada: posição, recorte dela e quando o lugar nasceu. A área que não repinta
 /// deixa os lugares do último desenho, que continuam certos; a que redesenha apaga os seus e grava os que aparecerem.
@@ -183,6 +183,12 @@ impl Hangar {
             .into_any_element()
     }
 
+    /// O lugar do brilho do "Pensando": a linha apagada fica na área, guardada e acessível; o brilho é pintado por
+    /// cima, fora da view guardada, para a batida não redesenhar a conversa.
+    pub(super) fn thinking_focus_slot(&self, area: Area, key: impl Into<SharedString>, label: SharedString) -> AnyElement {
+        mark_place(self.panes.marks.clone(), area, key.into(), Floating::ThinkingFocus(label)).into_any_element()
+    }
+
     /// O que anima nos lugares da área, desenhado fora da view guardada: a batida suja só isso e a raiz, que redesenha
     /// em todo quadro, e a área segue reusada do cache. Fica depois da área na árvore, para ler os lugares já gravados.
     pub(super) fn working_mark_float(&self, area: Area, fade: Duration, reduce_motion: bool) -> AnyElement {
@@ -250,8 +256,8 @@ impl Element for FloatingMark {
         // Cópia dos lugares: desenhar o filho não pode achar a lista emprestada.
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
-            // O brilho não entra com fade: o texto parado some da área no mesmo quadro.
-            let t = if self.reduce_motion || matches!(place.draw, Floating::Shimmer(_)) { 1. }
+            // Os brilhos não entram com fade: o texto parado já está na linha.
+            let t = if self.reduce_motion || matches!(place.draw, Floating::Shimmer(_) | Floating::ThinkingFocus(_)) { 1. }
                 else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
             // Só a marca entra com o fade: o selo já estava na linha antes de ela começar a trabalhar.
             let (inner, badge) = match place.draw {
@@ -261,6 +267,7 @@ impl Element for FloatingMark {
                 ),
                 Floating::Elapsed(since, suffix) => (super::chrome::Elapsed::new(place.key.clone(), since).suffix(suffix).into_any_element(), None),
                 Floating::Shimmer(text) => (super::chrome::Shimmer::new(place.key.clone(), text).into_any_element(), None),
+                Floating::ThinkingFocus(label) => (super::chrome::ThinkingFocus::new(place.key.clone(), label).into_any_element(), None),
             };
             let mut child = div().size_full().relative().child(div().size_full().opacity(t).child(inner)).children(badge)
                 .into_any_element();

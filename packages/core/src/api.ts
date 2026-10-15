@@ -1832,10 +1832,32 @@ export async function searchTranscriptsForServer(s: Server, q: string): Promise<
 // Tira da fila durável uma entrada que o backend desistiu de entregar (a bolha "não chegou").
 // `entryId` é o id CRU da fila — a bolha do chat é `queued-<id>`.
 export async function descartarDaFila(name: string, entryId: string, server?: Server | null): Promise<void> {
-  await sessionFetch<{ ok: boolean }>(server,
-    `/api/sessions/${encodeURIComponent(name)}/queue/${encodeURIComponent(entryId)}`,
-    { method: 'DELETE' },
-  );
+  await sessionFetch<{ ok: boolean }>(server, queuePath(name, entryId), { method: 'DELETE' });
+}
+
+function queuePath(name: string, entryId: string): string {
+  return `/api/sessions/${encodeURIComponent(name)}/queue/${encodeURIComponent(entryId)}`;
+}
+
+/** Troca o texto de uma mensagem que espera na fila. 409 `queue_entry_gone` se ela já saiu. */
+export async function editQueuedMessage(name: string, entryId: string, text: string, server?: Server | null): Promise<void> {
+  await sessionFetch<{ ok: boolean }>(server, queuePath(name, entryId), { method: 'PATCH', body: JSON.stringify({ text }) });
+}
+
+/** O X do painel: tira só a que espera; entrega incerta não é desistida por aqui. */
+export async function cancelQueuedMessage(name: string, entryId: string, server?: Server | null): Promise<void> {
+  await sessionFetch<{ ok: boolean }>(server, `${queuePath(name, entryId)}?only_waiting=true`, { method: 'DELETE' });
+}
+
+/** "Orientar": manda esta mensagem agora, no turno em curso; sem turno, entrega na hora (`steered: false`). */
+export async function steerQueuedMessage(name: string, entryId: string, server?: Server | null): Promise<{ ok: boolean; steered: boolean }> {
+  return sessionFetch<{ ok: boolean; steered: boolean }>(server, `${queuePath(name, entryId)}/steer`, { method: 'POST' });
+}
+
+/** Põe `entryId` antes de `beforeId` (`null`: no fim da fila). */
+export async function reorderQueuedMessage(name: string, entryId: string, beforeId: string | null, server?: Server | null): Promise<void> {
+  await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/queue/reorder`,
+    { method: 'POST', body: JSON.stringify({ id: entryId, before_id: beforeId }) });
 }
 
 export async function sendInput(name: string, text: string, server?: Server | null): Promise<void> {

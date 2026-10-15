@@ -1601,7 +1601,7 @@ fn user_mode(facts: &InputFacts, text: &str, stashed: bool) -> bool {
 /// entrega nativa (socket), que não passam pelo teclado. Antes do rascunho ser lido: com um rascunho
 /// guardado o modo vira `Fill`, e a entrega nativa que não escreve cai na digitação.
 pub fn presses_keys(facts: &InputFacts, text: &str) -> bool {
-    if facts.native.is_some() && recognized_message(text).is_some() { return false; }
+    if native_message(facts, text) { return false; }
     let slash = text.trim_start().starts_with('/');
     !(facts.plugin_live && !slash && user_mode(facts, text, false))
 }
@@ -1613,6 +1613,8 @@ pub(crate) fn message_prefix(text: &str) -> Option<(&str, &str)> {
     if sender.is_empty() { return None; }
     Some((sender, body.trim_start()))
 }
+/// Recado de outra sessão com o socket nativo do agente: vai pelo canal do próprio Claude Code, não pelo teclado.
+pub fn native_message(facts: &InputFacts, text: &str) -> bool { facts.native.is_some() && recognized_message(text).is_some() }
 fn recognized_message(text: &str) -> Option<&str> { message_prefix(text).map(|(_, body)| body) }
 /// Nem menu nem diálogo, e o composer não se lê: espera que não é do Claude, é da leitura.
 pub(crate) fn composer_unreadable(screen: &str) -> bool {

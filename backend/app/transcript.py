@@ -632,20 +632,35 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
                 return out
             # Imagens coladas no terminal: contar os blocos `image` -> o front busca cada uma lazy.
             img_count = sum(1 for it in content if isinstance(it, dict) and it.get("type") == "image")
-            txt = _first(content, "text")
-            t = txt.get("text", "") if txt is not None else ""
+            textos = [it.get("text", "") for it in content if isinstance(it, dict) and it.get("type") == "text"]
+            t = textos[0] if textos else ""
             if _is_command_meta(t):
                 return []
             if _INTERRUPCAO_RE.match(t.strip()):
                 return [ChatEvent(kind="notice", id=uid, text="interrupted")]
-            cleaned = _strip_meta_blocks(t)
-            if _IMAGE_SOURCE_RE.match(cleaned):
-                return []
-            cleaned = _IMAGE_MARKER_RE.sub("", cleaned).strip()   # tira "[Image #N]" da legenda
+            # Entradas que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto
+            # por entrada. Todas aparecem, uma por linha (espelha `user_blocks` do hangar-server).
+            partes = []
+            for k, bloco in enumerate(textos):
+                limpo = _strip_meta_blocks(bloco)
+                # Bloco seguinte que, sem os <system-reminder>, é marcação do harness (comando,
+                # notificação, skill) não é texto digitado; o que sobra depois do lembrete fica.
+                if k and _is_command_meta(limpo):
+                    continue
+                if _IMAGE_SOURCE_RE.match(limpo):
+                    if k == 0:
+                        return []
+                    continue
+                limpo = _IMAGE_MARKER_RE.sub("", limpo).strip()   # tira "[Image #N]" da legenda
+                if limpo:
+                    partes.append(limpo)
+            cleaned = "\n".join(partes)
             if not cleaned and not img_count:
                 return []
+            # Entrada de várias linhas juntada a outra não é linha da mensagem: o /history casa pelo bloco.
             return [ChatEvent(kind="user_msg", id=uid, text=cleaned,
-                              image_count=img_count or None)]
+                              image_count=img_count or None,
+                              commit_blocks=partes if len(partes) > 1 else None)]
         return []
 
     # A transferência pro Codex importa resposta em texto puro; o histórico precisa mostrá-la igual.

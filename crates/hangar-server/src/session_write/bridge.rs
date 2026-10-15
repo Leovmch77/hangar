@@ -1,6 +1,6 @@
 //! Pontes privadas do Rust para o que entra pelo Python (convidado 8766, Connect 8768, broadcast, grupo,
 //! par, MCP): a do Codex (com e sem terminal), que também recebe o `DELETE` que ele administra, e a das
-//! respostas de pergunta do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
+//! respostas de pergunta e do painel da fila do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
 //! como a do dono, com o corpo intacto, e o que o Rust não atende volta como 421, para o Python tratar
 //! sozinho (nunca outro repasse ao Rust).
 use std::net::SocketAddr;
@@ -38,13 +38,15 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 }
 
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit` e
-/// `permission-mode`, e `GET` em `permission-modes`, de sessão Claude com entrada no Rust, pela mesma rota
-/// do dono. Outra rota, método ou sessão: 421.
+/// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
+/// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
+/// mesma rota do dono. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
-    let allowed = match *req.method() {
+    let queue = control::queue_route(req.method(), &rest);
+    let allowed = queue.is_some() || match *req.method() {
         Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
         Method::GET => rest == "permission-modes",
         _ => false,
@@ -53,6 +55,7 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+    if let Some(route) = queue { return control::queue_dispatch(route, st, peer, req).await; }
     let (s, c) = (State(st), ConnectInfo(peer));
     match rest.as_str() {
         "answer" => answer::answer(s, c, req).await,
@@ -161,6 +164,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 /// As rotas que o Rust atende para o Codex dele; outra cai no Python (421).
 async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str, req: Request) -> Response {
     use super::{answer, codex, control, input, relaunch};
+    if let Some(route) = control::queue_route(req.method(), rest) { return control::queue_dispatch(route, st, peer, req).await; }
     let (s, c) = (State(st), ConnectInfo(peer));
     match (method, rest) {
         ("POST", "input") => input::input(s, c, req).await,
@@ -171,7 +175,6 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "answer") => answer::answer(s, c, req).await,
         ("POST", "keys") => control::keys(s, c, req).await,
         ("POST", "term-input") => control::term_input(s, c, req).await,
-        ("DELETE", queue) if queue.starts_with("queue/") => control::queue_remove(s, c, req).await,
         ("GET", "models") => codex::models(s, c, req).await,
         ("POST", "model") => codex::model(s, c, req).await,
         ("POST", "service-tier") => codex::service_tier(s, c, req).await,

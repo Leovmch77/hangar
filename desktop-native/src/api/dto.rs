@@ -107,6 +107,9 @@ pub struct SessionInfo {
     pub worktree_gone: bool,
     /// Raiz do repositório onde o agente trabalha quando saiu do da pasta de abertura; `None` = o cwd.
     pub git_cwd: Option<String>,
+    /// Servidores MCP criados por plugin (`$.tool.register`); a pele Terminal deixa as chamadas deles fora da dobra.
+    #[serde(default)]
+    pub plugin_tool_servers: Vec<String>,
     /// Membros do grupo de trabalho além dela; `srv::nome` é par de outro servidor.
     pub pair_peers: Option<Vec<String>>,
     /// Id estável do grupo: a lista junta num bloco quem tem o mesmo.
@@ -620,6 +623,14 @@ pub struct Steered {
 mod tests {
     use super::{ChatEvent, ChatEventExt, OrqEntry, OrqLine, OrqPanel, SessionInfo, SessionState, plan_pending};
     use serde_json::json;
+
+    #[test]
+    fn session_info_without_plugin_servers_reads_empty() {
+        let old: SessionInfo = serde_json::from_value(serde_json::json!({"name": "s"})).unwrap();
+        assert!(old.plugin_tool_servers.is_empty());
+        let new: SessionInfo = serde_json::from_value(serde_json::json!({"name": "s", "plugin_tool_servers": ["pmedico"]})).unwrap();
+        assert_eq!(new.plugin_tool_servers, vec!["pmedico".to_owned()]);
+    }
 
     #[test]
     fn session_reads_worktree_location() {

@@ -109,4 +109,8 @@ pub struct ChatEvent {
     /// Byte logo após a linha do transcript: vira o `id:` do SSE e nunca vai no JSON (`exclude=True`).
     #[serde(skip)]
     pub offset: Option<u64>,
+    /// Só em `user_msg` do Claude com vários blocos de texto: o texto de cada bloco, que vira chave de
+    /// commit do `/history` além das linhas. Nunca vai no JSON (`exclude=True` no Python).
+    #[serde(skip)]
+    pub commit_blocks: Option<Vec<String>>,
 }

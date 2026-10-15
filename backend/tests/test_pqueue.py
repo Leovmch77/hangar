@@ -119,6 +119,26 @@ def test_merged_history_dedup_is_ts_aware(tmp_path):
     assert "queued-e2" in ids          # posterior ao commit -> ainda pendente, nao some
 
 
+def test_merged_history_absorve_cada_bloco_da_mensagem_juntada(tmp_path):
+    # A CLI juntou duas entradas num `user` só, um bloco por entrada; a primeira tem várias linhas e
+    # não é linha da mensagem juntada. Cada uma é absorvida pelo próprio bloco, sem bolha repetida.
+    import json
+    j = tmp_path / "t.jsonl"
+    j.write_text(json.dumps({"type": "user", "uuid": "u0", "timestamp": "2026-01-01T00:00:00Z",
+                             "message": {"role": "user", "content": "inicio"}}) + "\n" +
+                 json.dumps({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T00:01:40Z",
+                             "message": {"role": "user", "content": [
+                                 {"type": "text", "text": "linha um\nlinha dois"},
+                                 {"type": "text", "text": "outra entrada"}]}}) + "\n", encoding="utf-8")
+    tc = pqueue._ts_of_line(j.read_text(encoding="utf-8").splitlines()[1])
+    PromptQueue("s").path.write_text(
+        json.dumps({"id": "e1", "text": "linha um\nlinha dois", "ts": tc - 5, "delivered": True}) + "\n" +
+        json.dumps({"id": "e2", "text": "outra entrada", "ts": tc - 4, "delivered": True}) + "\n",
+        encoding="utf-8")
+    hist = pqueue.merged_history("s", str(j))
+    assert [(e.id, e.text) for e in hist] == [("u0", "inicio"), ("u1", "linha um\nlinha dois\noutra entrada")]
+
+
 def test_merged_history_junta_as_tentativas_do_mesmo_prompt_barrado(tmp_path):
     # Hook quebrado + 3 reenvios = 3 entradas system com o MESMO id "held:". Id repetido na lista
     # quebra o {#each} do front; fica a 1a tentativa, que e onde a bolha nasce.

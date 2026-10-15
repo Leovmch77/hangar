@@ -4,7 +4,7 @@ pub mod route;
 pub mod sse;
 
 use std::time::Duration;
-use reqwest::{Client, Response, StatusCode, header};
+use reqwest::{Client, Method, Response, StatusCode, header};
 use serde_json::{Value, json};
 use url::Url;
 use dto::{ChatEvent, CommandInfo, Delivery, PairResult, SessionInfo, UploadFile, Uploaded};
@@ -130,6 +130,14 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
+            // Comando de barra recusado: com mensagens esperando no painel, a frase própria (o motivo cru não explica
+            // nada); os outros motivos vão dentro da frase compartilhada, como no web.
+            if fields.get("code").and_then(Value::as_str) == Some("erro_comando_nao_executado") {
+                let param = |name: &str| fields.get("params").and_then(|p| p.get(name)).and_then(Value::as_str).unwrap_or("").to_owned();
+                if param("motivo") == "queue_waiting" { return Some(crate::i18n::tr_shared("command_refused_queue_waiting", &[])); }
+                let params = std::collections::HashMap::from([("comando".to_owned(), param("comando")), ("motivo".to_owned(), param("motivo"))]);
+                if let Some(message) = crate::i18n::tr_web("erro_comando_nao_executado", &params) { return Some(message); }
             }
             // Pergunta sem identidade, trocada ou ilegível: a frase do web no idioma do app, não o `msg` do servidor.
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("claude_") || code.starts_with("erro_interacao_")) {
@@ -415,9 +423,16 @@ impl Api {
 
     // Mutação sem retry: timeout ou queda depois de enviar vira incerteza, nunca repetição.
     pub async fn act(&self, name: &str, path: &[&str], body: Option<Value>, delete: bool, seconds: u64) -> Result<Value, Failure> {
+        self.request(name, if delete { Method::DELETE } else { Method::POST }, path, None, body, seconds).await
+    }
+
+    /// Pedido na rota da sessão com método e consulta próprios; o `act` é o caso `POST`/`DELETE` sem consulta.
+    pub async fn request(&self, name: &str, method: Method, path: &[&str], query: Option<(&str, &str)>, body: Option<Value>, seconds: u64)
+        -> Result<Value, Failure> {
         let mut url = self.endpoint(Some(name), None);
         url.path_segments_mut().expect("validated HTTP base").extend(path);
-        let mut req = if delete { self.client.delete(url) } else { self.client.post(url) };
+        if let Some((key, value)) = query { url.query_pairs_mut().append_pair(key, value); }
+        let mut req = self.client.request(method, url);
         if let Some(body) = body { req = req.json(&body); }
         let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
@@ -894,6 +909,16 @@ mod tests {
     }
 
     #[test]
+    fn slash_command_refused_with_queued_messages_has_its_own_sentence() {
+        let waiting = failure_detail(Some(json!({"detail": {"code": "erro_comando_nao_executado", "msg": "pt cru",
+            "params": {"comando": "/clear", "motivo": "queue_waiting"}}})), 400);
+        assert_eq!(waiting, crate::i18n::tr_shared("command_refused_queue_waiting", &[]));
+        let other = failure_detail(Some(json!({"detail": {"code": "erro_comando_nao_executado", "msg": "pt cru",
+            "params": {"comando": "/help", "motivo": "keyboard_loan"}}})), 400);
+        assert!(other.contains("/help") && other.contains("keyboard_loan") && !other.contains("{comando}"), "{other}");
+    }
+
+    #[test]
     fn subagent_message_refusals_translate_by_code_with_the_reason() {
         for code in ["erro_subagente_mensagem_sem_terminal", "erro_subagente_mensagem_sem_plugin", "erro_subagente_inexistente",
             "erro_subagente_mensagem_sem_resposta"] {
@@ -1137,5 +1162,49 @@ mod tests {
             server.await.unwrap();
             assert_eq!(result, response, "a falha da organização conserva o cru e sua causa");
         }
+    }
+
+    #[tokio::test]
+    async fn queue_panel_actions_send_method_path_and_body_of_the_owner_routes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    head.push_str(&line);
+                    if line == "\r\n" { break; }
+                }
+                assert!(head.to_ascii_lowercase().contains("authorization: bearer fixture-token\r\n"));
+                let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                let line = head.lines().next().unwrap().to_owned();
+                let body = (!body.is_empty()).then(|| serde_json::from_slice::<Value>(&body).unwrap());
+                seen.push((line.split_whitespace().take(2).collect::<Vec<_>>().join(" "), body));
+                let reply = r#"{"ok":true,"steered":true}"#;
+                stream.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        let api = Api::new(&format!("http://{address}"), "fixture-token").unwrap();
+        use crate::interaction::Action;
+        for action in [Action::QueueEdit("e 1".into(), "novo".into()), Action::QueueCancel("e 1".into()), Action::QueueSteer("e 1".into()),
+            Action::QueueReorder("e 1".into(), None)] {
+            let reply = api.request("a b", action.method(), &action.path(), action.query(), action.queue_body(), action.seconds()).await.unwrap();
+            assert_eq!(reply["steered"], true);
+        }
+        assert_eq!(server.await.unwrap(), vec![
+            ("PATCH /api/sessions/a%20b/queue/e%201".to_owned(), Some(json!({"text": "novo"}))),
+            ("DELETE /api/sessions/a%20b/queue/e%201?only_waiting=true".to_owned(), None),
+            ("POST /api/sessions/a%20b/queue/e%201/steer".to_owned(), None),
+            ("POST /api/sessions/a%20b/queue/reorder".to_owned(), Some(json!({"id": "e 1", "before_id": null}))),
+        ]);
     }
 }

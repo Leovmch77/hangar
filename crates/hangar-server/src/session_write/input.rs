@@ -89,7 +89,9 @@ pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent,
             // Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
             let motivo = payload_code(reply).unwrap_or("deferred");
             let comando = p.text.split_whitespace().next().unwrap_or_default();
-            let msg = format!("{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.");
+            // Mensagens esperando no Hangar: o comando não passa à frente delas (nem as apaga num `/clear`).
+            let msg = if motivo == "queue_waiting" { format!("{comando} não foi executado: há mensagens na fila. Oriente ou apague antes de mandar o comando.") }
+                else { format!("{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.") };
             let refused = Sent::Refused { code: "erro_comando_nao_executado", msg, params: json!({"comando": comando, "motivo": motivo}) };
             (refused, Some(("runtime.command_deferred", diary_code(motivo))))
         }
@@ -162,6 +164,23 @@ pub fn steer_terminal_control(control: &Result<RuntimeReply, RuntimeError>) -> R
         Disposition::Deferred => Err(control_failed(MSG_CONTROL_DEFERRED)),
         _ => Err(control_failed(MSG_CONTROL_UNCONFIRMED)),
     }
+}
+
+/// `/steer` sem corpo que orientou uma entrada do Hangar (`steer_first` com `entry_id`): a resposta é a do
+/// Orientar, mais os campos que o chip de app antigo lê. Nunca `promoted: true`: o app antigo tiraria todas as
+/// bolhas da fila. `confirmed` conta a que saiu agora (orientada ou entregue com o Claude parado); `None` é o
+/// caminho de antes, sem entrada esperando.
+pub fn steer_first_answer(control: &Result<RuntimeReply, RuntimeError>) -> Option<(StatusCode, Value)> {
+    let entry = control.as_ref().ok()?.payload.get("entry_id")?.clone();
+    let (status, mut body) = super::control::queue_steer_terminal(control);
+    if status == StatusCode::OK {
+        let payload = &control.as_ref().ok()?.payload;
+        let sent = payload["steered"] == true || payload["drained"].as_u64().is_some_and(|n| n > 0);
+        body["promoted"] = json!(false);
+        body["confirmed"] = json!(u64::from(sent));
+        body["queued_ids"] = json!([entry]);
+    }
+    Some((status, body))
 }
 
 /// 2ª metade: a contagem de entregas que o `confirm` baixou da fila.
@@ -410,11 +429,15 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
         crate::runtime::gateway::EntryHandle::Terminal { handle, .. } => {
-            // Só o Kimi promove com texto; no Claude com terminal o corpo é ignorado e promove a fila.
-            let control = handle.control(operation_id, "steer".into(), json!({})).await;
-            match steer_terminal_control(&control) {
-                Err(refused) => refused,
-                Ok(promoted) => steer_terminal_done(promoted, &handle.confirm().await),
+            // Só o Kimi promove com texto; no Claude com terminal o corpo é ignorado. Com mensagem esperando no
+            // Hangar, ela é orientada (a primeira); sem nenhuma, promove a fila do Claude Code.
+            let control = handle.control(operation_id, "steer_first".into(), json!({})).await;
+            match steer_first_answer(&control) {
+                Some(answered) => answered,
+                None => match steer_terminal_control(&control) {
+                    Err(refused) => refused,
+                    Ok(promoted) => steer_terminal_done(promoted, &handle.confirm().await),
+                },
             }
         }
         headless => {

@@ -1,6 +1,6 @@
 //! Página da conversa no Windows: uma WebView2 própria, estacionada fora da área da janela, que o app pinta pelo
 //! screencast (`paint_surface`) e dirige por CDP, como o Chromium sem janela do Linux.
-use std::{cell::Cell, future::Future, rc::Rc, sync::Arc};
+use std::{cell::Cell, future::Future, rc::Rc, sync::Arc, time::Duration};
 
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -16,10 +16,20 @@ pub(super) struct Page {
     pub(super) cdp: Rc<Cdp>,
     pub(super) frames: Arc<Frames>,
     placed: Cell<Option<(Size<Pixels>, f32)>>,
-    visible: Cell<bool>,
+    visible: Rc<Cell<bool>>,
     pressed: Cell<bool>,
+    zoom: Cell<f32>,
+    /// O zoom mudou e o próximo `place` agenda o reinício do screencast depois de assentar.
+    zoomed: Cell<bool>,
+    /// Contagem das colocações: o reinício agendado desiste se outra (clique da série ou resize) veio depois.
+    zoom_turn: Rc<Cell<u64>>,
+    executor: ForegroundExecutor,
+    background: BackgroundExecutor,
     _acks: Task<()>,
 }
+
+/// Espera depois do último clique de zoom antes de reiniciar o screencast.
+const ZOOM_SETTLE_MS: u64 = 120;
 
 impl Starter {
     /// Documento do agente posto direto na página. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
@@ -101,7 +111,8 @@ impl Starter {
                 cdp.fire("Page.screencastFrameAck", json!({"sessionId": id}));
             }
         });
-        let page = Page { cdp, frames, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false), _acks: acks };
+        let page = Page { cdp, frames, placed: Cell::new(None), visible: Rc::default(), pressed: Cell::new(false), zoom: Cell::new(1.),
+            zoomed: Cell::new(false), zoom_turn: Rc::default(), executor: self.executor.clone(), background: self.background.clone(), _acks: acks };
         Ok(Engine {
             view, _context: context, state: Rc::default(), events, placed: Cell::new(None), asleep: Cell::new(false), dead,
             _watch: None, page: Some(page),
@@ -123,7 +134,8 @@ impl Page {
             self.placed.set(Some((bounds.size, scale)));
             // A densidade emulada pelo CDP não chega ao screencast da WebView2: quem desenha no dobro é a escala de
             // rasterização dela, com a janela no tamanho físico correspondente (a página continua vendo w×h de CSS).
-            rasterize(view, frame_scale);
+            // Zoom da tela cheia: a WebView2 rasteriza mais denso no mesmo tamanho físico, e a página vê `w/zoom` de CSS.
+            rasterize(view, frame_scale * self.zoom.get());
             let (pw, ph) = ((w * frame_scale).round().max(1.) as u32, (h * frame_scale).round().max(1.) as u32);
             if let Err(e) = view.set_bounds(Rect {
                 // Toda à esquerda da área do pai, que recorta a janela filha.
@@ -132,13 +144,39 @@ impl Page {
             }) { eprintln!("[pagina] tamanho da WebView2 nao aplicado: {e}"); }
             // Reiniciar sem parar o anterior a WebView2 recusa ("The parameter is incorrect").
             if !first { self.cdp.fire("Page.stopScreencast", json!({})); }
-            self.cdp.fire("Page.startScreencast", json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1}));
+            let screencast = json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1});
+            self.cdp.fire("Page.startScreencast", screencast.clone());
+            // Toda colocação nova avança a contagem: um reinício ainda esperando voltaria com o tamanho antigo.
+            let turn = self.zoom_turn.get() + 1;
+            self.zoom_turn.set(turn);
+            if self.zoomed.replace(false) {
+                // Página parada: o quadro do reinício pode sair antes da rasterização nova, e nenhum outro chega sozinho.
+                // Reiniciar depois de assentar manda o do zoom final.
+                let (cdp, turns, visible) = (self.cdp.clone(), self.zoom_turn.clone(), self.visible.clone());
+                let timer = self.background.timer(Duration::from_millis(ZOOM_SETTLE_MS));
+                self.executor.spawn(async move {
+                    timer.await;
+                    if turns.get() == turn && visible.get() {
+                        cdp.fire("Page.stopScreencast", json!({}));
+                        cdp.fire("Page.startScreencast", screencast);
+                    }
+                }).detach();
+            }
         }
         self.frames.seen();
         if let Some(texture) = self.frames.shown() {
             let bounds = pixel_aligned(bounds, (texture.width(), texture.height()), scale, frame_scale);
             window.paint_surface(bounds, texture);
         }
+    }
+
+    /// Zoom da página em tela cheia: o próximo `place` refaz a escala e o screencast. Quem chama pede o quadro novo
+    /// (`cx.notify`), senão o `place` só vem na próxima pintura.
+    pub(super) fn set_zoom(&self, zoom: f32) {
+        let zoom = crate::browser::valid_zoom(zoom);
+        if self.zoom.replace(zoom) == zoom { return; }
+        self.placed.set(None);
+        self.zoomed.set(true);
     }
 
     /// Fora da tela: sem screencast e sem a textura na GPU.
@@ -149,6 +187,7 @@ impl Page {
 
     /// O `clickCount` da soltura repete o do aperto: sem ele o Chromium não dispara `dblclick`.
     pub(super) fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        let at = crate::browser::unzoom(at, self.zoom.get());
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
         let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
         let left = name == "left";
@@ -168,6 +207,7 @@ impl Page {
 
     /// `delta.y > 0` avança a página; quem chama já inverteu o sinal da GPUI.
     pub(super) fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
+        let (at, delta) = (crate::browser::unzoom(at, self.zoom.get()), crate::browser::unzoom(delta, self.zoom.get()));
         self.cdp.fire("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
             "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),

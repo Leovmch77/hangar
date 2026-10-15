@@ -26,6 +26,8 @@ pub struct Chat {
     index: HashMap<String, usize>,
     /// Quantos eventos do começo não mudaram desde o último `take_unsynced`.
     unsynced: usize,
+    /// Última lista do evento `queue`; sem ele, o painel nasce das bolhas da fila.
+    pub queue_server: Option<crate::queue_panel::QueuePanel>,
 }
 
 impl Chat {
@@ -231,9 +233,25 @@ impl Chat {
     /// Porta de `queuedMessages` (core): no Codex e sem terminal a fila é do processo, entregue não espera mais.
     pub fn waiting(&self, provider: &str, headless: bool) -> usize {
         let process = provider == "codex" || headless;
-        self.events.iter().filter(|e| e.kind == "user_msg" && e.queued() && e.desistiu != Some(true)
-            && e.queued_consumed != Some(true) && !(process && e.queued_delivered == Some(true))).count()
+        self.events.iter().filter(|e| crate::queue_panel::waits_in_queue(e, process)).count()
     }
+
+    /// O evento `queue` do servidor. Quem entrou ou saiu do painel muda de altura na conversa: remede a partir dela.
+    pub fn set_queue_panel(&mut self, panel: Option<crate::queue_panel::QueuePanel>) {
+        let ids = |chat: &Self| chat.queue_panel().entries.iter().map(|e| e.id.clone()).collect::<HashSet<String>>();
+        let before = ids(self);
+        self.queue_server = panel;
+        let after = ids(self);
+        if let Some(i) = before.symmetric_difference(&after).filter_map(|id| self.position(&format!("queued-{id}"))).min() {
+            self.changed_at(i);
+        }
+    }
+
+    pub fn queue_panel(&self) -> std::borrow::Cow<'_, crate::queue_panel::QueuePanel> {
+        crate::queue_panel::current(self.queue_server.as_ref(), &self.events)
+    }
+
+    pub fn queue_len(&self) -> usize { crate::queue_panel::len(self.queue_server.as_ref(), &self.events) }
 
     pub fn retire(&mut self, id: &str) {
         self.removed.insert(id.to_owned());
@@ -684,5 +702,23 @@ mod tests {
         assert!(!chat.update_live_tool(tool.clone()));
         chat.apply(ChatEvent { kind: "tool_result".into(), id: "r".into(), tool_use_id: Some("x".into()), ..Default::default() });
         assert!(chat.update_live_tool(tool));
+    }
+
+    #[test]
+    fn queue_event_replaces_the_derived_panel_and_remeasures_from_the_bubble_it_hides() {
+        let mut chat = Chat::default();
+        chat.apply(event("assistant_msg", "x", "oi"));
+        chat.apply(event("user_msg", "queued-a", "um"));
+        assert!(chat.queue_panel().entries.is_empty());
+        chat.take_unsynced();
+        let entry = crate::queue_panel::QueueEntry { id: "a".into(), text: "um".into(), ts: None };
+        chat.set_queue_panel(Some(crate::queue_panel::QueuePanel { entries: vec![entry], actions: true }));
+        assert_eq!(chat.take_unsynced(), 1);
+        assert!(chat.queue_panel().actions);
+        chat.set_queue_panel(Some(crate::queue_panel::QueuePanel::default()));
+        assert_eq!(chat.take_unsynced(), 1);
+        // Lista igual não remede nada.
+        chat.set_queue_panel(Some(crate::queue_panel::QueuePanel::default()));
+        assert_eq!(chat.take_unsynced(), 2);
     }
 }

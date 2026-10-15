@@ -61,6 +61,8 @@ export interface SessionInfo {
   worktree_gone?: boolean;
   /** Raiz do repositório onde o agente trabalha quando saiu do da pasta de abertura; o git da sessão é lido ali. */
   git_cwd?: string | null;
+  /** Servidores MCP criados por plugin (`$.tool.register`); a pele 'terminal' deixa as chamadas deles fora da dobra. */
+  plugin_tool_servers?: string[] | null;
   // Linhas adicionadas/removidas no working tree vs HEAD (git diff --numstat, staged+unstaged;
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;

@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { frameHeight, htmlPageFromResult, isHtmlRenderTool, pageFetchState, reservedHeight } from './htmlPage';
+import {
+  frameHeight, htmlPageFromResult, isHtmlRenderTool, pageExpandable, pageFetchState, pageZoomKey, pageZoomLabel,
+  parseHostMessage, reservedHeight, stepPageZoom, themedPageDocument, wheelZoom, PAGE_ZOOM_MAX, PAGE_ZOOM_MIN,
+} from './htmlPage';
 
 const ref = { id: 'a1', title: 'T', height: null, heights: { '360': 500, '728': 380, '1000': 360 }, ownTheme: false };
 
 describe('htmlPage', () => {
+  it('troca só o bloco de tema e preserva a base', () => {
+    const doc = '<html><head><style id="hangar-theme" data-base=":root{--radius:10px}">velho</style></head></html>';
+    const out = themedPageDocument(doc, 'light', { '--foreground': '#111' });
+    expect(out).toContain(':root{color-scheme:light;--foreground:#111}:root{--radius:10px}');
+    expect(out).not.toContain('velho');
+  });
+
   it('reconhece a tool do hangar e só ela', () => {
     expect(isHtmlRenderTool('mcp__hangar__html_render')).toBe(true);
     for (const n of ['hangar__html_render', 'hangar.html_render', 'hangar/html_render', 'mcp__hangar.html_render']) {
@@ -82,5 +92,63 @@ describe('htmlPage', () => {
     expect(pageFetchState(404, 'Not Found')).toBe('error');
     expect(pageFetchState(500)).toBe('error');
     expect(pageFetchState('network')).toBe('error');
+  });
+});
+
+describe('tela cheia da página', () => {
+  it('anda em degraus de 25% entre 50% e 200%', () => {
+    expect(stepPageZoom(1, 'in')).toBe(1.25);
+    expect(stepPageZoom(1, 'out')).toBe(0.75);
+    expect(stepPageZoom(PAGE_ZOOM_MAX, 'in')).toBe(PAGE_ZOOM_MAX);
+    expect(stepPageZoom(PAGE_ZOOM_MIN, 'out')).toBe(PAGE_ZOOM_MIN);
+    expect(stepPageZoom(1.75, 'reset')).toBe(1);
+    // Sem erro acumulado: 4 subidas a partir de 1 dão 2 exato.
+    let z = 1;
+    for (let i = 0; i < 4; i++) z = stepPageZoom(z, 'in');
+    expect(z).toBe(2);
+  });
+
+  it('rótulo da porcentagem', () => {
+    expect(pageZoomLabel(1)).toBe('100%');
+    expect(pageZoomLabel(1.25)).toBe('125%');
+    expect(pageZoomLabel(0.5)).toBe('50%');
+  });
+
+  it('só Ctrl ou Cmd, sem Alt, viram zoom', () => {
+    const k = (key: string, ctrlKey = true, metaKey = false, altKey = false) => pageZoomKey({ key, ctrlKey, metaKey, altKey });
+    expect(k('=')).toBe('in');
+    expect(k('+')).toBe('in');
+    expect(k('-')).toBe('out');
+    expect(k('0')).toBe('reset');
+    expect(k('=', false, true)).toBe('in');
+    expect(k('=', false)).toBeNull();
+    expect(k('=', true, false, true)).toBeNull();
+    expect(k('a')).toBeNull();
+  });
+
+  it('roda acumula até um degrau, para cima amplia', () => {
+    expect(wheelZoom(0, -10)).toEqual({ action: null, pending: -10 });
+    expect(wheelZoom(-45, -10)).toEqual({ action: 'in', pending: 0 });
+    expect(wheelZoom(0, 120)).toEqual({ action: 'out', pending: 0 });
+    expect(wheelZoom(30, -30)).toEqual({ action: null, pending: 0 });
+  });
+
+  it('botão só com a página à vista e nunca para o site', () => {
+    expect(pageExpandable(ref, 'ready')).toBe(true);
+    for (const s of ['loading', 'error', 'expired'] as const) expect(pageExpandable(ref, s)).toBe(false);
+    expect(pageExpandable({ ...ref, url: 'https://a.dev' }, 'ready')).toBe(false);
+  });
+
+  it('mensagem da página: só altura finita positiva e link http(s)', () => {
+    const size = (h: unknown) => ({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: h } });
+    expect(parseHostMessage(size(320))).toEqual({ kind: 'height', height: 320 });
+    expect(parseHostMessage(JSON.stringify(size(320)))).toEqual({ kind: 'height', height: 320 });
+    expect(parseHostMessage(size(-1))).toBeNull();
+    expect(parseHostMessage(size('x'))).toBeNull();
+    const link = (url: unknown) => ({ method: 'ui/open-link', params: { url } });
+    expect(parseHostMessage(link('https://a.dev/x'))).toEqual({ kind: 'link', url: 'https://a.dev/x' });
+    expect(parseHostMessage(link('javascript:alert(1)'))).toBeNull();
+    expect(parseHostMessage('not json')).toBeNull();
+    expect(parseHostMessage(null)).toBeNull();
   });
 });

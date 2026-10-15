@@ -425,16 +425,34 @@ impl FileTail {
     }
 }
 
-/// Inscrição que sai junto com a tarefa: o abort derruba o future e roda o Drop.
-struct Subscription {
+/// Inscrição de um arquivo no observador da pasta, que sai junto com quem a guarda: no leitor, o abort
+/// derruba o future e roda o Drop.
+pub(crate) struct Subscription {
     watchers: Watchers,
-    path: PathBuf,
-    wake: Arc<Notify>,
+    pub(crate) path: PathBuf,
+    pub(crate) wake: Arc<Notify>,
+    armed: bool,
+}
+
+impl Subscription {
+    pub(crate) fn new(watchers: Watchers, path: PathBuf, wake: Arc<Notify>) -> Self {
+        Subscription { watchers, path, wake, armed: false }
+    }
+
+    /// Pasta que ainda não existe não arma; cada volta tenta de novo. Diz se está armada.
+    pub(crate) fn arm(&mut self) -> bool {
+        if !self.armed {
+            self.armed = self.watchers.subscribe(&self.path, &self.wake);
+        }
+        self.armed
+    }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        self.watchers.unsubscribe(&self.path, &self.wake);
+        if self.armed {
+            self.watchers.unsubscribe(&self.path, &self.wake);
+        }
     }
 }
 
@@ -445,17 +463,14 @@ async fn run(
     watchers: Watchers,
     on_dead: OnDead,
 ) {
-    let sub = Subscription { watchers, path, wake: Arc::new(Notify::new()) };
-    let mut watching = false;
+    let mut sub = Subscription::new(watchers, path, Arc::new(Notify::new()));
     let mut misses = 0u32;
     loop {
+        let watching = sub.arm();
         if !watching {
-            watching = sub.watchers.subscribe(&sub.path, &sub.wake);
-            if !watching {
-                misses += 1;
-                if misses == DIR_WARN_AFTER {
-                    tracing::warn!(path = %sub.path.display(), "pasta do transcript ausente ou sem observador; segue relendo a cada segundo");
-                }
+            misses += 1;
+            if misses == DIR_WARN_AFTER {
+                tracing::warn!(path = %sub.path.display(), "pasta do transcript ausente ou sem observador; segue relendo a cada segundo");
             }
         }
         let st = state.clone();
