@@ -356,6 +356,45 @@ describe('ações e atualização da conversa na rota', () => {
     act(() => root.unmount());
   });
 
+  it.each(['cancelar', 'Parar'])('%s não devolve ao campo pendente entregue antes do ACK da interrupção', async (action) => {
+    let finish!: () => void;
+    vi.mocked(interrupt).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const alert = vi.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const { container, root } = await render(createElement(ChatScreen));
+    try {
+      const chat = chatStore('s1', 'sess');
+      const pending = [{ id: 'pending-a', text: 'anterior' }, { id: 'pending-b', text: 'já entregue' }];
+      act(() => chat.use.setState({ pending, stateEvent: action === 'cancelar' ? {
+        session: 'sess', state: 'awaiting_input', question: 'permission', options: ['Yes', 'No'], interaction_id: 'perm:1',
+      } : { session: 'sess', state: 'working' } }));
+      if (action === 'cancelar') {
+        act(() => button(container, '✕comum_cancelar')!.click());
+      } else {
+        act(() => button(container, 'composer_parar')!.click());
+        const choices = alert.mock.calls[0][2] as { style?: string; onPress?: () => void }[];
+        act(() => choices.find((choice) => choice.style === 'destructive')!.onPress!());
+      }
+      expect(interrupt).toHaveBeenCalledExactlyOnceWith('sess', true, useServers.getState().servers[0]);
+      // Parar exige campo vazio; a edição ocorre enquanto a interrupção aguarda resposta.
+      const field = container.querySelector('textarea')!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'digitado');
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(field.value).toBe('digitado');
+      expect(chat.use.getState().pending).toEqual(pending);
+      // A entrega pelo SSE retira só a última mensagem, antes da confirmação do interrupt.
+      act(() => chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== pending[1].id) })));
+      expect(chat.use.getState().pending).toEqual([pending[0]]);
+      await act(async () => finish());
+      expect(field.value).toBe('digitado');
+      expect(chat.use.getState().pending).toEqual([pending[0]]);
+    } finally {
+      act(() => root.unmount());
+      alert.mockRestore();
+    }
+  });
+
   it.each(['recarregar', 'codex', 'claude'])('%s usa o servidor da rota e conserva o destino na reversão', async (action) => {
     chatRow.extra = { provider: action === 'codex' ? 'codex' : 'claude' };
     const { container, root } = await render(createElement(ChatScreen));

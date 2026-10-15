@@ -34,7 +34,7 @@ export function SideQuestionSheet({ open, serverId, name, question, onClose }: {
   const ask = async (raw: string) => {
     const q = raw.trim();
     if (!q) return;
-    if (!server) { setError(m.servidor_nao_existe()); setText(q); return; }
+    if (!server) { setError(m.chat_servidor_removido()); setText(q); return; }
     if (inFlightRef.current) {
       setError(m.btw_em_andamento());
       setText(q);
@@ -67,7 +67,7 @@ export function SideQuestionSheet({ open, serverId, name, question, onClose }: {
     setInFlight(null);
     setError('');
     setItems(null);
-    if (!server) { setItems([]); setError(m.servidor_nao_existe()); return; }
+    if (!server) { setItems([]); setError(m.chat_servidor_removido()); return; }
     historicoLateral(name, server)
       .then((h) => { if (my === epoch.current) setItems(h); })
       .catch((e) => {

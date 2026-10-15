@@ -41,7 +41,7 @@ export function useEffortControl({ serverId, name, provider, chosen, onChosen, c
 
   const load = useCallback(async () => {
     if (hidden) return;
-    if (!server) { setItems([]); setError(m.servidor_nao_existe()); return; }
+    if (!server) { setItems([]); setError(m.chat_servidor_removido()); return; }
     setLoading(true);
     setError(null);
     setNotice(null);
@@ -77,7 +77,7 @@ export function useEffortControl({ serverId, name, provider, chosen, onChosen, c
   const select = useCallback(
     async (level: string) => {
       if (applying) return;
-      if (!server) { setNotice(m.servidor_nao_existe()); return; }
+      if (!server) { setNotice(m.chat_servidor_removido()); return; }
       setApplying(true);
       setNotice(null);
       const mark = (lv: string) => setItems((cur) => cur.map((it) => ({ ...it, selected: it.label === lv })));
