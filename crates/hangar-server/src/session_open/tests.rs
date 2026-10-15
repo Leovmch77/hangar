@@ -401,6 +401,34 @@ fn inherit_false_resolves_like_no_creator() {
     assert_eq!(opted_out.permission_mode, Some(PermissionMode::BypassPermissions));
 }
 
+/// D-001 para o Codex: o modo da criadora vale também numa sessão Codex, com e sem terminal, e a
+/// nova nunca é mais permissiva que ela.
+#[test]
+fn a_codex_session_inherits_the_creator_mode_never_more_permissive() {
+    let (_, base) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_headless_creator").unwrap();
+    let sidecar = "<ROOT>/home/.hangar/claude-headless/mae.json";
+    let table = [("acceptEdits", "Approve for me"), ("auto", "Ask for approval"), ("bypassPermissions", "Full Access"),
+        ("manual", "Ask for approval"), ("dontAsk", "Ask for approval"), ("plan", "Ask for approval"), ("default", "Ask for approval")];
+    for (claude, codex) in table {
+        for headless in [false, true] {
+            let mut fixture = base.clone();
+            fixture["scenario"]["state"]["files"][sidecar]["permission_mode"] = json!(claude);
+            // `plan` no sidecar volta ao modo de antes dele; aqui, ele também é `plan`.
+            fixture["scenario"]["state"]["files"][sidecar]["previous_non_plan"] = json!(claude);
+            fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
+            fixture["scenario"]["steps"][0]["json"]["headless"] = json!(headless);
+            let resolved = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("{claude}: {e}"));
+            assert_eq!(resolved.spec.permission_mode.map(PermissionMode::name), Some(codex), "{claude} headless={headless}");
+            assert!(resolved.warnings.is_empty(), "{claude}: {:?}", resolved.warnings);
+        }
+    }
+    // Codex para Codex, pelo nome.
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_codex_creator").unwrap();
+    fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
+    fixture["scenario"]["steps"][0]["json"]["headless"] = json!(false);
+    assert_eq!(resolve_fixture(&fixture).unwrap().spec.permission_mode, Some(PermissionMode::ApproveForMe));
+}
+
 /// D-001 para o Codex: a criadora Codex passa a conta Codex dela.
 #[test]
 fn a_codex_creator_passes_its_codex_account_to_a_codex_session() {

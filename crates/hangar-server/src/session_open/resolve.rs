@@ -122,6 +122,8 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
     let mut codex_account = request.codex_account.clone();
     let mut headless = request.headless;
     let mut permission = request.permission_mode.clone();
+    // Fora do `permission`: o pedido explícito num Codex com terminal continua recusado, o herdado não.
+    let mut inherited_codex_mode = None;
     let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
 
     // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta.
@@ -153,6 +155,14 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
                     match creator_mode(&info) {
                         Some(mode) => permission = Some(mode.name().to_owned()),
                         None => warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta")),
+                    }
+                }
+                if permission.is_none() && provider == AgentProvider::Codex
+                    && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
+                {
+                    inherited_codex_mode = creator_codex_mode(&info);
+                    if inherited_codex_mode.is_none() {
+                        warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta"));
                     }
                 }
             }
@@ -190,7 +200,8 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
             None => account_mode(config_dir.as_deref(), facts)?,
         }),
         // O lançador do Codex sem modo abre em Full Access (`sem_terminal.MODO_PADRAO`).
-        AgentProvider::Codex => Some(permission.as_deref().and_then(PermissionMode::codex).unwrap_or(PermissionMode::FullAccess)),
+        AgentProvider::Codex => Some(permission.as_deref().and_then(PermissionMode::codex).or(inherited_codex_mode)
+            .unwrap_or(PermissionMode::FullAccess)),
         _ => None,
     };
     let cwd = facts.existing_dir(&request.cwd).unwrap_or_else(|| request.cwd.clone());
@@ -239,6 +250,22 @@ fn creator_mode(info: &CreatorFacts) -> Option<PermissionMode> {
         });
     }
     PermissionMode::claude(if raw == "default" { "manual" } else { raw }).filter(|m| *m != PermissionMode::Plan)
+}
+
+/// Modo da criadora numa sessão Codex: a nova nunca é mais permissiva que ela. Codex para Codex pelo
+/// nome; do Claude, o inverso do `_codex_as_claude_mode` (bypass → Full Access, acceptEdits →
+/// Approve for me, manual → Ask for approval), e os modos sem imagem no Codex (auto, dontAsk, plan)
+/// vão para Ask for approval, o mais restrito.
+fn creator_codex_mode(info: &CreatorFacts) -> Option<PermissionMode> {
+    let raw = info.permission_mode.as_deref()?;
+    if info.provider == AgentProvider::Codex {
+        return PermissionMode::CODEX.into_iter().find(|m| m.name() == raw);
+    }
+    Some(match PermissionMode::claude(if raw == "default" { "manual" } else { raw })? {
+        PermissionMode::BypassPermissions => PermissionMode::FullAccess,
+        PermissionMode::AcceptEdits => PermissionMode::ApproveForMe,
+        _ => PermissionMode::AskForApproval,
+    })
 }
 
 /// `modo_da_conta`: `default` vira `manual`; ausente ou desconhecido, o padrão do app (bypass).
