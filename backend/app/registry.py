@@ -1025,6 +1025,11 @@ def _rename_pair_python(old: str, new: str) -> None:
         rename_pair(old, new)
 
 
+class SessionOpenNeedsRust(Exception):
+    """Claude com terminal nasce no Rust (abertura única); sem ele, abrir não tem quem faça."""
+    code = "session_open_needs_rust_server"
+
+
 class GroupCleanupFailed(ValueError):
     """O nome reusado ainda tem o grupo da sessão antiga e o Rust não o desfez: criar agora faria
     a sessão nova nascer dentro dele."""
@@ -2169,6 +2174,9 @@ class SessionRegistry:
                engine_account: str | None = None, engine_models: list[dict] | None = None,
                service_tier: str | None = None,
                claude_customizations: dict | None = None) -> SessionInfo:
+        # Claude com terminal (sessão nova) abre no Rust; a retomada do Arquivo ainda passa aqui.
+        if provider == "claude" and not headless and resume_session_id is None:
+            raise SessionOpenNeedsRust()
         if claude_customizations is not None and provider != "claude":
             raise ValueError("plugins e skills por sessão só valem para Claude")
         if service_tier is not None:
@@ -2385,9 +2393,6 @@ class SessionRegistry:
                     cwd, sid, model, effort, claude_settings=claude_settings, resume=True))
         else:
             sid = str(uuid.uuid4())
-            if provider == "claude":
-                claude_settings = session_customizations.prepare(
-                    sid, cwd, tmux.config_dir_de(config_dir), claude_customizations, resume=False)
             # spawn_command vem do Adapter do provider (import local: get_adapter->ClaudeAdapter nao
             # importa registry, mas evita qualquer ciclo se um adapter futuro vier a importar daqui).
             from app.adapters import get_adapter
@@ -2395,8 +2400,6 @@ class SessionRegistry:
             # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
             # e aceitar o argumento neles seria escolha que some calada.
             extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
-            if claude_settings is not None:
-                extra["claude_settings"] = claude_settings
             if provider == "codex":
                 extra["codex_home"] = codex_home
                 extra["codex_account"] = account.id
@@ -2406,8 +2409,6 @@ class SessionRegistry:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
                 cwd, sid, model, effort, permission_mode, **extra))
-            if provider == "claude" and permission_mode:
-                modo_permissao.remember_launch_mode(sid, permission_mode)
         if engine:
             # `hangar-engine --exec` aplica o env DENTRO do pane (os.execvpe). Não usamos `tmux -e` porque
             # a key ficaria em /proc/<pid>/cmdline, legível por qualquer usuário da máquina. Depois do

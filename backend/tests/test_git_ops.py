@@ -258,7 +258,7 @@ def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
 
     def create(name, cwd, config_dir, **kwargs):
         calls.append(cwd)
-        return SessionInfo(name=name, cwd=cwd, provider="claude")
+        return SessionInfo(name=name, cwd=cwd, provider="pi")
 
     monkeypatch.setattr(api.registry, "create", create)
     client = TestClient(api.app)
@@ -269,7 +269,8 @@ def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
     assert client.get("/api/fs/branches", params={"root": str(repo), "path": d},
                       headers=auth).status_code == 403
 
-    result = client.post("/api/sessions", json={"name": "chat", "cwd": d,
+    # Pi: Claude com terminal (e a worktree dele) nasce no Rust.
+    result = client.post("/api/sessions", json={"name": "chat", "cwd": d, "provider": "pi",
                                                  "branch": "feature"}, headers=auth)
     assert result.status_code == 200, result.text
     assert result.json()["cwd"] == str(tmp_path / "repo-feature")
@@ -294,7 +295,7 @@ def test_create_session_rolls_back_worktree_when_registry_fails(tmp_path, monkey
 
     monkeypatch.setattr(api.registry, "create", fail)
     response = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d,
-                                                              "branch": "feature"},
+                                                              "provider": "pi", "branch": "feature"},
                                         headers={"Authorization": "Bearer test-token"})
     assert response.status_code == 409
     assert not (tmp_path / "repo-chat").exists()
@@ -1269,9 +1270,10 @@ def test_create_session_with_new_branch(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
     monkeypatch.setattr(api.settings, "auth_token", "test-token")
     monkeypatch.setattr(api.registry, "create",
-                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="claude"))
+                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="pi"))
     r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
-                                                        "new_branch": True, "base": "main"},
+                                                        "new_branch": True, "base": "main",
+                                                        "provider": "pi"},
                                  headers={"Authorization": "Bearer test-token"})
     assert r.status_code == 200, r.text
     assert r.json()["branch"] == "nova" and r.json()["worktree"] is True
@@ -1299,7 +1301,8 @@ def test_create_session_rollback_deletes_new_branch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(api.registry, "create", fail)
     r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
-                                                        "new_branch": True, "base": "feature"},
+                                                        "new_branch": True, "base": "feature",
+                                                        "provider": "pi"},
                                  headers={"Authorization": "Bearer test-token"})
     assert r.status_code == 409
     assert not (tmp_path / "repo-chat").exists()

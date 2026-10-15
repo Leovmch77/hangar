@@ -603,6 +603,15 @@ async def _mux_indisponivel(request: Request, exc: tmux.MuxIndisponivel):
                                 detalhe=str(exc))})
 
 
+@app.exception_handler(registry_mod.SessionOpenNeedsRust)
+async def _abrir_precisa_do_rust(request: Request, exc: Exception):
+    """Abrir Claude com terminal é do Rust: no modo `python` do Supervisor a recusa tem código e frase."""
+    diag.registrar("sessao.criar_recusada", "erro", codigo=registry_mod.SessionOpenNeedsRust.code,
+                   detalhe=f"{request.method} {request.url.path}")
+    return JSONResponse(status_code=503, content={"detail": erro(
+        registry_mod.SessionOpenNeedsRust.code, "abrir e reabrir sessão precisam do servidor Rust, que não está rodando")})
+
+
 @app.exception_handler(list_bridge.ListBridgeError)
 async def _lista_indisponivel(request: Request, exc: list_bridge.ListBridgeError):
     """Com o Rust dono, a lista vem dele; ponte fora ou Rust ainda subindo é 503 com o código, nunca
@@ -2362,6 +2371,11 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
         body = body.model_copy(update={"provider": provider})
     explicit_account = body.config_dir is not None
     body, account_source, avisos_extra = await _inherit_from_creator(body)
+    headless = body.headless if body.headless is not None else (
+        not body.read_only and body.provider in ("claude", "codex") and bool(runtime_config.get("headless_default")))
+    if body.provider == "claude" and not headless:
+        # Claude com terminal abre no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
+        raise registry_mod.SessionOpenNeedsRust()
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
         connected = await _connected_codex_accounts()

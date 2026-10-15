@@ -19,19 +19,24 @@ def _reg(tmp_path, monkeypatch, visto):
     return reg.SessionRegistry(projects_dir=tmp_path)
 
 
+# Claude com terminal nasce no Rust; o pane aqui é o da retomada do Arquivo.
+_ARCHIVE_SID = "11111111-1111-1111-1111-111111111111"
+
+
 def test_create_no_terminal_exporta_a_variavel_no_pane(tmp_path, monkeypatch):
     visto = {}
-    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), subagent_model="claude-opus-5")
+    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), subagent_model="claude-opus-5",
+                                              resume_session_id=_ARCHIVE_SID)
     assert visto["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
 
 
 def test_create_sem_escolha_nao_exporta_nada(tmp_path, monkeypatch):
     visto = {}
-    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path))
+    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), resume_session_id=_ARCHIVE_SID)
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in visto["env"]
 
 
-@pytest.mark.parametrize("kw", [{"provider": "pi"}, {"engine": "kimi"}])
+@pytest.mark.parametrize("kw", [{"provider": "pi"}, {"engine": "kimi", "headless": True}])
 def test_create_recusa_fora_do_claude_sem_motor(tmp_path, monkeypatch, kw):
     with pytest.raises(ValueError, match="subagentes"):
         _reg(tmp_path, monkeypatch, {}).create("s", str(tmp_path), subagent_model="opus", **kw)
@@ -39,7 +44,8 @@ def test_create_recusa_fora_do_claude_sem_motor(tmp_path, monkeypatch, kw):
 
 def test_create_recusa_valor_que_vira_flag(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
-        _reg(tmp_path, monkeypatch, {}).create("s", str(tmp_path), subagent_model="--dangerously")
+        _reg(tmp_path, monkeypatch, {}).create("s", str(tmp_path), subagent_model="--dangerously",
+                                               headless=True)
 
 
 def test_sem_terminal_grava_no_sidecar(tmp_path, monkeypatch):

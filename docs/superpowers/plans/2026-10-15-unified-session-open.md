@@ -108,19 +108,19 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Um spawner de terminal no Rust**
+- [x] **Step 1: Um spawner de terminal no Rust**
   A partir do `lifecycle::stage_session`: escopo systemd (repete a recusa transitória, S-31), `-e`
   completo e igual para todo provider, ramo psmux, conferência de que o comando não morreu ao nascer
   (S-15). Itens TMX.
-- [ ] **Step 2: Plano de lançamento do Claude a partir do spec**
+- [x] **Step 2: Plano de lançamento do Claude a partir do spec**
   argv e ambiente (motor, `--context`, `--settings`, Jev, portão de hooks, plugin), pré-confiar a
   pasta, preparar a conta (`hangar-conta --prep`, passando o cwd; `python3` no Windows).
-- [ ] **Step 3: Criar Claude com terminal no Rust, com worktree**
+- [x] **Step 3: Criar Claude com terminal no Rust, com worktree**
   `create_worktree` (`crates/hangar-workspace/src/git.rs:365`) ganha o laço de nome `-2…-99` de
   `git_ops.py:472` e o desfazer de `_undo_worktree` (`api.py:2393`).
-- [ ] **Step 4: Consertos desta parte**
+- [x] **Step 4: Consertos desta parte**
   S-15, S-31, S-32, S-40, S-45, S-55, S-63, S-66, S-67.
-- [ ] **Step 5: Apagar o Python substituído**
+- [x] **Step 5: Apagar o Python substituído**
   `registry.create` com terminal, os call sites de `tmux.new_session` desta parte e os helpers sem
   chamador.
 

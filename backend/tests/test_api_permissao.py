@@ -30,10 +30,11 @@ def _client():
     return TestClient(app)
 
 
+# Claude sem terminal nos casos abaixo: com terminal a abertura é do Rust.
 def test_create_com_permissao_claude_ok():
     with patch("app.api.registry.create", return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
         r = _client().post("/api/sessions", headers=AUTH, json={
-            "name": "x", "cwd": "/tmp", "provider": "claude", "permission_mode": "plan"})
+            "name": "x", "cwd": "/tmp", "provider": "claude", "permission_mode": "plan", "headless": True})
     assert r.status_code == 200
     assert cr.call_args.kwargs.get("permission_mode") == "plan"
 
@@ -55,7 +56,7 @@ def test_create_com_perfil_omp_passa_e_fora_do_omp_400():
     assert cr.call_args.kwargs.get("omp_profile") == "trabalho"
     with patch("app.api.registry.create") as cr:
         r = _client().post("/api/sessions", headers=AUTH, json={
-            "name": "x", "cwd": "/tmp", "provider": "claude", "omp_profile": "trabalho"})
+            "name": "x", "cwd": "/tmp", "provider": "claude", "omp_profile": "trabalho", "headless": True})
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "erro_perfil_so_omp"
     cr.assert_not_called()
@@ -64,7 +65,7 @@ def test_create_com_perfil_omp_passa_e_fora_do_omp_400():
 def test_create_com_permissao_invalida_409():
     with patch("app.api.registry.create") as cr:
         r = _client().post("/api/sessions", headers=AUTH, json={
-            "name": "x", "cwd": "/tmp", "provider": "claude", "permission_mode": "invalido"})
+            "name": "x", "cwd": "/tmp", "provider": "claude", "permission_mode": "invalido", "headless": True})
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "erro_permissao_invalida"
     cr.assert_not_called()
@@ -72,7 +73,8 @@ def test_create_com_permissao_invalida_409():
 
 def test_create_sem_permissao_recebe_none():
     with patch("app.api.registry.create", return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
-        r = _client().post("/api/sessions", headers=AUTH, json={"name": "x", "cwd": "/tmp", "provider": "claude"})
+        r = _client().post("/api/sessions", headers=AUTH, json={
+            "name": "x", "cwd": "/tmp", "provider": "claude", "headless": True})
     assert r.status_code == 200
     assert cr.call_args.kwargs.get("permission_mode") is None
 

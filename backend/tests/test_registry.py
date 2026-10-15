@@ -567,20 +567,13 @@ def test_resolve_jsonl_returns_none_when_dir_empty(tmp_path):
     assert reg.resolve_jsonl("/home/u/p") is None
 
 
-def test_create_pins_fresh_jsonl_not_existing_mtime(tmp_path):
-    # Pasta JA tem um jsonl antigo. A sessao nova nao pode resolver pra ele (newest-by-mtime) ->
-    # create() fixa o jsonl proprio (uuid novo) no cache na hora.
-    proj = tmp_path / "-home-u-p"
-    proj.mkdir()
-    (proj / "old.jsonl").write_text("{}\n")
+def test_create_claude_with_terminal_needs_rust(tmp_path):
+    # Claude com terminal nasce no Rust; a retomada do Arquivo e o sem terminal seguem aqui.
     reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as ns:
-        info = reg.create("cc", "/home/u/p")
-    assert info.jsonl.endswith(".jsonl") and not info.jsonl.endswith("old.jsonl")
-    assert SessionRegistry._jsonl_cache["cc"] == info.jsonl
-    # o comando passado ao tmux carrega o --session-id do uuid novo
-    assert "--session-id" in ns.call_args[0][2]
+    with patch.object(registry.tmux, "new_session") as ns:
+        with pytest.raises(registry.SessionOpenNeedsRust):
+            reg.create("cc", "/home/u/p", provider="claude")
+    ns.assert_not_called()
 
 
 def test_create_limpa_pareamento_de_sessao_morta_fora_do_kill(tmp_path, monkeypatch):
@@ -595,7 +588,7 @@ def test_create_limpa_pareamento_de_sessao_morta_fora_do_kill(tmp_path, monkeypa
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True):
-        reg.create("cc", "/home/u/p")
+        reg.create("cc", "/home/u/p", provider="pi")
     assert pair.PairLink("cc").get() is None
     # grupo de 1 nao existe: o companheiro tambem sai, senao ficaria apontando pra um fantasma
     assert pair.PairLink("outra").get() is None
@@ -605,7 +598,7 @@ def test_create_rejects_duplicate_name(tmp_path):
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "has_session", return_value=True):
         with pytest.raises(ValueError):
-            reg.create("cc", "/home/u/p")
+            reg.create("cc", "/home/u/p", provider="pi")
 
 
 def test_create_raises_when_tmux_fails(tmp_path):
@@ -613,7 +606,7 @@ def test_create_raises_when_tmux_fails(tmp_path):
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=False):
         with pytest.raises(ValueError):
-            reg.create("cc", "/home/u/p")
+            reg.create("cc", "/home/u/p", provider="pi")
 
 
 # --- create(resume_session_id=...): retomar conversa MORTA do Arquivo (sobe sessao NOVA com --resume) ---
@@ -629,8 +622,7 @@ def test_create_with_resume_session_id_builds_resume_command(tmp_path):
     assert SessionRegistry._jsonl_cache["cc"] == info.jsonl
 
 
-@pytest.mark.parametrize("resumed", [False, True])
-def test_create_keeps_plugins_when_starting_or_resuming(tmp_path, monkeypatch, resumed):
+def test_create_keeps_plugins_when_resuming(tmp_path, monkeypatch):
     from app import plugin_bridge
     roots = ["/plugins/hangar", "/plugins/outro mod"]
     monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: roots)
@@ -638,11 +630,10 @@ def test_create_keeps_plugins_when_starting_or_resuming(tmp_path, monkeypatch, r
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True) as new_session:
-        reg.create("cc", "/projeto", resume_session_id=_UUID if resumed else None,
-                   model="haiku", effort="low")
+        reg.create("cc", "/projeto", resume_session_id=_UUID, model="haiku", effort="low")
     import shlex
     argv = shlex.split(new_session.call_args[0][2])
-    assert argv[:2] == ["claude", "--resume" if resumed else "--session-id"]
+    assert argv[:2] == ["claude", "--resume"]
     assert [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == "--plugin-dir"] == roots
     assert argv[argv.index("--model") + 1] == "haiku"
     assert argv[argv.index("--effort") + 1] == "low"
@@ -1391,5 +1382,5 @@ def test_create_clears_the_old_named_queue_before_the_pane_exists(tmp_path):
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.PromptQueue, "clear", lambda self: order.append("clear")), \
          patch.object(registry.tmux, "new_session", side_effect=lambda *a, **k: order.append("pane") or True):
-        reg.create("cc", "/home/u/p")
+        reg.create("cc", "/home/u/p", provider="pi")
     assert order[:2] == ["clear", "pane"]

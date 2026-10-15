@@ -91,7 +91,8 @@ async def test_create_session_troca_conta_herdada_acabando(criadora, monkeypatch
         return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
 
     monkeypatch.setattr(api, "_criar_sessao", criar)
-    info = await api.create_session(_body())
+    # Sem terminal: com terminal a abertura (e a troca de conta) é do Rust.
+    info = await api.create_session(_body(headless=True))
     assert (criados[0].config_dir, info.config_dir, info.account_source) == (conta, conta, origem)
 
 

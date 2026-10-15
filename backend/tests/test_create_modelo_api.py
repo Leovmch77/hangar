@@ -30,7 +30,7 @@ def _config_isolada(tmp_path, monkeypatch):
 
 def test_model_invalido_devolve_400():
     r = TestClient(app).post("/api/sessions", headers=AUTH, json={
-        "name": "x", "cwd": "/tmp", "model": "k3; touch /tmp/x"})
+        "name": "x", "cwd": "/tmp", "model": "k3; touch /tmp/x", "headless": True})
     assert r.status_code == 400
 
 
@@ -52,7 +52,7 @@ def test_pi_com_til_no_id_chega_intacto_ao_create():
 
 def test_effort_fora_da_lista_devolve_400():
     r = TestClient(app).post("/api/sessions", headers=AUTH, json={
-        "name": "x", "cwd": "/tmp", "provider": "claude", "effort": "turbo"})
+        "name": "x", "cwd": "/tmp", "provider": "claude", "effort": "turbo", "headless": True})
     assert r.status_code == 400
 
 
@@ -84,8 +84,10 @@ def test_kimi_sem_modelo_nao_e_barrado_pela_validacao():
 @pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
 def test_codex_account_so_vale_para_codex(provider):
     with patch("app.api.registry.create") as cr:
+        # Claude sem terminal: com terminal a abertura é do Rust.
         r = TestClient(app).post("/api/sessions", headers=AUTH, json={
-            "name": "x", "cwd": "/tmp", "provider": provider, "codex_account": "work"})
+            "name": "x", "cwd": "/tmp", "provider": provider, "codex_account": "work",
+            "headless": provider == "claude"})
     assert r.status_code == 400
     cr.assert_not_called()
 
@@ -405,7 +407,7 @@ def test_padrao_do_jev_ligado_chega_ao_create_pela_rota(monkeypatch):
     with patch("app.api.registry.create",
                return_value=SessionInfo(name="j", cwd="/tmp", provider="claude")) as cr:
         r = TestClient(app).post("/api/sessions", headers=AUTH,
-                                 json={"name": "j", "cwd": "/tmp", "provider": "claude"})
+                                 json={"name": "j", "cwd": "/tmp", "provider": "claude", "headless": True})
     assert r.status_code == 200
     assert cr.call_args.kwargs["jev"] is True
 

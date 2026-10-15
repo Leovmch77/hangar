@@ -197,8 +197,10 @@ def test_modelos_recusa_nome_junto_com_api_key_de_terceiro(cli):
 # POST /api/archive/.../resume só tinham cobertura por curl manual — cobrindo aqui.
 # ---------------------------------------------------------------------------
 
+# Sem terminal: Claude com terminal (e o motor dele) nasce no Rust.
 def test_create_sessao_com_motor_desconhecido_e_400(cli):
-    r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "fantasma"}, headers=AUTH)
+    r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "fantasma", "headless": True},
+                 headers=AUTH)
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "erro_motor_invalido"
 
@@ -215,10 +217,11 @@ def test_create_sessao_com_motor_valido_repassa_a_keyword(cli):
     cli.put("/api/engines/kimi", json=_kimi(), headers=AUTH)
     with patch("app.api.registry.create",
               return_value=SessionInfo(name="x", cwd="/tmp", engine="kimi")) as cr:
-        r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "kimi"}, headers=AUTH)
+        r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "kimi", "headless": True},
+                     headers=AUTH)
     assert r.status_code == 200
     cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine="kimi",
-                               model=None, effort=None, context_window=None)
+                               model=None, effort=None, context_window=None, headless=True)
 
 
 # ---------------------------------------------------------------------------

@@ -73,17 +73,12 @@ def _fixed_proxy(monkeypatch):
     eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
 
 
-def test_fixed_account_is_in_terminal_command_and_headless_sidecar(tmp_path, monkeypatch):
+def test_fixed_account_is_in_headless_sidecar(tmp_path, monkeypatch):
     from app.adapters.claude_headless import sessions
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
     _fixed_proxy(monkeypatch)
     seen = {}
     registry = _reg(tmp_path, monkeypatch, seen)
-    info = registry.create("terminal-fixed", str(tmp_path), engine="proxy", engine_account="default",
-                           model="gpt-5.5", context_window=400000)
-    assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5 --context 400000 -- claude" in seen["command"]
-    assert "--model fixed/gpt-5.5" in seen["command"]
-    assert info.engine_account == "default" and info.conta == "codex:/tmp/codex"
     info = registry.create("headless-fixed", str(tmp_path), engine="proxy", engine_account="default",
                            model="gpt-5.5", headless=True)
     meta = sessions.load(info.name)
@@ -93,8 +88,7 @@ def test_fixed_account_is_in_terminal_command_and_headless_sidecar(tmp_path, mon
 
 
 @pytest.mark.parametrize("tier", ["default", "priority"])
-@pytest.mark.parametrize("headless", [False, True])
-def test_create_claude_service_tier_transport(tmp_path, monkeypatch, tier, headless):
+def test_create_claude_service_tier_transport(tmp_path, monkeypatch, tier):
     from app import cliproxy
     from app.adapters.claude_headless import sessions
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
@@ -103,13 +97,10 @@ def test_create_claude_service_tier_transport(tmp_path, monkeypatch, tier, headl
     seen = {}
     registry = _reg(tmp_path, monkeypatch, seen)
     info = registry.create("fast", str(tmp_path), engine="proxy", model="gpt-5.5",
-                           service_tier=tier, headless=headless)
-    if headless:
-        meta = sessions.load(info.name)
-        assert meta["service_tier"] == tier
-        assert f"--service-tier {tier} -- claude" in registry._comando_terminal(meta, resume=True)
-    else:
-        assert f"--service-tier {tier} -- claude" in seen["command"]
+                           service_tier=tier, headless=True)
+    meta = sessions.load(info.name)
+    assert meta["service_tier"] == tier
+    assert f"--service-tier {tier} -- claude" in registry._comando_terminal(meta, resume=True)
 
 
 @pytest.mark.parametrize("tier", ["default", "priority"])
@@ -119,7 +110,7 @@ def test_create_incompatible_service_tier_has_no_effects(tmp_path, monkeypatch, 
     monkeypatch.setattr(reg, "_pretrust_cwd", lambda *a: pytest.fail("não pode preparar conta"))
     monkeypatch.setattr(reg.tmux, "new_session", lambda *a, **k: pytest.fail("não pode abrir pane"))
     with pytest.raises(ValueError, match="service_tier"):
-        reg.SessionRegistry(tmp_path).create("fast", str(tmp_path), service_tier=tier)
+        reg.SessionRegistry(tmp_path).create("fast", str(tmp_path), service_tier=tier, headless=True)
 
 
 @pytest.mark.parametrize("tier", ["default", "priority"])
@@ -224,33 +215,23 @@ def test_resume_fixed_account_never_drops_its_route(tmp_path, monkeypatch):
     assert not seen
 
 
-def test_create_com_motor_prefixa_o_comando(tmp_path, monkeypatch):
-    _motor()
-    visto = {}
-    info = _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), engine="kimi")
-    assert visto["command"].startswith("hangar-engine --exec kimi -- claude --session-id ")
-    assert info.engine == "kimi"
+_ARCHIVE_SID = "11111111-2222-3333-4444-555555555555"
 
 
+# Claude com terminal nasce no Rust; o prefixo do motor segue aqui na retomada do Arquivo.
 def test_create_com_motor_nao_poe_a_key_no_comando(tmp_path, monkeypatch):
     _motor()
     visto = {}
-    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), engine="kimi")
+    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), engine="kimi",
+                                              resume_session_id=_ARCHIVE_SID)
     assert "sk-kimi" not in visto["command"]
-
-
-def test_create_sem_motor_nao_muda_o_comando(tmp_path, monkeypatch):
-    visto = {}
-    info = _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path))
-    assert visto["command"].startswith("claude --session-id ")
-    assert info.engine is None
 
 
 def test_create_com_motor_inexistente_estoura(tmp_path, monkeypatch):
     visto = {}
     r = _reg(tmp_path, monkeypatch, visto)
     with pytest.raises(ValueError, match="motor"):
-        r.create("s", str(tmp_path), engine="fantasma")
+        r.create("s", str(tmp_path), engine="fantasma", resume_session_id=_ARCHIVE_SID)
     assert "command" not in visto
 
 
@@ -436,16 +417,6 @@ def test_resume_do_arquivo_aceita_motor(tmp_path, monkeypatch):
 # ── Task 3: escolha de modelo/janela entra no prefixo hangar-engine ────────────────────────────────
 
 
-def test_create_com_escolha_poe_modelo_e_esforco_no_comando(tmp_path, monkeypatch):
-    # A flag do modelo chega ao claude; o uuid é aleatório, então confere por prefixo. O modo de
-    # permissão vem da conta na criação (fixado aqui pra não ler o settings.json de quem roda).
-    visto = {}
-    monkeypatch.setattr(reg.modo_permissao, "modo_da_conta", lambda cfg: "acceptEdits")
-    _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), model="k3-256k", effort="high")
-    assert visto["command"].startswith("claude --session-id ")
-    assert visto["command"].endswith("--model k3-256k --effort high --permission-mode acceptEdits")
-
-
 def test_create_com_motor_e_escolha_remonta_o_prefixo_com_modelo_e_janela(tmp_path, monkeypatch):
     """O prefixo do motor leva modelo E janela: a flag sozinha ganharia só de ANTHROPIC_MODEL, e o
     ambiente (aliases, subagente, janela) voltaria pro modelo do motor — o cenário "motor de 1M
@@ -453,9 +424,10 @@ def test_create_com_motor_e_escolha_remonta_o_prefixo_com_modelo_e_janela(tmp_pa
     _motor()
     visto = {}
     _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), engine="kimi",
-                                              model="k3-256k", context_window=262144)
+                                              model="k3-256k", context_window=262144,
+                                              resume_session_id=_ARCHIVE_SID)
     assert visto["command"].startswith(
-        "hangar-engine --exec kimi --model k3-256k --context 262144 -- claude --session-id ")
+        f"hangar-engine --exec kimi --model k3-256k --context 262144 -- claude --resume {_ARCHIVE_SID}")
 
 
 def test_create_com_motor_e_modelo_sem_janela_omite_o_context(tmp_path, monkeypatch):
@@ -464,9 +436,10 @@ def test_create_com_motor_e_modelo_sem_janela_omite_o_context(tmp_path, monkeypa
     _motor()
     visto = {}
     _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), engine="kimi",
-                                              model="k3-256k", context_window=None)
+                                              model="k3-256k", context_window=None,
+                                              resume_session_id=_ARCHIVE_SID)
     assert visto["command"].startswith(
-        "hangar-engine --exec kimi --model k3-256k -- claude --session-id ")
+        f"hangar-engine --exec kimi --model k3-256k -- claude --resume {_ARCHIVE_SID}")
 
 
 def test_resume_preserva_modelo_e_janela_do_pane(tmp_path, monkeypatch):
@@ -575,14 +548,3 @@ def test_resume_de_motor_removido_descarta_a_escolha_no_fallback(tmp_path, monke
     info = r.resume("s", sid)
     assert visto["command"] == f"claude --resume {sid}"
     assert info.engine is None
-
-
-def test_terminal_claude_remembers_its_launch_mode_until_the_transcript_has_one(tmp_path, monkeypatch):
-    import re
-
-    from app import permission_mode
-    seen = {}
-    info = _reg(tmp_path, monkeypatch, seen).create("par", str(tmp_path), permission_mode="bypassPermissions")
-    sid = re.search(r"--session-id[ =']+([0-9a-f-]{36})", seen["command"]).group(1)
-    assert info.name == "par"
-    assert permission_mode.session_non_plan_mode(str(tmp_path / f"{sid}.jsonl")) == "bypassPermissions"

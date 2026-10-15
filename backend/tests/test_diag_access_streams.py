@@ -130,11 +130,12 @@ def test_criacao_registra_etapas_sem_caminho_ou_comando(diario, tmp_path, monkey
     monkeypatch.setattr(registry.ThenLink, "clear", lambda _: None)
     monkeypatch.setattr(reg, "_clear_pair", lambda _: None)
     monkeypatch.setattr(reg, "_jsonl_cache", {})
+    # Pi: Claude com terminal nasce no Rust, que registra as próprias etapas.
     if criou:
-        assert reg.create("teste", str(tmp_path / SECRET)).name == "teste"
+        assert reg.create("teste", str(tmp_path / SECRET), provider="pi").name == "teste"
     else:
         with pytest.raises(ValueError, match="falha ao criar"):
-            reg.create("teste", str(tmp_path / SECRET))
+            reg.create("teste", str(tmp_path / SECRET), provider="pi")
     rows = diario()
     etapas = [r["etapa"] for r in rows if r["evento"] == "sessao.criar_etapa"]
     assert etapas[:4] == ["validar", "preparar_comando", "confiar_pasta", "criar_terminal"]

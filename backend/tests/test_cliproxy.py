@@ -92,7 +92,7 @@ def test_incompatible_subagent_is_refused_before_creation(cli, tmp_path, monkeyp
     monkeypatch.setattr(api.registry, "create", create)
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "fixed", "cwd": str(tmp_path), "engine": "proxy", "engine_account": "default",
-        "model": "gpt-5.5", "headless": False})
+        "model": "gpt-5.5", "headless": True})
     assert response.status_code == 400, response.text
     assert "subagentes" in response.text
     create.assert_not_called()
@@ -311,7 +311,7 @@ def test_create_claude_proxy_forwards_fast(cli, tmp_path, monkeypatch, tier):
     monkeypatch.setattr(api.registry, "create", create)
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": "gpt-5.5", "service_tier": tier})
+        "engine_account": "default", "model": "gpt-5.5", "service_tier": tier, "headless": True})
     assert response.status_code == 200, response.text
     assert create.call_args.kwargs["service_tier"] == tier
 
@@ -347,7 +347,7 @@ def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, mon
     monkeypatch.setattr(api.registry, "create", create)
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": model, "headless": False})
+        "engine_account": "default", "model": model, "headless": True})
     assert response.status_code == 200, response.text
     assert seen[0][0] is None
     assert seen[0][1]["engine_account"] == "default"

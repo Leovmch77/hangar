@@ -1061,7 +1061,7 @@ def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
     monkeypatch.setattr(api_mod, "list_config_dirs",
                         lambda: [ConfigDirInfo(path="/h/.claude-work", label="work", active=True)])
     r = api_client.post("/api/sessions", headers=_h(),
-                        json={"name": "x", "cwd": "/tmp", "config_dir": "/h/.evil"})
+                        json={"name": "x", "cwd": "/tmp", "provider": "pi", "config_dir": "/h/.evil"})
     assert r.status_code == 400
 
 
@@ -1073,23 +1073,25 @@ def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
 def test_create_default_provider_routes_to_claude_create(api_client, monkeypatch):
     monkeypatch.setattr(api_mod, "_session_provider_catalog", AsyncMock(return_value={
         "claude": {"disponivel": True, "default": True}, "codex": {"disponivel": True, "default": False}}))
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(), json={"name": "x", "cwd": "/tmp"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "claude"
-    cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_explicit_claude_provider_routes_to_claude_create(api_client):
+    # Sem terminal: Claude com terminal nasce no Rust.
     with patch("app.api.registry.create",
               return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
         r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "provider": "claude"})
+                            json={"name": "x", "cwd": "/tmp", "headless": True})
     assert r.status_code == 200
+    assert r.json()["provider"] == "claude"
     cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine=None,
-                               model=None, effort=None, context_window=None)
+                               model=None, effort=None, context_window=None, headless=True)
+
+
+def test_create_claude_with_terminal_needs_rust(api_client):
+    # Sem o Rust a abertura recusa antes de qualquer efeito, com código para o cliente.
+    with patch("app.api.registry.create") as cr:
+        r = api_client.post("/api/sessions", headers=_h(),
+                            json={"name": "x", "cwd": "/tmp", "provider": "claude"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "session_open_needs_rust_server"
+    cr.assert_not_called()
 
 
 def test_create_codex_provider_routes_to_create_normal(api_client):
@@ -1144,9 +1146,11 @@ def test_create_rejects_invalid_service_tier(api_client, tier):
 
 @pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
 def test_create_service_tier_only_accepts_codex(api_client, provider):
+    # Claude sem terminal: com terminal a abertura é do Rust.
     with patch("app.api.registry.create") as create:
         response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": provider, "service_tier": "default"})
+            "name": "cx", "cwd": "/tmp", "provider": provider, "service_tier": "default",
+            "headless": provider == "claude"})
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "erro_criacao_sessao"
     create.assert_not_called()

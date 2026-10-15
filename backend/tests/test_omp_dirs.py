@@ -77,7 +77,7 @@ def test_create_recusa_perfil_fora_do_omp_e_nome_invalido_antes_de_tocar_o_tmux(
     from app.registry import SessionRegistry
     reg = SessionRegistry(tmp_path / "projects")
     with pytest.raises(ValueError, match="perfil so vale para provider omp"):
-        reg.create("x", str(tmp_path), provider="claude", omp_profile="trabalho")
+        reg.create("x", str(tmp_path), provider="pi", omp_profile="trabalho")
     with pytest.raises(ValueError, match="perfil OMP inv"):
         reg.create("x", str(tmp_path), provider="omp", omp_profile="Nome Inválido")
 

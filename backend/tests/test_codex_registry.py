@@ -149,8 +149,10 @@ def test_registry_rejects_invalid_tier_before_effects(tmp_path, provider, tier):
     with patch.object(registry.tmux, "new_session") as spawn, \
          patch.object(registry, "_pretrust_cwd") as trust, \
          patch.object(codex_sessions, "save") as save:
+        # Claude sem terminal: com terminal a abertura é do Rust.
         with pytest.raises(ValueError, match="service_tier"):
-            reg.create("cx", "/tmp/proj", provider=provider, service_tier=tier)
+            reg.create("cx", "/tmp/proj", provider=provider, service_tier=tier,
+                       headless=provider == "claude")
     spawn.assert_not_called()
     trust.assert_not_called()
     save.assert_not_called()
@@ -275,19 +277,6 @@ def test_list_does_not_duplicate_codex_tmux_tui_as_claude(tmp_path):
     resolve.assert_not_called()
 
 
-# --- Teste 3: create(provider="claude") = nao-regressao (tmux, sem sidecar) -----------------
-
-def test_create_claude_still_uses_tmux_no_sidecar(tmp_path):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        info = reg.create("claudesess", "/tmp/proj")
-    assert info.provider == "claude"
-    new_sess.assert_called_once()  # caminho tmux intacto
-    # nenhum sidecar Codex gravado
-    assert codex_sessions.load("claudesess") is None
-
-
 # --- Teste 4: kill de Codex fecha o client (mock) e apaga o sidecar -------------------------
 
 def test_kill_codex_do_rust_encerra_pela_ponte_e_limpa_so_as_lojas_daqui(tmp_path):
@@ -406,13 +395,14 @@ def test_rename_avisa_lease_codex_antes_do_sidecar(tmp_path):
 
 # --- Colisao de nome cross-provider (review Important #1) ------------------------------------
 
-def test_create_claude_rejects_existing_codex_name(tmp_path):
+def test_create_terminal_rejects_existing_codex_name(tmp_path):
     codex_sessions.save("dup", "tid-1", "/home/u/.codex/rollout.jsonl", "/tmp/a")
     reg = SessionRegistry(projects_dir=tmp_path)
+    # Pi: Claude com terminal nasce no Rust.
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
         with pytest.raises(ValueError):
-            reg.create("dup", "/tmp/proj")
+            reg.create("dup", "/tmp/proj", provider="pi")
     new_sess.assert_not_called()  # nao chegou a spawnar pane tmux orfao
 
 

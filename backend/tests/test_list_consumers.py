@@ -84,9 +84,11 @@ def test_create_seeds_rust_cache(rust, tmp_path, monkeypatch):
     monkeypatch.setattr(list_bridge, "rename", lambda old, new: renamed.append((old, new)))
     monkeypatch.setattr(registry, "_retire_waiting_runtime", lambda _name: None)
     reg = SessionRegistry(projects_dir=tmp_path)
+    # Retomada do Arquivo: Claude com terminal novo nasce no Rust, que semeia o próprio cache.
+    sid = "12345678-1234-1234-1234-123456789abc"
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True):
-        info = reg.create("cc", "/home/u/p")
+        info = reg.create("cc", "/home/u/p", resume_session_id=sid)
     # Nome reusado não herda nada da morta, e o transcript novo vale antes de o claude escrevê-lo.
     assert forgotten == ["cc"]
     assert seeded == [("cc", info.jsonl)]
@@ -95,7 +97,7 @@ def test_create_seeds_rust_cache(rust, tmp_path, monkeypatch):
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True) as new_session, \
          pytest.raises(list_bridge.ListBridgeError):
-        reg.create("dd", "/home/u/p")
+        reg.create("dd", "/home/u/p", resume_session_id=sid)
     new_session.assert_not_called()
 
 

@@ -1130,7 +1130,7 @@ def test_registry_cria_lista_e_mata_sem_tmux(tmp_path, monkeypatch):
     assert info.headless and info.provider == "claude" and info.jsonl.endswith(".jsonl")
     assert S.load("hl")["cwd"] == str(tmp_path)
     with pytest.raises(ValueError):
-        reg.create("hl", str(tmp_path), provider="claude")          # nome ocupado pelo sidecar
+        reg.create("hl", str(tmp_path), provider="pi")              # nome ocupado pelo sidecar
     with pytest.raises(ValueError):
         reg.create("x", str(tmp_path), provider="pi", headless=True)  # só claude
     listadas = [i for i in reg.list() if i.name == "hl"]
