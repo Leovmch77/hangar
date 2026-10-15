@@ -339,7 +339,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         permission_mode: spec.permission_mode.map(|m| m.name().to_owned()), remember_provider };
     let warnings = host.born(&born).await;
     if let Err(error) = super::record::write(host.home(), spec) {
-        tracing::warn!(kind = ?error.kind(), "registro da sessão não gravado; a sessão segue pelo sidecar");
+        tracing::warn!(kind = ?error.kind(), "spec da sessão não gravado; ela nasceu e é adotada pela varredura");
     }
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": "claude",
         "etapa": "terminal_criado", "operacao": diary.op}));
