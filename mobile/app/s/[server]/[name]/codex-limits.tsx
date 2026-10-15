@@ -21,7 +21,7 @@ export default function CodexLimitsSheet() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    if (!target) { setError(m.servidor_nao_existe()); setLoading(false); return; }
+    if (!target) { setError(m.chat_servidor_removido()); setLoading(false); return; }
     getLimits(sessionName, target)
       .then((res) => {
         if (!cancelled) setLimits(res);

@@ -166,6 +166,10 @@
     chave: 'tts_max_chars', tipo: 'numero' as const, sufixo: m.config_server_car(),
     rotulo: m.config_server_confirmar_leitura(), ajuda: m.config_server_confirmar_leitura_ajuda(),
   };
+  const CAMPO_DITADO_MAX = {
+    chave: 'dictation_max_minutes', tipo: 'numero' as const, sufixo: m.config_server_min(),
+    rotulo: m.config_server_ditado_max(), ajuda: m.config_server_ditado_max_ajuda(),
+  };
   const CAMPO_CMD_LOCAL = {
     chave: 'tts_local_cmd', tipo: 'texto' as const,
     rotulo: m.config_server_comando_voz(), ajuda: m.config_server_comando_voz_ajuda(),
@@ -322,6 +326,7 @@
         {#if estiloErro}<p class="aviso erro">{estiloErro}</p>{/if}
 
         <LinhaConfig campo={CAMPO_VOCABULARIO} {store} removivel />
+        <LinhaConfig campo={CAMPO_DITADO_MAX} {store} removivel />
       </div>
     </section>
 

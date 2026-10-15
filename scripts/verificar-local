@@ -384,7 +384,8 @@ ambiente_limpo() {
     node_dir="${NODE_DIR:-$(dirname "$(realpath "$(command -v node)")")}"
     uv_dir="$(dirname "$(command -v uv)")"
     # O CI instala o codex no PATH; os contratos de contas precisam dele.
-    command -v codex >/dev/null && codex_dir="$(dirname "$(realpath "$(command -v codex)")"):"
+    # A pasta do link, não a do alvo: instalado pelo npm, o alvo é `codex.js` e lá não existe `codex`.
+    command -v codex >/dev/null && codex_dir="$(dirname "$(command -v codex)"):"
     mkdir -p "$casa/tmux" "$casa/run"
     chmod 700 "$casa/run"
     LIMPO=(env -i

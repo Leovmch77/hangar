@@ -405,6 +405,11 @@ def test_local_le_host_porta_e_primeira_chave(tmp_path):
     assert cliproxy.local() == {"base_url": "http://127.0.0.1:9000", "api_key": CHAVE}
 
 
+def test_local_le_chave_do_formato_novo_em_access(tmp_path):
+    _config(tmp_path, f'access:\n  api-keys:\n    - "{CHAVE}"\napi-keys:\n  gemini:\n    - name: g\n')
+    assert cliproxy.local() == {"base_url": "http://127.0.0.1:8317", "api_key": CHAVE}
+
+
 def test_local_sem_config_e_none(tmp_path):
     assert cliproxy.local() is None
 

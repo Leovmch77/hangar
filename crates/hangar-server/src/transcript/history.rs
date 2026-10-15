@@ -155,15 +155,15 @@ fn tail_offset(path: &Path, window: u64) -> u64 {
     read().unwrap_or(0)
 }
 
-/// `_ts_of_obj` (pqueue.py:227).
+/// `_ts_of_obj` (pqueue.py:227), menos o bool, que o Python conta como 1 ms.
 fn ts_of_obj(obj: &Map<String, Value>) -> f64 {
     if let Some(t) = obj.get("timestamp").and_then(Value::as_str) {
         return py::iso_timestamp(&t.replace('Z', "+00:00")).unwrap_or(0.0);
     }
-    if let Some(n) = obj.get("message").and_then(Value::as_object).and_then(|m| m.get("timestamp")).and_then(py::number) {
+    if let Some(n) = obj.get("message").and_then(Value::as_object).and_then(|m| m.get("timestamp")).and_then(Value::as_f64) {
         return n / 1000.0;
     }
-    ["time", "created_at"].iter().find_map(|k| obj.get(*k).and_then(py::number)).map_or(0.0, |n| n / 1000.0)
+    ["time", "created_at"].iter().find_map(|k| obj.get(*k).and_then(Value::as_f64)).map_or(0.0, |n| n / 1000.0)
 }
 
 /// `_transcript_start_ts` (pqueue.py:258) com o `or 0.0` de quem só poda.
@@ -330,18 +330,18 @@ fn load_queue(path: &Path) -> io::Result<Vec<Map<String, Value>>> {
         .collect())
 }
 
-fn is_local_output(entry: &Map<String, Value>) -> bool {
+pub(crate) fn is_local_output(entry: &Map<String, Value>) -> bool {
     entry.get("papel").and_then(Value::as_str) == Some("assistant")
 }
 
 /// `_da_sessao_atual` (pqueue.py:171) com o relógio já resolvido.
-fn from_current_session(entry: &Map<String, Value>, min_ts: f64, ts: f64) -> bool {
+pub(crate) fn from_current_session(entry: &Map<String, Value>, min_ts: f64, ts: f64) -> bool {
     let grace = if py::truthy(entry.get("pre_transcript")) { HANDOFF_GRACE_S } else { 0.0 };
     ts >= min_ts - grace
 }
 
 /// `_entry_event` (pqueue.py:210).
-fn entry_event(entry: &Map<String, Value>) -> ChatEvent {
+pub(crate) fn entry_event(entry: &Map<String, Value>) -> ChatEvent {
     let id = entry.get("id").map_or_else(|| "None".to_string(), py::py_str);
     let text = entry.get("text").and_then(Value::as_str).map(str::to_string);
     let mut ev = if is_local_output(entry) {

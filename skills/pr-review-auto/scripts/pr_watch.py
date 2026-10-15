@@ -30,6 +30,10 @@ BOT = "coderabbitai"
 OK = {"SUCCESS", "SKIPPED", "NEUTRAL"}
 PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
+# Windows pipes default to the ANSI codepage, which cannot encode emoji in bot comments.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 
 class Fatal(Exception):
     """Retrying will not help: stop the watch and say why."""
@@ -47,7 +51,7 @@ def preview(text, n=240):
 def fetch(owner, repo, number):
     out = subprocess.run(
         ["gh", "api", "graphql", "-f", f"query={QUERY}", "-F", f"o={owner}", "-F", f"r={repo}", "-F", f"n={number}"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     data = json.loads(out.stdout or "{}", strict=False)
     if any(e.get("type") == "NOT_FOUND" for e in data.get("errors") or []):
@@ -231,7 +235,7 @@ def main():
     a = ap.parse_args()
     if not a.repo:
         out = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-                             capture_output=True, text=True, timeout=60)
+                             capture_output=True, text=True, encoding="utf-8", timeout=60)
         if out.returncode != 0:
             raise Fatal(f"no --repo and the current directory has no GitHub repo: {out.stderr.strip()[:200]}")
         a.repo = out.stdout.strip()

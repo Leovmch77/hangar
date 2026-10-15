@@ -59,6 +59,7 @@ vi.mock('react-native', async () => {
 });
 
 import { useDitado } from './useDitado';
+import { useDitadoEstiloStore } from './ditadoEstiloStore';
 import type { MotivoFim } from '@hangar/core';
 
 function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; onErroParada?: (e: Error) => void }) {
@@ -557,7 +558,10 @@ describe('useDitado — VAD e teto', () => {
     await h.unmount();
   });
 
-  it('sem metering não usa VAD e encerra pelo teto', async () => {
+  it('sem metering não usa VAD e encerra pelo teto lido da configuração', async () => {
+    // A releitura da config no começo da gravação traria outro teto; aqui o teto é o da store.
+    const refreshCeiling = useDitadoEstiloStore.getState().refreshCeiling;
+    useDitadoEstiloStore.setState({ ceilingMs: 180_000, refreshCeiling: async () => {} });
     fakeRec.getStatus.mockReturnValue({});
     const onFim = vi.fn();
     const h = mountHook({ onFim });
@@ -572,5 +576,7 @@ describe('useDitado — VAD e teto', () => {
     expect(onFim.mock.calls[0]?.[1]).toBe('teto');
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     await h.unmount();
+    useDitadoEstiloStore.setState({ refreshCeiling });
+    useDitadoEstiloStore.getState()._zerarParaTeste();
   });
 });

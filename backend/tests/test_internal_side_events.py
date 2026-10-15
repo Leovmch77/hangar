@@ -110,15 +110,24 @@ async def test_side_nao_procura_o_transcript_sozinho(tmp_path, fila, monkeypatch
     assert not any(e["event"] in ("reset", "info") for e in vistos)
 
 
-async def test_side_repassa_a_fila(tmp_path, fila, monkeypatch):
+async def test_side_nao_repassa_a_fila(tmp_path, fila, monkeypatch):
+    # A fila do chat é do hub do Rust, que lê a projeção: a conexão interna não a manda.
     monkeypatch.setattr(sse, "get_adapter", lambda provider: _Adapter())
-    entry = pqueue.PromptQueue("lado-fila").append("manda isso depois", delivered=False)
+    pqueue.PromptQueue("lado-fila").append("manda isso depois", delivered=False)
     jsonl = tmp_path / "f.jsonl"
     jsonl.write_text("")
     gen = sse.merged_events("lado-fila", str(jsonl), side=True)
-    vistos = await _coleta(gen, lambda v: any(e["event"] == "message" for e in v))
-    msg = next(json.loads(e["data"]) for e in vistos if e["event"] == "message")
-    assert msg["id"] == f"queued-{entry['id']}"
+    vistos = []
+    try:
+        async with asyncio.timeout(1.5):
+            async for ev in gen:
+                vistos.append(ev)
+    except TimeoutError:
+        pass
+    finally:
+        await gen.aclose()
+    assert any(e["event"] == "state" for e in vistos), "o stream abriu"
+    assert not any(e["event"] in ("message", "queue_confirmed") for e in vistos)
 
 
 async def test_rota_side_events_conta_app_so_com_app_1_e_recusa_conversa_invalida(

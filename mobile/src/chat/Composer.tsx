@@ -837,6 +837,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   );
 
   const { gravando, rms, iniciar, parar } = useDitado({
+    server: styleServer,
     onFim: handleTranscribe,
     onErroParada: (e) => {
       cancelVoiceSend();

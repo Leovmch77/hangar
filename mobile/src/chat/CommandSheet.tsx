@@ -25,7 +25,7 @@ export function useSessionCommands(serverId: string, name: string, provider: str
 
   useEffect(() => {
     if (!wanted) return;
-    if (!server) { setError(m.servidor_nao_existe()); return; }
+    if (!server) { setError(m.chat_servidor_removido()); return; }
     let alive = true;
     // Revalidação que falha não troca a lista que está na tela pelo erro.
     const revalidating = shown.current;

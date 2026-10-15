@@ -696,9 +696,25 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   durante a leitura ou no "ok" dele, espera o fim da fala e sai sem novo aviso. Outra sessão continua
   avisada à parte. Encerram: `quiet` ligado, `unfollow_session`, a fala dele cortando a leitura daquela
   sessão e `LISTEN_IDLE` (10 min) sem resultado dela. Motivo em "Voz: escuta contínua e retorno curto (15/10/2026)".
+- **Voz: o sim ao aviso já leva o resultado.** Com aviso pendente e a fala dele depois dele no trecho sendo um sim
+  curto (`accepts_offer`: até 6 palavras, sem negação), o Hangar aceita (`Results::accept_offer`) e manda o primeiro
+  resultado guardado por `turn/steer` ao turno do próprio sim, com nota para não chamar `quiet`; esse turno vira o de
+  resumo. Resposta longa ou ambígua segue com o organizador (`quiet`). Steer recusado devolve o resultado à frente
+  da fila, que sai no fim do turno. Medição em "Voz: escuta contínua e retorno curto (15/10/2026)".
+- **Voz: só pedaço de fala novo é ele falando.** `transcript/done role=user` sem `delta` do usuário nos últimos
+  `LATE_FINAL` (1,5 s) é o fechamento atrasado de uma fala já encerrada: não segura nem corta resumo.
+- **Voz: guardado sabe o que já foi ouvido.** `read_session` (e a leitura do Jev) de uma sessão tira da fila o que
+  dela aparece na leitura, por parágrafo; o resumo de um guardado leva a marca de mais antigo (quando há outro da mesma
+  sessão) ou de interrompido, e o organizador não o apresenta como novidade. O cortado volta inteiro à fila, nunca
+  como lido.
+- **Voz: busca de sessão não espera peer caído.** Peer que falhou fica marcado até responder; só a vigia o tenta de
+  novo, vencidos os 30 s. A busca de um pedido (enviar, trocar, ler) pula os marcados.
 - **Voz: pedido completo tem uma confirmação curta.** Ao encaminhar pedido completo, sobretudo longo ou
   demorado, a voz diz numa frase o que entendeu e aguarda; nunca a cada pedaço de fala nem narrando passos.
-  O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação.
+  O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação. Como o prompt sozinho não
+  bastou, o Hangar garante o retorno (`WaitAck`): fala nova repassada que passa `ACK_AFTER` (3,5 s) sem fala
+  da voz nem início da resposta do organizador ganha uma frase curta ("Entendi, estou cuidando disso."),
+  dita só com ele calado, uma por pedido e no máximo uma a cada `ACK_GAP` (20 s); sem aparelho, nada.
 - **Voz: tela vazia não apaga a conversa.** Sem sessão na tela, a chamada segue com a última sessão real:
   a nota diz que a tela está vazia e de qual sessão a conversa trata, e `read_session`, `send_to_session`
   e `ask_session` sem nome vão para ela. Fechada essa sessão (pela voz ou no app, visto na lista seguinte
@@ -3793,8 +3809,28 @@ embrulham tudo em `except` e saem com 0). O aviso cobre script sumido, Python su
 - **Silêncio que parecia travamento.** A regra "Encaminhe e fique em silêncio", posta junto com a saída do
   `delegationAckFiller`, tirou também o retorno de que o pedido foi entendido. O ruído medido era o aviso a
   cada delegação (fragmentos inclusos), não uma confirmação por pedido completo.
-- **Não verificado em chamada real:** se a voz obedece à confirmação única e se 10 min de `LISTEN_IDLE`
-  cabem no uso.
+- **Não verificado em chamada real:** se 10 min de `LISTEN_IDLE` cabem no uso.
+- **A instrução não bastou.** No teste do mesmo dia, com a regra nova no prompt e a preferência gravada na
+  memória da voz ("Quer confirmação curta após pedido completo…"), ele seguiu ouvindo silêncio até a
+  resposta. Na chamada de 15/10 15:31 UTC (antes da mudança), a primeira fala da voz veio 7,5 s depois da
+  delegação. Por isso a confirmação passou ao Hangar (`WaitAck`), com os 3,5 s escolhidos sem medição: um
+  turno de conversa sem ferramenta já levava 2,4 s até a primeira mensagem.
+- **Demora do sim ao aviso.** Chamada de 15/10, aviso de 4 resultados: delegação do "sim" às 15:41:11,5; o
+  organizador pensou 4,7 s até chamar `quiet` (16,2); fechou a resposta desse turno às 20,2 (+4,0 s), e só aí
+  o Hangar abriu o turno de resumo, com a voz lendo às 22,4 (+2,2 s). O texto já estava no Hangar e nada era
+  buscado de novo: a espera eram as três rodadas do organizador em fila. Com o resultado entrando no turno do
+  sim, ficam a delegação e uma rodada. Não medido ainda em chamada real.
+- **Avisos repetidos e corte falso (chamada de 15/10, 17:50–18:27 UTC, notebook).** Sete resumos cortados por
+  "fala do usuário"; seis tiveram só um `transcript/done role=user`, de 8 a 19 s depois do último pedaço de fala (o
+  fechamento do próprio "sim"). Cada corte devolvia o resultado à fila e gerava novo aviso: o mesmo resultado foi
+  avisado três vezes entre 18:08 e 18:11. Nas 36 finais restantes, 29 chegaram mais de 1,5 s depois do último pedaço
+  (mediana 9,8 s).
+- **Busca de 8 s.** Quatro buscas de sessão (três envios e um `read_session`) levaram 8,0 s, contra 0,1 s nas
+  demais; cada uma coincidiu com a nova tentativa ao peer que falhava a cada 38 s (30 s de espera + 8 s de
+  `READ_TIMEOUT`). O resto do tempo das ações é o organizador: 2 a 9 s até a ferramenta e cerca de 2 s depois dela.
+- **Troca anunciada antes de acontecer (18:23).** O registro não guarda texto: às 18:22:56 a voz falou sozinha e às
+  18:23:05 o organizador respondeu sem `switch_session` (Jev: conversa, 0,57); a troca só veio às 18:23:35, no
+  pedido repetido. Não dá para dizer qual das duas falas anunciou.
 
 ## Progresso de MCP no Claude sem terminal
 
