@@ -19,6 +19,7 @@ import { getTableChartPref, setTableChartPref } from './tableChartPref';
 import { superficie } from '../theme/superficie';
 import { Icon, type IconName } from '../ui/Icon';
 import { useAparencia } from '../stores/aparencia';
+import { useServers } from '../stores/servers';
 
 // Tema completo do unistyles (tokens + base) — UnistylesTheme não é exportado na raiz.
 type TemaApp = UnistylesThemes[keyof UnistylesThemes];
@@ -109,18 +110,20 @@ export const AssistantBubble = memo(function AssistantBubble({
 }) {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
+  const paths = useMemo(() => parseFilePaths(text), [text]);
   const proposed = useMemo(() => proposedPlan(text), [text]);
   const display = useMemo(() => planDisplayText(text), [text]);
   const md = useMemo(() => mkMarkdownStyle(theme), [theme]);
   // Anexos: mídia/pdf/html citados por caminho (precisam da sessão) + mídia remota por URL, que o
   // web desenha igual. Imagem e vídeo da mensagem formam UMA galeria no visor.
   const atts = useMemo(() => {
-    const local = sessionName
-      ? parseFilePaths(text).map((r) => ({ ...r, uri: fileUrlNative(sessionName, r.path), headers: fileAuthHeader() as Record<string, string> | undefined }))
+    const local = sessionName && server
+      ? paths.map((r) => ({ ...r, uri: fileUrlNative(sessionName, r.path, server), headers: fileAuthHeader(server) as Record<string, string> | undefined }))
       : [];
     const remota = parseMediaUrls(text).map((r) => ({ ...r, uri: r.url!, headers: undefined }));
     return [...local, ...remota];
-  }, [text, sessionName]);
+  }, [text, sessionName, server, paths]);
   const galeria = useMemo<MediaItem[]>(
     () => atts.flatMap((a) => (a.kind === 'image' || a.kind === 'video' ? [{ uri: a.uri, headers: a.headers, name: a.name, kind: a.kind }] : [])),
     [atts],
@@ -196,6 +199,7 @@ export const AssistantBubble = memo(function AssistantBubble({
             : null}
         </View>
       ) : null}
+      {sessionName && paths.length > 0 && !server ? <Text style={{ color: theme.tokens.status.error }} accessibilityRole="alert">{m.chat_servidor_removido()}</Text> : null}
       {atts.length > 0 ? (
         <View style={styles.atts}>
           {atts.map((r) => {
@@ -231,7 +235,7 @@ export const AssistantBubble = memo(function AssistantBubble({
           })}
         </View>
       ) : null}
-      <DocumentViewer doc={doc} onClose={() => setDoc(null)} />
+      <DocumentViewer doc={doc?.headers && !server ? null : doc} onClose={() => setDoc(null)} />
       {hasCodigos ? (
         <View style={styles.atts}>
           {codigos.map((p) => (

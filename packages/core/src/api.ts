@@ -136,8 +136,9 @@ export function uploadUrlNative(name: string, filename: string, server?: Server)
 }
 
 // Par nativo do transcriptImageUrl: o token vai no header (fileAuthHeader), nunca na URL.
-export function transcriptImageUrlNative(name: string, id: string, idx: number): string {
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/transcript-image/${encodeURIComponent(id)}/${idx}`;
+export function transcriptImageUrlNative(name: string, id: string, idx: number, server?: Server): string {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  return `${base}/api/sessions/${encodeURIComponent(name)}/transcript-image/${encodeURIComponent(id)}/${idx}`;
 }
 
 // URL do mp3 gerado. `?token` porque <audio> nao manda header Authorization e o front vem de outra

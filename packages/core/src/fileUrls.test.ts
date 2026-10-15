@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { configureApi } from './apiEnv';
-import { fileUrl, fileUrlNative, fileAuthHeader, uploadUrl, uploadUrlNative } from './api';
+import { fileUrl, fileUrlNative, fileAuthHeader, uploadUrl, uploadUrlNative, transcriptImageUrlNative } from './api';
+import type { Server } from './servers';
 
 function stubEventSource() {
   return { addEventListener() {}, removeEventListener() {}, close() {}, onerror: null, onopen: null, readyState: 0 } as unknown as import('./apiEnv').EventSourceLike;
@@ -34,6 +35,15 @@ describe('fileUrls token handling', () => {
   it('uploadUrl vs uploadUrlNative seguem mesmo contrato', () => {
     expect(uploadUrl('s', 'a.png')).toContain('token=');
     expect(uploadUrlNative('s', 'a.png')).not.toContain('token=');
+  });
+
+  it('mídia nativa usa endereço e credencial da conversa, não os do ativo', () => {
+    const server: Server = { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' };
+    expect(fileUrlNative('s 1', '/tmp/a.png', server)).toBe('https://a.test/api/sessions/s%201/file?path=%2Ftmp%2Fa.png');
+    expect(uploadUrlNative('s 1', 'a b.png', server)).toBe('https://a.test/api/sessions/s%201/uploads/a%20b.png');
+    expect(transcriptImageUrlNative('s 1', 'msg/1', 2, server)).toBe('https://a.test/api/sessions/s%201/transcript-image/msg%2F1/2');
+    expect(fileAuthHeader(server)).toEqual({ Authorization: 'Bearer token-a' });
+    expect(transcriptImageUrlNative('s', 'msg', 0)).toBe('https://backend.example/api/sessions/s/transcript-image/msg/0');
   });
 
   it('mutação: se fileUrlNative voltasse a anexar token, este teste ficaria vermelho', () => {

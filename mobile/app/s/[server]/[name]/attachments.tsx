@@ -34,26 +34,26 @@ export default function AttachmentsSheet() {
   const [webErro, setWebErro] = useState<string | null>(null);
   const [webCarregando, setWebCarregando] = useState(true);
   const ready = useServers((s) => s.ready);
-  const servidorSumiu = !ready ? false : !useServers.getState().servers.some((s) => s.id === serverId);
+  const target = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
 
   const load = useCallback(async () => {
+    if (!target) { setErro(m.chat_servidor_removido()); setLoading(false); return; }
     setLoading(true);
     setErro(null);
     try {
-      const r = await listUploads(sessionName);
+      const r = await listUploads(sessionName, target);
       setFiles(r.files);
     } catch (e) {
       setErro(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [sessionName]);
+  }, [sessionName, target]);
 
   useEffect(() => {
     if (!ready) return;
-    if (!useServers.getState().ensureActive(serverId)) return;
     void load();
-  }, [load, ready, serverId]);
+  }, [load, ready]);
 
   useEffect(() => {
     setWebErro(null);
@@ -62,6 +62,7 @@ export default function AttachmentsSheet() {
 
   const handlePress = useCallback(
     (f: UploadFile) => {
+      if (!target) { toast.erro(m.chat_servidor_removido()); return; }
       const k = fileKind(f.filename);
       if (k === 'image') {
         setLightbox(f);
@@ -72,19 +73,19 @@ export default function AttachmentsSheet() {
           router.push(`/s/${serverId}/${sessionName}/files?path=${encodeURIComponent(f.filename)}` as never);
           return;
         } catch {
-          const url = fileUrlNative(sessionName, f.filename);
-          setDocUrl({ url, headers: fileAuthHeader(), title: f.filename });
+          const url = fileUrlNative(sessionName, f.filename, target);
+          setDocUrl({ url, headers: fileAuthHeader(target), title: f.filename });
           return;
         }
       }
       if (k === 'video') {
-        setDoc({ uri: uploadUrlNative(sessionName, f.filename), headers: fileAuthHeader(), name: f.filename, kind: 'video' });
+        setDoc({ uri: uploadUrlNative(sessionName, f.filename, target), headers: fileAuthHeader(target), name: f.filename, kind: 'video' });
         return;
       }
-      const url = uploadUrlNative(sessionName, f.filename);
-      setDocUrl({ url, headers: fileAuthHeader(), title: f.filename });
+      const url = uploadUrlNative(sessionName, f.filename, target);
+      setDocUrl({ url, headers: fileAuthHeader(target), title: f.filename });
     },
-    [sessionName, serverId, router],
+    [sessionName, serverId, target, router],
   );
 
   // Volta para a conversa: o Composer mostra "transcrevendo" e recebe o texto ou o motivo da falha.
@@ -113,6 +114,25 @@ export default function AttachmentsSheet() {
 
   const audios = files.filter((f) => fileKind(f.filename) === 'audio');
   const others = files.filter((f) => fileKind(f.filename) !== 'audio');
+
+  if (!ready) {
+    return (
+      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center' }]}>
+        <ActivityIndicator color={theme.tokens.text.muted} />
+        <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
+      </View>
+    );
+  }
+
+  if (!target) {
+    return (
+      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 }]}>
+        <Text style={[styles.err, { color: theme.tokens.status.error }]} accessibilityRole="alert">
+          {m.chat_servidor_removido()}
+        </Text>
+      </View>
+    );
+  }
 
   if (docUrl) {
     const semToken = !docUrl.headers || Object.keys(docUrl.headers).length === 0;
@@ -175,25 +195,6 @@ export default function AttachmentsSheet() {
     );
   }
 
-  if (!ready) {
-    return (
-      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center' }]}>
-        <ActivityIndicator color={theme.tokens.text.muted} />
-        <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
-      </View>
-    );
-  }
-
-  if (servidorSumiu) {
-    return (
-      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 }]}>
-        <Text style={[styles.err, { color: theme.tokens.status.error }]} accessibilityRole="alert">
-          {m.arq_sessao_encerrada()}
-        </Text>
-      </View>
-    );
-  }
-
   return (
     <View style={[styles.container, { backgroundColor: theme.tokens.bg.base }]}>
       <Text style={[styles.title, { color: theme.tokens.text.primary }]}>
@@ -219,7 +220,7 @@ export default function AttachmentsSheet() {
         <ScrollView contentContainerStyle={styles.list}>
           {audios.map((f) => (
             <View key={f.filename} style={styles.audioRow}>
-              <AudioChip uri={uploadUrlNative(sessionName, f.filename)} headers={fileAuthHeader()} name={f.filename} />
+              <AudioChip uri={uploadUrlNative(sessionName, f.filename, target)} headers={fileAuthHeader(target)} name={f.filename} />
               <Pressable onPress={() => retranscribe(f)} hitSlop={8} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]}
                 accessibilityRole="button" accessibilityLabel={`${m.composer_transcrever_de_novo()}: ${f.filename}`}>
                 <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_transcrever_de_novo()}</Text>
@@ -228,7 +229,7 @@ export default function AttachmentsSheet() {
           ))}
           <View style={styles.grid}>
             {others.map((f) => (
-              <AttachmentCard key={f.filename} file={f} sessionName={sessionName} onPress={() => handlePress(f)} />
+              <AttachmentCard key={f.filename} file={f} sessionName={sessionName} serverId={serverId} onPress={() => handlePress(f)} />
             ))}
           </View>
         </ScrollView>
@@ -236,8 +237,8 @@ export default function AttachmentsSheet() {
 
       <Lightbox
         visible={!!lightbox}
-        uri={lightbox ? uploadUrlNative(sessionName, lightbox.filename) : ''}
-        headers={fileAuthHeader()}
+        uri={lightbox ? uploadUrlNative(sessionName, lightbox.filename, target) : ''}
+        headers={fileAuthHeader(target)}
         filename={lightbox?.filename ?? ''}
         onClose={() => setLightbox(null)}
       />

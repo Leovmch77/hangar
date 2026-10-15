@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, ActivityIndicator, Platform, ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, AppState, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -165,27 +165,40 @@ export default function ChatScreen() {
     if (!ready || servidorSumiu) return;
     setFetchedSession(undefined);
     let alive = true;
+    let active = (AppState.currentState ?? 'active') === 'active';
+    let generation = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
+      if (!alive || !active) return;
       const server = useServers.getState().servers.find((s) => s.id === serverId);
       if (!server) return;
+      const g = generation;
       try {
         const all = await fetchSessionsForServer(server);
-        if (!alive) return;
+        if (!alive || !active || g !== generation) return;
         const hit = all.find((s) => s.name === name);
         setFetchedSession(hit ?? null);
         if (hit?.provider === 'codex') timer = setTimeout(refresh, hit.tracked === false ? 2000 : 5000);
       } catch {
-        if (alive) {
+        if (alive && active && g === generation) {
           console.warn('fetchSessionsForServer falhou');
           timer = setTimeout(refresh, 5000);
         }
       }
     };
+    const subscription = AppState.addEventListener('change', (state) => {
+      const next = state === 'active';
+      if (next === active) return;
+      active = next;
+      generation++;
+      clearTimeout(timer);
+      if (active) void refresh();
+    });
     void refresh();
     return () => {
       alive = false;
       clearTimeout(timer);
+      subscription.remove();
     };
   }, [ready, servidorSumiu, serverId, name]);
   const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
@@ -330,8 +343,10 @@ export default function ChatScreen() {
   const recarregarBloqueado = stateEvent?.state !== 'idle' || recarregando;
   const recarregar = () => {
     if (recarregando) return;
+    const target = destino();
+    if (!target) return mostrarAviso(m.chat_servidor_removido());
     setRecarregando(true);
-    void recarregarSessao(name).catch((e) => mostrarAviso(e)).finally(() => setRecarregando(false));
+    void recarregarSessao(name, target).catch((e) => mostrarAviso(e)).finally(() => setRecarregando(false));
   };
   const handleCancelOptions = async () => {
     if (!optionCurrent()) return;
@@ -339,11 +354,12 @@ export default function ChatScreen() {
     if (!target) return mostrarAviso(m.chat_servidor_removido());
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
-    // Recupera o texto no toque, somado ao que já estava no campo.
-    if (last) setReturned({ route: rota, value: { text: last.text } });
     try {
       await interrupt(name, !!last, target);
-      if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+      if (last) {
+        chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+        setReturned({ route: rota, value: { text: last.text } });
+      }
     } catch (e) { optionError(e); }
   };
   const headless = !!(stateEvent?.headless ?? currentSession?.headless);
@@ -359,17 +375,19 @@ export default function ChatScreen() {
   const implementPlan = async (plan: string) => {
     const live = chat.use.getState();
     if (live.stateEvent?.state !== 'idle' || plan !== decidablePlan?.plan) throw new Error(m.chat_plan_indisponivel());
+    const target = destino();
+    if (!target) throw new Error(m.chat_servidor_removido());
     if (provider === 'codex') {
-      await implementCodexPlan(name);
+      await implementCodexPlan(name, target);
       return;
     }
-    await setPermissionMode(name, live.stateEvent?.claude_previous_non_plan || 'acceptEdits');
+    await setPermissionMode(name, live.stateEvent?.claude_previous_non_plan || 'acceptEdits', target);
     try {
       await chat.send(m.chat_plan_pedido());
     } catch (err) {
       // Pedido não saiu: a sessão não pode ficar fora do modo plano sem ter implementado nada.
       try {
-        await setPermissionMode(name, 'plan');
+        await setPermissionMode(name, 'plan', target);
       } catch (revertErr) {
         console.warn('plan: revert to plan mode failed', name, revertErr);
         throw new Error(m.native_plan_send_failed_stuck({ reason: err instanceof Error ? err.message : String(err) }));

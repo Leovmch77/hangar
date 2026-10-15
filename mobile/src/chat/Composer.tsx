@@ -606,11 +606,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const firstDraft = !!snapshot && snapshot.id === firstInputId && firstInputMessage(snapshot).trim() === finalText.trim();
       const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
       if (sendToPairNow && pairPeers?.length) {
+        const server = useServers.getState().servers.find((s) => s.id === serverId);
+        if (!server) throw new Error(m.chat_servidor_removido());
         const recipients = [name, ...pairPeers];
         await submitConversationDraft(serverId, name, finalText, async () => {
           groupPendingId = `pending-group-${Date.now()}`;
           chat.use.setState((current) => ({ pending: [...current.pending, { id: groupPendingId!, text: finalText }] }));
-          const results = await broadcast(recipients, finalText);
+          const results = await broadcast(recipients, finalText, server);
           const failedRecipients = recipients.filter((recipient) => !results[recipient]?.ok);
           if (failedRecipients.length) {
             const delivered = recipients.filter((recipient) => results[recipient]?.ok);
@@ -992,7 +994,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setSteering(true);
     setError('');
     try {
-      chat.applySteer(await steerSession(name));
+      const server = useServers.getState().servers.find((s) => s.id === serverId);
+      if (!server) { setError(m.chat_servidor_removido()); return; }
+      chat.applySteer(await steerSession(name, undefined, server));
     } catch (e) {
       const status = (e as { status?: number } | null)?.status;
       setError(status === 409 ? m.composer_fila_erro() : e instanceof Error ? e.message : m.composer_fila_erro());
@@ -1000,7 +1004,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       steeringRef.current = false;
       setSteering(false);
     }
-  }, [name, chat]);
+  }, [serverId, name, chat]);
 
   const isKimi = provider === 'kimi';
   // Só o Kimi fica com o chip "mandar agora" (a fila dele é a da TUI, promovida inteira por ctrl-s);
@@ -1048,7 +1052,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const caretPos = !sel ? text.length : sel.start === sel.end ? Math.min(sel.end, text.length) : -1;
   const slashToken = useMemo(() => slashTokenAt(text, caretPos), [text, caretPos]);
   const slashQuery = slashToken?.query ?? null;
-  const { commands, error: commandsError, retry: retryCommands } = useSessionCommands(name, provider, commandSheetOpen || slashQuery !== null);
+  const { commands, error: commandsError, retry: retryCommands } = useSessionCommands(serverId, name, provider, commandSheetOpen || slashQuery !== null);
   const suggestions = useMemo(() => slashMatches(commands ?? [], slashQuery), [commands, slashQuery]);
 
   const replaceText = useCallback((next: string, cursor = next.length) => {
@@ -1549,7 +1553,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
         {/* Monta só aberta: o histórico da pergunta lateral é lido a cada abertura. */}
         {sideQuestion !== null ? (
-          <SideQuestionSheet open name={name} question={sideQuestion} onClose={() => setSideQuestion(null)} />
+          <SideQuestionSheet open serverId={serverId} name={name} question={sideQuestion} onClose={() => setSideQuestion(null)} />
         ) : null}
 
         <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} server={styleServer} />

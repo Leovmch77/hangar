@@ -6,11 +6,13 @@ import { getLimits, resetsIn } from '@hangar/core';
 import type { SessionLimits, RateLimitWindow } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
+import { useServers } from '../../../../src/stores/servers';
 
 export default function CodexLimitsSheet() {
   const { theme } = useUnistyles();
   const { server, name } = useLocalSearchParams<{ server: string; name: string }>();
   const sessionName = String(name ?? '');
+  const target = useServers((s) => s.servers.find((x) => x.id === String(server ?? '')) ?? null);
   const [limits, setLimits] = useState<SessionLimits | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -19,7 +21,8 @@ export default function CodexLimitsSheet() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    getLimits(sessionName)
+    if (!target) { setError(m.servidor_nao_existe()); setLoading(false); return; }
+    getLimits(sessionName, target)
       .then((res) => {
         if (!cancelled) setLimits(res);
       })
@@ -32,7 +35,7 @@ export default function CodexLimitsSheet() {
     return () => {
       cancelled = true;
     };
-  }, [sessionName]);
+  }, [sessionName, target]);
 
   function label(w: RateLimitWindow): string {
     const pct = w.usedPercent != null ? `${Math.round(w.usedPercent)}%` : '—';

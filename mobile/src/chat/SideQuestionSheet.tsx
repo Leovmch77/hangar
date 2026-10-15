@@ -7,17 +7,20 @@ import type { PerguntaLateral } from '@hangar/core';
 import { Sheet } from '../ui/Sheet';
 import { mkMarkdownStyle } from './AssistantBubble';
 import { superficie } from '../theme/superficie';
+import { useServers } from '../stores/servers';
 import * as m from '../paraglide/messages';
 
 // Pergunta lateral (`/btw`): responde com o contexto da conversa sem entrar nela nem interromper.
 // `question` vem do composer e dispara sozinha ao abrir; vazia, só abre o campo.
-export function SideQuestionSheet({ open, name, question, onClose }: {
+export function SideQuestionSheet({ open, serverId, name, question, onClose }: {
   open: boolean;
+  serverId: string;
   name: string;
   question: string;
   onClose: () => void;
 }) {
   const { theme } = useUnistyles();
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
   const [items, setItems] = useState<PerguntaLateral[] | null>(null);
   const [inFlight, setInFlight] = useState<string | null>(null);
@@ -31,6 +34,7 @@ export function SideQuestionSheet({ open, name, question, onClose }: {
   const ask = async (raw: string) => {
     const q = raw.trim();
     if (!q) return;
+    if (!server) { setError(m.servidor_nao_existe()); setText(q); return; }
     if (inFlightRef.current) {
       setError(m.btw_em_andamento());
       setText(q);
@@ -42,7 +46,7 @@ export function SideQuestionSheet({ open, name, question, onClose }: {
     setError('');
     setText('');
     try {
-      const r = await perguntaLateral(name, q);
+      const r = await perguntaLateral(name, q, server);
       if (my === epoch.current) setItems((cur) => [...(cur ?? []), r]);
     } catch (e) {
       if (my !== epoch.current) return;
@@ -63,7 +67,8 @@ export function SideQuestionSheet({ open, name, question, onClose }: {
     setInFlight(null);
     setError('');
     setItems(null);
-    historicoLateral(name)
+    if (!server) { setItems([]); setError(m.servidor_nao_existe()); return; }
+    historicoLateral(name, server)
       .then((h) => { if (my === epoch.current) setItems(h); })
       .catch((e) => {
         if (my !== epoch.current) return;
@@ -72,8 +77,9 @@ export function SideQuestionSheet({ open, name, question, onClose }: {
       });
     if (question.trim()) void ask(question);
     // Só ao abrir: `ask` lê estado que muda a cada resposta e repetiria a pergunta.
+    return () => { epoch.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, name, question]);
+  }, [open, name, serverId, question]);
 
   return (
     <Sheet open={open} sizes={['large']} onDismiss={onClose} scrollable>

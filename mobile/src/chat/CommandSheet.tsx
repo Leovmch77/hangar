@@ -5,6 +5,7 @@ import { getCommands } from '@hangar/core';
 import type { CommandInfo } from '@hangar/core';
 import { Sheet } from '../ui/Sheet';
 import { superficie } from '../theme/superficie';
+import { useServers } from '../stores/servers';
 import * as m from '../paraglide/messages';
 
 // Uma lista por sessão para a folha e as sugestões em linha. Cada abertura a revalida (plugins e
@@ -12,30 +13,33 @@ import * as m from '../paraglide/messages';
 // fica guardada, como no PWA.
 const cache = new Map<string, CommandInfo[]>();
 
-export function useSessionCommands(name: string, provider: string | null, wanted: boolean) {
-  const key = `${provider ?? 'claude'}|${name}`;
-  const [commands, setCommands] = useState<CommandInfo[] | null>(() => cache.get(key) ?? null);
+export function useSessionCommands(serverId: string, name: string, provider: string | null, wanted: boolean) {
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
+  const key = `${serverId}|${provider ?? 'claude'}|${name}`;
+  const [loaded, setLoaded] = useState<{ key: string; commands: CommandInfo[] | null }>(() => ({ key, commands: cache.get(key) ?? null }));
+  const commands = !server ? null : loaded.key === key ? loaded.commands : cache.get(key) ?? null;
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
-  const shown = useRef(commands !== null);
+  const shown = useRef(false);
   shown.current = commands !== null;
 
   useEffect(() => {
     if (!wanted) return;
+    if (!server) { setError(m.servidor_nao_existe()); return; }
     let alive = true;
     // Revalidação que falha não troca a lista que está na tela pelo erro.
     const revalidating = shown.current;
-    if (!revalidating) setError('');
-    getCommands(name)
+    setError('');
+    getCommands(name, server)
       .then((c) => {
         if (provider !== 'codex') cache.set(key, c);
-        if (alive) setCommands(c);
+        if (alive) setLoaded({ key, commands: c });
       })
       .catch((e: unknown) => {
         if (alive && !revalidating) setError(e instanceof Error ? e.message : String(e));
       });
     return () => { alive = false; };
-  }, [wanted, name, provider, key, attempt]);
+  }, [wanted, name, server, provider, key, attempt]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
   return { commands, error, retry };
