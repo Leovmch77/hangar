@@ -5,25 +5,28 @@ use std::sync::LazyLock;
 const DARK: &str = "--background:transparent;--foreground:#d2cbcd;--muted-foreground:#8d8489;--surface:#1a171a;\
 --border:rgba(255,248,244,0.12);--accent:#7c87e8;--accent-foreground:#ffffff;--danger:#ff453a;--warning:#ff9f0a;\
 --success:#34c759;--info:#5b9cf5;--code-background:#100e11;--chart-1:#7c87e8;--chart-2:#d95926;--chart-3:#199e70;\
---chart-4:#c98500;--chart-5:#b07ce8;--chart-6:#e8607c;";
+--chart-4:#c98500;--chart-5:#b07ce8;--chart-6:#e8607c;--destructive-foreground:#100e11;--warning-foreground:#100e11;\
+--success-foreground:#100e11;--info-foreground:#100e11;";
 const LIGHT: &str = "--background:transparent;--foreground:#221d1b;--muted-foreground:#6f6660;--surface:#fffdfa;\
 --border:rgba(50,40,35,0.14);--accent:#5b6ad0;--accent-foreground:#ffffff;--danger:#b3251c;--warning:#7a5408;\
 --success:#146c30;--info:#2f6fd6;--code-background:#f8f6f2;--chart-1:#5b6ad0;--chart-2:#eb6834;--chart-3:#1baf7a;\
---chart-4:#eda100;--chart-5:#8a4fd0;--chart-6:#c93d62;";
+--chart-4:#eda100;--chart-5:#8a4fd0;--chart-6:#c93d62;--destructive-foreground:#ffffff;--warning-foreground:#ffffff;\
+--success-foreground:#ffffff;--info-foreground:#ffffff;";
 const COMMON: &str = "--radius:10px;--font-sans:-apple-system,BlinkMacSystemFont,\"SF Pro Text\",system-ui,sans-serif;\
 --font-mono:\"JetBrains Mono\",ui-monospace,\"SF Mono\",monospace;";
 const BASE: &str = "html{background:var(--background);color:var(--foreground);font:14px/1.5 var(--font-sans);\
 scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}";
 /// Nomes comuns de tema de componente, derivados das cores-base: seguem o tema do app e a troca dele. Especificidade
-/// zero: a página e o cliente sobrescrevem.
+/// zero: a página e o cliente sobrescrevem. O `-foreground` de cada cor de estado é o texto sobre ela e mora nos
+/// esquemas (escuro sobre as cores claras do tema escuro, branco sobre as escuras do claro); sobre a superfície suave o
+/// texto é a própria cor.
 const DERIVED: &str = ":where(:root){--muted:var(--surface);--card:var(--surface);--card-foreground:var(--foreground);\
 --popover:var(--surface);--popover-foreground:var(--foreground);--secondary:var(--surface);\
 --secondary-foreground:var(--foreground);--input:var(--border);--ring:var(--accent);--primary:var(--accent);\
 --primary-foreground:var(--accent-foreground);--accent-surface:color-mix(in srgb,var(--accent) 14%,transparent);\
---accent-surface-foreground:var(--foreground);--destructive:var(--danger);--destructive-foreground:var(--danger);\
---destructive-surface:color-mix(in srgb,var(--danger) 14%,transparent);--warning-foreground:var(--warning);\
---warning-surface:color-mix(in srgb,var(--warning) 14%,transparent);--success-foreground:var(--success);\
---info-foreground:var(--info);--code-foreground:var(--foreground)}";
+--accent-surface-foreground:var(--foreground);--destructive:var(--danger);\
+--destructive-surface:color-mix(in srgb,var(--danger) 14%,transparent);\
+--warning-surface:color-mix(in srgb,var(--warning) 14%,transparent);--code-foreground:var(--foreground)}";
 
 /// Ponte com o app: tamanho, link e troca de tema, no formato JSON-RPC do MCP Apps.
 const HOST: &str = r#"(()=>{const send=m=>{const s=JSON.stringify(m);if(window.hangarHost)window.hangarHost(s);
@@ -138,11 +141,38 @@ mod tests {
     fn derived_variables_follow_the_base_ones_and_yield_to_the_page() {
         let out = inject("<p></p>", true);
         for var in ["--card:var(--surface)", "--popover:var(--surface)", "--primary:var(--accent)", "--ring:var(--accent)",
-            "--destructive:var(--danger)", "--input:var(--border)", "--info-foreground:var(--info)", "--code-foreground:var(--foreground)"] {
+            "--destructive:var(--danger)", "--input:var(--border)", "--code-foreground:var(--foreground)"] {
             assert!(out.contains(var), "sem {var}");
         }
         assert!(out.contains(":where(:root){"), "derivadas com especificidade zero: a página e o cliente sobrescrevem");
         assert!(out.contains("--destructive-surface:color-mix("));
+    }
+
+    /// Contraste WCAG entre duas cores `#rrggbb`.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let lum = |hex: &str| {
+            let c = |i: usize| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap()) / 255.;
+            let f = |c: f64| if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+            0.2126 * f(c(1)) + 0.7152 * f(c(3)) + 0.0722 * f(c(5))
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn status_foreground_is_readable_on_its_color() {
+        // `background: var(--destructive); color: var(--destructive-foreground)` é o uso comum: o texto não some no fundo.
+        let value = |scheme: &str, var: &str| {
+            let at = scheme.find(&format!("{var}:")).unwrap_or_else(|| panic!("sem {var}")) + var.len() + 1;
+            scheme[at..at + 7].to_owned()
+        };
+        for scheme in [DARK, LIGHT] {
+            for (color, on) in [("--danger", "--destructive-foreground"), ("--warning", "--warning-foreground"),
+                ("--success", "--success-foreground"), ("--info", "--info-foreground")] {
+                let ratio = contrast(&value(scheme, color), &value(scheme, on));
+                assert!(ratio >= 4.5, "{on} sobre {color}: {ratio:.2}");
+            }
+        }
     }
 
     #[test]

@@ -919,8 +919,12 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   `--border`, `--accent`, `--accent-foreground`, `--danger`, `--warning`, `--success`, `--info`,
   `--code-background`, `--chart-1` a `--chart-6`), a página tem os nomes comuns de tema de componente:
   `--card`, `--popover`, `--muted`, `--secondary`, `--primary`, `--input`, `--ring`, `--destructive`,
-  `--code-foreground`, as superfícies suaves `--accent-surface`, `--destructive-surface` e
-  `--warning-surface` e os `-foreground` de cada uma.
+  `--code-foreground` e as superfícies suaves `--accent-surface`, `--destructive-surface` e
+  `--warning-surface`.
+  - O `-foreground` de `--destructive`, `--warning`, `--success` e `--info` é o texto sobre a cor cheia, com
+    contraste de pelo menos 4,5:1: o fundo da conversa sobre as cores claras do escuro, branco sobre as escuras do
+    claro. Antes ele era a própria cor, e `background: var(--destructive); color: var(--destructive-foreground)`
+    sumia. Sobre a superfície suave o texto é a própria cor.
   - As derivadas saem das base por `var()` e `color-mix()` num `:where(:root)` do CSS base: seguem o tema
     do app e a troca ao vivo, e a página ou o cliente sobrescrevem (especificidade zero).
   - O bloco de tema guarda os padrões de cada esquema (`data-dark`, `data-light`: cores, raio e

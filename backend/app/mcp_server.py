@@ -373,9 +373,10 @@ _HTML_RENDER = (
     "TEMA: use as variáveis --foreground, --muted-foreground, --surface, --border, --accent, --accent-foreground, "
     "--danger, --warning, --success, --info, --code-background, --code-foreground, --chart-1 a --chart-6, "
     "--radius, --font-sans, --font-mono; para componente, também --card, --popover, --muted, --secondary, "
-    "--primary, --input, --ring, --destructive e as superfícies suaves --accent-surface, --destructive-surface e "
-    "--warning-surface (cada uma com seu -foreground). --background é transparente. Elas seguem o tema claro/escuro "
-    "do app; seu CSS pode sobrescrever. "
+    "--primary, --input, --ring e --destructive; --destructive-foreground, --warning-foreground, "
+    "--success-foreground e --info-foreground são o texto sobre a cor cheia. Superfícies suaves: --accent-surface "
+    "(texto --accent-surface-foreground), --destructive-surface e --warning-surface (texto na própria cor, --danger e "
+    "--warning). --background é transparente. Elas seguem o tema claro/escuro do app; seu CSS pode sobrescrever. "
     "own_theme=true para mock de outro produto/site ou página que precisa das próprias cores: ela leva o próprio "
     "fundo e paleta, como foi desenhada, e não recebe o tema do app; sem ele, a página segue o tema do app. "
     "height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela.")
