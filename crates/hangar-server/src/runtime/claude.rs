@@ -755,9 +755,12 @@ impl ClaudeEngine {
                     let text = text_blocks(&event["message"]["content"]);
                     // A CLI de hoje põe a saída no `local_command_source`, sem o comando: a resposta do `/effort` é
                     // reconhecida pelo texto dela; o nome do comando no campo fica para a CLI que o mandava.
-                    let effort_source = text.starts_with("Set effort level to ")
-                        || event["local_command_source"].as_str().is_some_and(|source|source.trim_start_matches('/').split_whitespace().next() == Some("effort"));
+                    let named = event["local_command_source"].as_str().is_some_and(|source|source.trim_start_matches('/').split_whitespace().next() == Some("effort"));
+                    let effort_source = named || text.starts_with("Set effort level to ");
+                    // Só o `/effort` do próprio Hangar fica sem rótulo; o digitado pela pessoa leva o `/` dela.
+                    let mut answered_intent = named;
                     if let Some(intent) = self.effort_intent.clone().filter(|i|effort_source && (i["status"] == "dispatching" || i["status"] == "unknown")) {
+                        answered_intent = true;
                         let value = intent["value"].as_str().unwrap_or("");
                         let child = format!("{}:effort",intent["operation_id"].as_str().unwrap_or(""));
                         if text.starts_with(&format!("Set effort level to {value}")) && self.wires.contains_key(&child) {
@@ -779,7 +782,7 @@ impl ClaudeEngine {
                         }
                     }
                     // `local_command_source` traz a saída, não o comando: quem respondeu é o último `/` escrito.
-                    let source = if effort_source { None } else { self.slash_input.take() };
+                    let source = if answered_intent { None } else { self.slash_input.take() };
                     if !text.trim().is_empty() {
                         self.policy("local_output",json!({"text":text,"source":source}),effects);
                     }

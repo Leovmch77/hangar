@@ -273,6 +273,16 @@ fn effort_is_confirmed_by_the_cli_output_carried_in_the_source() {
     assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "op-1")));
 }
 
+#[test]
+fn effort_typed_by_the_user_keeps_its_slash_command_on_the_answer() {
+    let mut engine = engine(json!({"name":"session","initialized":true}));
+    engine.command(command(OperationKind::Steer,json!({"text":"/effort high"})),clock(11.0)).unwrap();
+    let out = "Set effort level to high (this session only): Comprehensive implementation";
+    let effects = line(&mut engine,json!({"type":"assistant","local_command_source":format!("<local-command-stdout>{out}</local-command-stdout>"),
+        "message":{"content":[{"type":"text","text":out}]}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Policy { kind,payload,.. } if kind == "local_output" && payload["source"] == "/effort high")));
+}
+
 /// A CLI põe a SAÍDA no `local_command_source`, não o comando.
 #[test]
 fn local_answer_carries_the_slash_command_that_was_written() {
