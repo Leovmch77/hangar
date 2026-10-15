@@ -1,4 +1,5 @@
 //! Tema e script de ponte que vão no começo do `<head>` de toda página publicada.
+use super::store::PageMeta;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -59,9 +60,16 @@ static INJECTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?s)<style id="hangar-theme"[^>]*>[^<]*</style>|<script id="hangar-host">.*?</script>"#).unwrap()
 });
 
-/// A página como o agente a escreveu: sem o bloco de tema e a ponte que `inject` pôs, para a Fonte, copiar e salvar. O
-/// `<head>` que o `inject` criou para a página que não tinha fica, vazio.
-pub fn source(html: &str) -> String { INJECTED.replacen(html, 2, "").into_owned() }
+/// O documento que o app mostra: tema e ponte na frente da página gravada.
+pub fn served(stored: String, meta: &PageMeta) -> String {
+    if meta.original { inject(&stored, !meta.own_theme) } else { stored }
+}
+
+/// A página como o agente a escreveu, para a Fonte, copiar e salvar. Só a página gravada antes de `original` precisa
+/// tirar o bloco do arquivo, e ali o `<head>` que o `inject` criou fica, vazio.
+pub fn source(stored: String, meta: &PageMeta) -> String {
+    if meta.original { stored } else { INJECTED.replacen(&stored, 2, "").into_owned() }
+}
 
 pub fn inject(html: &str, follow_app_theme: bool) -> String {
     let inert = inert_ranges(html);
@@ -118,20 +126,28 @@ mod tests {
         assert!(HOST.contains("ctrlKey:e.ctrlKey,metaKey:e.metaKey") && HOST.contains("if(!e.isTrusted)return;"));
     }
 
+    fn meta(original: bool, own_theme: bool) -> PageMeta {
+        PageMeta { title: "t".into(), height: None, heights: Default::default(), created: 0, draft: false, own_theme, url: None, original }
+    }
+
     #[test]
-    fn source_is_the_page_without_what_the_server_injected() {
-        for original in ["<!doctype html><html><head><title>t</title></head><body><p>oi</p></body></html>",
-            "<html lang=\"pt\"><head></head><body><script>var a='<head>'</script></body></html>"] {
-            assert_eq!(source(&inject(original, true)), original, "{original}");
-            assert_eq!(source(&inject(original, false)), original, "tema próprio: {original}");
+    fn source_is_exactly_what_the_agent_wrote_and_the_bridge_comes_on_read() {
+        for original in ["<!doctype html><html><head><title>t</title></head><body><p>oi</p></body></html>", "<p>oi</p>",
+            "<!doctype html><p>oi</p>", "<html><head><style id=\"hangar-theme\">:root{--a:1}</style></head><body>x</body></html>"] {
+            for own_theme in [false, true] {
+                let m = meta(true, own_theme);
+                assert_eq!(source(original.to_owned(), &m), original);
+                assert_eq!(served(original.to_owned(), &m), inject(original, !own_theme));
+            }
         }
-        for original in ["<p>oi</p>", "<!doctype html><p>oi</p>"] {
-            // Sem `<head>`, o que o `inject` criou fica vazio.
-            assert_eq!(source(&inject(original, true)).replacen("<head></head>", "", 1), original);
-        }
-        // Página gravada por versão anterior do bloco também sai limpa.
-        let old = "<html><head><style id=\"hangar-theme\" data-base=\":root{}\">:root{--a:1}</style><script id=\"hangar-host\">(()=>{})();</script></head><body>x</body></html>";
-        assert_eq!(source(old), "<html><head></head><body>x</body></html>");
+    }
+
+    #[test]
+    fn page_saved_with_the_block_in_the_file_is_served_as_is_and_its_source_drops_it() {
+        let m = meta(false, false);
+        let stored = inject("<html><head></head><body>x</body></html>", true);
+        assert_eq!(served(stored.clone(), &m), stored);
+        assert_eq!(source(stored, &m), "<html><head></head><body>x</body></html>");
     }
 
     #[test]

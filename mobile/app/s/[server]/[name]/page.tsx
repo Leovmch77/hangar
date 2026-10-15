@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Pressable, ScrollView, Share, Text, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -57,9 +57,13 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
   const [showingSource, setShowingSource] = useState(false);
   const [source, setSource] = useState<string | null>(null);
   const [sourceFailed, setSourceFailed] = useState(false);
+  // Um pedido por vez: alternar com o pedido no ar não dispara outro, e uma resposta velha não sobrescreve a nova.
+  const fetching = useRef(false);
   const fetchSource = useCallback(async () => {
+    if (fetching.current) return;
+    fetching.current = true;
     setSourceFailed(false);
-    try { setSource(await loadSource()); } catch { setSourceFailed(true); }
+    try { setSource(await loadSource()); } catch { setSourceFailed(true); } finally { fetching.current = false; }
   }, [loadSource]);
   const toggleSource = () => {
     setShowingSource((v) => !v);

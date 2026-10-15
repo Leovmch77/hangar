@@ -20,14 +20,22 @@
   let saving = $state<'busy' | 'again' | 'failed' | null>(null);
   let fileUrl: string | null = null;
 
-  async function fetchSource() {
-    if (source != null) return;
-    sourceFailed = false;
-    try {
-      source = await loadSource();
-    } catch {
-      sourceFailed = true;
-    }
+  // Um pedido por vez: alternar Página e Fonte com o pedido no ar reaproveita o mesmo, e uma resposta velha não
+  // sobrescreve a nova.
+  let fetching: Promise<void> | null = null;
+  function fetchSource(): Promise<void> {
+    if (source != null) return Promise.resolve();
+    fetching ??= (async () => {
+      sourceFailed = false;
+      try {
+        source = await loadSource();
+      } catch {
+        sourceFailed = true;
+      } finally {
+        fetching = null;
+      }
+    })();
+    return fetching;
   }
 
   async function copySource() {

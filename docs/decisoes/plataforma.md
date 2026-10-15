@@ -902,8 +902,11 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   segue no cartão estático.
 - **Fonte, copiar, salvar, links e atalhos (15/10/2026, pedido do usuário).** A tela cheia troca
   entre Página e Fonte, copia a fonte e a salva em `.html` (nativo e PWA; no app, Compartilhar).
-  A fonte vem do servidor (`?raw=1&source=1`, `theme::source`), sem o bloco de tema e a ponte que o
-  `inject` pôs: o cliente não sabe desfazer a injeção e copiaria CSS e script que não são da página.
+  A fonte vem do servidor (`?raw=1&source=1`), sem o bloco de tema e a ponte: o cliente copiaria CSS
+  e script que não são da página. O `<id>.html` guarda a página como o agente escreveu e o bloco
+  entra na leitura (`theme::served`), porque desfazer a injeção por regex deixava o `<head>` que ela
+  criou e podia levar um bloco de mesmo id escrito pelo agente. Página gravada antes disso (sem
+  `original` no meta) continua com o bloco no arquivo e só ela passa pela regex.
   O nome do arquivo sai do título. Salvar no nativo usa o diálogo do sistema na pasta Downloads.
   Link clicado na página segue a regra do chat, numa função só (`links::open_link`): PR do GitHub
   ou MR do GitLab abre no painel de navegador da sessão, Ctrl/Cmd+clique vai ao navegador do
