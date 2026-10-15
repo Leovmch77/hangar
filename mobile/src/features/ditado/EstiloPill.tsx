@@ -55,7 +55,7 @@ export function DictationStyleMenu({ open, onClose, server }: { open: boolean; o
       await trocar(hit.valor);
       onClose();
     } catch (e) {
-      setErro(e instanceof Error ? e.message : 'falha');
+      setErro(e instanceof Error ? e.message : m.erro_desconhecido());
     } finally {
       setAplicando(null);
     }
