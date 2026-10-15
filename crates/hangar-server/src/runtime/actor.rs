@@ -1619,7 +1619,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                             // classe, e o envio recusa com `native_mode_class_missing` em vez de adivinhar.
                                             let registry = lifecycle.as_ref().and_then(std::sync::Weak::upgrade);
                                             let class = match &registry {
-                                                Some(registry)=>Some(registry.message_class(sender,&target.name).await?),
+                                                Some(registry)=>match registry.message_class(sender,&target.name).await {
+                                                    Ok(class)=>Some(class),
+                                                    // Nada foi escrito ainda: o recado segue pelo cano como texto comum, nunca incerto.
+                                                    Err(error)=>{
+                                                        if crate::warn_limit::allow(Some(&target.key),&error.code) {
+                                                            tracing::warn!(key=%target.key,session=%target.name,code=%error.code,"classe do recado não se leu; vai pelo cano");
+                                                        }
+                                                        return Ok(json!({"outcome":"not_written","error_code":error.code}));
+                                                    },
+                                                },
                                                 None=>None,
                                             };
                                             let payload = json!({"text":command.payload["text"],"mode":class});
