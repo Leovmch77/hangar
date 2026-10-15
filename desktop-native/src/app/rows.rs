@@ -533,7 +533,8 @@ impl Hangar {
 /// cada linha na fonte.
 fn line_piece<'a>(markdown: &'a str, starts: &[usize], from: usize, to: usize) -> &'a str {
     let start = starts.get(from).copied().unwrap_or(markdown.len()).min(markdown.len());
-    let end = starts.get(to).map_or(markdown.len(), |&at| at - 1).max(start);
+    // Linha 0 até a linha 0 é vazio: sem o `saturating_sub`, o `at - 1` estouraria.
+    let end = starts.get(to).map_or(markdown.len(), |&at| at.saturating_sub(1)).max(start).min(markdown.len());
     let slice = &markdown[start..end];
     slice.strip_suffix('\r').unwrap_or(slice)
 }
@@ -544,6 +545,7 @@ mod tests {
     fn line_piece_drops_the_line_terminator() {
         for md in ["a\nb\nc\n", "a\r\nb\r\nc\r\n"] {
             let starts: Vec<usize> = std::iter::once(0).chain(md.match_indices('\n').map(|(at, _)| at + 1)).collect();
+            assert_eq!(super::line_piece(md, &starts, 0, 0), "");
             assert_eq!(super::line_piece(md, &starts, 0, 2), if md.contains('\r') { "a\r\nb" } else { "a\nb" });
             assert_eq!(super::line_piece(md, &starts, 2, 3), "c");
             assert_eq!(super::line_piece(md, &starts, 1, 9), &md[starts[1]..]);
