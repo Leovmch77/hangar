@@ -17,7 +17,7 @@ const FALLBACK: f32 = 240.;
 /// Moldura do site (modo URL) sem altura pedida; o servidor já manda esta, o app repete para resultado antigo.
 const SITE_HEIGHT: u32 = 640;
 /// Clique ou tecla na página que ainda vale como gesto para ela abrir um link.
-const GESTURE: Duration = Duration::from_secs(2);
+pub(super) const GESTURE: Duration = Duration::from_secs(2);
 /// Espera do último quadro da página que sai do orçamento.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const PARK_SHOT: Duration = Duration::from_secs(3);
@@ -86,17 +86,31 @@ fn scrolls_inside(page: &PageRef, width: f32, reported: Option<f32>) -> bool {
     natural(page, width, reported) > frame_height(page, width, reported) + 0.5
 }
 
-/// Fila das páginas vivas, mais recente no fim: passou do teto, a mais antiga sai.
+/// Fila das páginas vivas, mais recente no fim: passou do teto, a mais antiga sai. A tela cheia ocupa uma vaga fora da
+/// fila enquanto aberta: o motor dela não é de nenhum cartão.
 #[derive(Default)]
-pub struct Budget { order: VecDeque<String> }
+pub struct Budget { order: VecDeque<String>, pinned: usize }
 
 impl Budget {
     /// Marca `id` como usada agora; devolve quem deve fechar.
     pub fn touch(&mut self, id: &str) -> Option<String> {
         self.order.retain(|x| x != id);
         self.order.push_back(id.to_owned());
-        (self.order.len() > LIVE_MAX).then(|| self.order.pop_front()).flatten()
+        (self.order.len() + self.pinned > LIVE_MAX).then(|| self.order.pop_front()).flatten()
     }
+
+    /// Tela cheia abriu: reserva a vaga e devolve quem deve fechar para ela caber.
+    pub fn pin(&mut self) -> Vec<String> {
+        self.pinned += 1;
+        let mut out = Vec::new();
+        while self.order.len() + self.pinned > LIVE_MAX && let Some(old) = self.order.pop_front() { out.push(old); }
+        out
+    }
+
+    pub fn unpin(&mut self) { self.pinned = self.pinned.saturating_sub(1); }
+
+    /// Conversa trocada: a fila esvazia, a vaga da tela cheia aberta continua dela.
+    pub fn clear(&mut self) { self.order.clear(); }
 }
 
 #[derive(Debug, PartialEq)]
@@ -146,12 +160,54 @@ impl Paint {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ViewState { Loading, Ready, Error, Expired }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Miss { NoImage, Expired, Other }
+
+/// O 404 da página traz o motivo no código; sem ele é erro comum.
+pub(super) fn miss(status: Option<u16>, code: Option<&str>) -> Miss {
+    match (status, code) {
+        (Some(404), Some("erro_pagina_sem_imagem")) => Miss::NoImage,
+        (Some(404), Some("erro_pagina_expirou")) => Miss::Expired,
+        _ => Miss::Other,
+    }
+}
+
+/// Tela cheia só com a página à vista. Site sem página viva só abre no navegador, e sem imagem não há o que ampliar.
+fn expandable(state: ViewState, live: bool, site: bool, no_image: bool) -> bool {
+    state == ViewState::Ready && !no_image && (live || !site)
+}
+
+/// Tecla para a página viva. O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(super) fn forward_key(engine: &Engine, k: &Keystroke, cx: &App) {
+    let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
+    match paste.then(|| cx.read_from_clipboard().and_then(|item| item.text())).flatten() {
+        Some(text) => engine.insert_text(&text),
+        None => engine.key(true, k),
+    }
+}
 
 /// Motor vivo da página e o laço que lê os eventos dele; caem juntos.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-struct Running { engine: Rc<Engine>, _drain: Task<()>, framed: bool, theme_sent: String, at: Option<String> }
+pub(super) struct Running {
+    pub(super) engine: Rc<Engine>, pub(super) _drain: Task<()>, pub(super) framed: bool, pub(super) theme_sent: Option<ThemeKey>,
+    pub(super) at: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Running {
+    /// Entrega o tema do app à página quando ele mudou desde o último envio; o primeiro leva antes as fontes.
+    pub(super) fn push_theme(&mut self) {
+        let key = theme_key();
+        if self.theme_sent == Some(key) { return; }
+        if self.theme_sent.is_none() { self.engine.evaluate(&APP_FONTS); }
+        self.engine.evaluate(&theme_script());
+        self.theme_sent = Some(key);
+    }
+}
 
 struct PageView {
     page: PageRef,
@@ -224,9 +280,12 @@ impl Pages {
     /// junto com as visões.
     pub fn clear(&mut self) {
         self.views.clear();
-        self.budget = Budget::default();
+        self.budget.clear();
         self.paint.away.borrow_mut().clear();
     }
+
+    /// Tela cheia fechou: a vaga dela volta para os cartões.
+    pub fn unpin(&mut self) { self.budget.unpin(); }
 
     /// Conversa refeita: sai quem não tem mais linha.
     pub fn retain_rows(&mut self, keep: impl Fn(&String) -> bool) {
@@ -244,7 +303,7 @@ fn record_width(cell: &Cell<f32>, bounds: Bounds<Pixels>, window: &mut Window) {
 }
 
 /// Larguras em que o servidor tira a imagem (`WIDTHS` da rota `shot`).
-fn shot_width(width: f32) -> u32 {
+pub(super) fn shot_width(width: f32) -> u32 {
     [360, 728, 1000].into_iter().min_by_key(|w| (*w as f32 - width).abs() as u32).unwrap_or(728)
 }
 
@@ -258,7 +317,7 @@ fn hex(color: Hsla) -> String {
 /// A fonte do app vem embutida nele, não instalada: sem isto o Chromium da página cai na fonte do sistema, mais fina,
 /// e a página destoa do texto ao lado.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+pub(super) static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use base64::Engine as _;
     let face = |bytes: &[u8], weight: u16| format!("@font-face{{font-family:\"{}\";font-weight:{weight};src:url(data:font/ttf;base64,{})}}",
         theme::SANS, base64::engine::general_purpose::STANDARD.encode(bytes));
@@ -267,6 +326,16 @@ static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!("(()=>{{if(document.getElementById('hangar-fonts'))return;const s=document.createElement('style');s.id='hangar-fonts';s.textContent={};document.head.appendChild(s)}})()",
         serde_json::to_string(&css).unwrap_or_default())
 });
+
+/// O que o script do tema lê do app: chave igual, script igual, sem montá-lo a cada quadro.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 5] }
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn theme_key() -> ThemeKey {
+    ThemeKey { dark: theme::is_dark(), colors: [theme::text(), theme::muted(), theme::surface(), theme::border(), theme::accent()] }
+}
 
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -308,10 +377,10 @@ impl Hangar {
     fn page_failed(&mut self, id: &str, error: &Failure) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         view.busy = false;
-        match (error.status, error.code.as_deref()) {
-            (Some(404), Some("erro_pagina_sem_imagem")) => { view.no_image = true; view.state = ViewState::Ready; }
-            (Some(404), Some("erro_pagina_expirou")) => view.state = ViewState::Expired,
-            _ => { eprintln!("[pagina] {id}: {}", error.detail); view.state = ViewState::Error; }
+        match miss(error.status, error.code.as_deref()) {
+            Miss::NoImage => { view.no_image = true; view.state = ViewState::Ready; }
+            Miss::Expired => view.state = ViewState::Expired,
+            Miss::Other => { eprintln!("[pagina] {id}: {}", error.detail); view.state = ViewState::Error; }
         }
     }
 
@@ -425,7 +494,7 @@ impl Hangar {
                 if this.update(cx, |this, cx| this.page_event(&owner, event, cx)).is_err() { break; }
             }
         });
-        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: String::new(), at: None });
+        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: None, at: None });
         view.state = ViewState::Ready;
         if let Some(old) = self.pages.budget.touch(&id) { self.park_page(&old, cx); }
         cx.notify();
@@ -522,7 +591,7 @@ impl Hangar {
     }
 
     /// Baixa a casca isolada pelo `Api` (token no cabeçalho, nunca na URL), grava numa cópia privada e a abre.
-    fn open_page_in_browser(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(super) fn open_page_in_browser(&mut self, id: String, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let name = key.name.clone();
         let task = self.runtime.spawn(async move {
@@ -541,6 +610,23 @@ impl Hangar {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// Abre a página em tela cheia. Viva: motor próprio, que toma uma vaga do orçamento até o diálogo fechar.
+    fn open_page_fullscreen(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
+        let Some(view) = self.pages.views.get(id) else { return };
+        if !expandable(view.state, view.live, view.page.url.is_some(), view.no_image) { return; }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        let start = view.page.url.clone().map(|url| view.running.as_ref().and_then(|r| r.at.clone()).unwrap_or(url));
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let start = None;
+        let source = page_fullscreen::Source { page: view.page.clone(), html: view.html.clone(), live: view.live, start };
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if source.live { for old in self.pages.budget.pin() { self.park_page(&old, cx); } }
+        let host = page_fullscreen::Host { hangar: cx.entity().downgrade(), api, name: key.name.clone(), runtime: self.runtime.clone(),
+            window: self.pages.window };
+        page_fullscreen::open(host, source, window, cx);
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -589,6 +675,7 @@ impl Hangar {
         if self.pages.views.get(&id).is_some_and(|v| v.running.is_some()) { self.pages.budget.touch(&id); }
         let width = self.pages.width.get();
         let Some(view) = self.pages.views.get_mut(&id) else { return div().into_any_element() };
+        let full = expandable(view.state, view.live, view.page.url.is_some(), view.no_image);
         let title = view.page.title.clone();
         let height = px(frame_height(&view.page, width, view.reported));
         let note = |text: String| div().py(px(12.)).text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(text);
@@ -627,6 +714,7 @@ impl Hangar {
                 .child(Button::new(SharedString::from(format!("page-open-{id}"))).ghost().xsmall().icon(IconName::ExternalLink)
                     .label(tr_shared("page_open_browser", &[]))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_page_in_browser(open.clone(), cx))))
+                .children(full.then(|| fullscreen_button(&id, cx)))
                 .child(toggle_button(&id, false, cx));
             let picture = match (view.state, image, view.no_image) {
                 (_, _, true) => Some(note(tr_shared("page_no_image", &[]))),
@@ -637,13 +725,8 @@ impl Hangar {
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
-            let script = theme_script();
             let follows = !view.page.own_theme && view.page.url.is_none();
-            if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed && r.theme_sent != script) {
-                if running.theme_sent.is_empty() { running.engine.evaluate(&APP_FONTS); }
-                running.engine.evaluate(&script);
-                running.theme_sent = script;
-            }
+            if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed) { running.push_theme(); }
             let engine = view.running.as_ref().map(|r| r.engine.clone());
             let framed = view.running.as_ref().is_some_and(|r| r.framed);
             // O site tem altura fixa e rola por dentro: a roda é sempre dele.
@@ -695,13 +778,7 @@ impl Hangar {
                     let k = &event.keystroke;
                     if k.key == "escape" { this.root_focus.focus(window, cx); return; }
                     if let Some(view) = this.pages.views.get_mut(&key_down) { view.gesture = Some(Instant::now()); }
-                    let Some(engine) = this.page_engine(&key_down) else { return };
-                    // O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita o texto.
-                    let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
-                    match paste.then(|| cx.read_from_clipboard().and_then(|item| item.text())).flatten() {
-                        Some(text) => engine.insert_text(&text),
-                        None => engine.key(true, k),
-                    }
+                    if let Some(engine) = this.page_engine(&key_down) { forward_key(&engine, k, cx); }
                 }))
                 .on_key_up(cx.listener(move |this, event: &KeyUpEvent, _, cx| {
                     cx.stop_propagation();
@@ -718,11 +795,20 @@ impl Hangar {
                 }
                 None => h_flex().gap_2().child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(title)),
             };
-            return v_flex().w_full().gap_1().child(strip.child(toggle_button(&id, false, cx))).child(card).into_any_element();
+            let strip = strip.children(full.then(|| fullscreen_button(&id, cx))).child(toggle_button(&id, false, cx));
+            return v_flex().w_full().gap_1().child(strip).child(card).into_any_element();
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         div().w_full().h(height).child(loading()).into_any_element()
     }
+}
+
+fn fullscreen_button(id: &str, cx: &mut Context<Hangar>) -> Button {
+    let tip = tr_shared("page_fullscreen", &[]);
+    let target = id.to_owned();
+    Button::new(SharedString::from(format!("page-full-{id}"))).ghost().xsmall().icon(IconName::Maximize)
+        .tooltip(tip.clone()).accessibility_label(tip)
+        .on_click(cx.listener(move |this, _, window, cx| this.open_page_fullscreen(&target, window, cx)))
 }
 
 fn toggle_button(id: &str, collapsed: bool, cx: &mut Context<Hangar>) -> Button {
@@ -737,7 +823,8 @@ fn toggle_button(id: &str, collapsed: bool, cx: &mut Context<Hangar>) -> Button 
 #[cfg(test)]
 mod tests {
     // Sem `super::*`: o glob da gpui_kit traz um `test` próprio que sombreia o `#[test]` da std.
-    use super::{Budget, HostMsg, PageRef, frame_height, page_failure, page_from_result, parse_host, scrolls_inside};
+    use super::{Budget, HostMsg, Miss, PageRef, ViewState, expandable, frame_height, miss, page_failure, page_from_result, parse_host,
+        scrolls_inside};
 
     #[test]
     fn answered_call_without_page_is_a_visible_failure() {
@@ -783,6 +870,45 @@ mod tests {
         for id in ["a", "b", "c", "d"] { assert_eq!(b.touch(id), None); }
         assert_eq!(b.touch("a"), None);
         assert_eq!(b.touch("e"), Some("b".into()));
+    }
+
+    #[test]
+    fn pinned_fullscreen_takes_a_slot_until_released() {
+        let mut b = Budget::default();
+        for id in ["a", "b", "c", "d"] { assert_eq!(b.touch(id), None); }
+        assert_eq!(b.pin(), vec!["a".to_owned()]);
+        assert_eq!(b.touch("b"), None, "quem já está vivo não expulsa ninguém");
+        assert_eq!(b.touch("e"), Some("c".into()));
+        b.unpin();
+        b.unpin();
+        assert_eq!(b.touch("f"), None, "a vaga voltou, e soltar de novo não fica negativo");
+    }
+
+    #[test]
+    fn clear_keeps_the_pinned_slot() {
+        let mut b = Budget::default();
+        assert!(b.pin().is_empty());
+        b.clear();
+        for id in ["a", "b", "c"] { assert_eq!(b.touch(id), None); }
+        assert_eq!(b.touch("d"), Some("a".into()), "conversa recarregada com a tela cheia aberta: a vaga dela continua");
+    }
+
+    #[test]
+    fn fullscreen_only_for_a_page_on_screen() {
+        assert!(expandable(ViewState::Ready, true, false, false));
+        assert!(expandable(ViewState::Ready, true, true, false), "site vivo abre no diálogo");
+        assert!(expandable(ViewState::Ready, false, false, false), "imagem estática amplia");
+        assert!(!expandable(ViewState::Ready, false, true, false), "site sem página viva fica com o navegador");
+        assert!(!expandable(ViewState::Ready, false, false, true), "sem imagem não há o que ampliar");
+        for state in [ViewState::Loading, ViewState::Error, ViewState::Expired] { assert!(!expandable(state, true, false, false)); }
+    }
+
+    #[test]
+    fn page_failures_by_server_code() {
+        assert_eq!(miss(Some(404), Some("erro_pagina_sem_imagem")), Miss::NoImage);
+        assert_eq!(miss(Some(404), Some("erro_pagina_expirou")), Miss::Expired);
+        assert_eq!(miss(Some(404), None), Miss::Other);
+        assert_eq!(miss(None, Some("erro_pagina_expirou")), Miss::Other);
     }
 
     #[test]

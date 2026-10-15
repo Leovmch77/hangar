@@ -50,6 +50,8 @@ pub(super) struct SubConversation {
     expanded: HashSet<String>,
     rich: HashMap<String, Rich>,
     list: ListState,
+    /// Servidores de plugin da sessão aberta: mudam quais chamadas ficam fora da dobra.
+    plugin_servers: Vec<String>,
 }
 
 /// Rodando só enquanto o subagente não terminou e nenhuma mensagem veio depois da chamada, como na conversa.
@@ -150,7 +152,15 @@ fn prepended_anchor<'a>(old: &'a [ChatEvent], new: &[ChatEvent]) -> Option<&'a s
 impl SubConversation {
     pub fn new() -> Self {
         Self { events: Vec::new(), finished: false, started: None, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
-            list: ListState::new(0, ListAlignment::Bottom, px(200.)) }
+            list: ListState::new(0, ListAlignment::Bottom, px(200.)), plugin_servers: Vec::new() }
+    }
+
+    /// O conjunto muda a altura das linhas da pele Terminal: remede todas.
+    pub fn set_plugin_servers(&mut self, servers: &[String], cx: &mut Context<Self>) {
+        if self.plugin_servers == servers { return; }
+        self.plugin_servers = servers.to_vec();
+        self.list.remeasure();
+        cx.notify();
     }
 
     /// A Aparência mudou: refaz as linhas (pensamento com ou sem ferramentas) e remede todas (Clássico ou Chips).
@@ -345,7 +355,7 @@ impl SubConversation {
         let outcome = match &edits { Some(edits) if result.is_some() => term::edit_summary(edits, created), _ => tool.status.clone() };
         let open = self.expanded.contains(&key);
         let inner = div().w_full().flex().items_start().justify_start().gap(px(8.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-            .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().bg(dot))
+            .child(term::bullet(dot, 19.))
             .child(div().min_w_0().flex().flex_wrap()
                 .child(div().font_weight(FontWeight::BOLD).text_color(theme::text()).child(name.clone()))
                 .child(div().min_w_0().text_color(theme::text()).child(format!("({arg})"))));
@@ -385,7 +395,7 @@ impl SubConversation {
         use super::terminal_look as term;
         let kinds: Vec<Option<term::FoldKind>> = tools.iter().map(|t| {
             let call = &self.events[t.call];
-            if call.kind == "thinking" { None } else { term::fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref()) }
+            if call.kind == "thinking" { None } else { term::fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref(), &self.plugin_servers) }
         }).collect();
         let running = |t: &ToolRow| t.result.is_none() && t.tone == Tone::Accent;
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -401,20 +411,15 @@ impl SubConversation {
             let live = folded.iter().rev().find(|t| running(t));
             let title = term::fold_title(&self.events, &calls, &folded_kinds, live.is_some());
             let toggle = key.clone();
-            let mut block = vec![div().pl(px(term::INDENT - 8.)).child(Button::new(SharedString::from(format!("sub-{key}"))).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
-                .accessibility_label(title.clone())
-                .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))).into_any_element()];
+            let mut block = vec![term::fold_header(SharedString::from(format!("sub-{key}")), title, open, live.is_some(),
+                cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))];
             if !open {
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(term::INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
-                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
                     let call = &self.events[tool.call];
                     let shell = call.tool_name.as_deref().is_some_and(|name| term::is_any(name, term::SHELL_TOOLS));
-                    block.push(sub(if shell { format!("$ {}", tool.summary) } else { tool.summary.clone() }, theme::muted()));
+                    block.push(term::fold_sub(if shell { format!("$ {}", tool.summary) } else { tool.summary.clone() }, theme::muted()));
                 }
-                for tool in folded.iter().filter(|t| t.tone == Tone::Warning) { block.push(sub(tool.status.clone(), theme::danger())); }
+                for tool in folded.iter().filter(|t| t.tone == Tone::Warning) { block.push(term::fold_sub(tool.status.clone(), theme::danger())); }
             }
             rows.push(div().flex().flex_col().children(block).into_any_element());
             if open { for tool in folded { rows.push(self.render_terminal_tool(tool, cx)); } }
@@ -429,6 +434,7 @@ impl SubConversation {
         let row_id = SharedString::from(format!("sub-row-{}", row.id()));
         let inner = match row {
             Row::Message { id, markdown, user, label, at } => {
+                let dotted = terminal() && !user && label.is_none();
                 let (long, more_key) = (user && long_message(&markdown), format!("{id}:more"));
                 let open = self.expanded.contains(&more_key);
                 let view = self.text(id.clone(), markdown, cx);
@@ -438,7 +444,9 @@ impl SubConversation {
                     .child(collapse(chat_text(&view, cx).on_link_click(open_web_link), long, open))
                     .when(long, |el| el.child(more_button(SharedString::from(format!("sub-more-{id}")), open)
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx)))));
-                div().w_full().flex().flex_col().map(|el| if user { el.items_end().child(user_bubble(content)) } else { el.child(content) })
+                div().w_full().flex().flex_col().map(|el| if user { el.items_end().child(user_bubble(content)) }
+                    else if dotted { el.child(super::terminal_look::assistant_text_row(content, super::conversation_line(false))) }
+                    else { el.child(content) })
                     .when_some(at, |el, at| el.child(div().pt(px(4.)).text_xs().text_color(theme::faint()).child(at)))
                     .into_any_element()
             }
@@ -481,6 +489,7 @@ impl SubConversation {
             Row::Thinking { id, summary, count, parts } => {
                 let open = self.expanded.contains(&id);
                 let header = self.header(&id, cx).accessibility_label(format!("{}: {summary}", tr("thinking")))
+                    .child(super::chrome::small_icon(IconName::Brain, 14., theme::muted()))
                     .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(tr("thinking")))
                     .child(div().flex_1().min_w_0().truncate().italic().text_color(theme::muted()).child(summary))
                     .when_some(count, |el, count| el.child(div().flex_shrink_0().text_color(theme::muted()).child(count)));

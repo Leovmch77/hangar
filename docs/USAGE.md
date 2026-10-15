@@ -377,11 +377,22 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do composer
   mostra **⏳ N na fila · mandar agora**; tocar manda o `ctrl-s` do Kimi e a fila **inteira** entra no
   turno em curso, sem esperar. Não tocar = espera, como sempre.
-- **Orientar no Codex:** durante um turno, o botão de envio habitual coloca a mensagem na fila.
-  **Orientar** envia o texto ao turno em andamento. O indicador da fila também tem **Orientar**
-  para promover mensagens já enviadas. Se o turno terminar antes da entrega, o texto é preservado
-  e o app informa a falha; a orientação não inicia outro turno por conta própria.
-- **Slash commands:** `/` abre a lista (`/clear`, `/compact`, …). `/clear` limpa de verdade (zera a fila).
+- **Painel "Na fila" (Claude e Codex):** mensagem mandada com a sessão trabalhando espera no
+  Hangar, num painel acima do composer (app nativo, PWA no celular e app), na ordem de entrega; ela
+  sai sozinha quando o agente para, uma por vez, e só então vira bolha na conversa. Em cada linha:
+  **Apagar** tira a mensagem da fila (em todos os aparelhos abertos); **Editar** leva o texto ao
+  composer, onde o envio vira **Atualizar** (Esc ou Cancelar sai sem mudar; anexo e microfone ficam
+  desligados enquanto edita); a alça (ou as setas) **reordena**; **Orientar** manda aquela mensagem
+  agora, no meio do turno. No app as ações ficam no toque longo da linha. Se a mensagem sair da
+  fila enquanto você a edita, o composer volta ao rascunho e o app avisa uma vez. Pi, omp, Kimi
+  mostram o painel só para leitura.
+- **Orientar no Codex:** durante um turno, o botão de envio habitual coloca a mensagem no painel
+  "Na fila". **Orientar** (no composer) envia o texto ao turno em andamento; para uma mensagem já
+  na fila, use o **Orientar** da linha dela. Se o turno terminar antes da entrega, o texto é
+  preservado e o app informa a falha; a orientação não inicia outro turno por conta própria.
+- **Slash commands:** `/` abre a lista (`/clear`, `/compact`, …). `/clear` limpa de verdade (zera a
+  fila). No Claude com terminal, com mensagens esperando no painel, comando de barra é recusado com
+  aviso: oriente ou apague as mensagens antes, para o comando não passar na frente delas nem apagá-las.
 - **Modelo/esforço:** toque na pill (ex `Opus4.8·1M·high`) → escolhe modelo + esforço (só na sessão).
 - **Codex — modo e skills:** o botão **Normal/Planejar**, ou **Shift+Tab** no campo de mensagem,
   muda o modo nativo da sessão. A troca preserva modelo, esforço e permissões e vale para o próximo
@@ -401,6 +412,17 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 - **Atividade / Workflows:** ícone de atividade no topo (pulsa quando há workflow/agente rodando) →
   abre o painel: tarefas + workflows → fases/agentes → prompt+resultado de cada agente (3 níveis).
 - **Interromper:** botão **⏹ stop** (manda `Esc`).
+- **Pele Terminal** (no nativo, **Aparência → Chamadas de ferramenta → Terminal**; no web, a pele
+  Terminal): fica parecida com o Claude Code. O texto do agente abre com uma bolinha e cada chamada
+  com a bolinha do estado dela (cor de destaque rodando, verde concluída, vermelha com erro); edição
+  aparece como **Update** e ferramenta de MCP como `servidor - ferramenta (MCP)`, e as chamadas dos
+  servidores criados por plugin ficam à vista, fora da dobra. Enquanto o modelo pensa, a linha
+  mostra o cérebro e **Pensando** com um brilho que percorre o texto (parado com movimento
+  reduzido); o raciocínio terminado também abre com o cérebro, em todas as peles.
+- **Página em tela cheia:** a página HTML que o agente mostra na conversa tem o botão de tela cheia
+  (no nativo e na PWA do celular; no app, abre numa tela própria). O diálogo tem zoom de 50% a 200%
+  pelos botões, **Ctrl+roda** ou **Ctrl+=/-/0** (no app, pinça); a página continua viva e
+  clicável no zoom escolhido. **Esc** fecha.
 
 ### Mods do Claude Code (faixa e painéis)
 Sessões com terminal espelham o que os mods do Claude Code desenham, sem código de mod nenhum

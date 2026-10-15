@@ -1,4 +1,4 @@
-use super::{live_thinking_content, terminal_tool_body, tool_body_control};
+use super::{assistant_text_row, fold_lead, live_thinking_content, terminal_tool_body, tool_body_control};
 use gpui::{Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, point, px, prelude::*};
 use gpui_kit::component::text::TextView;
 use gpui_kit::base::text::TextViewState;
@@ -10,12 +10,12 @@ struct ThinkingSurface {
 
 impl Render for ThinkingSurface {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        live_thinking_content(self.look, &self.text, cx)
+        live_thinking_content(self.look, &self.text, None, cx)
     }
 }
 
 #[gpui::test]
-fn terminal_thinking_exposes_markdown_once_without_its_own_controls(cx: &mut TestAppContext) {
+fn terminal_thinking_shows_brain_label_once_without_the_old_marker(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_, cx) = cx.add_window_view(|window, cx| {
         window.retain_a11y_tree(true);
@@ -26,7 +26,9 @@ fn terminal_thinking_exposes_markdown_once_without_its_own_controls(cx: &mut Tes
     });
     cx.run_until_parked();
     let snapshot = cx.update(|window, cx| { let _ = window.draw(cx); window.a11y_snapshot(None).unwrap() });
-    assert!(snapshot.contains('∴'), "o pensamento exposto precisa do marcador, não de título sintético");
+    // O `∴` saiu: quem abre o raciocínio agora é o brain, e o rótulo do T3 aparece uma vez só.
+    assert!(!snapshot.contains('∴'));
+    assert_eq!(snapshot.matches(&crate::i18n::tr("thinking_live")).count(), 1);
     assert_eq!(snapshot.matches("Texto sintético já exposto.").count(), 1);
     assert!(!snapshot.lines().any(|line| line.trim_start().starts_with("Button ")));
 }
@@ -46,7 +48,7 @@ fn non_terminal_live_thinking_keeps_its_existing_header(cx: &mut TestAppContext)
         cx.run_until_parked();
         let snapshot = cx.update(|window, cx| { let _ = window.draw(cx); window.a11y_snapshot(None).unwrap() });
         assert!(!snapshot.contains('∴'));
-        assert!(snapshot.contains(&crate::i18n::tr("thinking_live")));
+        assert_eq!(snapshot.matches(&crate::i18n::tr("thinking_live")).count(), 1);
     }
 }
 
@@ -343,4 +345,43 @@ fn terminal_body_background_collapses_only_the_call(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |view, _| view.collapsed.clone()), ["call-1"]);
     assert!(view.read_with(cx, |view, _| view.expanded.contains("row#fold-call-1")));
     assert!(!view.read_with(cx, |view, _| view.expanded.contains("call-1")));
+}
+
+struct DotSurface { live: bool }
+
+impl Render for DotSurface {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(400.)).flex().flex_col()
+            .child(div().flex().gap(px(8.)).child(fold_lead(self.live))
+                .child(div().debug_selector(|| "term-fold-title".into()).child("Rodou 1 comando de shell")))
+            .child(assistant_text_row(div().child("Texto do agente."), 27.))
+    }
+}
+
+#[gpui::test]
+fn fold_line_has_the_dot_only_while_a_call_runs(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, cx) = cx.add_window_view(|_, _| DotSurface { live: true });
+    cx.run_until_parked();
+    let _ = cx.update(|window, cx| window.draw(cx));
+    assert!(cx.debug_bounds("term-fold-dot").is_some());
+    let running = cx.debug_bounds("term-fold-title").unwrap().origin.x;
+    view.update(cx, |view, cx| { view.live = false; cx.notify(); });
+    cx.run_until_parked();
+    let _ = cx.update(|window, cx| window.draw(cx));
+    assert!(cx.debug_bounds("term-fold-dot").is_none());
+    // Terminada, o espaço do ponto fica: o título não anda.
+    assert_eq!(cx.debug_bounds("term-fold-title").unwrap().origin.x, running);
+}
+
+#[gpui::test]
+fn agent_text_gets_the_white_dot_before_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_, cx) = cx.add_window_view(|_, _| DotSurface { live: false });
+    cx.run_until_parked();
+    let _ = cx.update(|window, cx| window.draw(cx));
+    let dot = cx.debug_bounds("term-text-dot").unwrap();
+    assert_eq!(dot.origin.x, px(0.));
+    // Centrado na primeira linha de 27 px.
+    assert_eq!(dot.size.height, px(27.));
 }

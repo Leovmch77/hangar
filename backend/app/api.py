@@ -515,7 +515,9 @@ async def _codex_rust_port(name: str, request: Request):
         if codex_sessions.exists(name):
             reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
-        if reply is None and route.split("?")[0] in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} \
+        # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
+        rota = route.split("?")[0]
+        if reply is None and (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} or rota.startswith("queue/")) \
                 and getattr(await _cached_info(name), "provider", "claude") == "claude":
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
@@ -3750,6 +3752,18 @@ async def descartar_da_fila(name: str, entry_id: str):
     if not removed:
         raise HTTPException(404, erro("erro_fila_entrada_nao_encontrada", "entrada não está na fila"))
     return {"ok": True}
+
+
+async def _queue_unavailable():
+    # Só chega aqui quem o Rust não atende: Pi, omp e Kimi, ou o processo no modo `python`.
+    raise HTTPException(409, erro("queue_action_unavailable", "esta sessão não permite mexer na fila agora"))
+
+
+# As três rotas do painel só existem para o repasse do `_codex_rust_port` (convite e Connect) ao Rust.
+for _method, _path in (("PATCH", "/api/sessions/{name}/queue/{entry_id}"), ("POST", "/api/sessions/{name}/queue/reorder"),
+                       ("POST", "/api/sessions/{name}/queue/{entry_id}/steer")):
+    app.add_api_route(_path, _queue_unavailable, methods=[_method],
+                      dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 
 
 # --- Loop runner (harness bloco A) -------------------------------------------

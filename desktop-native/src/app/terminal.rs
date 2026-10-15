@@ -5,6 +5,22 @@ use std::{cell::Cell, rc::Rc};
 
 actions!(terminal, [CopyTerminal, PasteTerminal]);
 
+/// Piso do painel encaixado quando a coluna aperta: alça, abas e algumas linhas.
+pub(super) const TERMINAL_MIN_HEIGHT: f32 = 120.;
+/// Piso da conversa com o terminal encaixado: ele não a engole nem empurra o próprio pé para baixo da barra de abas.
+pub(super) const CONVERSATION_MIN_HEIGHT: f32 = 120.;
+
+/// Moldura do painel encaixado: a altura guardada é o pedido, e a coluna pode encolhê-lo até o piso.
+pub(super) fn docked_terminal_frame(height: f32) -> Div {
+    div().h(px(height)).min_h(px(TERMINAL_MIN_HEIGHT)).flex_shrink_1().overflow_hidden()
+}
+
+/// A área da conversa entre o cabeçalho e a faixa de baixo; com o terminal encaixado, ela guarda o piso.
+pub(super) fn conversation_pane_style(terminal_docked: bool) -> StyleRefinement {
+    let style = StyleRefinement::default().w_full().flex_1();
+    if terminal_docked { style.min_h(px(CONVERSATION_MIN_HEIGHT)) } else { style.min_h_0() }
+}
+
 /// Respostas carregam o `uid` da aba, não a posição: aba de atalho entra e sai no meio da fila.
 pub(super) enum Reply {
     Probe(u64, u64, u64, Result<(), Failure>),
@@ -128,6 +144,8 @@ pub(super) struct Panel {
     /// Fila de abas rolável: ao trocar a aba ativa, rola até ela (uma vez por troca, para não brigar com a roda do mouse).
     tab_scroll: ScrollHandle,
     scrolled_to: std::cell::Cell<Option<u64>>,
+    /// A altura que a coluna deixou aparecer no último desenho; a guardada pode ser maior.
+    shown: Rc<Cell<f32>>,
 }
 
 impl Panel {
@@ -137,7 +155,7 @@ impl Panel {
         Self { id, tabs, next_uid: 2, session, server, error: None,
             active: 0, focus: cx.focus_handle().tab_stop(true), height: appearance::get().terminal_height, drag: None, maximized: false,
             shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now(),
-            tab_scroll: ScrollHandle::new(), scrolled_to: std::cell::Cell::new(None) }
+            tab_scroll: ScrollHandle::new(), scrolled_to: std::cell::Cell::new(None), shown: Rc::new(Cell::new(0.)) }
     }
 
     fn index(&self, uid: u64) -> Option<usize> { self.tabs.iter().position(|slot| slot.uid == uid) }
@@ -217,6 +235,9 @@ pub(super) fn terminal_offered(session: &SessionInfo, shortcut_terms: bool) -> b
 }
 
 impl Hangar {
+    /// Painel aberto no rodapé, não maximizado: divide a coluna com a conversa.
+    pub(super) fn terminal_docked(&self) -> bool { self.terminal.as_ref().is_some_and(|panel| !panel.maximized) }
+
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.is_some() { self.close_terminal(true, window, cx); return; }
         if self.selected.as_ref().is_some_and(|s| s.orq() || s.read_only()) { return; }
@@ -624,6 +645,9 @@ impl Hangar {
         let Some((start, height)) = panel.drag else { return; };
         if !pressed {
             panel.drag = None;
+            // Coluna apertada: grava o que aparece, não o pedido que ela cortou.
+            let shown = panel.shown.get();
+            if shown > 0. { panel.height = panel.height.min(shown); }
             // Grava só ao soltar, e vale para o próximo terminal aberto.
             let mut next = appearance::get();
             next.terminal_height = panel.height;
@@ -753,16 +777,24 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| this.close_terminal(true, window, cx))));
         let terminal = div().id("terminal-panel")
             .when(panel.maximized, |el| el.absolute().inset_0().occlude())
-            .when(!panel.maximized, |el| el.h(px(height)).flex_shrink_0())
+            .when(!panel.maximized, |el| el.size_full())
             .flex().flex_col().min_h_0().border_t_1().border_color(theme::border()).bg(theme::background())
             .when(!panel.maximized, |el| el.child(div().id("term-resize").h(px(6.)).flex_shrink_0().cursor_row_resize()
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    if let Some(panel) = this.terminal.as_mut() { panel.drag = Some((f32::from(event.position.y), height)); cx.notify(); }
+                    // Parte do que aparece: com a guardada cortada pela coluna, a alça seguiria parada até descer a diferença.
+                    if let Some(panel) = this.terminal.as_mut() {
+                        let shown = panel.shown.get();
+                        panel.drag = Some((f32::from(event.position.y), if shown > 0. { shown } else { height }));
+                        cx.notify();
+                    }
                 }))))
             .child(header).child(body);
-        Some(if rising {
-            div().h(px(height)).flex_shrink_0().overflow_hidden().child(terminal.relative().top(px(below))).into_any_element()
-        } else { terminal.into_any_element() })
+        if panel.maximized { return Some(terminal.into_any_element()); }
+        let shown = panel.shown.clone();
+        Some(docked_terminal_frame(height)
+            .child(canvas(move |bounds, _, _| shown.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().inset_0())
+            .child(if rising { terminal.relative().top(px(below)) } else { terminal })
+            .into_any_element())
     }
 
     fn terminal_body(&self, panel: &Panel, slot: &Slot, cx: &mut Context<Self>) -> AnyElement {
@@ -860,6 +892,9 @@ mod live_tests {
         assert!(parse_live_terms(&json!({"not": "a list"})).is_empty());
     }
 }
+
+#[cfg(test)]
+mod layout_tests;
 
 #[cfg(test)]
 mod tests {

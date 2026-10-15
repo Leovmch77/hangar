@@ -821,11 +821,17 @@ export function toolVerbo(nome: string | null | undefined): string {
   }
 }
 
-/** `mcp__hangar-computer-control__objetivo` -> ["computer-control", "objetivo"]; nome que não é de MCP, null. */
-function partesMcp(nome: string | null | undefined): [string, string] | null {
+/** `mcp__<servidor>__<ferramenta>` -> [servidor como está no nome, ferramenta]; nome que não é de MCP, null. */
+function rawMcpParts(nome: string | null | undefined): [string, string] | null {
   const partes = (nome ?? '').split('__');
   if (partes[0] !== 'mcp' || partes.length < 3) return null;
-  return [partes[1].replace(/^hangar-/, ''), partes.slice(2).join('__')];
+  return [partes[1], partes.slice(2).join('__')];
+}
+
+/** `mcp__hangar-computer-control__objetivo` -> ["computer-control", "objetivo"]; nome que não é de MCP, null. */
+function partesMcp(nome: string | null | undefined): [string, string] | null {
+  const mcp = rawMcpParts(nome);
+  return mcp && [mcp[0].replace(/^hangar-/, ''), mcp[1]];
 }
 
 /** `mcp__hangar-computer-control__objetivo` -> "computer-control · objetivo"; o resto fica como veio. */
@@ -833,6 +839,26 @@ export function nomeFerramenta(nome: string | null | undefined): string {
   if (!nome) return m.formato_tool_generico();
   const mcp = partesMcp(nome);
   return mcp ? mcp.join(' · ') : nome;
+}
+
+/** Servidor de `mcp__<servidor>__<ferramenta>` como está no nome, com o `hangar-`: é o que o Rust publica. */
+function servidorMcpCru(nome: string | null | undefined): string | null {
+  return rawMcpParts(nome)?.[0] ?? null;
+}
+
+const TERM_UPDATE = new Set(['edit', 'multiedit', 'notebookedit', 'apply_patch']);
+const TERM_FILE = new Set(['read', 'notebookread', 'write', ...TERM_UPDATE]);
+
+/** Ferramenta de arquivo na pele 'terminal' (a regra `FILE_TOOLS` do nativo): o cabeçalho mostra o nome do arquivo. */
+export function terminalFileTool(nome: string | null | undefined): boolean {
+  return TERM_FILE.has((nome ?? '').toLowerCase());
+}
+
+/** Nome da chamada na pele 'terminal', como o Claude Code: "Update" na edição e "servidor - ferramenta (MCP)". */
+export function terminalToolName(nome: string | null | undefined): string {
+  if (TERM_UPDATE.has((nome ?? '').toLowerCase())) return 'Update';
+  const mcp = partesMcp(nome);
+  return mcp ? `${mcp[0]} - ${mcp[1]} (MCP)` : nomeFerramenta(nome);
 }
 
 /** Quebra um comando de shell nos `;`, `&&`, `||` e quebras de linha de fora de aspas e parênteses,
@@ -949,7 +975,11 @@ const shellKinds = new WeakMap<object, TerminalFoldKind>();
 
 /** Tipo da chamada na linha dobrada da pele 'terminal', como o Claude Code conta; `null` não dobra
  * (edição, gravação, agente e o carregador de ferramentas ficam sempre à vista). */
-export function terminalFoldKind(name: string | null | undefined, input?: Record<string, unknown> | null): TerminalFoldKind | null {
+export function terminalFoldKind(
+  name: string | null | undefined,
+  input?: Record<string, unknown> | null,
+  pluginServers: readonly string[] = [],
+): TerminalFoldKind | null {
   switch (name?.toLowerCase()) {
     case 'read': case 'notebookread': return 'read';
     case 'grep': case 'glob': case 'find': case 'websearch': case 'webfetch': return 'search';
@@ -965,7 +995,9 @@ export function terminalFoldKind(name: string | null | undefined, input?: Record
       return kind;
     }
   }
-  return partesMcp(name) ? 'mcp' : null;
+  // Servidor criado por plugin fica à vista, com o ponto, como no Claude Code; os outros somam na dobra.
+  const servidor = servidorMcpCru(name);
+  return servidor !== null && !pluginServers.includes(servidor) ? 'mcp' : null;
 }
 
 // Frase de cada tipo: concluída e em andamento, no singular e no plural.
@@ -1011,10 +1043,11 @@ export function terminalFoldTitle(
  * com erro, como no Claude Code; edição e o resto mantêm a linha própria. */
 export function splitTerminalRun<T extends { tool_name?: string | null; tool_input?: Record<string, unknown> | null }>(
   tools: T[],
+  pluginServers: readonly string[] = [],
 ): ({ kind: 'fold'; tools: T[] } | { kind: 'tool'; tool: T })[] {
   const out: ({ kind: 'fold'; tools: T[] } | { kind: 'tool'; tool: T })[] = [];
   for (const tool of tools) {
-    if (!terminalFoldKind(tool.tool_name, tool.tool_input)) { out.push({ kind: 'tool', tool }); continue; }
+    if (!terminalFoldKind(tool.tool_name, tool.tool_input, pluginServers)) { out.push({ kind: 'tool', tool }); continue; }
     const last = out[out.length - 1];
     if (last?.kind === 'fold') last.tools.push(tool); else out.push({ kind: 'fold', tools: [tool] });
   }

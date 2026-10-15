@@ -29,9 +29,10 @@ export function entraNoPensamento(pref: PensamentoTools, nome?: string | null): 
   return ehBusca(nome);
 }
 
-/** Linha fechada do bloco: a primeira frase do pensamento, quando ela é curta. */
+/** Linha fechada do bloco: a primeira frase do pensamento, quando ela é curta. Sem `**`, `__` e crases: a linha é
+ * texto corrido, e as marcas apareceriam cruas. */
 export function resumoPensamento(texto: string): string {
-  const limpo = texto.replace(/\s+/g, ' ').trim();
+  const limpo = texto.replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
   const fim = limpo.search(/[.!?](\s|$)/);
   return fim > 0 && fim < 140 ? limpo.slice(0, fim + 1) : limpo;
 }

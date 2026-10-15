@@ -868,6 +868,18 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   alfa de superfície `Rgba8Unorm`, com alfa puro: o `blend_color` já multiplica, e pré-multiplicar
   aplicaria o alfa duas vezes; a superfície XRGB do WPE continua opaca. Navegação bloqueada responde
   `Aborted`: `BlockedByClient` troca a página pela tela de erro do Chrome.
+- **Tela cheia (14/10/2026, pedido do usuário, referência T3):** diálogo grande com zoom de 50% a 200%. No nativo vivo
+  (Linux e Windows) é um motor próprio do tamanho do palco, que toma uma vaga fixa do orçamento de páginas vivas
+  enquanto aberto (`Budget::pin`) e a devolve quando a entidade do diálogo cai. O zoom é a escala do motor, não imagem
+  ampliada: no Linux, viewport CSS dividido e densidade multiplicada no `Emulation.setDeviceMetricsOverride`; no Windows,
+  escala de rasterização da WebView2 no mesmo tamanho físico. O quadro mantém os pixels e as coordenadas de clique e
+  roda são divididas pelo zoom. No macOS o diálogo amplia a imagem do `/shot`, a partir da largura do diálogo. Na roda
+  do nativo um dente do mouse (3 linhas de 16 px) é um degrau: com o limiar de 50 px, um dente sozinho não ampliava.
+  No PWA o zoom é CSS `zoom`, como no T3, e a cópia do diálogo leva uma ponte própria (`hangar-zoom`) que traz
+  Ctrl+roda, Ctrl+=/-/0 e Esc de dentro do iframe em origem opaca; sem ela o Ctrl+roda ampliava o app inteiro pelo
+  navegador. A cópia nasce no tema de agora, não no da carga do cartão. No PWA a tela cheia só existe fora da vista
+  desktop (abaixo de 820 px): a web desktop está congelada e a tela cheia de desktop é a do nativo. No app é uma tela
+  de pilha com a pinça do WebView, liberada mesmo em página que trava o `viewport`.
 - **Windows:** viva, como no Linux. Cada página é uma WebView2 própria estacionada fora da área da
   janela (visível para o Chromium: `SW_HIDE` para os quadros), com o documento posto pelo CDP, quadro
   por `Page.startScreencast` em PNG no dobro da tela e entrada por `Input.*`. O DirectX do GPUI
@@ -2508,3 +2520,50 @@ o recusava, e o processo do Claude nasce da receita em memória (`claude_relaunc
 
 Ficaram no Python, por fazerem parte da abertura de sessão (#165): a geração lida em
 `runtime_adapter.binding()` e o `_has_pending` da reabertura.
+
+## Painel da fila: o evento `queue` nasce no hub do Rust (14/10/2026)
+
+A fila de Claude e Codex é do Rust, e o hub de `/events` (`side.rs`) já reparte o chat entre os
+aparelhos: por isso a lista inteira sai dali (`queue_panel.rs`), lida da projeção da fila (o mesmo
+arquivo do `/history`), com o recorte da conversa atual do `/history`, publicada quando muda e
+repetida para quem chega depois (`LATEST`). `actions` é o registro dizer que o Rust escreve na
+sessão (entrada saudável); sem ele os botões somem. Quem entra pela 8766/8768 recebe o evento pelo
+canal privado do estado, repassado sem mudança pelo Python (`_RUST_STATE_EVENTS`). As bolhas
+`queued-` do Python (`pqueue.follow`) continuam: são elas que viram a bolha de usuário quando a
+mensagem sai da fila.
+
+- Rotas do painel, todas no Rust e todas por mensagem ao ator da sessão, nunca ao `Store`:
+  `DELETE /queue/{id}?only_waiting=true`, `PATCH /queue/{id}` (`{"text"}`),
+  `POST /queue/reorder` (`{"id","before_id"}`, `null` = fim) e `POST /queue/{id}/steer`. Agem só
+  na entrada que ainda espera; a que a drenagem já reivindicou (ou que sumiu) responde 409
+  `queue_entry_gone`, e texto vazio, começado por `/` ou com caractere de controle, 422
+  `queue_text_invalid`. Sem o parâmetro, o `DELETE` segue descartando também a bolha desistida.
+- O evento leva `removed`: os ids que esperavam na publicação anterior e sumiram da projeção
+  (apagados noutro aparelho). Todo aparelho retira a bolha `queued-<id>` deles; a entregue continua
+  na projeção e não entra. Sem isso a bolha da apagada ficava nos outros aparelhos.
+- O retrato do hub também esquece a apagada: ao gravar o `queue`, as bolhas `queued-<id>` de
+  `removed` saem da lista que repete `message`/`queue_confirmed` a quem chega depois, e o id fica
+  lembrado (os últimos 256) para um quadro que o produtor da fila do hub (`queue_feed`) leu antes da
+  exclusão não voltar ao retrato nem aos aparelhos abertos. Na
+  prova de ponta a ponta (14/10/2026), o aparelho que abriu o chat depois de um
+  `DELETE ?only_waiting=true` recebia o `queue` com `entries: []` e, atrás dele, as bolhas das
+  apagadas com `queued_delivered: false`: "2 na fila" sem botões no nativo. O `removed` do
+  retrato não resolvia, porque a publicação seguinte o zera e o retrato repete o `queue` antes das
+  bolhas.
+- A vigia da fila nunca pergunta a descoberta: o caminho da fila chega ao hub por quem já leu a
+  sessão (rota `/events`, canal privado, vigia da ligação, troca de conversa do ciclo de vida).
+  Perguntando por conta própria, o `/events` sem o token do dono fazia uma consulta a mais.
+- `actions` mantém o último valor quando o retrato do ator não responde em 1 s (ele está entregando):
+  sem isso os botões piscavam a cada entrega. Entrada ausente ou doente desliga na hora.
+- A regra de "esperando" é uma só (`row_waits` em `runtime/queue.rs`): o painel lê a projeção, que
+  não tem as operações; por um instante ele pode mostrar a linha que a drenagem acabou de pegar, e a
+  ação nela volta 409.
+- Convidado com acesso completo alcança as mesmas ações pela 8766, como já alcança `/input`,
+  `/steer` e `/interrupt`: o porteiro deixa passar e o Python repassa à ponte do Rust
+  (`_codex_rust_port`), sem lógica de fila. Acesso de par segue só leitura.
+- Limite até a migração: Pi, omp e Kimi (fila no Python) e o processo no modo `python` não têm o
+  evento nem as rotas no Rust. O painel deles nasce das bolhas `queued-` do `/history`, sem
+  botões, e as rotas novas respondem 409 `queue_action_unavailable`. Nada disso foi escrito no
+  Python.
+- Contrato interno: as rotas novas da ponte do Claude e do Codex subiram `INTERNAL_PROTOCOL` e
+  `RUST_SERVER_PROTOCOL` juntos.

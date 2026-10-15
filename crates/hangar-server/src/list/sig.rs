@@ -73,6 +73,8 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
             // Só a linha com formulário leva o ID dele (formulário novo com a mesma pergunta também sai);
             // as demais seguem byte a byte com o Python.
             if let (Value::Array(items), Some(id)) = (&mut sig, i.ask_form.as_ref().and_then(|form| form.get("interaction_id"))) { items.push(id.clone()); }
+            // Só no Rust: vazio deixa a assinatura byte a byte com a do Python.
+            if let (Value::Array(items), false) = (&mut sig, i.plugin_tool_servers.is_empty()) { items.push(json!(i.plugin_tool_servers)); }
             sig
         })
         .collect();
@@ -113,6 +115,25 @@ mod tests {
         let first = list_sig(&[row.clone()]);
         row.interaction_id = Some("b".into());
         assert_ne!(first, list_sig(&[row]));
+    }
+
+    #[test]
+    fn plugin_tool_servers_enter_the_signature_only_when_present() {
+        let mut row: SessionRow = serde_json::from_value(json!({"name": "s"})).unwrap();
+        let empty: Value = serde_json::from_str(&list_sig(&[row.clone()])).unwrap();
+        row.plugin_tool_servers = vec!["pmedico".into()];
+        let with: Value = serde_json::from_str(&list_sig(&[row.clone()])).unwrap();
+        let len = |v: &Value| v[0].as_array().unwrap().len();
+        assert_eq!(len(&with), len(&empty) + 1);
+        assert_eq!(with[0].as_array().unwrap().last(), Some(&json!(["pmedico"])));
+    }
+
+    #[test]
+    fn empty_plugin_tool_servers_are_not_serialized() {
+        let row: SessionRow = serde_json::from_value(json!({"name": "s"})).unwrap();
+        assert!(serde_json::to_value(&row).unwrap().get("plugin_tool_servers").is_none());
+        let row: SessionRow = serde_json::from_value(json!({"name": "s", "plugin_tool_servers": ["pmedico"]})).unwrap();
+        assert_eq!(serde_json::to_value(&row).unwrap()["plugin_tool_servers"], json!(["pmedico"]));
     }
 
     /// Valores tirados do `sse._status_sig` do Python.

@@ -336,6 +336,15 @@ fn mode_ready_proof(target:&RuntimeTarget,view:&Value,commit:Option<&ModeCommit>
         || commit.proof.operation_id!=proof.operation_id || commit.proof.mode!=proof.mode || commit.digest!=digest {return Err(failure("lifecycle_commit_changed"));}
     Ok(())
 }
+/// Por que não há o que orientar agora (as recusas do adapter Python): sem turno, ou o Claude parado numa
+/// permissão ou pergunta, que o stdin não lê. O código deixa a rota separar "o turno acabou" de "responda antes".
+fn steer_refusal(view:&Value,provider:&str)->Option<(&'static str,&'static str)> {
+    if view["alive"] != true || view["in_progress"] != true { return Some(("steer_no_turn","Não há turno em andamento para orientar")); }
+    if provider == "claude" && (view["pending"].as_array().is_some_and(|p|!p.is_empty()) || !view["question"].is_null()) {
+        return Some(("steer_question_open","Responda a permissão ou pergunta pendente antes de orientar"));
+    }
+    None
+}
 fn claude_delivery_allowed(target:&RuntimeTarget,view:&Value,error:bool)->bool {view["deliverable"]==true && !error && target.metadata["lifecycle_pending"]!=true}
 fn block_claude_sid(target:&mut RuntimeTarget,view:&Value)->bool {
     let changed=target.provider=="claude" && view["conversation"].as_str().is_some_and(|sid|!sid.is_empty() && target.metadata["session_id"]!=sid);
@@ -787,15 +796,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             pending.preparing = false;
             if pending.cancelled || pending.timed_out { continue; }
             if pending.command.kind == OperationKind::SteerQueue {
-                // Mesmas recusas do adapter Python: sem turno não há o que orientar, e o Claude parado numa
-                // permissão ou pergunta não lê o stdin; a fila sumiria da tela até alguém responder.
-                let view = engine.view();
-                let refusal = if view["alive"] != true || view["in_progress"] != true { Some("Não há turno em andamento para orientar") }
-                    else if target.provider == "claude" && (view["pending"].as_array().is_some_and(|p|!p.is_empty()) || !view["question"].is_null()) {
-                        Some("Responda a permissão ou pergunta pendente antes de orientar") }
-                    else { None };
-                if let Some(text) = refusal {
-                    effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,payload:json!({"error":text}) });
+                if let Some((code,text)) = steer_refusal(&engine.view(),&target.provider) {
+                    effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,payload:json!({"error":text,"code":code}) });
                     continue;
                 }
                 let queue = queue.clone(); let target = target.clone(); let sender = internal.clone(); let sample = clock(start);
@@ -2761,6 +2763,14 @@ mod tests {
         assert!(effects.iter().any(|effect|matches!(effect,Effect::Surface { effect:SurfaceEffect::Reply { token:1,result:Err(error) } }
             if error.code == "erro_mod_botao_inexistente")));
         assert!(waiters.contains_key(&1));
+    }
+
+    #[test]
+    fn steer_queue_refusals_carry_a_code() {
+        assert_eq!(steer_refusal(&json!({"alive":true,"in_progress":false}),"claude"),Some(("steer_no_turn","Não há turno em andamento para orientar")));
+        assert_eq!(steer_refusal(&json!({"alive":true,"in_progress":true,"pending":[{"request_id":"r"}]}),"claude").map(|r|r.0),Some("steer_question_open"));
+        assert_eq!(steer_refusal(&json!({"alive":true,"in_progress":true,"pending":[{"request_id":"r"}]}),"codex"),None);
+        assert_eq!(steer_refusal(&json!({"alive":true,"in_progress":true,"pending":[],"question":null}),"claude"),None);
     }
 
     #[tokio::test]

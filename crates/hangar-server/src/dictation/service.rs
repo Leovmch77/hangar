@@ -104,6 +104,9 @@ async fn organize_before_deadline(
     if !config.llm_reasoning_effort.is_empty() {
         body["reasoning_effort"] = json!(config.llm_reasoning_effort);
     }
+    if openrouter_by_throughput(endpoint, model) {
+        body["provider"] = json!({"sort": "throughput"});
+    }
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -204,5 +207,21 @@ async fn organize_before_deadline(
         text: output,
         estilo_aplicado: applied.into(),
         ..original
+    }
+}
+
+/// Sem ordem, o OpenRouter escolhe o provedor pelo preço e cai em quem leva 10x mais. Sufixo no modelo
+/// (`:nitro`, `:floor`) é escolha da pessoa e vence.
+fn openrouter_by_throughput(endpoint: &str, model: &str) -> bool {
+    reqwest::Url::parse(endpoint).ok().is_some_and(|url| url.host_str() == Some("openrouter.ai")) && !model.contains(':')
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn openrouter_without_suffix_asks_for_throughput() {
+        assert!(super::openrouter_by_throughput("https://openrouter.ai/api/v1", "openai/gpt-oss-120b"));
+        assert!(!super::openrouter_by_throughput("https://openrouter.ai/api/v1", "openai/gpt-oss-120b:floor"));
+        assert!(!super::openrouter_by_throughput("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"));
     }
 }

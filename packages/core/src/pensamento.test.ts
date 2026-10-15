@@ -13,6 +13,7 @@ describe('pensamento', () => {
   it('ehBusca', () => { expect(ehBusca('WebFetch')).toBe(true); expect(ehBusca('Read')).toBe(false); });
   it('resumo é a primeira frase curta', () => {
     expect(resumoPensamento('Vou olhar o arquivo. Depois testo.')).toBe('Vou olhar o arquivo.');
+    expect(resumoPensamento('**Lendo o `app.rs`** com __calma__. Depois.')).toBe('Lendo o app.rs com calma.');
     expect(resumoPensamento('x'.repeat(200) + '. fim')).toBe('x'.repeat(200) + '. fim');
   });
 });

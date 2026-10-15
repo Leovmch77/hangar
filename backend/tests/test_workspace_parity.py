@@ -195,8 +195,11 @@ def test_executor_death_ends_the_command_and_its_child(tmp_path):
             finally:
                 kernel.CloseHandle(ctypes.c_void_p(handle))
         if os.name != "nt":
-            stat = Path(f"/proc/{pid}/stat")
-            if not stat.exists() or stat.read_text().split(")", 1)[1].split()[0] == "Z":
+            # O processo pode sumir entre achar e ler o /proc: a leitura falha com ESRCH, e isso é morto.
+            try:
+                if Path(f"/proc/{pid}/stat").read_text().split(")", 1)[1].split()[0] == "Z":
+                    return False
+            except OSError:
                 return False
         try:
             os.kill(pid, 0)

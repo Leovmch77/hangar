@@ -106,8 +106,27 @@ fn slim(result: &Value) -> Value {
 /// O recibo guarda a ação sem o volume: basta para detectar reuso do mesmo identificador.
 fn receipt_payload(mut action: Value) -> Value {
     if action["kind"] == "set_runtime_state" { action["state"] = Value::Null; }
+    // A repetição do avanço ainda precisa distinguir outro estado; a vista inteira (comandos incluídos) não.
+    else if action["kind"] == "advance_lifecycle" && !action["state"].is_string() { action["state"] = Value::String(fingerprint(&action["state"])); }
     else if action.get("result").is_some() { action["result"] = slim(&action["result"]); }
     action
+}
+
+/// sha256 do JSON com as chaves ordenadas, como a igualdade de `Value`, que ignora a ordem.
+fn fingerprint(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                Value::Object(entries.into_iter().map(|(key, value)| (key.clone(), sorted(value))).collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    let bytes = serde_json::to_vec(&sorted(value)).expect("Value tem chaves String e números finitos");
+    ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl State {
@@ -135,6 +154,10 @@ impl State {
         if migrated { state.version = VERSION; state.next_seq = RECENT_CALLS + 1; }
         if state.version != VERSION || state.next_seq == 0 || !state.rows.iter().all(Value::is_object)
             || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
+        // Recibo gravado antes do corte encolhe já na leitura; o arquivo emagrece na próxima gravação.
+        for (_, receipt) in state.operations.iter_mut().filter(|(key, _)| key.starts_with(CALL_PREFIX)) {
+            receipt.payload = receipt_payload(std::mem::take(&mut receipt.payload));
+        }
         if !needs_terminal_recovery(&state) {
             migrated |= confirm_answered_commands(&mut state);
             migrated |= confirm_side_questions(&mut state);
@@ -203,6 +226,14 @@ pub enum Action {
     Reconcile { committed:Vec<String>, min_ts:f64, now:f64, grace:f64, max_attempts:u64,
         confirm_only:bool, na_fila_tui:Vec<String> },
     Remove { entry_id:String },
+    /// O X do painel: tira a entrada que ainda espera a vez. `"cancelled"`, `"not_waiting"` ou `"absent"`.
+    Cancel { entry_id:String },
+    /// Troca o texto da entrada que espera; a intenção adiada guardada na operação leva o texto novo.
+    Edit { entry_id:String, text:String },
+    /// Põe a entrada antes de `before_id`; `None` é o fim da fila. Só entre as que esperam.
+    Reorder { entry_id:String, before_id:Option<String> },
+    /// Põe a entrada na frente das que esperam: a próxima drenagem a leva.
+    Promote { entry_id:String },
     Clear,
     Rename { name:String },
     Prepare { id:String, payload:Value, entry_id:Option<String> },
@@ -474,6 +505,51 @@ fn mark_materialized(state:&mut State,entry:&str) {
     for id in ids {state.operations.get_mut(&id).unwrap().entry_materialized=true;}
 }
 
+/// A entrada ainda espera a vez no Hangar, e só ela o painel apaga, edita ou move: nada a reivindicou nem a
+/// confirmou, ninguém desistiu dela, não é a resposta reservada de uma pergunta e nenhuma tentativa está em
+/// voo. A tentativa terminal preparada e ainda não escrita não está em voo: o ator do terminal não intercala
+/// ações da fila com o despacho. Sem terminal, a preparada é o despacho começando.
+fn waiting_row(state:&State,row:&Value)->bool {
+    let id=row_id(row);
+    row_waits(row)
+        && !state.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref()==Some(id)
+            && (op.payload["kind"]=="dispatch_async_answer" || matches!(op.status,Status::Dispatching|Status::Unknown)
+                || op.status==Status::Prepared && !terminal_input(state,op) && !stale_terminal_intent(op)))
+}
+
+/// A parte da regra que a linha sozinha responde, a única que a projeção (sem as operações) permite ler:
+/// o painel da fila a usa, e a tentativa em voo que ela não vê o ator recusa como `not_waiting`.
+pub(crate) fn row_waits(row:&Value)->bool {
+    row["delivered"]==false && row["confirmed"]!=true && row["desistiu"]!=true && row["papel"]!="assistant" && row["reserved"]!=true
+}
+
+/// Intenção terminal de uma vida anterior que nunca começou a escrever (queda e reabertura no meio):
+/// a linha continua só esperando, e a drenagem desta vida a leva com tentativa nova.
+fn stale_terminal_intent(op:&Operation)->bool {
+    op.payload["payload"].get("_terminal_generation").is_some() && op.wire_attempts.is_empty()
+}
+
+/// Posição da entrada esperando, ou por que ela não pode ser mexida.
+fn waiting_index(state:&State,entry:&str)->Result<usize,&'static str> {
+    match state.rows.iter().position(|row|row_id(row)==entry) {
+        None=>Err("absent"),
+        Some(index) if !waiting_row(state,&state.rows[index])=>Err("not_waiting"),
+        Some(index)=>Ok(index),
+    }
+}
+
+/// As que esperam, na ordem de entrega, com o mesmo corte de idade do `Claim`: linha de vida anterior que a
+/// drenagem nunca levaria não segura comando nem Orientar.
+pub(crate) fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
+    state.rows.iter().filter(|row|current(row,min_ts) && waiting_row(state,row)).map(|row|row_id(row).to_owned()).collect()
+}
+
+/// Texto que a fila aceita como mensagem: comando de barra não tem linha na fila, e controle quebraria a digitação.
+/// Uma regra só, para a edição do painel, a rota e a intenção terminal recuperada.
+pub(crate) fn queue_text_ok(text:&str)->bool {
+    !text.trim().is_empty() && !text.trim_start().starts_with('/') && !text.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t'))
+}
+
 fn terminal_protected(state:&State,entry:&str,except:&str)->bool {
     let protected_status=|status|matches!(status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed);
     state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry) && ((op.id!=except && protected_status(op.status))
@@ -627,7 +703,7 @@ fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
         let entry=op.entry_id.as_deref().unwrap();
         if state.rows.iter().any(|row|row_id(row)==entry) {continue;}
         let text=op.payload["payload"]["text"].as_str().unwrap();
-        if text.trim().is_empty() || text.trim_start().starts_with('/') || text.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t')) {return Err(invalid("intenção terminal inválida"));}
+        if !queue_text_ok(text) {return Err(invalid("intenção terminal inválida"));}
         let mut row=json!({"id":entry,"text":text,"ts":clock.epoch_s,"delivered":false});
         if op.payload["payload"]["pre_transcript"]==true {row["pre_transcript"]=json!(true);}
         append_row(state,row)?;
@@ -758,6 +834,50 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             state.rows.retain(|r| row_id(r) != entry_id || r["desistiu"] != true || protected.contains(&entry_id));
             json!(before != state.rows.len())
         }
+        Action::Cancel { entry_id } => match waiting_index(state,&entry_id) {
+            Err(outcome)=>json!(outcome),
+            Ok(index)=>{
+                state.rows.remove(index);
+                // A intenção adiada desta entrada sai junto: o Recover não a rematerializa como linha nova.
+                state.operations.retain(|key,op|key.starts_with(CALL_PREFIX) || op.entry_id.as_deref()!=Some(entry_id.as_str()));
+                json!("cancelled")
+            }
+        },
+        Action::Edit { entry_id, text } => {
+            if !queue_text_ok(&text) { return Err(invalid("texto da fila inválido")); }
+            match waiting_index(state,&entry_id) {
+                Err(outcome)=>json!(outcome),
+                Ok(index)=>{
+                    state.rows[index]["text"]=json!(text);
+                    for (_,op) in state.operations.iter_mut().filter(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref()==Some(entry_id.as_str())) {
+                        if op.payload["payload"]["text"].is_string() { op.payload["payload"]["text"]=json!(text); }
+                    }
+                    json!("edited")
+                }
+            }
+        }
+        Action::Reorder { entry_id, before_id } => {
+            let from=match waiting_index(state,&entry_id) { Err(outcome)=>return Ok(json!(outcome)), Ok(index)=>index };
+            if let Some(before)=before_id.as_deref().filter(|before|*before!=entry_id) {
+                if let Err(outcome)=waiting_index(state,before) { return Ok(json!(outcome)); }
+                let row=state.rows.remove(from);
+                let at=state.rows.iter().position(|r|row_id(r)==before).expect("conferida acima");
+                state.rows.insert(at,row);
+            } else if before_id.is_none() {
+                let row=state.rows.remove(from);
+                state.rows.push(row);
+            }
+            json!("moved")
+        }
+        Action::Promote { entry_id } => match waiting_index(state,&entry_id) {
+            Err(outcome)=>json!(outcome),
+            Ok(from)=>{
+                let row=state.rows.remove(from);
+                let at=state.rows.iter().position(|r|waiting_row(state,r)).unwrap_or(state.rows.len()).min(from);
+                state.rows.insert(at,row);
+                json!("moved")
+            }
+        },
         Action::Clear => { state.rows.clear(); Value::Null }
         Action::Rename { name } => {
             if name.is_empty() { return Err(invalid("nome vazio na fila")); }
@@ -791,7 +911,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if let Some(old) = state.operations.get(&entry_id) {
                 if old.payload != payload || old.entry_id.as_deref() != Some(entry_id.as_str()) { return Err(invalid("intenção da operação mudou")); }
             } else {
-                append_row(state,json!({"id":entry_id,"text":text,"ts":clock.epoch_s,"delivered":false}))?;
+                append_row(state,json!({"id":entry_id,"text":text,"ts":clock.epoch_s,"delivered":false,"reserved":true}))?;
                 state.operations.insert(entry_id.clone(),Operation::new(&entry_id,payload,Some(entry_id.clone())));
             }
             serde_json::to_value(&state.operations[&entry_id])?
@@ -1325,6 +1445,37 @@ mod lifecycle_tests {
         assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
         assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
     }
+    #[test]
+    fn advance_receipt_keeps_a_fingerprint_of_the_view_not_the_view() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("state.json");
+        let mut store=Store::open(&path,dir.path(),State::new("key",4,"session",vec![])).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        let commands:Vec<Value>=(0..200).map(|i|json!({"name":format!("/command-{i}"),"description":"x".repeat(400)})).collect();
+        let advance=|state:Value|Action::AdvanceLifecycle {generation:5,state};
+        store.exec(4,"advance",clock,advance(json!({"view":{"commands":commands},"metadata":{"a":1,"b":2}}))).unwrap();
+        let stored=&store.state().operations["call::advance"].payload["state"];
+        assert_eq!(stored.as_str().map(str::len),Some(64));
+        assert!(!serde_json::to_string(&store.state().operations["call::advance"]).unwrap().contains("/command-0"));
+        assert_eq!(String::from_utf8(std::fs::read(&path).unwrap()).unwrap().matches("\"/command-0\"").count(),1);
+        assert_eq!(store.exec(4,"advance",clock,advance(json!({"metadata":{"b":2,"a":1},"view":{"commands":commands}}))).unwrap(),json!({"generation":5}));
+        assert!(store.exec(4,"advance",clock,advance(json!({"view":{"commands":[]},"metadata":{"a":1,"b":2}}))).is_err());
+    }
+    #[test]
+    fn advance_receipt_written_with_the_whole_view_shrinks_on_load_and_still_repeats() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("state.json");
+        let view=json!({"view":{"commands":[{"name":"/old","description":"y".repeat(400)}]}});
+        let mut old=State::new("key",5,"session",vec![]);
+        let mut receipt=Operation::new("call::advance",json!({"kind":"advance_lifecycle","generation":5,"state":view}),None);
+        receipt.status=Status::Accepted; receipt.result=json!({"generation":5}); receipt.seq=1; old.next_seq=2;
+        old.operations.insert("call::advance".into(),receipt);
+        std::fs::write(&path,serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut store=Store::open(&path,dir.path(),State::new("key",5,"session",vec![])).unwrap();
+        assert!(store.state().operations["call::advance"].payload["state"].is_string());
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        assert_eq!(store.exec(4,"advance",clock,Action::AdvanceLifecycle {generation:5,state:view}).unwrap(),json!({"generation":5}));
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -1375,5 +1526,145 @@ mod replaced_read_tests {
         std::io::Read::read_to_end(&mut reader, &mut old).unwrap();
         assert_eq!(old, b"velho");
         assert_eq!(std::fs::read(&path).unwrap(), b"novo");
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+    fn store(dir:&tempfile::TempDir) -> Store {
+        Store::open(&dir.path().join("state.json"),dir.path(),State::new("key",1,"session",vec![])).unwrap()
+    }
+    fn clock(epoch_s:f64) -> ClockSample { ClockSample { monotonic_s:0.0,epoch_s } }
+    fn append(store:&mut Store,id:&str) {
+        store.exec(1,&format!("append:{id}"),clock(10.0),Action::Append { text:format!("texto {id}"),delivered:false,ts:Some(10.0),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
+    }
+    fn exec(store:&mut Store,call:&str,action:Action) -> Value { store.exec(1,call,clock(20.0),action).unwrap() }
+
+    #[test]
+    fn cancel_removes_only_a_waiting_entry() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a"); append(&mut store,"b");
+        assert_eq!(exec(&mut store,"cancel-a",Action::Cancel { entry_id:"a".into() }),json!("cancelled"));
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["b".to_string()]);
+        assert_eq!(exec(&mut store,"cancel-x",Action::Cancel { entry_id:"x".into() }),json!("absent"));
+    }
+
+    #[test]
+    fn waiting_ids_cut_rows_older_than_the_life_like_the_claim() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"old");
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["old".to_string()]);
+        // A vida começou depois dela (ts 10): a drenagem nunca a levaria, e ela não segura comando nem Orientar.
+        assert!(waiting_ids(store.state(),50.0).is_empty());
+    }
+
+    #[test]
+    fn a_never_written_terminal_intent_of_an_older_life_still_waits() {
+        // Queda e reabertura numa vida nova: a intenção preparada antes não escreveu nada.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a");
+        let command=json!({"operation_id":"a","kind":"input","payload":{"text":"texto a","pre_transcript":false,"_terminal_generation":0}});
+        exec(&mut store,"prepare",Action::Prepare { id:"a".into(),payload:command,entry_id:Some("a".into()) });
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["a".to_string()]);
+        assert_eq!(exec(&mut store,"move",Action::Promote { entry_id:"a".into() }),json!("moved"));
+    }
+
+    #[test]
+    fn edit_and_cancel_refuse_a_claimed_entry() {
+        // A drenagem reivindicou a entrada no meio: o painel recusa em vez de mexer no que já saiu.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a");
+        exec(&mut store,"claim",Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None });
+        assert_eq!(exec(&mut store,"edit",Action::Edit { entry_id:"a".into(),text:"novo".into() }),json!("not_waiting"));
+        assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"a".into() }),json!("not_waiting"));
+        assert_eq!(exec(&mut store,"move",Action::Promote { entry_id:"a".into() }),json!("not_waiting"));
+        assert_eq!(store.state().rows[0]["text"],"texto a");
+    }
+
+    #[test]
+    fn edit_rewrites_the_deferred_intent_so_the_drain_sends_the_new_text() {
+        // Sem terminal o ator reenvia o comando gravado na operação: ele precisa levar o texto novo.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a");
+        let command=json!({"operation_id":"a","kind":"input","payload":{"text":"texto a","pre_transcript":false}});
+        exec(&mut store,"prepare",Action::Prepare { id:"a".into(),payload:command,entry_id:Some("a".into()) });
+        exec(&mut store,"finish",Action::Finish { id:"a".into(),status:Status::Deferred,result:json!({"operation_id":"a","disposition":"deferred","payload":{}}) });
+        assert_eq!(exec(&mut store,"edit",Action::Edit { entry_id:"a".into(),text:"texto novo".into() }),json!("edited"));
+        assert_eq!(store.state().rows[0]["text"],"texto novo");
+        assert_eq!(store.state().operations["a"].payload["payload"]["text"],"texto novo");
+        // A reentrega prepara a mesma intenção, agora com o texto novo, sem "intenção da operação mudou".
+        let again=json!({"operation_id":"a","kind":"input","payload":{"text":"texto novo","pre_transcript":false}});
+        assert!(store.exec(1,"prepare-again",clock(21.0),Action::Prepare { id:"a".into(),payload:again,entry_id:Some("a".into()) }).is_ok());
+    }
+
+    #[test]
+    fn edit_refuses_empty_slash_and_control_text() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a");
+        for (call,text) in [("e1","   "),("e2","/clear"),("e3","a\u{1b}b")] {
+            let error=store.exec(1,call,clock(20.0),Action::Edit { entry_id:"a".into(),text:text.into() }).unwrap_err();
+            assert_eq!(refusal(&error),Some("texto da fila inválido"),"{text:?}");
+        }
+        assert_eq!(store.state().rows[0]["text"],"texto a");
+    }
+
+    #[test]
+    fn reorder_moves_among_waiting_and_end_is_none() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        for id in ["a","b","c"] { append(&mut store,id); }
+        assert_eq!(exec(&mut store,"r1",Action::Reorder { entry_id:"c".into(),before_id:Some("a".into()) }),json!("moved"));
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["c","a","b"]);
+        assert_eq!(exec(&mut store,"r2",Action::Reorder { entry_id:"c".into(),before_id:None }),json!("moved"));
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["a","b","c"]);
+        assert_eq!(exec(&mut store,"r3",Action::Promote { entry_id:"b".into() }),json!("moved"));
+        assert_eq!(waiting_ids(store.state(),0.0),vec!["b","a","c"]);
+        // A drenagem segue a ordem nova.
+        let claimed=exec(&mut store,"claim",Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None });
+        assert_eq!(claimed[0]["id"],"b");
+    }
+
+    #[test]
+    fn reorder_before_a_delivered_entry_is_not_waiting() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a"); append(&mut store,"b");
+        exec(&mut store,"claim",Action::Claim { min_ts:0.0,limit:Some(1),entry_id:Some("a".into()) });
+        assert_eq!(exec(&mut store,"r",Action::Reorder { entry_id:"b".into(),before_id:Some("a".into()) }),json!("not_waiting"));
+    }
+
+    #[test]
+    fn reserved_answer_is_not_a_waiting_entry() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        exec(&mut store,"reserve",Action::ReserveAsyncAnswer { entry_id:"ans".into(),text:"resposta".into(),payload:json!({"kind":"dispatch_async_answer"}) });
+        assert_eq!(store.state().rows[0]["reserved"],true);
+        assert!(waiting_ids(store.state(),0.0).is_empty());
+        assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"ans".into() }),json!("not_waiting"));
+    }
+
+    #[test]
+    fn cancel_never_touches_an_uncertain_delivery() {
+        // O X do painel não é o "Descartar" da bolha perdida: a incerta continua na fila, sem desistência.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"u");
+        exec(&mut store,"prepare",Action::Prepare { id:"u".into(),payload:json!({"kind":"input","payload":{"text":"texto u"}}),entry_id:Some("u".into()) });
+        exec(&mut store,"begin",Action::BeginDispatch { id:"u".into(),wire_id:"w".into(),staged:false });
+        exec(&mut store,"finish",Action::Finish { id:"u".into(),status:Status::Unknown,result:json!({}) });
+        assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"u".into() }),json!("not_waiting"));
+        assert_eq!(store.state().rows.len(),1);
+        assert!(store.state().rows[0]["desistiu"].is_null());
+    }
+
+    #[test]
+    fn cancelled_terminal_intent_does_not_come_back_on_recovery() {
+        // A intenção terminal preparada e adiada sai junto: o Recover não rematerializa a linha.
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        let intent=json!({"operation_id":"t","kind":"input","payload":{"text":"oi","pre_transcript":false,"_terminal_generation":1}});
+        exec(&mut store,"prepare",Action::Prepare { id:"t".into(),payload:intent,entry_id:Some("t".into()) });
+        store.exec(1,"append",clock(10.0),Action::Append { text:"oi".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("t".into()) }).unwrap();
+        // Adiada como a mensagem do turno em curso, antes de ser apagada no painel.
+        exec(&mut store,"finish",Action::Finish { id:"t".into(),status:Status::Deferred,result:json!({"operation_id":"t","disposition":"deferred","payload":{"code":"queue_ahead"}}) });
+        assert_eq!(exec(&mut store,"cancel",Action::Cancel { entry_id:"t".into() }),json!("cancelled"));
+        assert!(store.exec(1,"recover",clock(20.0),Action::Recover).is_ok());
+        assert!(store.state().rows.is_empty());
     }
 }

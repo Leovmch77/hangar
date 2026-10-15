@@ -163,7 +163,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate" | "agent" | "agent-sent"))) {
         return true;
     }
-    if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {
+    if tail.is_some_and(|t| crate::session_write::control::queue_route(method, t).is_some()) {
         return true;
     }
     // Grupos (`groups::routes`): o convidado segue ao Python, que recusa.
@@ -195,6 +195,7 @@ const PROBES: &[(&str, &str)] = &[
     ("POST", "/api/sessions/x/input"), ("POST", "/api/sessions/x/interrupt"), ("POST", "/api/sessions/x/answer"),
     ("POST", "/api/sessions/x/steer"), ("POST", "/api/sessions/x/select"), ("POST", "/api/sessions/x/select/submit"),
     ("POST", "/api/sessions/x/term-input"), ("DELETE", "/api/sessions/x/queue/e1"),
+    ("PATCH", "/api/sessions/x/queue/e1"), ("POST", "/api/sessions/x/queue/reorder"), ("POST", "/api/sessions/x/queue/e1/steer"),
     ("POST", "/api/sessions/x/model"), ("POST", "/api/sessions/x/rename"), ("DELETE", "/api/sessions/x"),
     ("GET", "/api/sessions/x/term"), ("POST", "/api/sessions/x/keys"),
     ("GET", "/api/sessions/x/git/log"), ("GET", "/api/sessions/x/files/list"), ("POST", "/api/sessions/x/git/commit"),
@@ -386,7 +387,8 @@ mod tests {
         assert!(get("/api/sessions/a/git/log") && get("/api/worktrees"), "Git e worktrees vêm dos matches");
         assert!(get("/api/sessions/a/pages/p1") && get("/api/sessions/a/pages/p1/shot") && !get("/api/sessions/a/pages"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/input") && rust_route(&Method::DELETE, "/api/sessions/a/queue/e1")
-            && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
+            && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && rust_route(&Method::POST, "/api/sessions/a/queue/e1/steer")
+            && rust_route(&Method::PATCH, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/pair") && rust_route(&Method::DELETE, "/api/sessions/a/pair")
             && get("/api/sessions/a/pair/contract") && rust_route(&Method::POST, "/api/sessions/a/unpair-remote")
             && !get("/api/sessions/a/pair") && rust_route(&Method::POST, "/api/sessions/a/pair-invite"));

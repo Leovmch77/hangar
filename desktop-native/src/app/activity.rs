@@ -390,6 +390,10 @@ impl ActivityPanel {
         if self.poll.is_some() && self.opened.as_ref().is_some_and(|o| !o.done && self.done(&o.run)) { self.fetch_detail(); }
     }
 
+    pub(super) fn set_plugin_servers(&mut self, servers: &[String], cx: &mut Context<Self>) {
+        self.conversation.update(cx, |view, cx| view.set_plugin_servers(servers, cx));
+    }
+
     fn done(&self, run: &SubRun) -> bool { sub_done(&self.activity.agents, &self.subs, run) }
 
     /// A aba passou a aparecer (ou mudou de sessão): relê a lista. `None` = escondida, o relógio para.
@@ -919,9 +923,10 @@ impl Hangar {
         let key = self.selected_key();
         if !self.side.open { self.act.pending_tab = None; }
         let target = key.filter(|_| self.side.open && !self.side_menu_shown() && self.side_tab() == SideTab::Activity).zip(self.activity_link());
+        let servers = self.selected.as_ref().map(|s| s.plugin_tool_servers.clone()).unwrap_or_default();
         let (activity, processes) = (&self.conversation.activity, &self.chat.state.shells);
-        self.act.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.show(target, cx); });
-        for tab in &self.act.tabs { tab.view.update(cx, |view, cx| view.set_data(activity, processes, cx)); }
+        self.act.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.set_plugin_servers(&servers, cx); view.show(target, cx); });
+        for tab in &self.act.tabs { tab.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.set_plugin_servers(&servers, cx); }); }
     }
 
     /// Clique numa aba do painel: fecha a aba de subagente aberta e grava a escolha como as outras preferências de tela.

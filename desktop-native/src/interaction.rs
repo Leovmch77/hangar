@@ -258,8 +258,10 @@ fn plan_markers(text: &str) -> Vec<(usize, usize, bool)> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// `SelectText`: a escolha que leva o texto digitado junto (o "o que mudar" do plano).
-pub enum Action { Answer, Skip, Select(usize), SelectText(usize, String), Submit, Cancel, Steer, Discard(String), Implement }
+/// `SelectText`: a escolha que leva o texto digitado junto (o "o que mudar" do plano). `Queue*`: ações do painel "Na fila",
+/// pelo id cru da entrada; `QueueReorder` leva o `before_id` (`None` é o fim).
+pub enum Action { Answer, Skip, Select(usize), SelectText(usize, String), Submit, Cancel, Steer, Discard(String), Implement,
+    QueueCancel(String), QueueEdit(String, String), QueueSteer(String), QueueReorder(String, Option<String>) }
 
 impl Action {
     pub fn path(&self) -> Vec<&str> {
@@ -267,10 +269,42 @@ impl Action {
             Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) | Action::SelectText(..) => vec!["select"], Action::Submit => vec!["select", "submit"],
             Action::Cancel => vec!["interrupt"], Action::Steer => vec!["steer"], Action::Discard(id) => vec!["queue", id],
             Action::Implement => vec!["codex", "plan", "implement"],
+            Action::QueueCancel(id) | Action::QueueEdit(id, _) => vec!["queue", id], Action::QueueSteer(id) => vec!["queue", id, "steer"],
+            Action::QueueReorder(..) => vec!["queue", "reorder"],
         }
     }
     // Acima da espera do backend (35 s no Codex) para não declarar incerto o que ainda roda lá.
     pub fn seconds(&self) -> u64 { if matches!(self, Action::Answer) { 60 } else { 30 } }
+
+    pub fn method(&self) -> reqwest::Method {
+        match self {
+            Action::Discard(_) | Action::QueueCancel(_) => reqwest::Method::DELETE,
+            Action::QueueEdit(..) => reqwest::Method::PATCH,
+            _ => reqwest::Method::POST,
+        }
+    }
+
+    /// O X do painel só tira a que espera (`only_waiting`): entrega incerta nunca vira desistência por ele.
+    pub fn query(&self) -> Option<(&'static str, &'static str)> {
+        matches!(self, Action::QueueCancel(_)).then_some(("only_waiting", "true"))
+    }
+
+    /// Corpo das ações do painel da fila; `before_id` nulo é o fim da fila.
+    pub fn queue_body(&self) -> Option<Value> {
+        match self {
+            Action::QueueEdit(_, text) => Some(json!({"text": text})),
+            Action::QueueReorder(id, before) => Some(json!({"id": id, "before_id": before})),
+            _ => None,
+        }
+    }
+
+    /// Id da entrada da fila em que a ação do painel age.
+    pub fn queue_entry(&self) -> Option<&str> {
+        match self {
+            Action::QueueCancel(id) | Action::QueueEdit(id, _) | Action::QueueSteer(id) | Action::QueueReorder(id, _) => Some(id),
+            _ => None,
+        }
+    }
 }
 
 /// Uma mutação de interação por sessão; outra sessão segue livre.
@@ -317,6 +351,16 @@ mod tests {
             vec!["https://a.com/x?y=1", "http://b.com/c"]);
         assert!(question_links("rode `curl https://a.com` e ftp://x.com javascript:alert(1)").is_empty());
         assert!(question_links("Aprovar o plano?").is_empty());
+    }
+
+    #[test]
+    fn queue_actions_route_to_the_entry_by_its_raw_id() {
+        assert_eq!(Action::QueueCancel("a".into()).path(), vec!["queue", "a"]);
+        assert_eq!(Action::QueueEdit("a".into(), "x".into()).path(), vec!["queue", "a"]);
+        assert_eq!(Action::QueueSteer("a".into()).path(), vec!["queue", "a", "steer"]);
+        assert_eq!(Action::QueueReorder("a".into(), None).path(), vec!["queue", "reorder"]);
+        assert_eq!(Action::QueueReorder("b".into(), Some("a".into())).queue_entry(), Some("b"));
+        assert_eq!(Action::Steer.queue_entry(), None);
     }
 
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.

@@ -508,6 +508,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   ou as dicas do próprio rodapé. Interromper com o foco lá manda esse Esc antes do que interrompe.
   Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
 
+- **Claude com terminal segura a mensagem no Hangar durante o turno.** Com o Claude fora de `idle`
+  (registro nativo, depois o estado do plugin, depois o marcador de hook), o `/input` grava a
+  entrada na fila do Hangar (`terminal_turn_hold`, `delivered:false`) em vez de digitá-la. A fila
+  drena com o Claude parado, composer legível e sem pergunta, uma por vez, no tique do ator; a
+  entrega que encontrou o Claude parado faz a próxima esperar até 3 s (`turn_start_wait`) pelo
+  turno que ela abriu. Recado com socket nativo (`[de: …]`, `[grupo: …]`, `[painel: …]`) e comando
+  de barra não são segurados, e o recado passa no meio do turno mesmo atrás de mensagem segurada. Com
+  mensagem esperando, comando de barra é recusado na tela (`queue_waiting`): não passa à frente nem
+  some na troca de conversa do `/clear`. "Orientar" de uma entrada (`steer_entry`) digita só ela e
+  aperta `ctrl+x ctrl+s`, que leva junto o que já estava na fila interna do Claude Code e interrompe
+  o turno; parado, ela vai para a frente e sai na entrega comum. As ações do painel (apagar,
+  editar, reordenar, Orientar) valem só para a entrada que ainda espera e passam pelo ator da
+  sessão; a que a drenagem já reivindicou responde 409 `queue_entry_gone`. O `/steer` sem corpo
+  (chip de app antigo) é o Orientar da primeira que espera; sem nenhuma, promove como antes. Limite:
+  `/clear` ou `/resume` digitados direto no terminal no meio do turno trocam o session-id, e a troca
+  de vínculo descarta as mensagens que o app segurava. Ver
+  [segurar a fila no turno](#claude-com-terminal-segura-a-fila-no-turno-14102026).
+
 - **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
   nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
   é entrega incerta comum. Passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
@@ -771,6 +789,40 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   "Bifurcar" repete o "f" do Claude Code: `$.agent.spawn({ subagentType: "fork" })` e, no fim do
   agente, `$.prompt.submit` leva a resposta à conversa principal. Medição em
   [Pergunta lateral pelo plugin](#pergunta-lateral-btw-pelo-plugin-08102026).
+
+- **Mensagem `user` do Claude com vários blocos de texto mostra todos, um por linha.** É o que a CLI
+  grava quando junta entradas que chegaram durante o turno (um bloco por entrada). Os testes da
+  primeira linha (comando, interrupção, agente, colega, fonte de imagem) seguem só no primeiro
+  bloco; bloco seguinte que é marcação do harness (`is_command_meta`), só a fonte da imagem ou só
+  `<system-reminder>` não entra. O texto de cada bloco também é chave de commit do `/history`
+  (`commit_blocks`, fora do JSON). Python (`transcript.py`) e Rust (`transcript/claude.rs`) iguais,
+  provados pelo golden do contrato. Ver
+  [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
+
+## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
+
+Na prova de ponta a ponta da fila, duas entradas orientadas no mesmo turno ("fila A editada" e
+"fila C terceira") chegaram ao modelo como uma mensagem `user` com dois blocos de texto, e o
+`/history` mostrava só a primeira: os dois parsers liam apenas o primeiro bloco. A confirmação não
+dependia disso (o recibo e o índice de linhas confirmadas já liam todos os blocos, uma ocorrência
+por bloco), então a entrada sumia da conversa sem voltar como bolha.
+
+Com o texto juntado por `\n`, a entrada de uma linha continua casando com a própria linha: as
+chaves de commit (`chaves_de_commit`/`_chaves_de_commit`) e o dedup dos aparelhos
+(`especificidade`/`claim`) aceitam a entrada que é uma linha da mensagem. A entrada de várias
+linhas não é linha da mensagem juntada (`a\nb` dentro de `a\nb\nc`), e ficava repetida no
+`/history` até o recibo confirmar: por isso o parser leva o texto de cada bloco no `commit_blocks`
+(campo interno, como o `offset`), e o `/history` soma as chaves de cada bloco às da mensagem. Nos
+aparelhos, a mensagem real aposenta pelo texto só a bolha dona (regra antiga, de propósito: duas
+"ok" na fila e uma real deixam a segunda visível); as outras saem pelo `queue_confirmed` do recibo.
+
+Bloco seguinte que é marcação do harness (`<task-notification>`, `<command-name>`, "Base directory
+for this skill:"…) ficava cru na bolha; agora fica de fora, como já ficava no primeiro.
+
+Limite que fica: primeiro bloco só com `<system-reminder>` ainda tira a mensagem inteira da
+conversa, porque `<system-reminder>` está entre os prefixos de marcação e o teste de comando lê o
+primeiro bloco cru. É anterior a esta mudança e não há transcript local com esse formato para
+provar que ele acontece.
 
 ## Codex com terminal no Rust: adoção e dono único
 
@@ -4259,3 +4311,39 @@ restante; cancelamento mantém a guarda da conta até encerrar a árvore. A prov
 segurando stdout: ambos encerram antes de liberar a pasta e a guarda da conta, sem waits artificiais
 nos testes. O resolvedor Claude é compartilhado com o leitor de contas, incluindo instalação npm
 no Windows.
+
+## Claude com terminal segura a fila no turno (14/10/2026)
+
+Até o PR #137 a drenagem do terminal só esperava a caixa de digitar: com o Claude trabalhando, a
+mensagem era digitada e ficava na fila interna do Claude Code, onde o app não a apagava nem a
+editava. Decisão do usuário (spec `2026-10-14-queued-messages-panel-design.md`): a mensagem fica no
+Hangar durante o turno, no painel "Na fila", e sai sozinha quando o Claude para. O mecanismo
+anterior está em [superado](superado.md#drenagem-do-terminal-no-meio-do-turno-e-chip-mandar-agora-do-claude).
+O corte do painel de agentes do #137 continua valendo.
+
+- Quem diz "parado" é o `InputFacts.idle` (`terminal_facts.rs`): registro nativo `status: idle`;
+  sem ele, o estado do plugin vivo; sem ele, o marcador de hook. A tela só decide sem nenhum dos três.
+- Logo depois de uma entrega o registro nativo ainda diz `idle` por um tique: sem a espera do
+  `turn_start_wait` (3 s, armada só quando a entrega encontrou o Claude parado), a segunda mensagem
+  sairia junto com a primeira num turno curto. O Orientar no meio do turno não arma a espera.
+- O recado de outra sessão pelo socket nativo continua no meio do turno: é o canal do próprio
+  Claude Code para isso, e segurá-lo atrasaria a conversa entre sessões. O socket existe em toda
+  sessão recente, mas só o texto com prefixo de recado vai por ele; por isso a condição de segurar é
+  o texto, não a presença do socket. Os fatos da drenagem não trazem o socket (ele depende do
+  texto): o recado candidato relê os fatos com o próprio texto antes de passar à frente.
+- Comando de barra não é segurado (vai à fila do Claude Code, como antes), mas com mensagem
+  esperando no Hangar é recusado: a troca de conversa esvazia a fila, e um `/clear` nessa hora
+  apagaria em silêncio o que a pessoa já tinha mandado.
+- `ctrl+x ctrl+s` interrompe o turno e manda o que está na fila interna do Claude Code (inclusive
+  o que a pessoa digitou direto no terminal): o "Orientar" por item digita só a escolhida antes de
+  apertar, mas não separa o que já estava lá. A tecla só sai com a marca `ctrl+x ctrl+s to send now`
+  na tela (até três leituras com o Claude trabalhando, uma com ele parado); sem ela, o Claude já
+  tinha parado e levou a mensagem como envio comum.
+- Limite que fica (15/10/2026, revisão final): o app recusa comando de barra com mensagem
+  esperando, mas `/clear` ou `/resume` digitados direto no terminal no meio do turno não passam
+  pelo app. O Claude Code troca o session-id, o vínculo da sessão muda (`Action::Clear` na troca,
+  `gateway.rs`) e as mensagens seguradas saem da fila sem entrega. Mudar isso exigiria a fila
+  sobreviver à troca de conversa, contra o invariante de que a fila é da conversa; fica documentado.
+- O `/steer` sem corpo, que o chip "mandar agora" de um app antigo ainda manda, vira o Orientar da
+  primeira entrada esperando (`steer_first` no ator): só promover a fila interna do Claude Code
+  deixaria a mensagem do Hangar para trás. Sem entrada esperando, o comportamento é o de antes.

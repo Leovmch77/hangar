@@ -527,10 +527,14 @@ pub fn family_counts(events: &[ChatEvent], tools: &[Tool]) -> Vec<(Family, usize
 
 /// `mcp__hangar-computer-control__objetivo` vira "computer-control · objetivo"; o resto fica como veio.
 pub fn tool_display_name(name: &str) -> String {
-    let parts: Vec<&str> = name.split("__").collect();
-    if parts.len() < 3 || parts[0] != "mcp" { return name.to_owned(); }
-    format!("{} · {}", parts[1].trim_start_matches("hangar-"), parts[2..].join("__"))
+    match mcp_parts(name) {
+        Some((server, tool)) => format!("{} · {tool}", server.trim_start_matches("hangar-")),
+        None => name.to_owned(),
+    }
 }
+
+/// `mcp__<servidor>__<ferramenta>`: o servidor como está no nome e a ferramenta, que pode ter `__` no meio.
+pub fn mcp_parts(name: &str) -> Option<(&str, &str)> { name.strip_prefix("mcp__")?.split_once("__") }
 
 const SUMMARY_MAX: usize = 96;
 
@@ -582,9 +586,11 @@ pub fn pretty_input(input: Option<&Map<String, Value>>) -> String {
     }
 }
 
-/// First sentence of the thought when it is short, otherwise the flattened start.
+/// First sentence of the thought when it is short, otherwise the flattened start. Markdown marks (`**`, `__`,
+/// crases) saem: a linha fechada é texto corrido, e a pele Clássica as mostraria cruas.
 pub fn thought_summary(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = text.replace("**", "").replace("__", "").replace('`', "");
+    let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     let end = flat.char_indices().find(|&(i, ch)| matches!(ch, '.' | '!' | '?')
         && flat[i + ch.len_utf8()..].chars().next().is_none_or(char::is_whitespace)).map(|(i, _)| i + 1);
     match end { Some(end) if flat[..end].chars().count() < 140 => flat[..end].to_owned(), _ => one_line(&flat, 140) }
@@ -617,6 +623,11 @@ mod tests {
     use serde_json::json;
 
     fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), ..Default::default() } }
+
+    #[test]
+    fn thought_summary_drops_markdown_marks() {
+        assert_eq!(thought_summary("**Lendo o `app.rs`** com __calma__. Depois testo."), "Lendo o app.rs com calma.");
+    }
     fn call(id: &str, tool: &str, name: &str) -> ChatEvent {
         ChatEvent { tool_use_id: Some(tool.into()), tool_name: Some(name.into()), ..ev("tool_use", id) }
     }

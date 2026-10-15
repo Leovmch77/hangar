@@ -1165,7 +1165,7 @@ impl Hangar {
             cx.notify();
             return;
         }
-        if self.delivery.pending(&key) || self.queued_count() > 0 || !self.controls.planning.insert(key.clone()) { return; }
+        if self.delivery.pending(&key) || self.pending_count() > 0 || !self.controls.planning.insert(key.clone()) { return; }
         let target = self.chat.state.claude_previous_non_plan.clone().filter(|m| !m.is_empty() && m != "plan").unwrap_or_else(|| "acceptEdits".into());
         let request = tr("plan_request");
         self.action_feedback.remove(&key);
@@ -1206,7 +1206,7 @@ impl Hangar {
         if self.plans_dismissed.contains(&id) { return None; }
         let key = self.selected_key()?;
         let running = self.controls.planning.contains(&key);
-        let ready = !running && self.can_send() && !self.delivery.pending(&key) && self.queued_count() == 0;
+        let ready = !running && self.can_send() && !self.delivery.pending(&key) && self.pending_count() == 0;
         let dismiss = id.clone();
         Some(div().py_2().flex().items_center().gap_2().border_t_1().border_color(theme::border())
             .child(div().flex_1().min_w_0().text_sm().child(tr(if running { "plan_implementing" } else { "headless_plan_title" })))

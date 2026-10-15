@@ -259,6 +259,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Promovem camada que renderiza preto durante o scroll.
 - **A lista de mensagens é janelada** (`WINDOW=120`). Não renderize o transcript inteiro.
 - **O app renderiza `AskUserQuestion` nativamente**; use à vontade. Texto numerado é só fallback.
+- **Mensagem esperando na fila do Hangar aparece no painel "Na fila", não como bolha.** A lista e a
+  ordem vêm do evento `queue`; o modelo é `packages/core/src/queuePanel.ts` (o nativo repete em
+  `desktop-native/src/queue_panel.rs`).
 - **Dedup de fila/pending é delicado** — bolhas `pending`/`queued-` reconciliam por texto
   normalizado contra o transcript real.
 - **Vite HMR pode servir componente VAZIO** (stub <1KB, sem erro no console): a tela some sem
@@ -535,16 +538,18 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Índice, paridade e medidas de custos em [plataforma.md](docs/decisoes/plataforma.md#custos-e-uso-no-hangar-server).
 - **As escritas do dono em sessão Claude e Codex, com e sem terminal, são do Rust.** `/input`
   (`/clear` incluído: o ator do terminal o conduz), `/steer`, `/interrupt`, `/keys`, `/select`,
-  `/select/submit`, `/term-input`, `/answer`, o descarte da fila e os controles do Codex são
-  decididos no `hangar-server` (`session_write/table.rs`). Repasse ao Python só sem entrada no
+  `/select/submit`, `/term-input`, `/answer`, o descarte da fila, o painel da fila (`PATCH` e
+  `DELETE queue/<id>`, este com `?only_waiting`, `POST queue/reorder` e `POST queue/<id>/steer`) e
+  os controles do Codex são decididos no `hangar-server` (`session_write/table.rs`). Repasse ao Python só sem entrada no
   Rust (abertura, Pi/omp/Kimi) e nas rotas de pane de sessão sem terminal. Entrada doente é 503
   `runtime_unhealthy`, corpo fora de forma é 422 `erro_corpo_invalido`, nunca repasse. Cada sessão
   tem uma porta de entrada no Rust: o Python a fecha antes de congelar ou transferir a sessão
   (renomear, trocar de conta) e a reabre depois; fechada pela troca de conversa, recusa na hora
   (409), fechada por congelamento curto, a escrita espera. A saúde diz o que o Rust atende em
   `owns` (`table::owned_modes`). No convidado e no Connect (8766/8768) o Python autentica e repassa
-  num sentido, corpo intacto: `answer`/`select`/`select/submit` do Claude a
-  `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust a
+  num sentido, corpo, método e query intactos: `answer`/`select`/`select/submit` e as rotas
+  `queue/*` do Claude a `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust (`queue/*`
+  incluídas) a
   `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast, grupo, par e
   MCP para Codex com terminal); 421 = o Rust não atende e o Python segue, transporte que falha =
   5xx `<provedor>_bridge_failed`. Texto que nasce no Python para o Claude segue em `_send_one`, coberto

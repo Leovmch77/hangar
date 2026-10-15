@@ -68,6 +68,15 @@ pub const TOOL_FOLD: Spec = Spec::new(140, EASE_OUT);
 pub const TOOL_CONNECTOR: Spec = Spec::new(480, EASE_OUT_QUINT);
 /// Uma passada do brilho no título do grupo que ainda roda.
 pub const TOOL_SHIMMER: Duration = Duration::from_millis(3400);
+/// O brilho do "Pensando", o `live-activity-focus` do T3: uma passada a cada 2,2 s, em 30 degraus.
+pub const THINKING_FOCUS: Duration = Duration::from_millis(2200);
+pub const THINKING_FOCUS_STEPS: u32 = 30;
+/// Largura da faixa: os 4,5rem do T3.
+pub const THINKING_FOCUS_WIDTH: f32 = 72.;
+/// O `mask-image` do T3 em px desde a borda esquerda da faixa: (posição, alfa).
+const FOCUS_STOPS: [(f32, f32); 7] = [(0., 0.), (10.8, 0.12), (25.2, 0.55), (36., 1.), (46.8, 0.55), (61.2, 0.12), (72., 0.)];
+/// Largura de cada recorte da faixa: 24 recortes cobrem os 72 px sem degrau visível no texto.
+const FOCUS_STRIP: f32 = 3.;
 /// `zeron-pulse`: período dos esqueletos de carregando.
 pub const PULSE: Duration = Duration::from_millis(2400);
 
@@ -141,6 +150,43 @@ pub fn connector_continuation(next_progress: Option<f32>) -> f32 {
 pub fn shimmer_amount(x: f32, phase: f32) -> f32 {
     let center = -2.5 + phase.clamp(0., 1.) * 6.;
     (-2..=2).map(|copy| center + copy as f32 * 3.).map(|c| (1. - (x - c).abs() / 0.36).clamp(0., 1.)).fold(0., f32::max)
+}
+
+/// Alfa do gradiente da faixa a `u` px da borda esquerda dela; fora da faixa, 0.
+pub fn focus_mask(u: f32) -> f32 {
+    if !(0. ..=THINKING_FOCUS_WIDTH).contains(&u) { return 0.; }
+    FOCUS_STOPS.windows(2).find(|pair| u <= pair[1].0)
+        .map_or(0., |pair| {
+            let ((x0, a0), (x1, a1)) = (pair[0], pair[1]);
+            a0 + (a1 - a0) * (u - x0) / (x1 - x0)
+        })
+}
+
+/// Fase da passada em degraus, como o `steps(30)` do CSS: anda de 1/30 em 1/30 e volta a 0 a cada 2,2 s.
+pub fn focus_phase(elapsed: Duration) -> f32 {
+    let period = THINKING_FOCUS.as_secs_f64();
+    let steps = THINKING_FOCUS_STEPS as f64;
+    ((elapsed.as_secs_f64() % period / period * steps).floor() / steps) as f32
+}
+
+/// Borda esquerda da faixa: entra toda por fora à esquerda e sai toda por fora à direita, como o overlay do T3,
+/// que tem a largura da linha mais duas faixas.
+pub fn focus_band_left(phase: f32, width: f32) -> f32 {
+    -THINKING_FOCUS_WIDTH + phase * (width + 2. * THINKING_FOCUS_WIDTH)
+}
+
+/// Os recortes da faixa que caem na linha: posição e largura em px desde o começo dela, e o alfa do gradiente no
+/// meio do recorte. A GPUI não tem máscara em gradiente; recortar a cópia acesa em fatias faz o mesmo desenho.
+pub fn focus_strips(phase: f32, width: f32) -> Vec<(f32, f32, f32)> {
+    let left = focus_band_left(phase, width);
+    let count = (THINKING_FOCUS_WIDTH / FOCUS_STRIP) as usize;
+    (0..count).filter_map(|n| {
+        let start = n as f32 * FOCUS_STRIP;
+        // Metade da direita lê o alfa no recorte espelhado: o mesmo valor, bit a bit, e a linha moldada se reaproveita.
+        let alpha = focus_mask(start.min(THINKING_FOCUS_WIDTH - FOCUS_STRIP - start) + FOCUS_STRIP / 2.);
+        let (x0, x1) = ((left + start).max(0.), (left + start + FOCUS_STRIP).min(width));
+        (x1 > x0 && alpha > 0.).then_some((x0, x1 - x0, alpha))
+    }).collect()
 }
 
 /// Progresso com curva da entrada do elemento `key`, contado do primeiro desenho dele; pede quadros até terminar. O
@@ -232,5 +278,62 @@ mod tests {
     #[test]
     fn pulse_ends() {
         assert!((pulse_wave(0.) - 0.).abs() < 1e-6 && (pulse_wave(0.5) - 1.).abs() < 1e-6);
+    }
+
+    #[test]
+    fn focus_mask_matches_the_t3_gradient() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        for (u, alpha) in [(0., 0.), (10.8, 0.12), (25.2, 0.55), (36., 1.), (46.8, 0.55), (61.2, 0.12), (72., 0.)] {
+            assert!(close(focus_mask(u), alpha), "u={u}: {} != {alpha}", focus_mask(u));
+        }
+        // Linear entre as paradas, simétrica em volta do centro, zero fora da faixa.
+        assert!(close(focus_mask(5.4), 0.06));
+        for d in [0., 3., 11.1, 20., 35.] { assert!(close(focus_mask(36. - d), focus_mask(36. + d))); }
+        assert_eq!((focus_mask(-0.5), focus_mask(72.5), focus_mask(f32::NAN)), (0., 0., 0.));
+    }
+
+    #[test]
+    fn focus_phase_steps_thirty_times_per_pass() {
+        let step = THINKING_FOCUS / THINKING_FOCUS_STEPS;
+        let ms = Duration::from_millis;
+        assert_eq!(focus_phase(Duration::ZERO), 0.);
+        assert_eq!(focus_phase(step - ms(1)), 0.);
+        assert!((focus_phase(step + ms(1)) - 1. / 30.).abs() < 1e-6);
+        assert!((focus_phase(THINKING_FOCUS - ms(1)) - 29. / 30.).abs() < 1e-6);
+        // A passada recomeça: exatamente 2,2 s é o degrau 0 de novo, e tempo longo não passa de 29/30.
+        assert_eq!(focus_phase(THINKING_FOCUS), 0.);
+        assert!(focus_phase(Duration::from_secs(3600) + ms(2199)) <= 29. / 30. + 1e-6);
+        let mut seen: Vec<u32> = (0..2200).map(|t| (focus_phase(ms(t)) * 30.).round() as u32).collect();
+        seen.dedup();
+        assert_eq!(seen, (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn focus_band_crosses_from_outside_to_outside() {
+        // Linha de 90 px: o trajeto é 90 + 2 × 72 = 234 px.
+        assert_eq!(focus_band_left(0., 90.), -72.);
+        assert!((focus_band_left(0.5, 90.) - 45.).abs() < 1e-4);
+        assert!(focus_strips(0., 90.).is_empty(), "no degrau 0 a faixa ainda está toda à esquerda");
+        assert!(focus_strips(29. / 30., 90.).is_empty(), "no último degrau ela já saiu à direita");
+        assert!(!focus_strips(0.5, 90.).is_empty());
+    }
+
+    #[test]
+    fn focus_strips_stay_inside_the_row() {
+        for width in [0., 1., 22., 90., 400.] {
+            for n in 0..30 {
+                for (x, w, alpha) in focus_strips(n as f32 / 30., width) {
+                    assert!(x >= 0. && w > 0. && x + w <= width + 1e-4, "width={width} n={n}: ({x}, {w})");
+                    assert!(alpha > 0. && alpha <= 1.);
+                }
+            }
+        }
+        // No meio da passada sobre uma linha larga, a faixa inteira cabe: 24 recortes de 3 px, o pico no meio.
+        let strips = focus_strips(0.5, 400.);
+        assert_eq!(strips.len(), 24);
+        assert!(strips.iter().all(|&(_, w, _)| (w - 3.).abs() < 1e-4));
+        let peak = strips.iter().map(|s| s.2).fold(0., f32::max);
+        assert!((peak - focus_mask(34.5).max(focus_mask(37.5))).abs() < 1e-4);
+        assert!((0..12).all(|n| strips[n].2 == strips[23 - n].2), "recortes espelhados têm o mesmo alfa");
     }
 }

@@ -20,6 +20,7 @@ mod electron;
 mod mend;
 mod motion;
 mod plugin_ui;
+mod queue_panel;
 mod single_instance;
 mod term_view;
 mod status;
@@ -46,7 +47,8 @@ gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, GitBranch, RotateCcwClock, 
     SquarePen, FilePlus, Wrench, Circle, CircleDashed, ChartColumn, Table, ListChecks, Download, Clock, Languages, Banknote,
     Zap, Rocket, MessageCircle, Key, Pencil, GripVertical, AudioLines, Volume2, Hash, LogOut, Smartphone, FolderTree, ChevronsDownUp, FileCode,
     RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert, Link, Wifi,
-    CircleStop, Upload, Workflow, CloudDownload, ArrowDownToLine, ArrowUpFromLine, GitFork, Trash, MessageCircleQuestionMark]);
+    CircleStop, Upload, Workflow, CloudDownload, ArrowDownToLine, ArrowUpFromLine, GitFork, Trash, MessageCircleQuestionMark, Brain,
+    ListOrdered, CornerUpRight]);
 
 pub const HANGAR_MARK: &str = "brand/hangar-mark.svg";
 pub const GROUP_GLYPH: &str = "brand/group-glyph.svg";

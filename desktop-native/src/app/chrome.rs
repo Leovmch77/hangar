@@ -4,7 +4,7 @@ use gpui_kit::assets::IconName;
 use crate::theme;
 use crate::appearance::{self, SurfaceMaterial};
 pub use crate::motion::ease_out;
-use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
+use std::{cell::Cell, marker::PhantomData, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
 /// Batida das animações que se repetem: 15 por segundo, numa grade de tempo comum a todas. Cada batida redesenha a raiz,
 /// que pinta as marcas flutuantes, então a cadência é o custo da sessão trabalhando. Relógios próprios,
@@ -332,9 +332,21 @@ impl Shimmer {
     pub fn new(key: impl Into<ElementId>, text: SharedString) -> Self { Self { key: key.into(), text } }
 }
 
-struct ShimmerView { text: SharedString, born: Instant, visible: Rc<Cell<bool>> }
+/// Rótulo animado no relógio comum, com o desenho dado por `K`: pede quadro só enquanto aparece na área visível, e o
+/// texto trocado o redesenha.
+struct LiveLabel<K> { text: SharedString, born: Instant, visible: Rc<Cell<bool>>, kind: PhantomData<K> }
 
-impl Render for ShimmerView {
+fn live_label<K: 'static>(key: ElementId, text: SharedString, window: &mut Window, cx: &mut App) -> impl IntoElement + use<K>
+where LiveLabel<K>: Render {
+    let view = keyed_view(key, window, cx, |cx| {
+        pulse(Duration::ZERO, |view: &LiveLabel<K>| view.visible.get(), cx);
+        LiveLabel { text: text.clone(), born: Instant::now(), visible: Rc::new(Cell::new(true)), kind: PhantomData }
+    });
+    view.update(cx, |view, cx| if view.text != text { view.text = text; cx.notify(); });
+    view.cached(StyleRefinement::default().size_full())
+}
+
+impl Render for LiveLabel<Shimmer> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (base, lit) = (theme::muted(), theme::text());
         let chars = self.text.chars().count().max(1) as f32;
@@ -355,15 +367,80 @@ impl Render for ShimmerView {
 }
 
 impl RenderOnce for Shimmer {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let text = self.text;
-        let view = keyed_view(self.key, window, cx, |cx| {
-            pulse(Duration::ZERO, |view: &ShimmerView| view.visible.get(), cx);
-            ShimmerView { text: text.clone(), born: Instant::now(), visible: Rc::new(Cell::new(true)) }
-        });
-        view.update(cx, |view, cx| if view.text != text { view.text = text; cx.notify(); });
-        view.cached(StyleRefinement::default().size_full())
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement { live_label::<Shimmer>(self.key, self.text, window, cx) }
+}
+
+/// Medidas da linha "brain + Pensando" da pele Terminal: a linha apagada e a cópia acesa usam as mesmas.
+pub const THINKING_ICON: f32 = 14.;
+pub const THINKING_GAP: f32 = 8.;
+pub const THINKING_TEXT: f32 = 12.5;
+pub const THINKING_LINE: f32 = 19.;
+
+/// A linha apagada do raciocínio na pele Terminal: brain e rótulo, na largura do conteúdo (a faixa anda sobre ela,
+/// não sobre a linha inteira). `overlay` é o lugar do brilho, por cima de tudo.
+pub fn thinking_label_row(label: SharedString, overlay: Option<AnyElement>) -> Div {
+    let dim = theme::muted();
+    div().relative().flex().flex_none().items_center().gap(px(THINKING_GAP)).h(px(THINKING_LINE))
+        .font_family(theme::MONO).text_size(px(THINKING_TEXT)).line_height(px(THINKING_LINE)).text_color(dim)
+        .child(small_icon(IconName::Brain, THINKING_ICON, dim))
+        .child(div().flex_none().whitespace_nowrap().child(label))
+        .children(overlay.map(|overlay| div().absolute().inset_0().child(overlay)))
+}
+
+/// Onde a cópia acesa pinta o ícone e o texto, a partir do canto da linha: o mesmo lugar do `thinking_label_row`.
+pub fn thinking_focus_layout(origin: Point<Pixels>) -> (Bounds<Pixels>, Point<Pixels>) {
+    let icon = Bounds { origin: point(origin.x, origin.y + px((THINKING_LINE - THINKING_ICON) / 2.)), size: size(px(THINKING_ICON), px(THINKING_ICON)) };
+    (icon, point(origin.x + px(THINKING_ICON + THINKING_GAP), origin.y))
+}
+
+/// O brilho do "Pensando" como no T3: a linha acesa por cima da apagada, vista só pela faixa que anda em degraus.
+/// Pintada direto, sem elementos: as 24 cópias não entram na árvore de acessibilidade, e a linha da área continua
+/// sendo a única que o leitor de tela lê.
+#[derive(IntoElement)]
+pub struct ThinkingFocus { key: ElementId, label: SharedString }
+
+impl ThinkingFocus {
+    pub fn new(key: impl Into<ElementId>, label: SharedString) -> Self { Self { key: key.into(), label } }
+}
+
+impl Render for LiveLabel<ThinkingFocus> {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (visible, label, born) = (self.visible.clone(), self.text.clone(), self.born);
+        canvas(move |bounds, window, _| visible.set(window.content_mask().bounds.intersects(&bounds)),
+            move |bounds, _, window, cx| {
+                // Movimento reduzido: só a linha apagada, como o `opacity: 0` do T3. Lido a cada quadro: a vista é
+                // guardada (`cached`), e a preferência trocada no meio não chegaria pelo render.
+                if cx.reduce_motion() { return; }
+                let lit = theme::text();
+                let run = TextRun { len: label.len(), font: Font { family: theme::MONO.into(), ..window.text_style().font() }, color: lit,
+                    ..Default::default() };
+                let (icon, text_at) = thinking_focus_layout(bounds.origin);
+                let phase = crate::motion::focus_phase(born.elapsed());
+                // O gradiente é simétrico: o recorte espelhado tem o mesmo alfa e reaproveita a linha já moldada.
+                let mut shaped: Vec<(f32, ShapedLine)> = Vec::new();
+                for (x, w, alpha) in crate::motion::focus_strips(phase, f32::from(bounds.size.width)) {
+                    let color = lit.opacity(alpha);
+                    let at = match shaped.iter().position(|(seen, _)| *seen == alpha) {
+                        Some(at) => at,
+                        None => {
+                            let line = window.text_system().shape_line(label.clone(), px(THINKING_TEXT), &[TextRun { color, ..run.clone() }], None);
+                            shaped.push((alpha, line));
+                            shaped.len() - 1
+                        }
+                    };
+                    let line = &shaped[at].1;
+                    let clip = Bounds { origin: point(bounds.origin.x + px(x), bounds.origin.y), size: size(px(w), bounds.size.height) };
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                        let _ = window.paint_svg(icon, IconName::Brain.path(), None, TransformationMatrix::unit(), color, cx);
+                        let _ = line.paint(text_at, px(THINKING_LINE), TextAlign::Left, None, window, cx);
+                    });
+                }
+            }).size_full()
     }
+}
+
+impl RenderOnce for ThinkingFocus {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement { live_label::<ThinkingFocus>(self.key, self.label, window, cx) }
 }
 
 pub fn format_elapsed(elapsed: Duration) -> String {
@@ -623,4 +700,20 @@ pub fn no_terminal_mark(size: f32, color: Hsla) -> Svg {
 
 pub fn small_icon(icon: IconName, size: f32, color: Hsla) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
+
+    #[test]
+    fn thinking_focus_layout_matches_the_label_row() {
+        // A cópia acesa é pintada à mão: ícone centrado na linha de 19 px e texto depois do ícone e do vão,
+        // exatamente onde o `thinking_label_row` põe os dele.
+        let (icon, text) = thinking_focus_layout(point(px(10.), px(100.)));
+        assert_eq!(icon, Bounds { origin: point(px(10.), px(102.5)), size: size(px(14.), px(14.)) });
+        assert_eq!(text, point(px(32.), px(100.)));
+    }
 }

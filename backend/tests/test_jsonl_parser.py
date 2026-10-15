@@ -19,6 +19,42 @@ def test_user_text_message():
     assert evs == [ChatEvent(kind="user_msg", id="u1", text="corrige o bug")]
 
 
+def test_entradas_juntadas_pela_cli_mostram_todos_os_blocos():
+    # Duas entradas que chegaram durante o turno: a CLI grava um `user` só, um bloco por entrada.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u-merged", "parentUuid": None,
+        "message": {"role": "user", "content": [
+            {"type": "text", "text": "fila A editada\n"},
+            {"type": "text", "text": "<system-reminder>lembrete</system-reminder>"},
+            {"type": "text", "text": "fila C terceira"},
+        ]},
+    }))
+    assert evs == [ChatEvent(kind="user_msg", id="u-merged", text="fila A editada\nfila C terceira",
+                             commit_blocks=["fila A editada", "fila C terceira"])]
+    assert "commit_blocks" not in evs[0].model_dump_json()
+    # Bloco seguinte que é marcação do harness não entra na bolha.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u-meta", "message": {"content": [
+            {"type": "text", "text": "pedido"},
+            {"type": "text", "text": "<task-notification><task-id>t-1</task-id></task-notification>"},
+            {"type": "text", "text": "Base directory for this skill: /s"},
+            {"type": "text", "text": "<system-reminder>x</system-reminder>\n<command-name>/y</command-name>"},
+            {"type": "text", "text": "<system-reminder>lembrete</system-reminder>\ndepois do lembrete"}]},
+    }))
+    assert [(e.id, e.text) for e in evs] == [("u-meta", "pedido\ndepois do lembrete")]
+    # A fonte da imagem num bloco seguinte não vira texto; na primeira, a linha continua fora.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u-img", "message": {"content": [
+            {"type": "text", "text": "[Image #1] veja"}, {"type": "image"},
+            {"type": "text", "text": "[Image: source: /tmp/a.png]"}]},
+    }))
+    assert evs == [ChatEvent(kind="user_msg", id="u-img", text="veja", image_count=1)]
+    assert parse_line(_line({
+        "type": "user", "uuid": "u-src", "message": {"content": [
+            {"type": "text", "text": "[Image: source: /tmp/a.png]"}, {"type": "text", "text": "outra"}]},
+    })) == []
+
+
 def test_interrupcao_vira_aviso_e_nao_bolha_do_usuario():
     # O CLI grava a interrupção como entrada "user" sintética em inglês. Bolha ali dava a entender
     # que a pessoa tinha digitado aquilo; agora é aviso, com a frase por conta da interface.

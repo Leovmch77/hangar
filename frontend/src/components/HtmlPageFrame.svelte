@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { baseOf, fileAuthHeader, frameHeight, pageFetchState, pageUrls, reservedHeight, themeVariables,
-    type HtmlPageRef, type PageFetchState } from '@hangar/core';
+  import { baseOf, fileAuthHeader, frameHeight, pageExpandable, pageFetchState, pageUrls, parseHostMessage, reservedHeight,
+    themedPageDocument, type HtmlPageRef, type PageFetchState } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
+  import { desktop } from '../lib/desktop.svelte';
+  import { openPageLink, pageVariables, postTheme, readScheme } from '../lib/pageHost';
+  import HtmlPageDialog from './HtmlPageDialog.svelte';
+  import IconMaximize from './icons/IconMaximize.svelte';
   import { getRouteBaseUrl } from '../lib/auth';
   import { useFollowTail } from '../lib/followTail';
 
@@ -15,40 +19,19 @@
   let doc = $state('');
   let reported = $state<number | null>(null);
   let width = $state(0);
-  let scheme = $state<'dark' | 'light'>(readScheme());
+  let scheme = $state(readScheme());
   let frame: HTMLIFrameElement | undefined = $state();
   let box: HTMLDivElement | undefined = $state();
+  let expanded = $state(false);
 
   const height = $derived(width ? frameHeight(page, width, reported) : reservedHeight(page, 728));
+  // A web desktop está congelada: a tela cheia é do celular (PWA); no desktop ela mora no app nativo.
+  const fullscreen = $derived(!desktop.atual && pageExpandable(page, status));
 
-  function readScheme(): 'dark' | 'light' {
-    return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-  }
-
-  // Nome da variável na página → token do app.
-  const MAP: Record<string, string> = {
-    '--foreground': '--text-primary', '--muted-foreground': '--text-muted', '--surface': '--bg-surface',
-    '--border': '--border-default', '--accent': '--accent', '--accent-foreground': '--text-inverse',
-    '--danger': '--error', '--warning': '--warning', '--success': '--success', '--code-background': '--bg-base',
-    '--chart-1': '--chart-1', '--chart-2': '--chart-2', '--chart-3': '--chart-3', '--chart-4': '--chart-4',
-    '--font-sans': '--font-ui', '--font-mono': '--font-mono',
-  };
-
-  function vars() {
-    const cs = getComputedStyle(document.documentElement);
-    return themeVariables((name) => cs.getPropertyValue(MAP[name] ?? name));
-  }
-
-  // A tag vai partida: escrita inteira dentro do <script>, o pré-processador do Svelte a toma por um bloco de estilo.
-  const TAG = 'style';
-  const THEME_BLOCK = new RegExp(`(<${TAG} id="hangar-theme" data-base="([^"]*)">)[\\s\\S]*?(</${TAG}>)`);
-
-  function themed(html: string) {
-    const css = `:root{color-scheme:${scheme};${Object.entries(vars()).map(([k, v]) => `${k}:${v}`).join(';')}}`;
-    // Troca só o conteúdo do bloco de tema injetado pelo servidor; o data-base fica para as trocas seguintes.
-    return html.replace(THEME_BLOCK,
-      (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
-  }
+  $effect(() => {
+    // Janela que virou desktop ou página que caiu fecham o diálogo de vez: voltar ao celular não o reabre.
+    if (!fullscreen) expanded = false;
+  });
 
   let seq = 0;
 
@@ -66,7 +49,7 @@
       // Tema próprio: a página fica como foi desenhada, sem as cores do app.
       const html = next === 'ready' ? await r.text() : null;
       if (mine !== seq) return;
-      if (html != null) doc = page.ownTheme ? html : themed(html);
+      if (html != null) doc = page.ownTheme ? html : themedPageDocument(html, scheme, pageVariables());
       status = next;
     } catch {
       if (mine === seq) status = pageFetchState('network');
@@ -75,14 +58,9 @@
 
   function onMessage(e: MessageEvent) {
     if (!frame || e.source !== frame.contentWindow) return;
-    const d = e.data;
-    if (d?.method === 'ui/notifications/size-changed' && Number.isFinite(d.params?.height)) {
-      reported = d.params.height;
-    } else if (d?.method === 'ui/open-link' && typeof d.params?.url === 'string' && /^https?:/i.test(d.params.url)
-      // Só com gesto real: a página não abre aba sozinha.
-      && (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive) {
-      window.open(d.params.url, '_blank', 'noopener,noreferrer');
-    }
+    const msg = parseHostMessage(e.data);
+    if (msg?.kind === 'height') reported = msg.height;
+    else if (msg?.kind === 'link') openPageLink(msg.url);
   }
 
   $effect(() => {
@@ -95,8 +73,7 @@
     // Tema do app mudou: a página recebe as variáveis novas sem recarregar.
     const theme = scheme;
     if (page.ownTheme) return;
-    frame?.contentWindow?.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed',
-      params: { theme, styles: { variables: vars() } } }, '*');
+    postTheme(frame, theme, pageVariables());
   });
 
   onMount(() => {
@@ -128,6 +105,10 @@
          Sem allow-popups: link só abre pela ponte ui/open-link, com gesto do leitor. -->
     <iframe bind:this={frame} title={page.title} srcdoc={doc} sandbox="allow-scripts"
       referrerpolicy="no-referrer" style:color-scheme={page.ownTheme ? 'normal' : scheme}></iframe>
+    {#if fullscreen}
+      <button type="button" class="expand" aria-label={m.page_fullscreen()} title={m.page_fullscreen()}
+        onclick={() => (expanded = true)}><IconMaximize size={14} /></button>
+    {/if}
   {:else if status === 'loading'}
     <p class="note">{m.page_loading({ title: page.title })}</p>
   {:else if status === 'expired'}
@@ -137,6 +118,9 @@
       <button type="button" class="link" onclick={load}>{m.page_retry()}</button></p>
   {/if}
 </div>
+{#if expanded && fullscreen}
+  <HtmlPageDialog title={page.title} {doc} ownTheme={page.ownTheme} {scheme} onClose={() => (expanded = false)} />
+{/if}
 {/if}
 
 <style>
@@ -147,6 +131,15 @@
   .site-url { color: var(--text-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .site .link { margin-left: 0; }
   .note { margin: 0; padding: 12px 0; color: var(--text-muted); font-size: var(--text-sm); }
+  /* Como o T3: aparece ao passar o mouse ou com foco; no toque fica sempre à vista. */
+  .expand {
+    position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; display: inline-flex;
+    align-items: center; justify-content: center; padding: 0; border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--text-secondary);
+    cursor: pointer; opacity: 0; transition: opacity 150ms var(--ease-out);
+  }
+  .page:hover .expand, .expand:focus-visible { opacity: 1; }
+  @media (pointer: coarse) { .expand { opacity: 1; } }
   .link {
     min-height: 0; min-width: 0; margin-left: 8px; padding: 0; border: 0; background: none;
     font: inherit; color: var(--accent); cursor: pointer;

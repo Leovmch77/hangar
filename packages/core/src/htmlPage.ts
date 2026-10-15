@@ -88,3 +88,72 @@ export function themeVariables(get: (name: string) => string): Record<string, st
   for (const v of VARS) { const x = get(v).trim(); if (x) out[v] = x; }
   return out;
 }
+
+const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/;
+
+// Troca só o conteúdo do bloco de tema que o servidor injeta; o data-base fica para as trocas seguintes. Uma regra
+// para a PWA e o app.
+export function themedPageDocument(html: string, scheme: 'dark' | 'light', vars: Record<string, string>): string {
+  const css = `:root{color-scheme:${scheme};${Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')}}`;
+  return html.replace(THEME_BLOCK,
+    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
+}
+
+// Tela cheia da página (como o HtmlRenderDialog do T3): zoom de 50% a 200% em degraus de 25%.
+export const PAGE_ZOOM_MIN = 0.5;
+export const PAGE_ZOOM_MAX = 2;
+export const PAGE_ZOOM_STEP = 0.25;
+// Roda (px) que vale um degrau: touchpad manda muitos eventos pequenos.
+export const PAGE_ZOOM_WHEEL_STEP = 50;
+export type PageZoomAction = 'in' | 'out' | 'reset';
+
+export function stepPageZoom(zoom: number, action: PageZoomAction): number {
+  if (action === 'reset') return 1;
+  const next = zoom + (action === 'in' ? PAGE_ZOOM_STEP : -PAGE_ZOOM_STEP);
+  // Arredonda ao degrau: somar 0,25 seguidas vezes não acumula erro de ponto flutuante.
+  return Math.min(PAGE_ZOOM_MAX, Math.max(PAGE_ZOOM_MIN, Math.round(next / PAGE_ZOOM_STEP) * PAGE_ZOOM_STEP));
+}
+
+export function pageZoomLabel(zoom: number): string {
+  return `${Math.round(zoom * 100)}%`;
+}
+
+export function pageZoomKey(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey?: boolean }): PageZoomAction | null {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return null;
+  if (e.key === '=' || e.key === '+') return 'in';
+  if (e.key === '-' || e.key === '_') return 'out';
+  if (e.key === '0') return 'reset';
+  return null;
+}
+
+// Convenção do DOM: delta negativo é roda para cima, que amplia, como no navegador.
+export function wheelZoom(pending: number, deltaY: number): { action: PageZoomAction | null; pending: number } {
+  const total = pending + deltaY;
+  if (Math.abs(total) < PAGE_ZOOM_WHEEL_STEP) return { action: null, pending: total };
+  return { action: total < 0 ? 'in' : 'out', pending: 0 };
+}
+
+// Site (modo URL) só vive no nativo; fora dele o cartão abre o endereço e não há o que ampliar.
+export function pageExpandable(ref: HtmlPageRef, state: PageFetchState): boolean {
+  return !ref.url && state === 'ready';
+}
+
+export type HostMessage = { kind: 'height'; height: number } | { kind: 'link'; url: string };
+
+// Mensagem da página do agente, não confiável: só altura finita positiva e link http(s). Chega como texto
+// do WebView do app ou como objeto do postMessage do PWA.
+export function parseHostMessage(data: unknown): HostMessage | null {
+  let d: unknown = data;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch { return null; }
+  }
+  if (!d || typeof d !== 'object') return null;
+  const { method, params } = d as { method?: unknown; params?: { height?: unknown; url?: unknown } };
+  const h = params?.height;
+  if (method === 'ui/notifications/size-changed' && typeof h === 'number' && Number.isFinite(h) && h > 0) {
+    return { kind: 'height', height: h };
+  }
+  const url = params?.url;
+  if (method === 'ui/open-link' && typeof url === 'string' && /^https?:\/\//i.test(url)) return { kind: 'link', url };
+  return null;
+}

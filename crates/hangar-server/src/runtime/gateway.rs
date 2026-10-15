@@ -51,6 +51,14 @@ async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate
         .map_err(|_| failure("account_busy"))
 }
 
+/// Retrato do ator em até 1 s: `None` no prazo esgotado, `Some(false)` doente ou fora.
+async fn probe(handle:&EntryHandle) -> Option<bool> {
+    match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
+        Ok(Ok(view))=>Some(healthy(handle.has_terminal(),&view)),
+        Ok(Err(_))=>Some(false),
+        Err(_)=>None,
+    }
+}
 /// Entrada aberta de uma sessão, achada por nome, para as rotas de escrita do Rust.
 #[allow(dead_code)] // o `handle` é lido pelas rotas de escrita que entram depois
 pub struct WriteTarget { pub key:String,pub generation:u64,pub provider:String,pub terminal:bool,pub healthy:bool,pub(crate) handle:EntryHandle }
@@ -1751,11 +1759,14 @@ impl RuntimeRegistry {
         let (key,generation,provider,handle) = self.entries.lock().await.iter().filter(|(_,e)|e.name==name).max_by_key(|(_,e)|e.generation)
             .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
         let terminal = handle.has_terminal();
-        let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
-            Ok(Ok(view))=>healthy(terminal,&view),
-            _=>false,
-        };
+        let healthy = probe(&handle).await.unwrap_or(false);
         Some(WriteTarget { key,generation,provider,terminal,healthy,handle })
+    }
+    /// A saúde que o painel da fila mostra: `None` quando o ator não respondeu no prazo (ocupado entregando),
+    /// para quem pergunta manter o último valor em vez de piscar os botões a cada entrega.
+    pub async fn write_health(&self,name:&str) -> Option<bool> {
+        let handle = self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation).map(|e|e.handle.clone());
+        match handle { Some(handle)=>probe(&handle).await, None=>Some(false) }
     }
     /// A entrada mais nova do nome é de terminal? Sem retrato: serve a decisão que vem antes da porta.
     pub async fn is_terminal(&self,name:&str) -> bool {

@@ -2,7 +2,7 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { estilosDitado, type FirstConversationAttempt, type MotivoFim } from '@hangar/core';
+import { estilosDitado, type FirstConversationAttempt, type MotivoFim, type QueuePanel } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -23,6 +23,8 @@ vi.mock('react-native', async (original) => ({
   }, children),
 }));
 
+// A tela monta o painel da fila e o passa ao Composer; aqui ele vem vazio.
+const noQueue: QueuePanel = { entries: [], actions: false };
 const focusNavigation = vi.hoisted(() => ({
   listeners: new Map<string, Set<(event: { data: { closing: boolean } }) => void>>(),
   focused: true,
@@ -117,6 +119,9 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
     .concat(' native_par_so_leitura')
+    // Painel "Na fila" e a edição da mensagem da fila no Composer.
+    .concat(' queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down queue_panel_remove atalhos_editar comum_apagar')
+    .concat(' queue_panel_update queue_panel_update_aria queue_panel_editing queue_entry_gone')
     .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_toks_now stats_toks_recent stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
@@ -179,7 +184,9 @@ vi.mock('../stores/chat', async (original) => {
   });
   return { ...actual,
     chatStore: (serverId: string, name: string) => realFirstInput.enabled ? actual.chatStore(serverId, name)
-      : { use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} },
+      : { use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {},
+        startQueueEdit: (_id: string, draft: string) => draft, cancelQueueEdit: () => {}, dropQueueEdit: () => {},
+        submitQueueEdit: async () => {}, removeQueued: async () => {}, steerQueued: async () => {}, moveQueued: async () => {} },
     filaCount: (...args: Parameters<typeof actual.filaCount>) => realFirstInput.enabled ? actual.filaCount(...args) : 0,
     isSubmitting: (serverId: string, name: string) => realFirstInput.enabled && actual.isSubmitting(serverId, name),
   };
@@ -362,7 +369,7 @@ it('opções e pasta da Nova conversa recebem foco e devolvem ao seletor que abr
 });
 
 describe('Parar no Composer', () => {
-  const props = { serverId: 's1', name: 'sess' };
+  const props = { serverId: 's1', name: 'sess', queuePanel: noQueue };
 
   it('ocioso: sem Parar, envio presente', async () => {
     composerChat.state = 'idle';
@@ -448,7 +455,7 @@ describe('Parar no Composer', () => {
 describe('linha de botões do Composer', () => {
   it('campo em linha própria; +, microfone com a dica do estilo e um chip só de ajustes', async () => {
     composerChat.state = 'idle';
-    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess' }));
+    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', queuePanel: noQueue }));
     const field = container.querySelector('[aria-label="composer_mensagem"]')!;
     const settings = container.querySelector('[aria-label="composer_session_settings"]')!;
     expect(settings).not.toBeNull();
@@ -463,7 +470,7 @@ describe('linha de botões do Composer', () => {
 
   it('trabalhando com texto sem terminal: a linha não muda — sem Orientar, com microfone e chip', async () => {
     composerChat.state = 'working';
-    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {} }));
+    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {}, queuePanel: noQueue }));
     expect(container.querySelector('[aria-label="codex_orientar"]')).toBeNull();
     expect(container.querySelector('[aria-label="composer_gravar_audio"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_session_settings"]')).not.toBeNull();
@@ -473,7 +480,7 @@ describe('linha de botões do Composer', () => {
 });
 
 describe('primeiro texto recuperado no Composer', () => {
-  const props = { serverId: 's1', name: 'sess', draft: 'primeiro texto', firstInputId: 'attempt-1' };
+  const props = { serverId: 's1', name: 'sess', draft: 'primeiro texto', firstInputId: 'attempt-1', queuePanel: noQueue };
   beforeEach(() => {
     composerChat.send.mockClear(); firstInput.confirm.mockClear(); firstInput.send.mockReset();
     firstInput.attempt = {
@@ -552,7 +559,7 @@ describe('primeiro texto recuperado no Composer', () => {
 });
 
 describe('primeiro envio incerto com os stores reais', () => {
-  const props = { serverId: 's1', name: 'recuperada', draft: 'primeiro texto', firstInputId: 'unknown-real' };
+  const props = { serverId: 's1', name: 'recuperada', draft: 'primeiro texto', firstInputId: 'unknown-real', queuePanel: noQueue };
   afterEach(() => { vi.useRealTimers(); _resetNewConversationForTests(); });
   beforeEach(() => {
     realFirstInput.enabled = true;
@@ -679,7 +686,7 @@ describe('primeiro envio incerto com os stores reais', () => {
 });
 
 describe('rascunho guardado no Composer', () => {
-  const props = { serverId: 's1', name: 'sess' };
+  const props = { serverId: 's1', name: 'sess', queuePanel: noQueue };
   const type = (container: HTMLElement, value: string) => act(() => {
     const field = container.querySelector('textarea')!;
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);
@@ -746,7 +753,7 @@ describe('rascunho guardado no Composer', () => {
     act(() => first.root.unmount());
     expect(stored('s1', 'sess')?.text).toBe('oi');
 
-    const other = await render(createElement(Composer, { serverId: 's2', name: 'sess' }));
+    const other = await render(createElement(Composer, { serverId: 's2', name: 'sess', queuePanel: noQueue }));
     expect(other.container.querySelector('textarea')!.value).toBe('');
     act(() => other.root.unmount());
     const reopened = await render(createElement(Composer, props));
@@ -1022,7 +1029,7 @@ it('plano real preserva prosa, links e abertura do arquivo sem tags do protocolo
 });
 
 describe('ditado entregue à conversa de origem', () => {
-  const props = { serverId: 's1', name: 'sess' };
+  const props = { serverId: 's1', name: 'sess', queuePanel: noQueue };
   const type = (container: HTMLElement, value: string) => act(() => {
     const field = container.querySelector('textarea')!;
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);

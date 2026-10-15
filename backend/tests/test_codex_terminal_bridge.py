@@ -166,10 +166,10 @@ def test_sends_from_python_paths_go_to_the_rust_and_return_its_code(monkeypatch)
     assert asyncio.run(api_mod._send_one_codex("cx", "oi")) == {"ok": False, "error": {"code": "x"}, "delivered": False}
 
 
-def _request(port, path="/api/sessions/cx/keys", query=b"", body=b'{"key":"Up"}'):
+def _request(port, path="/api/sessions/cx/keys", query=b"", body=b'{"key":"Up"}', method="POST"):
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
-    return Request({"type": "http", "method": "POST", "path": path, "query_string": query, "headers": [],
+    return Request({"type": "http", "method": method, "path": path, "query_string": query, "headers": [],
                     "server": ("127.0.0.1", port)}, receive)
 
 
@@ -322,6 +322,29 @@ def test_claude_question_from_guest_or_connect_goes_to_the_rust(monkeypatch, rou
     assert calls == [("ct", route, "POST", body)] * 2
     asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, "/api/sessions/ct/keys")))
     assert len(calls) == 2, "fora da pergunta o Claude não vai a esta ponte"
+
+
+@pytest.mark.parametrize(("method", "route", "query", "body"), [
+    ("PATCH", "queue/a", b"", b'{"text": "novo"}'),
+    ("DELETE", "queue/a", b"only_waiting=true", b""),
+    ("POST", "queue/reorder", b"", b'{"id": "a", "before_id": null}'),
+    ("POST", "queue/a/steer", b"", b""),
+])
+def test_queue_panel_from_guest_or_connect_goes_to_the_rust_whole(monkeypatch, method, route, query, body):
+    claude, codex = [], []
+    _provider(monkeypatch, ct="claude", cx="codex")
+    monkeypatch.setattr(api_mod.codex_sessions, "exists", lambda name: name == "cx")
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: claude.append(args) or (200, b'{"ok": true}'))
+    monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: codex.append(args) or (200, b'{"ok": true}'))
+    full = route + (f"?{query.decode()}" if query else "")
+    for port in (GUEST_PORT, api_mod.CONNECT_PORT):
+        for name in ("ct", "cx"):
+            with pytest.raises(api_mod._RustReply) as reply:
+                asyncio.run(api_mod._codex_rust_port(name, _request(port, f"/api/sessions/{name}/{route}", query=query, body=body, method=method)))
+            assert reply.value.args == (200, b'{"ok": true}')
+    # Método, query e corpo chegam como vieram, por uma ponte só para cada provedor.
+    assert claude == [("ct", full, method, body)] * 2
+    assert codex == [("cx", full, method, body)] * 2
 
 
 def test_claude_bridge_down_is_a_visible_503_without_local_answer(monkeypatch):

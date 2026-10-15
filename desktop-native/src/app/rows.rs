@@ -201,7 +201,7 @@ pub(super) fn tree_call_line(id: String, call: &ChatEvent, ending: Option<AnyEle
 
 /// Linha de raciocínio da árvore; o texto vai embaixo, pelo `tree_row`.
 pub(super) fn tree_thought_line(id: String, cx: &App) -> Button {
-    tree_line(id, IconName::MessageCircle, tr("thinking"), String::new(), None, false, cx)
+    tree_line(id, IconName::Brain, tr("thinking"), String::new(), None, false, cx)
 }
 
 /// Raciocínio ainda chegando, fechado sob a linha: texto corrido cortado em três linhas.

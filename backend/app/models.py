@@ -277,6 +277,9 @@ class ChatEvent(BaseModel):
     # em vez de reenviar as últimas 200 linhas e torcer pra cobrir o buraco. Interno (o front não
     # lê este campo): exclude=True mantém o payload igual ao de hoje.
     offset: Optional[int] = Field(default=None, exclude=True)
+    # Só em user_msg do Claude com vários blocos de texto: o texto de cada bloco, que vira chave de
+    # commit do /history além das linhas. Interno, como o `offset`.
+    commit_blocks: Optional[list[str]] = Field(default=None, exclude=True)
 
     # Rede de seguranca na FRONTEIRA do contrato com o front: qualquer provider (Claude, Codex, Pi
     # ou o proximo) que grave um surrogate solto no transcript passaria direto pro

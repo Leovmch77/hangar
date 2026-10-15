@@ -252,6 +252,8 @@ pub struct Engine {
     dead: Rc<Cell<bool>>,
     /// Desenhada no dobro da tela (página e site da conversa).
     double: bool,
+    /// Zoom da tela cheia: a página vê `1/zoom` do espaço em densidade `zoom` vezes maior; o quadro não muda de tamanho.
+    zoom: Cell<f32>,
     /// Contexto próprio da página da conversa, fechado junto com ela.
     context: Option<String>,
 }
@@ -374,7 +376,7 @@ impl Starter {
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
                 surface, dead, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
-                pressed: Cell::new(false),
+                pressed: Cell::new(false), zoom: Cell::new(1.),
             }),
             Err(e) => { surface.close(); Err(e) }
         }
@@ -618,10 +620,34 @@ impl Engine {
         }).detach();
     }
 
+    fn fit(&self, size: Size<Pixels>, scale: f32) -> Fit {
+        let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
+        Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double,
+            w: f32::from(size.width), h: f32::from(size.height), frame_scale, zoom: self.zoom.get() }
+    }
+
+    /// Zoom da página em tela cheia. Aplicado na hora, sem a espera do arrasto; quando a série de cliques assenta, o
+    /// screencast reinicia para mandar o quadro do zoom final.
+    pub fn set_zoom(&self, zoom: f32) {
+        let zoom = crate::browser::valid_zoom(zoom);
+        if self.zoom.replace(zoom) == zoom { return; }
+        // Avança a contagem: um ajuste de arrasto ainda esperando levaria o zoom antigo e desfaria este.
+        let turn = self.resizes.get() + 1;
+        self.resizes.set(turn);
+        // Escondida, o próximo `place` já aplica o zoom novo; aqui o screencast voltaria sem ninguém olhando.
+        if !self.visible.get() { return; }
+        let Some((size, scale)) = self.placed.get() else { return };
+        let fit = self.fit(size, scale);
+        fit.apply(true);
+        // Página parada: o quadro do reinício sai antes do relayout, no zoom anterior, e os que vêm sem confirmação
+        // no meio da série são descartados; nenhum outro chega sozinho. Reiniciar depois de assentar manda o atual.
+        let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
+        self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.restart(); } }).detach();
+    }
+
     /// Chamado na pintura da página, a cada quadro visível.
     pub fn place(&self, bounds: Bounds<Pixels>, window: &mut Window) {
         let scale = window.scale_factor();
-        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         // A página da conversa é desenhada no dobro da tela e reduzida pela GPU: em 1x o Chromium sem janela só suaviza o
         // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
         let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
@@ -629,7 +655,7 @@ impl Engine {
         let first = !self.visible.replace(true);
         if resized { self.placed.set(Some((bounds.size, scale))); }
         if first || resized {
-            let fit = Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double, w, h, frame_scale };
+            let fit = self.fit(bounds.size, scale);
             let turn = self.resizes.get() + 1;
             self.resizes.set(turn);
             if first {
@@ -671,6 +697,7 @@ impl Engine {
     /// Qualquer botão, com os modificadores. O `clickCount` da soltura repete o do aperto: sem ele o Chromium não
     /// dispara `dblclick`. Arrasto só se acompanha com o esquerdo.
     pub fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        let at = crate::browser::unzoom(at, self.zoom.get());
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
         let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
         let left = name == "left";
@@ -689,6 +716,7 @@ impl Engine {
 
     /// Com modificadores: Ctrl+roda é zoom da página e Shift+roda rola de lado.
     pub fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
+        let (at, delta) = (crate::browser::unzoom(at, self.zoom.get()), crate::browser::unzoom(delta, self.zoom.get()));
         self.send("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
             "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),
@@ -708,12 +736,18 @@ impl Engine {
 
 const RESIZE_SETTLE_MS: u64 = 120;
 
+/// Viewport CSS e densidade com zoom: o quadro continua com os mesmos pixels, a página é que vê menos (ou mais) espaço.
+fn zoomed_metrics(w: f32, h: f32, frame_scale: f32, zoom: f32) -> (u32, u32, f32) {
+    let zoom = crate::browser::valid_zoom(zoom);
+    ((w / zoom).round() as u32, (h / zoom).round() as u32, frame_scale * zoom)
+}
+
 /// Tamanho e escala da página no painel, e como pedir ao Chromium.
-struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, w: f32, h: f32, frame_scale: f32 }
+struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, w: f32, h: f32, frame_scale: f32, zoom: f32 }
 
 impl Fit {
     fn apply(&self, resized: bool) {
-        let Fit { session, window, decoration, double, w, h, frame_scale } = self;
+        let Fit { session, window, decoration, double, w, h, frame_scale, zoom } = self;
         if resized {
             let size = json!({"width": w.round() as i64, "height": (h + decoration).round() as i64});
             drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
@@ -721,11 +755,11 @@ impl Fit {
             // tamanho antigo, esticado; em tela 1,25 sem a densidade dela o quadro também era esticado. Com layout pedido
             // pelo agente o tamanho é dele: o do painel só fica guardado, para o `layout desktop` voltar ao atual.
             let viewport = &session.viewport;
-            let (width, height) = (w.round() as u32, h.round() as u32);
-            viewport.panel.set(Some((width, height, *frame_scale)));
+            let (width, height, density) = zoomed_metrics(*w, *h, *frame_scale, *zoom);
+            viewport.panel.set(Some((width, height, density)));
             if !viewport.held.get() {
                 drop(session.call("Emulation.setDeviceMetricsOverride", json!({
-                    "width": width, "height": height, "deviceScaleFactor": frame_scale, "mobile": false,
+                    "width": width, "height": height, "deviceScaleFactor": density, "mobile": false,
                 })));
             }
         }
@@ -733,6 +767,12 @@ impl Fit {
         // PNG: o painel tem que mostrar a página como o navegador mostra; JPEG borrava o texto.
         let params = json!({"format": "png", "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
         drop(session.call("Page.startScreencast", params));
+    }
+
+    /// Para e reabre o screencast com os mesmos parâmetros: o Chromium manda o quadro atual mesmo com a página parada.
+    fn restart(&self) {
+        drop(self.session.call("Page.stopScreencast", json!({})));
+        self.apply(false);
     }
 }
 
@@ -780,6 +820,14 @@ mod tests {
         slot.unseen = false;
         assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("d"));
         assert_eq!(slot.next(), None);
+    }
+
+    #[test]
+    fn zoom_keeps_frame_pixels_and_divides_the_css_viewport() {
+        assert_eq!(super::zoomed_metrics(1000., 600., 2., 1.), (1000, 600, 2.));
+        assert_eq!(super::zoomed_metrics(1000., 600., 2., 2.), (500, 300, 4.));
+        assert_eq!(super::zoomed_metrics(1000., 600., 2., 0.5), (2000, 1200, 1.));
+        assert_eq!(super::zoomed_metrics(1000., 600., 2., 0.), (1000, 600, 2.), "zoom inválido vale 1");
     }
 
     /// Prova de ponta a ponta com o Chromium da máquina e a GPUI sem janela, num perfil e num HOME descartáveis:

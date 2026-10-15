@@ -9,7 +9,7 @@ import {
   summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
-  parseFilePaths, separarComando, nomeFerramenta,
+  parseFilePaths, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
 } from './format';
 import type { ChatEvent, State } from './types';
 import { overwriteGetLocale } from './paraglide/runtime';
@@ -1110,6 +1110,21 @@ describe('nomeFerramenta', () => {
   });
 });
 
+describe('terminalToolName', () => {
+  it('edição vira Update e MCP ganha o "(MCP)" do Claude Code', () => {
+    expect(terminalToolName('Edit')).toBe('Update');
+    expect(terminalToolName('apply_patch')).toBe('Update');
+    expect(terminalToolName('mcp__pmedico__progresso')).toBe('pmedico - progresso (MCP)');
+    expect(terminalToolName('mcp__hangar-computer-control__objetivo')).toBe('computer-control - objetivo (MCP)');
+    expect(terminalToolName('Bash')).toBe('Bash');
+  });
+  it('ferramenta de arquivo na pele terminal: leitura, escrita e edição', () => {
+    for (const t of ['Read', 'NotebookRead', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch']) expect(terminalFileTool(t)).toBe(true);
+    expect(terminalFileTool('Bash')).toBe(false);
+    expect(terminalFileTool(null)).toBe(false);
+  });
+});
+
 
 describe('formatElapsed', () => {
   it('distingue tempo desconhecido, zero, minutos e horas sem somar tarefas', () => {
@@ -1135,6 +1150,13 @@ describe('splitTerminalRun', () => {
 
   it('lista vazia devolve lista vazia', () => {
     expect(splitTerminalRun([])).toEqual([]);
+  });
+
+  it('a chamada de MCP de plugin fica sozinha entre duas dobras', () => {
+    const run = [t('Bash', 'make'), t('mcp__pmedico__progresso'), t('Bash', 'make'), t('mcp__ai-memory__memory_status')];
+    const parts = splitTerminalRun(run, ['pmedico'])
+      .map((p) => (p.kind === 'fold' ? p.tools.map((x) => x.tool_name) : p.tool.tool_name));
+    expect(parts).toEqual([['Bash'], 'mcp__pmedico__progresso', ['Bash', 'mcp__ai-memory__memory_status']]);
   });
 });
 
@@ -1190,6 +1212,14 @@ describe('terminalFoldKind', () => {
     expect(terminalFoldKind('mcp__hangar__send')).toBe('mcp');
     expect(terminalFoldKind('mcp__x')).toBeNull();
     expect(terminalFoldKind('Edit')).toBeNull();
+  });
+
+  it('MCP de servidor criado por plugin ($.tool.register) não dobra; os outros servidores dobram', () => {
+    expect(terminalFoldKind('mcp__pmedico__progresso', null, ['pmedico'])).toBeNull();
+    expect(terminalFoldKind('mcp__ai-memory__memory_status', null, ['pmedico'])).toBe('mcp');
+    // O conjunto tem o nome cru da ferramenta: o `hangar-` não é tirado na comparação.
+    expect(terminalFoldKind('mcp__hangar-computer-control__objetivo', null, ['computer-control'])).toBe('mcp');
+    expect(terminalFoldKind('mcp__hangar-computer-control__objetivo', null, ['hangar-computer-control'])).toBeNull();
   });
 });
 

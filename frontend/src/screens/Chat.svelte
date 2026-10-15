@@ -86,6 +86,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   } from '@hangar/core';
   import { dictations, draftStorageKey, parseStoredDraft, readMigrating } from '../lib/dictationStore.svelte';
   import { formataErro } from '@hangar/core';
+  import QueuePanel from '../components/QueuePanel.svelte';
+  import {
+    beginQueueEdit, cancelQueuedMessage, currentQueuePanel, echoInQueuePanel, editQueuedMessage, hiddenByQueuePanel, parseQueuePanel,
+    queueEditExitText, queueEditLeft, queueEditPayload, queueRemovedBubbleIds, reorderQueuedMessage, steerQueuedMessage,
+    type QueueEdit, type QueuePanel as QueuePanelModel,
+  } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLiveRetiring } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
@@ -409,6 +415,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Última posição recebida do transcript; reenviada no reconnect pra retomar exatamente dali.
   let lastEventId: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // Conexão aberta sem o evento `queue` no retrato (a sessão voltou ao Python): a lista antiga do servidor sai.
+  let queueAbsentTimer: ReturnType<typeof setTimeout> | undefined;
   let screenEl: HTMLElement | undefined = $state();
   let pending = $state<{ id: string; text: string; solid?: boolean }[]>([]);
   // Draft do composer (bindable): o interrupt devolve a msg pendente aqui pra editar e reenviar.
@@ -429,6 +437,23 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
   let rascunhoConferido = $state(rascunhoSalvo.jsonl === null);
   let composerText = $state(rascunhoSalvo.jsonl === null ? rascunhoSalvo.text : '');
+  // Painel "Na fila": a lista do servidor (evento `queue`) ou, sem ele, a derivada das bolhas.
+  let serverQueue = $state<QueuePanelModel | null>(null);
+  let queueEdit = $state<QueueEdit | null>(null);
+  let queueBusy = $state(false);
+  // Só fora do desktop: a vista desktop do web fica como está (o desktop evolui no nativo).
+  const queuePanelShown = $derived(!desktop);
+  const queueList = $derived(currentQueuePanel(serverQueue, events));
+  // O eco local que já está no painel some da conversa: senão a mesma mensagem aparece duas vezes.
+  const pendingShown = $derived(queuePanelShown ? pending.filter((p) => !echoInQueuePanel(p.text, queueList)) : pending);
+  // A entrada em edição saiu da fila (entregue, orientada ou apagada noutro aparelho): avisa e devolve o campo.
+  $effect(() => {
+    if (!queueEdit) return;
+    const left = queueEditLeft(queueEdit, queueList, untrack(() => composerText));
+    if (!left) return;
+    leaveQueueEdit(left.composerText);
+    mostrarAviso(m.queue_entry_gone());
+  });
   $effect(() => {
     if (rascunhoConferido || !sessionJsonl) return;
     rascunhoConferido = true;
@@ -439,6 +464,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const texto = composerText;
     const jsonl = sessionJsonl;
     if (!rascunhoConferido) return;      // antes de conferir, apagar aqui perderia o rascunho certo
+    // Em edição o campo tem o texto da fila, não o rascunho: o guardado continua o de antes da edição.
+    if (queueEdit) return;
     try {
       if (texto) localStorage.setItem(draftKey, JSON.stringify({ text: texto, jsonl }));
       else localStorage.removeItem(draftKey);
@@ -786,6 +813,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // neste repo) e passa pelo mesmo scan de tmux+/proc do registry que o poll da lista — refazer
   // isso a cada 5s dobrava a taxa de scan e ~47 MB/h de tráfego à toa no celular via Tailscale.
   const planName = $derived(planSession?.plan_name ?? null);
+  // Primitivo, pelo mesmo motivo do `planName`: `allSessions` troca de referência a cada lista.
+  const pluginServersKey = $derived((planSession?.plugin_tool_servers ?? []).join('\n'));
+  const pluginServers = $derived(pluginServersKey ? pluginServersKey.split('\n') : []);
   // Busca só quando o plano MUDA de nome E o painel que o mostra PODE estar visível — os MESMOS
   // sinais que já decidem a renderização (`desktop && showContextPanel` no DesktopSessionContext;
   // `activityOpen` na ActivitySheet mobile). Sem isto o fetch rodava até com a sessão em split/
@@ -908,6 +938,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
   let composerRef = $state<{ focus: () => void; ditarAnexo: (arquivo: string) => void;
+                            caretToEnd: (focusField?: boolean) => Promise<void>;
                             preencherComando: (n: string) => Promise<boolean>;
                             prefillText: (t: string) => Promise<boolean> } | undefined>();
 
@@ -2161,6 +2192,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Backoff do reconnect por erro (3s -> 30s). Auditoria: sem isto, com a VPN caida, o retry
   // nativo do EventSource + o setTimeout de 3s martelavam ~2 conexoes a cada 3s pra sempre.
   const SSE_RETRY_MIN = 3000;
+  // Prazo para o `queue` do retrato chegar depois do primeiro quadro da conexão.
+  const QUEUE_SNAPSHOT_MS = 3000;
   const SSE_RETRY_MAX = 30000;
   let sseRetryDelay = SSE_RETRY_MIN;
   // CLOSED seguidos com a sessao viva na lista: o teto que impede o laco que a faixa existe pra cortar.
@@ -2189,6 +2222,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const inicio = Date.now();
     const req = diag.novoReq();
     let primeiroQuadro = true;
+    let queueSeen = false;
     const quadroFalhou = (codigo: string) => diag.registrar({ evento: 'sse.quadro_falhou',
       nivel: 'erro', tela: 'chat', sessao: sessionName, req, codigo }, destino);
     // O callback mantém o destino da conexão mesmo se o usuário trocar de servidor.
@@ -2215,6 +2249,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     function noteAlive() {
       if (primeiroQuadro) {
         primeiroQuadro = false;
+        // O retrato chega junto do primeiro quadro: sem `queue` nele, o painel volta a sair das bolhas.
+        clearTimeout(queueAbsentTimer);
+        queueAbsentTimer = setTimeout(() => { if (!queueSeen) serverQueue = null; }, QUEUE_SNAPSHOT_MS);
         diag.registrar({ evento: 'sse.conectou', tela: 'chat', sessao: sessionName,
           req, ms: Date.now() - inicio }, destino);
         if (cairaAntes) {
@@ -2380,6 +2417,20 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Faixa de estatísticas da sessão (app/stats.py). Full-replace; ausência de evento = sem faixa.
     es.addEventListener('stats', (e) => {
       try { statsEvent = JSON.parse(e.data) as StatsEvent; } catch { quadroFalhou('stats'); }
+    });
+
+    // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
+    es.addEventListener('queue', (e) => {
+      noteAlive();
+      queueSeen = true;
+      try {
+        const data = JSON.parse(e.data);
+        serverQueue = parseQueuePanel(data);
+        // Apagadas noutro aparelho: a bolha delas sai daqui também.
+        const gone = queueRemovedBubbleIds(data);
+        for (const id of gone) retiredQueuedIds.add(id);
+        dropQueuedBubbles(gone);
+      } catch { quadroFalhou('queue'); }
     });
 
     // Heartbeat do backend: so prova de vida (reseta o watchdog numa conexao ociosa, sem msgs).
@@ -2559,6 +2610,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       pluginSource = null;
       pluginLocalTab = null;
       retiredQueuedIds.clear();
+      serverQueue = null;
+      cancelQueueEdit();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
       cancelPreviewDrop();
@@ -2691,6 +2744,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     es?.close();
     clearTimeout(watchdog);
     clearTimeout(reconnectTimer);
+    clearTimeout(queueAbsentTimer);
     cancelPreviewDrop();
     document.removeEventListener('visibilitychange', onVisible);
   });
@@ -2764,7 +2818,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // subagente que terminou (`transcript.py`, `queued-task:<id>`, tool_result). Sem o kind, um
   // agente de fundo terminando contaria como mensagem na fila.
   const filaCount = $derived(
-    sessionProvider !== 'kimi' && sessionProvider !== 'codex' && !(sessionProvider === 'claude' && !desktop) && !sessionHeadless
+    (queuePanelShown && sessionProvider !== 'kimi')
+    || (sessionProvider !== 'kimi' && sessionProvider !== 'codex' && !(sessionProvider === 'claude' && !desktop) && !sessionHeadless)
       ? 0
       : queuedMessages(events, sessionProvider, sessionHeadless).length,
   );
@@ -2780,8 +2835,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       events = events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e);
     }
     if (!r.promoted) return (r.confirmed ?? 0) > 0;
-    events = events.filter((e) => !(e.kind === 'user_msg' && e.id?.startsWith('queued-')));
-    rebuildIndex();
+    dropQueuedBubbles(events.filter((e) => e.kind === 'user_msg' && e.id?.startsWith('queued-')).map((e) => e.id));
     return true;
   }
 
@@ -3176,9 +3230,64 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       mostrarAviso(formataErro(err));
       return;
     }
-    events = events.filter((e) => e.id !== `queued-${entryId}`);
+    dropQueuedBubbles([`queued-${entryId}`]);
+  }
+
+  // Tira da conversa as bolhas da fila dadas pelo id de bolha (`queued-<id>`).
+  function dropQueuedBubbles(ids: Iterable<string>) {
+    const drop = new Set(ids);
+    if (!drop.size) return;
+    events = events.filter((e) => !drop.has(e.id));
     rebuildIndex();
   }
+
+  // ── Painel "Na fila" (celular) ─────────────────────────────────────────────
+  // Uma ação por vez: os botões do painel ficam desativados enquanto o pedido está em voo.
+  async function queueAction(run: () => Promise<unknown>) {
+    if (queueBusy) return;
+    queueBusy = true;
+    try { await run(); } catch (err) { mostrarAviso(formataErro(err) ?? err); }
+    finally { queueBusy = false; }
+  }
+  function startQueueEdit(id: string) {
+    const entry = queueList.entries.find((e) => e.id === id);
+    if (!entry || queueEdit?.entryId === id) return;
+    const next = beginQueueEdit(entry, composerText, queueEdit);
+    queueEdit = next.edit;
+    composerText = next.composerText;
+    void composerRef?.caretToEnd(true);
+  }
+  function leaveQueueEdit(text: string) {
+    queueEdit = null;
+    composerText = text;
+    void composerRef?.caretToEnd();
+  }
+  function cancelQueueEdit() { if (queueEdit) leaveQueueEdit(queueEdit.savedDraft); }
+  const submitQueueEdit = (text: string) => queueAction(async () => {
+    const edit = queueEdit;
+    if (!edit) return;
+    // Texto igual ao da fila: só sai da edição, sem pedido.
+    const next = queueEditPayload(text, queueList.entries.find((e) => e.id === edit.entryId)?.text);
+    try {
+      if (next !== null) await editQueuedMessage(sessionName, edit.entryId, next, sessionServer());
+    } catch (err) {
+      // Saiu da fila: a edição fecha já, com o aviso desta recusa; o efeito da saída não avisa de novo.
+      if ((err as { code?: unknown })?.code === 'queue_entry_gone' && queueEdit === edit) {
+        leaveQueueEdit(queueEditExitText(edit, composerText));
+      }
+      throw err;
+    }
+    if (queueEdit === edit) leaveQueueEdit(edit.savedDraft);
+  });
+  const removeQueued = (id: string) => queueAction(async () => {
+    await cancelQueuedMessage(sessionName, id, sessionServer());
+    // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
+    dropQueuedBubbles([`queued-${id}`]);
+  });
+  // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
+  const steerQueued = (id: string) => queueAction(() => steerQueuedMessage(sessionName, id, sessionServer()));
+  const reorderQueued = (id: string, before: string | null) =>
+    queueAction(() => reorderQueuedMessage(sessionName, id, before, sessionServer()));
 
   async function handleInterrupt() {
     // Ao interromper, o Claude Code MANTEM a msg enfileirada no input -> proximo envio concatenava.
@@ -3489,8 +3598,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       plan={planControls}
       footer={chatPlans}
       {stateEvent}
-      {pending}
+      pending={pendingShown}
       {sessionName}
+      {pluginServers}
       agentesRodando={activity.agents.filter((a) => a.running)}
       onFimDoLocal={pedirMaisAntigos}
       {ancora}
@@ -3515,6 +3625,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
+      hiddenQueued={queuePanelShown ? (ev) => hiddenByQueuePanel(ev, queueList) : undefined}
     />
   {/if}
 
@@ -3707,7 +3818,19 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         accountPct={contaPior?.janela.pct ?? null}
         accountWindow={contaPior?.janela.rotulo ?? null}
         onOpenAccounts={() => (accountsOpen = true)}
-      />
+        queueEditing={queueEdit !== null}
+        {queueBusy}
+        onQueueEditSubmit={submitQueueEdit}
+        onQueueEditCancel={cancelQueueEdit}
+      >
+        {#snippet queuePanel()}
+          {#if queuePanelShown}
+            <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
+                        onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
+                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued} />
+          {/if}
+        {/snippet}
+      </Composer>
     {/if}
   </div>
   </div>

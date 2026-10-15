@@ -54,9 +54,17 @@ mod tests {
 
     #[tokio::test]
     async fn specific_loopback_reserves_the_announced_address_at_the_effective_port() {
-        let public = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        // A porta sorteada em 127.0.0.2 pode estar com outro teste em 127.0.0.1 (a suíte roda em paralelo): sorteia outra.
+        let mut attempts = 0;
+        let (public, bridge) = loop {
+            let public = TcpListener::bind("127.0.0.2:0").await.unwrap();
+            match bind(&public).await {
+                Ok(bridge) => break (public, bridge.unwrap()),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts < 20 => attempts += 1,
+                Err(error) => panic!("{error}"),
+            }
+        };
         let address = public.local_addr().unwrap();
-        let bridge = bind(&public).await.unwrap().unwrap();
         assert_eq!(bridge.local_addr().unwrap(), SocketAddr::from((Ipv4Addr::LOCALHOST, address.port())));
         assert_ne!(address.port(), 0);
         assert!(TcpListener::bind(bridge.local_addr().unwrap()).await.is_err());

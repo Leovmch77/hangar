@@ -68,3 +68,21 @@ describe('recusas do par externo', () => {
       expect(texto).not.toBe(code);
     });
 });
+
+describe('painel da fila', () => {
+  it.each([
+    'queue_action_unavailable', 'queue_entry_gone', 'queue_steer_not_delivered',
+    'queue_steer_question_open', 'queue_steer_uncertain', 'queue_text_invalid',
+  ])('%s vira frase do app, não o texto do servidor', (code) => {
+    const texto = formataErro({ code, params: {}, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    expect(texto).not.toBe(code);
+  });
+
+  it('comando recusado com mensagens na fila tem frase própria; os outros motivos seguem na frase genérica', () => {
+    expect(formataErro({ code: 'erro_comando_nao_executado', params: { comando: '/clear', motivo: 'queue_waiting' }, msg: 'x' }))
+      .toBe(m.command_refused_queue_waiting());
+    expect(formataErro({ code: 'erro_comando_nao_executado', params: { comando: '/clear', motivo: 'busy' }, msg: 'x' }))
+      .toBe(m.erro_comando_nao_executado({ comando: '/clear', motivo: 'busy' }));
+  });
+});
