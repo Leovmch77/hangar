@@ -42,7 +42,7 @@ vi.mock('../../paraglide/messages', () => ({
     + 'chat_mode_plan chat_mode_normal native_codex_permission_probe_hint composer_codex_approval '
     + 'native_mode_plan native_mode_auto native_mode_manual native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk '
     + 'native_ctl_fast native_ctl_fast_on native_ctl_fast_off native_ctl_fast_hint native_ctl_fast_unavailable '
-    + 'native_invalid_response servidor_nao_existe'
+    + 'native_invalid_response servidor_nao_existe chat_servidor_removido'
   ).split(' ').map((key) => [key, () => key])),
   native_ctl_failed: ({ reason }: { reason: string }) => `native_ctl_failed ${reason}`,
 }));
