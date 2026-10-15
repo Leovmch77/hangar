@@ -30,7 +30,9 @@ escopo), nunca pelo agente: registre e pergunte, uma pergunta por vez, opções 
 3. Marque toda volta Rust → Python → Rust e Python → Rust → Python: todas somem.
 4. O caminho Python sai no mesmo trabalho. Nas portas 8766 e 8768 fica só o repasse ao Rust, num
    sentido. No modo `python` do Supervisor a rota responde um código de erro próprio, sem reserva.
-5. Divida em rotas. Cada rota migra inteira, uma por vez, atrás do Supervisor; nunca tudo junto.
+5. Divida em rotas e marque de qual rota cada uma depende (lê, chama ou estende o que a outra
+   cria); sem dependência, a rota é independente. Cada rota migra inteira e entra atrás do
+   Supervisor uma por vez, nunca tudo junto.
 6. **Contrato por rota**, aprovado antes do Rust: o que se compara (status, corpo JSON, eventos
    SSE, efeitos em disco, no tmux e em processos) e a lista fechada de diferenças aceitas, cada
    uma com a regra de comparação e o porquê. O que não está na lista sai igual.
@@ -95,7 +97,29 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
    - `None`, chave ausente e `null` são três casos; `""`, `0` e `[]` são falsos no Python;
    - entrada que o Python recusava e o Rust passa a aceitar.
 
-## 5. Implementar item a item
+## 5. Implementar rota a rota
+
+**Execução:**
+
+1. Commite tudo antes de abrir worktrees. Rotas independentes, ou cuja base já foi mesclada,
+   abrem juntas: um subagente por rota, cada um numa worktree própria a partir da ponta da branch
+   (no Claude Code, `isolation: "worktree"`), no máximo 3 por vez. Confira o disco antes: cada
+   worktree compila do zero o próprio `crates/target` (~7 GB). Rota que depende de outra espera a
+   base ser mesclada.
+2. O subagente recebe os caminhos absolutos dos arquivos de fase (`.superpowers/` não vai para a
+   worktree) e o recorte da rota: as linhas do inventário, o contrato e as decisões que a tocam,
+   as armadilhas da fase 4 e as regras abaixo. Devolve cada ID fechado com o teste que o prova e
+   as linhas RED e GREEN. Só a sessão escreve nos arquivos de fase: a linha nova de inventário
+   (regra 2) vem no relato do subagente.
+3. Rota que toca concorrência, prazo, repetição ou o contrato entre Python e Rust passa, antes da
+   mesclagem, por um revisor de contexto limpo, só leitura, sobre o diff da worktree contra o
+   contrato e o recorte do inventário. A correção volta ao subagente que escreveu; a sessão
+   confere o diff e os testes dela, sem nova rodada do revisor.
+4. A sessão mescla uma worktree por vez: resolve o conflito, sobe o protocolo (regra 7) e roda
+   `cargo test --workspace` e o pytest da área antes da mesclagem seguinte. Worktree mesclada é
+   apagada; rota que dependia dela abre agora.
+
+**Regras de cada item, para o subagente e para a sessão:**
 
 1. Um teste Rust por item, pela interface pública (rota, ator, fila), com o esperado vindo da
    fixture, do teste Python ou do commit de fix. RED com falha de asserção, depois GREEN.
@@ -106,10 +130,11 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
 4. Toda entrada externa (JSONL, texto de pane, payload HTTP, sidecar) passa por `proptest` ou
    fuzz sem pânico.
 5. Falha visível com código; nunca sucesso falso; nunca reserva Python com o Rust de pé.
-6. Um escritor por arquivo. Uma compilação pesada por vez: `nice -n 19 ionice -c 3`, `-j 3`,
-   `CARGO_TARGET_DIR` próprio.
-7. Contrato interno mudou (rota `/internal`, evento, variável do filho): suba `INTERNAL_PROTOCOL`
-   (Rust) e `RUST_SERVER_PROTOCOL` (Python) no mesmo commit.
+6. Um escritor por worktree. Cada worktree compila no próprio `crates/target`, nunca
+   compartilhado entre checkouts (já rodou binário velho), com `nice -n 19 ionice -c 3` e `-j 3`.
+7. Contrato interno mudou (rota `/internal`, evento, variável do filho): a sessão sobe
+   `INTERNAL_PROTOCOL` (Rust) e `RUST_SERVER_PROTOCOL` (Python) no mesmo commit, na mesclagem; o
+   subagente só avisa que a rota dele muda o contrato.
 
 ## 6. Portões de prova
 
