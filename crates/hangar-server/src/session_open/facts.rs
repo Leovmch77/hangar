@@ -77,6 +77,28 @@ impl LocalFacts {
         read_json(&path).ok().flatten().filter(Value::is_object).unwrap_or(Value::Null)
     }
 
+    /// `_engine_models`: o `/v1/models` do motor; sem resposta é 502 com o motivo, sem a chave.
+    fn provider_models(&self, engine: &str) -> Result<Vec<Value>, OpenError> {
+        let engines = self.engines_file();
+        let (base, key) = (engines[engine]["base_url"].as_str().unwrap_or(""), engines[engine]["api_key"].as_str().unwrap_or(""));
+        // O provedor pode repetir a chave no erro; ela não sai daqui.
+        let redact = |error: String| if key.is_empty() { error } else { error.replace(key, "***") };
+        self.runtime.block_on(engine_models(base, key)).map_err(|e| {
+            let message = redact(e);
+            OpenError::new(502, "erro_provedor_offline", format!("o provedor do motor '{engine}' nao respondeu: {message}"))
+                .with_params(json!({"nome": engine, "erro": message}))
+        })
+    }
+
+    /// `cliproxy_accounts.models_for`: só os modelos da conta, sem o prefixo dela.
+    fn account_models(&self, engine: &str, prefix: &str) -> Result<Vec<Value>, OpenError> {
+        let start = format!("{prefix}/");
+        Ok(self.provider_models(engine)?.into_iter().filter_map(|mut m| {
+            let id = m["id"].as_str()?.strip_prefix(&start)?.to_owned();
+            (SAFE_MODEL.is_match(&id) && !id.starts_with("gpt-image-")).then(|| { m["id"] = Value::from(id); m })
+        }).collect())
+    }
+
     fn terminal_creator(&self, name: &str) -> Option<CreatorFacts> {
         let panes = self.panes();
         let pane = panes.iter().find(|p| p.session == name && !p.hidden)?;
@@ -97,6 +119,87 @@ impl LocalFacts {
         let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten());
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
     }
+}
+
+static SAFE_ACCOUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[a-z0-9][a-z0-9_-]{0,31}\z").unwrap());
+static SAFE_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z").unwrap());
+static SAFE_MODEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9][A-Za-z0-9_.:\[\]-]*\z").unwrap());
+
+fn cliproxy(msg: impl Into<String>) -> OpenError { OpenError::new(400, "erro_cliproxy_conta", msg) }
+
+fn engines_of(env: &AccountEnvironment) -> Value {
+    let path = env.base.get("CP_ENGINES_FILE").filter(|p| !p.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| env.home.join(".claude").join("engines.json"));
+    read_json(&path).ok().flatten().filter(Value::is_object).unwrap_or(Value::Null)
+}
+
+/// `cliproxy_accounts._credentials`: as credenciais OAuth do CLIProxyAPI desta máquina.
+fn credentials(home: &Path) -> Result<Vec<(PathBuf, Value)>, OpenError> {
+    let unreadable = || cliproxy("CLIProxyAPI: não consegui ler as credenciais locais");
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(home.join(".cli-proxy-api")) {
+        Ok(entries) => entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err(unreadable()),
+    };
+    paths.sort();
+    let mut out = Vec::new();
+    for path in paths {
+        if path.symlink_metadata().map_err(|_| unreadable())?.file_type().is_symlink() {
+            return Err(cliproxy("CLIProxyAPI: credencial por link não é permitida"));
+        }
+        let data: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|_| unreadable())?).map_err(|_| unreadable())?;
+        if !data.is_object() { return Err(cliproxy("CLIProxyAPI: arquivo de credencial inválido")); }
+        if data.get("disabled").is_some_and(|d| !d.is_boolean()) { return Err(cliproxy("CLIProxyAPI: campo disabled inválido")); }
+        out.push((path, data));
+    }
+    Ok(out)
+}
+
+/// `cliproxy.account_for_engine` + `cliproxy_accounts.resolve`: a credencial ativa da conta Codex
+/// pedida no CLIProxyAPI local, com prefixo exclusivo, e a rota que o `hangar-engine` recebe.
+pub fn fixed_account(accounts: &AccountService, engine: &str, account: &str) -> Result<super::claude::EngineRoute, OpenError> {
+    let env = &accounts.env;
+    let cfg = &engines_of(env)[engine];
+    let local = cliproxy_base(&env.home).filter(|local| normalize_base(cfg["base_url"].as_str().unwrap_or("")) == *local)
+        .ok_or_else(|| cliproxy("a conta ChatGPT só pode ser fixada no CLIProxyAPI local"))?;
+    if !SAFE_ACCOUNT.is_match(account) { return Err(cliproxy("CLIProxyAPI: identificador de conta inválido")); }
+    let creds = credentials(&env.home)?;
+    let visible = accounts.visible_codex_accounts().map_err(|e| OpenError::new(e.status, e.code, e.message))?;
+    let mut entries: Vec<(String, String, Option<String>, usize)> = Vec::new();
+    for codex in visible {
+        let raw = match std::fs::read(codex.home.join("auth.json")) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(cliproxy(format!("CLIProxyAPI: login Codex ilegível na conta {}", codex.id))),
+        };
+        let data: Value = serde_json::from_slice(&raw).map_err(|_| cliproxy(format!("CLIProxyAPI: login Codex ilegível na conta {}", codex.id)))?;
+        let Some(id) = data["tokens"]["account_id"].as_str().filter(|i| !i.is_empty()) else { continue };
+        let matches: Vec<usize> = creds.iter().enumerate()
+            .filter(|(_, (_, c))| c["type"] == "codex" && c["account_id"] == id && c["disabled"] != true).map(|(i, _)| i).collect();
+        if matches.len() > 1 { return Err(cliproxy(format!("CLIProxyAPI: mais de uma credencial ativa para a conta {}", codex.id))); }
+        let Some(&found) = matches.first() else { continue };
+        if entries.iter().any(|e| e.3 == found) { return Err(cliproxy("CLIProxyAPI: a mesma credencial corresponde a mais de uma conta Hangar")); }
+        let home = codex.home.canonicalize().unwrap_or(codex.home.clone()).to_string_lossy().into_owned();
+        entries.push((codex.id, home, text(&creds[found].1["prefix"]), found));
+    }
+    for (_, _, prefix, at) in &entries {
+        let Some(prefix) = prefix else { continue };
+        if !SAFE_PREFIX.is_match(prefix) { return Err(cliproxy("CLIProxyAPI: conta sem prefixo válido; prepare as contas primeiro")); }
+        if creds.iter().enumerate().any(|(i, (_, c))| i != *at && c["prefix"].as_str() == Some(prefix)) {
+            return Err(cliproxy("CLIProxyAPI: prefixo compartilhado entre credenciais; prepare as contas primeiro"));
+        }
+    }
+    let (id, home, prefix, _) = entries.into_iter().find(|e| e.0 == account)
+        .ok_or_else(|| cliproxy(format!("CLIProxyAPI: conta {account} desconhecida, desconectada ou desativada")))?;
+    let prefix = prefix.ok_or_else(|| cliproxy("CLIProxyAPI: conta sem prefixo; prepare as contas primeiro"))?;
+    Ok(super::claude::EngineRoute { account: id, credential_id: format!("codex:{home}"), home, base_url: local, prefix })
+}
+
+/// `cliproxy_accounts.prefix_model` sem o prefixo: o modelo como a conta o expõe.
+fn base_model(model: &str, prefix: &str) -> Result<String, OpenError> {
+    let model = model.strip_prefix(&format!("{prefix}/")).unwrap_or(model);
+    if !SAFE_MODEL.is_match(model) { return Err(cliproxy("CLIProxyAPI: modelo inválido ou prefixo de outra conta")); }
+    Ok(model.to_owned())
 }
 
 /// `_session_provider_catalog` com os logins já lidos: conectado se algum login diz que sim (Claude
@@ -314,25 +417,34 @@ impl OpenFacts for LocalFacts {
             && cliproxy_base(&self.env().home).is_some_and(|local| normalize_base(cfg["base_url"].as_str().unwrap_or("")) == local)
     }
 
-    fn fixed_engine_model(&self, _engine: &str, _account: &str, _model: Option<&str>) -> Result<String, OpenError> {
-        // ponytail: a conta ChatGPT fixa (`cliproxy_accounts`) ainda é só do Python; recusa visível
-        // até a Task do Claude com motor portar `_fixed_engine_account`.
-        Err(OpenError::new(503, "session_open_fact_unavailable", "a conta ChatGPT fixa do motor ainda não é conferida pelo Rust"))
+    /// `create_session` com `engine_account`: a credencial da conta, o catálogo dela (o do motor só com
+    /// o prefixo dela) e o modelo principal e o dos subagentes disponíveis nele. Devolve o modelo sem o
+    /// prefixo da conta.
+    fn fixed_engine_model(&self, engine: &str, account: &str, model: Option<&str>) -> Result<String, OpenError> {
+        if !self.engines().iter().any(|e| e == engine) { return Err(OpenError::new(400, "erro_motor_invalido", "motor inválido")); }
+        let route = fixed_account(&self.accounts, engine, account)?;
+        let engines = self.engines_file();
+        let cfg = &engines[engine];
+        let models = self.account_models(engine, &route.prefix)?;
+        let selected = model.filter(|m| !m.is_empty()).or(cfg["model"].as_str()).unwrap_or("");
+        let base = base_model(selected, &route.prefix)?;
+        let subagent = cfg["subagent_model"].as_str().filter(|m| !m.is_empty()).unwrap_or(selected);
+        for (label, chosen) in [("principal", selected), ("dos subagentes", subagent)] {
+            let id = base_model(chosen, &route.prefix)?;
+            if !models.iter().any(|m| m["id"].as_str() == Some(catalog_model(&id))) {
+                return Err(cliproxy(format!("CLIProxyAPI: modelo {label} indisponível nesta conta")));
+            }
+        }
+        Ok(base)
     }
 
-    /// `create_session`: o id de catálogo do modelo (sem o `[1m]` do GPT) no `/v1/models` do motor;
-    /// com o `[1m]` a janela é 1M, senão a que o provedor diz.
+    /// `create_session`: o id de catálogo do modelo (sem o `[1m]` do GPT) no `/v1/models` do motor (o
+    /// da conta fixa, quando há); com o `[1m]` a janela é 1M, senão a que o provedor diz.
     fn engine_window(&self, engine: &str, model: &str, account: Option<&str>) -> Result<Option<u64>, OpenError> {
-        let unavailable = |detail: &str| OpenError::new(503, "session_open_fact_unavailable",
-            format!("o catálogo do motor '{engine}' não respondeu: {detail}")).with_params(json!({"nome": engine}));
-        if account.is_some() {
-            return Err(unavailable("a conta ChatGPT fixa ainda não é lida pelo Rust"));
-        }
-        let engines = self.engines_file();
-        let (base, key) = (engines[engine]["base_url"].as_str().unwrap_or(""), engines[engine]["api_key"].as_str().unwrap_or(""));
-        // O provedor pode repetir a chave no erro; ela não sai daqui.
-        let redact = |error: String| if key.is_empty() { error } else { error.replace(key, "***") };
-        let models = self.runtime.block_on(engine_models(base, key)).map_err(|e| unavailable(&redact(e)))?;
+        let models = match account {
+            Some(account) => self.account_models(engine, &fixed_account(&self.accounts, engine, account)?.prefix)?,
+            None => self.provider_models(engine)?,
+        };
         let catalog_id = catalog_model(model);
         Ok(models.iter().find(|m| m["id"].as_str() == Some(catalog_id)).and_then(|m| {
             if catalog_id != model { return Some(1_000_000) }

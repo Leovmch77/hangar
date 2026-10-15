@@ -905,7 +905,7 @@ fn the_claude_pane_is_the_one_python_launched() {
         let bridge = claude::PluginBridge { port: 8765, secret: "segredo".into() };
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: Some(&bridge), bridge_key: &"a".repeat(32),
             runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
-            read_only: read_only.as_deref(), windows: false, initial_prompt: None };
+            read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None };
         let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
         // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
         let inner = |words: Vec<String>| words.iter().enumerate()
@@ -973,7 +973,7 @@ fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
     for (prompt, tail) in [("olá", vec!["--permission-mode", "bypassPermissions", "olá"]),
                            ("-v e depois", vec!["--permission-mode", "bypassPermissions", "--", "-v e depois"])] {
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt) };
+            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt), engine_route: None };
         let command = claude::pane(&resolved.spec, "sid", &ctx).command;
         assert_eq!(command[command.len() - tail.len()..], tail.iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]);
     }
@@ -994,7 +994,7 @@ fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
     let absolute = home.join("work/proj").to_string_lossy().into_owned();
     assert_eq!(spec.cwd, absolute);
     let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None };
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
     let argv = terminal::new_session_argv(&terminal::tests::machine_at(&home.join(".claude").to_string_lossy()), &claude::pane(&spec, "sid", &ctx));
     assert_eq!(argv[argv.iter().position(|a| a == "-c").unwrap() + 1], absolute);
     let transcript = claude::transcript(&spec, "sid", &home.join(".claude/projects"));
@@ -1002,6 +1002,50 @@ fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
     claude::pretrust(&home.join(".claude.json"), &spec.cwd, false);
     let trusted: Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
     assert_eq!(trusted["projects"][&absolute]["hasTrustDialogAccepted"], true);
+}
+
+/// Conta ChatGPT fixa do motor (`_fixed_engine_account`, `cliproxy.engine_env`): a credencial do
+/// CLIProxyAPI local da conta Codex, o modelo sem o prefixo dela, a janela do catálogo dela e a rota
+/// no `hangar-engine` (`--account`, `--account-home`, `--account-base-url`).
+#[test]
+fn a_fixed_chatgpt_account_resolves_and_routes_the_engine() {
+    let runtime = test_runtime();
+    let catalog = json!({"data": [{"id": "work/gpt-5.5", "context_length": 400000}, {"id": "other/gpt-5.5", "context_length": 1}]});
+    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route("/v1/models", axum::routing::get(move || async move {
+        ([(axum::http::header::CONTENT_TYPE, "application/json")], catalog.to_string())
+    }));
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    for dir in ["work", ".claude", ".cli-proxy-api", ".codex", ".codex-work"] { std::fs::create_dir_all(home.join(dir)).unwrap(); }
+    std::fs::write(home.join(".cli-proxy-api/config.yaml"), format!("port: {port}\napi-keys:\n  - k\n")).unwrap();
+    std::fs::write(home.join(".cli-proxy-api/codex-work.json"), json!({"type": "codex", "account_id": "acc1", "prefix": "work"}).to_string()).unwrap();
+    std::fs::write(home.join(".codex-work/.hangar-codex-conta"), json!({"version": 1, "id": "work"}).to_string()).unwrap();
+    std::fs::write(home.join(".codex-work/auth.json"), json!({"tokens": {"account_id": "acc1"}}).to_string()).unwrap();
+    std::fs::write(home.join(".claude/engines.json"),
+        json!({"gpt": {"base_url": format!("http://127.0.0.1:{port}/v1"), "api_key": "k", "model": "gpt-5.5"}}).to_string()).unwrap();
+    let open = |account: &str| {
+        let body = json!({"name": "s1", "cwd": home.join("work"), "provider": "claude", "headless": false, "engine": "gpt",
+            "engine_account": account, "model": "work/gpt-5.5", "permission_mode": "manual"});
+        resolve::resolve_open(&SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap(), &OWNER, &local_facts(&home, &runtime))
+    };
+    let spec = open("work").unwrap().spec;
+    assert_eq!(spec.model.as_deref(), Some("gpt-5.5"), "sem o prefixo da conta");
+    assert_eq!(spec.account, Account::Engine { name: "gpt".into(), account: Some("work".into()), config_dir: None,
+        context_window: Some(400000), context_window_unknown: false });
+    let refused = open("outra").unwrap_err();
+    assert_eq!((refused.status, refused.code), (400, Some("erro_cliproxy_conta")), "{}", refused.msg);
+    let route = facts::fixed_account(&crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::from_map(
+        [("HOME".to_owned(), home.to_string_lossy().into_owned())].into())), "gpt", "work").unwrap();
+    let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
+    let command = claude::pane(&spec, "sid", &claude::ClaudeContext { engine_route: Some(&route), ..ctx }).command;
+    let home_text = home.join(".codex-work").to_string_lossy().into_owned();
+    assert_eq!(command[..12], ["hangar-engine", "--exec", "gpt", "--account", "work", "--account-home", &home_text,
+        "--account-base-url", &format!("http://127.0.0.1:{port}"), "--model", "gpt-5.5", "--context"]);
+    assert_eq!(route.credential_id, format!("codex:{home_text}"));
 }
 
 /// A abertura inteira pelo lado Rust do harness: nasceu, a ordem do diário é a do Python e o spec

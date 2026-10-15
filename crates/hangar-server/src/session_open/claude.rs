@@ -11,6 +11,10 @@ use serde_json::{Map, Value, json};
 use super::terminal::{PaneSpec, TerminalEnv};
 use super::{Account, SessionSpec};
 
+/// A rota da conta ChatGPT fixa do motor no `hangar-engine` (`cliproxy.engine_env`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineRoute { pub account: String, pub credential_id: String, pub home: String, pub base_url: String, pub prefix: String }
+
 /// Endereço e segredo da ponte do plugin do Hangar.
 #[derive(Clone, Debug)]
 pub struct PluginBridge { pub port: u16, pub secret: String }
@@ -33,6 +37,8 @@ pub struct ClaudeContext<'a> {
     pub windows: bool,
     /// A primeira mensagem da conversa (S-40).
     pub initial_prompt: Option<&'a str>,
+    /// A conta ChatGPT fixa do motor, resolvida na abertura.
+    pub engine_route: Option<&'a EngineRoute>,
 }
 
 /// `runtime_config.get`: o `runtime-config.json` vence; senão a variável `CP_*`; senão o padrão.
@@ -125,6 +131,10 @@ pub fn pane(spec: &SessionSpec, sid: &str, ctx: &ClaudeContext) -> PaneSpec {
     // O ambiente do motor entra dentro do pane (`hangar-engine --exec`): a chave nunca passa por `-e`.
     if let Account::Engine { name, context_window, .. } = &spec.account {
         command.extend(["hangar-engine".into(), "--exec".into(), name.clone()]);
+        if let Some(route) = ctx.engine_route {
+            command.extend(["--account".into(), route.account.clone(), "--account-home".into(), route.home.clone(),
+                "--account-base-url".into(), route.base_url.clone()]);
+        }
         if let Some(model) = &spec.model {
             command.extend(["--model".into(), model.clone()]);
             if let Some(window) = context_window { command.extend(["--context".into(), window.to_string()]); }

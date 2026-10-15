@@ -181,14 +181,14 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
 }
 
 /// O corpo de `CreatedSessionInfo` de uma sessão Claude com terminal que acabou de nascer.
-fn created_body(spec: &SessionSpec, jsonl: &str, warnings: Vec<String>) -> Value {
+fn created_body(spec: &SessionSpec, jsonl: &str, warnings: Vec<String>, route: Option<&claude::EngineRoute>) -> Value {
     let engine = match &spec.account { Account::Engine { name, .. } => Value::from(name.clone()), _ => Value::Null };
     // Worktree ligada: o `.git` dela é arquivo. A branch que já era a da pasta fica na pasta.
     let linked = spec.worktree.is_some() && Path::new(&spec.cwd).join(".git").is_file();
     let head = json!({
         "name": spec.name, "lifecycle_id": null, "transfer_id": null, "transfer_phase": null, "cwd": spec.cwd,
-        "jsonl": jsonl, "provider": "claude", "headless": false, "engine": engine, "engine_account": null,
-        "codex_home": null, "codex_service_tier": null, "conta": null, "state": "idle", "last_activity": null,
+        "jsonl": jsonl, "provider": "claude", "headless": false, "engine": engine, "engine_account": route.map(|r| r.account.clone()),
+        "codex_home": null, "codex_service_tier": null, "conta": route.map(|r| r.credential_id.clone()), "state": "idle", "last_activity": null,
         "last_reply": null, "last_reply_at": null, "tracked": true,
         "branch": spec.worktree.as_ref().map(|w| w.branch.clone()),
         "worktree": linked,
@@ -249,7 +249,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, &runtime).await {
-        Ok((jsonl, warnings)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings), undo }),
+        Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo }),
         Err(error) => {
             if let Some(undo) = undo { undo.undo()?; }
             Err(error)
@@ -258,7 +258,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
 }
 
 async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
-                remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>), OpenError> {
+                remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref()).await?) } else { None };
     // A conta do Hangar se reconcilia antes de abrir; os avisos dela vêm antes dos da abertura.
@@ -283,14 +283,14 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     let result = terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await;
     let events = diary.end(result.as_ref().err());
     host.diary(events);
-    let (jsonl, mut born_warnings) = result?;
+    let (jsonl, mut born_warnings, route) = result?;
     avisos.append(&mut born_warnings);
-    Ok((jsonl, avisos))
+    Ok((jsonl, avisos, route))
 }
 
 /// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
 async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
-                       remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>), OpenError> {
+                       remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     host.leave_old_group(&spec.name).await?;
     diary.step("preparar_comando");
@@ -310,11 +310,17 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
                 hora, sem erro. Instale o lancador: no Linux, scripts/install-claude-wrapper.sh; no Windows, install.ps1."));
         }
     }
+    // A conta ChatGPT fixa do motor: a mesma rota que a abertura conferiu, relida agora.
+    let route = match &spec.account {
+        Account::Engine { name, account: Some(account), .. } => Some(super::facts::fixed_account(
+            &crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::from_map(host.env().clone())), name, account)?),
+        _ => None,
+    };
     let roots = claude::plugin_roots(host.home());
     let bridge = host.bridge();
     let key = host.new_bridge_key();
     let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: bridge.as_ref(), bridge_key: &key, runtime_config: runtime,
-        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt };
+        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref() };
     let pane = claude::pane(spec, &sid, &ctx);
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
     diary.step("confiar_pasta");
@@ -337,5 +343,5 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     }
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": "claude",
         "etapa": "terminal_criado", "operacao": diary.op}));
-    Ok((jsonl, warnings))
+    Ok((jsonl, warnings, route))
 }
