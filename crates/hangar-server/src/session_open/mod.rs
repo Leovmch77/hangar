@@ -4,6 +4,7 @@
 pub mod facts;
 pub mod record;
 pub mod resolve;
+pub mod terminal;
 #[cfg(test)]
 mod tests;
 

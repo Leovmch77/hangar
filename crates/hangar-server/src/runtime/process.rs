@@ -198,7 +198,7 @@ fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
 /// Recusa (a transitória esgotada ou outra) deixa esta subida sem escopo e a próxima sonda de novo.
 /// Bloqueante (processo e esperas): chamar fora do runtime.
 #[cfg(unix)]
-fn scope_prefix() -> &'static [std::ffi::OsString] {
+pub(crate) fn scope_prefix() -> &'static [std::ffi::OsString] {
     const ARGS: &[&str] = &["--user", "--scope", "--collect", "-q", "--"];
     static PREFIX: OnceLock<Vec<std::ffi::OsString>> = OnceLock::new();
     // Uma sondagem por vez: duas em paralelo criariam a colisão de escopos que a repetição tenta evitar.
