@@ -1997,8 +1997,11 @@ impl Hangar {
                 }
                 Some(new) => {
                     let before = self.selected_key();
+                    // Outro conjunto de servidores de plugin muda quais chamadas dobram: as linhas mudam de altura.
+                    let refold = new.plugin_tool_servers != old.plugin_tool_servers;
                     if let Some(key) = &before { self.controls.on_session_update(key, &new); }
                     self.selected = Some(new);
+                    if refold { self.list_state.remeasure(); self.sync_activity(cx); }
                     self.sync_artifacts_owner(cx);
                     // Recentes listados para a chave de antes: com outra chave, a lista some da tela mas seguiria aberta.
                     if self.selected_key() != before { self.close_recent(); }

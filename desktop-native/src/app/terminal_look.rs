@@ -119,11 +119,15 @@ pub(super) const WRITE_SHOWN: usize = 10;
 pub(super) const EDIT_SHOWN: usize = 40;
 pub(super) const INDENT: f32 = 22.;
 
-/// Edit, MultiEdit e o patch do Codex aparecem como "Update", que é o nome que o terminal usa.
+/// Edit, MultiEdit e o patch do Codex aparecem como "Update", e MCP como "servidor - ferramenta (MCP)": os nomes que
+/// o terminal usa.
 pub(super) fn display_name(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
         "edit" | "multiedit" | "notebookedit" | "apply_patch" => "Update".into(),
-        _ => conversation::tool_display_name(name),
+        _ => match (mcp_server(name), name.splitn(3, "__").nth(2)) {
+            (Some(server), Some(tool)) => format!("{server} - {tool} (MCP)"),
+            _ => conversation::tool_display_name(name),
+        },
     }
 }
 
@@ -348,20 +352,25 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
 
 pub(super) fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
 
-/// O servidor de um nome `mcp__<servidor>__<ferramenta>`, sem o prefixo `hangar-`, como o cartão mostra.
-fn mcp_server(name: &str) -> Option<&str> {
+/// O servidor de `mcp__<servidor>__<ferramenta>` como está no nome: é o que a lista publica.
+fn mcp_server_raw(name: &str) -> Option<&str> {
     let mut parts = name.split("__");
     (parts.next() == Some("mcp")).then_some(())?;
     let server = parts.next()?;
     parts.next()?;
-    Some(server.strip_prefix("hangar-").unwrap_or(server))
+    Some(server)
+}
+
+/// O servidor sem o prefixo `hangar-`, como o cartão mostra.
+fn mcp_server(name: &str) -> Option<&str> {
+    mcp_server_raw(name).map(|server| server.strip_prefix("hangar-").unwrap_or(server))
 }
 
 pub(super) const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
 
 /// Tipo da chamada na linha dobrada, como o Claude Code conta; `None` não dobra (edição, gravação, agente e o carregador
 /// de ferramentas ficam sempre à vista).
-pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
+pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>, plugin_servers: &[String]) -> Option<FoldKind> {
     let name = name.unwrap_or_default();
     if is_any(name, &["read", "notebookread"]) { return Some(FoldKind::Read); }
     if is_any(name, &["grep", "glob", "find", "websearch", "webfetch"]) { return Some(FoldKind::Search); }
@@ -375,7 +384,9 @@ pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<Strin
         };
         return Some(kind);
     }
-    mcp_server(name).map(|_| FoldKind::Mcp)
+    // Servidor criado por plugin fica à vista, com o ponto, como no Claude Code; os outros somam na dobra.
+    let server = mcp_server_raw(name)?;
+    (!plugin_servers.iter().any(|s| s == server)).then_some(FoldKind::Mcp)
 }
 
 /// A linha dobrada, na ordem e no tempo verbal do Claude Code: "Buscou 1 padrão, leu 2 arquivos, rodou 3 comandos de
@@ -506,9 +517,10 @@ impl Hangar {
     /// escondida.
     pub(super) fn render_terminal_group(&mut self, row: &str, tools: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         // Uma classificação por chamada e por quadro: o parse do comando não se repete no laço nem no título.
+        let servers: &[String] = self.selected.as_ref().map_or(&[], |s| s.plugin_tool_servers.as_slice());
         let kinds: Vec<Option<FoldKind>> = tools.iter().map(|t| {
             let call = &self.chat.events[t.call];
-            fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref())
+            fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref(), servers)
         }).collect();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut i = 0;
@@ -553,7 +565,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, fold_kind, fold_title, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
+    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, display_name, fold_kind, fold_title, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
     use serde_json::json;
 
     #[test]
@@ -597,7 +609,7 @@ mod tests {
 
     #[test]
     fn fold_kind_counts_like_claude_code() {
-        let kind = |name: &str| fold_kind(Some(name), None);
+        let kind = |name: &str| fold_kind(Some(name), None, &[]);
         assert_eq!(kind("Read"), Some(FoldKind::Read));
         assert_eq!(kind("Grep"), Some(FoldKind::Search));
         assert_eq!(kind("mcp__hangar__send"), Some(FoldKind::Mcp));
@@ -608,7 +620,25 @@ mod tests {
         assert_eq!(kind("Write"), None);
         assert_eq!(kind("Agent"), None);
         let codex = json!({"cmd": ["rg", "-n", "x"]});
-        assert_eq!(fold_kind(Some("exec_command"), codex.as_object()), Some(FoldKind::Search));
+        assert_eq!(fold_kind(Some("exec_command"), codex.as_object(), &[]), Some(FoldKind::Search));
+    }
+
+    #[test]
+    fn plugin_mcp_servers_stay_out_of_the_fold() {
+        let plugin = ["pmedico".to_owned()];
+        assert_eq!(fold_kind(Some("mcp__pmedico__progresso"), None, &plugin), None);
+        assert_eq!(fold_kind(Some("mcp__ai-memory__memory_status"), None, &plugin), Some(FoldKind::Mcp));
+        // O conjunto tem o nome cru da ferramenta: o `hangar-` não é tirado na comparação.
+        assert_eq!(fold_kind(Some("mcp__hangar-computer-control__objetivo"), None, &["computer-control".to_owned()]), Some(FoldKind::Mcp));
+        assert_eq!(fold_kind(Some("mcp__hangar-computer-control__objetivo"), None, &["hangar-computer-control".to_owned()]), None);
+    }
+
+    #[test]
+    fn mcp_calls_get_the_claude_code_name() {
+        assert_eq!(display_name("mcp__pmedico__progresso"), "pmedico - progresso (MCP)");
+        assert_eq!(display_name("mcp__hangar-computer-control__objetivo"), "computer-control - objetivo (MCP)");
+        assert_eq!(display_name("Edit"), "Update");
+        assert_eq!(display_name("Bash"), "Bash");
     }
 
     #[test]

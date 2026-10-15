@@ -50,6 +50,8 @@ pub(super) struct SubConversation {
     expanded: HashSet<String>,
     rich: HashMap<String, Rich>,
     list: ListState,
+    /// Servidores de plugin da sessão aberta: mudam quais chamadas ficam fora da dobra.
+    plugin_servers: Vec<String>,
 }
 
 /// Rodando só enquanto o subagente não terminou e nenhuma mensagem veio depois da chamada, como na conversa.
@@ -150,7 +152,15 @@ fn prepended_anchor<'a>(old: &'a [ChatEvent], new: &[ChatEvent]) -> Option<&'a s
 impl SubConversation {
     pub fn new() -> Self {
         Self { events: Vec::new(), finished: false, started: None, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
-            list: ListState::new(0, ListAlignment::Bottom, px(200.)) }
+            list: ListState::new(0, ListAlignment::Bottom, px(200.)), plugin_servers: Vec::new() }
+    }
+
+    /// O conjunto muda a altura das linhas da pele Terminal: remede todas.
+    pub fn set_plugin_servers(&mut self, servers: &[String], cx: &mut Context<Self>) {
+        if self.plugin_servers == servers { return; }
+        self.plugin_servers = servers.to_vec();
+        self.list.remeasure();
+        cx.notify();
     }
 
     /// A Aparência mudou: refaz as linhas (pensamento com ou sem ferramentas) e remede todas (Clássico ou Chips).
@@ -385,7 +395,7 @@ impl SubConversation {
         use super::terminal_look as term;
         let kinds: Vec<Option<term::FoldKind>> = tools.iter().map(|t| {
             let call = &self.events[t.call];
-            if call.kind == "thinking" { None } else { term::fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref()) }
+            if call.kind == "thinking" { None } else { term::fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref(), &self.plugin_servers) }
         }).collect();
         let running = |t: &ToolRow| t.result.is_none() && t.tone == Tone::Accent;
         let mut rows: Vec<AnyElement> = Vec::new();
