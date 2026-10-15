@@ -504,6 +504,37 @@ mod held_routes {
     }
 
     #[tokio::test]
+    async fn plugin_loopback_explicit_drop_is_not_written_but_failed_submit_stays_unknown() {
+        use futures_util::FutureExt;
+        for dropped in [Some(true), Some(false), None] {
+            let (store, facts, address, _server) = start().await;
+            let binding = &facts.identity.binding;
+            let poll = store.begin_pull(binding, plugin::Pull {
+                instance: "i".into(), modos: vec!["user".into(), "receipt_v2".into()],
+                estado: Some("idle".into()), session_id: Some(binding.conversation.clone()),
+            }, std::time::Instant::now()).unwrap();
+            let mut publish = Box::pin(store.publish(binding, hangar_server::terminal_input::PluginRequest {
+                id: "refused".into(), text: "pode continuar".into(), mode: hangar_server::terminal_input::PluginMode::User,
+            }));
+            assert!(publish.as_mut().now_or_never().is_none());
+            let publication = poll.wait().await;
+            let mut body = envelope(); body["ok"] = json!(false);
+            for key in ["publication_id", "generation", "session_id"] { body[key] = publication[key].clone(); }
+            if let Some(dropped) = dropped { body["dropped"] = json!(dropped); }
+            if dropped == Some(true) {
+                let mut stale = body.clone(); stale["generation"] = json!(binding.generation + 1);
+                assert_eq!(post(address, "submitted", stale).await.status().as_u16(), 200);
+                assert!(publish.as_mut().now_or_never().is_none(), "recibo de outra vida não autoriza reenvio");
+                let mut contradictory = body.clone(); contradictory["ok"] = json!(true);
+                assert!(post(address, "submitted", contradictory).await.status().is_client_error());
+                assert!(post(address, "filled", body.clone()).await.status().is_client_error());
+            }
+            assert_eq!(post(address, "submitted", body).await.status().as_u16(), 200);
+            assert_eq!(publish.await.unwrap(), if dropped == Some(true) { plugin::PluginReply::NotWritten } else { plugin::PluginReply::Unknown });
+        }
+    }
+
+    #[tokio::test]
     async fn plugin_loopback_held_legacy_finish_and_receipts_keep_wire_names() {
         use futures_util::FutureExt;
         let (store, facts, address, _server) = start().await;

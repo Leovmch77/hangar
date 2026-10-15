@@ -190,6 +190,21 @@ async fn terminal_input_plugin_user_requires_capability_idle_and_safe_text() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;s.facts.lock().unwrap().plugin_user=true;*s.reply.lock().unwrap()=PluginReply::Accepted;
  assert_eq!(driver(io.clone(),s.clone()).prompt("hello","id").await.disposition,Disposition::Accepted);assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::User);assert!(io.writes().is_empty());
 }
+#[tokio::test]
+async fn terminal_input_plugin_user_refusal_sends_text_and_enter_once() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen(""),screen("pode continuar"),screen("")]));
+ let services=Arc::new(Services::new());
+ services.facts.lock().unwrap().plugin_live=true;
+ services.facts.lock().unwrap().plugin_user=true;
+ *services.reply.lock().unwrap()=PluginReply::NotWritten;
+ let result=driver(io.clone(),services.clone()).prompt("pode continuar","refused").await;
+ assert_eq!(services.published.lock().unwrap()[0].mode,PluginMode::User);
+ assert_eq!(result.disposition,Disposition::Accepted);
+ let writes=io.writes();
+ assert_eq!(writes.len(),2,"recusa explícita permite uma escrita e um Enter");
+ assert_eq!(writes[0].args.last().unwrap(),"pode continuar");
+ assert_eq!(writes[1].args.last().unwrap(),"\r");
+}
 #[test]
 fn terminal_input_review_matches_per_question_not_cross_question_substrings() {
  let a=vec![option_answer(0,"first"),option_answer(1,"second")];

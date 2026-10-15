@@ -225,10 +225,13 @@ async function pull($: EngineInterface, ponte: Bridge, discovered = false) {
         });
       } else if (text && modo === "user") {
         let ok = false;
+        let dropped = false;
         try {
           if (!session_id || await $.session.id() === session_id) {
-            await $.prompt.submit({ text, asUser: true });
-            ok = true;
+            const result = await $.prompt.submit({ text, asUser: true });
+            // Recusa do engine resolve com `drop`; só uma exceção não cobre esse caso.
+            dropped = "drop" in result;
+            ok = !dropped;
           }
         } catch (err) {
           $.ui.log(`hangar: prompt.submit falhou: ${String(err)}`, { to: "debug" });
@@ -236,7 +239,7 @@ async function pull($: EngineInterface, ponte: Bridge, discovered = false) {
         await $.http.fetch(`${ponte.url}/submitted`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok,
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok, dropped,
             ...receipt, session_id: await $.session.id() }),
         });
       } else if (text) {
