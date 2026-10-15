@@ -2,8 +2,9 @@
 //! do servidor, lendo os mesmos arquivos, para o terminal decidir igual com o servidor fora do ar.
 //!
 //!   hangar-open resolve [PEDIDO]  resolve nesta máquina e imprime o spec, sem efeito nenhum
-//!   hangar-open open [PEDIDO]     pede ao servidor; fora do ar, resolve aqui, imprime e sai 3
-//!                                 (abrir sem ele: Task 4)
+//!   hangar-open open [PEDIDO]     pede ao servidor; fora do ar, abre aqui o Claude com terminal
+//!                                 (o servidor adota a sessão quando voltar); o resto só resolve,
+//!                                 imprime e sai 3
 //!
 //! Token, porta e as opções `CP_*` do servidor vêm do `backend/.env` da cópia do Hangar onde o
 //! comando mora, como no `hangar-send`. PEDIDO é o JSON do `POST /api/sessions`; omitido, vem da
@@ -15,7 +16,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use hangar_server::accounts::environment::AccountEnvironment;
-use hangar_server::session_open::{OpenCaller, OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
+use hangar_server::session_open::claude::PluginBridge;
+use hangar_server::session_open::local::LocalHost;
+use hangar_server::session_open::open::open_claude_terminal;
+use hangar_server::session_open::{AgentProvider, OpenCaller, OpenError, SessionOpenRequest, Surface, facts::LocalFacts, resolve_open};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,18 +76,32 @@ fn main() -> ExitCode {
                 eprintln!("hangar-open: o servidor não respondeu ({reason}); confira a lista antes de tentar de novo");
                 return ExitCode::from(1);
             }
-            Ask::Down(reason) => eprintln!("hangar-open: servidor fora do ar ({reason}); resolvido nesta máquina, sem abrir"),
+            Ask::Down(reason) => eprintln!("hangar-open: servidor fora do ar ({reason}); segue nesta máquina"),
         }
     }
     let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone());
     // Quem roda o comando no terminal da máquina é o dono.
-    match resolve_open(&request, &OpenCaller::Owner, &facts) {
-        Ok(resolved) => {
-            println!("{}", serde_json::to_string_pretty(&resolved).unwrap_or_default());
-            if command == "open" { ExitCode::from(3) } else { ExitCode::SUCCESS }
-        }
-        Err(error) => refused(&error),
+    let resolved = match resolve_open(&request, &OpenCaller::Owner, &facts) {
+        Ok(resolved) => resolved,
+        Err(error) => return refused(&error),
+    };
+    let claude_terminal = resolved.spec.provider == AgentProvider::Claude && resolved.spec.surface == Surface::Terminal;
+    if command == "open" && claude_terminal {
+        // A mesma abertura do servidor (D-013): token e porta do `.env` dele, para a ponte do plugin
+        // valer quando ele voltar.
+        let bridge = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty())
+            .map(|token| PluginBridge { port: server.get("CP_PORT").and_then(|p| p.parse().ok()).unwrap_or(8765), secret: token.clone() });
+        let host = LocalHost::new(server_env(std::env::vars(), &server), bridge);
+        return match runtime.block_on(open_claude_terminal(&host, resolved, &OpenCaller::Owner)) {
+            Ok(opened) => {
+                println!("{}", opened.body);
+                ExitCode::SUCCESS
+            }
+            Err(error) => refused(&error),
+        };
     }
+    println!("{}", serde_json::to_string_pretty(&resolved).unwrap_or_default());
+    if command == "open" { ExitCode::from(3) } else { ExitCode::SUCCESS }
 }
 
 /// `backend/.env` da cópia do Hangar onde o comando mora (`<cópia>/…/hangar-open`).

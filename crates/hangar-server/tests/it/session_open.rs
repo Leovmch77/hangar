@@ -160,3 +160,32 @@ async fn the_env_file_gives_token_and_port_and_no_token_sends_nothing() {
     assert_eq!(fake.last_hit().1["authorization"], "Bearer do-env", "a última linha do .env vale");
     assert_eq!(fake.last_body(), body.as_bytes());
 }
+
+/// D-013: com o servidor fora do ar, `hangar-open open` abre o Claude com terminal aqui mesmo, pela
+/// mesma biblioteca (o tmux é um programa falso que grava o que recebe), e deixa o spec gravado para o
+/// servidor adotar a sessão quando voltar.
+#[tokio::test]
+async fn the_command_opens_claude_with_terminal_locally_with_the_server_down() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let fixture = fixture("create_claude_terminal_default");
+    materialize(&fixture, &root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let tmux = root.join("bin/tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nd=${0%/*}\necho \"$@\" >> \"$d/tmux.log\"\ncase \"$1\" in\n  new-session) : > \"$d/alive\" ;;\n  has-session) [ -f \"$d/alive\" ] ;;\n  list-panes) exit 1 ;;\nesac\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bin = install(&root, "CP_AUTH_TOKEN=x\nCP_PORT=1\n");
+    let body = fixture["scenario"]["steps"][0]["json"].to_string().replace("<ROOT>", &root.to_string_lossy());
+    let (code, out, stderr) = hangar_open(&bin, &root, &["open", &body], &[]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!((out["name"].as_str(), out["provider"].as_str(), out["headless"].as_bool()), (Some("s1"), Some("claude"), Some(false)));
+    let log = std::fs::read_to_string(root.join("bin/tmux.log")).unwrap();
+    let created = log.lines().find(|l| l.starts_with("new-session")).unwrap();
+    assert!(created.contains("CP_PROVIDER=claude") && created.contains("CLAUDE_CODE_NO_FLICKER=1"), "{created}");
+    let key = created.split("CP_SESSION_KEY=").nth(1).unwrap().split(' ').next().unwrap();
+    let spec: Value = serde_json::from_slice(&std::fs::read(root.join(format!("home/.hangar/session-specs/{key}.json"))).unwrap()).unwrap();
+    assert_eq!((spec["name"].as_str(), spec["surface"].as_str()), (Some("s1"), Some("terminal")));
+    let trusted: Value = serde_json::from_slice(&std::fs::read(root.join("home/.claude.json")).unwrap()).unwrap();
+    assert_eq!(trusted["projects"][root.join("work/proj").to_string_lossy().as_ref()]["hasTrustDialogAccepted"], true);
+}

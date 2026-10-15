@@ -6,6 +6,7 @@ pub mod claude;
 #[doc(hidden)]
 pub mod contract;
 pub mod facts;
+pub mod local;
 pub mod open;
 pub mod record;
 pub mod resolve;
