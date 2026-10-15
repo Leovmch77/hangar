@@ -226,7 +226,9 @@ impl ParsedDocument {
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
                     let is_last = ix + 1 == blocks.len();
-                    blocks[ix]
+                    // Modified for Hangar: the list measures each item as a layout root, which drops the root's own
+                    // margins; the wrapper makes a block's `mt`/`mb` (e.g. from `with_heading`) take up space.
+                    div().child(blocks[ix]
                         .render_block(
                             NodeRenderOptions {
                                 ix,
@@ -236,7 +238,7 @@ impl ParsedDocument {
                             &node_cx,
                             window,
                             cx,
-                        )
+                        ))
                         .into_any_element()
                 }
             })

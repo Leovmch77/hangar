@@ -22,10 +22,9 @@ pub(crate) fn terminal_font(window: &Window) -> gpui_kit::Font {
     static SYSTEM_MONO: std::sync::OnceLock<gpui_kit::SharedString> = std::sync::OnceLock::new();
     font(SYSTEM_MONO.get_or_init(|| {
         let default = gpui_kit::base::TypographyTokens::default().mono;
-        let installed = window.text_system().all_font_names();
-        [default.as_ref(), "Menlo", "Consolas", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", crate::theme::CODE_MONO]
-            .into_iter().find(|name| installed.iter().any(|installed| installed == name))
-            .unwrap_or(crate::theme::CODE_MONO).to_owned().into()
+        crate::theme::first_installed(&window.text_system().all_font_names(),
+            &[default.as_ref(), "Menlo", "Consolas", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", crate::theme::CODE_MONO],
+            crate::theme::CODE_MONO)
     }).clone())
 }
 
