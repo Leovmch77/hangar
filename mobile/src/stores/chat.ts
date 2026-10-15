@@ -11,6 +11,7 @@ import {
   especificidade,
   donoDaLinha,
   sendInputForServer,
+  steerSession,
   queuedMessages,
   registrarDiag,
   parsePluginToast,
@@ -109,7 +110,7 @@ export interface ChatApi {
   retain: () => void;
   release: () => void;
   loadOlder: () => void;
-  send: (text: string, draftRevision?: number) => Promise<void>;
+  send: (text: string, draftRevision?: number, mode?: 'steer') => Promise<void>;
   // Recarrega o histórico depois de falha da primeira carga (o SSE segue vivo por conta
   // própria — onerror reconecta —, então retry é só a parte REST).
   retry: () => void;
@@ -822,9 +823,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       rebuildIndex(events);
       useChatStore.setState({ events });
     },
-    async send(text: string, draftRevision?: number) {
-      const trimmed = text.trim();
-      if (!trimmed) return;
+    async send(text: string, draftRevision?: number, mode?: 'steer') {
+      const trimmed = mode === 'steer' ? text : text.trim();
+      if (!trimmed.trim()) return;
       // Destino desta conversa, nunca o servidor ativo: trocar de servidor no meio não desvia o envio.
       const target = useServers.getState().servers.find((s) => s.id === serverId);
       if (!target) throw new Error(m.chat_servidor_removido());
@@ -836,8 +837,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         const solid = useChatStore.getState().stateEvent?.state === 'idle';
         useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed, solid }] }));
         try {
-          await sendInputForServer(target, name, trimmed);
+          if (mode === 'steer') await steerSession(name, trimmed, target);
+          else await sendInputForServer(target, name, trimmed);
         } catch (err) {
+          // O /steer também usa 409 quando escreveu sem confirmar: não presumir recusa.
+          if (mode === 'steer' && (err as { status?: number } | null)?.status === 409) {
+            throw new Error(m.queue_steer_uncertain(), { cause: err });
+          }
           if (isInputRejected(err)) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));
           throw err;
         }

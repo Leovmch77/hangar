@@ -1007,8 +1007,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   }, [serverId, name, chat]);
 
   const isKimi = provider === 'kimi';
-  // Só o Kimi fica com o chip "mandar agora" (a fila dele é a da TUI, promovida inteira por ctrl-s);
-  // Claude e Codex orientam por mensagem no painel "Na fila".
+  // Só o Kimi promove a fila inteira por ctrl-s; orientar texto do campo é outra ação.
   const showSteer = isKimi && state === 'working' && (filaCount > 0 || steering);
 
   const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
@@ -1022,11 +1021,34 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
   const canSend = hasContent && !sending && !uploading && !readBlocked && !submissionBlocksSend && !gravando && !busyVoice;
+  const showTextSteer = state === 'working' && (isCodex || (isClaude && headless))
+    && !!text.trim() && !text.trimStart().startsWith('/') && !editing && !(sendToPair && pairPeers?.length);
+  const canSteerText = showTextSteer && canSend && !pendingAttach;
+  const handleSteerText = useCallback(async () => {
+    if (!canSteerText || sendingRef.current || isSubmitting(origin.serverId, origin.name)
+      || transcribingRef.current || micStartingRef.current || chat.use.getState().queueEdit
+      || chat.use.getState().stateEvent?.state !== 'working') return;
+    const value = textRef.current;
+    if (!value.trim() || value.trimStart().startsWith('/') || blockedRef.current || !persistText(value)) return;
+    const revision = draftRef.current!.revision;
+    sendingRef.current = true;
+    setSending(true);
+    setError('');
+    limparUndo();
+    cancelarAuto();
+    try {
+      await chat.send(value, revision, 'steer');
+      setBar(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : m.composer_falha_envio());
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }, [canSteerText, origin, chat, persistText, limparUndo, cancelarAuto, setBar]);
   // Sem terminal, pergunta pendente só tem saída pelo Parar (não há pane para mandar Esc).
   const canInterrupt = state === 'working' || (headless && state === 'awaiting_input');
-  // Campo vazio: o Parar ocupa o lugar do Enviar (como no PC). Com texto ou fila os dois ficam,
-  // porque a mensagem entra na fila.
-  // Com texto a linha é Orientar + Enviar, como no PWA; parar pede o campo vazio.
+  // Parar pede o campo vazio; com texto, Orientar (quando disponível) fica ao lado de Enviar.
   const showStop = !!onStop && canInterrupt && !hasContent && !editing;
   const showSend = editing || !showStop || hasContent || sending || uploading || filaCount > 0;
   // Em edição o botão é o Atualizar: só o texto conta, e uma ação da fila por vez.
@@ -1388,6 +1410,21 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               ) : (
                 <View style={[styles.stopMark, { backgroundColor: theme.tokens.status.error }]} />
               )}
+            </Pressable>
+          ) : null}
+
+          {showTextSteer ? (
+            <Pressable
+              onPress={() => void handleSteerText()}
+              disabled={!canSteerText}
+              hitSlop={7}
+              accessibilityRole="button"
+              accessibilityLabel={m.codex_orientar()}
+              accessibilityHint={m.codex_orientar_ajuda()}
+              accessibilityState={{ disabled: !canSteerText, busy: sending }}
+              style={({ pressed }) => [styles.steerBtn, { backgroundColor: pressed ? theme.tokens.bg.hover : theme.tokens.fillSubtle }, !canSteerText && styles.iconBtnDisabled]}
+            >
+              <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>{m.codex_orientar()}</Text>
             </Pressable>
           ) : null}
 
