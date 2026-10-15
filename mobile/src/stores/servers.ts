@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
-import { reconcilePairEntries } from '@hangar/core';
+import { reconcilePairEntries, registrarDiag } from '@hangar/core';
 import type { ExternalPair, LanInfo, PairAttach, Server } from '@hangar/core';
 
 const KEY = 'cp_servers_v1';
@@ -68,29 +68,43 @@ export const ownServers = (list: Server[]) => list.filter((s) => !s.invite);
 export const useServers = create<ServersState>((set, get) => {
   let lastOwnActive: string | null = null;
   let reading: Promise<void> | null = null;
+  let readingUserAction = false;
   let writing: Promise<void> | null = null;
   let retriedBeforeWrite = false;
   let vaultFailed = false;
   let writeFailed = false;
-  let pending: ((p: Persisted) => Persisted)[] = [];
+  let pending: { update: (p: Persisted) => Persisted; userAction: boolean }[] = [];
   let warnings: AvisoServidores[] = [];
   const ids = new Map<string, string>();
   const resolveId = (id: string) => ids.get(id) ?? id;
 
   function warn(aviso: AvisoServidores) {
+    const same = (other: AvisoServidores | null) => other?.tipo === aviso.tipo
+      && (aviso.tipo !== 'token' || (other.tipo === 'token' && other.label === aviso.label));
+    if (same(get().aviso) || warnings.some(same)) return;
     if (get().aviso) warnings.push(aviso);
     else { warnings = []; set({ aviso }); }
   }
 
-  function persistir(): Promise<void> {
+  function logFailure(stage: 'read' | 'parse' | 'schema' | 'write', error: unknown) {
+    registrarDiag({
+      evento: 'servidores.cofre_falhou', nivel: 'erro', tela: 'servidores',
+      codigo: stage === 'write' ? 'servers_vault_write_failed' : stage === 'read' ? 'servers_vault_read_failed' : 'servers_vault_corrupt',
+      operacao: stage, detalhe: error instanceof SyntaxError ? 'SyntaxError' : error instanceof Error ? 'Error' : typeof error,
+    });
+  }
+
+  function persistir(userAction = true): Promise<void> {
     const { servers: all, activeId } = get();
     const servers = all.filter((s) => !s.ephemeral);
     if (servers.some((s) => s.id === activeId) || activeId === null) lastOwnActive = activeId;
     const salvo: Persisted = { servers, activeId: servers.some((s) => s.id === lastOwnActive) ? lastOwnActive : (servers[0]?.id ?? null) };
     const write = () => SecureStore.setItemAsync(KEY, JSON.stringify(salvo)).then(() => {
       writeFailed = false;
-    }).catch(() => {
-      if (!writeFailed) { writeFailed = true; warn({ tipo: 'persistencia' }); }
+    }).catch((error: unknown) => {
+      logFailure('write', error);
+      if (userAction || !writeFailed) warn({ tipo: 'persistencia' });
+      writeFailed = true;
     });
     // O cofre pode terminar escritas fora de ordem; a mais nova precisa ser a última.
     const current = writing ? writing.then(write) : write();
@@ -99,35 +113,38 @@ export const useServers = create<ServersState>((set, get) => {
     return current;
   }
 
-  function change(update: (p: Persisted) => Persisted) {
-    if (!get().vaultReadable) pending.push(update);
+  function change(update: (p: Persisted) => Persisted, userAction = true) {
+    if (!get().vaultReadable) pending.push({ update, userAction });
     set(update(get()));
-    if (get().vaultReadable) void persistir();
-    else if (!reading && !retriedBeforeWrite) {
+    if (get().vaultReadable) void persistir(userAction);
+    else if (reading) readingUserAction ||= userAction;
+    else if (!retriedBeforeWrite) {
       retriedBeforeWrite = true;
-      void get().load();
-    }
+      void load(userAction);
+    } else if (userAction) warn({ tipo: 'vault_unread' });
   }
 
-  return ({
-  servers: [],
-  activeId: null,
-  ready: false,
-  vaultReadable: false,
-  aviso: null,
-  load() {
-    if (reading) return reading;
+  function load(userAction = true): Promise<void> {
+    if (reading) {
+      readingUserAction ||= userAction;
+      return reading;
+    }
+    readingUserAction = userAction;
     const previousWrite = writing;
     reading = Promise.resolve().then(async () => {
+      let stage: 'read' | 'parse' | 'schema' = 'read';
       try {
         if (previousWrite) await previousWrite;
         const raw = await SecureStore.getItemAsync(KEY);
+        stage = 'parse';
         const p: unknown = raw === null ? { servers: [], activeId: null } : JSON.parse(raw);
+        stage = 'schema';
         if (!isPersisted(p)) throw new Error('Dados inválidos no cofre de servidores');
         lastOwnActive = p.activeId;
         const ephemeral = get().servers.filter((s) => s.ephemeral && !p.servers.some((saved) => saved.id === s.id));
-        const recovered = pending.reduce((value, update) => update(value), { servers: [...p.servers, ...ephemeral], activeId: p.activeId });
+        const recovered = pending.reduce((value, { update }) => update(value), { servers: [...p.servers, ...ephemeral], activeId: p.activeId });
         const changed = pending.length > 0;
+        const manualChange = pending.some((change) => change.userAction);
         pending = [];
         if (recovered.activeId !== null && !recovered.servers.some((s) => s.id === recovered.activeId)) {
           recovered.activeId = ownServers(recovered.servers)[0]?.id ?? null;
@@ -137,15 +154,25 @@ export const useServers = create<ServersState>((set, get) => {
         warnings = warnings.filter((aviso) => aviso.tipo !== 'vault_unread');
         const aviso = get().aviso?.tipo === 'vault_unread' ? (warnings.shift() ?? null) : get().aviso;
         set({ ...recovered, ready: true, vaultReadable: true, aviso });
-        if (changed) await persistir();
-      } catch {
+        if (changed) await persistir(manualChange);
+      } catch (error: unknown) {
+        logFailure(stage, error);
         set({ ready: true, vaultReadable: false });
-        if (!vaultFailed) { vaultFailed = true; warn({ tipo: 'vault_unread' }); }
+        if (readingUserAction || !vaultFailed) warn({ tipo: 'vault_unread' });
+        vaultFailed = true;
       }
     }).finally(() => { reading = null; });
     set({ vaultReadable: false });
     return reading;
-  },
+  }
+
+  return ({
+  servers: [],
+  activeId: null,
+  ready: false,
+  vaultReadable: false,
+  aviso: null,
+  load,
   add({ baseUrl, token, label }) {
     const base = baseUrl.replace(/\/+$/, '');
     // Só máquina própria troca o token: a entrada do par no mesmo endereço tem o token de convidado.
@@ -208,7 +235,7 @@ export const useServers = create<ServersState>((set, get) => {
     set({ servers: get().servers.map((s) => (s.id === id && s.invite ? { ...s, inviteEnded: true } : s)) });
   },
   rememberLan(id, lan) {
-    change((p) => ({ ...p, servers: p.servers.map((s) => s.id === resolveId(id) ? { ...s, lan } : s) }));
+    change((p) => ({ ...p, servers: p.servers.map((s) => s.id === resolveId(id) ? { ...s, lan } : s) }), false);
   },
   });
 });

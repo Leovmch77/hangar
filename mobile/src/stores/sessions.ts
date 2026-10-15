@@ -40,7 +40,7 @@ type ConnectionAttempt = { server: Server; generation: number; abort: AbortContr
 const connecting = new Map<string, ConnectionAttempt>();
 const failures = new Map<string, number>();
 const retryAt = new Map<string, number>();
-// Erro HTTP não é queda de rede; só uma lista válida encerra este recuo.
+// Falha da lista não é necessariamente queda de rede; só lista SSE válida encerra este recuo.
 const httpFailures = new Map<string, number>();
 const httpRetryAt = new Map<string, number>();
 const HTTP_RETRY_DELAYS_MS = [2000, 5000, 30000, 60000, 120000, 240000, 300000, 600000, 1800000];
@@ -107,7 +107,7 @@ function pause() {
 
 function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   if (!foreground || refs === 0 || retryTimers.has(id)) return;
-  const delay = retryDelay(id) || 1000;
+  const delay = retryDelay(id);
   const servidor = serversCache.find((s) => s.id === id);
   if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista', espera_ms: delay }, servidor.baseUrl);
   clearTimeout(retryTimers.get(id));
@@ -203,7 +203,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
   let countedFailure = false;
   let countedHttpFailure = false;
   const failed = (alreadyCounted = false) => {
-    if (countedFailure || countedHttpFailure) return;
+    if (countedFailure) return;
     countedFailure = true;
     const count = Math.min((failures.get(s.id) ?? 0) + 1, 6);
     failures.set(s.id, count);
@@ -222,9 +222,11 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     countedHttpFailure = true;
     const count = Math.min((httpFailures.get(s.id) ?? 0) + 1, HTTP_RETRY_DELAYS_MS.length);
     httpFailures.set(s.id, count);
-    const seconds = retryAfter?.trim() && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter) : NaN;
-    const requested = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter ?? '') - Date.now();
-    httpRetryAt.set(s.id, Date.now() + Math.max(HTTP_RETRY_DELAYS_MS[count - 1], Number.isFinite(requested) ? requested : 0));
+    const value = retryAfter?.trim() ?? '';
+    const requested = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+    const delay = Math.min(HTTP_RETRY_DELAYS_MS[HTTP_RETRY_DELAYS_MS.length - 1],
+      Math.max(HTTP_RETRY_DELAYS_MS[count - 1], Number.isNaN(requested) ? 0 : requested));
+    httpRetryAt.set(s.id, Date.now() + delay);
   };
   const receivedList = () => {
     countedHttpFailure = false;
@@ -268,7 +270,6 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
       if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
-      receivedList();
       slots.set(s.id, { sessions, error: null });
       recompute(set);
     } catch (error) {
@@ -278,6 +279,11 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       if (!httpResponse) failed(true);
       slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: httpResponse ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
+      if (countedHttpFailure) {
+        esquecerRota(s.id);
+        scheduleRetry(s.id, get, set);
+        return;
+      }
     }
     if (!isCurrent(attempt)) return;
     const es = openSessionsStream(s);
@@ -323,7 +329,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       streams.delete(s.id);
       es.close();
       if (http && rejected(status)) return;
-      if (http && status >= 400) httpFailed();
+      httpFailed();
       slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: http || countedHttpFailure ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
       esquecerRota(s.id);
@@ -335,6 +341,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'conexao',
       detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
     failed();
+    httpFailed();
     slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
     recompute(set);
     esquecerRota(s.id);
@@ -447,6 +454,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
       disconnect(s.id);
       retentarAgora(s.id);
       retryAt.delete(s.id);
+      httpFailures.delete(s.id);
       httpRetryAt.delete(s.id);
       refused.delete(s.id);
       connect(serversCache, get, set, s.id);

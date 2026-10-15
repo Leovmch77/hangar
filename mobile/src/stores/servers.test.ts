@@ -1,6 +1,11 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 
 const vault = vi.hoisted(() => new Map<string, string>());
+const diag = vi.hoisted(() => vi.fn());
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@hangar/core')>(),
+  registrarDiag: diag,
+}));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(),
   setItemAsync: vi.fn(),
@@ -14,6 +19,7 @@ let ownServers: typeof import('./servers').ownServers;
 beforeEach(async () => {
   vi.resetModules();
   vault.clear();
+  diag.mockClear();
   vi.mocked(SecureStore.getItemAsync).mockReset().mockImplementation(async (k) => vault.get(k) ?? null);
   vi.mocked(SecureStore.setItemAsync).mockReset().mockImplementation(async (k, v) => { vault.set(k, v); });
   vi.mocked(SecureStore.deleteItemAsync).mockReset().mockImplementation(async (k) => { vault.delete(k); });
@@ -80,11 +86,11 @@ describe('proteção do cofre', () => {
     expect(useServers.getState()).toMatchObject({
       ...SAVED, ready: true, vaultReadable: false, aviso: { tipo: 'vault_unread' },
     });
-    for (const mutate of mutations) {
+    for (const [index, mutate] of mutations.entries()) {
       useServers.getState().limparAviso();
       mutate();
       await settle();
-      expect(useServers.getState().aviso).toBeNull();
+      expect(useServers.getState().aviso).toEqual(index < 3 ? { tipo: 'vault_unread' } : null);
       expect(useServers.getState().vaultReadable).toBe(false);
       expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
       expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
@@ -144,6 +150,7 @@ describe('proteção do cofre', () => {
     useServers.getState().limparAviso();
     const added = useServers.getState().add({ baseUrl: 'http://10.0.0.3:8765', token: 'memory-token' });
     await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
     for (let i = 0; i < 10; i++) {
       useServers.getState().rememberLan(added.id, { url: '', id: '' });
       await settle();
@@ -154,6 +161,65 @@ describe('proteção do cofre', () => {
     expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
     expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(SAVED));
     expect(useServers.getState().vaultReadable).toBe(false);
+  });
+
+  test.each(['add', 'remove', 'setActive'] as const)('%s manual reavisa após dispensar a mesma falha', async (action) => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValue(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().limparAviso();
+    const mutate = mutations[['add', 'remove', 'setActive'].indexOf(action)];
+    mutate();
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
+    mutate();
+    mutate();
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
+    expect(SecureStore.getItemAsync).toHaveBeenCalledTimes(3);
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(SAVED));
+  });
+
+  test('load ilegível reavisa após dispensar e não duplica aviso ainda na fila', async () => {
+    vault.set(VAULT_KEY, '{');
+    await useServers.getState().load();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
+    await useServers.getState().load();
+    await useServers.getState().load();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
+  });
+
+  test('rememberLan em releitura automática não repete aviso já dispensado', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValue(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().limparAviso();
+    for (let i = 0; i < 10; i++) {
+      useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+      await settle();
+    }
+    expect(takeWarnings()).toEqual([]);
+    expect(SecureStore.getItemAsync).toHaveBeenCalledTimes(3);
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+  });
+
+  test('ação manual durante releitura automática só avisa se a releitura falhar', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().limparAviso();
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+    useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+    useServers.getState().setActive(SAVED_SERVER.id);
+    expect(useServers.getState().aviso).toBeNull();
+    read.reject(new Error('bloqueado'));
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }]);
   });
 
   test('load público recupera no retorno ao primeiro plano e reavisa apenas uma falha nova', async () => {
@@ -254,6 +320,65 @@ function takeWarnings() {
 }
 
 describe('avisos independentes', () => {
+  test.each(['add', 'remove', 'setActive'] as const)('%s manual reavisa persistência e não duplica aviso atual', async (action) => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.setItemAsync).mockRejectedValue(new Error('disco cheio'));
+    useServers.getState().setActive(SAVED_SERVER.id);
+    await settle();
+    useServers.getState().limparAviso();
+    const mutate = mutations[['add', 'remove', 'setActive'].indexOf(action)];
+    mutate();
+    mutate();
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'persistencia' }]);
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(SAVED));
+  });
+
+  test('persistência automática avisa só na primeira falha da fase, sucesso libera novo aviso', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.setItemAsync).mockRejectedValue(new Error('disco cheio'));
+    useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'persistencia' }]);
+    for (let i = 0; i < 10; i++) {
+      useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+      await settle();
+    }
+    expect(takeWarnings()).toEqual([]);
+    vi.mocked(SecureStore.setItemAsync).mockResolvedValueOnce();
+    useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+    await settle();
+    useServers.getState().rememberLan(SAVED_SERVER.id, { url: '', id: '' });
+    await settle();
+    expect(takeWarnings()).toEqual([{ tipo: 'persistencia' }]);
+  });
+
+  test('recuperação com escrita recusada conserva intenção manual e fila de todos os motivos', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.setItemAsync).mockRejectedValue(new Error('disco cheio'));
+    useServers.getState().setActive(SAVED_SERVER.id);
+    await settle();
+    useServers.getState().limparAviso();
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().markInvalid(SAVED_SERVER.id);
+    await settle();
+    expect(takeWarnings()).toEqual([
+      { tipo: 'token', label: SAVED_SERVER.label }, { tipo: 'persistencia' },
+    ]);
+    expect(useServers.getState()).toMatchObject({ vaultReadable: true, servers: [] });
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(SAVED));
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValue(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().markInvalid('another');
+    await settle();
+    useServers.getState().setActive('another');
+    expect(takeWarnings()).toEqual([{ tipo: 'vault_unread' }, { tipo: 'token', label: '' }]);
+  });
+
   test.each([true, false])('token e leitura recusada coexistem, token primeiro: %s', async (tokenFirst) => {
     vault.set(VAULT_KEY, JSON.stringify(SAVED));
     await useServers.getState().load();
@@ -299,13 +424,43 @@ describe('avisos independentes', () => {
     expect(takeWarnings()).toEqual(tokenFirst ? [token, failed] : [failed, token]);
     useServers.getState().setActive(SAVED_SERVER.id);
     await settle();
-    expect(takeWarnings()).toEqual([]);
+    expect(takeWarnings()).toEqual([failed]);
     vi.mocked(SecureStore.setItemAsync).mockImplementationOnce(async (key, raw) => { vault.set(key, raw); });
     useServers.getState().setActive(SAVED_SERVER.id);
     await settle();
     useServers.getState().setActive(SAVED_SERVER.id);
     await settle();
     expect(takeWarnings()).toEqual([failed]);
+  });
+});
+
+describe('diário seguro do cofre', () => {
+  test.each([
+    ['read', 'servers_vault_read_failed', 'Error'],
+    ['parse', 'servers_vault_corrupt', 'SyntaxError'],
+    ['schema', 'servers_vault_corrupt', 'Error'],
+    ['write', 'servers_vault_write_failed', 'Error'],
+  ] as const)('%s registra etapa, código e tipo, nunca o segredo', async (stage, code, errorType) => {
+    const secret = 'token-ultrassecreto-NAO-REGISTRAR';
+    const error = new Error(`SecureStore recusou ${secret}`);
+    error.name = secret;
+    vault.set(VAULT_KEY, JSON.stringify({ ...SAVED, servers: [{ ...SAVED_SERVER, token: secret }] }));
+    if (stage === 'read') vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(error);
+    if (stage === 'parse') vault.set(VAULT_KEY, `{"token":"${secret}"`);
+    if (stage === 'schema') vault.set(VAULT_KEY, JSON.stringify({ token: secret }));
+    await useServers.getState().load();
+    if (stage === 'write') {
+      vi.mocked(SecureStore.setItemAsync).mockRejectedValueOnce(error);
+      useServers.getState().setActive(SAVED_SERVER.id);
+      await settle();
+    }
+    expect(diag).toHaveBeenCalledExactlyOnceWith({
+      evento: 'servidores.cofre_falhou', nivel: 'erro', tela: 'servidores',
+      codigo: code, operacao: stage, detalhe: errorType,
+    });
+    expect(JSON.stringify(diag.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(diag.mock.calls)).not.toContain(SAVED_SERVER.baseUrl);
+    expect(useServers.getState().aviso).toEqual({ tipo: stage === 'write' ? 'persistencia' : 'vault_unread' });
   });
 });
 
