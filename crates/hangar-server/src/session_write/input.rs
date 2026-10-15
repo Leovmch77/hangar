@@ -89,7 +89,9 @@ pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent,
             // Comando de barra não tem linha na fila: adiado, ele não roda depois sozinho.
             let motivo = payload_code(reply).unwrap_or("deferred");
             let comando = p.text.split_whitespace().next().unwrap_or_default();
-            let msg = format!("{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.");
+            // Mensagens esperando no Hangar: o comando não passa à frente delas (nem as apaga num `/clear`).
+            let msg = if motivo == "queue_waiting" { format!("{comando} não foi executado: há mensagens na fila. Oriente ou apague antes de mandar o comando.") }
+                else { format!("{comando} não foi executado: o terminal não aceitou agora ({motivo}). Mande de novo.") };
             let refused = Sent::Refused { code: "erro_comando_nao_executado", msg, params: json!({"comando": comando, "motivo": motivo}) };
             (refused, Some(("runtime.command_deferred", diary_code(motivo))))
         }

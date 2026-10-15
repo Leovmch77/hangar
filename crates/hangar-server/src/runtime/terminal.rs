@@ -24,16 +24,19 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender> }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
 /// app parada até alguém mexer no terminal; nenhum clique do app está em curso, porque com a reserva do pane
 /// a entrada nem chega aqui.
 const FOCUS_RETURN:Duration=Duration::from_secs(10);
+/// Depois de uma entrega comum, quanto a fila espera o Claude aparecer ocupado antes de levar a próxima: a prova
+/// pode chegar antes de o registro nativo dizer `busy`, e um turno curto demais nunca aparece ocupado num tique.
+const TURN_START_WAIT:Duration=Duration::from_secs(3);
 /// Quantas devoluções uma linha tenta; as que falham não viram um laço de teclas, só o registro.
 const FOCUS_RETURN_TRIES:u32=2;
 /// Teclas de uma devolução: o anel do `ctrl+x tab` medido tem até 23 paradas (doze botões na faixa e dez
@@ -258,6 +261,9 @@ struct Executor {
     /// Quando a reabertura deste incidente foi pedida. Reabertura que falhou é pedida de novo depois do
     /// intervalo do registro, senão a fila ficava parada para sempre com o aviso prometendo reabrir.
     heal_requested:Option<tokio::time::Instant>,
+    /// Entrega comum aceita com o Claude parado: até este instante (ou até ele aparecer ocupado) a fila
+    /// trata a sessão como trabalhando, para a próxima não cair no mesmo turno.
+    turn_wait:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
@@ -336,7 +342,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:None,diag:policy.diag()};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag()};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -983,6 +989,13 @@ impl Executor {
             self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
             return Ok(result);
         }
+        // Comando de barra com mensagens esperando no Hangar: não passa à frente delas nem as perde num `/clear`
+        // (a troca de conversa esvazia a fila). Recusado na tela, como todo comando de barra adiado.
+        if slash && !super::queue::waiting_ids(&state).is_empty() {
+            let result=reply(id,Disposition::Deferred,json!({"code":"queue_waiting","queued":false,"cleanup":"not_needed"}));
+            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+            return Ok(result);
+        }
         if self.loaned() {
             // O Python está digitando no pane: a entrada com linha na fila espera e sai depois da
             // devolução; comando e controle, sem fila para esperar, são recusados com o código.
@@ -1010,9 +1023,11 @@ impl Executor {
         if let Some(facts)=&facts {self.deliverable=facts.as_ref().is_ok_and(|facts|current && facts.ready && !facts.open_question);}
         // Com o Claude trabalhando a mensagem fica na fila do Hangar, onde o painel a apaga, edita e reordena.
         // O recado com socket nativo segue: é o canal do próprio Claude Code para o meio do turno.
-        let held=prompt && !slash && !steer && facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|!f.idle && !input::native_message(f,text)));
+        let busy=match facts.as_ref() {Some(Ok(f))=>self.turn_busy(f.idle),_=>false};
+        let started_turn=facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|f.idle));
+        let held=prompt && !slash && !steer && busy && facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|!input::native_message(f,text)));
         let mut result=if !current {reply(id,Disposition::Deferred,json!({"code":"terminal_facts","cleanup":"not_needed"}))}
-            else if held {reply(id,Disposition::Deferred,json!({"code":"turn_hold","queued":true,"cleanup":"not_needed"}))}
+            else if held {reply(id,Disposition::Deferred,json!({"code":"terminal_turn_hold","queued":true,"cleanup":"not_needed"}))}
             else if prompt && !slash && !facts.as_ref().is_some_and(|result|result.as_ref().is_ok_and(|f|f.ready && !f.open_question || f.native.is_some())) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
             else {
                 let bound=match row_id.is_some() {
@@ -1168,6 +1183,8 @@ impl Executor {
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
         if row_id.is_some() && result.disposition==Disposition::Accepted {
             self.confirm_until=Some(tokio::time::Instant::now()+CONFIRM_WINDOW); self.confirm_seen=None;
+            // Entregue com o Claude parado, ela abre um turno que a próxima espera; a orientada no meio do turno, não.
+            if started_turn && !self.options.turn_start_wait.is_zero() {self.turn_wait=Some(tokio::time::Instant::now()+self.options.turn_start_wait);}
         }
         Ok(result)
     }
@@ -1219,6 +1236,14 @@ impl Executor {
         self.heal_requested=Some(tokio::time::Instant::now());
         let target=self.target.clone();
         tokio::spawn(async move {let _=registry.heal_claude(target.name,target.key,target.generation).await;});
+    }
+    /// O Claude conta como trabalhando: ocupado de fato, ou logo depois de uma entrega comum que ainda não o
+    /// mostrou ocupado. Vê-lo ocupado encerra a espera.
+    fn turn_busy(&mut self,idle:bool)->bool {
+        if !idle {self.turn_wait=None; return true;}
+        let waiting=self.turn_wait.is_some_and(|until|tokio::time::Instant::now()<until);
+        if !waiting {self.turn_wait=None;}
+        waiting
     }
     /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).
     fn track_stall(&mut self,row:&str,result:&RuntimeReply)->bool {
@@ -1278,14 +1303,20 @@ impl Executor {
         }
         // A fila do Hangar espera o turno: o Claude parado leva uma por vez. O "Orientar" (`steer`) passa por
         // cima, e o recado com socket nativo também, porque esse canal o Claude Code atende no meio do turno.
-        if !steer && !facts.idle {
+        if !steer && self.turn_busy(facts.idle) {
+            // Os fatos da manutenção não sabem do socket (ele depende do texto): o recado candidato relê com o dele.
             let waiting=super::queue::waiting_ids(&state);
-            let native=state.rows.iter().filter_map(|r|Some((r["id"].as_str()?,r["text"].as_str()?)))
-                .find(|(id,text)|waiting.iter().any(|w|w==id) && entry.as_deref().is_none_or(|e|e==*id) && input::native_message(&facts,text))
-                .map(|(id,_)|id.to_owned());
+            let candidate=state.rows.iter().filter_map(|r|Some((r["id"].as_str()?,r["text"].as_str()?)))
+                .find(|(id,text)|waiting.iter().any(|w|w==id) && entry.as_deref().is_none_or(|e|e==*id) && input::message_prefix(text).is_some())
+                .map(|(id,text)|(id.to_owned(),text.to_owned()));
+            let native=match candidate {
+                Some((id,text))=>self.services(&id,&id,&text).facts(&self.target.binding).await.ok()
+                    .filter(|f|f.binding==self.target.binding && input::native_message(f,&text)).map(|_|id),
+                None=>None,
+            };
             let Some(native)=native else {
                 if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
-                return Ok(json!({"drained":0,"turn_hold":true}));
+                return Ok(json!({"drained":0,"held_for_turn":true}));
             };
             entry=Some(native);
         }
@@ -1337,21 +1368,22 @@ impl Executor {
             return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_entry_gone","cleanup":"not_needed"})));
         }
         self.publish().await?;
-        let working=!facts.idle;
+        // O turno pode começar entre as leituras: a entrega sempre passa pelo turno, e quem decide se promove é
+        // a marca da fila interna na tela, lida depois.
+        let idle=facts.idle;
         // Como no pedido de drenagem: a falha aparece na vista, além de voltar a quem pediu.
-        let drained=match self.drain_once(Some(entry),working).await {Ok(value)=>value,Err(failure)=>{self.enter_error(failure.clone()).await?; return Err(failure);}};
+        let drained=match self.drain_once(Some(entry),true).await {Ok(value)=>value,Err(failure)=>{self.enter_error(failure.clone()).await?; return Err(failure);}};
         let outcome=serde_json::from_value::<RuntimeReply>(drained["reply"].clone()).ok();
         match outcome.map(|r|r.disposition) {
             Some(Disposition::Accepted)=>{},
             Some(Disposition::Unknown)=>return Ok(reply(id,Disposition::Unknown,json!({"code":"queue_steer_uncertain"}))),
             // Parado e sem entregar agora (caixa ilegível, foco num mod): ficou na frente e sai no próximo tique.
-            None|Some(Disposition::Deferred) if !working=>return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":0}))),
+            None|Some(Disposition::Deferred) if idle=>return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":0}))),
             _=>return Ok(reply(id,Disposition::Deferred,json!({"code":"queue_steer_not_delivered","cleanup":"not_needed"}))),
         }
-        if !working {return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":1})));}
         let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
-        // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o turno acabou no
-        // meio e o Claude Code já levou a mensagem: entregue igual, sem promover.
+        // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o Claude estava parado
+        // (ou o turno acabou no meio) e já levou a mensagem: entregue igual, sem promover.
         let mut steered=driver.steer().await;
         for _ in 1..STEER_HINT_TRIES {
             if steered.disposition!=input::Disposition::Deferred {break;}
