@@ -256,6 +256,23 @@ fn effort_is_deferred_until_a_safe_boundary() {
     assert_eq!(engine.view()["effort"],"high");
 }
 
+/// Formato real da CLI: a SAÍDA vai no `local_command_source`, sem o nome do comando. Outra saída local no
+/// meio não confirma nem recusa o esforço.
+#[test]
+fn effort_is_confirmed_by_the_cli_output_carried_in_the_source() {
+    let mut engine = engine(json!({"name":"session","initialized":true,"effort":"medium"}));
+    let effects = engine.command(command(OperationKind::SetEffort,json!({"effort":"low"})),clock(10.0)).unwrap();
+    assert!(effects.iter().any(|e|matches!(e,Effect::Write { operation_id:Some(id),.. } if id == "op-1:effort")));
+    line(&mut engine,json!({"type":"assistant","local_command_source":"<local-command-stdout>Total cost: $0</local-command-stdout>",
+        "message":{"content":[{"type":"text","text":"Total cost: $0"}]}}),11.0);
+    assert_eq!(engine.view()["effort_intent"]["status"],"dispatching");
+    let out = "Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead";
+    let effects = line(&mut engine,json!({"type":"assistant","local_command_source":format!("<local-command-stdout>{out}</local-command-stdout>"),
+        "message":{"content":[{"type":"text","text":out}]}}),12.0);
+    assert_eq!(engine.view()["effort"],"low");
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "op-1")));
+}
+
 /// A CLI põe a SAÍDA no `local_command_source`, não o comando.
 #[test]
 fn local_answer_carries_the_slash_command_that_was_written() {

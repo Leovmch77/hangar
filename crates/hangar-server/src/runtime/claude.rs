@@ -753,7 +753,10 @@ impl ClaudeEngine {
             "assistant" => {
                 if !event["local_command_source"].is_null() {
                     let text = text_blocks(&event["message"]["content"]);
-                    let effort_source = event["local_command_source"].as_str().is_some_and(|source|source.trim_start_matches('/').split_whitespace().next() == Some("effort"));
+                    // A CLI de hoje põe a saída no `local_command_source`, sem o comando: a resposta do `/effort` é
+                    // reconhecida pelo texto dela; o nome do comando no campo fica para a CLI que o mandava.
+                    let effort_source = text.starts_with("Set effort level to ")
+                        || event["local_command_source"].as_str().is_some_and(|source|source.trim_start_matches('/').split_whitespace().next() == Some("effort"));
                     if let Some(intent) = self.effort_intent.clone().filter(|i|effort_source && (i["status"] == "dispatching" || i["status"] == "unknown")) {
                         let value = intent["value"].as_str().unwrap_or("");
                         let child = format!("{}:effort",intent["operation_id"].as_str().unwrap_or(""));
