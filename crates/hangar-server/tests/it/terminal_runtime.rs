@@ -554,8 +554,13 @@ async fn terminal_runtime_queued_row_waits_for_idle_then_drains_one_by_one() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(f.state()["rows"][1]["delivered"],false,"a segunda esperou o turno da primeira");
     assert_eq!(h.command(f.command("three","Três")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred,"o /input novo também espera");
+    // Ocupado até a drenagem ler de fato: cada leitura de fatos captura o pane, e o registro nativo é regravado
+    // com `busy` na primeira chamada depois da troca. Três capturas depois dela incluem uma leitura inteira já
+    // ocupada; o segundo mínimo cobre o runner lento, onde cada leitura leva décimos de segundo.
+    let captures=||f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="capture-pane").count();
+    let before=captures(); let busy_since=std::time::Instant::now();
     f.idle.store(false,std::sync::atomic::Ordering::Release);
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    f.wait_for("a drenagem leu a sessão ocupada",||captures()>=before+3 && busy_since.elapsed()>=Duration::from_secs(1)).await;
     assert_eq!(f.state()["rows"][1]["delivered"],false);
     f.idle.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("segunda sai depois",||f.state()["rows"][1]["delivered"]==true).await;
