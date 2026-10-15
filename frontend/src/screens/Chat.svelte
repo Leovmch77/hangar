@@ -1120,10 +1120,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       trocandoModo = false;
     }
   }
-  // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra ele reler MCP,
-  // hooks e settings. O motivo vem do backend no `state`; sem motivo a ação fica só no menu.
-  const recarregavel = $derived(sessionProvider === 'claude' && sessionHeadless);
-  const recarregarMotivo = $derived(recarregavel ? (stateEvent?.recarregar_motivo ?? null) : null);
+  // Recarregar (Claude): recicla o processo na mesma conversa pra ele reler MCP, hooks e settings;
+  // com terminal, o pane reabre com o comando de hoje. O motivo só existe sem terminal (vem do
+  // backend no `state`); sem motivo a ação fica só no menu.
+  const recarregavel = $derived(sessionProvider === 'claude');
+  const recarregarMotivo = $derived(recarregavel && sessionHeadless ? (stateEvent?.recarregar_motivo ?? null) : null);
   let recarregando = $state(false);
   // Dispensar a pill: reciclar o processo é escolha da pessoa (pode não querer agora, não precisar
   // do que mudou, ou ser falso alarme), e até dispensar o aviso ficava em cima do composer o tempo

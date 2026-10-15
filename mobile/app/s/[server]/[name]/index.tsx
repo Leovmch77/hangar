@@ -316,9 +316,11 @@ export default function ChatScreen() {
         setStopVivo(null);
       });
   };
-  // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra reler MCP/hooks/
-  // settings. O motivo vem do backend no `state`; sem motivo a ação fica só no "⋯".
-  const recarregavel = currentSession?.provider === 'claude' && !!(stateEvent?.headless ?? currentSession?.headless);
+  // Recarregar (Claude): recicla o processo na mesma conversa pra reler MCP/hooks/settings; com
+  // terminal, o pane reabre com o comando de hoje. O motivo só existe sem terminal (vem do `state`);
+  // sem motivo a ação fica só no "⋯".
+  const recarregavel = currentSession?.provider === 'claude';
+  const semTerminal = !!(stateEvent?.headless ?? currentSession?.headless);
   // Só o stream da sessão diz `dead`: aí não há para quem escrever, o composer vira o aviso.
   const dead = stateEvent?.state === 'dead';
   const [recarregando, setRecarregando] = useState(false);
@@ -421,7 +423,7 @@ export default function ChatScreen() {
           }
         />
         <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
-                   provider={provider} semTerminal={!!(stateEvent?.headless ?? currentSession?.headless)} temPergunta={!!askPayload}
+                   provider={provider} semTerminal={semTerminal} temPergunta={!!askPayload}
                    recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
         <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
         {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
@@ -533,7 +535,7 @@ export default function ChatScreen() {
             </Text>
           ) : null}
           {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
-          {!servidorSumiu && recarregavel ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
+          {!servidorSumiu && recarregavel && semTerminal ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
           {!servidorSumiu && !codexPreThread && fetchedSession !== null
             ? dead
               ? (

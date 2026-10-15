@@ -105,7 +105,7 @@ struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branche
 
 #[derive(Clone, Debug)]
 /// O renomear leva o número do pedido: resposta de um diálogo cancelado não fecha a tentativa seguinte na mesma sessão.
-pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool), Account { path: String, label: String, engine_account: Option<String> } }
+pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool), Reload, Account { path: String, label: String, engine_account: Option<String> } }
 
 /// Gravações de git e o remover vínculo: o resultado é a notificação da sessão, já em texto.
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
@@ -829,6 +829,7 @@ impl Hangar {
                 Write::Delete => api.act(name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
                 Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
+                Write::Reload => api.act(name, &["recarregar"], None, false, 60).await,
                 Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, 120).await,
             };
             tell.send(SidebarReply::Wrote(target, what, result)).await;
@@ -854,6 +855,13 @@ impl Hangar {
         let this = cx.entity().downgrade();
         chrome::confirm_alert(window, cx, label.clone(), message, label, ButtonVariant::Primary,
             move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Mode(terminal), cx)); true });
+    }
+
+    pub(super) fn confirm_reload(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_origin(&target, window, cx);
+        let this = cx.entity().downgrade();
+        chrome::confirm_alert(window, cx, tr("reload"), tr("reload_confirm"), tr("reload"), ButtonVariant::Primary,
+            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Reload, cx)); true });
     }
 
     /// A mesma conversa noutra conta: reinicia o processo da sessão, então pergunta antes, como o modo.
@@ -1163,6 +1171,8 @@ impl Hangar {
                     (Write::Editor, Err(error)) => Some(Notification::error(failed("sidebar_editor_failed", &error))),
                     (Write::Mode(_), Ok(_)) => None,
                     (Write::Mode(_), Err(error)) => Some(Notification::error(failed("sidebar_mode_failed", &error))),
+                    (Write::Reload, Ok(_)) => Some(Notification::success(tr("reload_sent"))),
+                    (Write::Reload, Err(error)) => Some(Notification::error(failed("sidebar_reload_failed", &error))),
                     (Write::Account { label, .. }, Ok(_)) => Some(Notification::success(tr("sidebar_same_moved").replace("{n}", label))),
                     (Write::Account { .. }, Err(error)) => Some(Notification::error(failed("sidebar_same_failed", &error))),
                     (Write::Delete, Ok(value)) => {
@@ -1388,6 +1398,11 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
         let label = if idle { label } else { format!("{label} · {}", web("modo_so_ociosa")) };
         item(label, |this, target, window, cx| this.confirm_mode(target, window, cx)).disabled(!idle)
     });
+    // Relança na mesma conversa com o comando de hoje (plugin, nome, conta); só Claude e parada, como a troca de modo.
+    let reload = (session.provider == "claude").then(|| {
+        let label = if idle { tr("reload") } else { format!("{} · {}", tr("reload"), web("modo_so_ociosa")) };
+        item(label, |this, target, window, cx| this.confirm_reload(target, window, cx)).disabled(!idle)
+    });
     // O convite só alcança as rotas da própria sessão, como o menu do web: silenciar, editor, encadear, agrupar, modo e bastão
     // são do servidor inteiro ou mexem no processo do dono.
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
@@ -1418,6 +1433,7 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
             } else { undo_items(hangar, target, &pairs).into_iter().fold(menu, |menu, item| menu.item(item)) })
             .separator()
             .when_some(mode, |menu, mode| menu.item(mode))
+            .when_some(reload, |menu, reload| menu.item(reload))
             .submenu(tr("sidebar_baton"), window, cx, move |menu, window, cx| {
                 let (hangar, target, cwd) = (baton_weak.clone(), baton_target.clone(), baton_cwd.clone());
                 let menu = menu_style(menu).min_w(px(200.)).item(PopupMenuItem::new(tr("sidebar_baton_summary")).on_click(move |_, window, cx| {

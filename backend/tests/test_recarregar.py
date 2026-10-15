@@ -100,18 +100,77 @@ def cliente(monkeypatch):
 _H = {"Authorization": "Bearer secret"}
 
 
-def test_rota_recusa_com_terminal_e_ocupada_e_recicla_ociosa(cliente, tmp_path, monkeypatch):
+def test_rota_com_terminal_relanca_o_pane_com_o_comando_de_hoje(cliente, tmp_path, monkeypatch):
+    # O pane restaurado no boot nasceu sem o plugin: recarregar remonta o comando (plugin, nome,
+    # token) pelo mesmo caminho da troca de modo, sem subir o processo sem terminal no meio.
+    import app.api as api_mod
+    from app.models import SessionInfo
+    monkeypatch.setattr("app.pqueue.settings.projects_dir", tmp_path)
+    info = SessionInfo(name="tt", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude")
+    hl = ClaudeHeadlessAdapter()
+    hl.recarregar = AsyncMock()
+    hl.ensure_running = AsyncMock()
+    ordem = MagicMock()
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=False), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value="erro_sessao_trabalhando")), \
+         patch.object(api_mod.registry, "para_headless", ordem.para_headless), \
+         patch.object(api_mod.registry, "para_terminal", ordem.para_terminal):
+        r = cliente.post("/api/sessions/tt/recarregar", headers=_H)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_sessao_trabalhando"
+    assert ordem.mock_calls == []
+
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=False), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.perm_mode.ler_modo", return_value="plan"), \
+         patch("app.api._pane_came_up", return_value=True), \
+         patch.object(api_mod.registry, "para_headless", ordem.para_headless), \
+         patch.object(api_mod.registry, "para_terminal", ordem.para_terminal):
+        r = cliente.post("/api/sessions/tt/recarregar", headers=_H)
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert [c[0] for c in ordem.mock_calls] == ["para_headless", "para_terminal"]
+    assert ordem.para_headless.call_args.args == ("tt", "plan")
+    hl.ensure_running.assert_not_awaited()
+    hl.recarregar.assert_not_awaited()
+
+
+@pytest.mark.parametrize("falha", ["excecao", "pane_morreu"])
+def test_rota_com_terminal_que_nao_reabre_segue_sem_terminal(cliente, tmp_path, monkeypatch, falha):
+    # O processo antigo já saiu: qualquer falha da reabertura tem que deixar a sessão viva (sem
+    # terminal) e dizer isso, nunca responder ok com a sessão sem processo.
+    import app.api as api_mod
+    from app.models import SessionInfo
+    monkeypatch.setattr("app.pqueue.settings.projects_dir", tmp_path)
+    info = SessionInfo(name="tt", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude")
+    hl = ClaudeHeadlessAdapter()
+    hl.acordar = MagicMock()
+    sidecar = {"name": "tt", "cwd": "/tmp", "session_id": "x"}
+    reabrir = MagicMock(side_effect=RuntimeError("tmux caiu") if falha == "excecao" else None)
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=False), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.perm_mode.ler_modo", return_value=None), \
+         patch.object(api_mod.registry, "para_headless", return_value=sidecar), \
+         patch.object(api_mod.registry, "para_terminal", reabrir), \
+         patch("app.api._pane_came_up", return_value=False), \
+         patch("app.api.headless_sessions.exists", return_value=False), \
+         patch("app.api.headless_sessions.restaurar") as restaurar:
+        r = cliente.post("/api/sessions/tt/recarregar", headers=_H)
+    assert r.status_code == 502 and r.json()["detail"]["code"] == "erro_recarregar_sem_terminal"
+    restaurar.assert_called_once_with(sidecar)
+    hl.acordar.assert_called_once_with("tt")
+
+
+def test_rota_recusa_ocupada_e_recicla_ociosa(cliente, tmp_path, monkeypatch):
     from app.models import SessionInfo
     monkeypatch.setattr("app.pqueue.settings.projects_dir", tmp_path)
     info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
     hl = ClaudeHeadlessAdapter()
     hl.recarregar = AsyncMock()
-    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
-         patch("app.api._headless", return_value=False), \
-         patch("app.api.get_adapter", return_value=hl):
-        r = cliente.post("/api/sessions/hl/recarregar", headers=_H)
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_recarregar_so_sem_terminal"
-
     hl._sessions["hl"] = MagicMock(vivo=True, iniciando=False, pending={}, question=None, in_progress=True)
     with patch("app.api._cached_info", AsyncMock(return_value=info)), \
          patch("app.api._headless", return_value=True), \
