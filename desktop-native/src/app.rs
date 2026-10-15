@@ -2088,6 +2088,7 @@ impl Hangar {
                     return (false, Changed::Screen);
                 };
                 self.chat.set_queue_panel(Some(panel));
+                for id in crate::queue_panel::removed(&data) { self.chat.retire(&id); }
                 self.queue_panel_changed(window, cx);
                 return (true, Changed::Rows);
             }
@@ -2970,6 +2971,13 @@ impl Hangar {
     fn queued_count(&self) -> usize {
         let (provider, headless) = self.provider();
         if provider == "kimi" { self.chat.waiting(provider, headless) } else { self.chat.queue_panel().entries.len() }
+    }
+
+    /// O que ainda vai entrar na conversa: o painel, ou as bolhas da fila quando são mais (mensagem reservada que
+    /// o Claude ainda não consumiu fica fora do painel). Segura o "implementar plano" e marca a linha.
+    fn pending_count(&self) -> usize {
+        let (provider, headless) = self.provider();
+        self.queued_count().max(self.chat.waiting(provider, headless))
     }
 
     /// O chip "N na fila · mandar agora" ficou só para o Kimi: nos outros, o painel orienta por mensagem.
@@ -3996,7 +4004,7 @@ impl Hangar {
     fn render_plan_bar(&mut self, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (id, plan) = self.codex_plan()?;
         if self.plans_dismissed.contains(&id) || self.chat.ask.is_some() { return None; }
-        let ready = self.chat.state.state == "idle" && self.queued_count() == 0;
+        let ready = self.chat.state.state == "idle" && self.pending_count() == 0;
         let dismiss = id.clone();
         Some(div().py_2().flex().items_center().gap_2().border_t_1().border_color(theme::border())
             .child(div().flex_1().min_w_0().text_sm().child(tr(if ready { "codex_plan_title" } else { "codex_plan_wait" })))
@@ -5355,7 +5363,7 @@ impl Hangar {
         let menu_open = self.sidebar.button_menu.as_ref() == Some(&target);
         let show_menu = hovered || focused || menu_open;
         let outcome = selected.then(|| self.selected_key()).flatten().and_then(|key| self.delivery.outcome(&key));
-        let queued = selected && self.history_installed && self.queued_count() > 0;
+        let queued = selected && self.history_installed && self.pending_count() > 0;
         let state = conversation_row_state(&session, outcome, queued);
         let color = theme::conversation_status(state);
         let status_label = tr(&format!("sidebar_state_{state}"));

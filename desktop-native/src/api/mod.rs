@@ -131,6 +131,14 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            // Comando de barra recusado: com mensagens esperando no painel, a frase própria (o motivo cru não explica
+            // nada); os outros motivos vão dentro da frase compartilhada, como no web.
+            if fields.get("code").and_then(Value::as_str) == Some("erro_comando_nao_executado") {
+                let param = |name: &str| fields.get("params").and_then(|p| p.get(name)).and_then(Value::as_str).unwrap_or("").to_owned();
+                if param("motivo") == "queue_waiting" { return Some(crate::i18n::tr_shared("command_refused_queue_waiting", &[])); }
+                let params = std::collections::HashMap::from([("comando".to_owned(), param("comando")), ("motivo".to_owned(), param("motivo"))]);
+                if let Some(message) = crate::i18n::tr_web("erro_comando_nao_executado", &params) { return Some(message); }
+            }
             // Pergunta sem identidade, trocada ou ilegível: a frase do web no idioma do app, não o `msg` do servidor.
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("claude_") || code.starts_with("erro_interacao_")) {
                 if let Some(message) = crate::i18n::tr_web(code, &std::collections::HashMap::new()) { return Some(message); }
@@ -916,6 +924,16 @@ mod tests {
         assert!(message.contains("test/channel"), "{message}");
         assert!(!message.contains("{branch}"));
         assert_ne!(message, "server fallback");
+    }
+
+    #[test]
+    fn slash_command_refused_with_queued_messages_has_its_own_sentence() {
+        let waiting = failure_detail(Some(json!({"detail": {"code": "erro_comando_nao_executado", "msg": "pt cru",
+            "params": {"comando": "/clear", "motivo": "queue_waiting"}}})), 400);
+        assert_eq!(waiting, crate::i18n::tr_shared("command_refused_queue_waiting", &[]));
+        let other = failure_detail(Some(json!({"detail": {"code": "erro_comando_nao_executado", "msg": "pt cru",
+            "params": {"comando": "/help", "motivo": "keyboard_loan"}}})), 400);
+        assert!(other.contains("/help") && other.contains("keyboard_loan") && !other.contains("{comando}"), "{other}");
     }
 
     #[test]

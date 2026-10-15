@@ -626,13 +626,23 @@ impl Engine {
             w: f32::from(size.width), h: f32::from(size.height), frame_scale, zoom: self.zoom.get() }
     }
 
-    /// Zoom da página em tela cheia. Aplicado na hora, sem a espera do arrasto: o próximo quadro já vem no zoom novo.
+    /// Zoom da página em tela cheia. Aplicado na hora, sem a espera do arrasto; quando a série de cliques assenta, o
+    /// screencast reinicia para mandar o quadro do zoom final.
     pub fn set_zoom(&self, zoom: f32) {
+        let zoom = crate::browser::valid_zoom(zoom);
         if self.zoom.replace(zoom) == zoom { return; }
         // Avança a contagem: um ajuste de arrasto ainda esperando levaria o zoom antigo e desfaria este.
-        self.resizes.set(self.resizes.get() + 1);
+        let turn = self.resizes.get() + 1;
+        self.resizes.set(turn);
         // Escondida, o próximo `place` já aplica o zoom novo; aqui o screencast voltaria sem ninguém olhando.
-        if self.visible.get() && let Some((size, scale)) = self.placed.get() { self.fit(size, scale).apply(true); }
+        if !self.visible.get() { return; }
+        let Some((size, scale)) = self.placed.get() else { return };
+        let fit = self.fit(size, scale);
+        fit.apply(true);
+        // Página parada: o quadro do reinício sai antes do relayout, no zoom anterior, e os que vêm sem confirmação
+        // no meio da série são descartados; nenhum outro chega sozinho. Reiniciar depois de assentar manda o atual.
+        let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
+        self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.restart(); } }).detach();
     }
 
     /// Chamado na pintura da página, a cada quadro visível.
@@ -728,6 +738,7 @@ const RESIZE_SETTLE_MS: u64 = 120;
 
 /// Viewport CSS e densidade com zoom: o quadro continua com os mesmos pixels, a página é que vê menos (ou mais) espaço.
 fn zoomed_metrics(w: f32, h: f32, frame_scale: f32, zoom: f32) -> (u32, u32, f32) {
+    let zoom = crate::browser::valid_zoom(zoom);
     ((w / zoom).round() as u32, (h / zoom).round() as u32, frame_scale * zoom)
 }
 
@@ -756,6 +767,12 @@ impl Fit {
         // PNG: o painel tem que mostrar a página como o navegador mostra; JPEG borrava o texto.
         let params = json!({"format": "png", "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
         drop(session.call("Page.startScreencast", params));
+    }
+
+    /// Para e reabre o screencast com os mesmos parâmetros: o Chromium manda o quadro atual mesmo com a página parada.
+    fn restart(&self) {
+        drop(self.session.call("Page.stopScreencast", json!({})));
+        self.apply(false);
     }
 }
 
@@ -810,6 +827,7 @@ mod tests {
         assert_eq!(super::zoomed_metrics(1000., 600., 2., 1.), (1000, 600, 2.));
         assert_eq!(super::zoomed_metrics(1000., 600., 2., 2.), (500, 300, 4.));
         assert_eq!(super::zoomed_metrics(1000., 600., 2., 0.5), (2000, 1200, 1.));
+        assert_eq!(super::zoomed_metrics(1000., 600., 2., 0.), (1000, 600, 2.), "zoom inválido vale 1");
     }
 
     /// Prova de ponta a ponta com o Chromium da máquina e a GPUI sem janela, num perfil e num HOME descartáveis:

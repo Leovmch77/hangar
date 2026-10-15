@@ -58,6 +58,9 @@ pub struct Starter {
     /// Confirmações de quadro da página da conversa, que voltam ao WebView2 na thread da interface.
     #[cfg(target_os = "windows")]
     executor: ForegroundExecutor,
+    /// Prazos da página da conversa (o reinício do screencast depois do zoom).
+    #[cfg(target_os = "windows")]
+    background: BackgroundExecutor,
 }
 
 impl HasWindowHandle for Starter {
@@ -77,6 +80,8 @@ impl Engine {
             parent: HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw(),
             #[cfg(target_os = "windows")]
             executor: cx.foreground_executor().clone(),
+            #[cfg(target_os = "windows")]
+            background: cx.background_executor().clone(),
         })
     }
 }

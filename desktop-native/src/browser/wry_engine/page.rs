@@ -1,6 +1,6 @@
 //! Página da conversa no Windows: uma WebView2 própria, estacionada fora da área da janela, que o app pinta pelo
 //! screencast (`paint_surface`) e dirige por CDP, como o Chromium sem janela do Linux.
-use std::{cell::Cell, future::Future, rc::Rc, sync::Arc};
+use std::{cell::Cell, future::Future, rc::Rc, sync::Arc, time::Duration};
 
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -16,11 +16,20 @@ pub(super) struct Page {
     pub(super) cdp: Rc<Cdp>,
     pub(super) frames: Arc<Frames>,
     placed: Cell<Option<(Size<Pixels>, f32)>>,
-    visible: Cell<bool>,
+    visible: Rc<Cell<bool>>,
     pressed: Cell<bool>,
     zoom: Cell<f32>,
+    /// O zoom mudou e o próximo `place` agenda o reinício do screencast depois de assentar.
+    zoomed: Cell<bool>,
+    /// Contagem dos reinícios agendados: o de um clique anterior da série desiste.
+    zoom_turn: Rc<Cell<u64>>,
+    executor: ForegroundExecutor,
+    background: BackgroundExecutor,
     _acks: Task<()>,
 }
+
+/// Espera depois do último clique de zoom antes de reiniciar o screencast.
+const ZOOM_SETTLE_MS: u64 = 120;
 
 impl Starter {
     /// Documento do agente posto direto na página. Sem `background` o fundo é transparente; com ele, opaco nessa cor.
@@ -102,7 +111,8 @@ impl Starter {
                 cdp.fire("Page.screencastFrameAck", json!({"sessionId": id}));
             }
         });
-        let page = Page { cdp, frames, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false), zoom: Cell::new(1.), _acks: acks };
+        let page = Page { cdp, frames, placed: Cell::new(None), visible: Rc::default(), pressed: Cell::new(false), zoom: Cell::new(1.),
+            zoomed: Cell::new(false), zoom_turn: Rc::default(), executor: self.executor.clone(), background: self.background.clone(), _acks: acks };
         Ok(Engine {
             view, _context: context, state: Rc::default(), events, placed: Cell::new(None), asleep: Cell::new(false), dead,
             _watch: None, page: Some(page),
@@ -134,7 +144,23 @@ impl Page {
             }) { eprintln!("[pagina] tamanho da WebView2 nao aplicado: {e}"); }
             // Reiniciar sem parar o anterior a WebView2 recusa ("The parameter is incorrect").
             if !first { self.cdp.fire("Page.stopScreencast", json!({})); }
-            self.cdp.fire("Page.startScreencast", json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1}));
+            let screencast = json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1});
+            self.cdp.fire("Page.startScreencast", screencast.clone());
+            if self.zoomed.replace(false) {
+                // Página parada: o quadro do reinício pode sair antes da rasterização nova, e nenhum outro chega sozinho.
+                // Reiniciar depois de assentar manda o do zoom final.
+                let turn = self.zoom_turn.get() + 1;
+                self.zoom_turn.set(turn);
+                let (cdp, turns, visible) = (self.cdp.clone(), self.zoom_turn.clone(), self.visible.clone());
+                let timer = self.background.timer(Duration::from_millis(ZOOM_SETTLE_MS));
+                self.executor.spawn(async move {
+                    timer.await;
+                    if turns.get() == turn && visible.get() {
+                        cdp.fire("Page.stopScreencast", json!({}));
+                        cdp.fire("Page.startScreencast", screencast);
+                    }
+                }).detach();
+            }
         }
         self.frames.seen();
         if let Some(texture) = self.frames.shown() {
@@ -143,9 +169,13 @@ impl Page {
         }
     }
 
-    /// Zoom da página em tela cheia: o próximo `place` refaz a escala e o screencast.
+    /// Zoom da página em tela cheia: o próximo `place` refaz a escala e o screencast. Quem chama pede o quadro novo
+    /// (`cx.notify`), senão o `place` só vem na próxima pintura.
     pub(super) fn set_zoom(&self, zoom: f32) {
-        if self.zoom.replace(zoom) != zoom { self.placed.set(None); }
+        let zoom = crate::browser::valid_zoom(zoom);
+        if self.zoom.replace(zoom) == zoom { return; }
+        self.placed.set(None);
+        self.zoomed.set(true);
     }
 
     /// Fora da tela: sem screencast e sem a textura na GPU.

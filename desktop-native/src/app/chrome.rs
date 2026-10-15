@@ -402,12 +402,13 @@ impl ThinkingFocus {
 struct ThinkingFocusView { label: SharedString, born: Instant, visible: Rc<Cell<bool>> }
 
 impl Render for ThinkingFocusView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (visible, label, born, still) = (self.visible.clone(), self.label.clone(), self.born, cx.reduce_motion());
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (visible, label, born) = (self.visible.clone(), self.label.clone(), self.born);
         canvas(move |bounds, window, _| visible.set(window.content_mask().bounds.intersects(&bounds)),
             move |bounds, _, window, cx| {
-                // Movimento reduzido: só a linha apagada, como o `opacity: 0` do T3.
-                if still { return; }
+                // Movimento reduzido: só a linha apagada, como o `opacity: 0` do T3. Lido a cada quadro: a vista é
+                // guardada (`cached`), e a preferência trocada no meio não chegaria pelo render.
+                if cx.reduce_motion() { return; }
                 let lit = theme::text();
                 let font = Font { family: theme::MONO.into(), ..window.text_style().font() };
                 let (icon, text_at) = thinking_focus_layout(bounds.origin);

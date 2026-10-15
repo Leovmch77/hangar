@@ -24,6 +24,12 @@ pub fn parse(data: &Value) -> Option<QueuePanel> {
     Some(QueuePanel { entries, actions: data.get("actions").and_then(Value::as_bool) == Some(true) })
 }
 
+/// Ids que esperavam e foram apagados noutro aparelho (`removed` do evento): a bolha `queued-<id>` sai daqui também.
+pub fn removed(data: &Value) -> Vec<String> {
+    data.get("removed").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
+        .filter(|id| !id.is_empty()).map(|id| format!("{PREFIX}{id}")).collect()
+}
+
 /// Sem o evento (Pi, omp, Kimi, modo `python`): as bolhas da fila que ainda esperam, sem ações.
 pub fn derived(events: &[ChatEvent]) -> QueuePanel {
     let entries = events.iter().filter(|e| e.kind == "user_msg" && e.id.starts_with(PREFIX) && e.queued_delivered == Some(false)
@@ -98,6 +104,13 @@ mod tests {
         assert_eq!((derived.entries.len(), derived.actions), (1, false));
         assert_eq!(derived.entries[0].id, "a");
         assert_eq!(current(Some(&panel(&["z"])), &[queued("a", Some(false))]).entries[0].id, "z");
+    }
+
+    #[test]
+    fn removed_ids_become_bubble_ids() {
+        let data = serde_json::json!({"entries":[],"actions":true,"removed":["a","",3,"b"]});
+        assert_eq!(removed(&data), vec!["queued-a".to_owned(), "queued-b".to_owned()]);
+        assert!(removed(&serde_json::json!({"entries":[]})).is_empty(), "servidor antigo, sem o campo");
     }
 
     #[test]

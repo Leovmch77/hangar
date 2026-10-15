@@ -56,16 +56,20 @@ pub enum Pointer {
     Move,
 }
 
+/// Zoom que dá para aplicar: zero, negativo, infinito ou NaN viram 1 (dividiriam o viewport por nada).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn valid_zoom(zoom: f32) -> f32 { if zoom.is_finite() && zoom > 0. { zoom } else { 1. } }
+
 /// Ponto da tela (px lógicos, relativo à página) em px CSS da página ampliada: com zoom, ela vê `1/zoom` do espaço.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn unzoom(p: gpui_kit::Point<gpui_kit::Pixels>, zoom: f32) -> gpui_kit::Point<gpui_kit::Pixels> {
-    let z = if zoom > 0. { zoom } else { 1. };
+    let z = valid_zoom(zoom);
     gpui_kit::point(gpui_kit::px(f32::from(p.x) / z), gpui_kit::px(f32::from(p.y) / z))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::unzoom;
+    use super::{unzoom, valid_zoom};
     use gpui_kit::{point, px};
 
     #[test]
@@ -73,5 +77,11 @@ mod tests {
         assert_eq!(unzoom(point(px(200.), px(100.)), 2.), point(px(100.), px(50.)));
         assert_eq!(unzoom(point(px(200.), px(100.)), 0.5), point(px(400.), px(200.)));
         assert_eq!(unzoom(point(px(7.), px(9.)), 0.), point(px(7.), px(9.)), "zoom inválido não divide por zero");
+    }
+
+    #[test]
+    fn invalid_zoom_is_one() {
+        for bad in [0., -1., f32::NAN, f32::INFINITY] { assert_eq!(valid_zoom(bad), 1.); }
+        assert_eq!(valid_zoom(1.5), 1.5);
     }
 }
