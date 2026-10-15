@@ -12,6 +12,7 @@ pub mod hub;
 pub mod links;
 pub mod mux;
 pub mod plan;
+pub mod plugin_tools;
 pub mod procs;
 pub mod reply;
 pub mod shadow;

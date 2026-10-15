@@ -232,6 +232,7 @@ pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>,
     let jsonl = row.jsonl.clone().filter(|_| row.tracked);
     apply_location(row, locate(provider, row.cwd.as_deref(), jsonl.as_deref(), dirs, problems));
     fill_links(row, dirs, problems);
+    if !matches!(provider, "pi" | "omp" | "kimi" | "codex") { fill_plugin_tools(row, jsonl.as_deref()); }
     if matches!(provider, "pi" | "omp" | "kimi" | "codex") {
         row.provider = provider.to_owned();
     }
@@ -263,6 +264,12 @@ pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>,
 pub fn fill_location(row: &mut SessionRow, provider: &str, dirs: &Dirs, problems: &mut Problems) {
     let loc = locate(provider, row.cwd.as_deref(), row.jsonl.as_deref(), dirs, problems);
     apply_location(row, loc);
+}
+
+/// Servidores de plugin do transcript da sessão Claude; sem transcript próprio, nenhum.
+pub fn fill_plugin_tools(row: &mut SessionRow, jsonl: Option<&str>) {
+    row.plugin_tool_servers = jsonl.filter(|j| !j.is_empty())
+        .map(|j| super::plugin_tools::plugin_tool_servers(Path::new(j))).unwrap_or_default();
 }
 
 fn apply_location(row: &mut SessionRow, loc: Location) {
