@@ -51,8 +51,6 @@ async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate
         .map_err(|_| failure("account_busy"))
 }
 
-/// Entrada aberta de uma sessão, achada por nome, para as rotas de escrita do Rust.
-#[allow(dead_code)] // o `handle` é lido pelas rotas de escrita que entram depois
 /// Retrato do ator em até 1 s: `None` no prazo esgotado, `Some(false)` doente ou fora.
 async fn probe(handle:&EntryHandle) -> Option<bool> {
     match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
@@ -61,6 +59,8 @@ async fn probe(handle:&EntryHandle) -> Option<bool> {
         Err(_)=>None,
     }
 }
+/// Entrada aberta de uma sessão, achada por nome, para as rotas de escrita do Rust.
+#[allow(dead_code)] // o `handle` é lido pelas rotas de escrita que entram depois
 pub struct WriteTarget { pub key:String,pub generation:u64,pub provider:String,pub terminal:bool,pub healthy:bool,pub(crate) handle:EntryHandle }
 
 /// Prazo do fechamento da porta: abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.

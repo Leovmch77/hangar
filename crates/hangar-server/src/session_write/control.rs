@@ -534,35 +534,47 @@ pub async fn queue_steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 /// Claude e Codex sem terminal, e Codex com terminal: o turno é do processo. Com turno, `SteerQueue` só desta
 /// entrada; sem turno (ou ele acabou no meio), ela vai para a frente e sai na entrega comum.
 async fn queue_steer_runtime(handle: &EntryHandle, entry_id: &str) -> Answer {
-    // A orientação aceita que voltou à fila: ela vai para a frente, mas não entrou no turno.
     let mut returned = false;
     if handle.view().await.is_ok_and(|view| view["in_progress"] == true) {
         let sent = handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::SteerQueue,
             payload: json!({"entry_id": entry_id}) }).await;
-        match &sent {
-            Ok(reply) if reply.disposition == Disposition::Accepted => {
-                // Fora de `ids`: ou ela já não esperava, ou a orientação dela voltou à fila; o `Promote` separa os dois.
-                if reply.payload["ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == entry_id)) { return steered(true); }
-                returned = true;
-            }
-            Ok(reply) if payload_code(reply) == Some("steer_question_open") => return queue_refused("queue_steer_question_open", MSG_STEER_QUESTION),
-            Ok(reply) if payload_code(reply) == Some("steer_no_turn") => {}
-            Ok(reply) if reply.disposition == Disposition::Unknown => return queue_refused("queue_steer_uncertain", MSG_STEER_UNCERTAIN),
-            Ok(_) => return queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED),
-            Err(error) => return runtime_failed(error),
+        match steer_in_turn(&sent, entry_id) {
+            Ok(answer) => return answer,
+            Err(back) => returned = back,
         }
     }
-    match handle.queue(random_hex(16), Action::Promote { entry_id: entry_id.into() }).await {
-        Ok(moved) if moved == json!("moved") => {}
-        Ok(_) => return queue_gone(),
-        Err(error) => return runtime_failed(&error),
-    }
+    let moved = handle.queue(random_hex(16), Action::Promote { entry_id: entry_id.into() }).await;
+    let after = match steer_after_promote(&moved, returned) { Ok(after) => after, Err(answer) => return answer };
     // Sem entregar agora (pergunta aberta, processo subindo), ela fica na frente: a próxima rodada a leva.
     if let Err(error) = handle.drain().await {
         tracing::warn!(code = %error.code, "orientar sem turno: a drenagem não rodou; a entrada ficou na frente");
     }
-    if returned { return queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED); }
-    steered(false)
+    after
+}
+
+/// A resposta do `SteerQueue` no meio do turno: `Ok` encerra a rota; `Err` segue ao `Promote`, com `true` quando a
+/// orientação foi aceita mas a entrada voltou à fila (fora de `ids`) e `false` quando não havia turno.
+pub fn steer_in_turn(sent: &Result<RuntimeReply, RuntimeError>, entry_id: &str) -> Result<Answer, bool> {
+    match sent {
+        // Fora de `ids`: ou ela já não esperava, ou a orientação dela voltou à fila; o `Promote` separa os dois.
+        Ok(reply) if reply.disposition == Disposition::Accepted =>
+            if reply.payload["ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == entry_id)) { Ok(steered(true)) } else { Err(true) },
+        Ok(reply) if payload_code(reply) == Some("steer_question_open") => Ok(queue_refused("queue_steer_question_open", MSG_STEER_QUESTION)),
+        Ok(reply) if payload_code(reply) == Some("steer_no_turn") => Err(false),
+        Ok(reply) if reply.disposition == Disposition::Unknown => Ok(queue_refused("queue_steer_uncertain", MSG_STEER_UNCERTAIN)),
+        Ok(_) => Ok(queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED)),
+        Err(error) => Ok(runtime_failed(error)),
+    }
+}
+
+/// Depois do `Promote`: `Err` responde já (a entrada sumiu, ou a fila falhou); `Ok` é a resposta depois da drenagem.
+/// A orientação aceita que voltou à fila foi para a frente, mas não entrou no turno: `queue_steer_not_delivered`.
+pub fn steer_after_promote(moved: &Result<Value, RuntimeError>, returned: bool) -> Result<Answer, Answer> {
+    match moved {
+        Ok(moved) if moved == "moved" => Ok(if returned { queue_refused("queue_steer_not_delivered", MSG_STEER_NOT_DELIVERED) } else { steered(false) }),
+        Ok(_) => Err(queue_gone()),
+        Err(error) => Err(runtime_failed(error)),
+    }
 }
 
 #[cfg(test)]

@@ -156,6 +156,22 @@ fn a_failed_runtime_has_a_code_and_never_a_forward() {
     assert_eq!(queue_answer(&Err(RuntimeError::new("runtime_closed", "ator saiu"))).0, StatusCode::BAD_GATEWAY);
 }
 
+#[test]
+fn headless_steer_that_fell_back_to_promote_during_the_turn_is_not_delivered() {
+    let accepted = |ids: Value| Ok(RuntimeReply { operation_id: "op".into(), disposition: Disposition::Accepted, payload: json!({"ids": ids}) });
+    assert_eq!(steer_in_turn(&accepted(json!(["a"])), "a").unwrap(), (StatusCode::OK, json!({"ok": true, "steered": true})));
+    // Aceita, mas a entrada voltou à fila: segue ao Promote marcada como devolvida.
+    assert_eq!(steer_in_turn(&accepted(json!(["outra"])), "a"), Err(true));
+    let no_turn = Ok(RuntimeReply { operation_id: "op".into(), disposition: Disposition::Rejected, payload: json!({"code": "steer_no_turn"}) });
+    assert_eq!(steer_in_turn(&no_turn, "a"), Err(false));
+    // Devolvida e posta na frente: não entrou no turno.
+    let (status, body) = steer_after_promote(&Ok(json!("moved")), true).unwrap();
+    assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::CONFLICT, Some("queue_steer_not_delivered")));
+    // Sem turno (ou ele acabou no meio): vai para a frente e sai na entrega comum.
+    assert_eq!(steer_after_promote(&Ok(json!("moved")), false).unwrap(), (StatusCode::OK, json!({"ok": true, "steered": false})));
+    assert_eq!(steer_after_promote(&Ok(json!("absent")), true).unwrap_err().1["detail"]["code"], "queue_entry_gone");
+}
+
 // ── a rota inteira ──────────────────────────────────────────────────────────────────────────────
 
 async fn cano(sink: Arc<std::sync::Mutex<Vec<Value>>>) -> String {

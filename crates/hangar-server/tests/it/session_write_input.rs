@@ -333,6 +333,26 @@ async fn deferred_submit_with_steer_promotes_that_very_entry() {
     assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
+#[test]
+fn steer_without_body_that_steered_an_entry_keeps_the_fields_old_clients_read() {
+    use hangar_server::runtime::protocol::Disposition;
+    let r = |disposition, payload: Value| Ok(RuntimeReply { operation_id: OP.into(), disposition, payload });
+    // Sem `entry_id`: nada esperava no Hangar, e a rota segue o caminho de antes.
+    assert!(steer_first_answer(&r(Disposition::Accepted, json!({"promoted": true}))).is_none());
+    assert!(steer_first_answer(&Err(RuntimeError::new("terminal_io", "x"))).is_none());
+    let (status, body) = steer_first_answer(&r(Disposition::Accepted, json!({"steered": true, "drained": 1, "entry_id": "a"}))).unwrap();
+    assert_eq!((status.as_u16(), body),
+        (200, json!({"ok": true, "steered": true, "promoted": false, "confirmed": 1, "queued_ids": ["a"]})));
+    // Parado e sem entregar agora: ficou na frente, nada confirmado; nunca `promoted: true`.
+    let (_, body) = steer_first_answer(&r(Disposition::Accepted, json!({"steered": false, "drained": 0, "entry_id": "a"}))).unwrap();
+    assert_eq!((body["promoted"].clone(), body["confirmed"].clone(), body["queued_ids"].clone()), (json!(false), json!(0), json!(["a"])));
+    // Parado e entregue na hora: conta como confirmada.
+    let (_, body) = steer_first_answer(&r(Disposition::Accepted, json!({"steered": false, "drained": 1, "entry_id": "a"}))).unwrap();
+    assert_eq!(body["confirmed"], 1);
+    let (status, body) = steer_first_answer(&r(Disposition::Deferred, json!({"code": "queue_steer_not_delivered", "entry_id": "a"}))).unwrap();
+    assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (409, Some("queue_steer_not_delivered")));
+}
+
 #[tokio::test]
 async fn headless_steer_with_text_is_served_in_rust() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);

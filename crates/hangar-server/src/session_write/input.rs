@@ -166,6 +166,23 @@ pub fn steer_terminal_control(control: &Result<RuntimeReply, RuntimeError>) -> R
     }
 }
 
+/// `/steer` sem corpo que orientou uma entrada do Hangar (`steer_first` com `entry_id`): a resposta é a do
+/// Orientar, mais os campos que o chip de app antigo lê. Nunca `promoted: true`: o app antigo tiraria todas as
+/// bolhas da fila. `confirmed` conta a que saiu agora (orientada ou entregue com o Claude parado); `None` é o
+/// caminho de antes, sem entrada esperando.
+pub fn steer_first_answer(control: &Result<RuntimeReply, RuntimeError>) -> Option<(StatusCode, Value)> {
+    let entry = control.as_ref().ok()?.payload.get("entry_id")?.clone();
+    let (status, mut body) = super::control::queue_steer_terminal(control);
+    if status == StatusCode::OK {
+        let payload = &control.as_ref().ok()?.payload;
+        let sent = payload["steered"] == true || payload["drained"].as_u64().is_some_and(|n| n > 0);
+        body["promoted"] = json!(false);
+        body["confirmed"] = json!(u64::from(sent));
+        body["queued_ids"] = json!([entry]);
+    }
+    Some((status, body))
+}
+
 /// 2ª metade: a contagem de entregas que o `confirm` baixou da fila.
 pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>) -> (StatusCode, Value) {
     match confirm {
@@ -415,13 +432,12 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
             // Só o Kimi promove com texto; no Claude com terminal o corpo é ignorado. Com mensagem esperando no
             // Hangar, ela é orientada (a primeira); sem nenhuma, promove a fila do Claude Code.
             let control = handle.control(operation_id, "steer_first".into(), json!({})).await;
-            if control.as_ref().is_ok_and(|reply| reply.payload.get("entry_id").is_some()) {
-                super::control::queue_steer_terminal(&control)
-            } else {
-                match steer_terminal_control(&control) {
+            match steer_first_answer(&control) {
+                Some(answered) => answered,
+                None => match steer_terminal_control(&control) {
                     Err(refused) => refused,
                     Ok(promoted) => steer_terminal_done(promoted, &handle.confirm().await),
-                }
+                },
             }
         }
         headless => {
