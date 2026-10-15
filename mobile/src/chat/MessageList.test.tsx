@@ -59,7 +59,8 @@ const discardButtons = (container: HTMLElement) => [...container.querySelectorAl
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
   // B está ativo, mas o chat abaixo é de A.
-  configureApi({ getBaseUrl: () => servers.servers[1].baseUrl, getToken: () => 'token-b', onUnauthorized: () => {}, origin: null });
+  configureApi({ getBaseUrl: () => servers.servers[1].baseUrl, getToken: () => 'token-b', onUnauthorized: () => {}, origin: null,
+    createEventSource: () => { throw new Error('unexpected SSE'); } });
 });
 afterEach(() => {
   act(() => { for (const root of roots.splice(0)) root.unmount(); });

@@ -2,7 +2,7 @@
 import { act, createElement, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, recarregarSessao, setPermissionMode, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
+import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -66,6 +66,7 @@ vi.mock('expo-router', () => ({
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   fetchSessionsForServer: vi.fn(async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }]),
+  fetchDictationOrganization: vi.fn(async () => 'on'),
   interrupt: vi.fn(async () => {}),
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
@@ -162,7 +163,13 @@ vi.mock('react-native-mmkv', () => ({
     getNumber: () => undefined, getBoolean: () => undefined, contains: (key: string) => storage.memory.has(key),
   }),
 }));
-beforeEach(() => { storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; voiceInput.simulateRecorder = false; });
+beforeEach(() => {
+  storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; voiceInput.simulateRecorder = false;
+  realFirstInput.upload.mockReset().mockResolvedValue({ path: '/up/sess/ditado-1.m4a' });
+  _limparEsfriamentoParaTestes();
+  _resetRotasForTests();
+});
+afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
 const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {} }));
 
@@ -646,10 +653,10 @@ describe('linha de botões do Composer', () => {
     act(() => root.unmount());
   });
 
-  it('trabalhando com texto sem terminal: a linha não muda — sem Orientar, com microfone e chip', async () => {
+  it('trabalhando com texto sem terminal: mostra Orientar, microfone, chip e Enviar', async () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {}, queuePanel: noQueue }));
-    expect(container.querySelector('[aria-label="codex_orientar"]')).toBeNull();
+    expect(container.querySelector('[aria-label="codex_orientar"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_gravar_audio"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_session_settings"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();

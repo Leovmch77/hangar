@@ -578,7 +578,7 @@ test('descartar usa ID cru e servidor da rota, espera ACK e recompõe o índice 
   expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-raw/id', 'raw/id', 'queued-b']);
   await chat.discardQueued('b');
   expect(requests).toHaveLength(1);
-  requests[0].responder(null);
+  requests[0].responder({ ok: true });
   await discard;
   expect(chat.use.getState().queueBusy).toBe(false);
   expect(chat.use.getState().events.map((e) => e.id)).toEqual(['raw/id', 'queued-b']);
@@ -928,7 +928,7 @@ describe('send vai ao servidor da conversa', () => {
 type Pedido = {
   url: string;
   init?: RequestInit;
-  responder: (body: ChatEvent[] | null, opts?: { status?: number; etag?: string }) => void;
+  responder: (body: ChatEvent[] | { ok: boolean } | null, opts?: { status?: number; etag?: string }) => void;
 };
 
 // fetch que só responde quando o teste manda: permite resposta atrasada chegar fora de ordem.

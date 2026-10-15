@@ -999,10 +999,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error()); }
   }, [dictation, origin]);
 
-  // Ditado que voltou com a conversa fora da tela entra sozinho no fim do rascunho intacto.
+  // Ditado que voltou fora da tela só entra no rascunho intacto com a conversa ativa e em foco.
   // `transcribing` nas dependências: o aviso do fim do POST chega antes de esta tela soltar a trava.
   useEffect(() => {
-    if (blockedRef.current || transcribingRef.current) return;
+    if (!mountedRef.current || !activeRef.current || !navigation.isFocused() || blockedRef.current || transcribingRef.current) return;
     if (textRef.current !== (draftRef.current?.text ?? '')) return;
     try {
       const before = textRef.current.trim();
@@ -1014,7 +1014,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
     }
-  }, [draftUpdate, transcript, transcribing, origin, adoptDictation, cancelVoiceSend]);
+  }, [draftUpdate, transcript, transcribing, origin, adoptDictation, cancelVoiceSend, navigation]);
 
   const handleSteer = useCallback(async () => {
     if (steeringRef.current) return;
