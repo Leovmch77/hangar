@@ -232,9 +232,10 @@ pub fn fill_pane_row(row: &mut SessionRow, provider: &str, pid_env: Option<i64>,
     let jsonl = row.jsonl.clone().filter(|_| row.tracked);
     apply_location(row, locate(provider, row.cwd.as_deref(), jsonl.as_deref(), dirs, problems));
     fill_links(row, dirs, problems);
-    if !matches!(provider, "pi" | "omp" | "kimi" | "codex") { fill_plugin_tools(row, jsonl.as_deref()); }
     if matches!(provider, "pi" | "omp" | "kimi" | "codex") {
         row.provider = provider.to_owned();
+    } else {
+        fill_plugin_tools(row, jsonl.as_deref());
     }
     row.engine = pid_env.and_then(|p| env(procs, p, "CP_ENGINE"));
     row.engine_account = match (pid_env, &row.engine) {

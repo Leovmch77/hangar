@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::StatusCode;
+use axum::http::request::Parts;
+use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
@@ -276,12 +277,39 @@ fn queue_gone() -> Answer { (StatusCode::CONFLICT, detail_body("queue_entry_gone
 fn queue_refused(code: &str, msg: &str) -> Answer { (StatusCode::CONFLICT, detail_body(code, msg, json!({}))) }
 fn steered(value: bool) -> Answer { (StatusCode::OK, json!({"ok": true, "steered": value})) }
 
-/// Id da entrada em `/api/sessions/{n}/queue/{id}` (ou `…/{id}/steer`, com `steer`), sem o escape.
-pub(crate) fn queue_entry(path: &str, steer: bool) -> Option<String> {
-    let segments: Vec<&str> = path.trim_start_matches("/api/sessions/").split('/').collect();
-    let shape = if steer { segments.len() == 4 && segments[3] == "steer" } else { segments.len() == 3 };
-    (shape && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten()
-        .filter(|id| !id.is_empty()).map(|id| id.into_owned())
+/// Rota do painel da fila em `tail` (o que vem depois de `/api/sessions/{n}/`), com o id ainda escapado.
+/// `reorder` só é caminho fixo no `POST`: no `DELETE` e no `PATCH` vale como o id de mesmo nome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueueRoute<'a> { Remove(&'a str), Edit(&'a str), Reorder, Steer(&'a str) }
+
+pub(crate) fn queue_route<'a>(method: &Method, tail: &'a str) -> Option<QueueRoute<'a>> {
+    let rest = tail.strip_prefix("queue/")?;
+    let id = |id: &'a str| (!id.is_empty() && !id.contains('/')).then_some(id);
+    match *method {
+        Method::DELETE => id(rest).map(QueueRoute::Remove),
+        Method::PATCH => id(rest).map(QueueRoute::Edit),
+        Method::POST if rest == "reorder" => Some(QueueRoute::Reorder),
+        Method::POST => rest.strip_suffix("/steer").and_then(id).map(QueueRoute::Steer),
+        _ => None,
+    }
+}
+
+/// O handler da rota da fila, para as pontes que já a reconheceram.
+pub(crate) async fn queue_dispatch(route: QueueRoute<'_>, st: Arc<AppState>, peer: SocketAddr, req: Request) -> Response {
+    let (s, c) = (State(st), ConnectInfo(peer));
+    match route {
+        QueueRoute::Remove(_) => queue_remove(s, c, req).await,
+        QueueRoute::Edit(_) => queue_edit(s, c, req).await,
+        QueueRoute::Reorder => queue_reorder(s, c, req).await,
+        QueueRoute::Steer(_) => queue_steer(s, c, req).await,
+    }
+}
+
+/// Id da entrada no caminho do pedido (`…/queue/{id}` ou `…/queue/{id}/steer`), sem o escape.
+fn queue_entry(parts: &Parts) -> Option<String> {
+    let tail = parts.uri.path().strip_prefix("/api/sessions/")?.split_once('/')?.1;
+    let (QueueRoute::Remove(raw) | QueueRoute::Edit(raw) | QueueRoute::Steer(raw)) = queue_route(&parts.method, tail)? else { return None };
+    percent_decode_str(raw).decode_utf8().ok().map(|id| id.into_owned())
 }
 
 /// `{"text": texto}`, só esse campo.
@@ -455,7 +483,7 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(entry_id) = queue_entry(ctx.parts.uri.path(), false) else { return invalid_body(ctx.headers()) };
+    let Some(entry_id) = queue_entry(&ctx.parts) else { return invalid_body(ctx.headers()) };
     // O X do painel só tira a que espera: entrega incerta nunca vira desistência por ele.
     let only_waiting = match crate::auth::query_param(ctx.parts.uri.query(), "only_waiting").as_deref() {
         None => false,
@@ -463,7 +491,7 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
         Some(_) => return invalid_body(ctx.headers()),
     };
     let cancelled = ctx.target.handle.queue(random_hex(16), Action::Cancel { entry_id: entry_id.clone() }).await;
-    if let (false, Err(failure)) = (only_waiting, &cancelled) {
+    if !only_waiting && let Err(failure) = &cancelled {
         tracing::warn!(session = %ctx.name, code = %failure.code, "descarte: o cancelamento falhou; tenta tirar a linha");
     }
     if only_waiting || matches!(cancelled, Ok(ref done) if *done == json!("cancelled")) {
@@ -493,7 +521,7 @@ pub async fn queue_edit(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (Some(entry_id), Some(text)) = (queue_entry(ctx.parts.uri.path(), false), parse_queue_text(&bytes).filter(|_| json_content_type(ctx.headers())))
+    let (Some(entry_id), Some(text)) = (queue_entry(&ctx.parts), parse_queue_text(&bytes).filter(|_| json_content_type(ctx.headers())))
         else { return invalid_body(ctx.headers()) };
     if !queue_text_ok(&text) {
         return answer(&ctx, (StatusCode::UNPROCESSABLE_ENTITY, detail_body("queue_text_invalid", MSG_QUEUE_TEXT, json!({}))));
@@ -517,7 +545,7 @@ pub async fn queue_steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(entry_id) = queue_entry(ctx.parts.uri.path(), true) else { return invalid_body(ctx.headers()) };
+    let Some(entry_id) = queue_entry(&ctx.parts) else { return invalid_body(ctx.headers()) };
     // Corpo vazio ou `{}`: nada além do id do caminho.
     if !bytes.is_empty() && serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.as_object().map(|o| o.is_empty())) != Some(true) {
         return invalid_body(ctx.headers());
@@ -605,10 +633,26 @@ mod tests {
 
     #[test]
     fn queue_entry_comes_from_the_path() {
-        assert_eq!(queue_entry("/api/sessions/s/queue/a%2Fb", false), Some("a/b".into()));
-        assert_eq!(queue_entry("/api/sessions/s/queue/a/steer", true), Some("a".into()));
-        assert_eq!(queue_entry("/api/sessions/s/queue/a/steer", false), None);
-        assert_eq!(queue_entry("/api/sessions/s/queue/", false), None);
+        let parts = |method: Method, path: &str| Request::builder().method(method).uri(path).body(()).unwrap().into_parts().0;
+        assert_eq!(queue_entry(&parts(Method::DELETE, "/api/sessions/s/queue/a%2Fb")), Some("a/b".into()));
+        assert_eq!(queue_entry(&parts(Method::POST, "/api/sessions/s/queue/a/steer")), Some("a".into()));
+        assert_eq!(queue_entry(&parts(Method::PATCH, "/api/sessions/s/queue/a/steer")), None);
+        assert_eq!(queue_entry(&parts(Method::DELETE, "/api/sessions/s/queue/")), None);
+        assert_eq!(queue_entry(&parts(Method::POST, "/api/sessions/s/queue/reorder")), None);
+    }
+
+    #[test]
+    fn queue_route_is_strict() {
+        use QueueRoute::*;
+        assert_eq!(queue_route(&Method::DELETE, "queue/e1"), Some(Remove("e1")));
+        assert_eq!(queue_route(&Method::DELETE, "queue/reorder"), Some(Remove("reorder")));
+        assert_eq!(queue_route(&Method::PATCH, "queue/e1"), Some(Edit("e1")));
+        assert_eq!(queue_route(&Method::POST, "queue/reorder"), Some(Reorder));
+        assert_eq!(queue_route(&Method::POST, "queue/e1/steer"), Some(Steer("e1")));
+        for (method, tail) in [(Method::POST, "queue/e1"), (Method::DELETE, "queue/a/b"), (Method::PATCH, "queue/"),
+            (Method::POST, "queue//steer"), (Method::POST, "queue/a/b/steer"), (Method::GET, "queue/e1"), (Method::DELETE, "input")] {
+            assert_eq!(queue_route(&method, tail), None, "{method} {tail}");
+        }
     }
 
     #[test]

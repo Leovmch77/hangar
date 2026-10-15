@@ -167,7 +167,7 @@ fn ts_of_obj(obj: &Map<String, Value>) -> f64 {
 }
 
 /// `_transcript_start_ts` (pqueue.py:258) com o `or 0.0` de quem só poda.
-fn transcript_start_ts(path: &Path) -> f64 {
+pub(crate) fn transcript_start_ts(path: &Path) -> f64 {
     let Ok(f) = File::open(path) else { return 0.0 };
     let mut rd = BufReader::new(f);
     let mut raw = Vec::new();
@@ -398,8 +398,8 @@ fn merge_queue(path: &Path, p: &mut Parsed) -> io::Result<()> {
 
 /// O painel da fila: as entradas que esperam a vez no Hangar, na ordem da fila. A regra de esperar é a da fila
 /// (`row_waits`); o recorte de conversa é o do `/history` (texto vazio fora, de antes da conversa atual fora).
-pub(crate) fn queue_panel_entries(queue: &Path, jsonl: &Path) -> io::Result<QueuePanel> {
-    let start_ts = transcript_start_ts(jsonl);
+/// `start_ts` é o `transcript_start_ts` da conversa.
+pub(crate) fn queue_panel_entries(queue: &Path, start_ts: f64) -> io::Result<QueuePanel> {
     let rows = load_queue(queue)?;
     let present = rows.iter().map(|entry| entry.get("id").map_or_else(|| "None".to_string(), py::py_str)).collect();
     let entries = rows
@@ -429,7 +429,8 @@ pub(crate) struct QueuePanel {
     pub present: std::collections::HashSet<String>,
 }
 
-fn stamp(path: &Path) -> Option<String> {
+/// Tamanho e mtime: muda a cada escrita do arquivo.
+pub(crate) fn stamp(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
     Some(format!("{}.{mtime}", meta.len()))
@@ -477,7 +478,7 @@ mod tests {
             serde_json::json!({"id":"blank","text":"  ","ts":start + 7.0,"delivered":false}),
         ];
         std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
-        let panel = queue_panel_entries(&queue, &jsonl).unwrap();
+        let panel = queue_panel_entries(&queue, start).unwrap();
         let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["b", "a"], "a ordem é a da fila, não a do relógio");
         assert_eq!(panel.entries[0], serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0}));
@@ -493,7 +494,7 @@ mod tests {
             serde_json::json!({"id":"a","text":"primeira","ts":6.0,"delivered":false}),
         ];
         std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
-        let panel = queue_panel_entries(&queue, &jsonl).unwrap();
+        let panel = queue_panel_entries(&queue, transcript_start_ts(&jsonl)).unwrap();
         let ids: Vec<&str> = panel.entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["a"], "a saída local não é mensagem esperando");
     }
@@ -501,7 +502,7 @@ mod tests {
     #[test]
     fn queue_panel_of_a_missing_queue_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), &dir.path().join("t.jsonl")).unwrap().entries.is_empty());
+        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), transcript_start_ts(&dir.path().join("t.jsonl"))).unwrap().entries.is_empty());
     }
 
     #[test]

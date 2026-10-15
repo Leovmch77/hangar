@@ -19,7 +19,7 @@ struct Scan { offset: u64, servers: Vec<String> }
 static SCANS: LazyLock<Mutex<Capped<PathBuf, Scan>>> = LazyLock::new(Default::default);
 
 /// O nome como o Claude Code o põe em `mcp__<nome>__<ferramenta>`.
-pub fn tool_name_server(name: &str) -> String {
+fn tool_name_server(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
@@ -36,7 +36,7 @@ fn plugin_block(block: &str) -> Option<&str> {
 }
 
 /// Um anexo `mcp_instructions_delta`: o que saiu ou foi trocado deixa de contar; o que entrou conta se for de plugin.
-pub fn apply_delta(servers: &mut Vec<String>, attachment: &Map<String, Value>) {
+fn apply_delta(servers: &mut Vec<String>, attachment: &Map<String, Value>) {
     for name in strings(attachment, "removedNames").chain(strings(attachment, "addedNames")) {
         let name = tool_name_server(name);
         servers.retain(|s| *s != name);
@@ -72,12 +72,14 @@ fn read_from(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
 /// só o que ele ganhou. Arquivo menor que o já lido foi trocado e é relido do começo.
 pub fn plugin_tool_servers(path: &Path) -> Vec<String> {
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else { return Vec::new() };
-    let cached = SCANS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned().filter(|s| s.offset <= len);
-    let mut scan = cached.clone().unwrap_or_default();
+    let cached = |scans: &mut Capped<PathBuf, Scan>| scans.get(path).filter(|s| s.offset <= len).cloned();
+    let mut scan = cached(&mut SCANS.lock().unwrap_or_else(|e| e.into_inner())).unwrap_or_default();
     if scan.offset < len {
         // Fora do cadeado: a primeira leitura de um transcript grande não segura as outras linhas. Leitura que
-        // falhou no meio aplicou parte dos anexos: vale o que o cache já tinha.
-        if read_from(path, &mut scan).is_err() { return cached.map(|s| s.servers).unwrap_or_default(); }
+        // falhou no meio aplicou parte dos anexos: vale o que o cache tem.
+        if read_from(path, &mut scan).is_err() {
+            return cached(&mut SCANS.lock().unwrap_or_else(|e| e.into_inner())).map(|s| s.servers).unwrap_or_default();
+        }
         SCANS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), scan.clone());
     }
     scan.servers

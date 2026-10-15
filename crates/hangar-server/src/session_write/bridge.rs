@@ -45,11 +45,9 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
-    let queue = rest.strip_prefix("queue/").filter(|tail| !tail.is_empty());
-    let allowed = match *req.method() {
-        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode")
-            || queue.is_some_and(|tail| tail == "reorder" || tail.strip_suffix("/steer").is_some_and(|id| !id.is_empty() && !id.contains('/'))),
-        Method::PATCH | Method::DELETE => queue.is_some_and(|tail| !tail.contains('/')),
+    let queue = control::queue_route(req.method(), &rest);
+    let allowed = queue.is_some() || match *req.method() {
+        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
@@ -57,18 +55,14 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+    if let Some(route) = queue { return control::queue_dispatch(route, st, peer, req).await; }
     let (s, c) = (State(st), ConnectInfo(peer));
-    let method = req.method().clone();
-    match (method, rest.as_str()) {
-        (Method::POST, "answer") => answer::answer(s, c, req).await,
-        (Method::POST, "select") => control::select(s, c, req).await,
-        (Method::POST, "permission-mode") => permissions::set_mode(s, c, req).await,
-        (Method::GET, "permission-modes") => permissions::modes(s, c, req).await,
-        (Method::POST, "select/submit") => control::select_submit(s, c, req).await,
-        (Method::POST, "queue/reorder") => control::queue_reorder(s, c, req).await,
-        (Method::POST, _) => control::queue_steer(s, c, req).await,
-        (Method::PATCH, _) => control::queue_edit(s, c, req).await,
-        _ => control::queue_remove(s, c, req).await,
+    match rest.as_str() {
+        "answer" => answer::answer(s, c, req).await,
+        "select" => control::select(s, c, req).await,
+        "permission-mode" => permissions::set_mode(s, c, req).await,
+        "permission-modes" => permissions::modes(s, c, req).await,
+        _ => control::select_submit(s, c, req).await,
     }
 }
 
@@ -170,6 +164,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 /// As rotas que o Rust atende para o Codex dele; outra cai no Python (421).
 async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str, req: Request) -> Response {
     use super::{answer, codex, control, input, relaunch};
+    if let Some(route) = control::queue_route(req.method(), rest) { return control::queue_dispatch(route, st, peer, req).await; }
     let (s, c) = (State(st), ConnectInfo(peer));
     match (method, rest) {
         ("POST", "input") => input::input(s, c, req).await,
@@ -180,10 +175,6 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "answer") => answer::answer(s, c, req).await,
         ("POST", "keys") => control::keys(s, c, req).await,
         ("POST", "term-input") => control::term_input(s, c, req).await,
-        ("DELETE", queue) if queue.starts_with("queue/") => control::queue_remove(s, c, req).await,
-        ("PATCH", queue) if queue.starts_with("queue/") => control::queue_edit(s, c, req).await,
-        ("POST", "queue/reorder") => control::queue_reorder(s, c, req).await,
-        ("POST", queue) if queue.starts_with("queue/") && queue.ends_with("/steer") => control::queue_steer(s, c, req).await,
         ("GET", "models") => codex::models(s, c, req).await,
         ("POST", "model") => codex::model(s, c, req).await,
         ("POST", "service-tier") => codex::service_tier(s, c, req).await,

@@ -3754,25 +3754,16 @@ async def descartar_da_fila(name: str, entry_id: str):
     return {"ok": True}
 
 
-def _queue_unavailable():
+async def _queue_unavailable():
     # Só chega aqui quem o Rust não atende: Pi, omp e Kimi, ou o processo no modo `python`.
     raise HTTPException(409, erro("queue_action_unavailable", "esta sessão não permite mexer na fila agora"))
 
 
 # As três rotas do painel só existem para o repasse do `_codex_rust_port` (convite e Connect) ao Rust.
-@app.patch("/api/sessions/{name}/queue/{entry_id}", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
-async def queue_edit(name: str, entry_id: str):
-    _queue_unavailable()
-
-
-@app.post("/api/sessions/{name}/queue/reorder", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
-async def queue_reorder(name: str):
-    _queue_unavailable()
-
-
-@app.post("/api/sessions/{name}/queue/{entry_id}/steer", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
-async def queue_steer(name: str, entry_id: str):
-    _queue_unavailable()
+for _method, _path in (("PATCH", "/api/sessions/{name}/queue/{entry_id}"), ("POST", "/api/sessions/{name}/queue/reorder"),
+                       ("POST", "/api/sessions/{name}/queue/{entry_id}/steer")):
+    app.add_api_route(_path, _queue_unavailable, methods=[_method],
+                      dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 
 
 # --- Loop runner (harness bloco A) -------------------------------------------

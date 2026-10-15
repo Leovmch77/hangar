@@ -163,12 +163,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate" | "agent" | "agent-sent"))) {
         return true;
     }
-    let queue_id = tail.and_then(|t| t.strip_prefix("queue/")).filter(|id| !id.is_empty() && !id.contains('/'));
-    if (*method == Method::DELETE || *method == Method::PATCH) && queue_id.is_some() {
-        return true;
-    }
-    if *method == Method::POST && (tail == Some("queue/reorder")
-        || tail.and_then(|t| t.strip_prefix("queue/")).and_then(|t| t.strip_suffix("/steer")).is_some_and(|id| !id.is_empty() && !id.contains('/'))) {
+    if tail.is_some_and(|t| crate::session_write::control::queue_route(method, t).is_some()) {
         return true;
     }
     // Grupos (`groups::routes`): o convidado segue ao Python, que recusa.

@@ -273,6 +273,8 @@ struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,ne
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
 /// ilegível) não deve atrasar a mensagem muito além disso.
 const MAX_STALL_WAIT:Duration=Duration::from_secs(8);
+/// Id de operação que o pedido pode usar: os prefixos `call::` e `terminal-` são do próprio ator.
+fn valid_operation_id(id:&str)->bool {!id.is_empty() && !id.starts_with("call::") && !id.starts_with("terminal-")}
 /// Leituras da marca "ctrl+x ctrl+s to send now" depois de digitar a entrada orientada.
 const STEER_HINT_TRIES:usize=3;
 /// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
@@ -904,7 +906,7 @@ impl Executor {
 
     /// `steer`: o "Orientar" de uma entrada, que passa pelo turno em curso em vez de esperar o Claude parar.
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>,steer:bool)->Result<RuntimeReply,RuntimeError> {
-        if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
+        if !valid_operation_id(id) {return Err(error("operation_id"));}
         if kind=="lifecycle_guard" {
             if self.loaned() || self.held() || self.last_error.is_some() || !self.uncertain.is_empty() || self.unprovable || self.mode_unproved {return Err(error("lifecycle_busy"));}
             let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
@@ -986,16 +988,12 @@ impl Executor {
             }
         }
         if prompt && !is_clear(text) && state.terminal_write_blocked(&self.target.binding.conversation) {
-            let result=reply(id,Disposition::Deferred,json!({"code":"terminal_write_barrier","queued":row_id.is_some(),"cleanup":"not_needed"}));
-            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
-            return Ok(result);
+            return self.defer(id,json!({"code":"terminal_write_barrier","queued":row_id.is_some(),"cleanup":"not_needed"})).await;
         }
         // Comando de barra com mensagens esperando no Hangar: não passa à frente delas nem as perde num `/clear`
         // (a troca de conversa esvazia a fila). Recusado na tela, como todo comando de barra adiado.
         if slash && !super::queue::waiting_ids(&state,self.target.created).is_empty() {
-            let result=reply(id,Disposition::Deferred,json!({"code":"queue_waiting","queued":false,"cleanup":"not_needed"}));
-            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
-            return Ok(result);
+            return self.defer(id,json!({"code":"queue_waiting","queued":false,"cleanup":"not_needed"})).await;
         }
         if self.loaned() {
             // O Python está digitando no pane: a entrada com linha na fila espera e sai depois da
@@ -1007,9 +1005,7 @@ impl Executor {
         }
         // Mensagem nova não passa à frente de outra que ficou adiada: espera na fila e a drenagem entrega na ordem.
         if fresh && state.pending_ahead(self.target.created) {
-            let result=reply(id,Disposition::Deferred,json!({"code":"queue_ahead","queued":true,"cleanup":"not_needed"}));
-            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
-            return Ok(result);
+            return self.defer(id,json!({"code":"queue_ahead","queued":true,"cleanup":"not_needed"})).await;
         }
         let root=row_id.as_deref().unwrap_or(id);
         // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
@@ -1024,12 +1020,13 @@ impl Executor {
         if let Some(facts)=&facts {self.deliverable=facts.as_ref().is_ok_and(|facts|current && facts.ready && !facts.open_question);}
         // Com o Claude trabalhando a mensagem fica na fila do Hangar, onde o painel a apaga, edita e reordena.
         // O recado com socket nativo segue: é o canal do próprio Claude Code para o meio do turno.
-        let busy=match facts.as_ref() {Some(Ok(f))=>self.turn_busy(f.idle),_=>false};
-        let started_turn=facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|f.idle));
-        let held=prompt && !slash && !steer && busy && facts.as_ref().is_some_and(|r|r.as_ref().is_ok_and(|f|!input::native_message(f,text)));
+        let ok=facts.as_ref().and_then(|result|result.as_ref().ok());
+        let busy=ok.is_some_and(|f|self.turn_busy(f.idle));
+        let started_turn=ok.is_some_and(|f|f.idle);
+        let held=prompt && !slash && !steer && busy && ok.is_some_and(|f|!input::native_message(f,text));
         let mut result=if !current {reply(id,Disposition::Deferred,json!({"code":"terminal_facts","cleanup":"not_needed"}))}
             else if held {reply(id,Disposition::Deferred,json!({"code":"terminal_turn_hold","queued":true,"cleanup":"not_needed"}))}
-            else if prompt && !slash && !facts.as_ref().is_some_and(|result|result.as_ref().is_ok_and(|f|f.ready && !f.open_question || f.native.is_some())) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
+            else if prompt && !slash && !ok.is_some_and(|f|f.ready && !f.open_question || f.native.is_some()) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
             else {
                 let bound=match row_id.is_some() {
                     true=>match self.receipt.capture(&self.target.transcript) {
@@ -1238,6 +1235,12 @@ impl Executor {
         let target=self.target.clone();
         tokio::spawn(async move {let _=registry.heal_claude(target.name,target.key,target.generation).await;});
     }
+    /// Adiada antes de escrever: fecha a operação com o motivo e o devolve a quem pediu.
+    async fn defer(&mut self,id:&str,payload:Value)->Result<RuntimeReply,RuntimeError> {
+        let result=reply(id,Disposition::Deferred,payload);
+        self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+        Ok(result)
+    }
     /// O Claude conta como trabalhando: ocupado de fato, ou logo depois de uma entrega comum que ainda não o
     /// mostrou ocupado. Vê-lo ocupado encerra a espera.
     fn turn_busy(&mut self,idle:bool)->bool {
@@ -1353,7 +1356,7 @@ impl Executor {
     /// digitada (o Claude Code a enfileira) e promovida com `ctrl+x ctrl+s`, o mesmo caminho do chip antigo,
     /// que leva junto o que já estava na fila interna do Claude Code (limite dele).
     async fn steer_entry(&mut self,id:&str,payload:&Value)->Result<RuntimeReply,RuntimeError> {
-        if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
+        if !valid_operation_id(id) {return Err(error("operation_id"));}
         let entry=payload["entry_id"].as_str().filter(|entry|!entry.is_empty() && payload.as_object().is_some_and(|p|p.len()==1))
             .ok_or_else(||error("terminal_payload"))?.to_owned();
         // A que já saiu (ou nunca esteve) responde antes de ler a tela: nenhuma tecla.
