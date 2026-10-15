@@ -508,6 +508,21 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   ou as dicas do próprio rodapé. Interromper com o foco lá manda esse Esc antes do que interrompe.
   Ver [o /clear e o rodapé do Claude Code](#o-clear-e-o-rodapé-do-claude-code).
 
+- **Claude com terminal segura a mensagem no Hangar durante o turno.** Com o Claude fora de `idle`
+  (registro nativo, depois o estado do plugin, depois o marcador de hook), o `/input` grava a
+  entrada na fila do Hangar (`terminal_turn_hold`, `delivered:false`) em vez de digitá-la. A fila
+  drena com o Claude parado, composer legível e sem pergunta, uma por vez, no tique do ator; a
+  entrega que encontrou o Claude parado faz a próxima esperar até 3 s (`turn_start_wait`) pelo
+  turno que ela abriu. Recado com socket nativo (`[de: …]`, `[grupo: …]`, `[painel: …]`) e comando
+  de barra não são segurados, e o recado passa no meio do turno mesmo atrás de mensagem segurada. Com
+  mensagem esperando, comando de barra é recusado na tela (`queue_waiting`): não passa à frente nem
+  some na troca de conversa do `/clear`. "Orientar" de uma entrada (`steer_entry`) digita só ela e
+  aperta `ctrl+x ctrl+s`, que leva junto o que já estava na fila interna do Claude Code e interrompe
+  o turno; parado, ela vai para a frente e sai na entrega comum. As ações do painel (apagar,
+  editar, reordenar, Orientar) valem só para a entrada que ainda espera e passam pelo ator da
+  sessão; a que a drenagem já reivindicou responde 409 `queue_entry_gone`. Ver
+  [segurar a fila no turno](#claude-com-terminal-segura-a-fila-no-turno-14102026).
+
 - **A trava do `/clear` só sobe se o Enter pode ter saído e sempre tem saída.** Aceito, ou incerto
   nas etapas do Enter (`submit`, `submit_proof`; no Python, `*.submeter`). Incerto antes do Enter
   é entrega incerta comum. Passado o prazo com a sessão parada e sem conversa nova (nem no vínculo
@@ -4259,3 +4274,30 @@ restante; cancelamento mantém a guarda da conta até encerrar a árvore. A prov
 segurando stdout: ambos encerram antes de liberar a pasta e a guarda da conta, sem waits artificiais
 nos testes. O resolvedor Claude é compartilhado com o leitor de contas, incluindo instalação npm
 no Windows.
+
+## Claude com terminal segura a fila no turno (14/10/2026)
+
+Até o PR #137 a drenagem do terminal só esperava a caixa de digitar: com o Claude trabalhando, a
+mensagem era digitada e ficava na fila interna do Claude Code, onde o app não a apagava nem a
+editava. Decisão do usuário (spec `2026-10-14-queued-messages-panel-design.md`): a mensagem fica no
+Hangar durante o turno, no painel "Na fila", e sai sozinha quando o Claude para. O mecanismo
+anterior está em [superado](superado.md#drenagem-do-terminal-no-meio-do-turno-e-chip-mandar-agora-do-claude).
+O corte do painel de agentes do #137 continua valendo.
+
+- Quem diz "parado" é o `InputFacts.idle` (`terminal_facts.rs`): registro nativo `status: idle`;
+  sem ele, o estado do plugin vivo; sem ele, o marcador de hook. A tela só decide sem nenhum dos três.
+- Logo depois de uma entrega o registro nativo ainda diz `idle` por um tique: sem a espera do
+  `turn_start_wait` (3 s, armada só quando a entrega encontrou o Claude parado), a segunda mensagem
+  sairia junto com a primeira num turno curto. O Orientar no meio do turno não arma a espera.
+- O recado de outra sessão pelo socket nativo continua no meio do turno: é o canal do próprio
+  Claude Code para isso, e segurá-lo atrasaria a conversa entre sessões. O socket existe em toda
+  sessão recente, mas só o texto com prefixo de recado vai por ele; por isso a condição de segurar é
+  o texto, não a presença do socket. Os fatos da drenagem não trazem o socket (ele depende do
+  texto): o recado candidato relê os fatos com o próprio texto antes de passar à frente.
+- Comando de barra não é segurado (vai à fila do Claude Code, como antes), mas com mensagem
+  esperando no Hangar é recusado: a troca de conversa esvazia a fila, e um `/clear` nessa hora
+  apagaria em silêncio o que a pessoa já tinha mandado.
+- `ctrl+x ctrl+s` interrompe o turno e manda o que está na fila interna do Claude Code (inclusive
+  o que a pessoa digitou direto no terminal): o "Orientar" por item digita só a escolhida antes de
+  apertar, mas não separa o que já estava lá. A tecla só sai com a marca `ctrl+x ctrl+s to send now`
+  na tela (até três leituras); sem ela, o Claude já tinha parado e levou a mensagem como envio comum.

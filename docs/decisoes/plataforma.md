@@ -2493,3 +2493,33 @@ o recusava, e o processo do Claude nasce da receita em memória (`claude_relaunc
 
 Ficaram no Python, por fazerem parte da abertura de sessão (#165): a geração lida em
 `runtime_adapter.binding()` e o `_has_pending` da reabertura.
+
+## Painel da fila: o evento `queue` nasce no hub do Rust (14/10/2026)
+
+A fila de Claude e Codex é do Rust, e o hub de `/events` (`side.rs`) já reparte o chat entre os
+aparelhos: por isso a lista inteira sai dali (`queue_panel.rs`), lida da projeção da fila (o mesmo
+arquivo do `/history`), com o recorte da conversa atual do `/history`, publicada quando muda e
+repetida para quem chega depois (`LATEST`). `actions` é o registro dizer que o Rust escreve na
+sessão (entrada saudável); sem ele os botões somem. Quem entra pela 8766/8768 recebe o evento pelo
+canal privado do estado, repassado sem mudança pelo Python (`_RUST_STATE_EVENTS`). As bolhas
+`queued-` do Python (`pqueue.follow`) continuam: são elas que viram a bolha de usuário quando a
+mensagem sai da fila.
+
+- Rotas do painel, todas no Rust e todas por mensagem ao ator da sessão, nunca ao `Store`:
+  `DELETE /queue/{id}?only_waiting=true`, `PATCH /queue/{id}` (`{"text"}`),
+  `POST /queue/reorder` (`{"id","before_id"}`, `null` = fim) e `POST /queue/{id}/steer`. Agem só
+  na entrada que ainda espera; a que a drenagem já reivindicou (ou que sumiu) responde 409
+  `queue_entry_gone`, e texto vazio, começado por `/` ou com caractere de controle, 422
+  `queue_text_invalid`. Sem o parâmetro, o `DELETE` segue descartando também a bolha desistida.
+- A regra de "esperando" é uma só (`row_waits` em `runtime/queue.rs`): o painel lê a projeção, que
+  não tem as operações; por um instante ele pode mostrar a linha que a drenagem acabou de pegar, e a
+  ação nela volta 409.
+- Convidado com acesso completo alcança as mesmas ações pela 8766, como já alcança `/input`,
+  `/steer` e `/interrupt`: o porteiro deixa passar e o Python repassa à ponte do Rust
+  (`_codex_rust_port`), sem lógica de fila. Acesso de par segue só leitura.
+- Limite até a migração: Pi, omp e Kimi (fila no Python) e o processo no modo `python` não têm o
+  evento nem as rotas no Rust. O painel deles nasce das bolhas `queued-` do `/history`, sem
+  botões, e as rotas novas respondem 409 `queue_action_unavailable`. Nada disso foi escrito no
+  Python.
+- Contrato interno: as rotas novas da ponte do Claude e do Codex subiram `INTERNAL_PROTOCOL` e
+  `RUST_SERVER_PROTOCOL` juntos.

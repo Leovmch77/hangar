@@ -259,6 +259,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Promovem camada que renderiza preto durante o scroll.
 - **A lista de mensagens é janelada** (`WINDOW=120`). Não renderize o transcript inteiro.
 - **O app renderiza `AskUserQuestion` nativamente**; use à vontade. Texto numerado é só fallback.
+- **Mensagem esperando na fila do Hangar aparece no painel "Na fila", não como bolha.** A lista e a
+  ordem vêm do evento `queue`; o modelo é `packages/core/src/queuePanel.ts` (o nativo repete em
+  `desktop-native/src/queue_panel.rs`).
 - **Dedup de fila/pending é delicado** — bolhas `pending`/`queued-` reconciliam por texto
   normalizado contra o transcript real.
 - **Vite HMR pode servir componente VAZIO** (stub <1KB, sem erro no console): a tela some sem

@@ -214,3 +214,14 @@ atende, voltava ao Rust. Saiu quando o `hangar-server` passou a ser dono da port
 (`crates/hangar-server/src/share/`); os testes do Python foram portados para o Rust antes de
 apagar. Ficaram no Python `share_life.py` (vida da sessão para `guest_users`, transferência e
 `registry`) e, em `guest_user_gate.py`, as listas de rotas do convidado com login próprio.
+
+## Drenagem do terminal no meio do turno e chip "mandar agora" do Claude
+
+(PR #137, 09/10/2026, até 14/10/2026 → [Claude com terminal segura a fila no
+turno](harnesses.md#claude-com-terminal-segura-a-fila-no-turno-14102026).) A drenagem da fila do
+Claude com terminal não esperava o `idle`: como a entrada direta, só pedia composer legível e
+nenhuma pergunta aberta, e a mensagem mandada durante o turno era digitada e ficava na fila
+interna do Claude Code, fora do alcance do app. Para furar essa fila, o chip
+"N na fila · mandar agora" (o mesmo do Kimi) era oferecido também ao Claude com terminal no
+nativo, no PWA e no app, e apertava `ctrl+x ctrl+s`, levando a fila interna inteira. Hoje a
+mensagem espera no Hangar, no painel "Na fila", e o chip ficou só para o Kimi.
