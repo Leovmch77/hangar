@@ -176,8 +176,9 @@ pub(crate) async fn run(hub: Weak<Hub>, generation: u64, binding: Binding, path:
         if !armed {
             armed = watch.watchers.subscribe(&watch.path, &watch.wake);
         }
-        let (mut current, file) = (follow.take().expect("devolvido a cada rodada"), watch.path.clone());
+        let (mut current, file, jsonl) = (follow.take().expect("devolvido a cada rodada"), watch.path.clone(), binding.jsonl.clone());
         let polled = match tokio::task::spawn_blocking(move || {
+            current.find_start(&jsonl);
             let polled = current.poll(&file);
             (current, polled)
         })
@@ -285,6 +286,17 @@ impl QueueFollow {
         QueueFollow { min_ts, start, first: true, seen: HashMap::new(), marker: None }
     }
 
+    /// Sem corte, o início da conversa é procurado de novo a cada rodada, como no painel: o transcript que
+    /// ainda não tinha linha passa a cortar a conversa anterior, e a fila é relida com o corte.
+    pub(crate) fn find_start(&mut self, jsonl: &Path) {
+        if self.min_ts == 0.0 {
+            self.min_ts = transcript_start_ts(jsonl);
+            if self.min_ts > 0.0 {
+                self.marker = None;
+            }
+        }
+    }
+
     /// Uma rodada: relê o arquivo se a marca dele mudou desde a última leitura. Erro de leitura não
     /// guarda a marca, e a próxima rodada tenta de novo.
     pub(crate) fn poll(&mut self, path: &Path) -> io::Result<Polled> {
@@ -346,7 +358,14 @@ impl QueueFollow {
         let cut_ts = if (self.first && local) || self.min_ts != 0.0 { Some(py_float(entry.get("ts")).map_err(|()| "ts")?) } else { None };
         let confirmed = py::truthy(entry.get("confirmed")) && !local;
         let mut event = entry_event(&entry);
-        present.insert(event.id.clone());
+        let cut = cut_ts.is_some_and(|ts| {
+            (self.first && local && ts < self.start - LOCAL_NOTE_GRACE_S)
+                || (self.min_ts != 0.0 && !from_current_session(&entry, self.min_ts, ts))
+        });
+        // Cortada não é bolha desta conversa: fora de `present`, sai do retrato se já tinha entrado.
+        if !cut {
+            present.insert(event.id.clone());
+        }
         if confirmed {
             event.queued_confirmed = Some(true);
         }
@@ -355,13 +374,8 @@ impl QueueFollow {
             return Ok(None);
         }
         self.seen.insert(id, signature);
-        if let Some(ts) = cut_ts {
-            if self.first && local && ts < self.start - LOCAL_NOTE_GRACE_S {
-                return Ok(None);
-            }
-            if self.min_ts != 0.0 && !from_current_session(&entry, self.min_ts, ts) {
-                return Ok(None);
-            }
+        if cut {
+            return Ok(None);
         }
         let data = serde_json::to_string(&event).map_err(|_| "json")?;
         let local_ts = local.then(|| cut_ts.unwrap_or_else(|| py_float(entry.get("ts")).unwrap_or(0.0)));

@@ -1860,6 +1860,9 @@ O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
 
 - Motivo: a confirmação do Codex fazia a volta Rust → Python → Rust (`op confirm`), e uma linha
   ruim na fila derrubava a conexão interna inteira (estatísticas, mods, navegador).
+- Diferença do Python, que fixava o corte ao abrir: hub aberto antes da primeira linha do
+  transcript procura o início da conversa a cada rodada, como o painel, e a bolha da conversa
+  anterior que perde o corte sai do retrato (`queue_cut_arrives_with_the_first_transcript_line`).
 - Prova de paridade: `backend/tests/fixtures/contract/golden/queue_follow.json` (40 cenários) e
   `queue_start_ts.json` (19 inícios de conversa), gravados do `follow` real por
   `gen_queue_follow.py`; o teste do Rust compara nome e `data` byte a byte. O serde_json do projeto
@@ -2529,8 +2532,9 @@ arquivo do `/history`), com o recorte da conversa atual do `/history`, publicada
 repetida para quem chega depois (`LATEST`). `actions` é o registro dizer que o Rust escreve na
 sessão (entrada saudável); sem ele os botões somem. Quem entra pela 8766/8768 recebe o evento pelo
 canal privado do estado, repassado sem mudança pelo Python (`_RUST_STATE_EVENTS`). As bolhas
-`queued-` do Python (`pqueue.follow`) continuam: são elas que viram a bolha de usuário quando a
-mensagem sai da fila.
+`queued-` continuam: são elas que viram a bolha de usuário quando a mensagem sai da fila. Com o Rust
+dono do estado, quem as publica é o produtor da fila do hub (`queue_feed.rs`); o `pqueue.follow` do
+Python fica com Pi, omp, Kimi e o modo `python`.
 
 - Rotas do painel, todas no Rust e todas por mensagem ao ator da sessão, nunca ao `Store`:
   `DELETE /queue/{id}?only_waiting=true`, `PATCH /queue/{id}` (`{"text"}`),

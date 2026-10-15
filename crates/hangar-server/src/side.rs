@@ -2470,6 +2470,28 @@ mod tests {
         assert!(replay.contains("queued-a2") && replay.contains("queued-a3"));
     }
 
+    /// Hub aberto antes da primeira linha do transcript fica sem corte; o corte chega com ela, e a bolha
+    /// da conversa anterior sai do retrato em vez de voltar confirmada.
+    #[tokio::test]
+    async fn queue_cut_arrives_with_the_first_transcript_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), ..test_ctx() };
+        let now = crate::queue_feed::wall_now();
+        let old = |confirmed: bool| serde_json::json!({"id":"old","text":"velha","ts":now - 600.0,"delivered":true,"confirmed":confirmed});
+        write_queue(dir.path(), "fila", &[old(false)]);
+        let binding = queue_binding(dir.path(), "a");
+        let lease = ctx.hubs.acquire("fila", binding.clone(), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        queue_frame(&mut rx, "queued-old", "queued_delivered").await;
+        let start = chrono::DateTime::from_timestamp((now - 10.0) as i64, 0).unwrap().to_rfc3339();
+        std::fs::write(&binding.jsonl, format!("{}\n", serde_json::json!({"type":"user","timestamp":start,"message":{"role":"user","content":"oi"}}))).unwrap();
+        write_queue(dir.path(), "fila", &[old(true), serde_json::json!({"id":"new","text":"nova","ts":now,"delivered":false})]);
+        queue_frame(&mut rx, "queued-new", "queued_delivered").await;
+        let replay: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+        assert!(!replay.contains("queued-old"), "bolha da conversa anterior ficou no retrato");
+        assert!(replay.contains("queued-new"));
+    }
+
     /// Dono que entra num hub só com convidados religa a conexão interna (`app=1`), mas não o produtor
     /// da fila: a fila não sai de novo, duplicada.
     #[tokio::test]
