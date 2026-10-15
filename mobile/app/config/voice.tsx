@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Linking, Text, View } from 'react-native';
+import { Linking, Switch, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
-import { dictationOrganizationOf, listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
-import { BlockHead, Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
+import { listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
+import { BlockHead, Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage, useInputStyle } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { Segmented } from '../../src/features/config/Segmented';
 import { Slider } from '../../src/features/config/Slider';
@@ -12,6 +12,12 @@ import { TranscriptionProviders } from '../../src/features/config/TranscriptionP
 import { useSettingsColors } from '../../src/features/config/colors';
 import { Icon } from '../../src/ui/Icon';
 import * as m from '../../src/paraglide/messages';
+
+const ORGANIZATION_MODES = [
+  { v: 'none', label: m.native_voice_organization_none, hint: m.native_voice_organization_none_hint },
+  { v: 'harness', label: m.native_voice_organization_harness, hint: m.native_voice_organization_harness_hint },
+  { v: 'external_api', label: m.native_voice_organization_external_api, hint: m.native_voice_organization_external_api_hint },
+] as const;
 
 type Style = 'limpar' | 'prosa' | 'briefing';
 const STYLES: { v: Style; label: () => string; hint: () => string }[] = [
@@ -52,11 +58,7 @@ export default function Voice() {
   useEffect(() => {
     if (!ready || openedByRead.current) return;
     openedByRead.current = true;
-    setOpen((o) => {
-      const next = o.map((x, i) => x || (i < 3 && SECTIONS[i].some(cfg.filled)));
-      next[1] ||= next[2];
-      return next;
-    });
+    setOpen((o) => o.map((x, i) => x || ((i === 0 || i === 2) && SECTIONS[i].some(cfg.filled))));
   }, [ready]);
 
   // Seção da ElevenLabs abre quando passa a haver chave; a do leitor, quando o comando passa a ter valor.
@@ -67,9 +69,8 @@ export default function Voice() {
 
   const transcribe = parseTranscriptionProviders(cfg.current(PROVIDERS)).length ? m.native_voice_status_custom()
     : cfg.keySet('groq_api_key') ? (cfg.filled('transcription_base_url') ? m.native_voice_status_custom() : m.native_voice_status_on()) : null;
-  const cleanup = cfg.filled('llm_base_url')
-    ? (cfg.keySet('llm_api_key') ? m.native_voice_status_custom() : null)
-    : (cfg.keySet('groq_api_key') && !cfg.filled('transcription_base_url') ? m.native_voice_status_default() : null);
+  const organization = ORGANIZATION_MODES.find((o) => o.v === cfg.current('dictation_organization_mode')) ?? ORGANIZATION_MODES[0];
+  const organizing = organization.v !== 'none';
   const read = elevenKey ? m.native_voice_status_elevenlabs() : localCmd ? m.native_voice_status_local() : null;
   const rows = (keys: string[]) => <Box>{keys.map((k) => <ConfigRow key={k} cfg={cfg} k={k} removable />)}</Box>;
 
@@ -86,14 +87,27 @@ export default function Voice() {
       <TranscriptionProviders cfg={cfg} />
 
       <BlockHead title={m.native_voice_after()} />
-      <Box>
-        <StyleRow cfg={cfg} />
-        <ConfigRow cfg={cfg} k="ditado_vocabulario" removable />
-      </Box>
+      <Box><ConfigRow cfg={cfg} k="ditado_vocabulario" removable /></Box>
 
-      <BlockHead title={m.native_voice_cleanup()} help={m.native_voice_cleanup_help()} right={<Status text={cleanup} />} />
-      <Disclosure open={open[1]} label={m.native_voice_cleanup_other()} onChange={toggle(1)} />
-      {open[1] ? (
+      <BlockHead title={m.native_voice_cleanup()} help={m.native_voice_cleanup_help()}
+        right={<Chip text={organization.label()} tone={organizing ? 'success' : 'muted'} />} />
+      <Box>
+        <RowShell icon="SlidersHorizontal" title={m.native_voice_cleanup()}
+          chips={<ScopeChips cfg={cfg} k="dictation_organization_mode" />} help={organization.hint()}>
+          <Segmented options={ORGANIZATION_MODES.map((o) => ({ v: o.v, label: o.label(), aria: `${o.label()}. ${o.hint()}` }))}
+            value={organization.v} label={m.native_voice_cleanup()} disabled={!('dictation_organization_mode' in cfg.fields)}
+            onChange={(v) => cfg.stage('dictation_organization_mode', v)} />
+        </RowShell>
+        {organizing ? <StyleRow cfg={cfg} /> : null}
+        {organizing ? <RecentMessagesRow cfg={cfg} /> : null}
+      </Box>
+      {organization.v === 'harness' ? (
+        <Box>
+          <HarnessModelRow cfg={cfg} k="dictation_claude_model" label={m.native_voice_harness_model_claude()} />
+          <HarnessModelRow cfg={cfg} k="dictation_codex_model" label={m.native_voice_harness_model_codex()} />
+        </Box>
+      ) : null}
+      {organization.v === 'external_api' ? (
         <>
           {rows(SECTIONS[1])}
           <Disclosure open={open[2]} label={m.native_voice_briefing_own()} onChange={toggle(2)} />
@@ -131,15 +145,34 @@ function StyleRow({ cfg }: { cfg: ServerConfig }) {
   const hint = STYLES.find((s) => s.v === current)?.hint();
   return (
     <RowShell icon="Type" title={m.native_voice_style()} chips={<ScopeChips cfg={cfg} k="ditado_estilo" />} help={m.native_voice_style_help()}>
-      {dictationOrganizationOf(cfg.fields) === 'off' ? (
-        <Muted>{m.ditado_organizacao_desligada()}</Muted>
-      ) : 'ditado_estilo' in cfg.fields ? (
+      {'ditado_estilo' in cfg.fields ? (
         <>
           <Segmented options={STYLES.map((s) => ({ v: s.v, label: s.label(), aria: `${s.label()}. ${s.hint()}` }))}
             value={current} label={m.native_voice_style()} onChange={(v) => cfg.stage('ditado_estilo', v)} />
           {hint ? <Muted>{hint}</Muted> : null}
         </>
       ) : null}
+    </RowShell>
+  );
+}
+
+function RecentMessagesRow({ cfg }: { cfg: ServerConfig }) {
+  const c = useSettingsColors();
+  const key = 'dictation_include_recent_messages';
+  return (
+    <RowShell icon="MessageSquare" title={m.native_voice_recent_messages()}
+      chips={<ScopeChips cfg={cfg} k={key} />} help={m.native_voice_recent_messages_help()}
+      right={<Switch accessibilityLabel={m.native_voice_recent_messages()} value={cfg.current(key) === true}
+        disabled={!(key in cfg.fields)} onValueChange={(on) => cfg.stage(key, on)} trackColor={{ true: c.accent }} />} />
+  );
+}
+
+function HarnessModelRow({ cfg, k, label }: { cfg: ServerConfig; k: string; label: string }) {
+  const input = useInputStyle();
+  return (
+    <RowShell icon="Bot" title={label} chips={<ScopeChips cfg={cfg} k={k} />} help={m.native_voice_organization_harness_hint()}>
+      <TextInput {...input} accessibilityLabel={label} editable={k in cfg.fields} autoCapitalize="none" autoCorrect={false}
+        value={textOf(cfg.current(k))} onChangeText={(v) => cfg.stage(k, v)} />
     </RowShell>
   );
 }
