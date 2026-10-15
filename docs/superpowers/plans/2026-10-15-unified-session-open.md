@@ -88,7 +88,7 @@ Status: ready-for-agent
   perdem campo nesta entrega (revert seguro). Contrato com o `hangar-codex-tui` (lê e grava
   `permission_mode` do sidecar Codex) e com o rename (Python). Leitura dos sidecars existentes para
   as sessões já vivas.
-- [ ] **Step 4: Biblioteca + comando de terminal (D-013)**
+- [x] **Step 4: Biblioteca + comando de terminal (D-013)**
   `resolve_open()` e o plano de lançamento numa biblioteca usada pelo servidor e por um comando
   (`hangar-open`, nome a fechar). Com o servidor de pé, o comando pede ao servidor; fora do ar, abre
   igual e o servidor adota depois.

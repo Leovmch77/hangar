@@ -1,6 +1,7 @@
 //! Abertura de sessão única: `SessionOpenRequest` (o pedido no fio, o `CreateBody` do Python mais
 //! `inherit`) → `resolve_open()` → `SessionSpec` (tudo decidido, gravado por sessão). Reabrir é o
 //! spec gravado ⊕ `SessionChange`. Spec: `docs/superpowers/specs/2026-10-15-unified-session-open.md`.
+pub mod facts;
 pub mod record;
 pub mod resolve;
 #[cfg(test)]
