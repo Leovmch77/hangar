@@ -177,7 +177,21 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
         tracing::warn!(code = "systemd_scope_refused", cause = %tail(&output.stderr), "escopo do systemd recusado; o terminal sobe sem ele");
         output = mux.run(argv).await;
     }
-    if output.ok() { Ok(()) } else { Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) }) }
+    // S-32: sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
+    // pé). Só vale se for esta: outra de mesmo nome ganhou a corrida e o pedido é recusado.
+    if output.ok() || is_this_one(mux, env, pane).await { Ok(()) } else { Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) }) }
+}
+
+/// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
+fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
+
+/// A sessão `pane.name` existe e carrega a chave deste pedido.
+async fn is_this_one(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> bool {
+    let target = target(env, &pane.name);
+    let exists = mux.run(vec![env.program.clone(), "has-session".into(), "-t".into(), format!("={}", pane.name)]).await;
+    if !exists.ok() { return false; }
+    let key = mux.run(vec![env.program.clone(), "show-environment".into(), "-t".into(), target, "CP_SESSION_KEY".into()]).await;
+    key.ok() && key.stdout.trim() == format!("CP_SESSION_KEY={}", pane.key)
 }
 
 /// O cliente do multiplexador: no psmux o pane herda o ambiente dele, e no tmux ele vira o do
@@ -377,6 +391,23 @@ pub(crate) mod tests {
         let error = spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err();
         assert_eq!((error.code, mux.runs().len()), ("systemd_scope_unit_missing", 4));
         assert_eq!(error.stderr, "Failed to start transient scope unit: Unit run-p4242.scope not found.");
+    }
+
+    /// S-32: sem resposta no prazo (ou o psmux com código diferente de zero), a sessão pode ter nascido;
+    /// ela só vale se for esta (a chave dela), e uma de mesmo nome que não é esta é recusa.
+    #[tokio::test]
+    async fn an_unanswered_new_session_counts_only_when_the_session_is_this_one() {
+        let key = format!("CP_SESSION_KEY={}\n", "k".repeat(32));
+        let timeout = MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() };
+        let answered = |stdout: &str| MuxOutput { code: Some(0), stdout: stdout.into(), stderr: String::new() };
+        let mux = FakeMux::answering(vec![timeout.clone(), ok(), answered(&key)]);
+        spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap();
+        assert_eq!(mux.runs()[1], ["tmux", "has-session", "-t", "=s1"]);
+        assert_eq!(mux.runs()[2], ["tmux", "show-environment", "-t", "=s1", "CP_SESSION_KEY"]);
+        let other = FakeMux::answering(vec![failed("duplicate session: s1\n"), ok(), answered("CP_SESSION_KEY=outra\n")]);
+        assert_eq!(spawn(&other, &machine(), &claude(Vec::new(), None)).await.unwrap_err().stderr, "duplicate session: s1");
+        let gone = FakeMux::answering(vec![timeout, failed("can't find session: s1\n")]);
+        assert_eq!(spawn(&gone, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, "terminal_nao_criado");
     }
 
     #[tokio::test]
