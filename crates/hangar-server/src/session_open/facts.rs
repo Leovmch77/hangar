@@ -231,7 +231,8 @@ impl OpenFacts for LocalFacts {
     fn supports_fast(&self, engine: Option<&str>, model: Option<&str>) -> bool {
         let engines = self.engines_file();
         let Some(cfg) = engine.filter(|e| self.engines().iter().any(|n| n == e)).map(|e| &engines[e]) else { return false };
-        let base = model.or_else(|| cfg["model"].as_str()).unwrap_or("").rsplit('/').next().unwrap_or("");
+        // `model or cfg.model`: texto vazio também cai no modelo do motor.
+        let base = model.filter(|m| !m.is_empty()).or_else(|| cfg["model"].as_str()).unwrap_or("").rsplit('/').next().unwrap_or("");
         GPT_MODEL.is_match(base)
             && cliproxy_base(&self.env().home).is_some_and(|local| normalize_base(cfg["base_url"].as_str().unwrap_or("")) == local)
     }

@@ -507,6 +507,27 @@ fn local_facts_read_transfers_and_real_paths() {
     assert_eq!(open(&home.join("guest/fora/proj"), &guest), Some((403, Some("erro_fora_da_pasta"))));
 }
 
+/// `model: ""` com Fast cai no modelo do motor como o `or` do Python: o Fast passa, e quem recusa é
+/// a regra do modelo, com o código e o texto de lá.
+#[test]
+fn an_empty_model_with_fast_falls_back_to_the_engine_model() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join(".cli-proxy-api")).unwrap();
+    std::fs::write(home.join(".cli-proxy-api/config.yaml"), "port: 8317\napi-keys:\n  - k\n").unwrap();
+    std::fs::write(home.join(".claude/engines.json"),
+        json!({"gpt": {"base_url": "http://127.0.0.1:8317/v1", "api_key": "k", "model": "gpt-5.5"}}).to_string()).unwrap();
+    let body = json!({"name": "s1", "cwd": home.join("work"), "provider": "claude", "headless": false, "engine": "gpt",
+        "model": "", "service_tier": "priority"});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let error = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime)).err();
+    assert_eq!(error.map(|e| (e.status, e.code, e.msg)),
+        Some((400, None, "model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)".into())));
+}
+
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
 #[test]
 fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
