@@ -43,7 +43,7 @@ vi.mock('../lib/auth', () => ({
 }));
 
 const sse = vi.hoisted(() => ({ handlers: new Map<string, (event: MessageEvent) => void>() }));
-const harness = vi.hoisted(() => ({ provider: 'codex' as 'claude' | 'codex' }));
+const harness = vi.hoisted(() => ({ provider: 'codex' as 'claude' | 'codex' | 'kimi' }));
 const sessionsStoreCtl = vi.hoisted(() => ({ pairPeers: null as string[] | null }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof api>(),
@@ -66,6 +66,10 @@ vi.mock('@hangar/core', async (original) => ({
   selectOption: vi.fn().mockResolvedValue(undefined),
   submitSelected: vi.fn().mockResolvedValue(undefined),
   skipQuestion: vi.fn().mockResolvedValue({ ok: true }),
+  editQueuedMessage: vi.fn().mockResolvedValue(undefined),
+  cancelQueuedMessage: vi.fn().mockResolvedValue(undefined),
+  steerQueuedMessage: vi.fn().mockResolvedValue({ ok: true, steered: true }),
+  reorderQueuedMessage: vi.fn().mockResolvedValue(undefined),
   openEventStream: vi.fn(() => ({
     onmessage: null, onerror: null, close: vi.fn(), readyState: 1,
     addEventListener: (type: string, handler: (event: MessageEvent) => void) => sse.handlers.set(type, handler),
@@ -668,4 +672,85 @@ it('celular: sem terminal, o plano pendente aparece aberto sem buscar no servido
   expect(document.querySelector('.plan-inline h3')?.textContent).toBe('Plano do teste');
   expect(document.querySelector('.plan-inline')?.textContent).toContain('C:/conta/plans/p.md');
   expect(api.getSessionPlanPreview).not.toHaveBeenCalledWith('codex-flow', true, expect.anything());
+});
+
+it('evento queue: painel lista, a bolha some da conversa e o chip sai', async () => {
+  await montar(false);
+  await emit('message', { kind: 'user_msg', id: 'queued-a', text: 'na fila', queued_delivered: false, queued_ts: 1 });
+  await emit('queue', { entries: [{ id: 'a', text: 'na fila', ts: 1 }], actions: true });
+  expect(document.querySelectorAll('.qp-row')).toHaveLength(1);
+  expect(document.querySelector('.queued-row')).toBeNull();
+  expect(document.querySelector('button.fila-chip')).toBeNull();
+  await emit('queue', { entries: [], actions: true });
+  await emit('message', { kind: 'user_msg', id: 'queued-a', text: 'na fila', queued_delivered: true, queued_ts: 1 });
+  expect(document.querySelector('.qp-row')).toBeNull();
+  expect(document.querySelector('.queued-row')).not.toBeNull();
+});
+
+it('painel da fila: editar atualiza e devolve o rascunho, Esc sai sem pedido, X tira a bolha', async () => {
+  await montar(false);
+  const textarea = document.querySelector<HTMLTextAreaElement>('textarea')!;
+  const digitar = async (text: string) => {
+    textarea.value = text;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+  };
+  await digitar('rascunho meu');
+  await emit('message', { kind: 'user_msg', id: 'queued-a', text: 'primeira', queued_delivered: false, queued_ts: 1 });
+  await emit('queue', { entries: [{ id: 'a', text: 'primeira', ts: 1 }, { id: 'b', text: 'segunda', ts: 2 }], actions: true });
+  const linha = (i: number) => document.querySelectorAll<HTMLElement>('.qp-row')[i];
+
+  linha(0).querySelector<HTMLButtonElement>('.qp-edit')!.click(); await flush();
+  expect(textarea.value).toBe('primeira');
+  expect(document.querySelector('.send-btn--update')?.textContent).toBe(m.queue_panel_update());
+  expect(linha(0).querySelector('.qp-cancel')).not.toBeNull();
+  // Atualizar sem mudar o texto só sai da edição.
+  document.querySelector<HTMLButtonElement>('.send-btn--update')!.click(); await flush();
+  expect(api.editQueuedMessage).not.toHaveBeenCalled();
+  expect(textarea.value).toBe('rascunho meu');
+
+  linha(0).querySelector<HTMLButtonElement>('.qp-edit')!.click(); await flush();
+  await digitar('primeira editada');
+  document.querySelector<HTMLButtonElement>('.send-btn--update')!.click(); await flush();
+  expect(api.editQueuedMessage).toHaveBeenLastCalledWith('codex-flow', 'a', 'primeira editada', expect.objectContaining({ id: 'codex-flow' }));
+  expect(textarea.value).toBe('rascunho meu');
+  expect(document.querySelector('.send-btn--update')).toBeNull();
+
+  linha(1).querySelector<HTMLButtonElement>('.qp-edit')!.click(); await flush();
+  expect(textarea.value).toBe('segunda');
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await flush();
+  expect(textarea.value).toBe('rascunho meu');
+  expect(api.editQueuedMessage).toHaveBeenCalledTimes(1);
+
+  linha(0).querySelector<HTMLButtonElement>('.qp-remove')!.click(); await flush();
+  expect(api.cancelQueuedMessage).toHaveBeenLastCalledWith('codex-flow', 'a', expect.objectContaining({ id: 'codex-flow' }));
+  await emit('queue', { entries: [{ id: 'b', text: 'segunda', ts: 2 }], actions: true });
+  expect(document.querySelector('.queued-row')).toBeNull();
+  expect(bolhas('primeira')).toHaveLength(0);
+
+  linha(0).querySelector<HTMLButtonElement>('.qp-steer')!.click(); await flush();
+  expect(api.steerQueuedMessage).toHaveBeenLastCalledWith('codex-flow', 'b', expect.objectContaining({ id: 'codex-flow' }));
+});
+
+it('painel da fila: a entrada em edição que sai da fila devolve o rascunho e avisa', async () => {
+  await montar(false);
+  await emit('queue', { entries: [{ id: 'a', text: 'primeira', ts: 1 }], actions: true });
+  document.querySelector<HTMLButtonElement>('.qp-edit')!.click(); await flush();
+  expect(document.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('primeira');
+  await emit('queue', { entries: [], actions: true });
+  // Rascunho vazio: a edição fica no campo como rascunho.
+  expect(document.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('primeira');
+  expect(document.querySelector('.send-btn--update')).toBeNull();
+  expect(document.body.textContent).toContain(m.queue_entry_gone());
+});
+
+it('celular, Kimi: painel derivado das bolhas, sem botões, e o chip da fila continua', async () => {
+  harness.provider = 'kimi';
+  await montarClaude(false);
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  await emit('message', { kind: 'user_msg', id: 'queued-k', text: 'para o kimi', queued_delivered: false, queued_ts: 1 });
+  expect(document.querySelectorAll('.qp-row')).toHaveLength(1);
+  expect(document.querySelector('.qp-row button')).toBeNull();
+  expect(document.querySelector('.queued-row')).toBeNull();
+  expect(document.querySelector('button.fila-chip')).not.toBeNull();
 });

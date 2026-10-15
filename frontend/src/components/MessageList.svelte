@@ -115,13 +115,15 @@
     focoId?: string | null;
     /** Servidores MCP criados por plugin: a pele 'terminal' deixa as chamadas deles fora da dobra. */
     pluginServers?: readonly string[];
+    /** Bolha `queued-` que o painel "Na fila" está mostrando: sai da conversa sem deixar buraco. */
+    hiddenQueued?: (ev: ChatEvent) => boolean;
   }
 
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
-    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null, pluginServers = []
+    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null, pluginServers = [], hiddenQueued
   }: Props = $props();
   const sessionServer = useSessionServer();
 
@@ -401,7 +403,7 @@
   // saida e ISTO, nao a distancia rolada.
   const temNovasEscondidas = $derived(windowEnd < events.length);
   const visibleEvents = $derived(
-    events.slice(windowStart, windowEnd).filter(ev => ev.kind !== 'tool_result')
+    events.slice(windowStart, windowEnd).filter(ev => ev.kind !== 'tool_result' && !hiddenQueued?.(ev))
   );
 
   // Agrupa RUNS de tool_use consecutivos (sem texto no meio) num card recolhível — uma sessao de

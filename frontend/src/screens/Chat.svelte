@@ -86,6 +86,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   } from '@hangar/core';
   import { dictations, draftStorageKey, parseStoredDraft, readMigrating } from '../lib/dictationStore.svelte';
   import { formataErro } from '@hangar/core';
+  import QueuePanel from '../components/QueuePanel.svelte';
+  import {
+    beginQueueEdit, cancelQueuedMessage, currentQueuePanel, editQueuedMessage, hiddenByQueuePanel, parseQueuePanel,
+    queueEditLeft, queueSteerable, reorderQueuedMessage, steerQueuedMessage,
+    type QueueEdit, type QueuePanel as QueuePanelModel,
+  } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLiveRetiring } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
@@ -429,6 +435,21 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
   let rascunhoConferido = $state(rascunhoSalvo.jsonl === null);
   let composerText = $state(rascunhoSalvo.jsonl === null ? rascunhoSalvo.text : '');
+  // Painel "Na fila": a lista do servidor (evento `queue`) ou, sem ele, a derivada das bolhas.
+  let serverQueue = $state<QueuePanelModel | null>(null);
+  let queueEdit = $state<QueueEdit | null>(null);
+  let queueBusy = $state(false);
+  // Só fora do desktop: a vista desktop do web fica como está (o desktop evolui no nativo).
+  const queuePanelShown = $derived(!desktop);
+  const queueList = $derived(currentQueuePanel(serverQueue, events));
+  // A entrada em edição saiu da fila (entregue, orientada ou apagada noutro aparelho): avisa e devolve o campo.
+  $effect(() => {
+    if (!queueEdit) return;
+    const left = queueEditLeft(queueEdit, queueList, untrack(() => composerText));
+    if (!left) return;
+    leaveQueueEdit(left.composerText);
+    mostrarAviso(m.queue_entry_gone());
+  });
   $effect(() => {
     if (rascunhoConferido || !sessionJsonl) return;
     rascunhoConferido = true;
@@ -439,6 +460,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const texto = composerText;
     const jsonl = sessionJsonl;
     if (!rascunhoConferido) return;      // antes de conferir, apagar aqui perderia o rascunho certo
+    // Em edição o campo tem o texto da fila, não o rascunho: o guardado continua o de antes da edição.
+    if (queueEdit) return;
     try {
       if (texto) localStorage.setItem(draftKey, JSON.stringify({ text: texto, jsonl }));
       else localStorage.removeItem(draftKey);
@@ -911,6 +934,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
   let composerRef = $state<{ focus: () => void; ditarAnexo: (arquivo: string) => void;
+                            caretToEnd: (focusField?: boolean) => Promise<void>;
                             preencherComando: (n: string) => Promise<boolean>;
                             prefillText: (t: string) => Promise<boolean> } | undefined>();
 
@@ -2385,6 +2409,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       try { statsEvent = JSON.parse(e.data) as StatsEvent; } catch { quadroFalhou('stats'); }
     });
 
+    // Fila do Hangar (Claude e Codex): lista inteira e ordem a cada mudança, de qualquer aparelho.
+    es.addEventListener('queue', (e) => {
+      noteAlive();
+      try { serverQueue = parseQueuePanel(JSON.parse(e.data)); } catch { quadroFalhou('queue'); }
+    });
+
     // Heartbeat do backend: so prova de vida (reseta o watchdog numa conexao ociosa, sem msgs).
     es.addEventListener('ping', () => noteAlive());
 
@@ -2562,6 +2592,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       pluginSource = null;
       pluginLocalTab = null;
       retiredQueuedIds.clear();
+      serverQueue = null;
+      cancelQueueEdit();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
       cancelPreviewDrop();
@@ -2767,7 +2799,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // subagente que terminou (`transcript.py`, `queued-task:<id>`, tool_result). Sem o kind, um
   // agente de fundo terminando contaria como mensagem na fila.
   const filaCount = $derived(
-    sessionProvider !== 'kimi' && sessionProvider !== 'codex' && !(sessionProvider === 'claude' && !desktop) && !sessionHeadless
+    (queuePanelShown && sessionProvider !== 'kimi')
+    || (sessionProvider !== 'kimi' && sessionProvider !== 'codex' && !(sessionProvider === 'claude' && !desktop) && !sessionHeadless)
       ? 0
       : queuedMessages(events, sessionProvider, sessionHeadless).length,
   );
@@ -3183,6 +3216,48 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     rebuildIndex();
   }
 
+  // ── Painel "Na fila" (celular) ─────────────────────────────────────────────
+  // Uma ação por vez: os botões do painel ficam desativados enquanto o pedido está em voo.
+  async function queueAction(run: () => Promise<unknown>) {
+    if (queueBusy) return;
+    queueBusy = true;
+    try { await run(); } catch (err) { mostrarAviso(formataErro(err) ?? err); }
+    finally { queueBusy = false; }
+  }
+  function startQueueEdit(id: string) {
+    const entry = queueList.entries.find((e) => e.id === id);
+    if (!entry || queueEdit?.entryId === id) return;
+    const next = beginQueueEdit(entry, composerText, queueEdit);
+    queueEdit = next.edit;
+    composerText = next.composerText;
+    void composerRef?.caretToEnd(true);
+  }
+  function leaveQueueEdit(text: string) {
+    queueEdit = null;
+    composerText = text;
+    void composerRef?.caretToEnd();
+  }
+  function cancelQueueEdit() { if (queueEdit) leaveQueueEdit(queueEdit.savedDraft); }
+  const submitQueueEdit = (text: string) => queueAction(async () => {
+    const edit = queueEdit;
+    if (!edit) return;
+    // Texto igual ao da fila: só sai da edição, sem pedido.
+    if (text !== queueList.entries.find((e) => e.id === edit.entryId)?.text) {
+      await editQueuedMessage(sessionName, edit.entryId, text, sessionServer());
+    }
+    if (queueEdit === edit) leaveQueueEdit(edit.savedDraft);
+  });
+  const removeQueued = (id: string) => queueAction(async () => {
+    await cancelQueuedMessage(sessionName, id, sessionServer());
+    // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
+    events = events.filter((e) => e.id !== `queued-${id}`);
+    rebuildIndex();
+  });
+  // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
+  const steerQueued = (id: string) => queueAction(() => steerQueuedMessage(sessionName, id, sessionServer()));
+  const reorderQueued = (id: string, before: string | null) =>
+    queueAction(() => reorderQueuedMessage(sessionName, id, before, sessionServer()));
+
   async function handleInterrupt() {
     // Ao interromper, o Claude Code MANTEM a msg enfileirada no input -> proximo envio concatenava.
     // Se ha pendente, devolve o texto pro composer (editavel) e remove a bubble; pede clear ao backend
@@ -3519,6 +3594,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
+      hiddenQueued={queuePanelShown ? (ev) => hiddenByQueuePanel(ev, queueList) : undefined}
     />
   {/if}
 
@@ -3711,7 +3787,19 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         accountPct={contaPior?.janela.pct ?? null}
         accountWindow={contaPior?.janela.rotulo ?? null}
         onOpenAccounts={() => (accountsOpen = true)}
-      />
+        {queuePanelShown}
+        queueEditing={queueEdit !== null}
+        onQueueEditSubmit={submitQueueEdit}
+        onQueueEditCancel={cancelQueueEdit}
+      >
+        {#snippet queuePanel()}
+          {#if queuePanelShown}
+            <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
+                        steerable={queueSteerable(sessionProvider)} onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
+                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued} />
+          {/if}
+        {/snippet}
+      </Composer>
     {/if}
   </div>
   </div>

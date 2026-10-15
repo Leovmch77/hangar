@@ -19,7 +19,8 @@
 
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
-  import { tick, onDestroy, untrack } from 'svelte';
+  import { tick, onDestroy, untrack, type Snippet } from 'svelte';
+  import { canUpdateQueueEdit } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import { novoEstadoVad, passoVad } from '@hangar/core';
@@ -139,6 +140,13 @@ import { cachePrazo } from '../lib/cachePrazo';
     accountPct?: number | null;
     accountWindow?: string | null;
     onOpenAccounts?: () => void;
+    // Painel "Na fila" (montado pelo Chat) acima da aba; com ele na tela, Claude e Codex não têm o chip da fila.
+    queuePanel?: Snippet;
+    queuePanelShown?: boolean;
+    // Edição de uma mensagem da fila: o envio vira "Atualizar" e Esc sai sem mudar nada.
+    queueEditing?: boolean;
+    onQueueEditSubmit?: (text: string) => void;
+    onQueueEditCancel?: () => void;
   }
   let {
     sessionName, sessionState, status, lastCache = null, onSend, onSteer, onCommand, onInterrupt, onOpenGit,
@@ -159,6 +167,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     sessionJsonl = null,
     sessionCwd = null, sessionBranch = null,
     accountLabel = null, accountPct = null, accountWindow = null, onOpenAccounts,
+    queuePanel, queuePanelShown = false, queueEditing = false, onQueueEditSubmit, onQueueEditCancel,
   }: Props = $props();
   const placeFolder = $derived(status?.repo || (sessionCwd ? sessionCwd.replace(/\/+$/, '').split('/').pop() || '' : ''));
   const placeBranch = $derived(status?.branch || sessionBranch || '');
@@ -244,6 +253,16 @@ import { cachePrazo } from '../lib/cachePrazo';
 
   // Exposto pro pai (atalho de teclado desktop "/" foca o campo).
   export function focus() { textareaEl?.focus(); }
+
+  // Exposto pro pai: o texto trocado por fora (edição da fila, rascunho de volta) deixa o cursor no fim.
+  export async function caretToEnd(focusField = false) {
+    await tick();
+    autoGrow();
+    if (!textareaEl) return;
+    if (focusField) textareaEl.focus();
+    const end = textareaEl.value.length;
+    textareaEl.setSelectionRange(end, end);
+  }
 
   // Exposto pro pai: um audio que JA esta nos anexos da sessao volta pro ditado. Vai por `?arquivo=`:
   // o servidor transcreve o que ja tem, sem baixar nem gravar outra copia. `autoEnvio: false` porque
@@ -499,11 +518,15 @@ import { cachePrazo } from '../lib/cachePrazo';
   // pra mandar Esc, e mensagem digitada fica na fila até alguém responder.
   const podeInterromper = $derived(isWorking || (headless && sessionState === 'awaiting_input'));
 
+  // Com o painel "Na fila" na tela, Claude e Codex se resolvem por ele; o Kimi segue com o chip (fila da TUI).
+  const chipFila = $derived(temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer
+    && !(queuePanelShown && (isCodex || headless || provider === 'claude')));
+
   // Com os atalhos de volta na fileira de baixo, a aba pode não ter nada: sessão fora de repo, sem
   // par, sem cache. Faixa vazia pendurada é pior que faixa ausente.
   const temAba = $derived(
     !!status?.repo || !!lastCache || status?.ctxPct != null
-    || !!onOpenPair || (temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer)
+    || !!onOpenPair || chipFila
     || (shellsRodando > 0 && !!onOpenActivity)
     || (!desktop.atual && (!!placeFolder || !!accountLabel)),
   );
@@ -1283,6 +1306,13 @@ import { cachePrazo } from '../lib/cachePrazo';
       submit();
       return;
     }
+    // Em edição da fila, Esc só sai da edição: interromper o turno ali seria surpresa.
+    if (e.key === 'Escape' && queueEditing) {
+      e.preventDefault();
+      e.stopPropagation();
+      onQueueEditCancel?.();
+      return;
+    }
     // Esc com a sessão trabalhando = o Esc do terminal: interrompe o turno. Parada, deixa
     // passar pro resto da tela (overlays, visor).
     if (e.key === 'Escape' && podeInterromper) {
@@ -1952,6 +1982,11 @@ import { cachePrazo } from '../lib/cachePrazo';
   });
 
   async function submit(steer = false): Promise<boolean> {
+    if (queueEditing) {
+      if (!canUpdateQueueEdit(inputText)) return false;
+      onQueueEditSubmit?.(inputText);
+      return true;
+    }
     if (!canRequestSend) return false;
     cancelarContagem();
     if (starting) { recGeracao++; starting = false; }
@@ -2101,6 +2136,7 @@ import { cachePrazo } from '../lib/cachePrazo';
        fileira de dentro mudou pra cá: atalhos e estado da sessão à esquerda, o que só se lê (repo,
        branch, prazo do cache, contexto) à direita. Dentro do card ficam texto e controles do envio,
        que é o que a pessoa usa a cada mensagem. -->
+  {#if queuePanel}{@render queuePanel()}{/if}
   {#if temAba || ((isClaude || isCodex) && modoNaPrimeiraLinha)}
   <div class="status-tab">
     <div class="tab-left">
@@ -2130,7 +2166,7 @@ import { cachePrazo } from '../lib/cachePrazo';
           </button>
         {/if}
       {/if}
-      {#if temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && onSteer}
+      {#if chipFila}
         <!-- FILA da TUI (Kimi, Claude): msg já mandada, esperando o turno atual acabar. O chip existe pra
              DIZER que há fila (antes disso a bolha translúcida era a única pista) e dar a saída:
              tocar manda a tecla da TUI (Kimi `ctrl-s`, Claude `ctrl+x ctrl+s`), que promove a msg. Não tocar = espera, que
@@ -2294,6 +2330,9 @@ import { cachePrazo } from '../lib/cachePrazo';
       <p class="comandos-erro" role="status">{m.composer_commands_failed()}</p>
     {/if}
 
+    {#if queueEditing}
+      <p class="queue-editing">{m.queue_panel_editing()}</p>
+    {/if}
     <textarea
       bind:this={textareaEl}
       bind:value={inputText}
@@ -2631,11 +2670,21 @@ import { cachePrazo } from '../lib/cachePrazo';
         {@render seletorModo()}
       {/if}
       <div class="control-right">
-        {#if (isCodex || headless) && isWorking && hasInput && !sendToPair}
+        {#if (isCodex || headless) && isWorking && hasInput && !sendToPair && !queueEditing}
           <button class="model-pill" onclick={() => submit(true)} disabled={!canRequestSend}
             title={m.codex_orientar_ajuda()}>{m.codex_orientar()}</button>
         {/if}
-        {#if podeInterromper && !hasInput}
+        {#if queueEditing}
+          <!-- Edição da fila: o envio troca o texto da entrada, sem mandar nada; nunca vira Parar. -->
+          <button
+            class="send-btn send-btn--update"
+            class:send-btn--disabled={!canUpdateQueueEdit(inputText)}
+            onclick={() => submit()}
+            disabled={!canUpdateQueueEdit(inputText)}
+            aria-label={m.queue_panel_update_aria()}
+            title={m.queue_panel_update()}
+          >{m.queue_panel_update()}</button>
+        {:else if podeInterromper && !hasInput}
           <!-- Pensando + input vazio -> o slot vira STOP. Ao digitar/colar algo, volta a ser SEND
                (enfileira a msg). Um slot so -> ganha espaco. -->
           <button class="stop-btn" onclick={() => { if (skipChatConfirmations()) onInterrupt(); else confirmStopOpen = true; }} aria-label={m.composer_interromper_aria()}>
@@ -3398,6 +3447,24 @@ import { cachePrazo } from '../lib/cachePrazo';
     background: var(--bg-hover);
     color: var(--text-muted);
     cursor: default;
+  }
+  .send-btn--update {
+    width: auto;
+    padding: 0 var(--space-3);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  /* Aviso da edição da fila acima do campo: texto apagado, sem caixa (o vidro é do card). */
+  .queue-editing {
+    margin: 0 0 4px;
+    padding: 0 4px;
+    font-size: var(--text-xs);
+    color: var(--accent);
+  }
+  /* Painel da fila em cima da aba: os dois viram um bloco só, com a borda de cima da aba como costura (T3). */
+  .composer-dock :global(.qp + .status-tab) {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
   }
 
   /* Chip da FILA do Kimi. Accent (e nao o cinza dos outros chips da fileira) porque ele nao e
