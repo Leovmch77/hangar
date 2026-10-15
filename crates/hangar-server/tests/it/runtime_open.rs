@@ -406,6 +406,35 @@ async fn failed_open_leaves_no_entry_and_frees_the_lease() {
     drop(crate::lease_when_free(&target.lease_path)); // a trava sai junto com a falha
 }
 
+/// Sessão em motor: o filho do cano é o `hangar-engine` (Python) até o `execvpe` virar o `claude`.
+struct EngineBeforeExec(Instant);
+impl hangar_server::list::procs::ProcessView for EngineBeforeExec {
+    fn children(&self,timeout:Duration)->std::io::Result<Arc<hangar_server::list::procs::ChildrenMap>> {RecipeProcesses("sid-1").children(timeout)}
+    fn argv(&self,_:i64)->Vec<String> {vec![]}
+    fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(std::env::temp_dir())}
+    fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+    fn start_time(&self,_:i64)->Option<f64> {Some(1000.0)}
+    fn recipe(&self,pid:i64)->std::io::Result<hangar_server::list::procs::ProcessRecipe> {
+        let mut recipe=RecipeProcesses("sid-1").recipe(pid)?;
+        if pid==43 && self.0.elapsed()<Duration::from_millis(300) {
+            recipe.executable="/usr/bin/python3".into();
+            recipe.argv=["python3","/fixture/hangar-engine","--exec","motor","--","claude","--session-id","sid-1"].iter().map(Into::into).collect();
+        }
+        Ok(recipe)
+    }
+}
+
+#[tokio::test]
+async fn open_waits_for_the_engine_wrapper_to_become_claude() {
+    let dir = tempfile::tempdir().unwrap();
+    let (escuta,_,server) = cano(None,None).await;
+    let registry = registry_with(|registry|registry.with_processes(Arc::new(EngineBeforeExec(Instant::now())))).await;
+    let opened = registry.open(target(dir.path(),escuta,true)).await.expect("o open espera o exec do hangar-engine");
+    assert_eq!(opened["opened"],true);
+    registry.close("key",1).await.unwrap();
+    server.abort();
+}
+
 /// Cano recém-lançado que só cria o socket depois de um tempo (escopo do systemd + exec).
 #[cfg(unix)]
 #[tokio::test]

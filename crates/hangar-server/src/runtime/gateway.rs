@@ -812,7 +812,23 @@ impl RuntimeRegistry {
         let claude_recipe=if target.provider=="claude" {
             let procs=self.processes.clone();
             let sid=target.metadata["session_id"].as_str().ok_or_else(||failure("lifecycle_conversation"))?;
-            let (pid,birth)=super::lifecycle::launched_agent(procs.as_ref(),i64::from(target.binding.pid),sid)?;
+            // Em motor o filho do cano é o `hangar-engine` até o exec virar o `claude`, e o cano já escuta antes.
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(15);
+            let agent=loop {
+                match super::lifecycle::launched_agent(procs.as_ref(),i64::from(target.binding.pid),sid) {
+                    Err(error) if error.code=="relaunch_agent_identity" && tokio::time::Instant::now()<deadline=>tokio::time::sleep(Duration::from_millis(50)).await,
+                    found=>break found,
+                }
+            };
+            let (pid,birth)=match agent {
+                Ok(agent)=>agent,
+                Err(error)=>{
+                    if let Err(stop) = queue.shutdown().await {
+                        tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois de não achar o claude do cano");
+                    }
+                    return Err(error);
+                },
+            };
             let process=procs.recipe(pid).map_err(|_|failure("lifecycle_process_read"))?;
             let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&process)?;
             if argv_sid!=sid && !connection.snapshot.init.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).is_some_and(|event|event["session_id"]==sid) {return Err(failure("relaunch_conversation"));}
