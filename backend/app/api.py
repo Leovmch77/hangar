@@ -1155,12 +1155,17 @@ async def _pair_sweep_loop() -> None:
         await asyncio.sleep(_PAIR_SWEEP_S)
 
 
-def _invalidate_lists() -> None:
-    """Descarta o snapshot cru e a lista decorada do refresher: quem pedir /api/sessions depois de
-    uma mudança de membro ou de modo recalcula em vez de ver a sessão como era."""
+def invalidate_local_lists() -> None:
+    """A parte daqui do `_invalidate_lists`, sem perguntar ao Rust (quem chama pode ser o próprio Rust)."""
     with _list_lock:
         _list_snap["snap"] = None
     invalidate_recent_list()
+
+
+def _invalidate_lists() -> None:
+    """Descarta o snapshot cru e a lista decorada do refresher: quem pedir /api/sessions depois de
+    uma mudança de membro ou de modo recalcula em vez de ver a sessão como era."""
+    invalidate_local_lists()
     if registry_mod._rust_caches():
         # A mudança já aconteceu: a falha fica no diário (`lista.ponte`), o retrato do Rust vence
         # em 2 s e quem procura a sessão nova pede descoberta mais nova (`newer_than`).
@@ -2310,8 +2315,41 @@ def _create_error_code(e: ValueError) -> str:
     return "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
 
 
+async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSessionInfo | None:
+    """Claude com terminal abre no Rust. O dono pela 8765 já passou por lá (o Rust marca o que
+    devolveu); o que entra por aqui (convidado, Connect, MCP, bastão) vai à ponte, num sentido.
+    `None`: o pedido não é do Rust e segue aqui."""
+    from app import runtime_coordinator
+    if request is not None and request.headers.get("x-hangar-open") == "python":
+        return None
+    guest = guest_users.current.get()
+    payload = {"request": body.model_dump(mode="json", exclude_unset=True),
+               "guest_root": str(guest.root) if guest is not None else None}
+    answer = await asyncio.to_thread(runtime_coordinator.rust_session_open, payload)
+    if answer is None:
+        return None
+    status, raw = answer
+    data = json.loads(raw)
+    if status >= 400:
+        raise HTTPException(status, detail=data["detail"])
+    info = CreatedSessionInfo(**data["info"])
+    if guest is not None:
+        try:
+            await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+        except Exception:
+            # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
+            _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
+            await _kill_unclaimed(info.name)
+            raise
+        info = info.model_copy(update={"owner": guest.name})
+    return info
+
+
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
-async def create_session(body: CreateBody) -> CreatedSessionInfo:
+async def create_session(body: CreateBody, request: Request = None) -> CreatedSessionInfo:
+    opened = await _open_in_rust(body, request)
+    if opened is not None:
+        return opened
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)

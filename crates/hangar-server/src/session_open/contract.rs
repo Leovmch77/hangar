@@ -1,0 +1,255 @@
+//! O lado Rust do harness de contrato da abertura (`session_open_contract.py diff --side rust`): a
+//! abertura do Rust sobre o cenário montado em disco, com o multiplexador, os programas e as pontes
+//! gravados na forma em que o lado Python os grava. Só para o harness e os testes.
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use futures_util::future::BoxFuture;
+use serde_json::{Map, Value, json};
+
+use super::claude::PluginBridge;
+use super::open::{Born, OpenHost, ProgramOutput};
+use super::resolve::{CodexCatalogError, CodexLogin, CreatorFacts, OpenFacts, ProviderCatalog, ServerDefaults};
+use super::terminal::{Mux, MuxOutput, TerminalEnv};
+use super::{OpenCaller, OpenError, ServiceTier, SessionOpenRequest};
+
+const SCOPE: [&str; 6] = ["systemd-run", "--user", "--scope", "--collect", "-q", "--"];
+
+/// `<ROOT>` do cenário vira a raiz; `<ROOT_SANITIZED>`, a pasta de projeto dela.
+pub fn place(text: &str, root: &Path) -> String {
+    let root = root.to_string_lossy();
+    text.replace("<ROOT_SANITIZED>", &hangar_workspace::worktrees::sanitize_cwd(&root)).replace("<ROOT>", &root)
+}
+
+/// O `/proc` dos panes do cenário, fora do instantâneo de arquivos do harness.
+fn proc_root(root: &Path) -> PathBuf { root.join(".harness").join("proc-rust") }
+
+/// O que o lado Python não monta e o Rust lê do disco: os panes do cenário (um `tmux` que só lista e
+/// o `/proc` deles), o `plugin-dir` que o servidor publica ao subir e o `hangar-conta` desta árvore.
+pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.join("bin");
+    let write = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(path, bytes)
+    };
+    let mut panes = String::new();
+    for (index, session) in scenario["state"]["tmux_sessions"].as_array().into_iter().flatten().enumerate() {
+        let pid = 9_000_001 + index;
+        let name = session["name"].as_str().unwrap_or_default();
+        let env = session["env"].as_object().cloned().unwrap_or_default();
+        let provider = env.get("CP_PROVIDER").and_then(Value::as_str).unwrap_or("");
+        panes += &format!("{name}\t1\t{pid}\t{}\t%{index}\t\t{provider}\t\t0\t0\n", place(session["cwd"].as_str().unwrap_or_default(), root));
+        let argv: Vec<String> = session["command"].as_str().unwrap_or_default().trim_start_matches("exec ").split_whitespace().map(str::to_owned).collect();
+        let proc = proc_root(root).join(pid.to_string());
+        write(&proc.join("stat"), format!("{pid} ({}) S 1 {}", argv.first().map_or("sh", String::as_str), "0 ".repeat(20)).as_bytes())?;
+        write(&proc.join("cmdline"), (argv.join("\0") + "\0").as_bytes())?;
+        let environ: String = env.iter().map(|(k, v)| format!("{k}={}\0", place(v.as_str().unwrap_or_default(), root))).collect();
+        write(&proc.join("environ"), environ.as_bytes())?;
+        if session["environ_unreadable"] == true { std::fs::set_permissions(proc.join("environ"), std::fs::Permissions::from_mode(0o000))?; }
+    }
+    write(&bin.join("panes.txt"), panes.as_bytes())?;
+    write(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n")?;
+    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755))?;
+    let roots: String = ["hangar", "github-actions"].iter().map(|m| format!("{}\n", repo.join("plugins").join(m).display())).collect();
+    write(&root.join("home/.hangar/plugin-dir"), roots.as_bytes())?;
+    write(&bin.join("hangar-conta"), format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", repo.join("scripts/hangar-conta").display()).as_bytes())?;
+    std::fs::set_permissions(bin.join("hangar-conta"), std::fs::Permissions::from_mode(0o755))
+}
+
+/// O que o harness grava, na forma do lado Python.
+#[derive(Default)]
+struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, diary: Vec<Value> }
+
+/// O tmux em memória do harness: o estado inicial do cenário, os `new-session` gravados e as consultas
+/// respondidas pelo estado.
+struct FakeTmux { sessions: Mutex<BTreeMap<String, Value>>, force: Value, record: std::sync::Arc<Mutex<Record>> }
+
+impl Mux for FakeTmux {
+    fn scope(&self) -> Vec<String> { SCOPE.map(str::to_owned).into() }
+
+    fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
+        let scoped = argv.first().is_some_and(|a| a == "systemd-run");
+        let inner: Vec<String> = if scoped { argv.iter().skip_while(|a| *a != "--").skip(1).cloned().collect() } else { argv };
+        let args = &inner[1..];
+        let opt = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+        let target = opt("-t").map(|t| t.trim_start_matches('=').split(':').next().unwrap_or_default().to_owned());
+        let mut sessions = self.sessions.lock().unwrap();
+        let (code, stdout, stderr) = match args.first().map(String::as_str) {
+            Some("new-session") => {
+                let name = opt("-s").unwrap_or_default();
+                let (code, stderr) = if !self.force.is_null() {
+                    (self.force["rc"].as_i64().unwrap_or(1) as i32, self.force["stderr"].as_str().unwrap_or("").to_owned())
+                } else if sessions.contains_key(&name) {
+                    (1, format!("duplicate session: {name}\n"))
+                } else {
+                    let env: Map<String, Value> = args.windows(2).filter(|w| w[0] == "-e").filter_map(|w| w[1].split_once('='))
+                        .map(|(k, v)| (k.to_owned(), Value::from(v))).collect();
+                    sessions.insert(name, json!({"cwd": opt("-c"), "env": env, "command": args.last()}));
+                    (0, String::new())
+                };
+                let mut entry = json!({"prog": "tmux", "argv": args, "cwd": null, "rc": code});
+                if scoped { entry["scope"] = "systemd-run --user --scope --collect -q".into(); }
+                self.record.lock().unwrap().subprocesses.push(entry);
+                (code, String::new(), stderr)
+            }
+            Some("has-session") => match target.filter(|t| sessions.contains_key(t)) {
+                Some(_) => (0, String::new(), String::new()),
+                None => (1, String::new(), "can't find session\n".into()),
+            },
+            Some("show-environment") => match target.and_then(|t| sessions.get(&t).cloned()) {
+                Some(s) => (0, format!("{}={}\n", args.last().unwrap(), s["env"][args.last().unwrap().as_str()].as_str().unwrap_or("")), String::new()),
+                None => (1, String::new(), "can't find session\n".into()),
+            },
+            _ => (0, String::new(), String::new()),
+        };
+        Box::pin(async move { MuxOutput { code: Some(code), stdout, stderr } })
+    }
+}
+
+/// Os fatos de disco (`LocalFacts`), com as cotas que o harness deu à ponte do Python e gravadas.
+struct Facts { local: super::facts::LocalFacts, quotas: Vec<Value>, record: std::sync::Arc<Mutex<Record>> }
+
+impl OpenFacts for Facts {
+    fn providers(&self) -> Result<ProviderCatalog, OpenError> { self.local.providers() }
+    fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError> { self.local.creator(name) }
+    fn defaults(&self) -> ServerDefaults { self.local.defaults() }
+    fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError> { self.local.codex_logins() }
+    fn claude_quotas(&self) -> Vec<Value> {
+        self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "accounts", "op": "quotas", "args": {"cached_only": true}}));
+        self.quotas.iter().filter(|row| row["provedor"] == "claude").cloned().collect()
+    }
+    fn existing_dir(&self, cwd: &str) -> Option<String> { self.local.existing_dir(cwd) }
+    fn config_dirs(&self) -> Result<Vec<String>, OpenError> { self.local.config_dirs() }
+    fn engines(&self) -> Vec<String> { self.local.engines() }
+    fn supports_fast(&self, engine: Option<&str>, model: Option<&str>) -> bool { self.local.supports_fast(engine, model) }
+    fn fixed_engine_model(&self, engine: &str, account: &str, model: Option<&str>) -> Result<String, OpenError> {
+        self.local.fixed_engine_model(engine, account, model)
+    }
+    // O harness recusa a rede: o catálogo do motor não responde.
+    fn engine_window(&self, engine: &str, _model: &str, _account: Option<&str>) -> Result<Option<u64>, OpenError> {
+        Err(OpenError::new(503, "session_open_fact_unavailable", format!("o catálogo do motor '{engine}' não respondeu: rede recusada")))
+    }
+    fn codex_home(&self, account_id: &str) -> Result<String, OpenError> { self.local.codex_home(account_id) }
+    fn codex_choice(&self, home: Option<&str>, model: Option<&str>, effort: Option<&str>, tier: Option<ServiceTier>)
+        -> Result<(), CodexCatalogError> { self.local.codex_choice(home, model, effort, tier) }
+    fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> { self.local.account_mode(config_dir) }
+    fn name_in_use(&self, name: &str) -> bool { self.local.name_in_use(name) }
+    fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> { self.local.transfer_busy(name) }
+    fn real_path(&self, path: &str) -> PathBuf { self.local.real_path(path) }
+    fn new_key(&self) -> String { self.local.new_key() }
+    fn now(&self) -> f64 { self.local.now() }
+}
+
+struct Host { home: PathBuf, env: BTreeMap<String, String>, terminal: TerminalEnv, mux: FakeTmux, fakes: Value,
+    record: std::sync::Arc<Mutex<Record>> }
+
+/// As regras dos programas falsos do harness (`DEFAULT_PROGRAM_RULES` e `fakes.programs`).
+fn rule<'a>(fakes: &'a Value, prog: &str, args: &[String]) -> Option<&'a Value> {
+    fakes["programs"].as_array().into_iter().flatten().find(|r| {
+        r["prog"] == prog && r["args"].as_array().is_none_or(|want| want.iter().zip(args).all(|(w, a)| w == a.as_str()) && want.len() <= args.len())
+    })
+}
+
+impl OpenHost for Host {
+    fn home(&self) -> &Path { &self.home }
+    fn env(&self) -> &BTreeMap<String, String> { &self.env }
+    fn terminal(&self) -> &TerminalEnv { &self.terminal }
+    fn mux(&self) -> &dyn Mux { &self.mux }
+    fn bridge(&self) -> Option<PluginBridge> { Some(PluginBridge { port: 8765, secret: self.env.get("CP_AUTH_TOKEN").cloned().unwrap_or_default() }) }
+    fn server_projects(&self) -> PathBuf { self.home.join(".claude/projects") }
+
+    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
+        Box::pin(async move {
+            let prog = Path::new(&argv[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // `git` e o `hangar-conta` rodam de verdade, dentro da raiz, como no lado Python (lá o
+            // `contas.reconciliar` roda no próprio processo).
+            if matches!(prog.as_str(), "git" | "hangar-conta") { return super::server::run_program(&self.env, argv, timeout).await; }
+            let args = &argv[1..];
+            let found = rule(&self.fakes, &prog, args);
+            let code = found.map_or(0, |r| r["rc"].as_i64().unwrap_or(0) as i32);
+            let entry = json!({"prog": prog, "argv": args, "rc": code});
+            let mut record = self.record.lock().unwrap();
+            if found.is_some() { record.probes.push(entry) } else { record.subprocesses.push(entry) }
+            ProgramOutput { code: Some(code), stdout: found.and_then(|r| r["stdout"].as_str()).unwrap_or("").into(),
+                stderr: found.and_then(|r| r["stderr"].as_str()).unwrap_or("").into() }
+        })
+    }
+
+    fn customizations(&self, args: Value) -> BoxFuture<'_, Result<Value, OpenError>> {
+        Box::pin(async move {
+            self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "claude_customizations", "op": "prepare", "args": args}));
+            let reply = &self.fakes["rust_bridge"]["claude_customizations.prepare"];
+            match &reply["error"] {
+                Value::Null => Ok(if reply["result"].is_null() { json!({}) } else { reply["result"].clone() }),
+                e => Err(OpenError::new(e["status"].as_u64().unwrap_or(503) as u16, "claude_customizations_unavailable",
+                    e["detail"].as_str().unwrap_or_default().to_owned())),
+            }
+        })
+    }
+
+    fn leave_old_group<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> { Box::pin(async { Ok(()) }) }
+    fn release_name<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> { Box::pin(async { Ok(()) }) }
+
+    fn born<'a>(&'a self, born: &'a Born) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "share", "op": "session_died", "args": {"name": born.name}}));
+            Vec::new()
+        })
+    }
+
+    fn diary(&self, events: Vec<Value>) { self.record.lock().unwrap().diary.extend(events); }
+    fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
+    fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
+}
+
+/// Roda os passos do cenário (só `POST /api/sessions`) pela abertura do Rust. `{"not_ours": true}`
+/// quando algum passo não é do Rust (o Python o atende): o harness diz a rota que falta.
+pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -> Value {
+    let record = std::sync::Arc::new(Mutex::new(Record::default()));
+    let substituted: Value = serde_json::from_str(&place(&scenario.to_string(), root)).unwrap_or(Value::Null);
+    let state = &substituted["state"];
+    let sessions: BTreeMap<String, Value> = state["tmux_sessions"].as_array().into_iter().flatten()
+        .map(|s| (s["name"].as_str().unwrap_or_default().to_owned(), json!({"cwd": s["cwd"], "env": s["env"], "command": s["command"]}))).collect();
+    let home = root.join("home");
+    let terminal = TerminalEnv { birth: Duration::from_millis(100), ..TerminalEnv::local(&home, &env) };
+    let fakes = substituted["fakes"].clone();
+    let host = Host { home: home.clone(), env: env.clone(), terminal,
+        mux: FakeTmux { sessions: Mutex::new(sessions), force: fakes["tmux_new_session"].clone(), record: record.clone() },
+        fakes: fakes.clone(), record: record.clone() };
+    let mut steps = Vec::new();
+    for step in substituted["steps"].as_array().into_iter().flatten() {
+        if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
+        let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
+        if request.provider.as_deref().is_some_and(|p| p != "claude") || request.headless == Some(true) { return json!({"not_ours": true}); }
+        let runtime = tokio::runtime::Handle::current();
+        let (facts_env, facts_root, facts_record, quotas) = (env.clone(), root.to_owned(), record.clone(),
+            fakes["quotas"].as_array().cloned().unwrap_or_default());
+        let request_for_facts = request.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            let local = super::facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(facts_env), runtime)
+                .with_terminal(crate::list::mux::Mux::with_program(facts_root.join("bin/tmux"), Duration::from_secs(2)),
+                    std::sync::Arc::new(crate::list::procs::ProcFs::with_root(proc_root(&facts_root))));
+            super::resolve_open(&request_for_facts, &OpenCaller::Owner, &Facts { local, quotas, record: facts_record })
+        }).await.unwrap();
+        let (status, body) = match resolved {
+            Ok(resolved) if resolved.spec.provider != super::AgentProvider::Claude || resolved.spec.surface != super::Surface::Terminal =>
+                return json!({"not_ours": true}),
+            Ok(resolved) => match super::open::open_claude_terminal(&host, resolved, &OpenCaller::Owner).await {
+                Ok(opened) => (200, opened.body),
+                Err(error) => (error.status, error.body()),
+            },
+            Err(error) => {
+                if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, &error) { host.diary(events); }
+                (error.status, error.body())
+            }
+        };
+        steps.push(json!({"method": "POST", "path": "/api/sessions", "status": status, "body": body}));
+    }
+    let record = std::mem::take(&mut *record.lock().unwrap());
+    let tmux_sessions: Map<String, Value> = host.mux.sessions.lock().unwrap().clone().into_iter().collect();
+    json!({"steps": steps, "subprocesses": record.subprocesses, "probes": record.probes, "rust_bridge": record.rust_bridge,
+        "runtime_requests": [], "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary})
+}

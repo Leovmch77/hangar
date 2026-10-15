@@ -962,6 +962,32 @@ fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
     assert_eq!(claude::jev_pairs(false, &runtime), [("HANGAR_JEV".to_owned(), "off".to_owned())]);
 }
 
+/// A abertura inteira pelo lado Rust do harness: nasceu, a ordem do diário é a do Python e o spec
+/// fica gravado; o pane recusado não chega ao "criada" nem grava o spec.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_claude_terminal_open_runs_in_the_python_order() {
+    let runtime = test_runtime();
+    for (name, status, last) in [("create_claude_terminal_default", 200, "sessao.criada"), ("create_claude_terminal_tmux_fails", 409, "sessao.criar_recusada")] {
+        let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        materialize(&fixture, &root);
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
+        let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
+            .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
+        let raw = runtime.block_on(contract::run(&fixture["scenario"], &root, env));
+        assert_eq!(raw["steps"][0]["status"], status, "{name}: {}", raw["steps"][0]["body"]);
+        let events: Vec<String> = raw["diary"].as_array().unwrap().iter().map(|e| format!("{}:{}", e["evento"].as_str().unwrap(), e["etapa"].as_str().unwrap_or(""))).collect();
+        let at = |e: &str| events.iter().position(|x| x == e).unwrap_or_else(|| panic!("{name}: {e} em {events:?}"));
+        assert!(at("sessao.criar.inicio:") < at("sessao.criar_etapa:validar") && at("sessao.criar_etapa:confiar_pasta") < at("sessao.criar_etapa:criar_terminal"));
+        assert_eq!(events[events.len() - 2].split(':').next().unwrap(), last, "{name}: {events:?}");
+        let specs = root.join("home/.hangar/session-specs");
+        assert_eq!(std::fs::read_dir(&specs).map(|d| d.count()).unwrap_or(0), usize::from(status == 200), "{name}: spec gravado só ao nascer");
+    }
+}
+
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
 
 fn fixture_spec(name: &str) -> SessionSpec {

@@ -19,6 +19,7 @@ from app.mensagens import erro
 from app.sse import merged_events
 
 _LOOPBACK = {"127.0.0.1", "::1"}
+_log = logging.getLogger(__name__)
 
 # Só na memória: no os.environ ele iria para toda sessão que o backend sobe.
 _secret: str | None = None
@@ -146,6 +147,74 @@ async def rust_diag(request: Request) -> dict:
         raise HTTPException(400) from None
     diag.registrar(body["evento"], "aviso" if body["evento"] in _DIAG_WARNING else "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
     return {"ok": True}
+
+
+_OPEN_EVENTS = {"sessao.criar.inicio", "sessao.criar_etapa", "sessao.criada", "sessao.criar.fim", "sessao.criar_recusada"}
+_OPEN_FIELDS = {"evento", "nivel", "sessao", "provider", "etapa", "codigo", "detalhe", "ms", "erro_tipo", "operacao"}
+
+
+@router.post("/diag/events")
+async def open_diag(request: Request) -> dict:
+    """Os eventos de uma abertura que o Rust fez (`sessao.criar*`), na ordem; o arquivo é daqui."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 65536 else None
+        events = body.get("events") if isinstance(body, dict) else None
+        if (not isinstance(events, list) or len(events) > 32 or not all(
+                isinstance(e, dict) and set(e) <= _OPEN_FIELDS and e.get("evento") in _OPEN_EVENTS
+                and e.get("nivel") in ("ok", "aviso", "erro")
+                and all(isinstance(v, (str, int)) and not isinstance(v, bool) and len(str(v)) <= 300 for v in e.values())
+                for e in events)):
+            raise ValueError("eventos inválidos")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    for e in events:
+        fields = dict(e)
+        diag.registrar(fields.pop("evento"), fields.pop("nivel"), **fields)
+    return {"ok": True}
+
+
+@router.post("/sessions/{name}/release")
+async def session_release(name: str) -> dict:
+    """Nome reusado por uma sessão que o Rust abre: a fila, o `then` e os caches daqui não passam à
+    nova. Sem pontes: a lista e o grupo o próprio Rust esquece."""
+    from app.api import registry
+    await internal_thread(registry.release_name, name)
+    return {"ok": True}
+
+
+@router.post("/sessions/{name}/born")
+async def session_born(name: str, request: Request) -> dict:
+    """A sessão que o Rust abriu nasceu: o transcript dela no cache daqui, o modo de lançamento para
+    o aviso do painel, a lista daqui refeita e o provedor lembrado (o `runtime-config.json` é daqui)."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 8192 else None
+        if (not isinstance(body, dict) or set(body) != {"session_id", "jsonl", "permission_mode", "remember_provider"}
+                or not isinstance(body["session_id"], str) or not isinstance(body["jsonl"], str)
+                or not isinstance(body["permission_mode"], (str, type(None)))
+                or body["remember_provider"] not in (None, "claude", "codex", "pi", "omp", "kimi")):
+            raise ValueError("sessão inválida")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+
+    def apply() -> list[str]:
+        from app import api, permission_mode, runtime_config
+        from app.registry import SessionRegistry
+        SessionRegistry._jsonl_cache[name] = body["jsonl"]
+        if body["permission_mode"]:
+            permission_mode.remember_launch_mode(body["session_id"], body["permission_mode"])
+        api.invalidate_local_lists()
+        provider = body["remember_provider"]
+        if provider is None or runtime_config.get("last_session_provider") == provider:
+            return []
+        try:
+            runtime_config.aplicar({"last_session_provider": provider})
+        except Exception as exc:  # noqa: BLE001 — a sessão já existe; o aviso volta na resposta
+            _log.warning("não consegui lembrar o provedor da sessão %s: %s", name, exc)
+            return [f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]
+        return []
+    return {"avisos": await internal_thread(apply)}
 
 
 @router.post("/list/facts")

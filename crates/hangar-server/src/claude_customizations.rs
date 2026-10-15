@@ -127,6 +127,12 @@ pub async fn private(
     envelope(run(&st, op).await)
 }
 
+/// A operação `prepare` da ponte, para a abertura de sessão do próprio Rust: `{"settings": …}`.
+pub(crate) async fn prepare_for_open(st: &Arc<AppState>, args: Value) -> std::result::Result<Value, (u16, &'static str, &'static str)> {
+    let op = serde_json::from_value::<Operation>(json!({"op": "prepare", "args": args})).map_err(|_| { let e = invalid(); (e.status, e.code, e.detail) })?;
+    run(st, op).await.map_err(|e| (e.status, e.code, e.detail))
+}
+
 pub(crate) const CATALOG_PATH: &str = "/api/claude/customizations";
 
 /// `GET /api/claude/customizations`: o catálogo de plugins e skills da pasta na conta, com o

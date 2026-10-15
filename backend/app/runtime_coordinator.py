@@ -76,6 +76,44 @@ def rust_claude(name, route, method="POST", body=b""):
     return _rust_bridge("claude", name, route, method, body)
 
 
+def rust_session_open(payload: dict):
+    """A abertura que entra pelo Python (convidado, Connect, MCP, bastão) vai à ponte do Rust, num
+    sentido. `(status, corpo)`; `None` = o Rust não abre esse pedido (421) e o Python segue. Com o Rust
+    de pé ou esperado, ponte fora é falha com código, nunca o Python abrindo no lugar."""
+    if _current is None or _current.mode == "python":
+        return None
+    # Os códigos da ponte do Claude: a tela já tem frase para eles.
+    return _rust_post("/__hangar_server/sessions/open", json.dumps(payload).encode(), "claude")
+
+
+def _rust_post(path, body, code):
+    from app import list_bridge
+    import http.client
+    endpoint = list_bridge.endpoint()
+    status, raw, sent = 503, b"", False
+    if endpoint is not None:
+        conn = http.client.HTTPConnection(endpoint[0], timeout=180)
+        try:
+            conn.request("POST", path, body=body, headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]})
+            sent = True
+            response = conn.getresponse()
+            status, raw = response.status, response.read()
+        except (OSError, http.client.HTTPException):
+            if sent:
+                return 504, json.dumps({"detail": {"code": f"{code}_bridge_uncertain", "params": {},
+                    "msg": "O Rust recebeu o pedido e não respondeu; confira a lista antes de repetir."}}).encode()
+        finally:
+            conn.close()
+        if status == 421:
+            return None
+    with suppress(ValueError):
+        parsed = json.loads(raw)
+        if status < 300 or (isinstance(parsed, dict) and "detail" in parsed):
+            return status, raw
+    return max(status, 502), json.dumps({"detail": {"code": f"{code}_bridge_failed", "params": {},
+        "msg": "O Rust não respondeu ao repasse; tente de novo."}}).encode()
+
+
 def _rust_bridge(provider, name, route, method, body):
     from app import list_bridge
     import http.client, urllib.parse

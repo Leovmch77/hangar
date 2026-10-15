@@ -370,6 +370,27 @@ pub fn create_worktree(
     new_branch: bool,
     base: Option<&str>,
 ) -> Result<Value> {
+    let made = create_worktree_at(cwd, branch, name, root, new_branch, base)?;
+    Ok(json!([made.path, made.created]))
+}
+/// O que a criação fez: a pasta, se a worktree nasceu agora e se a branch local também (nova, ou
+/// trazida do remoto com `--track -b`), para quem desfaz só apagar o que este pedido criou.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: String,
+    pub created: bool,
+    pub branch_created: bool,
+}
+/// Texto que separa "pasta ocupada" das outras recusas 409 (o Python compara o mesmo).
+pub const TARGET_TAKEN: &str = "destino da worktree já existe";
+fn create_worktree_at(
+    cwd: &Path,
+    branch: &str,
+    name: &str,
+    root: &Path,
+    new_branch: bool,
+    base: Option<&str>,
+) -> Result<Worktree> {
     if !new_branch {
         option_like(branch)?;
     }
@@ -413,7 +434,7 @@ pub fn create_worktree(
             return Err(error(400, "branch inexistente"));
         }
         if info["current"] == branch {
-            return Ok(json!([cwd.to_string_lossy(), false]));
+            return Ok(Worktree { path: cwd.to_string_lossy().into_owned(), created: false, branch_created: false });
         }
     }
     if name.contains(['/', '\\', '\0']) || name == ".." {
@@ -427,9 +448,10 @@ pub fn create_worktree(
         return Err(error(400, "worktree fora da raiz autorizada"));
     }
     if target.symlink_metadata().is_ok() {
-        return Err(error(409, "destino da worktree já existe"));
+        return Err(error(409, TARGET_TAKEN));
     }
     let text = target.to_string_lossy();
+    let branch_created = new_branch;
     let created = if new_branch {
         let from = if local.iter().any(|b| b == start.as_str()) {
             start.clone()
@@ -464,7 +486,41 @@ pub fn create_worktree(
         }
     }
     copy_ignored(&main_root(cwd, &repo, &root), &target);
-    Ok(json!([text, true]))
+    Ok(Worktree { path: text.into_owned(), created: true, branch_created })
+}
+/// `create_branch_worktree`: a pasta leva o nome da branch (`stem`, já saneado); ocupada, ganha
+/// `-2`, `-3`… até `-99`. Só a pasta ocupada provoca nova tentativa.
+pub fn create_branch_worktree(
+    cwd: &Path,
+    branch: &str,
+    stem: &str,
+    root: &Path,
+    new_branch: bool,
+    base: Option<&str>,
+) -> Result<Worktree> {
+    for n in 1..100 {
+        let name = if n == 1 { stem.to_owned() } else { format!("{stem}-{n}") };
+        match create_worktree_at(cwd, branch, &name, root, new_branch, base) {
+            Err(e) if e.detail == TARGET_TAKEN => continue,
+            other => return other,
+        }
+    }
+    Err(error(409, TARGET_TAKEN))
+}
+/// Desfaz a worktree que o pedido criou (forçado: os arquivos copiados podem não estar ignorados na
+/// base) e a branch local que ele criou; a que já existia fica.
+pub fn undo_worktree(source: &Path, made: &Worktree, branch: &str) -> Result<()> {
+    if !made.created {
+        return Ok(());
+    }
+    remove_worktree(source, &made.path, true)?;
+    if made.branch_created {
+        let out = command(source, &["branch", "-D", branch])?;
+        if out.code != 0 {
+            return Err(error(500, scrub(&out.reason("não consegui apagar a branch"))));
+        }
+    }
+    Ok(())
 }
 /// Raiz do repositório principal: com `cwd` numa worktree ligada, a config mora no principal.
 fn main_root(cwd: &Path, repo: &Path, root: &Path) -> PathBuf {

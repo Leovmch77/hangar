@@ -1,4 +1,4 @@
-//! Abertura de sessão: o despacho provisório do `POST /api/sessions` e o comando `hangar-open`.
+//! Abertura de sessão: o despacho do `POST /api/sessions` e o comando `hangar-open`.
 use std::path::Path;
 use std::process::Command;
 
@@ -6,16 +6,28 @@ use serde_json::Value;
 
 use crate::fake::*;
 
+/// Claude com terminal é do Rust (a recusa também); o resto segue ao Python com o corpo intacto, e
+/// só o que o Rust olhou leva a marca de "já olhei" (a do cliente não passa).
 #[tokio::test]
-async fn create_goes_to_python_with_the_body_untouched() {
+async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     let (fake, up) = spawn_fake().await;
     let srv = spawn_server(config(up, "127.0.0.1")).await;
-    // Um pedido válido, um que o Rust recusaria (`bogus`) e um que nem é JSON: o Python decide os três.
-    for body in [&br#"{"name":"s1","cwd":"/x","provider":"claude"}"#[..], br#"{"name":"s1","cwd":"/x","bogus":1}"#, b"nem json"] {
+    let post = |body: &'static [u8]| client().post(format!("http://{srv}/api/sessions")).bearer_auth(OWNER)
+        .header("content-type", "application/json").header("x-hangar-open", "python").body(body.to_vec()).send();
+    let resp = post(br#"{"name":"s1","cwd":"/nao/existe","provider":"claude","headless":false}"#).await.unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(serde_json::from_str::<Value>(&resp.text().await.unwrap()).unwrap()["detail"]["code"], "erro_cwd_inexistente");
+    assert_eq!(fake.hits_to("/api/sessions"), 0, "o Rust respondeu sozinho");
+    let codex = br#"{"name":"s1","cwd":"/x","provider":"codex"}"#;
+    assert_eq!(post(codex).await.unwrap().text().await.unwrap(), "from-python");
+    assert_eq!(fake.last_body(), codex, "corpo repassado byte a byte");
+    assert_eq!(fake.last_hit().1["x-hangar-open"], "python", "o Rust olhou e devolveu");
+    for body in [&br#"{"name":"s1","cwd":"/x","bogus":1}"#[..], b"nem json"] {
         let resp = client().post(format!("http://{srv}/api/sessions")).bearer_auth(OWNER)
-            .header("content-type", "application/json").body(body.to_vec()).send().await.unwrap();
+            .header("content-type", "application/json").header("x-hangar-open", "python").body(body.to_vec()).send().await.unwrap();
         assert_eq!(resp.text().await.unwrap(), "from-python");
-        assert_eq!(fake.last_body(), body, "corpo repassado byte a byte");
+        assert_eq!(fake.last_body(), body);
+        assert!(fake.last_hit().1.get("x-hangar-open").is_none(), "a marca do cliente não passa");
     }
     assert_eq!(fake.hits_to("/api/sessions"), 3);
 }

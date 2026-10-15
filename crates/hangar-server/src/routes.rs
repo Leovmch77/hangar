@@ -424,6 +424,7 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/transcription/{operation}", axum::routing::post(crate::transcription::routes::private))
         .route("/__hangar_server/dictation/{operation}", axum::routing::post(crate::dictation::routes::private))
         .route("/__hangar_server/claude/customizations", axum::routing::post(crate::claude_customizations::private))
+        .route("/__hangar_server/sessions/open", axum::routing::post(crate::session_open::server::bridge))
         .route("/__hangar_server/forwarded", axum::routing::any(crate::forwarded::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/accounts", axum::routing::post(crate::accounts::http::private))
