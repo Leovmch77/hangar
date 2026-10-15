@@ -1,4 +1,4 @@
-//! Página publicada pelo agente desenhada dentro da conversa: viva no Linux, imagem estática nos outros.
+//! Página publicada pelo agente desenhada dentro da conversa: viva no Linux e no Windows, imagem estática no macOS.
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, VecDeque},
@@ -19,7 +19,7 @@ const SITE_HEIGHT: u32 = 640;
 /// Clique ou tecla na página que ainda vale como gesto para ela abrir um link.
 const GESTURE: Duration = Duration::from_secs(2);
 /// Espera do último quadro da página que sai do orçamento.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const PARK_SHOT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -150,7 +150,7 @@ impl Paint {
 enum ViewState { Loading, Ready, Error, Expired }
 
 /// Motor vivo da página e o laço que lê os eventos dele; caem juntos.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct Running { engine: Rc<Engine>, _drain: Task<()>, framed: bool, theme_sent: String, at: Option<String> }
 
 struct PageView {
@@ -164,7 +164,7 @@ struct PageView {
     busy: bool,
     html: Option<Rc<str>>,
     reported: Option<f32>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     running: Option<Running>,
     /// Saiu do orçamento: mostra o último quadro até voltar à tela.
     parked: bool,
@@ -196,7 +196,7 @@ pub struct Pages {
 
 impl Pages {
     pub fn new(window: AnyWindowHandle) -> Self {
-        let live = cfg!(target_os = "linux") && Engine::available().is_ok();
+        let live = cfg!(any(target_os = "linux", target_os = "windows")) && Engine::available().is_ok();
         Self {
             views: HashMap::new(), budget: Budget::default(), paint: Rc::default(), window, width: Rc::new(Cell::new(COLUMN)), live,
             #[cfg(target_os = "linux")]
@@ -257,7 +257,7 @@ fn hex(color: Hsla) -> String {
 
 /// A fonte do app vem embutida nele, não instalada: sem isto o Chromium da página cai na fonte do sistema, mais fina,
 /// e a página destoa do texto ao lado.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use base64::Engine as _;
     let face = |bytes: &[u8], weight: u16| format!("@font-face{{font-family:\"{}\";font-weight:{weight};src:url(data:font/ttf;base64,{})}}",
@@ -269,7 +269,7 @@ static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
 });
 
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn theme_script() -> String {
     let vars = json!({
         "--background": "transparent", "--foreground": hex(theme::text()), "--muted-foreground": hex(theme::muted()),
@@ -321,7 +321,7 @@ impl Hangar {
         let width = self.pages.width.get();
         let Some(view) = self.pages.views.get_mut(id) else { return };
         if view.busy || matches!(view.state, ViewState::Error | ViewState::Expired) { return; }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if view.live {
             if view.html.is_none() && view.page.url.is_none() {
                 view.busy = true;
@@ -380,7 +380,7 @@ impl Hangar {
 
     /// Abre o motor da página sem travar a janela: o cartão mostra o carregando, na altura reservada, até ele chegar.
     /// Falhou, a página cai para a imagem.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn start_page_engine(&mut self, id: &str, cx: &mut Context<Self>) {
         let (handle, width) = (self.pages.window, self.pages.width.get());
         let Some(view) = self.pages.views.get_mut(id) else { return };
@@ -404,7 +404,7 @@ impl Hangar {
         }).detach();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn page_engine_ready(&mut self, id: String, engine: Result<Rc<Engine>, String>, received: async_channel::Receiver<crate::browser::Event>, cx: &mut Context<Self>) {
         let Some(view) = self.pages.views.get_mut(&id) else { return };
         view.busy = false;
@@ -432,7 +432,7 @@ impl Hangar {
     }
 
     /// Fora do orçamento: guarda a tela atual como imagem e fecha o motor (o `Drop` fecha alvo e contexto).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn park_page(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         let Some(running) = view.running.take() else { return };
@@ -457,7 +457,7 @@ impl Hangar {
         }).detach();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn page_event(&mut self, id: &str, event: crate::browser::Event, cx: &mut Context<Self>) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         match event {
@@ -476,6 +476,8 @@ impl Hangar {
             }
             crate::browser::Event::Host(raw) => match parse_host(&raw) {
                 Some(HostMsg::Height(height)) if view.reported != Some(height) => {
+                    #[cfg(target_os = "windows")]
+                    crate::browser::frames::trace(format_args!("página pediu altura {height}"));
                     view.reported = Some(height);
                     self.remeasure_page(id);
                     self.redraw(panes::Area::Conversation, cx);
@@ -498,7 +500,7 @@ impl Hangar {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         view.collapsed = !view.collapsed;
         if view.collapsed {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             if let Some(running) = view.running.take() && view.page.url.is_some() && let Some(at) = running.at {
                 view.page.url = Some(at);
             }
@@ -541,12 +543,12 @@ impl Hangar {
         }).detach();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn page_engine(&self, id: &str) -> Option<Rc<Engine>> {
         self.pages.views.get(id)?.running.as_ref().map(|r| r.engine.clone())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         match kind {
@@ -565,7 +567,7 @@ impl Hangar {
         let live = self.pages.live;
         self.pages.views.entry(id.clone()).or_insert_with(|| PageView {
             page: page.clone(), row, state: ViewState::Loading, live, busy: false, html: None, reported: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             running: None,
             parked: false, last_frame: None, shot: None, no_image: false, focus: cx.focus_handle(), gesture: None, origin: Rc::default(), pressed: false, collapsed: false,
         });
@@ -578,12 +580,12 @@ impl Hangar {
                 .into_any_element();
         }
         // Estacionada que saiu da tela e voltou recarrega.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.pages.views.get(&id).is_some_and(|v| v.parked) && self.pages.paint.away.borrow_mut().remove(&id) {
             if let Some(view) = self.pages.views.get_mut(&id) { view.parked = false; }
         }
         self.drive_page(&id, cx);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.pages.views.get(&id).is_some_and(|v| v.running.is_some()) { self.pages.budget.touch(&id); }
         let width = self.pages.width.get();
         let Some(view) = self.pages.views.get_mut(&id) else { return div().into_any_element() };
@@ -633,7 +635,7 @@ impl Hangar {
             };
             return v_flex().relative().w_full().gap_1().child(measure).children(picture).child(bar).into_any_element();
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             let script = theme_script();
             let follows = !view.page.own_theme && view.page.url.is_none();
@@ -718,7 +720,7 @@ impl Hangar {
             };
             return v_flex().w_full().gap_1().child(strip.child(toggle_button(&id, false, cx))).child(card).into_any_element();
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         div().w_full().h(height).child(loading()).into_any_element()
     }
 }

@@ -61,3 +61,6 @@ dentro e área clicável sem papel vira botão (`window/a11y.rs`, `elements/div.
 adiou e é reemitido no reaproveitamento (`DeferredDraw`, `window.rs`). `Window::a11y_snapshot` devolve o último quadro em
 texto (`window/a11y/snapshot.rs`, testado pela suíte do app) e `Window::retain_a11y_tree` mantém a árvore sem leitor
 ligado. O clique pela acessibilidade só acontece se o elemento do nó estiver sob o ponto.
+
+`PaintSurface::texture` e `Window::paint_surface(bounds, texture)` valem também no Windows (`scene.rs`, `window.rs`,
+teste em `scene_damage.rs`): lá a textura é a `SurfaceTexture` do gpui-pre-windows.

@@ -687,7 +687,7 @@ mod tests {
             },
             #[cfg(target_os = "macos")]
             image_buffer: dummy_surface_buffer(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             texture: std::sync::Arc::new(()),
         });
         scene.finish();

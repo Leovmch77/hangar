@@ -1034,3 +1034,24 @@ também sai no campo `cdp_local` do sidecar da sessão.
 - Risco que fica: qualquer programa local pode dirigir o navegador da sessão enquanto o app roda,
   como uma porta de depuração do Chrome. O `/cdp/browser` com `Authorization` e o `/cdp` do celular
   não mudam.
+
+## Página da conversa no Windows: WebView2 fora da tela (14/10/2026)
+
+Prova da Task 9 de `docs/superpowers/plans/2026-10-07-paginas-na-conversa.md`, na DELPHI-02
+(Windows Server 2025, VM sem GPU, WebView2 155.0.4283.45), pelo navegador da sessão do app nativo
+e pelo `/cdp` da tela remota (os mesmos `Page.startScreencast`/`screencastFrameAck` e
+`Input.dispatchMouseEvent` que o modo página usaria):
+
+| Estado da WebView2 | Quadros em 10 s | Clique chegou à página |
+|---|---|---|
+| painel visível | 193 (19/s) | sim (`mousedown` 1, `click` 1) |
+| estacionada (aba do painel fechada) | 200 (20/s), 1280×800 | sim |
+| app minimizado | 201 (20/s), 1280×800 | sim |
+
+Página animada a cada 50 ms com contador de cliques visível; o clique foi conferido no print do
+próprio screencast, sem `Runtime.evaluate`. **Decisão: a Task 10 segue** — o cartão vivo no
+Windows usa uma WebView2 estacionada por página, quadros por screencast e entrada por CDP.
+
+- Clique vindo da tela remota com o agente agindo pausa o navegador da sessão como "você
+  assumiu" (`user_input` em `app/browser.rs`); a WebView2 do modo página é outra e não passa por
+  essa pausa.
