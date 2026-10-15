@@ -1,15 +1,20 @@
 //! `hangar-open`: o lançador do Hangar como comando de terminal (D-013). O mesmo `resolve_open()`
-//! do servidor, lendo os mesmos arquivos, para o terminal abrir igual com o servidor fora do ar.
+//! do servidor, lendo os mesmos arquivos, para o terminal decidir igual com o servidor fora do ar.
 //!
 //!   hangar-open resolve [PEDIDO]  resolve nesta máquina e imprime o spec, sem efeito nenhum
-//!   hangar-open open [PEDIDO]     pede ao servidor (`HANGAR_URL`, token `CP_AUTH_TOKEN`); fora do
-//!                                 ar, resolve aqui, imprime e sai 3 (abrir sem ele: Task 4)
+//!   hangar-open open [PEDIDO]     pede ao servidor; fora do ar, resolve aqui, imprime e sai 3
+//!                                 (abrir sem ele: Task 4)
 //!
-//! PEDIDO é o JSON do `POST /api/sessions`; omitido, vem da entrada padrão. Recusa sai em stderr
-//! no envelope `{"detail": …}` com código 1; uso errado, 2.
+//! Token, porta e as opções `CP_*` do servidor vêm do `backend/.env` da cópia do Hangar onde o
+//! comando mora, como no `hangar-send`. PEDIDO é o JSON do `POST /api/sessions`; omitido, vem da
+//! entrada padrão. Recusa sai em stderr no envelope `{"detail": …}` com código 1; uso errado, 2;
+//! sem token no `.env`, 4 (nada é enviado).
+use std::collections::BTreeMap;
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::session_open::{OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
 
 fn main() -> ExitCode {
@@ -37,6 +42,8 @@ fn main() -> ExitCode {
         Ok(request) => request,
         Err(error) => return refused(&error),
     };
+    let env_path = env_file();
+    let server = env_path.as_ref().and_then(|path| std::fs::read_to_string(path).ok()).map(|text| dotenv(&text)).unwrap_or_default();
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -45,7 +52,13 @@ fn main() -> ExitCode {
         }
     };
     if command == "open" {
-        match runtime.block_on(ask_server(&body)) {
+        let Some(token) = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty()) else {
+            let place = env_path.map_or_else(|| "nenhum backend/.env acima do comando".to_owned(), |p| p.display().to_string());
+            eprintln!("hangar-open: sem CP_AUTH_TOKEN no .env do servidor ({place}); nada foi enviado");
+            return ExitCode::from(4);
+        };
+        let port = server.get("CP_PORT").map_or("8765", String::as_str);
+        match runtime.block_on(ask_server(&format!("http://127.0.0.1:{port}"), token, &body)) {
             Ask::Answered(status, text) => {
                 println!("{text}");
                 return if (200..300).contains(&status) { ExitCode::SUCCESS } else { ExitCode::from(1) };
@@ -58,7 +71,7 @@ fn main() -> ExitCode {
             Ask::Down(reason) => eprintln!("hangar-open: servidor fora do ar ({reason}); resolvido nesta máquina, sem abrir"),
         }
     }
-    let facts = LocalFacts::new(hangar_server::accounts::environment::AccountEnvironment::capture(), runtime.handle().clone());
+    let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone());
     match resolve_open(&request, &facts) {
         Ok(resolved) => {
             println!("{}", serde_json::to_string_pretty(&resolved).unwrap_or_default());
@@ -68,17 +81,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// `backend/.env` da cópia do Hangar onde o comando mora (`<cópia>/…/hangar-open`).
+fn env_file() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    exe.ancestors().skip(1).map(|dir| dir.join("backend").join(".env")).find(|path| path.is_file())
+}
+
+/// `CHAVE=valor` por linha; a última vale, como o `install-native` lê.
+fn dotenv(text: &str) -> BTreeMap<String, String> {
+    text.lines().filter_map(|line| {
+        let line = line.trim();
+        let (key, value) = line.strip_prefix("export ").unwrap_or(line).split_once('=')?;
+        let value = value.trim();
+        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))).unwrap_or(value);
+        (!key.trim().starts_with('#')).then(|| (key.trim().to_owned(), value.to_owned()))
+    }).collect()
+}
+
+/// O ambiente que o servidor teria: a conta e as opções `CP_*` de quem chama não valem (uma sessão
+/// dentro da conta B leria a configuração da B); as `CP_*` vêm do `.env` do servidor.
+fn server_env(caller: impl Iterator<Item = (String, String)>, server: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut env: BTreeMap<String, String> = caller
+        .filter(|(key, _)| !matches!(key.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME") && !key.starts_with("CP_"))
+        .collect();
+    env.extend(server.iter().filter(|(key, _)| key.starts_with("CP_")).map(|(k, v)| (k.clone(), v.clone())));
+    env
+}
+
 enum Ask { Answered(u16, String), Down(String), Uncertain(String) }
 
-async fn ask_server(body: &[u8]) -> Ask {
-    let base = std::env::var("HANGAR_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".into());
-    let Ok(token) = std::env::var("CP_AUTH_TOKEN") else { return Ask::Uncertain("sem CP_AUTH_TOKEN".into()) };
+async fn ask_server(base: &str, token: &str, body: &[u8]) -> Ask {
     // O mesmo prazo das telas: a criação pode preparar conta e worktree.
     let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build() {
         Ok(client) => client,
         Err(error) => return Ask::Uncertain(error.to_string()),
     };
-    let sent = client.post(format!("{}/api/sessions", base.trim_end_matches('/'))).bearer_auth(token)
+    let sent = client.post(format!("{base}/api/sessions")).bearer_auth(token)
         .header("content-type", "application/json").body(body.to_vec()).send().await;
     match sent {
         Ok(response) => {
