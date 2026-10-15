@@ -801,7 +801,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -1769,7 +1769,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -1843,7 +1843,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -1869,7 +1869,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -2717,7 +2717,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -3685,7 +3685,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -3759,7 +3759,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -3785,7 +3785,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -4048,7 +4048,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -4263,7 +4263,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -5111,7 +5111,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,
@@ -6079,7 +6079,7 @@
   {
    "kind": "user_msg",
    "id": "u-024",
-   "text": "fila A editada\nfila C terceira",
+   "text": "fila A editada\nlinha um\nlinha dois\nfila C terceira",
    "tool_name": null,
    "tool_input": null,
    "tool_use_id": null,

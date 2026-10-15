@@ -29,7 +29,17 @@ def test_entradas_juntadas_pela_cli_mostram_todos_os_blocos():
             {"type": "text", "text": "fila C terceira"},
         ]},
     }))
-    assert evs == [ChatEvent(kind="user_msg", id="u-merged", text="fila A editada\nfila C terceira")]
+    assert evs == [ChatEvent(kind="user_msg", id="u-merged", text="fila A editada\nfila C terceira",
+                             commit_blocks=["fila A editada", "fila C terceira"])]
+    assert "commit_blocks" not in evs[0].model_dump_json()
+    # Bloco seguinte que é marcação do harness não entra na bolha.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u-meta", "message": {"content": [
+            {"type": "text", "text": "pedido"},
+            {"type": "text", "text": "<task-notification><task-id>t-1</task-id></task-notification>"},
+            {"type": "text", "text": "Base directory for this skill: /s"}]},
+    }))
+    assert evs == [ChatEvent(kind="user_msg", id="u-meta", text="pedido")]
     # A fonte da imagem num bloco seguinte não vira texto; na primeira, a linha continua fora.
     evs = parse_line(_line({
         "type": "user", "uuid": "u-img", "message": {"content": [

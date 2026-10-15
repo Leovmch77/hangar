@@ -268,7 +268,8 @@ fn absorb(p: &mut Parsed, ts: f64, i: u64, evs: Vec<ChatEvent>, held_ids: &mut H
         let ets = ev.ts.filter(|t| *t != 0.0).unwrap_or(ts);
         if matches!(ev.kind, ChatKind::UserMsg) {
             if let Some(text) = ev.text.as_deref().filter(|t| !t.is_empty()) {
-                for ln in chaves_de_commit(text) {
+                let blocks = ev.commit_blocks.iter().flatten().flat_map(|block| chaves_de_commit(block));
+                for ln in chaves_de_commit(text).into_iter().chain(blocks) {
                     if ets > p.committed.get(&ln).copied().unwrap_or(0.0) {
                         p.committed.insert(ln, ets);
                     }
@@ -522,6 +523,28 @@ mod tests {
         let texts = |evs: Vec<hangar_api::chat::ChatEvent>| evs.into_iter().filter_map(|e| e.text).collect::<Vec<_>>();
         assert_eq!(texts(merged_history(&req).unwrap()), ["antiga"]);
         assert!(texts(merged_history_capped(&req, TAIL_WINDOW).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn multi_line_entry_merged_with_another_is_absorbed_by_its_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jsonl, queue) = (dir.path().join("t.jsonl"), dir.path().join("q.jsonl"));
+        let lines = [
+            serde_json::json!({"type":"user","uuid":"u0","timestamp":"2026-01-01T00:00:00Z","message":{"content":"inicio"}}),
+            serde_json::json!({"type":"user","uuid":"u1","timestamp":"2026-01-01T00:01:40Z","message":{"content":[
+                {"type":"text","text":"linha um\nlinha dois"},{"type":"text","text":"outra entrada"}]}}),
+        ];
+        std::fs::write(&jsonl, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let commit = 1_767_225_700.0;
+        let rows = [
+            serde_json::json!({"id":"e1","text":"linha um\nlinha dois","ts":commit - 5.0,"delivered":true}),
+            serde_json::json!({"id":"e2","text":"outra entrada","ts":commit - 4.0,"delivered":true}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let req = HistoryRequest { provider: Provider::Claude, jsonl, queue: Some(queue), limit: None, tail_window: TAIL_WINDOW };
+        let got: Vec<(String, Option<String>)> = merged_history(&req).unwrap().into_iter().map(|e| (e.id, e.text)).collect();
+        assert_eq!(got, [("u0".to_string(), Some("inicio".to_string())),
+            ("u1".to_string(), Some("linha um\nlinha dois\noutra entrada".to_string()))], "nenhuma bolha da fila repetida");
     }
 
     #[test]

@@ -1166,7 +1166,10 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
                 ets = ev.ts or ts
                 items.append((ets, i, ev))
                 if ev.kind == "user_msg" and ev.text:
-                    for ln in _chaves_de_commit(ev.text):
+                    chaves = set(_chaves_de_commit(ev.text))
+                    for bloco in ev.commit_blocks or ():
+                        chaves.update(_chaves_de_commit(bloco))
+                    for ln in chaves:
                         if ets > committed_ts.get(ln, 0.0):
                             committed_ts[ln] = ets
 

@@ -14,3 +14,4 @@ não é json {
 {"id": "q-pendente", "text": "ainda na fila", "ts": 1788256824.1, "delivered": false}
 {"id": "q-juntada-a", "text": "fila A editada", "ts": 1788256831.0, "delivered": true}
 {"id": "q-juntada-c", "text": "fila C terceira", "ts": 1788256831.5, "delivered": true}
+{"id": "q-juntada-varias", "text": "linha um\nlinha dois", "ts": 1788256831.7, "delivered": true}

@@ -642,6 +642,9 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             # por entrada. Todas aparecem, uma por linha (espelha `user_blocks` do hangar-server).
             partes = []
             for k, bloco in enumerate(textos):
+                # Bloco seguinte que é marcação do harness (comando, notificação, skill) não é texto digitado.
+                if k and _is_command_meta(bloco):
+                    continue
                 limpo = _strip_meta_blocks(bloco)
                 if _IMAGE_SOURCE_RE.match(limpo):
                     if k == 0:
@@ -653,8 +656,10 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             cleaned = "\n".join(partes)
             if not cleaned and not img_count:
                 return []
+            # Entrada de várias linhas juntada a outra não é linha da mensagem: o /history casa pelo bloco.
             return [ChatEvent(kind="user_msg", id=uid, text=cleaned,
-                              image_count=img_count or None)]
+                              image_count=img_count or None,
+                              commit_blocks=partes if len(partes) > 1 else None)]
         return []
 
     # A transferência pro Codex importa resposta em texto puro; o histórico precisa mostrá-la igual.

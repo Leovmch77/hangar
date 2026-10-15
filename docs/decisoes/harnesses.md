@@ -793,8 +793,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Mensagem `user` do Claude com vários blocos de texto mostra todos, um por linha.** É o que a CLI
   grava quando junta entradas que chegaram durante o turno (um bloco por entrada). Os testes da
   primeira linha (comando, interrupção, agente, colega, fonte de imagem) seguem só no primeiro
-  bloco; bloco seguinte que é só a fonte da imagem ou só `<system-reminder>` não entra. Python
-  (`transcript.py`) e Rust (`transcript/claude.rs`) iguais, provados pelo golden do contrato. Ver
+  bloco; bloco seguinte que é marcação do harness (`is_command_meta`), só a fonte da imagem ou só
+  `<system-reminder>` não entra. O texto de cada bloco também é chave de commit do `/history`
+  (`commit_blocks`, fora do JSON). Python (`transcript.py`) e Rust (`transcript/claude.rs`) iguais,
+  provados pelo golden do contrato. Ver
   [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
 
 ## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
@@ -805,13 +807,24 @@ Na prova de ponta a ponta da fila, duas entradas orientadas no mesmo turno ("fil
 dependia disso (o recibo e o índice de linhas confirmadas já liam todos os blocos, uma ocorrência
 por bloco), então a entrada sumia da conversa sem voltar como bolha.
 
-Com o texto juntado por `\n`, cada entrada continua casando com a própria linha: as chaves de
-commit (`chaves_de_commit`/`_chaves_de_commit`) e o dedup dos aparelhos (`especificidade`/`claim`)
-aceitam a entrada que é uma linha da mensagem. O `/history` esconde as duas bolhas pela linha de
-cada uma. Nos aparelhos, a mensagem real aposenta pelo texto só a bolha dona (regra antiga, de
-propósito: duas "ok" na fila e uma real deixam a segunda visível); as outras saem pelo
-`queue_confirmed` do recibo.
+Com o texto juntado por `\n`, a entrada de uma linha continua casando com a própria linha: as
+chaves de commit (`chaves_de_commit`/`_chaves_de_commit`) e o dedup dos aparelhos
+(`especificidade`/`claim`) aceitam a entrada que é uma linha da mensagem. A entrada de várias
+linhas não é linha da mensagem juntada (`a\nb` dentro de `a\nb\nc`), e ficava repetida no
+`/history` até o recibo confirmar: por isso o parser leva o texto de cada bloco no `commit_blocks`
+(campo interno, como o `offset`), e o `/history` soma as chaves de cada bloco às da mensagem. Nos
+aparelhos, a mensagem real aposenta pelo texto só a bolha dona (regra antiga, de propósito: duas
+"ok" na fila e uma real deixam a segunda visível); as outras saem pelo `queue_confirmed` do recibo.
 
+Bloco seguinte que é marcação do harness (`<task-notification>`, `<command-name>`, "Base directory
+for this skill:"…) ficava cru na bolha; agora fica de fora, como já ficava no primeiro.
+
+Limite que fica: primeiro bloco só com `<system-reminder>` ainda tira a mensagem inteira da
+conversa, porque `<system-reminder>` está entre os prefixos de marcação e o teste de comando lê o
+primeiro bloco cru. É anterior a esta mudança e não há transcript local com esse formato para
+provar que ele acontece.
+
+## Codex com terminal no Rust: adoção e dono único
 
 (11/10/2026, branch `Hangar-rust`, contrato interno 52; desenho
 [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md).)

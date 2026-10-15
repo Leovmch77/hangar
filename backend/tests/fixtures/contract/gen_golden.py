@@ -180,10 +180,14 @@ CLAUDE = [
     j({"type": "user", "uuid": "u-023", "timestamp": T(30), "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "toolu_16", "content": "ok"}]},
        "toolUseResult": {"structuredPatch": [{"oldStart": 4294967296, "newStart": 1, "lines": ["+z"]}]}}),
-    # Duas entradas da fila que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto
-    # por entrada. As duas aparecem, e cada entrada (`q-juntada-*`) é absorvida pela própria linha.
+    # Entradas da fila que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto por
+    # entrada. Todas aparecem, e cada entrada (`q-juntada-*`) é absorvida pelo próprio bloco, inclusive a
+    # de várias linhas. O bloco de marcação do harness no meio não entra.
     j({"type": "user", "uuid": "u-024", "timestamp": T(32), "message": {"role": "user", "content": [
-        {"type": "text", "text": "fila A editada\n"}, {"type": "text", "text": "fila C terceira"}]}}),
+        {"type": "text", "text": "fila A editada\n"},
+        {"type": "text", "text": "<task-notification><task-id>t-9</task-id></task-notification>"},
+        {"type": "text", "text": "linha um\nlinha dois"},
+        {"type": "text", "text": "fila C terceira"}]}}),
 ]
 
 # Surrogate solto numa mensagem COM relógio: o RewriteFilter do Python estoura no md5
@@ -292,6 +296,7 @@ CLAUDE_QUEUE = [
     {"id": "q-pendente", "text": "ainda na fila", "ts": epoch(T(24, 100)), "delivered": False},
     {"id": "q-juntada-a", "text": "fila A editada", "ts": epoch(T(31)), "delivered": True},
     {"id": "q-juntada-c", "text": "fila C terceira", "ts": epoch(T(31, 500)), "delivered": True},
+    {"id": "q-juntada-varias", "text": "linha um\nlinha dois", "ts": epoch(T(31, 700)), "delivered": True},
 ]
 
 CODEX_QUEUE = [
@@ -1232,11 +1237,26 @@ def answer_rows() -> list:
 
 
 def write_session_write(out: Path | None = None) -> None:
+    from app import api, runtime_coordinator, runtime_terminal, terminal_input
+
     out = out or HERE / "session_write"
     out.mkdir(parents=True, exist_ok=True)
-    inputs, steers = session_write_rows()
-    for name, rows in (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows()),
-                       ("answer.json", answer_rows()), ("askq_chat_text.json", chat_text_rows())):
+    # Os casos trocam o coordenador e funções do `api` por dublês; sem devolver os originais, as rotas de
+    # grupo que vêm depois liam os dublês (`rust_owns_groups` quebrava, a recusa do orquestrador sumia).
+    patched = (api, api.diag, api.plugin_bridge, runtime_coordinator, runtime_terminal, terminal_input.TerminalInput)
+    saved = [(owner, dict(vars(owner))) for owner in patched]
+    try:
+        inputs, steers = session_write_rows()
+        rows_by_name = (("input.json", inputs), ("steer.json", steers), ("control.json", control_rows()),
+                        ("answer.json", answer_rows()), ("askq_chat_text.json", chat_text_rows()))
+    finally:
+        for owner, before in saved:
+            for name in set(vars(owner)) - set(before):
+                delattr(owner, name)
+            for name, value in before.items():
+                if vars(owner).get(name, value) is not value:
+                    setattr(owner, name, value)
+    for name, rows in rows_by_name:
         (out / name).write_text(json.dumps(rows, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
 
 
