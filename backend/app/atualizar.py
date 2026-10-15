@@ -690,9 +690,9 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
 
     O commit mais novo de `origin/<destino>` (primeiro pai) cujo contrato interno é o do binário
     publicado para este sistema: o topo sem binário próprio deixaria o Supervisor recusando o
-    hangar-server antigo. Sem Rust, sem release própria da branch ou sem build deste sistema,
-    devolve o topo, como antes. `None` = não deu para conferir (rede, git); quem chama decide.
-    Depois do `fetch`: lê `origin/<destino>` local.
+    hangar-server antigo. Sem Rust ou sem release própria de uma branch fora da main, devolve o
+    topo, como antes. `None` = não deu para conferir (rede, git, release da main sumida, sem build
+    deste sistema); quem chama decide. Depois do `fetch`: lê `origin/<destino>` local.
     """
     topo = f"origin/{destino}"
     plat = rust_release.platform_key()
@@ -707,7 +707,8 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
     try:
         manifest = rust_release.read_manifest(url)
     except urllib.error.HTTPError as e:
-        if e.code != 404:
+        # A release da main sempre existe: 404 nela é o CI regravando o manifesto (o `--clobber` apaga e sobe).
+        if e.code != 404 or tag == rust_release.MAIN_TAG:
             _log.warning("manifesto do hangar-server em %s: HTTP %s", url, e.code)
             return None, None
         # Branch sem release própria: o `fetch` cai na da main, cujo commit não é desta branch.
@@ -716,29 +717,32 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
         _log.warning("manifesto do hangar-server em %s ilegivel: %s", url, e)
         return None, None
     release = (url, tag, manifest)
-    if not rust_release.has_build(manifest, plat):
-        return topo, release
     want = binary[1] if (binary := _binary(release)) else None
     if want is None:
         entry = manifest.get("platforms", {}).get(plat) if isinstance(manifest.get("platforms"), dict) else None
-        _log.warning("contrato do binario %s ilegivel (entrada %r, commit do topo %r)",
+        _log.warning("binario %s sem contrato conferido (entrada %r, commit do topo %r)",
                      plat, entry, manifest.get("commit"))
         return None, release
+    return _newest_with_protocol(topo, want), release
+
+
+def _newest_with_protocol(topo: str, want: int) -> str | None:
+    """O commit mais novo de `topo` (primeiro pai) com o contrato `want`; `None` sem achar."""
     if _protocol_at(topo) == want:
-        return topo, release
+        return topo
     # Só os commits que mexeram no número: o pai de cada um é o último com o valor anterior.
     # `-m` e não `--diff-merges=first-parent`, que só existe do git 2.31 em diante.
     p = _git_quiet("log", "-m", "--first-parent", "--no-patch", "--format=%H",
                    "-G", "^RUST_SERVER_PROTOCOL = ", topo, "--", _PROTOCOL_FILE)
     if p.returncode != 0:
         _log.warning("git log do protocolo falhou (%s): %s", p.returncode, p.stderr.strip()[-300:])
-        return None, release
+        return None
     for sha in p.stdout.split():
         anterior = _git_quiet("rev-parse", "--verify", "--quiet", f"{sha}^1").stdout.strip()
         if anterior and _protocol_at(anterior) == want:
-            return anterior, release
-    _log.warning("nenhum commit de %s fala o protocolo %s do binario", topo, want)
-    return None, release
+            return anterior
+    _log.warning("nenhum commit de %s fala o protocolo %s", topo, want)
+    return None
 
 
 def _puxar(pre: dict) -> tuple | None:
@@ -758,8 +762,17 @@ def _puxar(pre: dict) -> tuple | None:
 
     ref, release = pinned_target(destino)
     if ref is None:
-        _avisar("não consegui conferir o binário do Rust publicado para este sistema; o código foi ao topo")
-        ref = f"origin/{destino}"
+        # Sem o binário conferido, vale o contrato do código no ar, o do binário que já está aqui.
+        atual = _protocol_at("HEAD")
+        if atual is None:
+            _avisar("não consegui conferir o binário do Rust publicado para este sistema; o código foi ao topo")
+            ref = f"origin/{destino}"
+        else:
+            _avisar("não consegui conferir o binário do Rust publicado para este sistema; o código "
+                    "não troca de contrato com ele até conferir")
+            ref = _newest_with_protocol(f"origin/{destino}", atual)
+            if ref is None:
+                return release              # nenhum commit nele: fica onde está
     if _troca_de_branch(pre):
         _trocar_para(destino, ref)
 
@@ -1054,8 +1067,8 @@ def _executar(porta: int) -> dict:
                 _avisar(f"o binário do Rust publicado para este sistema (commit {binary[0][:8]}) fala outro "
                         "contrato que este código; o Python atende sozinho até sair o binário novo")
             elif _behind_top():
-                _avisar(f"versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
-                        f"build falhou); atualizado até {para[:8]}")
+                _avisar(f"aguardando o build do servidor Rust para este sistema (compilando, ou o build "
+                        f"falhou): a versão mais nova muda o contrato com ele; atualizado até {para[:8]}")
 
         _etapa("passos")
         _aplicar_passos()
