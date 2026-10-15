@@ -35,6 +35,8 @@ pub struct TerminalEnv {
     pub server_config_dir: Option<String>,
     /// `~/.claude`: a conta padrão, que para o Claude Code é a ausência da variável.
     pub default_config_dir: PathBuf,
+    /// Quanto o pane precisa ficar de pé depois de criado para não contar como morto ao nascer (S-15).
+    pub birth: Duration,
 }
 
 impl TerminalEnv {
@@ -49,8 +51,11 @@ impl TerminalEnv {
             sockets.sort();
             sockets.into_iter().next()
         });
+        // ponytail: janela fixa; um CLI que cai depois dela passa como vivo. Prova por provedor (o
+        // agente com o id da conversa no pane) quando a reabertura vier para cá.
+        let birth = Duration::from_millis(if cfg!(windows) { 1500 } else { 500 });
         Self { windows: cfg!(windows), program: "tmux".into(), wayland, server_config_dir: var("CLAUDE_CONFIG_DIR"),
-            default_config_dir: home.join(".claude") }
+            default_config_dir: home.join(".claude"), birth }
     }
 }
 
@@ -179,7 +184,26 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     }
     // S-32: sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
     // pé). Só vale se for esta: outra de mesmo nome ganhou a corrida e o pedido é recusado.
-    if output.ok() || is_this_one(mux, env, pane).await { Ok(()) } else { Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) }) }
+    if !output.ok() && !is_this_one(mux, env, pane).await {
+        return Err(SpawnError { code: "terminal_nao_criado", stderr: tail(&output.stderr) });
+    }
+    born(mux, env, &pane.name).await
+}
+
+/// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada):
+/// sem `remain-on-exit` a sessão some com ele. Conferida a cada 100 ms durante a janela.
+async fn born(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> Result<(), SpawnError> {
+    let step = Duration::from_millis(100);
+    let mut waited = Duration::ZERO;
+    while waited < env.birth {
+        tokio::time::sleep(step).await;
+        waited += step;
+        let alive = mux.run(vec![env.program.clone(), "has-session".into(), "-t".into(), format!("={name}")]).await;
+        if !alive.ok() {
+            return Err(SpawnError { code: "terminal_morreu_ao_nascer", stderr: tail(&alive.stderr) });
+        }
+    }
+    Ok(())
 }
 
 /// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
@@ -244,6 +268,8 @@ pub(crate) mod tests {
     impl FakeMux {
         pub(crate) fn answering(replies: Vec<MuxOutput>) -> Self { Self { replies: Mutex::new(replies), ..Default::default() } }
         pub(crate) fn runs(&self) -> Vec<Vec<String>> { self.seen.lock().unwrap().clone() }
+        /// Só os `new-session`: a prova de vida acrescenta consultas.
+        pub(crate) fn creations(&self) -> Vec<Vec<String>> { self.runs().into_iter().filter(|run| run.iter().any(|a| a == "new-session")).collect() }
     }
 
     impl Mux for FakeMux {
@@ -261,7 +287,7 @@ pub(crate) mod tests {
 
     pub(crate) fn machine() -> TerminalEnv {
         TerminalEnv { windows: false, program: "tmux".into(), wayland: Some("wayland-1".into()), server_config_dir: None,
-            default_config_dir: "/r/home/.claude".into() }
+            default_config_dir: "/r/home/.claude".into(), birth: Duration::from_millis(500) }
     }
 
     fn fixture(name: &str) -> Value {
@@ -371,7 +397,7 @@ pub(crate) mod tests {
         let scope: Vec<String> = ["systemd-run", "--user", "--scope", "--collect", "-q", "--"].map(str::to_owned).into();
         let mux = FakeMux { scope: scope.clone(), ..FakeMux::answering(vec![failed("Failed to start transient scope unit: Access denied\n")]) };
         spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap();
-        let runs = mux.runs();
+        let runs = mux.creations();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][..6], scope[..]);
         assert_eq!(runs[1][0], "tmux", "a segunda vez sem o escopo");
@@ -385,11 +411,11 @@ pub(crate) mod tests {
         let missing = || failed("Failed to start transient scope unit: Unit run-p4242.scope not found.\n");
         let mux = FakeMux { scope: scope.clone(), ..FakeMux::answering(vec![missing(), missing()]) };
         spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap();
-        assert_eq!(mux.runs().len(), 3);
-        assert!(mux.runs().iter().all(|run| run[..6] == scope[..]), "todas com o escopo");
+        assert_eq!(mux.creations().len(), 3);
+        assert!(mux.creations().iter().all(|run| run[..6] == scope[..]), "todas com o escopo");
         let mux = FakeMux { scope: scope.clone(), ..FakeMux::answering(vec![missing(), missing(), missing(), missing()]) };
         let error = spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err();
-        assert_eq!((error.code, mux.runs().len()), ("systemd_scope_unit_missing", 4));
+        assert_eq!((error.code, mux.creations().len()), ("systemd_scope_unit_missing", 4));
         assert_eq!(error.stderr, "Failed to start transient scope unit: Unit run-p4242.scope not found.");
     }
 
@@ -408,6 +434,19 @@ pub(crate) mod tests {
         assert_eq!(spawn(&other, &machine(), &claude(Vec::new(), None)).await.unwrap_err().stderr, "duplicate session: s1");
         let gone = FakeMux::answering(vec![timeout, failed("can't find session: s1\n")]);
         assert_eq!(spawn(&gone, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, "terminal_nao_criado");
+    }
+
+    /// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag que o CLI
+    /// recusa); o pane é conferido até o fim da janela de nascimento e a morte é erro com código.
+    #[tokio::test(start_paused = true)]
+    async fn a_pane_that_dies_at_birth_is_an_error() {
+        let mux = FakeMux::answering(vec![ok(), ok(), failed("can't find session: s1\n")]);
+        let error = spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err();
+        assert_eq!(error, SpawnError { code: "terminal_morreu_ao_nascer", stderr: "can't find session: s1".into() });
+        let alive = FakeMux::answering(Vec::new());
+        spawn(&alive, &machine(), &claude(Vec::new(), None)).await.unwrap();
+        let polls = alive.runs().iter().filter(|run| run[1] == "has-session").count();
+        assert_eq!(polls, 5, "conferido a cada 100 ms durante a janela");
     }
 
     #[tokio::test]
