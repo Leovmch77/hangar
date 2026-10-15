@@ -276,12 +276,55 @@ def run_python_side(scenario: dict) -> dict:
             shutil.rmtree(root, ignore_errors=True)
 
 
+def _rust_binary() -> Path:
+    """O exemplo `session_open_contract` do `hangar-server` (lado Rust do harness)."""
+    if os.environ.get("HSO_RUST_BIN"):
+        return Path(os.environ["HSO_RUST_BIN"])
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "crates" / "target")
+    binary = target / "debug" / "examples" / "session_open_contract"
+    if not binary.is_file():
+        raise RuntimeError(f"lado Rust sem binário em {binary}: compile com `cargo build -p hangar-server "
+                           "--example session_open_contract` (ou aponte HSO_RUST_BIN)")
+    return binary
+
+
 def run_rust_side(scenario: dict) -> dict:
-    # Ponto de encaixe da Task do Rust: subir o `hangar-server` numa porta privada com o mesmo
-    # `materialize(scenario, root)` e o mesmo `base_env(root)`, interceptar tmux/processos na mesma
-    # forma e devolver o mesmo dicionário cru que `run_python_side`.
+    """A abertura do Rust sobre o mesmo cenário montado: o exemplo `session_open_contract` prepara o que
+    o Rust lê do disco (antes do instantâneo), roda os passos e devolve o mesmo dicionário cru. O que
+    ele ainda não atende (outros provedores, sem terminal, reaberturas) falha dizendo a rota."""
+    name = scenario["name"]
     route = " ".join(f"{s['method']} {s['path']}" for s in scenario["steps"] if "method" in s)
-    raise RustSideNotImplemented(f"Rust side not implemented for {route} (scenario {scenario['name']})")
+    if any(s.get("path") != "/api/sessions" or s.get("method") != "POST" for s in scenario["steps"]):
+        raise RustSideNotImplemented(f"Rust side not implemented for {route} (scenario {name})")
+    binary = _rust_binary()
+    root = root_for(name)
+    RUNS.mkdir(mode=0o700, exist_ok=True)
+    with open(RUNS / f"{root.name}.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _claim_root(root)
+        try:
+            materialize(scenario, root)
+            scenario_file = root / ".harness" / "scenario.json"
+            scenario_file.write_text(json.dumps(scenario, ensure_ascii=False))
+            env = base_env(root)
+            subprocess.run([str(binary), "prepare", str(scenario_file), str(root), str(REPO)], env=env, check=True,
+                           capture_output=True, timeout=60)
+            before = snapshot(root)
+            out = root / ".harness" / "out.json"
+            proc = subprocess.run([str(binary), "run", str(scenario_file), str(root), str(REPO), str(out)], env=env,
+                                  cwd=root / "work", capture_output=True, text=True, timeout=180)
+            if proc.returncode != 0 or not out.exists():
+                raise RuntimeError(f"cenário {name}: lado Rust saiu {proc.returncode}\n{proc.stderr[-6000:]}")
+            raw = json.loads(out.read_text(encoding="utf-8"))
+            if raw.get("not_ours"):
+                raise RustSideNotImplemented(f"Rust side not implemented for {route} (scenario {name}: not Claude with terminal)")
+            raw["files"] = file_changes(before, snapshot(root))
+            # O `hangar-conta` (rodado de verdade) grava no arquivo do diário antes da criação.
+            raw["diary"] = read_diary(root) + raw["diary"]
+            raw["_paths"] = {"root": str(root), "repo": str(REPO), "python": sys.executable}
+            return raw
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 SIDES = {"python": run_python_side, "rust": run_rust_side}
@@ -441,6 +484,136 @@ def generate(scenarios: list[dict]) -> list[tuple[str, str | None]]:
     return _parallel(one, scenarios)
 
 
+# ── Diferenças esperadas do lado Rust ───────────────────────────────────────────────────────
+# Cada conserto do `suspeitas.md` (D-011) ou decisão (D-xxx) que muda o que a fixture prende tem uma
+# regra: ela desfaz o conserto na saída crua do Rust (ou tira da fixture o que é só do Python) para o
+# resto ser comparado por igualdade. Regra que se aplica e não acha o conserto é diferença.
+
+# `terminal::NOT_INHERITED` e os segredos do servidor: o que o S-63 tira do pane com `env -u`.
+_NOT_INHERITED = {
+    "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS", "HANGAR_PLUGIN_URL", "HANGAR_PLUGIN_TOKEN",
+    "HANGAR_CLAUDE_SETTINGS", "HANGAR_JEV", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_BASE_URL",
+    "JEV_TEXTO_API_KEY", "JEV_TEXTO_MODELO", "JEV_TEXTO_CMD", "JEV_AUX_BASE_URL", "JEV_AUX_API_KEY", "JEV_AUX_MODELO",
+    "JEV_AUX_ESFORCO", "CP_ENGINE", "CP_ENGINE_ACCOUNT", "CP_ENGINE_CREDENTIAL_ID", "CP_ENGINE_ACCOUNT_BASE_URL",
+    "CP_ENGINE_SERVICE_TIER", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HANGAR_ORQ_READ_ONLY", "HANGAR_CANO_KEY",
+    "HANGAR_CANO_OWNER", "CP_PI_SESSION", "OMP_PROFILE", "CP_AUTH_TOKEN", "HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE",
+}
+
+
+def _new_sessions(raw: dict) -> list[dict]:
+    return [p for p in raw.get("subprocesses", []) if p.get("prog") == "tmux" and p.get("argv", [])[:1] == ["new-session"]]
+
+
+def _rule_s63(expected: dict, raw: dict) -> bool | None:
+    """S-63: o pane sai sem o que outra sessão deixou no servidor tmux (`env -u` de cada variável)."""
+    found = False
+
+    def undo(command: str) -> str:
+        nonlocal found
+        words, out, i = command.split(" "), [], 0
+        while i < len(words):
+            if words[i] == "-u" and i + 1 < len(words) and words[i + 1] in _NOT_INHERITED:
+                found, i = True, i + 2
+                continue
+            out.append(words[i])
+            i += 1
+        text = " ".join(out)
+        rest = text.removeprefix("exec env ")
+        return "exec " + rest if rest != text and not rest.startswith("-u ") else text
+    created = _new_sessions(raw)
+    for name in {p["argv"][p["argv"].index("-s") + 1] for p in created}:
+        if name in raw.get("tmux_sessions", {}):
+            raw["tmux_sessions"][name]["command"] = undo(raw["tmux_sessions"][name]["command"])
+    # O conserto conta pelo comando do `new-session`.
+    found = False
+    for p in created:
+        p["argv"][-1] = undo(p["argv"][-1])
+    return found if created else None
+
+
+def _rule_session_key(expected: dict, raw: dict) -> bool | None:
+    """Matriz, item 2 (D-012): `CP_SESSION_KEY` em toda sessão, também no Claude com terminal."""
+    created = _new_sessions(raw)
+    found = False
+    for p in created:
+        argv = p["argv"]
+        at = next((i for i in range(len(argv) - 1) if argv[i] == "-e" and argv[i + 1].startswith("CP_SESSION_KEY=")), None)
+        if at is not None:
+            del argv[at:at + 2]
+            found = True
+    for s in raw.get("tmux_sessions", {}).values():
+        s.get("env", {}).pop("CP_SESSION_KEY", None)
+    return found if created else None
+
+
+def _rule_spec_record(expected: dict, raw: dict) -> bool | None:
+    """Task 3 (D-012, item 3): a sessão nascida deixa o spec em `~/.hangar/session-specs/<key>.json`."""
+    created = [p for p in _new_sessions(raw) if p.get("rc") == 0]
+    records = [p for p in raw.get("files", {}) if "/home/.hangar/session-specs/" in p]
+    for p in records:
+        del raw["files"][p]
+    return bool(records) if created else None
+
+
+def _rule_s15_diary(expected: dict, raw: dict) -> bool | None:
+    """S-15/S-35: a recusa do lançamento vai ao diário com a etapa, o código e o stderr resumido."""
+    refused = [e for e in raw.get("diary", []) if e.get("evento") == "sessao.criar_recusada" and e.get("nivel") == "erro"]
+    for e in refused:
+        e["detalhe"] = e.pop("codigo", None)
+        e.pop("etapa", None)
+    return all(e["detalhe"] for e in refused) if refused else None
+
+
+def _rule_only_python(expected: dict, raw: dict) -> None:
+    """Do Python e não da abertura: o `api.servidor` do middleware HTTP dele (a rota é do Rust), as
+    consultas ao tmux dele (`mux.comando`), a sonda `claude --version` (o Rust lê o `plugin-dir` que o
+    servidor publica, como o terminal), o PATH do shell de login (Task 3: o do servidor), o `bwrap`
+    provado duas vezes (o Rust prova uma) e o nome da exceção no fim do diário (o Rust põe o código)."""
+    expected["diary"] = [e for e in expected.get("diary", []) if e.get("evento") not in ("api.servidor", "mux.comando")]
+    expected["probes"] = [p for p in expected.get("probes", []) if p.get("prog") not in ("claude", "sh-login")]
+    bwrap = [p for p in expected["probes"] if p.get("prog") == "bwrap"]
+    if len(bwrap) == 2 and bwrap[0] == bwrap[1]:
+        expected["probes"].remove(bwrap[1])
+    for side in (expected, raw):
+        for e in side.get("diary", []):
+            if e.get("evento") == "sessao.criar.fim":
+                e.pop("erro_tipo", None)
+    return None
+
+
+def _rule_name_before_lock(expected: dict, raw: dict) -> bool | None:
+    """Ordem: o nome inválido ou em uso é recusado antes de tocar a conta; o Python já tinha
+    tomado a trava dela e deixava o arquivo de trava vazio."""
+    detail = (raw.get("steps") or [{}])[0].get("body", {}).get("detail")
+    refused = isinstance(detail, dict) and (detail.get("code") == "erro_nome_em_uso" or str(detail.get("msg", "")).startswith("nome invalido"))
+    if not refused:
+        return None
+    locks = [p for p in expected.get("records", {}) if "/home/.hangar/account-locks/" in p]
+    for p in locks:
+        del expected["records"][p]
+    return not any("/home/.hangar/account-locks/" in p for p in raw.get("files", {}))
+
+
+RUST_DIFFERENCES = (
+    ("ordem: nome antes da trava da conta", _rule_name_before_lock),
+    ("S-63", _rule_s63),
+    ("matriz item 2 (CP_SESSION_KEY)", _rule_session_key),
+    ("registro do spec (Task 3)", _rule_spec_record),
+    ("S-15/S-35 (diário do lançamento)", _rule_s15_diary),
+    ("só do Python", _rule_only_python),
+)
+
+
+def apply_rust_differences(expected: dict, raw: dict) -> tuple[dict, dict, list[str]]:
+    """Fixture (normalizada) e saída crua do Rust com as diferenças esperadas desfeitas."""
+    expected, raw = copy.deepcopy(expected), copy.deepcopy(raw)
+    missing = []
+    for rule, fn in RUST_DIFFERENCES:
+        if fn(expected, raw) is False:
+            missing.append(f"$: a diferença esperada '{rule}' não apareceu na saída do Rust")
+    return expected, raw, missing
+
+
 def diff(side: str, names: list[str] | None = None) -> dict[str, list[str]]:
     """Roda cada fixture do lado pedido a partir do mesmo cenário gravado e compara."""
     fixtures = [json.loads(f.read_text(encoding="utf-8")) for f in sorted(FIXTURES.glob("*.json"))]
@@ -451,7 +624,14 @@ def diff(side: str, names: list[str] | None = None) -> dict[str, list[str]]:
 
     def one(fx):
         sc = fx["scenario"]
-        return sc["name"], compare(fx["result"], normalize(SIDES[side](sc), sc))
+        if side == "python":
+            return sc["name"], compare(fx["result"], normalize(run_python_side(sc), sc))
+        try:
+            raw = run_rust_side(sc)
+        except RustSideNotImplemented as exc:
+            return sc["name"], [f"$: {exc}"]
+        expected, raw, missing = apply_rust_differences(fx["result"], raw)
+        return sc["name"], missing + compare(expected, normalize(raw, sc))
     return dict(_parallel(one, chosen))
 
 

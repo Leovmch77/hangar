@@ -63,6 +63,30 @@ def test_compare_names_every_difference_with_its_path():
 
 
 def test_rust_side_fails_loudly_naming_the_route():
-    sc = next(s for s in SCENARIOS if s["name"] == "create_claude_terminal_default")
-    with pytest.raises(c.RustSideNotImplemented, match=r"Rust side not implemented for POST /api/sessions"):
+    sc = next(s for s in SCENARIOS if s["name"] == "reopen_mode_terminal_to_headless")
+    with pytest.raises(c.RustSideNotImplemented, match=r"Rust side not implemented for POST /api/sessions/s1/modo-execucao"):
         c.run_rust_side(sc)
+
+
+def test_rust_differences_undo_each_fix_and_report_a_missing_one():
+    command = ("exec env -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_SUBAGENT_MODEL -u CP_ENGINE -u CP_ENGINE_ACCOUNT "
+               "claude --session-id x")
+    raw = {"subprocesses": [{"prog": "tmux", "argv": ["new-session", "-s", "s1", "-e", "CP_PROVIDER=claude",
+                                                      "-e", "CP_SESSION_KEY=k", command], "rc": 0}],
+           "tmux_sessions": {"s1": {"env": {"CP_SESSION_KEY": "k"}, "command": command}},
+           "files": {"/r/home/.hangar/session-specs/k.json": {"created": {}}},
+           "diary": [{"evento": "sessao.criar_recusada", "nivel": "erro", "codigo": "terminal_nao_criado", "etapa": "criar_terminal",
+                      "detalhe": "boom"}, {"evento": "sessao.criar.fim", "erro_tipo": "erro_criacao_sessao"}]}
+    expected = {"diary": [{"evento": "api.servidor"}, {"evento": "sessao.criar.fim", "erro_tipo": "ValueError"}],
+                "probes": [{"prog": "claude"}, {"prog": "bwrap", "argv": ["a"]}, {"prog": "bwrap", "argv": ["a"]}]}
+    exp, out, missing = c.apply_rust_differences(expected, raw)
+    assert missing == []
+    assert out["subprocesses"][0]["argv"] == ["new-session", "-s", "s1", "-e", "CP_PROVIDER=claude",
+                                              "exec env -u CLAUDE_CONFIG_DIR claude --session-id x"]
+    assert out["tmux_sessions"]["s1"] == {"env": {}, "command": "exec env -u CLAUDE_CONFIG_DIR claude --session-id x"}
+    assert out["files"] == {} and out["diary"][0] == {"evento": "sessao.criar_recusada", "nivel": "erro",
+                                                      "detalhe": "terminal_nao_criado"}
+    assert exp == {"diary": [{"evento": "sessao.criar.fim"}], "probes": [{"prog": "bwrap", "argv": ["a"]}]}
+    # Sem o `env -u` do S-63 a regra acusa o conserto que faltou.
+    raw["subprocesses"][0]["argv"][-1] = "exec env -u CLAUDE_CONFIG_DIR claude"
+    assert any("S-63" in m for m in c.apply_rust_differences(expected, raw)[2])
