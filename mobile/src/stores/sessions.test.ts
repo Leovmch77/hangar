@@ -852,6 +852,43 @@ describe('recusas e recuperação da lista', () => {
   });
 
   test.each([
+    { failure: 'rede', error: 'offline', offline: true },
+    { failure: 'HTTP 503', error: m.sessao_erro_servidor(), offline: false },
+    { failure: 'constructor', error: 'offline', offline: true },
+  ].flatMap((failure) => ['foreground', 'retain'].map((resume) => ({ ...failure, resume }))))(
+    'classificação da falha sobrevive a $resume durante recuo: $failure', async ({ failure, error, offline, resume }) => {
+      useServers.setState({ activeId: null });
+      if (offline) fetchMock.mockRejectedValue(new TypeError('offline'));
+      if (failure === 'constructor') configureApi({
+        getBaseUrl: () => '', getToken: () => null, onUnauthorized: () => {}, origin: null,
+        createEventSource: () => { throw new Error('stream_unavailable'); },
+      });
+      let rel = useSessions.getState().retain();
+      await settle();
+      if (failure !== 'constructor') created[0].onerror?.(offline ? {} : { xhrStatus: 503 });
+      expect(useSessions.getState().byServer[0].error).toBe(error);
+      expect(estaDesligado('srv1')).toBe(offline);
+      expect(retryAfterMs('srv1')).toBe(offline ? 2000 : 0);
+      await advance(500);
+      if (!offline) fetchMock.mockResolvedValue(response({}, 503));
+      if (resume === 'foreground') {
+        useSessions.getState().setForeground(false);
+        useSessions.getState().setForeground(true);
+      } else {
+        rel();
+        rel = useSessions.getState().retain();
+      }
+      await settle();
+      expect(fetchMock).toHaveBeenCalledTimes(!offline && resume === 'foreground' ? 2 : 1);
+      expect(created).toHaveLength(failure === 'constructor' ? 0 : 1);
+      expect(useSessions.getState().byServer[0].error).toBe(error);
+      expect(estaDesligado('srv1')).toBe(offline);
+      expect(retryAfterMs('srv1')).toBe(offline ? 1500 : 0);
+      rel();
+    },
+  );
+
+  test.each([
     { xhrStatus: 503 }, { xhrStatus: 200, type: 'close' }, {}, { type: 'close' }, { type: 'timeout' },
   ])('REST 200 e ping não zeram recuo após erro SSE $xhrStatus/$type; só lista SSE válida zera', async (error) => {
     useServers.setState({ activeId: null });

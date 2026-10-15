@@ -43,6 +43,7 @@ const retryAt = new Map<string, number>();
 // Falha da lista não é necessariamente queda de rede; só lista SSE válida encerra este recuo.
 const httpFailures = new Map<string, number>();
 const httpRetryAt = new Map<string, number>();
+const lastFailureHttp = new Map<string, boolean>();
 const HTTP_RETRY_DELAYS_MS = [2000, 5000, 30000, 60000, 120000, 240000, 300000, 600000, 1800000];
 const refused = new Map<string, number>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -186,7 +187,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
     if (s.inviteEnded) continue;
     if (streams.has(s.id) || retryTimers.has(s.id) || connecting.has(s.id)) continue;
     if (retryDelay(s.id) > 0) {
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: httpFailures.has(s.id) ? m.sessao_erro_servidor() : 'offline' });
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: lastFailureHttp.get(s.id) ? m.sessao_erro_servidor() : 'offline' });
       scheduleRetry(s.id, get, set);
       continue;
     }
@@ -232,6 +233,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     countedHttpFailure = false;
     httpFailures.delete(s.id);
     httpRetryAt.delete(s.id);
+    lastFailureHttp.delete(s.id);
     answered();
   };
   const rejected = (status: number) => {
@@ -274,6 +276,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       recompute(set);
     } catch (error) {
       if (!isCurrent(attempt)) return;
+      lastFailureHttp.set(s.id, httpResponse);
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'sincronia',
         detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
       if (!httpResponse) failed(true);
@@ -324,6 +327,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       if (!active()) return;
       const status = (event as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
       const http = Number.isInteger(status) && status >= 100 && status <= 599;
+      lastFailureHttp.set(s.id, http);
       if (http) answered();
       else failed();
       streams.delete(s.id);
@@ -338,6 +342,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     streams.set(s.id, es);
   } catch (error) {
     if (!isCurrent(attempt)) return;
+    lastFailureHttp.set(s.id, false);
     registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'conexao',
       detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
     failed();
@@ -377,6 +382,7 @@ function refresh(get: () => SessionsState, set: (p: Partial<SessionsState>) => v
       retryAt.delete(s.id);
       httpFailures.delete(s.id);
       httpRetryAt.delete(s.id);
+      lastFailureHttp.delete(s.id);
       refused.delete(s.id);
       slots.delete(s.id);
     } else if (serversCache.find((next) => next.id === s.id)?.inviteEnded) {
@@ -501,6 +507,7 @@ export function _resetSessionsForTests() {
   retryAt.clear();
   httpFailures.clear();
   httpRetryAt.clear();
+  lastFailureHttp.clear();
   refused.clear();
   streams.clear();
   slots.clear();
