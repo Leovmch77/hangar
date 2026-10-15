@@ -48,7 +48,7 @@ fn non_terminal_live_thinking_keeps_its_existing_header(cx: &mut TestAppContext)
         cx.run_until_parked();
         let snapshot = cx.update(|window, cx| { let _ = window.draw(cx); window.a11y_snapshot(None).unwrap() });
         assert!(!snapshot.contains('∴'));
-        assert!(snapshot.contains(&crate::i18n::tr("thinking_live")));
+        assert_eq!(snapshot.matches(&crate::i18n::tr("thinking_live")).count(), 1);
     }
 }
 

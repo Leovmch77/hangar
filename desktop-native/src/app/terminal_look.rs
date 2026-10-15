@@ -120,7 +120,9 @@ pub(super) fn live_thinking_content(
 ) -> AnyElement {
     if look == appearance::ToolLook::Terminal { return terminal_live_thinking(view, focus, cx).into_any_element(); }
     div().flex().flex_col().gap_1().px_3().py_2()
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent()).child(tr("thinking_live")))
+        .child(div().flex().items_center().gap(px(6.)).text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent())
+            .child(chrome::small_icon(IconName::Brain, 14., theme::accent()))
+            .child(tr("thinking_live")))
         .child(chat_text(view, cx).text_sm().text_color(theme::muted()))
         .into_any_element()
 }

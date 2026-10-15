@@ -3706,6 +3706,7 @@ impl Hangar {
         let toggle_key = row.to_owned();
         let header = self.disclosure(row, open)
             .accessibility_label(format!("{}: {summary}", tr("thinking")))
+            .child(chrome::small_icon(IconName::Brain, 14., theme::muted()))
             .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(tr("thinking")))
             .child(div().flex_1().min_w_0().truncate().italic().text_color(theme::muted()).child(summary))
             .when_some(count, |el, count| el.child(div().flex_shrink_0().text_color(theme::muted()).child(count)))
