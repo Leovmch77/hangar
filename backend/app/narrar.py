@@ -4,6 +4,7 @@ import logging
 import re
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from typing import Any
@@ -103,6 +104,12 @@ def _provedor(perfil: str = "padrao") -> tuple[str, str, str]:
     return base, chave, modelo
 
 
+def openrouter_por_vazao(base_url: str, modelo: str) -> bool:
+    """Sem ordem, o OpenRouter escolhe o provedor pelo preço e cai em quem leva 10x mais. Sufixo no
+    modelo (`:nitro`, `:floor`) é escolha da pessoa e vence."""
+    return urllib.parse.urlsplit(base_url).hostname == "openrouter.ai" and ":" not in modelo
+
+
 def _esforco_raciocinio() -> str:
     """Valor de `reasoning_effort` a mandar, ou "" pra NAO mandar o campo.
 
@@ -152,6 +159,8 @@ def chamar_chat(system: str, prompt: str, *, temperature: float, timeout: int,
     esforco = _esforco_raciocinio()
     if esforco:
         corpo["reasoning_effort"] = esforco
+    if openrouter_por_vazao(base_url, modelo):
+        corpo["provider"] = {"sort": "throughput"}
     req = urllib.request.Request(
         f"{base_url}/chat/completions", data=json.dumps(corpo, ensure_ascii=False).encode("utf-8"),
         method="POST",
