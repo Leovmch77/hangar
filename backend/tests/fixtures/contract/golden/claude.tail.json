@@ -309,7 +309,7 @@
   "offset": 2666,
   "event": {
    "kind": "tool_result",
-   "id": "queued-task:tsk-1",
+   "id": "queued-task:tsk-1:ba8423ba",
    "text": null,
    "tool_name": null,
    "tool_input": null,
