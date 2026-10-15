@@ -106,8 +106,27 @@ fn slim(result: &Value) -> Value {
 /// O recibo guarda a ação sem o volume: basta para detectar reuso do mesmo identificador.
 fn receipt_payload(mut action: Value) -> Value {
     if action["kind"] == "set_runtime_state" { action["state"] = Value::Null; }
+    // A repetição do avanço ainda precisa distinguir outro estado; a vista inteira (comandos incluídos) não.
+    else if action["kind"] == "advance_lifecycle" && !action["state"].is_string() { action["state"] = Value::String(fingerprint(&action["state"])); }
     else if action.get("result").is_some() { action["result"] = slim(&action["result"]); }
     action
+}
+
+/// sha256 do JSON com as chaves ordenadas, como a igualdade de `Value`, que ignora a ordem.
+fn fingerprint(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                Value::Object(entries.into_iter().map(|(key, value)| (key.clone(), sorted(value))).collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    let bytes = serde_json::to_vec(&sorted(value)).expect("Value tem chaves String e números finitos");
+    ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl State {
@@ -135,6 +154,10 @@ impl State {
         if migrated { state.version = VERSION; state.next_seq = RECENT_CALLS + 1; }
         if state.version != VERSION || state.next_seq == 0 || !state.rows.iter().all(Value::is_object)
             || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
+        // Recibo gravado antes do corte encolhe já na leitura; o arquivo emagrece na próxima gravação.
+        for (_, receipt) in state.operations.iter_mut().filter(|(key, _)| key.starts_with(CALL_PREFIX)) {
+            receipt.payload = receipt_payload(std::mem::take(&mut receipt.payload));
+        }
         if !needs_terminal_recovery(&state) {
             migrated |= confirm_answered_commands(&mut state);
             migrated |= confirm_side_questions(&mut state);
@@ -1324,6 +1347,37 @@ mod lifecycle_tests {
         assert_eq!(store.state().rows.len(),1);
         assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
         assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn advance_receipt_keeps_a_fingerprint_of_the_view_not_the_view() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("state.json");
+        let mut store=Store::open(&path,dir.path(),State::new("key",4,"session",vec![])).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        let commands:Vec<Value>=(0..200).map(|i|json!({"name":format!("/command-{i}"),"description":"x".repeat(400)})).collect();
+        let advance=|state:Value|Action::AdvanceLifecycle {generation:5,state};
+        store.exec(4,"advance",clock,advance(json!({"view":{"commands":commands},"metadata":{"a":1,"b":2}}))).unwrap();
+        let stored=&store.state().operations["call::advance"].payload["state"];
+        assert_eq!(stored.as_str().map(str::len),Some(64));
+        assert!(!serde_json::to_string(&store.state().operations["call::advance"]).unwrap().contains("/command-0"));
+        assert_eq!(String::from_utf8(std::fs::read(&path).unwrap()).unwrap().matches("\"/command-0\"").count(),1);
+        assert_eq!(store.exec(4,"advance",clock,advance(json!({"metadata":{"b":2,"a":1},"view":{"commands":commands}}))).unwrap(),json!({"generation":5}));
+        assert!(store.exec(4,"advance",clock,advance(json!({"view":{"commands":[]},"metadata":{"a":1,"b":2}}))).is_err());
+    }
+    #[test]
+    fn advance_receipt_written_with_the_whole_view_shrinks_on_load_and_still_repeats() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("state.json");
+        let view=json!({"view":{"commands":[{"name":"/old","description":"y".repeat(400)}]}});
+        let mut old=State::new("key",5,"session",vec![]);
+        let mut receipt=Operation::new("call::advance",json!({"kind":"advance_lifecycle","generation":5,"state":view}),None);
+        receipt.status=Status::Accepted; receipt.result=json!({"generation":5}); receipt.seq=1; old.next_seq=2;
+        old.operations.insert("call::advance".into(),receipt);
+        std::fs::write(&path,serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut store=Store::open(&path,dir.path(),State::new("key",5,"session",vec![])).unwrap();
+        assert!(store.state().operations["call::advance"].payload["state"].is_string());
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        assert_eq!(store.exec(4,"advance",clock,Action::AdvanceLifecycle {generation:5,state:view}).unwrap(),json!({"generation":5}));
     }
 }
 
