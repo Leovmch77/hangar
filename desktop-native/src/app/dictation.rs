@@ -331,6 +331,8 @@ impl Dictation {
     /// Fim do ditado: o estado que o microfone da voz tinha antes, uma vez só.
     fn release_voice(&mut self) -> Option<bool> { self.voice_hold.take() }
     /// O painel da voz trocou o mudo para `muted`: devolve o que aplicar na chamada agora.
+    /// O que o painel escolheu durante o ditado (vale no fim); `None` sem ditado segurando a voz.
+    pub(super) fn voice_wanted(&self) -> Option<bool> { self.voice_hold }
     pub(super) fn voice_choice(&mut self, muted: bool) -> bool {
         match &mut self.voice_hold { Some(choice) => { *choice = muted; true } None => muted }
     }
