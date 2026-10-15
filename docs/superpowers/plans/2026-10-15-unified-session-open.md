@@ -73,7 +73,7 @@ Status: in-progress
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Tipos**
+- [x] **Step 1: Tipos**
   `SessionOpenRequest` (JSON do `CreateBody` + `inherit`), `SessionSpec`, `SessionChange`,
   `AgentProvider` e os enums fechados; o `Provider { Claude, Codex }` do `session_write` passa a
   derivar do `AgentProvider`. Desserialização estrita, `erro_corpo_invalido`. `account_source` no

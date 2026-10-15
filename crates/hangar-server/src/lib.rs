@@ -26,6 +26,7 @@ pub mod queue_panel;
 mod plugin_listener;
 pub mod routes;
 pub mod runtime;
+pub mod session_open;
 pub mod session_write;
 pub mod share_reach;
 pub mod side;
