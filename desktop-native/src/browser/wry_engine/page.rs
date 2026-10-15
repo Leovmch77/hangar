@@ -21,7 +21,7 @@ pub(super) struct Page {
     zoom: Cell<f32>,
     /// O zoom mudou e o próximo `place` agenda o reinício do screencast depois de assentar.
     zoomed: Cell<bool>,
-    /// Contagem dos reinícios agendados: o de um clique anterior da série desiste.
+    /// Contagem das colocações: o reinício agendado desiste se outra (clique da série ou resize) veio depois.
     zoom_turn: Rc<Cell<u64>>,
     executor: ForegroundExecutor,
     background: BackgroundExecutor,
@@ -146,11 +146,12 @@ impl Page {
             if !first { self.cdp.fire("Page.stopScreencast", json!({})); }
             let screencast = json!({"format": "png", "maxWidth": pw, "maxHeight": ph, "everyNthFrame": 1});
             self.cdp.fire("Page.startScreencast", screencast.clone());
+            // Toda colocação nova avança a contagem: um reinício ainda esperando voltaria com o tamanho antigo.
+            let turn = self.zoom_turn.get() + 1;
+            self.zoom_turn.set(turn);
             if self.zoomed.replace(false) {
                 // Página parada: o quadro do reinício pode sair antes da rasterização nova, e nenhum outro chega sozinho.
                 // Reiniciar depois de assentar manda o do zoom final.
-                let turn = self.zoom_turn.get() + 1;
-                self.zoom_turn.set(turn);
                 let (cdp, turns, visible) = (self.cdp.clone(), self.zoom_turn.clone(), self.visible.clone());
                 let timer = self.background.timer(Duration::from_millis(ZOOM_SETTLE_MS));
                 self.executor.spawn(async move {
