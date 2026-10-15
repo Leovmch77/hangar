@@ -52,7 +52,7 @@ pub enum Profile {
 /// (por serviço, total) do ditado: áudio mais longo leva mais num Whisper local.
 pub fn dictation_limits(minutes: u64) -> (u64, u64) {
     let recording = if minutes == 0 { 5 } else { minutes.min(30) } * 60;
-    ((recording / 2).max(60), recording.max(150))
+    ((recording / 3).max(60), recording.max(150))
 }
 
 impl Profile {
@@ -70,10 +70,10 @@ mod tests {
     use super::*;
     #[test]
     fn dictation_deadline_follows_the_recording_ceiling() {
-        assert_eq!(dictation_limits(0), (150, 300), "sem escolha: 5 min");
-        assert_eq!(dictation_limits(5), (150, 300));
+        assert_eq!(dictation_limits(0), (100, 300), "sem escolha: 5 min");
+        assert_eq!(dictation_limits(5), (100, 300));
         assert_eq!(dictation_limits(2), (60, 150), "gravação curta mantém o piso de antes");
-        assert_eq!(dictation_limits(30), (900, 1800));
-        assert_eq!(dictation_limits(90), (900, 1800), "acima de 30 não passa do teto");
+        assert_eq!(dictation_limits(30), (600, 1800));
+        assert_eq!(dictation_limits(90), (600, 1800), "acima de 30 não passa do teto");
     }
 }

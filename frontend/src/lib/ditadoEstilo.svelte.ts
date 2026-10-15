@@ -44,6 +44,15 @@ export const ditadoEstilo = {
    *  a config uma vez por carga de pagina, e uma troca feita noutra aba/aparelho nunca chegava —
    *  a tela dizia "So limpar" e o ditado voltava em briefing (visto ao vivo 21/08/2026). Chamado
    *  ao ABRIR o popover: e o instante em que a pessoa vai olhar a lista, e o custo e um GET. */
+  /** Relido a cada gravação: o teto pode ter mudado na tela de Voz. Falha mantém o último. */
+  async refreshCeiling(): Promise<void> {
+    try {
+      ceilingMs = dictationCeilingMs((await getConfig()).campos);
+    } catch {
+      // O ditado não espera a config.
+    }
+  },
+
   revalidar(): Promise<void> {
     carregado = false;
     return this.carregar();

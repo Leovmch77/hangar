@@ -1847,6 +1847,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     vadEstado = maosLivres ? novoEstadoVad() : undefined;
     motivoDoFim = null;
     recIniciadoEm = Date.now();
+    if (maosLivres) void ditadoEstilo.refreshCeiling();
     somaQuad = 0;
     nQuad = 0;
     if (maosLivres) void segurarTela();

@@ -764,7 +764,8 @@ impl Hangar {
         self.dictation.snapshot=Some(options);
         self.dictation.snapshot_style=self.dictation.style(self.connection);
         let max_seconds=self.dictation_selection(cx).map_or(5*60,|selection|selection.max_seconds);
-        match Recorder::start(pcm_limit(max_seconds)) {
+        // Folga sobre a parada: o relógio do microfone desvia, e o buffer cheio antes dela cortaria o fim calado.
+        match Recorder::start(pcm_limit(max_seconds + 5)) {
             Ok(recorder) => {
                 self.silence_voice_for_dictation();
                 self.dictation.owner = self.dictation_owner(cx);

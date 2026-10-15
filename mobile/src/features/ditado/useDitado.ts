@@ -181,10 +181,17 @@ export function useDitado({ onFim, onErroParada }: Opts) {
       setGravando(true);
       setRms(0);
 
-      const ceilingMs = useDitadoEstiloStore.getState().ceilingMs;
-      tetoRef.current = setTimeout(() => {
-        void finishRecording(recording, 'teto');
-      }, ceilingMs);
+      const armCeiling = (ceilingMs: number) => {
+        if (tetoRef.current) clearTimeout(tetoRef.current);
+        tetoRef.current = setTimeout(() => {
+          void finishRecording(recording, 'teto');
+        }, Math.max(0, ceilingMs - (Date.now() - inicioRef.current)));
+      };
+      armCeiling(useDitadoEstiloStore.getState().ceilingMs);
+      // O teto pode ter mudado na tela de Voz: relido agora, rearma o prazo desta gravação.
+      void useDitadoEstiloStore.getState().refreshCeiling().then(() => {
+        if (recording.phase === 'recording') armCeiling(useDitadoEstiloStore.getState().ceilingMs);
+      });
 
       intervaloRef.current = setInterval(() => {
         const st = recorder.getStatus();
@@ -207,7 +214,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
           rmsVal = 0;
         }
         setRms(rmsVal);
-        if (Date.now() - inicioRef.current >= ceilingMs) {
+        if (Date.now() - inicioRef.current >= useDitadoEstiloStore.getState().ceilingMs) {
           void finishRecording(recording, 'teto');
         }
       }, 55);

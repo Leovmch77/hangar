@@ -14,6 +14,7 @@ interface DitadoEstiloState {
   ceilingMs: number;
   carregar: () => Promise<void>;
   revalidar: () => Promise<void>;
+  refreshCeiling: () => Promise<void>;
   trocar: (novo: EstiloDitado) => Promise<void>;
   _zerarParaTeste: () => void;
 }
@@ -52,6 +53,18 @@ function createDictationStyleStore(server?: Server | null) {
           carregando = null;
         });
       return carregando;
+    },
+
+    // Relido a cada gravação: o teto pode ter mudado na tela de Voz, e a pílula não precisa piscar por isso.
+    refreshCeiling: async () => {
+      if (target === null) return;
+      const server = target ? { ...target } : undefined;
+      try {
+        const cfg = await (server ? getConfigForServer(server) : getConfig());
+        set({ ceilingMs: dictationCeilingMs(cfg.campos) });
+      } catch {
+        // Sem leitura fica o último teto conhecido; o ditado não espera a config.
+      }
     },
 
     revalidar: async () => {
