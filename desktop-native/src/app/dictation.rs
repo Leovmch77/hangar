@@ -330,6 +330,10 @@ impl Dictation {
     fn hold_voice(&mut self, muted: bool) -> bool { self.voice_hold.get_or_insert(muted); true }
     /// Fim do ditado: o estado que o microfone da voz tinha antes, uma vez só.
     fn release_voice(&mut self) -> Option<bool> { self.voice_hold.take() }
+    /// O painel da voz trocou o mudo para `muted`: devolve o que aplicar na chamada agora.
+    pub(super) fn voice_choice(&mut self, muted: bool) -> bool {
+        match &mut self.voice_hold { Some(choice) => { *choice = muted; true } None => muted }
+    }
 
     fn clear_config_error(&mut self) {
         if let Some(shown) = self.config_error.take() && self.error.as_ref() == Some(&shown) { self.error = None; }
@@ -1253,6 +1257,16 @@ mod tests {
         assert_eq!(dictation.release_voice(), None, "uma vez só");
         dictation.hold_voice(true);
         assert_eq!(dictation.release_voice(), Some(true), "silenciada antes, segue silenciada");
+    }
+
+    /// Desligar o mudo no painel durante o ditado não reabre o microfone da chamada: a escolha fica para o fim.
+    #[test]
+    fn panel_unmute_during_dictation_waits_for_the_end() {
+        let mut dictation = super::Dictation::default();
+        assert!(!dictation.voice_choice(false), "sem ditado, vale o que o painel pede");
+        dictation.hold_voice(true);
+        assert!(dictation.voice_choice(false), "ditando, a chamada segue surda");
+        assert_eq!(dictation.release_voice(), Some(false), "no fim vale a última escolha do painel");
     }
 
     #[test]

@@ -1100,6 +1100,16 @@ test('o popover do segundo homonimo e achado pela ordem, nao pelo primeiro de me
   assert.equal(naPagina(jsDeEstarAberto('Conta do Balancete')), 'false');
 });
 
+test('rotulo com mais de 80 caracteres e achado pelo mesmo nome que a arvore mostra', () => {
+  const longo = 'Conta contábil de destino para o lançamento das diferenças de câmbio apuradas no fechamento mensal';
+  assert.ok(longo.length > 80 && longo.length <= 120);
+  const nome = parsarSnapshot(`- RootWebArea "x"\n  - combobox "${longo}" [ref=@e1] [collapsed]`)[0].nome;
+  const naPagina = paginaFalsa([
+    campoFalso({ tag: 'button', attrs: { role: 'combobox', 'aria-label': longo, 'aria-expanded': 'true' } }),
+  ]);
+  assert.equal(naPagina(jsDeEstarAberto(nome)), 'true');
+});
+
 test('aviso de sucesso se reconhece pela cor ou pelo texto; o de erro nao', () => {
   const { avisoDeSucesso } = require('./jev_objetivo.cjs');
   assert.equal(avisoDeSucesso('Rascunho gravado Avaliação 66 gravada como rascunho, ainda sem valer.', 'border-green-200'), true);

@@ -386,7 +386,7 @@ const JS_CAMPOS = `
     const vistos = {};
     return [...document.querySelectorAll(${JSON.stringify(SELETOR_DE_CAMPOS)})]
       .filter((e) => visivel(e) && nomeDe(e))
-      .find((e) => normalizar(nomeComOrdem(vistos, nomeDe(e).slice(0, 80))) === normalizar(rotulo)) || null;
+      .find((e) => normalizar(nomeComOrdem(vistos, nomeDe(e).slice(0, 120))) === normalizar(rotulo)) || null;
   };`;
 
 const JS_VALORES = `(() => {${JS_CAMPOS}
@@ -407,7 +407,7 @@ const JS_VALORES = `(() => {${JS_CAMPOS}
     if (rico) {
       const n = nomeDe(e) || 'campo de texto sem rotulo';
       const t = String(e.innerText || '').replace(/\\s+/g, ' ').trim();
-      fora.valores[n.slice(0, 80)] = ${CHAVE_SECRETA}.test(n) ? (t ? '(oculto)' : '') : t.slice(0, 400);
+      fora.valores[n.slice(0, 120)] = ${CHAVE_SECRETA}.test(n) ? (t ? '(oculto)' : '') : t.slice(0, 400);
       continue;
     }
     const nome = nomeDe(e);
@@ -426,7 +426,7 @@ const JS_VALORES = `(() => {${JS_CAMPOS}
     const valor = marcado !== null ? (marcado ? 'marcado' : 'desmarcado')
       : (aberto ? 'lista aberta, buscando "' + String((busca || {}).value || '') + '"'
         : (combo ? String(e.innerText || '').replace(/\\s+/g, ' ').trim() : String(e.value ?? '')));
-    const chave = nomeComOrdem(vistos, nome.slice(0, 80));
+    const chave = nomeComOrdem(vistos, nome.slice(0, 120));
     chaves.set(e, chave);
     // O estado vai ao Jev, fora da maquina: o que esta digitado num campo de senha nao vai junto.
     const segredo = e.type === 'password' || ${CHAVE_SECRETA}.test(nome);
@@ -459,7 +459,7 @@ const JS_VALORES = `(() => {${JS_CAMPOS}
     const t = [e.type && e.type !== 'text' ? 'type=' + e.type : '', e.inputMode ? 'inputmode=' + e.inputMode : '',
       e.placeholder ? 'placeholder=' + e.placeholder : '', e.min ? 'min=' + e.min : '', e.max ? 'max=' + e.max : '']
       .filter(Boolean).join(' ');
-    if (t) fora.tipos[chaves.get(e) || nome.slice(0, 80)] = t.slice(0, 120);
+    if (t) fora.tipos[chaves.get(e) || nome.slice(0, 120)] = t.slice(0, 120);
   }
   // O porquê de um envio recusado: alerta, toast, campo marcado inválido com a mensagem dele.
   const limpo = (t) => String(t || '').replace(/\\s+/g, ' ').trim();

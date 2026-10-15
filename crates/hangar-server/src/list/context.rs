@@ -206,9 +206,12 @@ pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens:
 #[derive(Default)]
 pub struct ContextCache {
     entries: Capped<String, Entry>,
-    /// Janela que o Claude informou por modelo respondido (sem a data).
-    windows: std::collections::HashMap<String, u64>,
+    /// Janela que o Claude informou por conta e modelo respondido (sem a data), e quando.
+    windows: std::collections::HashMap<String, (u64, std::time::Instant)>,
 }
+
+/// Validade do aprendido: troca de plano na conta não pode deixar a janela antiga para sempre.
+pub const LEARNED_FOR: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
 struct Entry {
     at: f64,
@@ -238,7 +241,9 @@ pub fn source_version(jsonl: &str) -> SourceVersion {
 /// `gather` do Python. Só entra sessão Claude com transcript (o chamador filtra o vazio).
 impl ContextCache {
     /// Como `claude_reading_from`, aprendendo e aplicando a janela informada por modelo respondido.
-    pub fn reading(&mut self, inputs: &ReadingInputs, scan: &Scan) -> Reading {
+    /// `declared_reported`: o `declared` veio do Claude (sidecar da sessão sem terminal), não do limite que o
+    /// usuário pôs no ambiente.
+    pub fn reading(&mut self, inputs: &ReadingInputs, scan: &Scan, declared_reported: bool, now: std::time::Instant) -> Reading {
         // Por conta: o plano dela decide a janela do mesmo modelo.
         let key = match scan {
             Some(Some((_, Some(m)))) => Some(format!("{}\n{}", inputs.account_dir.display(), DATED.replace(m, "").to_lowercase())),
@@ -247,10 +252,12 @@ impl ContextCache {
         // Só janela que o Claude informou ensina; a deduzida aqui se perpetuaria. Motor declara a
         // janela dele, que não vale para o mesmo id na conta Anthropic; `[1m]` pedido é variante, não o padrão.
         let variant = [inputs.chosen, inputs.opened].into_iter().flatten().any(|m| m.to_lowercase().ends_with("[1m]"));
-        let reported = if inputs.engine || variant { None }
-            else { inputs.declared.filter(|w| *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window)) };
-        if let (Some(k), Some(w)) = (&key, reported) { self.windows.insert(k.clone(), w); }
-        let learned = key.and_then(|k| self.windows.get(&k).copied());
+        let reported = if inputs.engine || variant { None } else {
+            inputs.declared.filter(|w| declared_reported && *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window))
+        };
+        if let (Some(k), Some(w)) = (&key, reported) { self.windows.insert(k.clone(), (w, now)); }
+        let learned = key.and_then(|k| self.windows.get(&k).copied())
+            .filter(|(_, at)| now.saturating_duration_since(*at) < LEARNED_FOR).map(|(w, _)| w);
         reading_with(inputs, scan, learned)
     }
 
@@ -415,12 +422,37 @@ mod tests {
             answer("other.jsonl", "claude-sonnet-5-5", 1_000));
         let inputs = |jsonl, declared| ReadingInputs { jsonl, account_dir: tmp.path(), chosen: None, opened: None, declared, engine: false };
         let mut cache = ContextCache::default();
+        let now = std::time::Instant::now();
         // Sessão sem terminal que já terminou um turno: o sidecar guarda a janela do `result`.
-        cache.reading(&inputs(&old, Some(WINDOW_1M)), &scan_tail(&old));
-        let (ctx, _) = cache.reading(&inputs(&new, None), &scan_tail(&new));
+        cache.reading(&inputs(&old, Some(WINDOW_1M)), &scan_tail(&old), true, now);
+        let (ctx, _) = cache.reading(&inputs(&new, None), &scan_tail(&new), false, now);
         assert_eq!(ctx.map(|c| (c.used, c.window)), Some((186_979, WINDOW_1M)), "a nova, no meio do primeiro turno");
-        let (ctx, _) = cache.reading(&inputs(&other, None), &scan_tail(&other));
+        let (ctx, _) = cache.reading(&inputs(&other, None), &scan_tail(&other), false, now);
         assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "outro modelo não herda");
+        let later = now + LEARNED_FOR + std::time::Duration::from_secs(1);
+        let (ctx, _) = cache.reading(&inputs(&new, None), &scan_tail(&new), false, later);
+        assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "aprendido vence: plano trocado não fica para sempre");
+    }
+
+    /// O limite que o usuário declara no ambiente (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`) é escolha dele para aquela
+    /// sessão, não a janela do modelo: não ensina as outras.
+    #[test]
+    fn window_declared_by_the_user_does_not_teach_other_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("settings.json"), r#"{"model": "opus"}"#).unwrap();
+        let answer = |name: &str, used: u64| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, format!(r#"{{"type":"assistant","message":{{"model":"claude-opus-5-5","usage":{{"input_tokens":{used}}}}}}}"#)).unwrap();
+            path
+        };
+        let (limited, fresh) = (answer("limited.jsonl", 50_000), answer("fresh.jsonl", 60_000));
+        let inputs = |jsonl, declared| ReadingInputs { jsonl, account_dir: tmp.path(), chosen: None, opened: None, declared, engine: false };
+        let mut cache = ContextCache::default();
+        let now = std::time::Instant::now();
+        let (ctx, _) = cache.reading(&inputs(&limited, Some(500_000)), &scan_tail(&limited), false, now);
+        assert_eq!(ctx.map(|c| c.window), Some(500_000), "a própria sessão segue o que declarou");
+        let (ctx, _) = cache.reading(&inputs(&fresh, None), &scan_tail(&fresh), false, now);
+        assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "a outra não herda o limite declarado");
     }
 
     #[test]

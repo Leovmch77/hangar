@@ -1464,7 +1464,9 @@ impl Hangar {
                     .disabled(!matches!(self.voice.phase, Some(Phase::Live)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.voice.muted = !this.voice.muted;
-                        if let Some(call) = &this.voice.call { call.set_muted(this.voice.muted); }
+                        // Ditando, a chamada fica surda; a escolha do painel vale quando o ditado acaba.
+                        let effective = this.dictation.voice_choice(this.voice.muted);
+                        if let Some(call) = &this.voice.call { call.set_muted(effective); }
                         cx.notify();
                     })))
                 .child(Button::new("voice-stop").danger().small().label(tr_shared("codex_voice_stop_short", &[]))
