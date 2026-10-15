@@ -9,8 +9,8 @@ import {
 import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio';
 import type { SharedObject } from 'expo';
 import { novoEstadoVad, passoVad } from '@hangar/core';
-import type { EstadoVad, MotivoFim } from '@hangar/core';
-import { useDitadoEstiloStore } from './ditadoEstiloStore';
+import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
+import { dictationStyleStore } from './ditadoEstiloStore';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
 
@@ -20,6 +20,8 @@ type ManagedRecorder = AudioRecorder & InstanceType<SharedObject<RecordingEvents
 interface Opts {
   onFim: (file: File, motivo: MotivoFim, uri: string) => void;
   onErroParada?: (e: Error) => void;
+  /** Máquina da conversa: o teto da gravação é o configurado nela. */
+  server?: Server | null;
 }
 
 interface Recording {
@@ -46,7 +48,7 @@ function reportRecordingError(recording: Recording, error: unknown) {
   }
 }
 
-export function useDitado({ onFim, onErroParada }: Opts) {
+export function useDitado({ onFim, onErroParada, server }: Opts) {
   const [gravando, setGravando] = useState(false);
   const [rms, setRms] = useState(0);
 
@@ -187,10 +189,11 @@ export function useDitado({ onFim, onErroParada }: Opts) {
           void finishRecording(recording, 'teto');
         }, Math.max(0, ceilingMs - (Date.now() - inicioRef.current)));
       };
-      armCeiling(useDitadoEstiloStore.getState().ceilingMs);
+      const styleStore = dictationStyleStore(server);
+      armCeiling(styleStore.getState().ceilingMs);
       // O teto pode ter mudado na tela de Voz: relido agora, rearma o prazo desta gravação.
-      void useDitadoEstiloStore.getState().refreshCeiling().then(() => {
-        if (recording.phase === 'recording') armCeiling(useDitadoEstiloStore.getState().ceilingMs);
+      void styleStore.getState().refreshCeiling().then(() => {
+        if (recording.phase === 'recording') armCeiling(styleStore.getState().ceilingMs);
       });
 
       intervaloRef.current = setInterval(() => {
@@ -214,7 +217,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
           rmsVal = 0;
         }
         setRms(rmsVal);
-        if (Date.now() - inicioRef.current >= useDitadoEstiloStore.getState().ceilingMs) {
+        if (Date.now() - inicioRef.current >= styleStore.getState().ceilingMs) {
           void finishRecording(recording, 'teto');
         }
       }, 55);
@@ -230,7 +233,7 @@ export function useDitado({ onFim, onErroParada }: Opts) {
         }
       }
     }
-  }, [onFim, onErroParada, finishRecording, releaseRecording]);
+  }, [onFim, onErroParada, server, finishRecording, releaseRecording]);
 
   useEffect(() => {
     mountedRef.current = true;
