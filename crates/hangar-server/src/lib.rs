@@ -22,6 +22,7 @@ pub mod pages;
 pub mod plugin;
 pub mod proxy;
 pub mod query;
+pub mod queue_panel;
 mod plugin_listener;
 pub mod routes;
 pub mod runtime;

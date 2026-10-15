@@ -139,8 +139,9 @@ fn file_name(p: &std::path::Path) -> String {
 /// Eventos cujo último valor vale para quem chega depois: o Python só os manda na mudança.
 /// `nav` fica de fora: repetir um pedido já atendido reabriria o navegador; quem chega depois o
 /// recebe pela lista de sessões. `plugin_ui` (faixa dos mods) sai quando muda: sem o cache, quem
-/// abre o chat depois ficava sem a faixa até o mod redesenhar.
-const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
+/// abre o chat depois ficava sem a faixa até o mod redesenhar. `queue` (painel da fila) sai quando muda e vale
+/// para quem chega depois.
+const LATEST: [&str; 9] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui", crate::queue_panel::EVENT];
 const ASK_QUESTION: usize = 2;
 const PLUGIN_UI: usize = 7;
 /// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
@@ -229,7 +230,7 @@ impl SideCtx {
 
 #[derive(Default)]
 struct SideCache {
-    latest: [Option<Bytes>; 8],
+    latest: [Option<Bytes>; 9],
     /// Sobe a cada `plugin_ui` gravado; é o que o marcador `Out::Ui` leva.
     ui_version: u64,
     /// A vista da versão atual, lida, para calcular a diferença da próxima.
@@ -354,6 +355,10 @@ pub struct Hub {
     /// Aparelhos do dono no chat: a conexão interna leva `app=1` só com algum (convidado e canal
     /// privado não calam o push do dono).
     owners: std::sync::atomic::AtomicUsize,
+    /// Vigia da fila desta sessão (`queue_panel::watch`); sai no `close`.
+    queue_watch: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Acorda a vigia da fila: arquivo da fila mudou ou a troca de conversa limpou o retrato.
+    queue_wake: Arc<Notify>,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -410,10 +415,14 @@ impl Hub {
                 runtime_owned: std::sync::atomic::AtomicBool::new(owned),
                 guests: std::sync::atomic::AtomicUsize::new(0),
                 owners: std::sync::atomic::AtomicUsize::new(owners),
+                queue_watch: Mutex::new(None),
+                queue_wake: Arc::new(Notify::new()),
             }
         });
         hub.ensure_monitor();
         hub.restart_side();
+        let watch = tokio::spawn(crate::queue_panel::watch(Arc::downgrade(&hub), hub.ctx.clone(), hub.queue_wake.clone())).abort_handle();
+        *hub.queue_watch.lock().unwrap() = Some(watch);
         hub
     }
 
@@ -673,6 +682,7 @@ impl Hub {
         if let Some(h) = self.side.lock().unwrap().take() {
             h.abort();
         }
+        self.stop_queue_watch();
         self.stop_monitor();
         self.bound.lock().unwrap().take();
     }
@@ -710,8 +720,15 @@ impl Hub {
         let _ = self.tx.send(Out::Rebind);
         drop(bound);
         self.ensure_monitor();
-        // O retrato acabou de perder o estado: o `Monitor` publica o da época nova sem esperar o tique.
+        // O retrato acabou de perder o estado: o `Monitor` e a vigia da fila publicam o da época nova sem esperar o tique.
         self.wake.notify_one();
+        self.queue_wake.notify_one();
+    }
+
+    fn stop_queue_watch(&self) {
+        if let Some(watch) = self.queue_watch.lock().unwrap().take() {
+            watch.abort();
+        }
     }
 
     /// Quadro de evento para os aparelhos: entra no retrato e sai pelo canal, salvo quando é igual
@@ -792,6 +809,7 @@ impl Hub {
         if let Some(h) = self.side.lock().unwrap().take() {
             h.abort();
         }
+        self.stop_queue_watch();
         self.stop_monitor();
         let _ = self.tx.send(Out::Close);
     }
@@ -1008,9 +1026,10 @@ fn on_side_event(hub: &Arc<Hub>, event: &str, data: &str) -> bool {
     true
 }
 
-/// Quadro que o canal privado leva ao Python: o estado e a faixa dos mods, que o convidado também vê.
+/// Quadro que o canal privado leva ao Python: o estado, a faixa dos mods e o painel da fila, que o convidado
+/// também vê.
 fn private_frame(frame: &[u8], events: &[&str]) -> bool {
-    state_frame(frame, events) || state_frame(frame, &[LATEST[PLUGIN_UI]])
+    state_frame(frame, events) || state_frame(frame, &[LATEST[PLUGIN_UI], crate::queue_panel::EVENT])
 }
 
 /// Quadro que só o dono recebe: aviso de mod (texto dele) e pedido de navegador (url com o token).
@@ -1133,7 +1152,7 @@ async fn private_loop(lease: Lease, out: tokio::sync::mpsc::Sender<Bytes>) {
                 _ = out.closed() => return,
                 _ = ping.tick() => if !send(tail::ping_frame()).await { return },
                 msg = rx.recv() => match msg {
-                    Ok(Out::Side(f)) if state_frame(&f, events) => if !send(f).await { return },
+                    Ok(Out::Side(f)) if private_frame(&f, events) => if !send(f).await { return },
                     // O `/events` do Python repassa a vista inteira ao convidado: sem diferença aqui.
                     Ok(Out::Ui(version)) => if let Some(f) = hub.resolve(Queued::Ui(version), &mut None, false) {
                         if !send(f).await { return }
@@ -1931,9 +1950,68 @@ mod tests {
     #[test]
     fn private_channel_forwards_only_state_events_and_the_band() {
         for (event, pass) in [("state", true), ("preview", true), ("ask_question", true), ("suggest", true), ("plugin_ui", true),
-                              ("stats", false), ("message", false), ("plugin_toast", false), ("nav", false)] {
+                              ("queue", true), ("stats", false), ("message", false), ("plugin_toast", false), ("nav", false)] {
             assert_eq!(private_frame(&sse_frame(event, "{}", None), &STATE_EVENTS), pass, "{event}");
         }
+    }
+
+    #[test]
+    fn queue_snapshot_is_replayed_to_late_devices() {
+        let mut c = SideCache::default();
+        let frame = sse_frame("queue", r#"{"entries":[],"actions":true}"#, None);
+        c.record("queue", r#"{"entries":[],"actions":true}"#, &frame, false);
+        assert!(c.replay().iter().any(|f| f.starts_with(b"event: queue\r\n")));
+        assert!(private_frame(&frame, &STATE_EVENTS), "o canal privado leva a fila a quem entrou pelo Python");
+    }
+
+    #[tokio::test]
+    async fn queue_watch_publishes_the_waiting_list_and_follows_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jsonl, queue) = (dir.path().join("t.jsonl"), dir.path().join("fila").join("s.jsonl"));
+        std::fs::write(&jsonl, "{\"type\":\"user\",\"timestamp\":\"2026-10-14T12:00:00Z\",\"message\":{\"content\":\"oi\"}}\n").unwrap();
+        // 2026-10-14T12:00:00Z, o começo da conversa: as linhas são dela.
+        let start = 1_791_979_200.0;
+        let write = |rows: &[serde_json::Value]| {
+            std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
+            let tmp = queue.with_extension("tmp");
+            std::fs::write(&tmp, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+            std::fs::rename(&tmp, &queue).unwrap();
+        };
+        write(&[serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":false}),
+                serde_json::json!({"id":"sent","text":"entregue","ts":start + 2.0,"delivered":true})]);
+        let info = serde_json::json!({"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {"queue": queue}});
+        let ctx = SideCtx { locate: Arc::new(crate::locate::Fixed(Some(serde_json::from_value(info).unwrap()))), ..idle_ctx() };
+        let binding = Binding { provider: Provider::Claude, jsonl: jsonl.clone(), key: "k".into(), headless: false, life: None };
+        let lease = ctx.hubs.acquire("s", binding, &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        let queue_frames = |hub: &Hub| hub.cache.lock().unwrap().replay().into_iter()
+            .filter(|f| f.starts_with(b"event: queue\r\n")).map(|f| String::from_utf8_lossy(&f).into_owned()).collect::<Vec<_>>();
+        tokio::time::timeout(Duration::from_secs(5), async { while queue_frames(&lease.hub).is_empty() { tokio::time::sleep(Duration::from_millis(20)).await } })
+            .await.expect("a lista sai sem esperar mudança");
+        let first = queue_frames(&lease.hub);
+        assert!(first[0].contains(r#""entries":[{"id":"a","text":"primeira","ts":1791979201.0}]"#), "{first:?}");
+        assert!(first[0].contains(r#""actions":false"#), "sem registro do runtime, sem botões");
+        // Outro aparelho reordenou: a projeção regravada chega a quem está no chat.
+        write(&[serde_json::json!({"id":"b","text":"segunda","ts":start + 3.0,"delivered":false}),
+                serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":false})]);
+        let ids = |frame: &Bytes| {
+            let data = String::from_utf8_lossy(frame).lines().nth(1).unwrap_or("").trim_start_matches("data: ").to_owned();
+            serde_json::from_str::<serde_json::Value>(&data).ok().and_then(|v| v["entries"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|e| e["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()
+        };
+        // O observador avisa na hora; sem ele, a releitura de 5 s cobre.
+        let changed = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Out::Side(f)) if f.starts_with(b"event: queue\r\n") && ids(&f) != ["a"] => return ids(&f),
+                    Ok(_) => {}
+                    Err(error) => panic!("canal do hub: {error}"),
+                }
+            }
+        }).await.expect("a mudança chega");
+        assert_eq!(changed, ["b", "a"]);
+        close_hub(&lease.hub);
+        assert!(lease.hub.queue_watch.lock().unwrap().is_none(), "a vigia sai com o hub");
     }
 
     #[tokio::test]

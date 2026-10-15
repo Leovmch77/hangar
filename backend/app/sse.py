@@ -715,8 +715,9 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
 
 
 # Com o Rust de pé, estes saem do hub: os quatro primeiros do `Monitor` (Claude com terminal), os
-# seis do feed do Claude e do Codex sem terminal, e a faixa dos mods, que o hub junta das duas fontes.
-_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta", "plugin_ui")
+# seis do feed do Claude e do Codex sem terminal, a faixa dos mods, que o hub junta das duas fontes, e o
+# painel da fila (`queue`), que só o hub produz.
+_RUST_STATE_EVENTS = ("state", "preview", "ask_question", "suggest", "pensamento", "ferramenta", "plugin_ui", "queue")
 # O hub pinga o canal a cada 10 s: três calados = conexão morta.
 _RUST_CHANNEL_IDLE_S = 30.0
 _RUST_CHANNEL_LINE = 1 << 20

@@ -396,6 +396,29 @@ fn merge_queue(path: &Path, p: &mut Parsed) -> io::Result<()> {
     Ok(())
 }
 
+/// O painel da fila: as entradas que esperam a vez no Hangar, na ordem da fila. A regra de esperar é a da fila
+/// (`row_waits`); o recorte de conversa é o do `/history` (texto vazio fora, de antes da conversa atual fora).
+pub(crate) fn queue_panel_entries(queue: &Path, jsonl: &Path) -> io::Result<Vec<Value>> {
+    let start_ts = transcript_start_ts(jsonl);
+    Ok(load_queue(queue)?
+        .into_iter()
+        .filter(|entry| {
+            let ts = entry.get("ts").and_then(py::number).unwrap_or(0.0);
+            entry.get("text").and_then(Value::as_str).is_some_and(|text| !strip(text).is_empty())
+                && (start_ts == 0.0 || from_current_session(entry, start_ts, ts))
+        })
+        .map(Value::Object)
+        .filter(crate::runtime::queue::row_waits)
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.get("id").map_or_else(|| "None".to_string(), py::py_str),
+                "text": entry["text"],
+                "ts": entry.get("ts").and_then(py::number),
+            })
+        })
+        .collect())
+}
+
 fn stamp(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
@@ -423,7 +446,38 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chaves_de_commit, merged_history, merged_history_capped, HistoryRequest, Provider, TAIL_WINDOW};
+    use super::{chaves_de_commit, merged_history, merged_history_capped, queue_panel_entries, transcript_start_ts, HistoryRequest, Provider, TAIL_WINDOW};
+
+    #[test]
+    fn queue_panel_lists_only_waiting_entries_of_the_current_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, jsonl) = (dir.path().join("q.jsonl"), dir.path().join("t.jsonl"));
+        std::fs::write(&jsonl, "{\"type\":\"user\",\"timestamp\":\"2026-10-14T12:00:00Z\",\"message\":{\"content\":\"oi\"}}\n").unwrap();
+        // O relógio da fila parte do próprio transcript: a conversa atual começa nele.
+        let start = transcript_start_ts(&jsonl);
+        assert_eq!(start, 1_791_979_200.0);
+        let rows = [
+            serde_json::json!({"id":"old","text":"antes do /clear","ts":start - 10.0,"delivered":false}),
+            serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0,"delivered":false}),
+            serde_json::json!({"id":"a","text":"primeira","ts":start + 1.0,"delivered":false}),
+            serde_json::json!({"id":"sent","text":"entregue","ts":start + 3.0,"delivered":true}),
+            serde_json::json!({"id":"lost","text":"perdida","ts":start + 4.0,"delivered":false,"desistiu":true}),
+            serde_json::json!({"id":"ans","text":"resposta","ts":start + 5.0,"delivered":false,"reserved":true}),
+            serde_json::json!({"id":"local","text":"saída","ts":start + 6.0,"delivered":true,"confirmed":true,"papel":"assistant"}),
+            serde_json::json!({"id":"blank","text":"  ","ts":start + 7.0,"delivered":false}),
+        ];
+        std::fs::write(&queue, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let entries = queue_panel_entries(&queue, &jsonl).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["b", "a"], "a ordem é a da fila, não a do relógio");
+        assert_eq!(entries[0], serde_json::json!({"id":"b","text":"segunda","ts":start + 2.0}));
+    }
+
+    #[test]
+    fn queue_panel_of_a_missing_queue_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(queue_panel_entries(&dir.path().join("nada.jsonl"), &dir.path().join("t.jsonl")).unwrap().is_empty());
+    }
 
     #[test]
     fn capped_window_stops_before_reading_the_whole_transcript() {
