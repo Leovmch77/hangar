@@ -15,10 +15,12 @@ export function SessionPickerSheet({
   open,
   onClose,
   atual,
+  serverId,
 }: {
   open: boolean;
   onClose: () => void;
   atual: string;
+  serverId: string;
 }) {
   const { theme } = useUnistyles();
   const router = useRouter();
@@ -44,11 +46,11 @@ export function SessionPickerSheet({
             style={styles.item}
             accessibilityRole="button"
             accessibilityLabel={s.name}
-            accessibilityState={{ selected: s.name === atual }}
+            accessibilityState={{ selected: s.name === atual && s.serverId === serverId }}
           >
             <StateDot state={s.state} />
             <Text
-              style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: s.name === atual ? '700' : '500' }]}
+              style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: s.name === atual && s.serverId === serverId ? '700' : '500' }]}
               numberOfLines={1}
             >
               {s.name}
