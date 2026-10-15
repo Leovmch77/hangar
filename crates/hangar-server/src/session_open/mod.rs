@@ -7,7 +7,7 @@ pub mod resolve;
 #[cfg(test)]
 mod tests;
 
-pub use resolve::{OpenFacts, Resolved, resolve_open};
+pub use resolve::{OpenCaller, OpenFacts, Resolved, resolve_open};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};

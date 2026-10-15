@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use hangar_server::accounts::environment::AccountEnvironment;
-use hangar_server::session_open::{OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
+use hangar_server::session_open::{OpenCaller, OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,7 +76,8 @@ fn main() -> ExitCode {
         }
     }
     let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone());
-    match resolve_open(&request, &facts) {
+    // Quem roda o comando no terminal da máquina é o dono.
+    match resolve_open(&request, &OpenCaller::Owner, &facts) {
         Ok(resolved) => {
             println!("{}", serde_json::to_string_pretty(&resolved).unwrap_or_default());
             if command == "open" { ExitCode::from(3) } else { ExitCode::SUCCESS }

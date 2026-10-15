@@ -79,8 +79,20 @@ pub trait OpenFacts {
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String>;
     /// Terminal, sidecar Codex ou sidecar sem terminal com este nome.
     fn name_in_use(&self, name: &str) -> bool;
+    /// Troca de agente em curso no nome (`conversation_transfer.transfer_active`).
+    fn transfer_busy(&self, name: &str) -> Result<bool, OpenError>;
+    /// `os.path.realpath(os.path.expanduser(path))`.
+    fn real_path(&self, path: &str) -> std::path::PathBuf;
     fn new_key(&self) -> String;
     fn now(&self) -> f64;
+}
+
+/// Quem pede a abertura.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenCaller {
+    Owner,
+    /// Só abre dentro da pasta dele, não herda de sessão do dono nem usa as contas e plugins do dono.
+    Guest { root: std::path::PathBuf },
 }
 
 /// O spec e o que é só da abertura: avisos para a tela, a primeira mensagem e o lembrar provedor.
@@ -106,7 +118,8 @@ fn truthy(value: &Option<String>) -> bool { value.as_deref().is_some_and(|v| !v.
 
 fn conflict(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_criacao_sessao", msg) }
 
-pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
+pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
+    let guest = matches!(caller, OpenCaller::Guest { .. });
     let mut warnings = Vec::new();
     // Provedor omitido: opção exclusiva de um provedor decide; senão o padrão do servidor.
     let provider = match &request.provider {
@@ -126,8 +139,9 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
     let mut inherited_codex_mode = None;
     let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
 
-    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta.
-    if let Some(creator) = request.creator.as_deref().filter(|_| request.inherit != Some(false)) {
+    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
+    // nunca herda conta nem modo de uma sessão do dono, e nem fica sabendo dela.
+    if let Some(creator) = request.creator.as_deref().filter(|_| request.inherit != Some(false) && !guest) {
         match facts.creator(creator)? {
             None => warnings.push(format!("sessão criadora '{creator}' não encontrada; nada foi herdado")),
             Some(info) => {
@@ -171,7 +185,8 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
 
     // A padrão herdada é a mesma escolha de ninguém ter pedido conta: desconectada, troca igual.
     let unchosen = codex_account.is_none() || (source == AccountSource::Inherited && codex_account.as_deref() == Some("default"));
-    if provider == AgentProvider::Codex && unchosen {
+    // As outras contas Codex são do dono: o convidado fica na padrão.
+    if provider == AgentProvider::Codex && unchosen && !guest {
         let connected = facts.codex_logins();
         if let Some(first) = connected.first().filter(|_| !connected.iter().any(|login| login.is_default)) {
             codex_account = Some(first.id.clone());
@@ -191,7 +206,7 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
     let headless = headless.unwrap_or_else(|| {
         !request.read_only && matches!(provider, AgentProvider::Claude | AgentProvider::Codex) && facts.defaults().headless
     });
-    let model = validate(request, provider, headless, config_dir.as_deref(), codex_account.as_deref(), permission.as_deref(), facts)?;
+    let model = validate(request, caller, provider, headless, config_dir.as_deref(), codex_account.as_deref(), permission.as_deref(), facts)?;
     let name = validate_name(&request.name, provider, headless, request, facts)?;
 
     let permission_mode = match provider {
@@ -227,7 +242,8 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
         worktree: request.branch.clone().map(|branch| WorktreeSpec { branch, new_branch: request.new_branch, base: request.base.clone(), path: None }),
         creator: request.creator.clone(), created_at: facts.now(),
     };
-    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider })
+    // Só a abertura do dono muda o provedor lembrado.
+    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest })
 }
 
 /// `session_defaults.choose_provider`.
@@ -308,16 +324,26 @@ fn same_dir(a: &str, b: &str) -> bool {
 
 /// Validação na ordem do `_create_session_owned` (o primeiro erro vence), tudo antes de qualquer
 /// efeito. Devolve o modelo efetivo (a conta ChatGPT fixa tira o prefixo dela).
-fn validate(request: &SessionOpenRequest, provider: AgentProvider, headless: bool, config_dir: Option<&str>,
+#[allow(clippy::too_many_arguments)]
+fn validate(request: &SessionOpenRequest, caller: &OpenCaller, provider: AgentProvider, headless: bool, config_dir: Option<&str>,
             codex_account: Option<&str>, permission: Option<&str>, facts: &dyn OpenFacts) -> Result<Option<String>, OpenError> {
     let claude = provider == AgentProvider::Claude;
-    if request.claude_customizations.is_some() && !claude {
-        return Err(OpenError::new(400, "claude_customizations_invalid", "plugins e skills por sessão só valem para Claude"));
+    if request.claude_customizations.is_some() {
+        if !claude {
+            return Err(OpenError::new(400, "claude_customizations_invalid", "plugins e skills por sessão só valem para Claude"));
+        }
+        if matches!(caller, OpenCaller::Guest { .. }) {
+            return Err(OpenError::new(403, "claude_customizations_owner_only", "a seleção de plugins pertence ao dono"));
+        }
     }
     if request.service_tier.is_some() && provider != AgentProvider::Codex
         && !(claude && facts.supports_fast(request.engine.as_deref(), request.model.as_deref()))
     {
         return Err(OpenError::new(400, "erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"));
+    }
+    // Antes de qualquer outra coisa da pasta: o convidado nem fica sabendo se ela existe fora da dele.
+    if let OpenCaller::Guest { root } = caller && !facts.real_path(&request.cwd).starts_with(root) {
+        return Err(OpenError::new(403, "erro_fora_da_pasta", "o convidado só abre sessão dentro da pasta dele"));
     }
     if facts.existing_dir(&request.cwd).is_none() {
         return Err(OpenError::new(400, "erro_cwd_inexistente", format!("a pasta {} não existe", request.cwd))
@@ -421,6 +447,9 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
     }
     if name.len() > NAME_MAX {
         return Err(conflict(format!("nome invalido: use até {NAME_MAX} caracteres")));
+    }
+    if facts.transfer_busy(&name)? {
+        return Err(OpenError::new(409, "session_transfer_busy", "A sessão está trocando de agente; tente novamente quando terminar."));
     }
     if headless {
         if !matches!(provider, AgentProvider::Claude | AgentProvider::Codex) {

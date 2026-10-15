@@ -117,13 +117,15 @@ fn reopen_keeps_what_the_change_does_not_name() {
 /// harness deu ao Python (`session_open_contract.py`), lidos do mesmo jeito que o Python os lê.
 struct FixtureFacts {
     files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value,
-    /// Desvios que o teste pede e o cenário não tem: settings ilegível e contas Codex conectadas.
-    broken_mode: bool, connected: Vec<resolve::CodexLogin>,
+    /// Desvios que o teste pede e o cenário não tem: settings ilegível, contas Codex conectadas e
+    /// troca de agente em curso.
+    broken_mode: bool, connected: Vec<resolve::CodexLogin>, busy: bool,
 }
 
 /// A ponte do ditado com o Rust fora, como o harness a responde (`session_open_contract.py:941`).
 const HARNESS_BRIDGE_DOWN: &str = "O servidor Rust de organização está indisponível.";
 const HOME: &str = "<ROOT>/home";
+const OWNER: resolve::OpenCaller = resolve::OpenCaller::Owner;
 
 impl FixtureFacts {
     fn of(fixture: &Value) -> Self {
@@ -135,6 +137,7 @@ impl FixtureFacts {
             fakes: fixture["scenario"]["fakes"].clone(),
             broken_mode: false,
             connected: Vec::new(),
+            busy: false,
         }
     }
 
@@ -261,6 +264,10 @@ impl resolve::OpenFacts for FixtureFacts {
         self.tmux.iter().any(|s| s["name"] == name) || self.sidecar("claude-headless", name).is_some() || self.sidecar("codex-sessions", name).is_some()
     }
 
+    fn transfer_busy(&self, _name: &str) -> Result<bool, OpenError> { Ok(self.busy) }
+
+    fn real_path(&self, path: &str) -> std::path::PathBuf { path.into() }
+
     fn new_key(&self) -> String { "k".repeat(32) }
     fn now(&self) -> f64 { 0.0 }
 }
@@ -312,7 +319,7 @@ const FIXED: [&str; 2] = [
 
 fn resolve_fixture(fixture: &Value) -> Result<resolve::Resolved, OpenError> {
     let request = SessionOpenRequest::parse(&request_body(fixture)).unwrap();
-    resolve::resolve_open(&request, &FixtureFacts::of(fixture))
+    resolve::resolve_open(&request, &OWNER, &FixtureFacts::of(fixture))
 }
 
 #[test]
@@ -435,6 +442,71 @@ fn a_codex_session_inherits_the_creator_mode_never_more_permissive() {
     assert_eq!(resolve_fixture(&fixture).unwrap().spec.permission_mode, Some(PermissionMode::ApproveForMe));
 }
 
+fn resolve_as(name: &str, caller: &resolve::OpenCaller, patch: impl FnOnce(&mut Value), facts: impl FnOnce(FixtureFacts) -> FixtureFacts)
+    -> Result<resolve::Resolved, OpenError> {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
+    patch(&mut fixture["scenario"]["steps"][0]["json"]);
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    resolve::resolve_open(&request, caller, &facts(FixtureFacts::of(&fixture)))
+}
+
+/// CRI-022 e CRI-071: o convidado só abre dentro da pasta dele, não herda de sessão do dono, não usa
+/// plugins do dono, fica na conta Codex padrão e não muda o provedor lembrado.
+#[test]
+fn a_guest_opens_only_inside_its_folder_and_without_the_owner_choices() {
+    let guest = resolve::OpenCaller::Guest { root: "<ROOT>/work".into() };
+    let code = |r: Result<resolve::Resolved, OpenError>| r.err().map(|e| (e.status, e.code, e.msg));
+    let outside = resolve::OpenCaller::Guest { root: "<ROOT>/outra".into() };
+    assert_eq!(code(resolve_as("create_claude_terminal_default", &outside, |_| {}, |f| f)),
+        Some((403, Some("erro_fora_da_pasta"), "o convidado só abre sessão dentro da pasta dele".into())));
+    assert_eq!(code(resolve_as("create_claude_customizations", &guest, |_| {}, |f| f)),
+        Some((403, Some("claude_customizations_owner_only"), "a seleção de plugins pertence ao dono".into())));
+    let alone = resolve_as("create_inherit_from_headless_creator", &guest, |_| {}, |f| f).unwrap();
+    assert_eq!((alone.spec.account, alone.spec.account_source, alone.warnings.len()), (Account::Default, AccountSource::Default, 0));
+    assert_eq!(alone.spec.permission_mode, Some(PermissionMode::BypassPermissions), "modo da conta, não o da criadora");
+    let connected = |mut f: FixtureFacts| { f.connected = vec![resolve::CodexLogin { id: "trabalho".into(), is_default: false }]; f };
+    let codex = resolve_as("create_codex_terminal_default", &guest, |_| {}, connected).unwrap();
+    assert_eq!((codex.spec.account, codex.warnings.len()), (Account::Codex { account_id: "default".into() }, 0));
+    assert!(!resolve_as("create_remember_provider", &guest, |_| {}, |f| f).unwrap().remember_provider);
+    assert!(resolve_as("create_remember_provider", &OWNER, |_| {}, |f| f).unwrap().remember_provider);
+}
+
+/// Troca de agente em curso no nome: recusa com o código dela (S-35c), não `erro_criacao_sessao`.
+#[test]
+fn a_transfer_in_progress_refuses_with_its_own_code() {
+    let busy = resolve_as("create_claude_terminal_default", &OWNER, |_| {}, |mut f| { f.busy = true; f });
+    assert_eq!(busy.err().map(|e| (e.status, e.code)), Some((409, Some("session_transfer_busy"))));
+}
+
+/// Os fatos de verdade: índice de transferências do Python e caminho real (link para fora da pasta).
+#[cfg(unix)]
+#[test]
+fn local_facts_read_transfers_and_real_paths() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work/proj")).unwrap();
+    let body = |cwd: &std::path::Path| json!({"name": "s1", "cwd": cwd, "provider": "claude", "headless": false}).to_string();
+    let open = |cwd: &std::path::Path, caller: &resolve::OpenCaller| {
+        let request = SessionOpenRequest::parse(body(cwd).as_bytes()).unwrap();
+        resolve::resolve_open(&request, caller, &local_facts(&home, &runtime)).err().map(|e| (e.status, e.code))
+    };
+    let base = home.join(".hangar/conversation-transfers");
+    std::fs::create_dir_all(base.join("indexes")).unwrap();
+    let digest: String = ring::digest::digest(&ring::digest::SHA256, b"s1").as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let id = "4b7c4a1e-0000-4000-8000-000000000001";
+    std::fs::write(base.join(format!("indexes/session-{digest}.json")), json!([id]).to_string()).unwrap();
+    std::fs::write(base.join(format!("{id}.json")), json!({"id": id, "name": "s1", "phase": "imported"}).to_string()).unwrap();
+    assert_eq!(open(&home.join("work/proj"), &OWNER), Some((409, Some("session_transfer_busy"))));
+    std::fs::write(base.join(format!("{id}.json")), json!({"id": id, "name": "s1", "phase": "complete"}).to_string()).unwrap();
+    assert_eq!(open(&home.join("work/proj"), &OWNER), None);
+    // O link dentro da pasta do convidado aponta para fora dela: o caminho real decide.
+    std::fs::create_dir_all(home.join("guest")).unwrap();
+    std::os::unix::fs::symlink(home.join("work"), home.join("guest/fora")).unwrap();
+    let guest = resolve::OpenCaller::Guest { root: home.join("guest") };
+    assert_eq!(open(&home.join("guest/fora/proj"), &guest), Some((403, Some("erro_fora_da_pasta"))));
+}
+
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
 #[test]
 fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
@@ -442,7 +514,7 @@ fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
     fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
     let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
     let facts = FixtureFacts { connected: vec![resolve::CodexLogin { id: "trabalho".into(), is_default: false }], ..FixtureFacts::of(&fixture) };
-    let resolved = resolve::resolve_open(&request, &facts).unwrap();
+    let resolved = resolve::resolve_open(&request, &OWNER, &facts).unwrap();
     assert_eq!(resolved.spec.account, Account::Codex { account_id: "trabalho".into() });
     assert_eq!(resolved.warnings, ["A conta Codex padrão não está conectada; a sessão usa a conta trabalho."]);
 }
@@ -487,11 +559,11 @@ fn an_unreadable_account_mode_refuses_unless_a_mode_was_asked() {
     let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
     let facts = FixtureFacts { broken_mode: true, ..FixtureFacts::of(&fixture) };
     let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
-    let result = resolve::resolve_open(&request, &facts);
+    let result = resolve::resolve_open(&request, &OWNER, &facts);
     assert_eq!(result.err().map(|e| (e.status, e.code)), Some((409, Some("erro_modo_padrao_ilegivel"))));
     fixture["scenario"]["steps"][0]["json"]["permission_mode"] = json!("manual");
     let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
-    let resolved = resolve::resolve_open(&request, &facts).unwrap();
+    let resolved = resolve::resolve_open(&request, &OWNER, &facts).unwrap();
     assert_eq!((resolved.spec.permission_mode, resolved.warnings.len()), (Some(PermissionMode::Manual), 0));
 }
 
@@ -609,7 +681,7 @@ fn an_unreadable_creator_record_refuses_instead_of_inheriting_nothing() {
     std::fs::write(home.path().join(".hangar/codex-sessions/mae.json"), "{quebrado").unwrap();
     let body = json!({"name": "filha", "cwd": home.path().join("work"), "provider": "claude", "creator": "mae"});
     let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
-    let result = resolve::resolve_open(&request, &local_facts(home.path(), &runtime));
+    let result = resolve::resolve_open(&request, &OWNER, &local_facts(home.path(), &runtime));
     assert_eq!(result.err().map(|e| (e.status, e.code)), Some((409, Some("erro_criadora_ilegivel"))));
 }
 
@@ -652,7 +724,7 @@ proptest! {
         if let Ok(request) = SessionOpenRequest::parse(&serde_json::to_vec(&object).unwrap()) {
             let mut facts = FixtureFacts::of(&fixture);
             facts.fakes = json!({});
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve::resolve_open(&request, &facts)))
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve::resolve_open(&request, &OWNER, &facts)))
                 .map_err(|_| TestCaseError::fail("resolve_open entrou em pânico"))?;
         }
     }

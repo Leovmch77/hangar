@@ -281,6 +281,41 @@ impl OpenFacts for LocalFacts {
         self.headless_sidecar(name).exists() || self.codex_sidecar(name).exists() || self.panes().iter().any(|p| p.session == name)
     }
 
+    /// `transfer_active`: registro do índice da sessão com o mesmo nome e fase não terminal.
+    // ponytail: sem o `_belongs` do Python (vida da sessão); para um nome que nasce agora a vida
+    // antiga não existe e o registro em curso é dele. Portar junto quando a troca vier ao Rust.
+    fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> {
+        let base = self.hangar().join("conversation-transfers");
+        let digest: String = ring::digest::digest(&ring::digest::SHA256, name.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let invalid = || OpenError::new(409, "erro_criacao_sessao", "índice de transferência inválido");
+        let ids = match read_json(&base.join("indexes").join(format!("session-{digest}.json"))) {
+            Ok(None) => return Ok(false),
+            Ok(Some(Value::Array(ids))) => ids,
+            _ => return Err(invalid()),
+        };
+        Ok(ids.iter().filter_map(Value::as_str).filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+            .filter_map(|id| read_json(&base.join(format!("{id}.json"))).ok().flatten())
+            .any(|record| record["name"] == name && !matches!(record["phase"].as_str(), Some("complete" | "rejected" | "rolled_back"))))
+    }
+
+    /// Cada parte que existe é resolvida (link incluído); `..` depois do que não existe é lexical.
+    fn real_path(&self, path: &str) -> PathBuf {
+        let path = expand_home(path, &self.env().home);
+        let path = std::path::absolute(&path).unwrap_or(path);
+        let mut out = PathBuf::new();
+        for part in path.components() {
+            match part {
+                std::path::Component::ParentDir => { out.pop(); }
+                std::path::Component::CurDir => {}
+                part => {
+                    out.push(part);
+                    if let Ok(real) = out.canonicalize() { out = real; }
+                }
+            }
+        }
+        out
+    }
+
     fn new_key(&self) -> String { crate::mods::state::random_hex(16) }
 
     fn now(&self) -> f64 { crate::accounts::quotas::now() }
