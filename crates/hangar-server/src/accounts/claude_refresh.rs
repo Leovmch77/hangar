@@ -13,6 +13,49 @@ pub struct PendingCleanup(
     Arc<tokio::sync::Mutex<std::collections::HashMap<AccountKey, (String, super::AccountGuard)>>>,
 );
 
+/// Renovação rápida cujo CLI rodou e não renovou espera antes de rodar de novo: ele sobe o
+/// Claude com todos os MCPs (segundos no Windows) e a lista de credenciais esperava por ele.
+/// Credencial trocada (login novo) ou renovação completa libera na hora.
+#[derive(Clone, Default)]
+pub struct QuickRenewalBackoff(
+    Arc<std::sync::Mutex<std::collections::HashMap<AccountKey, (Value, f64, u32)>>>,
+);
+
+impl QuickRenewalBackoff {
+    const WAITS: [f64; 4] = [1800.0, 3600.0, 7200.0, 21600.0];
+
+    pub fn pending(&self, key: &AccountKey, credential: &Value, at: f64) -> bool {
+        let map = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.get(key)
+            .is_some_and(|(seen, until, _)| seen == credential && at < *until)
+    }
+
+    /// Devolve a espera aplicada, em segundos.
+    pub fn failed(&self, key: &AccountKey, credential: Value, at: f64) -> f64 {
+        let mut map = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let attempts = map
+            .get(key)
+            .filter(|entry| entry.0 == credential)
+            .map_or(0, |entry| entry.2);
+        let wait = Self::WAITS[(attempts as usize).min(Self::WAITS.len() - 1)];
+        map.insert(key.clone(), (credential, at + wait, attempts + 1));
+        wait
+    }
+
+    pub fn clear(&self, key: &AccountKey) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(key);
+    }
+}
+
 fn oauth(path: &Path) -> Value {
     fs::read(path.join(".credentials.json"))
         .ok()
@@ -68,6 +111,9 @@ impl AccountService {
         }
         let key =
             AccountKey::new(Provider::Claude, &account.home).map_err(|_| "renovacao-falhou")?;
+        if quick && self.quick_renewals.pending(&key, &before, now()) {
+            return Err("renovacao-falhou");
+        }
         let client = WindowClient::new(
             bridge.upstream(),
             bridge.secret().to_owned(),
@@ -99,12 +145,24 @@ impl AccountService {
             .ensure_unused()
             .map_err(|_| "sessao-viva")?;
         let before = oauth(&account.home);
-        let _ = self.claude_cli(&account, &["mcp", "list"]).await;
+        let cli = self.claude_cli(&account, &["mcp", "list"]).await;
         if renewed(&before, &oauth(&account.home)) {
+            self.quick_renewals.clear(&key);
             self.claude_auth.invalidate(&key);
             return Ok(());
         }
         if quick {
+            // CLI que nem subiu (ausente, processo recusado) não custou nada: a espera fica para o que rodou.
+            if let Err(code @ ("cli_missing" | "cli_not_started")) = cli {
+                tracing::warn!(code, "renovação rápida sem o CLI do Claude; nada de espera");
+            } else {
+                let wait = self.quick_renewals.failed(&key, before, now());
+                tracing::warn!(
+                    code = "quick_renewal_backoff",
+                    wait_s = wait,
+                    "renovação rápida não renovou; próxima tentativa automática após a espera"
+                );
+            }
             return Err("renovacao-falhou");
         }
         let operation = super::claude_login::nonce().map_err(|_| "renovacao-falhou")?;
@@ -147,6 +205,9 @@ impl AccountService {
         }
         let _ = fs::remove_file(record);
         self.claude_auth.invalidate(&key);
+        if success {
+            self.quick_renewals.clear(&key);
+        }
         if success { Ok(()) } else { Err("timeout") }
     }
 
@@ -269,6 +330,25 @@ mod tests {
             &old,
             &json!({"accessToken":"new","expiresAt":2000})
         ));
+    }
+
+    #[test]
+    fn failed_quick_renewal_waits_until_the_credential_changes_or_the_wait_ends() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = AccountKey::new(Provider::Claude, temp.path()).unwrap();
+        let backoff = QuickRenewalBackoff::default();
+        let old = json!({"refreshToken":"a"});
+        assert!(!backoff.pending(&key, &old, 1000.0));
+        assert_eq!(backoff.failed(&key, old.clone(), 1000.0), 1800.0);
+        assert!(backoff.pending(&key, &old, 1300.0));
+        assert!(!backoff.pending(&key, &json!({"refreshToken":"b"}), 1300.0));
+        assert!(!backoff.pending(&key, &old, 2800.0));
+        assert_eq!(backoff.failed(&key, old.clone(), 3000.0), 3600.0);
+        assert!(backoff.pending(&key, &old, 6599.0));
+        assert!(!backoff.pending(&key, &old, 6600.0));
+        backoff.clear(&key);
+        assert!(!backoff.pending(&key, &old, 3000.0));
+        assert_eq!(backoff.failed(&key, old, 3000.0), 1800.0);
     }
 
     #[cfg(unix)]

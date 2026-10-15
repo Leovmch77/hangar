@@ -169,11 +169,12 @@ impl AccountService {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         let mut tree = crate::terminal_process::CommandTree::configure(&mut command)
-            .map_err(|_| "cli_failed")?;
-        let mut child = command.spawn().map_err(|_| "cli_failed")?;
+            .map_err(|_| "cli_not_started")?;
+        let mut child = command.spawn().map_err(|_| "cli_not_started")?;
         if tree.attach(&child).is_err() {
             crate::terminal_process::finish(&mut tree).await;
             let _ = child.wait().await;
+            // O processo já existiu: conta como CLI que rodou.
             return Err("cli_failed");
         }
         let mut stdout = child.stdout.take().unwrap().take(65537);
