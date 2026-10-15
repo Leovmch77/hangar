@@ -25,7 +25,7 @@ uv run python tests/fixtures/contract/session_open_contract.py generate         
 uv run python tests/fixtures/contract/session_open_contract.py generate --group b    # um grupo
 uv run python tests/fixtures/contract/session_open_contract.py generate <cenário>    # uma
 uv run python tests/fixtures/contract/session_open_contract.py diff --side python    # Python × fixtures
-uv run python tests/fixtures/contract/session_open_contract.py diff --side rust      # Rust × fixtures (ainda falha)
+uv run python tests/fixtures/contract/session_open_contract.py diff --side rust      # Rust × fixtures
 uv run pytest tests/test_session_open_contract.py                                     # autoteste
 ```
 
@@ -34,6 +34,14 @@ O lado Python roda sobre o `git archive 601bc62a0` de `backend/app`, `plugins`, 
 que as Tasks seguintes apagarem o Python da árvore. Num clone raso (o checkout do job `backend` do CI)
 o commit não existe e o `diff --side python` falha dizendo isso. Por esse motivo a reexecução
 completa fica no comando acima e não no pytest.
+
+O lado Rust roda o exemplo `session_open_contract` do `hangar-server` (compile antes com `cargo build
+-p hangar-server --example session_open_contract`; o binário é procurado em `$CARGO_TARGET_DIR` ou
+em `HSO_RUST_BIN`). Ele monta o mesmo cenário, prepara o que o Rust lê do disco (os panes do cenário,
+o `plugin-dir` publicado, o `hangar-conta` desta árvore) antes do instantâneo e abre pela mesma
+biblioteca do servidor, com o tmux em memória e as pontes gravadas na forma do lado Python. Rota que o
+Rust ainda não atende falha dizendo a rota. Cada conserto (`suspeitas.md`) ou decisão que muda o que a
+fixture prende é uma regra em `RUST_DIFFERENCES`: ela desfaz a diferença e acusa quando o conserto falta.
 
 ## Como um cenário roda
 
