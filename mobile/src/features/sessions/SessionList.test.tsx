@@ -22,6 +22,7 @@ vi.mock('@hangar/core', async (original) => ({
   rotaDecidida: () => true,
   probeServerResponse: async () => ({ ok: true, status: 200, json: async () => calls.sessions }),
   openSessionsStream: () => calls.stream,
+  listExternalPairs: async () => [],
 }));
 vi.mock('../../stores/servers', async () => {
   const { create } = await import('zustand');
@@ -53,8 +54,8 @@ vi.mock('../../paraglide/messages', () => Object.fromEntries((
   'lista_agrupar_nenhum lista_agrupar_servidor lista_agrupar_projeto lista_agrupar ' +
   'native_brand lista_buscar lista_filtrar lista_filtro_limpar native_connected config_modal_titulo ' +
   'native_new_chat_title native_sidebar_all_sessions lista_sessoes_plural sessao_expandir sessao_recolher ' +
-  'lista_vazia_filtro lista_nenhuma_ativa comum_cancelar sessao_excluir sessao_excluir_curto servidor_nao_existe'
-).split(' ').map((key) => [key, () => key]))));
+  'lista_carregando lista_vazia_filtro lista_nenhuma_ativa comum_cancelar sessao_excluir sessao_excluir_curto servidor_nao_existe'
+).split(' ').map((key) => [key, () => key])));
 
 interface Section { id: string; data: AggSession[] }
 vi.mock('react-native', async (original) => ({
