@@ -266,7 +266,7 @@ impl LocalTerminalFacts {
         let valid_name = !sender.is_empty() && !sender.starts_with('-') && !sender.ends_with('-') && sender.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
         let sender_mode = if sender_is_session && valid_name { self.session_mode(sender, (sender == target.name).then_some(target)).await? } else { None };
         let mode = match sender_mode { Some(mode) => mode, None => match self.session_mode(&target.name, Some(target)).await? {
-            Some(mode) => mode, None => { let config = target.metadata.config_dir.clone(); tokio::task::spawn_blocking(move || account_mode(&config)).await.map_err(|_| ServiceError("terminal_account_mode_unavailable"))?? }
+            Some(mode) => mode, None => { let agent = target.metadata.agent_pid; let config = target.metadata.config_dir.clone(); tokio::task::spawn_blocking(move || launch_or_account_mode(Some(agent), &config)).await.map_err(|_| ServiceError("terminal_account_mode_unavailable"))?? }
         }};
         Ok(if mode.to_ascii_lowercase().contains("bypass") { "bypass" } else { "prompting" }.into())
     }
@@ -329,14 +329,32 @@ fn transcript_mode(path: &Path, cache: &Mutex<TranscriptModes>) -> Result<Option
         let value: Value = serde_json::from_slice(raw).ok()?;value["permissionMode"].as_str().filter(|mode| !mode.is_empty() && *mode != "plan").map(str::to_owned)
     });cache.insert(path.to_owned(), (key, mode.clone()));Ok(mode)
 }
-/// Modo sem confirmação na memória: o último que o próprio CLI gravou no transcript, senão o da conta
-/// (a ordem do Python). Para a classe do recado que o Rust manda pronta.
-pub(crate) fn unconfirmed_mode(transcript: &Path, config: &Path) -> Result<String, ServiceError> {
-    match transcript_mode(transcript, &Mutex::new(TranscriptModes::default()))? { Some(mode) => Ok(mode), None => account_mode(config) }
+/// Modo sem confirmação na memória: o último que o próprio CLI gravou no transcript, senão o de abertura
+/// e, por último, o da conta. Para a classe do recado que o Rust manda pronta.
+pub(crate) fn unconfirmed_mode(transcript: &Path, agent: Option<u32>, config: &Path) -> Result<String, ServiceError> {
+    match transcript_mode(transcript, &Mutex::new(TranscriptModes::default()))? { Some(mode) => Ok(mode), None => launch_or_account_mode(agent, config) }
+}
+/// Sessão recém-aberta ainda sem rodapé lido nem transcript: o `--permission-mode` com que o CLI nasceu
+/// decide antes do `defaultMode` da conta, que diverge dele e faz o Claude reter o recado.
+fn launch_or_account_mode(agent: Option<u32>, config: &Path) -> Result<String, ServiceError> {
+    // argv ilegível = agente que já saiu: o recado não chega a ele, e a conta segue como antes.
+    let argv = agent.and_then(|pid| SystemProcs::default().argv_checked(i64::from(pid)).ok());
+    match argv.as_deref().and_then(launch_mode) { Some(mode) => Ok(mode), None => account_mode(config) }
+}
+/// `--allow-dangerously-skip-permissions` só põe o bypass no ciclo do Shift+Tab: não é o modo de abertura.
+fn launch_mode(argv: &[String]) -> Option<String> {
+    if argv.iter().skip(1).take_while(|arg| *arg != "--").any(|arg| arg == "--dangerously-skip-permissions") { return Some("bypassPermissions".into()); }
+    let argv: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
+    let (_, _, mode) = crate::runtime::claude_relaunch::flag(&argv, "--permission-mode").ok()??;
+    canonical_mode(mode.to_str()?).filter(|mode| *mode != "plan").map(Into::into)
+}
+/// Nome do modo como o rodapé o mostra; `default` é o `manual` dele.
+fn canonical_mode(mode: &str) -> Option<&'static str> {
+    Some(match mode { "default" | "manual" => "manual", "plan" => "plan", "auto" => "auto", "acceptEdits" => "acceptEdits", "bypassPermissions" => "bypassPermissions", "dontAsk" => "dontAsk", _ => return None })
 }
 fn account_mode(config: &Path) -> Result<String, ServiceError> {
     let value = read_json(&config.join("settings.json"), "terminal_account_mode_unavailable")?;
-    Ok(match value.as_ref().and_then(|value| value["permissions"]["defaultMode"].as_str()) { Some("default") => "manual", Some(mode @ ("plan" | "auto" | "manual" | "acceptEdits" | "bypassPermissions" | "dontAsk")) => mode, _ => "bypassPermissions" }.into())
+    Ok(value.as_ref().and_then(|value| value["permissions"]["defaultMode"].as_str()).and_then(canonical_mode).unwrap_or("bypassPermissions").into())
 }
 fn same_birth(a: f64, b: f64) -> bool { if cfg!(any(target_os = "linux", windows)) { (a - b).abs() < 0.001 } else { a.floor() == b.floor() } }
 #[cfg(not(windows))]
@@ -649,6 +667,23 @@ mod tests {
         let local=LocalTerminalFacts::new(frame(),None,Some(unknown));
         assert_eq!(local.message_class(&target,"peer",true).await.unwrap_err().0,"permission_mode_unknown");
         assert_eq!(local.message_class(&target,"aviso",false).await.unwrap_err().0,"permission_mode_unknown");
+    }
+    #[test]
+    fn launch_mode_reads_the_permission_flag_the_cli_was_started_with() {
+        let argv=|args:&[&str]| args.iter().map(|arg|(*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(launch_mode(&argv(&["claude","--session-id","s","--permission-mode","bypassPermissions"])).as_deref(),Some("bypassPermissions"));
+        assert_eq!(launch_mode(&argv(&["claude","--permission-mode=acceptEdits"])).as_deref(),Some("acceptEdits"));
+        assert_eq!(launch_mode(&argv(&["claude","--dangerously-skip-permissions"])).as_deref(),Some("bypassPermissions"));
+        assert_eq!(launch_mode(&argv(&["claude","--permission-mode","default"])).as_deref(),Some("manual"));
+        // Só põe o bypass no ciclo; o CLI nasce no padrão da conta.
+        assert_eq!(launch_mode(&argv(&["claude","--allow-dangerously-skip-permissions"])),None);
+        // Nascido em `plan`, a base fora do plano não está no argv.
+        assert_eq!(launch_mode(&argv(&["claude","--permission-mode","plan"])),None);
+        assert_eq!(launch_mode(&argv(&["claude","--permission-mode"])),None);
+        assert_eq!(launch_mode(&argv(&["claude"])),None);
+        // Depois do `--` é o prompt, não flag; flag repetida não decide.
+        assert_eq!(launch_mode(&argv(&["claude","--","--permission-mode","bypassPermissions"])),None);
+        assert_eq!(launch_mode(&argv(&["claude","--permission-mode","auto","--permission-mode","bypassPermissions"])),None);
     }
     #[test]
     fn transcript_account_and_hook_body_preserve_errors_and_shape() {
