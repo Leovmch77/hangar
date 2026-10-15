@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::resolve::{CodexCatalogError, CodexLogin, CreatorFacts, OpenFacts, ProviderCatalog, ServerDefaults};
 use super::{AgentProvider, OpenError, ServiceTier};
@@ -54,6 +54,17 @@ impl LocalFacts {
         crate::runtime::codex_sidecar::path(&crate::runtime::codex_sidecar::dir(&self.env().home), name)
     }
 
+    /// Contas Codex visíveis e o último login conhecido de cada uma (`_codex_auth_states`).
+    fn codex_states(&self) -> Result<Vec<(crate::accounts::catalog::Account, String)>, OpenError> {
+        // Lista que não se lê não é "nenhuma conta": trocaria a conta ou o provedor calado.
+        let accounts = self.accounts.visible_codex_accounts()
+            .map_err(|error| OpenError::new(error.status, error.code, error.message).with_params(error.params))?;
+        Ok(accounts.into_iter().map(|account| {
+            let state = self.runtime.block_on(self.accounts.read_codex_auth_fast(&account))["status"].as_str().unwrap_or("unavailable").to_owned();
+            (account, state)
+        }).collect())
+    }
+
     fn panes(&self) -> Vec<crate::list::mux::Pane> {
         // Multiplexador fora é "sem sessão de terminal", como o `has_session` do Python.
         self.runtime.block_on(self.mux.list_panes()).unwrap_or_default()
@@ -86,6 +97,62 @@ impl LocalFacts {
         let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten());
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
     }
+}
+
+/// `_session_provider_catalog` com os logins já lidos: conectado se algum login diz que sim (Claude
+/// também com motor configurado); desconectado só se todos dizem que não. Ilegível não conta.
+pub(crate) fn provider_catalog(available: Vec<AgentProvider>, claude_logins: &[Option<bool>], engines: bool,
+                               codex_states: &[String], remembered: Option<String>) -> ProviderCatalog {
+    let (mut connected, mut disconnected) = (Vec::new(), Vec::new());
+    if available.contains(&AgentProvider::Claude) {
+        if claude_logins.contains(&Some(true)) || engines {
+            connected.push(AgentProvider::Claude);
+        } else if !claude_logins.is_empty() && claude_logins.iter().all(|login| *login == Some(false)) {
+            disconnected.push(AgentProvider::Claude);
+        }
+    }
+    if available.contains(&AgentProvider::Codex) {
+        if codex_states.iter().any(|s| s == "connected") {
+            connected.push(AgentProvider::Codex);
+        } else if !codex_states.is_empty() && codex_states.iter().all(|s| s == "disconnected") {
+            disconnected.push(AgentProvider::Codex);
+        }
+    }
+    ProviderCatalog { available, connected, disconnected, remembered }
+}
+
+/// `engines.catalog_model`: o `[1m]` do GPT marca a janela de 1M e não existe no catálogo.
+fn catalog_model(model: &str) -> &str {
+    static ONE_M: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\Agpt-\d[^/]*\[1m\]\z").unwrap());
+    let last = model.rsplit('/').next().unwrap_or(model);
+    if ONE_M.is_match(last) { model.strip_suffix("[1m]").unwrap_or(model) } else { model }
+}
+
+/// Número inteiro do JSON do provedor (`262144` ou `262144.0`).
+fn whole(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_f64().filter(|n| n.fract() == 0.0 && *n >= 0.0).map(|n| n as u64))
+}
+
+/// `engine_probe.listar_modelos`: `GET {base}/v1/models` com a chave do motor.
+async fn engine_models(base: &str, key: &str) -> Result<Vec<Value>, String> {
+    if [base, key].iter().any(|v| v.contains(['\n', '\r', '\0'])) {
+        return Err("endereço ou chave com quebra de linha".into());
+    }
+    // A URL pode vir com o `/v1` que o provedor documenta.
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").map_or(base, |b| b.trim_end_matches('/'));
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
+    // User-Agent explícito: o Cloudflare de alguns provedores recusa o padrão.
+    let response = client.get(format!("{base}/v1/models")).bearer_auth(key).header("user-agent", "hangar/1.0").send().await
+        .map_err(|e| format!("não foi possível falar com o provedor: {e}"))?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{} {}", status.as_u16(), body.chars().take(200).collect::<String>()));
+    }
+    let raw: Value = serde_json::from_str(&body).map_err(|_| format!("resposta não-JSON do provedor: {}", body.chars().take(200).collect::<String>()))?;
+    let data = raw.get("data").and_then(Value::as_array).ok_or("resposta inesperada do provedor (sem lista 'data')")?;
+    Ok(data.iter().filter(|m| m["id"].as_str().is_some_and(|id| !id.is_empty())).cloned().collect())
 }
 
 /// `Ok(None)` = arquivo ausente; `Err` = existe e não se lê como JSON.
@@ -156,22 +223,27 @@ fn normalize_base(url: &str) -> String {
 }
 
 impl OpenFacts for LocalFacts {
-    fn providers(&self) -> ProviderCatalog {
+    fn providers(&self) -> Result<ProviderCatalog, OpenError> {
         let path: Vec<(String, String)> = self.env().base.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let available: Vec<AgentProvider> = AgentProvider::ALL.into_iter()
             .filter(|p| crate::runtime::process::resolve_program(p.name(), &path).is_some()).collect();
-        // ponytail: login Claude pela credencial em disco e Codex pela leitura rápida da conta; o
-        // Python também pergunta o `loggedIn` do CLI. Trocar quando a rota do Rust criar sessão.
-        let mut connected = Vec::new();
-        let claude_logged = self.config_dirs().unwrap_or_default().iter().any(|dir| Path::new(dir).join(".credentials.json").is_file());
-        if available.contains(&AgentProvider::Claude) && (claude_logged || self.engines_file().as_object().is_some_and(|e| !e.is_empty())) {
-            connected.push(AgentProvider::Claude);
-        }
-        if available.contains(&AgentProvider::Codex) && !self.codex_logins().is_empty() {
-            connected.push(AgentProvider::Codex);
-        }
+        let claude_logins: Vec<Option<bool>> = if available.contains(&AgentProvider::Claude) {
+            // Login ilegível só deixa de preferir quem está conectado, como no Python.
+            let accounts = self.accounts.claude_accounts().unwrap_or_else(|error| {
+                tracing::warn!(code = error.code, "catálogo de provedores: login Claude ilegível");
+                Vec::new()
+            });
+            accounts.iter().map(|(_, account)| self.runtime.block_on(self.accounts.read_claude_auth(account))["loggedIn"].as_bool()).collect()
+        } else {
+            Vec::new()
+        };
+        let codex_states: Vec<String> = if available.contains(&AgentProvider::Codex) {
+            self.codex_states()?.into_iter().map(|(_, state)| state).collect()
+        } else {
+            Vec::new()
+        };
         let runtime = crate::runtime::codex_launch::runtime_config(self.env());
-        ProviderCatalog { available, connected, disconnected: Vec::new(), remembered: text(&runtime["last_session_provider"]) }
+        Ok(provider_catalog(available, &claude_logins, !self.engines().is_empty(), &codex_states, text(&runtime["last_session_provider"])))
     }
 
     fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError> {
@@ -181,7 +253,15 @@ impl OpenFacts for LocalFacts {
         if let Some(meta) = read(&self.headless_sidecar(name))?.map(Value::Object) {
             let mut mode = text(&meta["permission_mode"]);
             if mode.as_deref() == Some("plan") { mode = text(&meta["previous_non_plan"]); }
-            return Ok(Some(CreatorFacts { provider: AgentProvider::Claude, headless: true, config_dir: Ok(text(&meta["config_dir"])),
+            // Sem modo no sidecar vale o último que o CLI gravou no transcript da conversa.
+            let config_dir = text(&meta["config_dir"]);
+            let mode = mode.or_else(|| {
+                let account = config_dir.as_deref().map_or_else(|| self.env().claude_base.clone(), |dir| expand_home(dir, &self.env().home));
+                let jsonl = account.join("projects").join(hangar_workspace::worktrees::sanitize_cwd(&text(&meta["cwd"])?))
+                    .join(format!("{}.jsonl", text(&meta["session_id"])?));
+                crate::terminal_facts::transcript_mode(&jsonl, &Mutex::new(crate::list::capped::Capped::new(1))).ok().flatten()
+            });
+            return Ok(Some(CreatorFacts { provider: AgentProvider::Claude, headless: true, config_dir: Ok(config_dir),
                 permission_mode: mode, codex_account: None }));
         }
         if let Some(meta) = read(&self.codex_sidecar(name))? {
@@ -198,12 +278,9 @@ impl OpenFacts for LocalFacts {
         ServerDefaults { headless: field("headless_default", "CP_HEADLESS_DEFAULT", true), jev: field("jev_padrao", "CP_JEV_PADRAO", false) }
     }
 
-    fn codex_logins(&self) -> Vec<CodexLogin> {
-        let accounts = self.accounts.visible_codex_accounts().unwrap_or_default();
-        accounts.into_iter()
-            .filter(|account| self.runtime.block_on(self.accounts.read_codex_auth_fast(account))["status"] == "connected")
-            .map(|account| CodexLogin { id: account.id, is_default: account.is_default })
-            .collect()
+    fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError> {
+        Ok(self.codex_states()?.into_iter().filter(|(_, state)| state == "connected")
+            .map(|(account, _)| CodexLogin { id: account.id, is_default: account.is_default }).collect())
     }
 
     fn claude_quotas(&self) -> Vec<Value> {
@@ -243,10 +320,25 @@ impl OpenFacts for LocalFacts {
         Err(OpenError::new(503, "session_open_fact_unavailable", "a conta ChatGPT fixa do motor ainda não é conferida pelo Rust"))
     }
 
-    fn engine_window(&self, _engine: &str, _model: &str, _account: Option<&str>) -> Option<u64> {
-        // ponytail: o catálogo do motor (`_engine_models`) ainda é do Python; sem ele a sessão sobe
-        // sem a janela, como o Python faz com o provedor fora do ar.
-        None
+    /// `create_session`: o id de catálogo do modelo (sem o `[1m]` do GPT) no `/v1/models` do motor;
+    /// com o `[1m]` a janela é 1M, senão a que o provedor diz.
+    fn engine_window(&self, engine: &str, model: &str, account: Option<&str>) -> Result<Option<u64>, OpenError> {
+        let unavailable = |detail: &str| OpenError::new(503, "session_open_fact_unavailable",
+            format!("o catálogo do motor '{engine}' não respondeu: {detail}")).with_params(json!({"nome": engine}));
+        if account.is_some() {
+            return Err(unavailable("a conta ChatGPT fixa ainda não é lida pelo Rust"));
+        }
+        let engines = self.engines_file();
+        let (base, key) = (engines[engine]["base_url"].as_str().unwrap_or(""), engines[engine]["api_key"].as_str().unwrap_or(""));
+        // O provedor pode repetir a chave no erro; ela não sai daqui.
+        let redact = |error: String| if key.is_empty() { error } else { error.replace(key, "***") };
+        let models = self.runtime.block_on(engine_models(base, key)).map_err(|e| unavailable(&redact(e)))?;
+        let catalog_id = catalog_model(model);
+        Ok(models.iter().find(|m| m["id"].as_str() == Some(catalog_id)).and_then(|m| {
+            if catalog_id != model { return Some(1_000_000) }
+            // `context_length or context_window`: zero e ausente caem para o próximo.
+            [&m["context_length"], &m["context_window"]].into_iter().filter_map(whole).find(|n| *n != 0)
+        }))
     }
 
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError> {

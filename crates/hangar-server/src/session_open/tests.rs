@@ -182,12 +182,12 @@ impl FixtureFacts {
 }
 
 impl resolve::OpenFacts for FixtureFacts {
-    fn providers(&self) -> resolve::ProviderCatalog {
-        // O harness põe os cinco binários no PATH; login Claude é a credencial gravada.
-        let logged = self.files.keys().any(|path| path.ends_with("/.credentials.json"));
-        resolve::ProviderCatalog { available: AgentProvider::ALL.to_vec(),
-            connected: if logged { vec![AgentProvider::Claude] } else { vec![] }, disconnected: vec![],
-            remembered: self.runtime()["last_session_provider"].as_str().map(str::to_owned) }
+    /// O harness põe os cinco binários no PATH; sem o Rust o login Claude é ilegível e sem o serviço
+    /// de contas não há estado do Codex.
+    fn providers(&self) -> Result<resolve::ProviderCatalog, OpenError> {
+        let logins = vec![None; self.config_dirs()?.len()];
+        Ok(facts::provider_catalog(AgentProvider::ALL.to_vec(), &logins, !self.engines().is_empty(), &[],
+            self.runtime()["last_session_provider"].as_str().map(str::to_owned)))
     }
 
     fn creator(&self, name: &str) -> Result<Option<resolve::CreatorFacts>, OpenError> { Ok(self.find_creator(name)) }
@@ -198,7 +198,7 @@ impl resolve::OpenFacts for FixtureFacts {
     }
 
     // Sem serviço de contas Codex no harness: nenhuma conta conectada.
-    fn codex_logins(&self) -> Vec<resolve::CodexLogin> { self.connected.clone() }
+    fn codex_logins(&self) -> Result<Vec<resolve::CodexLogin>, OpenError> { Ok(self.connected.clone()) }
 
     fn claude_quotas(&self) -> Vec<Value> {
         self.fakes["quotas"].as_array().into_iter().flatten().filter(|row| row["provedor"] == "claude").cloned().collect()
@@ -233,8 +233,10 @@ impl resolve::OpenFacts for FixtureFacts {
         Err(OpenError::new(503, "session_open_fact_unavailable", "sem conta ChatGPT no cenário"))
     }
 
-    // O harness recusa a rede: o catálogo do motor não responde e a janela fica desconhecida.
-    fn engine_window(&self, _engine: &str, _model: &str, _account: Option<&str>) -> Option<u64> { None }
+    // O harness recusa a rede: o catálogo do motor não responde.
+    fn engine_window(&self, engine: &str, _model: &str, _account: Option<&str>) -> Result<Option<u64>, OpenError> {
+        Err(OpenError::new(503, "session_open_fact_unavailable", format!("o catálogo do motor '{engine}' não respondeu: rede recusada")))
+    }
 
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError> {
         if account_id == "default" { return Ok(format!("{HOME}/.codex")); }
@@ -317,41 +319,67 @@ const FIXED: [&str; 2] = [
     "create_inherit_flag_not_supported",
 ];
 
+/// Motor com modelo: o harness recusa a rede, o catálogo do motor não responde e o Rust recusa em vez
+/// de gravar a janela como desconhecida para sempre (o Python abria sem ela).
+const ENGINE_WINDOW_UNREAD: [&str; 2] = ["create_claude_terminal_engine", "create_claude_headless_engine_then_launch"];
+
 fn resolve_fixture(fixture: &Value) -> Result<resolve::Resolved, OpenError> {
     let request = SessionOpenRequest::parse(&request_body(fixture)).unwrap();
     resolve::resolve_open(&request, &OWNER, &FixtureFacts::of(fixture))
 }
 
-#[test]
-fn every_refusal_before_launch_has_python_status_code_and_text() {
-    let mut compared = 0;
-    for (name, fixture) in create_fixtures() {
-        let status = python_status(&fixture);
-        let detail = &fixture["result"]["steps"][0]["body"]["detail"];
-        if status == 200 || detail.is_array() || LAUNCH_REFUSALS.contains(&name.as_str()) || FIXED.contains(&name.as_str()) {
-            continue;
-        }
-        let error = resolve_fixture(&fixture).err().unwrap_or_else(|| panic!("{name}: o Python recusou com {status} e o Rust resolveu"));
-        // S-40: sem o prompt inicial na regra, a frase da recusa do só leitura sem terminal perde o "nem prompt inicial".
-        let python_msg = detail["msg"].as_str().or(detail.as_str()).unwrap()
-            .replace("sessao sem terminal nao aceita read_only nem prompt inicial", "sessao sem terminal nao aceita read_only");
-        assert_eq!(error.status as u64, status, "{name}");
-        assert_eq!(error.code, detail["code"].as_str(), "{name}");
-        assert_eq!(error.msg, python_msg, "{name}");
-        assert_eq!(error.params, if detail.is_object() { detail["params"].clone() } else { json!({}) }, "{name}");
-        compared += 1;
+/// O que o `resolve_open()` precisa dar para o cenário.
+enum Expected { Created, Resolves, Refused { status: u64, code: Option<String>, msg: Option<String>, params: Option<Value> }, Skip }
+
+fn expected(name: &str, fixture: &Value, local: bool) -> Expected {
+    let refused = |status: u64, code: &str| Expected::Refused { status, code: Some(code.into()), msg: None, params: None };
+    let status = python_status(fixture);
+    let detail = &fixture["result"]["steps"][0]["body"]["detail"];
+    match name {
+        // A forma do corpo é do `SessionOpenRequest::parse` (teste próprio).
+        _ if detail.is_array() && !FIXED.contains(&name) => Expected::Skip,
+        _ if LAUNCH_REFUSALS.contains(&name) || FIXED.contains(&name) => Expected::Resolves,
+        _ if ENGINE_WINDOW_UNREAD.contains(&name) => refused(503, "session_open_fact_unavailable"),
+        // O harness injetou o catálogo do Codex na ponte; o `LocalFacts` pergunta ao Codex instalado,
+        // que aqui é um programa que sai com erro: o Fast não é conferido e a escolha sem modelo, sim.
+        "create_codex_catalog_ok" if local => refused(502, "erro_codex_catalogo_invalido"),
+        "create_codex_catalog_refuses_choice" if local => Expected::Resolves,
+        "create_codex_priority_catalog_unavailable" if local => refused(422, "erro_codex_escolha_invalida"),
+        _ if status == 200 => Expected::Created,
+        _ => Expected::Refused {
+            status, code: detail["code"].as_str().map(str::to_owned),
+            // S-40: sem o prompt inicial na regra, a frase da recusa do só leitura sem terminal perde o "nem prompt inicial".
+            msg: Some(detail["msg"].as_str().or(detail.as_str()).unwrap()
+                .replace("sessao sem terminal nao aceita read_only nem prompt inicial", "sessao sem terminal nao aceita read_only")),
+            params: Some(if detail.is_object() { detail["params"].clone() } else { json!({}) }),
+        },
     }
-    assert_eq!(compared, 29, "recusas antes do lançamento nas fixtures");
 }
 
-#[test]
-fn every_created_session_resolves_to_what_python_launched() {
-    let (mut created, mut launches) = (0, 0);
-    for (name, fixture) in create_fixtures() {
-        let status = python_status(&fixture);
-        if status != 200 { continue; }
+/// Compara com o que o Python fez; devolve o que comparou (criadas, lançamentos, recusas).
+fn check(name: &str, fixture: &Value, result: Result<resolve::Resolved, OpenError>, local: bool) -> (u32, u32, u32) {
+    match (expected(name, fixture, local), result) {
+        (Expected::Skip, _) => (0, 0, 0),
+        (Expected::Resolves, result) => {
+            let resolved = result.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(resolved.warnings.is_empty(), "{name}: {:?}", resolved.warnings);
+            (0, 0, 0)
+        }
+        (Expected::Refused { status, code, msg, params }, result) => {
+            let error = result.err().unwrap_or_else(|| panic!("{name}: era para recusar com {status}"));
+            assert_eq!((error.status as u64, error.code.map(str::to_owned)), (status, code), "{name}: {}", error.msg);
+            if let Some(msg) = msg { assert_eq!(error.msg, msg, "{name}"); }
+            if let Some(params) = params { assert_eq!(error.params, params, "{name}"); }
+            (0, 0, 1)
+        }
+        (Expected::Created, result) => check_created(name, fixture, result),
+    }
+}
+
+fn check_created(name: &str, fixture: &Value, result: Result<resolve::Resolved, OpenError>) -> (u32, u32, u32) {
+    {
         let body = &fixture["result"]["steps"][0]["body"];
-        let resolved = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("{name}: o Python criou e o Rust recusou: {e}"));
+        let resolved = result.unwrap_or_else(|e| panic!("{name}: o Python criou e o Rust recusou: {e}"));
         let spec = &resolved.spec;
         assert_eq!(spec.name, body["name"].as_str().unwrap(), "{name}");
         assert_eq!(spec.provider.name(), body["provider"].as_str().unwrap(), "{name}");
@@ -359,9 +387,7 @@ fn every_created_session_resolves_to_what_python_launched() {
         assert_eq!(spec.account.config_dir(), body["config_dir"].as_str(), "{name}");
         assert_eq!(spec.account_source.wire(), body["account_source"].as_str(), "{name}");
         assert_eq!(resolved.warnings, serde_json::from_value::<Vec<String>>(body["avisos"].clone()).unwrap(), "{name}");
-        created += 1;
-        let Some(launched) = launched(&fixture) else { continue };
-        launches += 1;
+        let Some(launched) = launched(fixture) else { return (1, 0, 0) };
         let mode = spec.permission_mode.map(|m| m.name().to_owned());
         match spec.provider {
             AgentProvider::Claude => assert_eq!(mode, launched.permission, "{name}"),
@@ -381,8 +407,129 @@ fn every_created_session_resolves_to_what_python_launched() {
             _ => assert_eq!(launched.engine, None, "{name}"),
         }
     }
-    // Todo 200 tem o que o Python lançou: argv do pane ou o sidecar.
-    assert_eq!((created, launches), (43, 43));
+    (1, 1, 0)
+}
+
+fn sum(a: (u32, u32, u32), b: (u32, u32, u32)) -> (u32, u32, u32) { (a.0 + b.0, a.1 + b.1, a.2 + b.2) }
+
+/// As 81 criações com os fatos montados do cenário como o harness os deu ao Python.
+#[test]
+fn every_creation_fixture_resolves_like_python() {
+    let total = create_fixtures().iter()
+        .filter(|(name, fixture)| !matches!(expected(name, fixture, false), Expected::Skip))
+        .map(|(name, fixture)| check(name, fixture, resolve_fixture(fixture), false)).fold((0, 0, 0), sum);
+    // Todo 200 tem o que o Python lançou (argv do pane ou o sidecar); recusas antes do lançamento.
+    assert_eq!(total, (41, 41, 31));
+}
+
+/// As mesmas 81 pelo `LocalFacts` de produção, lendo um cenário montado em disco.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
+    let runtime = test_runtime();
+    let mut total = (0, 0, 0);
+    for (name, fixture) in create_fixtures() {
+        if matches!(expected(&name, &fixture, true), Expected::Skip) { continue; }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        materialize(&fixture, &root);
+        let body = String::from_utf8(request_body(&fixture)).unwrap().replace("<ROOT>", &root.to_string_lossy());
+        let request = SessionOpenRequest::parse(body.as_bytes()).unwrap();
+        let env = [("HOME", root.join("home")), ("PATH", root.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
+        let facts = facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
+            .with_terminal(crate::list::mux::Mux::with_program(root.join("bin/tmux"), std::time::Duration::from_secs(2)),
+                std::sync::Arc::new(crate::list::procs::ProcFs::with_root(root.join("proc"))));
+        total = sum(total, check(&name, &fixture, unroot(resolve::resolve_open(&request, &OWNER, &facts), &root), true));
+    }
+    // O catálogo do Codex: uma criada vira recusa e uma recusa passa a resolver.
+    assert_eq!(total, (40, 40, 31));
+}
+
+/// O caminho da raiz de teste volta a ser `<ROOT>`, como nas fixtures.
+fn unroot(result: Result<resolve::Resolved, OpenError>, root: &std::path::Path) -> Result<resolve::Resolved, OpenError> {
+    let root = root.to_string_lossy();
+    let place = |value: Value| serde_json::from_str::<Value>(&value.to_string().replace(&*root, "<ROOT>")).unwrap();
+    match result {
+        Ok(mut resolved) => {
+            resolved.spec = serde_json::from_value(place(serde_json::to_value(&resolved.spec).unwrap())).unwrap();
+            resolved.warnings = serde_json::from_value(place(json!(resolved.warnings))).unwrap();
+            Ok(resolved)
+        }
+        Err(mut error) => {
+            error.msg = error.msg.replace(&*root, "<ROOT>");
+            error.params = place(error.params);
+            Err(error)
+        }
+    }
+}
+
+/// O cenário numa raiz de verdade, para o `LocalFacts` ler como lê a máquina: arquivos e pastas, os
+/// programas do harness no PATH (todos saem com erro), um tmux de mentira com os panes do cenário e
+/// o `/proc` deles, as cotas no cache do Rust e o motor numa porta fechada (o harness recusa a rede).
+#[cfg(target_os = "linux")]
+fn materialize(fixture: &Value, root: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let root_text = root.to_string_lossy().into_owned();
+    let sanitized = hangar_workspace::worktrees::sanitize_cwd(&root_text);
+    let place = |raw: &str| raw.replace("<ROOT_SANITIZED>", &sanitized).replace("<ROOT>", &root_text);
+    let write = |path: &std::path::Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    let state = &fixture["scenario"]["state"];
+    for dir in state["dirs"].as_array().into_iter().flatten() {
+        std::fs::create_dir_all(place(dir.as_str().unwrap())).unwrap();
+    }
+    for repo in state["git_repos"].as_array().into_iter().flatten() {
+        std::fs::create_dir_all(place(repo["path"].as_str().unwrap())).unwrap();
+    }
+    for (path, content) in state["files"].as_object().into_iter().flatten() {
+        let mut content = content.clone();
+        if path.ends_with("/engines.json") {
+            for engine in content.as_object_mut().unwrap().values_mut() { engine["base_url"] = json!("http://127.0.0.1:9"); }
+        }
+        let text = match content { Value::String(text) => text, json => json.to_string() };
+        write(std::path::Path::new(&place(path)), place(&text).as_bytes());
+    }
+    let bin = root.join("bin");
+    for program in ["claude", "codex", "pi", "omp", "kimi", "hangar-codex-tui", "hangar-engine", "bwrap"] {
+        write(&bin.join(program), b"#!/bin/sh\nexit 1\n");
+        std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut panes = String::new();
+    for (index, session) in state["tmux_sessions"].as_array().into_iter().flatten().enumerate() {
+        let pid = 9_000_001 + index;
+        let name = session["name"].as_str().unwrap();
+        let env = session["env"].as_object().unwrap();
+        let provider = env.get("CP_PROVIDER").and_then(Value::as_str).unwrap_or("");
+        panes += &format!("{name}\t1\t{pid}\t{}\t%{index}\t\t{provider}\t\t0\t0\n", place(session["cwd"].as_str().unwrap()));
+        let argv: Vec<String> = session["command"].as_str().unwrap().trim_start_matches("exec ").split_whitespace().map(str::to_owned).collect();
+        let proc = root.join("proc").join(pid.to_string());
+        write(&proc.join("stat"), format!("{pid} ({}) S 1 {}", argv[0], "0 ".repeat(20)).as_bytes());
+        write(&proc.join("cmdline"), (argv.join("\0") + "\0").as_bytes());
+        let environ: String = env.iter().map(|(k, v)| format!("{k}={}\0", place(v.as_str().unwrap()))).collect();
+        write(&proc.join("environ"), environ.as_bytes());
+        if session["environ_unreadable"] == true {
+            std::fs::set_permissions(proc.join("environ"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+    write(&bin.join("panes.txt"), panes.as_bytes());
+    write(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n");
+    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // As cotas que o harness deu ao Python vinham do Rust: o cache dele em disco. Conta fora da
+    // padrão só é fonte de cota com a marca do Hangar.
+    let now = crate::accounts::quotas::now();
+    let mut cache = serde_json::Map::new();
+    for row in fixture["scenario"]["fakes"]["quotas"].as_array().into_iter().flatten() {
+        let id = place(row["id"].as_str().unwrap());
+        let home = std::path::PathBuf::from(id.strip_prefix("claude:").unwrap());
+        if row["ativa"] != true { write(&home.join(crate::accounts::storage::CLAUDE_MARKER), b"{}"); }
+        let signature = std::fs::read(home.join(".credentials.json")).ok()
+            .map(|bytes| json!(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref())).unwrap_or(Value::Null);
+        cache.insert(id, json!({"gravado_em": now, "credential_signature": signature,
+            "cota": {"estado": row["estado"], "janelas": row["janelas"], "ts": now, "motivo": null}}));
+    }
+    if !cache.is_empty() { write(&root.join("home/.hangar/cotas-cache.json"), Value::Object(cache).to_string().as_bytes()); }
 }
 
 #[test]
@@ -526,6 +673,94 @@ fn an_empty_model_with_fast_falls_back_to_the_engine_model() {
     let error = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime)).err();
     assert_eq!(error.map(|e| (e.status, e.code, e.msg)),
         Some((400, None, "model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)".into())));
+}
+
+/// `_session_provider_catalog` + `choose_provider` (api.py, session_defaults.py): desconectado só
+/// quando todo login lido diz que não; ilegível não conta para nenhum lado.
+#[test]
+fn the_provider_catalog_marks_disconnected_like_python() {
+    use AgentProvider::{Claude, Codex, Pi};
+    let all = AgentProvider::ALL.to_vec();
+    let states = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let c = facts::provider_catalog(all.clone(), &[Some(false), Some(false)], false, &states(&["disconnected"]), None);
+    assert_eq!((c.connected, c.disconnected), (vec![], vec![Claude, Codex]));
+    let c = facts::provider_catalog(all.clone(), &[Some(false), None], false, &states(&["disconnected", "unavailable"]), None);
+    assert_eq!((c.connected, c.disconnected), (vec![], vec![]));
+    let c = facts::provider_catalog(all.clone(), &[Some(false)], true, &[], None);
+    assert_eq!((c.connected, c.disconnected), (vec![Claude], vec![]), "motor configurado conta como Claude conectado");
+    let c = facts::provider_catalog(vec![Pi], &[Some(false)], false, &states(&["disconnected"]), None);
+    assert_eq!((c.connected, c.disconnected), (vec![], vec![]), "só o disponível é lido");
+    // O lembrado desconectado perde para o conectado.
+    let c = facts::provider_catalog(all, &[Some(false)], false, &states(&["connected"]), Some("claude".into()));
+    assert_eq!(resolve::choose_provider(&c), Codex);
+}
+
+/// Criadora sem terminal sem modo no sidecar: vale o do transcript dela (api.py `_creator_permission_mode`).
+#[test]
+fn a_headless_creator_without_a_mode_falls_back_to_its_transcript() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let sid = "11111111-1111-4111-8111-111111111111";
+    let sidecar = json!({"name": "mae", "provider": "claude", "headless": true, "key": "a".repeat(32), "cwd": work,
+        "session_id": sid, "config_dir": null, "permission_mode": null, "previous_non_plan": null});
+    std::fs::create_dir_all(home.join(".hangar/claude-headless")).unwrap();
+    std::fs::write(home.join(".hangar/claude-headless/mae.json"), sidecar.to_string()).unwrap();
+    let projects = home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&work.to_string_lossy()));
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(projects.join(format!("{sid}.jsonl")), "{\"permissionMode\":\"acceptEdits\"}\n{\"permissionMode\":\"plan\"}\n").unwrap();
+    let body = json!({"name": "filha", "cwd": work, "provider": "claude", "creator": "mae", "headless": false});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let resolved = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime)).unwrap();
+    assert_eq!((resolved.spec.permission_mode, resolved.warnings.len()), (Some(PermissionMode::AcceptEdits), 0), "{:?}", resolved.warnings);
+}
+
+/// Não dar para listar as contas Codex é erro visível, não "nenhuma conta".
+#[test]
+fn unlisted_codex_accounts_refuse_instead_of_counting_as_none() {
+    let runtime = test_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("work")).unwrap();
+    let body = json!({"name": "cx", "cwd": dir.path().join("work"), "provider": "codex", "headless": false});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let result = resolve::resolve_open(&request, &OWNER, &local_facts(&dir.path().join("sem-casa"), &runtime));
+    assert_eq!(result.err().map(|e| (e.status, e.code)), Some((503, Some("account_storage_unavailable"))));
+}
+
+/// Janela do motor como o Python: `context_length` (ou `context_window`) do catálogo do provedor,
+/// 1M para `gpt-…[1m]`; catálogo fora do ar recusa em vez de gravar a janela desconhecida.
+#[test]
+fn the_engine_window_comes_from_the_provider_catalog() {
+    let runtime = test_runtime();
+    let catalog = json!({"data": [{"id": "gpt-5.5", "context_length": 400000}, {"id": "k3", "context_window": 262144}, {"id": "sem"}]});
+    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route("/v1/models", axum::routing::get(move || async move {
+        ([(axum::http::header::CONTENT_TYPE, "application/json")], catalog.to_string())
+    }));
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/engines.json"), json!({
+        "e": {"base_url": format!("http://127.0.0.1:{port}/v1"), "api_key": "chave", "model": "k3"},
+        "fora": {"base_url": "http://127.0.0.1:9", "api_key": "chave", "model": "k3"}}).to_string()).unwrap();
+    let open = |engine: &str, model: &str| {
+        let body = json!({"name": "s1", "cwd": home.join("work"), "provider": "claude", "headless": false, "engine": engine, "model": model});
+        let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+        resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime))
+            .map(|r| match r.spec.account { Account::Engine { context_window, .. } => context_window, other => panic!("{other:?}") })
+            .map_err(|e| (e.status, e.code, e.msg.contains("chave")))
+    };
+    assert_eq!(open("e", "k3"), Ok(Some(262144)));
+    assert_eq!(open("e", "gpt-5.5[1m]"), Ok(Some(1_000_000)));
+    assert_eq!(open("e", "gpt-5.5"), Ok(Some(400000)));
+    assert_eq!(open("e", "sem"), Ok(None), "o catálogo não traz o número");
+    assert_eq!(open("e", "nao-existe"), Ok(None), "o catálogo não traz o modelo");
+    assert_eq!(open("fora", "k3"), Err((503, Some("session_open_fact_unavailable"), false)));
 }
 
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
@@ -681,12 +916,13 @@ fn unreadable_sidecars_are_errors_not_absent() {
     }
 }
 
-/// Os fatos de verdade numa casa de teste, sem tmux nem `/proc` de quem roda o teste.
+/// Os fatos de verdade numa casa de teste, sem tmux de quem roda o teste (o programa não existe, então
+/// nenhum pane e nenhum `/proc` é lido).
 fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> facts::LocalFacts {
     let env = [("HOME", home), ("PATH", &home.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
     facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
         .with_terminal(crate::list::mux::Mux::with_program(home.join("bin/tmux"), std::time::Duration::from_secs(2)),
-            std::sync::Arc::new(crate::list::procs::ProcFs::with_root(home.join("proc"))))
+            std::sync::Arc::new(crate::list::procs::SystemProcs::default()))
 }
 
 fn test_runtime() -> tokio::runtime::Runtime {
