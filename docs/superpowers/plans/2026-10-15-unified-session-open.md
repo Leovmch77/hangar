@@ -58,16 +58,19 @@ Status: done (c41701a0d)
 
 ### Task 2: Definir a sessão correta (matriz capacidades × origens)
 
-Status: in-progress
+Status: done (`matriz-capacidades.md`: 24 itens da sessão correta; mais perto do correto: MCP
+`new_session`, 22 de 25; terminal digitado, 6 de 25)
 
-- [ ] **Step 1: Matriz**
+- [x] **Step 1: Matriz**
   Tudo que o Hangar oferece e depende de como a sessão nasceu (plugins, MCP `hangar`, ponte do
   plugin, Jev, navegador embutido, Computer Use, hooks de estado, statusline, conta, permissão,
   modelo, motor, protocolo de grupo, …) × cada origem (modal "+", Nova conversa, PWA, Expo, voz,
   `hangar-send`, MCP, terminal, `hangar-codex`, reaberturas), com evidência de código, fixtures e
   sessões vivas. Saída: `matriz-capacidades.md`.
-- [ ] **Step 2: Padrão completo**
-  A lista "sessão correta" vira o padrão do `resolve_open()` sem parâmetros e os itens da Task 3.
+- [x] **Step 2: Padrão completo**
+  A lista "sessão correta" (seção 2 do `matriz-capacidades.md`, itens 1–24) vira o padrão do
+  `resolve_open()` sem parâmetros (escolhas: itens 9, 17–22, na Task 3) e do plano de lançamento
+  (identidade, terminal, ambiente e integrações: itens 1–8, 10–16, nas Tasks 4, 6, 7 e 9).
 
 ### Task 3: Tipos, `resolve_open()`, registro e o comando de terminal (R0)
 
