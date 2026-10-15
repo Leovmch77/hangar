@@ -85,13 +85,16 @@ pub async fn render(html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
 
 pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     let bin = bin.ok_or(ChromeError::Absent)?;
-    let slot = SLOTS.acquire().await.map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
+    // A vaga só volta quando o Chrome anterior morre: sem prazo aqui, a fila presa segura quem chega.
+    let slot = tokio::time::timeout(DEADLINE, SLOTS.acquire()).await
+        .map_err(|_| ChromeError::Failed("fila do navegador do servidor cheia"))?
+        .map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
     run(&bin, html, jobs, own_theme, slot).await
 }
 
 async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool, slot: SemaphorePermit<'static>) -> Result<Rendered, ChromeError> {
     let profile = tempfile::tempdir().map_err(|_| ChromeError::Failed("perfil temporário"))?;
-    let mut child = tokio::process::Command::new(bin)
+    let child = tokio::process::Command::new(bin)
         .args(["--headless", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
                "--disable-gpu", "--mute-audio", "--font-render-hinting=none"])
         .arg(format!("--user-data-dir={}", profile.path().display()))
@@ -99,19 +102,28 @@ async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool, slot: Semaph
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn().map_err(|_| ChromeError::Failed("navegador do servidor não subiu"))?;
+    let mut running = Running(Some((child, profile, slot)));
+    let (child, profile, _) = running.0.as_mut().expect("preenchido até o drop");
     // O prazo cobre só o desenho: no Windows o Chrome leva segundos para morrer depois de desenhar.
-    let result = tokio::time::timeout(DEADLINE, async {
-        let url = ws_url(profile.path(), &mut child).await?;
+    tokio::time::timeout(DEADLINE, async {
+        let url = ws_url(profile.path(), child).await?;
         drive(&url, html, jobs, own_theme).await
-    }).await.unwrap_or(Err(ChromeError::Failed("navegador do servidor passou do prazo")));
-    tokio::spawn(shutdown(child, profile, slot));
-    result
+    }).await.unwrap_or(Err(ChromeError::Failed("navegador do servidor passou do prazo")))
+}
+
+/// Encerra também quando quem pediu o desenho desiste no meio (cliente que caiu): sem isso a vaga voltaria
+/// com o Chrome vivo.
+struct Running(Option<(tokio::process::Child, tempfile::TempDir, SemaphorePermit<'static>)>);
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some((child, profile, slot)) = self.0.take() { tokio::spawn(shutdown(child, profile, slot)); }
+    }
 }
 
 /// Encerra a árvore inteira (no Windows os filhos do Chrome sobrevivem ao pai) e só então apaga o perfil,
 /// que fica preso enquanto algum deles vive. A vaga da fila só volta aqui: Chrome que não morre segura a fila
 /// em vez de acumular.
-async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir, _slot: SemaphorePermit<'static>) {
+async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir, slot: SemaphorePermit<'static>) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         let kill = tokio::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])
@@ -123,9 +135,22 @@ async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir, 
             outcome => tracing::warn!(code = "page_chrome_tree_kill_failed", ?outcome, "árvore do navegador do servidor não encerrada"),
         }
     }
-    let _ = child.start_kill();
-    if tokio::time::timeout(STOP_WAIT, child.wait()).await.is_err() {
-        tracing::warn!(code = "page_chrome_still_alive", "navegador do servidor não morreu");
+    if let Err(e) = child.start_kill() {
+        tracing::warn!(code = "page_chrome_kill_failed", io_kind = ?e.kind(), "pedido de parada do navegador do servidor recusado");
+    }
+    let exited = match tokio::time::timeout(STOP_WAIT, child.wait()).await {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!(code = "page_chrome_still_alive", "navegador do servidor não morreu; a vaga fica presa até ele sair");
+            child.wait().await
+        }
+    };
+    match exited {
+        Ok(_) => drop(slot),
+        Err(e) => {
+            tracing::warn!(code = "page_chrome_wait_failed", io_kind = ?e.kind(), "saída do navegador do servidor não confirmada; a vaga fica presa");
+            std::mem::forget(slot);
+        }
     }
     let mut last = None;
     for _ in 0..10 {
@@ -351,6 +376,14 @@ mod tests {
         assert_eq!((exc.level.as_str(), exc.text.as_str()), ("error", "Error: x"));
         let long = console_line("Runtime.consoleAPICalled", &json!({"type": "log", "args": [{"type": "string", "value": "é".repeat(900)}]}));
         assert_eq!(long.text.chars().count(), LINE_MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_queue_fails_instead_of_waiting_forever() {
+        let _held = SLOTS.acquire_many(2).await.unwrap();
+        let job = [Job { width: 360, theme: Theme::Dark, shot: None }];
+        let r = tokio::time::timeout(Duration::from_secs(60), render_with(Some(PathBuf::from("chrome")), "<p>x</p>", &job, false)).await;
+        assert_eq!(r.expect("espera pela vaga sem prazo").err().map(|e| e.reason()), Some("fila do navegador do servidor cheia"));
     }
 
     /// Alfa do primeiro pixel de um PNG RGBA 8 bits: o primeiro pixel da primeira linha sai cru em qualquer filtro.
