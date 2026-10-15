@@ -318,7 +318,7 @@ export default function ChatScreen() {
     const last = cur.length ? cur[cur.length - 1] : null;
     void interrupt(name, !!last, target)
       .then(() => {
-        if (!last) return;
+        if (!last || !chat.use.getState().pending.some((p) => p.id === last.id)) return;
         chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
         // Só depois do Esc confirmado: com falha a mensagem segue na fila e voltaria em dobro.
         setReturned({ route: rota, value: { text: last.text } });
@@ -356,7 +356,7 @@ export default function ChatScreen() {
     const last = cur.length ? cur[cur.length - 1] : null;
     try {
       await interrupt(name, !!last, target);
-      if (last) {
+      if (last && chat.use.getState().pending.some((p) => p.id === last.id)) {
         chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
         setReturned({ route: rota, value: { text: last.text } });
       }

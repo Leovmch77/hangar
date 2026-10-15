@@ -1122,8 +1122,14 @@ impl Hangar {
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
                     Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.browser_key().and_then(|k| self.side.browsers.get(&k).cloned())).into_any_element(),
-                    Some(SideTab::Context) if orq => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(orq_body).into_any_element(),
-                    Some(SideTab::Context) => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element(),
+                    Some(SideTab::Context) => {
+                        let scroll = div().id("side-scroll").min_h_0().overflow_y_scroll().child(if orq { orq_body } else { content.into_any_element() });
+                        // Com chamada de voz, a rolagem encolhe ao conteúdo e a sobra embaixo recebe o cartão da voz.
+                        match self.render_voice_dock(cx) {
+                            Some(dock) => div().flex_1().min_h_0().flex().flex_col().child(scroll.flex_shrink(1.)).child(dock).into_any_element(),
+                            None => scroll.flex_1().into_any_element(),
+                        }
+                    }
                 }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))
                     .child(div().min_w_0().truncate().text_color(theme::faint()).child(format!("{} · {server}", agent_label(&session.provider))))

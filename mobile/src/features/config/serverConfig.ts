@@ -47,6 +47,8 @@ const LIST: Field[] = [
   { key: 'groq_api_key', label: m.native_voice_groq, help: m.native_voice_groq_help, icon: 'Key', kind: SECRET },
   { key: 'transcription_base_url', label: m.native_voice_transcription_endpoint, help: m.native_voice_transcription_endpoint_help, icon: 'Globe', kind: TEXT },
   { key: 'transcription_model', label: m.native_voice_transcription_model, help: m.native_voice_transcription_model_help, icon: 'Bot', kind: TEXT },
+  { key: 'dictation_max_minutes', label: m.native_voice_dictation_max, help: m.native_voice_dictation_max_help, icon: 'Clock',
+    kind: { t: 'number', suffix: m.native_voice_minutes } },
   { key: 'ditado_vocabulario', label: m.native_voice_vocabulary, help: m.native_voice_vocabulary_help, icon: 'BookOpen', kind: TEXT },
   { key: 'llm_base_url', label: m.native_voice_llm_endpoint, help: m.native_voice_llm_endpoint_help, icon: 'Globe', kind: TEXT },
   { key: 'llm_api_key', label: m.native_voice_llm_key, help: m.native_voice_llm_key_help, icon: 'Key', kind: SECRET },

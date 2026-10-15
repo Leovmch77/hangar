@@ -2231,20 +2231,21 @@ async fn prove_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Receipt
     Ok((confirmed,legacy))
 }
 
-/// Codex com terminal aprende o rollout depois de conectar (thread sem turno não tem arquivo) e segue a
-/// thread que a TUI adotar; caminho vazio é ausência, e o recibo não o abre.
+/// O Codex aprende o rollout depois de conectar (thread sem turno não tem arquivo; o sem terminal é
+/// registrado antes dela) e, com terminal, segue a thread que a TUI adotar; caminho vazio é ausência, e o
+/// recibo não o abre.
 fn transcript_of(target:&RuntimeTarget,view:&Value) -> std::path::PathBuf {
     match view["rollout_path"].as_str().filter(|path|!path.is_empty()) {
-        Some(path) if target.provider == "codex" && view["headless"] == false => path.into(),
+        Some(path) if target.provider == "codex" => path.into(),
         _ => target.transcript.clone(),
     }
 }
 
-/// Codex com terminal (a TUI adota outra thread) e Claude sem terminal (`/clear`, `system/init` com outro
-/// sid) trocam de conversa sob o mesmo ator: o recibo segue a conversa da vista, como os cursores novos.
+/// Codex (thread que só nasce depois do registro, a TUI que adota outra, o `resume` que cai em `start`) e
+/// Claude sem terminal (`/clear`, `system/init` com outro sid) trocam de conversa sob o mesmo ator: o recibo
+/// segue a conversa da vista, como os cursores novos.
 fn receipt_conversation(target:&RuntimeTarget,view:&Value) -> Option<String> {
-    (target.provider == "claude" || target.provider == "codex" && view["headless"] == false)
-        .then(||view["conversation"].as_str().unwrap_or("").to_owned())
+    matches!(target.provider.as_str(),"claude" | "codex").then(||view["conversation"].as_str().unwrap_or("").to_owned())
 }
 
 async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,RuntimeError> {
@@ -2449,6 +2450,28 @@ mod tests {
     fn commit_target()->RuntimeTarget {
         RuntimeTarget {key:"key".into(),generation:4,name:"s".into(),provider:"claude".into(),metadata:json!({"session_id":"a","lifecycle_pending":false}),
             binding:CanoBinding {pid:42,escuta:"fixture".into(),token:"fixture".into(),versao:2},lease_path:"lease".into(),state_path:"state".into(),projection_dir:"projection".into(),transcript:"a.jsonl".into(),created:1.0}
+    }
+    #[tokio::test]
+    async fn headless_codex_registered_before_its_thread_confirms_the_input_in_the_rollout() {
+        // Registrado antes da thread: o alvo não tem transcript e o recibo nasceu sem conversa; o rollout só
+        // aparece com o primeiro turno.
+        let dir=tempfile::tempdir().unwrap();let rollout=dir.path().join("rollout.jsonl");
+        let mut target=commit_target();target.provider="codex".into();target.generation=5;target.transcript="".into();
+        let view=json!({"conversation":"thread-1","headless":true,"rollout_path":rollout});
+        let store=super::super::queue::Store::open(&dir.path().join("state"),dir.path(),super::super::queue::State::new("key",5,"s",vec![])).unwrap();
+        let queue=Arc::new(QueueActor::start(store,super::super::queue::acquire_lease(&dir.path().join("lease")).unwrap()));
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1.0};
+        let receipt=Arc::new(std::sync::Mutex::new(ReceiptIndex::new("codex","")));
+        queue.exec(5,"append",clock,Action::Append {text:"Olá".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("msg".into())}).await.unwrap();
+        queue.exec(5,"prepare",clock,Action::Prepare {id:"msg".into(),payload:json!({"kind":"input"}),entry_id:Some("msg".into())}).await.unwrap();
+        let cursor=capture_cursor(&target,&view).await.unwrap();
+        queue.exec(5,"cursor",clock,Action::BindDispatch {id:"msg".into(),cursor}).await.unwrap();
+        let now=chrono::Utc::now().to_rfc3339();
+        std::fs::write(&rollout,format!("{}\n{}\n",json!({"timestamp":now,"type":"session_meta","payload":{"id":"thread-1"}}),
+            json!({"timestamp":now,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Olá"}]}}))).unwrap();
+        let (confirmed,_,_)=confirm_inputs(queue.clone(),receipt,transcript_of(&target,&view),receipt_conversation(&target,&view),5,clock,None).await.unwrap();
+        assert_eq!(confirmed,vec!["msg".to_owned()],"a fala no rollout da thread não confirmou a entrada");
+        Arc::try_unwrap(queue).ok().unwrap().shutdown().await.unwrap();
     }
     #[test]
     fn metadata_commit_after_a_server_restart_with_the_same_pid_does_not_reuse_a_journaled_id() {

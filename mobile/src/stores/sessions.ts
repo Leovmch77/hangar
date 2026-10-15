@@ -40,6 +40,11 @@ type ConnectionAttempt = { server: Server; generation: number; abort: AbortContr
 const connecting = new Map<string, ConnectionAttempt>();
 const failures = new Map<string, number>();
 const retryAt = new Map<string, number>();
+// Falha da lista não é necessariamente queda de rede; só lista SSE válida encerra este recuo.
+const httpFailures = new Map<string, number>();
+const httpRetryAt = new Map<string, number>();
+const lastFailureHttp = new Map<string, boolean>();
+const HTTP_RETRY_DELAYS_MS = [2000, 5000, 30000, 60000, 120000, 240000, 300000, 600000, 1800000];
 const refused = new Map<string, number>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let hidden = new Map<string, string | null>();
@@ -68,9 +73,10 @@ function configureCooldown() {
 configureCooldown();
 
 function retryDelay(id: string) {
-  return useServers.getState().activeId === id
+  const networkDelay = useServers.getState().activeId === id
     ? Math.max(0, (retryAt.get(id) ?? 0) - Date.now())
     : retryAfterMs(id);
+  return Math.max(networkDelay, (httpRetryAt.get(id) ?? 0) - Date.now());
 }
 
 function refusedError(status: number) {
@@ -102,7 +108,7 @@ function pause() {
 
 function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   if (!foreground || refs === 0 || retryTimers.has(id)) return;
-  const delay = retryDelay(id) || 1000;
+  const delay = retryDelay(id);
   const servidor = serversCache.find((s) => s.id === id);
   if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista', espera_ms: delay }, servidor.baseUrl);
   clearTimeout(retryTimers.get(id));
@@ -181,7 +187,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
     if (s.inviteEnded) continue;
     if (streams.has(s.id) || retryTimers.has(s.id) || connecting.has(s.id)) continue;
     if (retryDelay(s.id) > 0) {
-      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: lastFailureHttp.get(s.id) ? m.sessao_erro_servidor() : 'offline' });
       scheduleRetry(s.id, get, set);
       continue;
     }
@@ -196,6 +202,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
 async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
   const s = attempt.server;
   let countedFailure = false;
+  let countedHttpFailure = false;
   const failed = (alreadyCounted = false) => {
     if (countedFailure) return;
     countedFailure = true;
@@ -211,6 +218,24 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     retryAt.delete(s.id);
     registrarSucesso(s.id);
   };
+  const httpFailed = (retryAfter?: string | null) => {
+    if (countedHttpFailure) return;
+    countedHttpFailure = true;
+    const count = Math.min((httpFailures.get(s.id) ?? 0) + 1, HTTP_RETRY_DELAYS_MS.length);
+    httpFailures.set(s.id, count);
+    const value = retryAfter?.trim() ?? '';
+    const requested = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+    const delay = Math.min(HTTP_RETRY_DELAYS_MS[HTTP_RETRY_DELAYS_MS.length - 1],
+      Math.max(HTTP_RETRY_DELAYS_MS[count - 1], Number.isNaN(requested) ? 0 : requested));
+    httpRetryAt.set(s.id, Date.now() + delay);
+  };
+  const receivedList = () => {
+    countedHttpFailure = false;
+    httpFailures.delete(s.id);
+    httpRetryAt.delete(s.id);
+    lastFailureHttp.delete(s.id);
+    answered();
+  };
   const rejected = (status: number) => {
     if (s.invite && (status === 401 || status === 410)) {
       useServers.getState().markEnded(s.id);
@@ -222,7 +247,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       useServers.getState().markInvalid(s.id);
       return true;
     }
-    if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    if (status === 403) {
       refused.set(s.id, status);
       slots.set(s.id, { sessions: null, error: refusedError(status) });
       recompute(set);
@@ -240,7 +265,10 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       httpResponse = true;
       answered();
       if (rejected(response.status)) return;
-      if (!response.ok) throw new Error(String(response.status));
+      if (!response.ok) {
+        httpFailed(response.status === 429 ? response.headers?.get('Retry-After') : null);
+        throw new Error(String(response.status));
+      }
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
       if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
@@ -248,11 +276,17 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       recompute(set);
     } catch (error) {
       if (!isCurrent(attempt)) return;
+      lastFailureHttp.set(s.id, httpResponse);
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'sincronia',
         detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
       if (!httpResponse) failed(true);
       slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: httpResponse ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
+      if (countedHttpFailure) {
+        esquecerRota(s.id);
+        scheduleRetry(s.id, get, set);
+        return;
+      }
     }
     if (!isCurrent(attempt)) return;
     const es = openSessionsStream(s);
@@ -267,6 +301,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       try {
         const sessions: unknown = JSON.parse(e.data);
         if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
+        receivedList();
         slots.set(s.id, { sessions: sessions as SessionInfo[], error: null });
         if (falhaDados) registrarDiag({ evento: 'lista.voltou', tela: 'lista' }, s.baseUrl);
         falhaDados = false;
@@ -292,11 +327,13 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       if (!active()) return;
       const status = (event as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
       const http = Number.isInteger(status) && status >= 100 && status <= 599;
+      lastFailureHttp.set(s.id, http);
       if (http) answered();
       else failed();
       streams.delete(s.id);
       es.close();
       if (http && rejected(status)) return;
+      httpFailed();
       slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: http ? m.sessao_erro_servidor() : 'offline' });
       recompute(set);
       esquecerRota(s.id);
@@ -305,9 +342,11 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     streams.set(s.id, es);
   } catch (error) {
     if (!isCurrent(attempt)) return;
+    lastFailureHttp.set(s.id, false);
     registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'conexao',
       detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
     failed();
+    httpFailed();
     slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
     recompute(set);
     esquecerRota(s.id);
@@ -330,7 +369,10 @@ function refresh(get: () => SessionsState, set: (p: Partial<SessionsState>) => v
   serversCache = state.servers.slice();
   if (initialKickPending && state.ready && foreground && refs > 0) {
     initialKickPending = false;
-    for (const s of serversCache) if (respondeuRecentemente(s.id)) retentarAgora(s.id);
+    for (const s of serversCache) if (respondeuRecentemente(s.id)) {
+      retentarAgora(s.id);
+      refused.delete(s.id);
+    }
   }
   for (const s of previous) {
     if (!hasServer(s)) {
@@ -338,6 +380,9 @@ function refresh(get: () => SessionsState, set: (p: Partial<SessionsState>) => v
       esquecerServidor(s.id);
       failures.delete(s.id);
       retryAt.delete(s.id);
+      httpFailures.delete(s.id);
+      httpRetryAt.delete(s.id);
+      lastFailureHttp.delete(s.id);
       refused.delete(s.id);
       slots.delete(s.id);
     } else if (serversCache.find((next) => next.id === s.id)?.inviteEnded) {
@@ -360,6 +405,7 @@ function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => voi
   storeGet = get;
   storeSet = set;
   unsubRecovered = onServerRecovered((id) => {
+    refused.delete(id);
     failures.delete(id);
     retryAt.delete(id);
     clearTimeout(retryTimers.get(id));
@@ -409,11 +455,16 @@ export const useSessions = create<SessionsState>((set, get) => ({
   },
   reconnect() {
     if (refs === 0 || !foreground) return;
-    pause();
-    for (const s of serversCache) retentarAgora(s.id);
-    retryAt.clear();
-    refused.clear();
-    connect(serversCache, get, set);
+    for (const s of serversCache) {
+      if (connecting.has(s.id) || (streams.has(s.id) && !slots.get(s.id)?.error)) continue;
+      disconnect(s.id);
+      retentarAgora(s.id);
+      retryAt.delete(s.id);
+      httpFailures.delete(s.id);
+      httpRetryAt.delete(s.id);
+      refused.delete(s.id);
+      connect(serversCache, get, set, s.id);
+    }
   },
   setForeground(active) {
     if (active === foreground) return;
@@ -422,7 +473,9 @@ export const useSessions = create<SessionsState>((set, get) => ({
     else {
       if (refs > 0 && useServers.getState().ready) initialKickPending = false;
       for (const s of serversCache) {
-        if (s.id === useServers.getState().activeId || respondeuRecentemente(s.id)) {
+        const wasRefused = refused.delete(s.id);
+        httpRetryAt.delete(s.id);
+        if (wasRefused || s.id === useServers.getState().activeId || respondeuRecentemente(s.id)) {
           retentarAgora(s.id);
           retryAt.delete(s.id);
         }
@@ -431,6 +484,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
     }
   },
   refreshServers() {
+    if (foreground && refs > 0) refused.clear();
     refresh(get, set);
   },
   markDeleting(serverId: string, name: string) {
@@ -451,6 +505,9 @@ export function _resetSessionsForTests() {
   retryTimers.clear();
   failures.clear();
   retryAt.clear();
+  httpFailures.clear();
+  httpRetryAt.clear();
+  lastFailureHttp.clear();
   refused.clear();
   streams.clear();
   slots.clear();

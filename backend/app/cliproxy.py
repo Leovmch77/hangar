@@ -45,7 +45,9 @@ def local() -> dict[str, str] | None:
         raise ValueError(f"{config_path()}: YAML inválido") from None
     if not isinstance(dados, dict):
         return None
-    lista = dados.get("api-keys")
+    # Formato novo: chaves de cliente em `access.api-keys`; a raiz `api-keys` passou a ser dos provedores.
+    access = dados.get("access")
+    lista = access.get("api-keys") if isinstance(access, dict) and access.get("api-keys") else dados.get("api-keys")
     if lista is not None and not isinstance(lista, list):
         raise ValueError(f"{config_path()}: api-keys deve ser uma lista")
     chaves = [k.strip() for k in (lista or []) if isinstance(k, str) and k.strip()]

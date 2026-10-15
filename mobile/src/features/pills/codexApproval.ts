@@ -32,15 +32,17 @@ export function useCodexApproval({ serverId, name, headless, enabled }: { server
     setCurrent(null);
     setModes(null);
     if (!enabled || !headless) return;
-    if (!server) { setError(m.servidor_nao_existe()); return; }
+    if (!server) { setError(m.chat_servidor_removido()); return; }
     let alive = true;
-    getCodexPermissions(name, server).then((res) => { if (alive) setCurrent(res.current); }).catch(() => {});
+    getCodexPermissions(name, server)
+      .then((res) => { if (alive) { setCurrent(res.current); setError(null); } })
+      .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : m.comum_falha_aplicar()); });
     return () => { alive = false; };
   }, [name, server, headless, enabled]);
 
   const load = useCallback(async () => {
     if (!enabled) return;
-    if (!server) { setModes(null); setError(m.servidor_nao_existe()); return; }
+    if (!server) { setModes(null); setError(m.chat_servidor_removido()); return; }
     setLoading(true);
     setError(null);
     setNotice(null);
@@ -58,7 +60,7 @@ export function useCodexApproval({ serverId, name, headless, enabled }: { server
   // Diz se a troca pegou: o painel só fecha no sucesso.
   const select = useCallback(async (mode: string): Promise<boolean> => {
     if (applying || mode === current) return false;
-    if (!server) { setNotice(m.servidor_nao_existe()); return false; }
+    if (!server) { setNotice(m.chat_servidor_removido()); return false; }
     setApplying(true);
     setNotice(null);
     try {
@@ -66,9 +68,11 @@ export function useCodexApproval({ serverId, name, headless, enabled }: { server
       setCurrent(res.current);
       return true;
     } catch (e) {
+      setCurrent(null);
       setNotice(e instanceof Error ? e.message : m.comum_falha_aplicar());
       // A troca pode ter chegado e falhado na volta: relê o que ficou valendo.
-      getCodexPermissions(name, server).then((res) => setCurrent(res.current)).catch(() => {});
+      getCodexPermissions(name, server).then((res) => setCurrent(res.current))
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : m.comum_falha_aplicar()));
       return false;
     } finally {
       setApplying(false);

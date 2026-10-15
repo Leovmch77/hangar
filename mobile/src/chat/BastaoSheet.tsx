@@ -24,7 +24,7 @@ export function BastaoSheet({ serverId, name }: { serverId: string; name: string
     setCarregando(true);
     setErro('');
     setVazio(false);
-    if (!server) { setErro(m.servidor_nao_existe()); setCarregando(false); return; }
+    if (!server) { setErro(m.chat_servidor_removido()); setCarregando(false); return; }
     getBastaoDossie(name, server)
       .then((t) => {
         if (vivo) setTexto(t);

@@ -183,21 +183,31 @@ async def test_guest_channel_failure_closes_the_stream(rust):
     assert exc.value.code == "state_channel_off"
 
 
-async def test_side_events_keeps_queue_nav_ping_toast(rust):
+async def test_side_events_keeps_nav_ping_toast_and_leaves_the_queue_to_the_hub(rust):
     adapter, jsonl = rust
-    entry = pqueue.PromptQueue("s").append("manda isso depois", delivered=False)
+    pqueue.PromptQueue("s").append("manda isso depois", delivered=False)
     sse.nav_pendente("s", "http://localhost:5173")
     plugin_bridge._store_toast("s", "Jenkins configurado.", 9000, "demo")
-    gen = sse.merged_events("s", str(jsonl), side=True)
-    quer = {"message", "nav", "ping", "plugin_toast"}
-    vistos = await _coleta(gen, lambda v: quer <= set(_nomes(v)))
-    assert quer <= set(_nomes(vistos))
+    vistos = await _por(sse.merged_events("s", str(jsonl), side=True), 1.5)
+    assert {"nav", "ping", "plugin_toast"} <= set(_nomes(vistos))
     assert "info" not in _nomes(vistos), "a conversa é escolhida pelo Rust"
-    msg = next(json.loads(e["data"]) for e in vistos if e["event"] == "message")
-    assert msg["id"] == f"queued-{entry['id']}"
+    assert not {"message", "queue_confirmed"} & set(_nomes(vistos)), "a fila sai do hub"
     assert not {"state", "preview", "ask_question", "suggest"} & set(_nomes(vistos))
     assert adapter.drains == [] and adapter.tails == []
     sse.nav_confirmar("s")
+
+
+async def test_guest_reads_the_queue_from_the_rust_channel(rust):
+    # Convidado com login próprio e Connect: as bolhas da fila vêm do hub, sem o `follow` do Python.
+    _adapter, jsonl = rust
+    pqueue.PromptQueue("s").append("do python", delivered=False)
+    bolha = json.dumps({"kind": "user_msg", "id": "queued-do-rust", "text": "do rust", "queued_delivered": False})
+    baixa = json.dumps({"kind": "user_msg", "id": "queued-velha", "queued_confirmed": True})
+    async with _CanalRust(_RUST_EVENTS + [("message", bolha), ("queue_confirmed", baixa)]):
+        vistos = await _por(sse.merged_events("s", str(jsonl), count_app=False), 1.5)
+    fila = [(e["event"], e["data"]) for e in vistos
+            if e["event"] == "queue_confirmed" or (e["event"] == "message" and '"queued-' in e["data"])]
+    assert fila == [("message", bolha), ("queue_confirmed", baixa)]
 
 
 # --- Codex sem terminal: o feed do hub do Rust é dono dos seis eventos (5B Task 9) ---
@@ -271,19 +281,71 @@ async def test_codex_headless_internal_connection_sends_none_of_the_six(codex, m
     adapter, jsonl, _sidecar, confirmados = codex
     vistos = await _por(sse.merged_events("cx", str(jsonl), provider="codex", side=True), 1.5)
     assert not _SEIS & set(_nomes(vistos)), _nomes(vistos)
-    assert adapter.tails == [str(jsonl)], "o tail_pump fica: é ele que confirma a fila do Codex"
-    # Abertura confirma uma vez; o `user_msg` do transcript, outra.
-    assert len(confirmados) >= 2
+    assert adapter.tails == [] and confirmados == [], "a baixa da fila do Codex é pedida pelo hub, em processo"
     assert adapter.drains == [], "a fila do Codex o ator drena sozinho"
 
 
 async def test_codex_headless_guest_reads_six_from_rust_channel(codex):
-    _adapter, jsonl, _sidecar, _ = codex
+    _adapter, jsonl, _sidecar, confirmados = codex
     async with _CanalRust(_CODEX_EVENTS):
         gen = sse.merged_events("cx", str(jsonl), provider="codex", count_app=False)
-        vistos = await _coleta(gen, lambda v: "ferramenta" in _nomes(v))
+        vistos = await _coleta(gen, lambda v: "ferramenta" in _nomes(v) and "message" in _nomes(v))
     do_rust = [(e["event"], e["data"]) for e in vistos if e["event"] in _SEIS]
     assert do_rust == _CODEX_EVENTS, "os seis passam como o hub os publicou, sem cópia do Python"
+    assert confirmados == [], "o hub que o canal assina confirma a fila; o Python não pede de novo"
+
+
+async def test_codex_turning_rust_owned_moves_the_queue_to_the_channel(codex, monkeypatch):
+    # Connect: o Codex com terminal fora do Rust vira sem terminal do Rust no meio do stream. O `follow`
+    # do Python sai junto das fontes do estado e as bolhas passam a vir do canal do hub.
+    from app.models import SessionInfo
+    adapter, jsonl, sidecar, confirmados = codex
+    sidecar["headless"] = False
+
+    async def quieto():
+        await asyncio.Event().wait()
+        yield
+
+    adapter.state_monitor = lambda name, sid_get, **kw: quieto()
+    queue = pqueue.PromptQueue("cx")
+    antes = queue.append("do python", delivered=False)
+
+    vistos, troca, viu_python = [], {}, []
+
+    async def lista():
+        # Só o vigia do stream consulta a lista, e depois de ler o modo inicial: trocar aqui garante que
+        # ele viu o Codex com terminal antes da troca.
+        if viu_python:
+            sidecar["headless"] = True
+        return [SessionInfo(name="cx", jsonl=str(jsonl), provider="codex", headless=sidecar["headless"])]
+
+    monkeypatch.setattr(sse, "_cached_list", lista)
+    bolha = json.dumps({"kind": "user_msg", "id": "queued-do-rust", "text": "do rust"})
+    async with _CanalRust([("message", bolha)]):
+        gen = sse.merged_events("cx", str(jsonl), provider="codex", count_app=False)
+
+        async def le(ate):
+            async for ev in gen:
+                vistos.append(ev)
+                if ev["event"] == "message" and f"queued-{antes['id']}" in ev["data"]:
+                    viu_python.append(True)
+                elif ev["event"] == "reset":
+                    troca["confirmados"] = len(confirmados)
+                    troca["depois"] = queue.append("depois da troca", delivered=False)
+                if ate(ev):
+                    return
+
+        try:
+            async with asyncio.timeout(8):
+                await le(lambda ev: ev["event"] == "message" and "queued-do-rust" in ev["data"])
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(1.5):
+                    await le(lambda ev: False)
+        finally:
+            await gen.aclose()
+    assert "reset" in _nomes(vistos)
+    assert not any(f"queued-{troca['depois']['id']}" in e["data"] for e in vistos if e["event"] == "message")
+    assert len(confirmados) == troca["confirmados"], "o Rust confirma; o Python não pede mais"
 
 
 @pytest.mark.parametrize("count_app", [False, True])

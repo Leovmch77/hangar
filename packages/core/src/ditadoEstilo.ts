@@ -31,6 +31,15 @@ export function dictationOrganizationOf(
   return campo.valor === 'none' || campo.valor === '' || campo.valor == null ? 'off' : 'unknown';
 }
 
+/** Teto da gravação do ditado (`dictation_max_minutes`, guardado no servidor): 0, vazio ou servidor
+ *  anterior ao campo = 5 min; nunca acima de 30, o mesmo limite do servidor. */
+export function dictationCeilingMs(
+  campos: Record<string, Pick<CampoConfig, 'valor'> | undefined> | undefined,
+): number {
+  const n = Number(campos?.dictation_max_minutes?.valor);
+  return (Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 30) : 5) * 60_000;
+}
+
 /** O modo é da máquina da sessão: `s` nulo lê o servidor ativo. */
 export async function fetchDictationOrganization(s: Server | null | undefined): Promise<DictationOrganization> {
   try {
