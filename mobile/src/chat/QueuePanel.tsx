@@ -14,13 +14,13 @@ type MenuId = 'up' | 'down' | 'steer' | 'edit' | 'remove';
 interface MenuAction { id: MenuId; title: string; disabled: boolean; destructive?: boolean }
 
 // A linha em edição já está no composer: reabrir, orientar ou apagar por ela jogaria fora o que foi digitado.
-function menuActions({ index, count, busy, steerable, editing = false }: {
-  index: number; count: number; busy: boolean; steerable: boolean; editing?: boolean;
+function menuActions({ index, count, busy, editing = false }: {
+  index: number; count: number; busy: boolean; editing?: boolean;
 }): MenuAction[] {
   return [
     { id: 'up', title: m.queue_panel_move_up(), disabled: busy || index === 0 },
     { id: 'down', title: m.queue_panel_move_down(), disabled: busy || index === count - 1 },
-    { id: 'steer', title: m.codex_orientar(), disabled: busy || !steerable || editing },
+    { id: 'steer', title: m.codex_orientar(), disabled: busy || editing },
     { id: 'edit', title: m.atalhos_editar(), disabled: busy || editing },
     { id: 'remove', title: m.comum_apagar(), disabled: busy || editing, destructive: true },
   ];
@@ -34,7 +34,6 @@ interface Props {
   panel: Panel;
   editingId: string | null;
   busy: boolean;
-  steerable: boolean;
   onEdit: (id: string) => void;
   onCancelEdit: () => void;
   onSteer: (id: string) => void;
@@ -42,7 +41,7 @@ interface Props {
   onMove: (id: string, delta: -1 | 1) => void;
 }
 
-export function QueuePanel({ panel, editingId, busy, steerable, onEdit, onCancelEdit, onSteer, onRemove, onMove }: Props) {
+export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove }: Props) {
   const { theme } = useUnistyles();
   const [expanded, setExpanded] = useState(true);
   const [full, setFull] = useState<string | null>(null);
@@ -75,7 +74,7 @@ export function QueuePanel({ panel, editingId, busy, steerable, onEdit, onCancel
         <ScrollView style={styles.list} nestedScrollEnabled keyboardShouldPersistTaps="handled">
           {panel.entries.map((entry, index) => {
             const editing = editingId === entry.id;
-            const actions = menuActions({ index, count: panel.entries.length, busy, steerable, editing });
+            const actions = menuActions({ index, count: panel.entries.length, busy, editing });
             const enabled = actions.filter((a) => !a.disabled);
             const openIOS = () => {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
@@ -116,12 +115,12 @@ export function QueuePanel({ panel, editingId, busy, steerable, onEdit, onCancel
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={m.codex_orientar()}
-                      accessibilityHint={steerable ? m.codex_orientar_ajuda() : m.queue_panel_steer_unavailable()}
-                      accessibilityState={{ disabled: busy || !steerable }}
-                      disabled={busy || !steerable}
+                      accessibilityHint={m.codex_orientar_ajuda()}
+                      accessibilityState={{ disabled: busy }}
+                      disabled={busy}
                       onPress={() => pick(entry.id, 'steer')}
                       hitSlop={6}
-                      style={[styles.iconBtn, (busy || !steerable) && styles.disabled]}
+                      style={[styles.iconBtn, busy && styles.disabled]}
                     >
                       <Icon name="CornerUpRight" size={16} color={theme.tokens.accent.base} />
                     </Pressable>

@@ -821,11 +821,17 @@ export function toolVerbo(nome: string | null | undefined): string {
   }
 }
 
-/** `mcp__hangar-computer-control__objetivo` -> ["computer-control", "objetivo"]; nome que não é de MCP, null. */
-function partesMcp(nome: string | null | undefined): [string, string] | null {
+/** `mcp__<servidor>__<ferramenta>` -> [servidor como está no nome, ferramenta]; nome que não é de MCP, null. */
+function rawMcpParts(nome: string | null | undefined): [string, string] | null {
   const partes = (nome ?? '').split('__');
   if (partes[0] !== 'mcp' || partes.length < 3) return null;
-  return [partes[1].replace(/^hangar-/, ''), partes.slice(2).join('__')];
+  return [partes[1], partes.slice(2).join('__')];
+}
+
+/** `mcp__hangar-computer-control__objetivo` -> ["computer-control", "objetivo"]; nome que não é de MCP, null. */
+function partesMcp(nome: string | null | undefined): [string, string] | null {
+  const mcp = rawMcpParts(nome);
+  return mcp && [mcp[0].replace(/^hangar-/, ''), mcp[1]];
 }
 
 /** `mcp__hangar-computer-control__objetivo` -> "computer-control · objetivo"; o resto fica como veio. */
@@ -837,8 +843,7 @@ export function nomeFerramenta(nome: string | null | undefined): string {
 
 /** Servidor de `mcp__<servidor>__<ferramenta>` como está no nome, com o `hangar-`: é o que o Rust publica. */
 function servidorMcpCru(nome: string | null | undefined): string | null {
-  const partes = (nome ?? '').split('__');
-  return partes[0] === 'mcp' && partes.length >= 3 ? partes[1] : null;
+  return rawMcpParts(nome)?.[0] ?? null;
 }
 
 const TERM_UPDATE = new Set(['edit', 'multiedit', 'notebookedit', 'apply_patch']);

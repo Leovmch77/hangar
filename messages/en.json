@@ -1291,7 +1291,6 @@
   "queue_panel_expand": "Expand the queue",
   "queue_panel_reorder": "Reorder (drag, or press the arrow keys)",
   "queue_panel_edit": "Edit in the composer",
-  "queue_panel_steer_unavailable": "This agent can't be steered per message",
   "queue_panel_remove": "Remove from the queue",
   "queue_panel_editing": "Editing the queued message",
   "queue_panel_update": "Update",

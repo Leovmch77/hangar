@@ -10,8 +10,8 @@
   import IconX from './icons/IconX.svelte';
   import IconChevronDown from './icons/IconChevronDown.svelte';
 
-  let { panel, editingId = null, busy = false, steerable = true, onEdit, onCancelEdit, onSteer, onRemove, onReorder }: {
-    panel: QueuePanel; editingId?: string | null; busy?: boolean; steerable?: boolean;
+  let { panel, editingId = null, busy = false, onEdit, onCancelEdit, onSteer, onRemove, onReorder }: {
+    panel: QueuePanel; editingId?: string | null; busy?: boolean;
     onEdit: (id: string) => void; onCancelEdit: () => void; onSteer: (id: string) => void;
     onRemove: (id: string) => void; onReorder: (id: string, beforeId: string | null) => void;
   } = $props();
@@ -23,7 +23,7 @@
   // Arrasto por ponteiro, não o HTML5: o arrasto nativo não anda com o dedo no celular, e só a alça arma.
   let drag = $state<{ id: string; pointer: number; startY: number; moved: boolean } | null>(null);
   let dropAt = $state<{ id: string; after: boolean } | null>(null);
-  const listId = `qp-${Math.random().toString(36).slice(2)}`;
+  const listId = $props.id();
 
   const order = () => panel.entries.map((e) => e.id).join('\n');
   // Mover o nó da linha tira o foco da alça; quem moveu pelas setas continua com o foco nela.
@@ -56,7 +56,8 @@
     // Um toque parado na alça é foco (para as setas), não arrasto.
     if (!drag.moved && Math.abs(e.clientY - drag.startY) < 4) return;
     drag.moved = true;
-    dropAt = rowAt(e.clientY);
+    const next = rowAt(e.clientY);
+    if (next?.id !== dropAt?.id || next?.after !== dropAt?.after) dropAt = next;
   }
   function gripUp(e: PointerEvent) {
     if (!drag || e.pointerId !== drag.pointer) return;
@@ -66,17 +67,27 @@
     const before = dropTarget(panel.entries, from, at.id, at.after);
     if (before !== undefined) onReorder(from, before);
   }
-  function dragEnd() { drag = null; dropAt = null; }
+  function dragEnd() { drag = null; dropAt = null; boxes = null; }
+
+  // Caixas das linhas lidas uma vez por arrasto: a lista que rola ou muda de ordem as relê.
+  let boxes: { order: string; rows: { id: string; top: number; bottom: number }[] } | null = null;
 
   // A linha sob o ponteiro e a metade dela; acima da primeira ou abaixo da última prende nas pontas.
   function rowAt(y: number): { id: string; after: boolean } | null {
-    const rows = [...(listEl?.querySelectorAll<HTMLElement>('.qp-row[data-id]') ?? [])];
+    const now = order();
+    if (boxes?.order !== now) {
+      const rows = [...(listEl?.querySelectorAll<HTMLElement>('.qp-row[data-id]') ?? [])].map((row) => {
+        const box = row.getBoundingClientRect();
+        return { id: row.dataset.id!, top: box.top, bottom: box.bottom };
+      });
+      boxes = { order: now, rows };
+    }
+    const rows = boxes.rows;
     if (!rows.length) return null;
     for (const row of rows) {
-      const box = row.getBoundingClientRect();
-      if (y < box.bottom) return { id: row.dataset.id!, after: y > box.top + box.height / 2 };
+      if (y < row.bottom) return { id: row.id, after: y > (row.top + row.bottom) / 2 };
     }
-    return { id: rows[rows.length - 1].dataset.id!, after: true };
+    return { id: rows[rows.length - 1].id, after: true };
   }
 </script>
 
@@ -90,7 +101,7 @@
       <span class="qp-count">{panel.entries.length}</span>
       <span class="qp-chevron" class:closed={!expanded}><IconChevronDown size={14} /></span>
     </button>
-    <ol class="qp-list" id={listId} hidden={!expanded} bind:this={listEl}>
+    <ol class="qp-list" id={listId} hidden={!expanded} bind:this={listEl} onscroll={() => (boxes = null)}>
       {#each panel.entries as entry (entry.id)}
         {@const editing = editingId === entry.id}
         <li class="qp-row" data-id={entry.id} class:editing class:full={fullId === entry.id}
@@ -115,8 +126,7 @@
             {:else}
               <button type="button" class="qp-edit" aria-label={m.queue_panel_edit()} title={m.queue_panel_edit()} disabled={busy}
                       onclick={() => onEdit(entry.id)}><IconPencil size={14} /></button>
-              <button type="button" class="qp-steer" disabled={busy || !steerable}
-                      title={steerable ? m.codex_orientar_ajuda() : m.queue_panel_steer_unavailable()}
+              <button type="button" class="qp-steer" disabled={busy} title={m.codex_orientar_ajuda()}
                       onclick={() => onSteer(entry.id)}><IconCornerUpRight size={14} /><span>{m.codex_orientar()}</span></button>
               <button type="button" class="qp-remove" aria-label={m.queue_panel_remove()} title={m.queue_panel_remove()} disabled={busy}
                       onclick={() => onRemove(entry.id)}><IconX size={14} /></button>

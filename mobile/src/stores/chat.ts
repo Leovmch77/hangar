@@ -16,7 +16,7 @@ import {
   parsePluginToast,
   parseQueuePanel,
   queueEditPayload,
-  queueEditLeft,
+  queueEditExitText,
   queueRemovedBubbleIds,
   currentQueuePanel,
   beginQueueEdit,
@@ -120,12 +120,12 @@ export interface ChatApi {
   markAskDismissed: () => void;
   // Resposta do "mandar agora": marca as entregues e, com a fila já baixada, tira as bolhas na hora.
   applySteer: (result: { promoted?: boolean; queued_ids?: string[] }) => void;
-  // Painel "Na fila". Entrar na edição devolve o texto do composer; cancelar devolve o rascunho guardado.
+  // Painel "Na fila". Entrar na edição devolve o texto do composer; toda saída dela passa por `dropQueueEdit`, que
+  // deixa em `queueEditExit` o texto do campo (sem ele, o rascunho guardado).
   startQueueEdit: (id: string, draft: string) => string;
-  cancelQueueEdit: () => string;
-  dropQueueEdit: () => void;
-  // Rascunho guardado de volta quando a edição foi gravada; null = falhou ou não havia o que gravar.
-  submitQueueEdit: (text: string) => Promise<string | null>;
+  cancelQueueEdit: () => void;
+  dropQueueEdit: (text?: string) => void;
+  submitQueueEdit: (text: string) => Promise<void>;
   removeQueued: (id: string) => Promise<void>;
   steerQueued: (id: string) => Promise<void>;
   moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
@@ -558,13 +558,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       try {
         const data = JSON.parse(e.data as string);
         // Apagadas noutro aparelho: a bolha delas sai daqui também.
-        const gone = queueRemovedBubbleIds(data);
-        let { events } = useChatStore.getState();
-        if (gone.length) {
-          events = events.filter((x) => !gone.includes(x.id));
-          rebuildIndex(events);
-        }
-        useChatStore.setState(gone.length ? { queuePanel: parseQueuePanel(data), events } : { queuePanel: parseQueuePanel(data) });
+        const events = dropQueuedBubbles(useChatStore.getState().events, queueRemovedBubbleIds(data));
+        useChatStore.setState({ queuePanel: parseQueuePanel(data), events });
       } catch {
         quadroFalhou('queue');
       }
@@ -687,6 +682,20 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     }
   }
 
+  // Toda saída da edição: o Composer põe `text` no campo, ou o rascunho guardado sem ele.
+  function dropQueueEdit(text?: string) {
+    useChatStore.setState({ queueEdit: null, queueEditExit: text ?? null });
+  }
+
+  // Tira da conversa as bolhas da fila dadas pelo id de bolha (`queued-<id>`); devolve a lista nova.
+  function dropQueuedBubbles(events: ChatEvent[], ids: Iterable<string>): ChatEvent[] {
+    const drop = new Set(ids);
+    if (!drop.size) return events;
+    const next = events.filter((e) => !drop.has(e.id));
+    rebuildIndex(next);
+    return next;
+  }
+
   const queueEntries = () => {
     const s = useChatStore.getState();
     return currentQueuePanel(s.queuePanel, s.events).entries;
@@ -701,17 +710,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       useChatStore.setState({ queueEdit: next.edit, queueEditExit: null });
       return next.composerText;
     },
-    cancelQueueEdit(): string {
-      const saved = useChatStore.getState().queueEdit?.savedDraft ?? '';
-      useChatStore.setState({ queueEdit: null });
-      return saved;
+    cancelQueueEdit() {
+      dropQueueEdit();
     },
-    dropQueueEdit() {
-      useChatStore.setState({ queueEdit: null });
-    },
-    async submitQueueEdit(text: string): Promise<string | null> {
+    dropQueueEdit,
+    async submitQueueEdit(text: string): Promise<void> {
       const edit = useChatStore.getState().queueEdit;
-      if (!edit || !canUpdateQueueEdit(text)) return null;
+      if (!edit || !canUpdateQueueEdit(text)) return;
       // Texto igual ao da fila: só sai da edição, sem pedido.
       const next = queueEditPayload(text, queueEntries().find((e) => e.id === edit.entryId)?.text);
       if (next !== null && !(await queueAction(async (t) => {
@@ -720,23 +725,18 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         } catch (err) {
           // Saiu da fila: a edição fecha já, com o aviso desta recusa; a saída pelo painel não avisa de novo.
           if ((err as { code?: unknown })?.code === 'queue_entry_gone' && useChatStore.getState().queueEdit === edit) {
-            // Com o rascunho guardado vazio, o texto editado fica no campo, como no PWA (`queueEditLeft`).
-            const left = queueEditLeft(edit, { entries: [], actions: false }, text);
-            useChatStore.setState({ queueEdit: null, queueEditExit: left?.composerText ?? edit.savedDraft });
+            dropQueueEdit(queueEditExitText(edit, text));
           }
           throw err;
         }
-      }))) return null;
-      if (useChatStore.getState().queueEdit === edit) useChatStore.setState({ queueEdit: null });
-      return edit.savedDraft;
+      }))) return;
+      if (useChatStore.getState().queueEdit === edit) dropQueueEdit();
     },
     async removeQueued(id: string) {
       const ok = await queueAction((t) => cancelQueuedMessage(name, id, t));
       if (!ok) return;
       // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
-      const events = useChatStore.getState().events.filter((e) => e.id !== `queued-${id}`);
-      rebuildIndex(events);
-      useChatStore.setState({ events });
+      useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
     },
     // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
     async steerQueued(id: string) {

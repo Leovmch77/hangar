@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatEvent } from './types';
 import {
   beginQueueEdit, canUpdateQueueEdit, currentQueuePanel, derivedQueuePanel, dropTarget, echoInQueuePanel, hiddenByQueuePanel,
-  moveTarget, parseQueuePanel, queueEditLeft, queueEditPayload, queueRemovedBubbleIds, queueSteerable, type QueuePanel,
+  moveTarget, parseQueuePanel, queueEditExitText, queueEditLeft, queueEditPayload, queueRemovedBubbleIds, type QueuePanel,
 } from './queuePanel';
 
 const q = (id: string, extra: Partial<ChatEvent> = {}): ChatEvent =>
@@ -58,6 +58,8 @@ describe('queuePanel', () => {
     expect(queueEditLeft(edit, panel('a'), 'novo')).toBeNull();
     expect(queueEditLeft(edit, panel(), 'novo')).toEqual({ composerText: 'novo' });
     expect(queueEditLeft({ ...edit, savedDraft: 'antes' }, panel(), 'novo')).toEqual({ composerText: 'antes' });
+    expect(queueEditExitText({ ...edit, savedDraft: '  ' }, 'novo')).toBe('novo');
+    expect(queueEditExitText({ ...edit, savedDraft: 'antes' }, 'novo')).toBe('antes');
   });
   it('setas e arrasto dão o before_id certo e nada na mesma posição', () => {
     const e = panel('a', 'b', 'c').entries;
@@ -70,10 +72,5 @@ describe('queuePanel', () => {
     expect(dropTarget(e, 'a', 'c', true)).toBeNull();
     expect(dropTarget(e, 'a', 'b', false)).toBeUndefined();
     expect(dropTarget(e, 'a', 'a', true)).toBeUndefined();
-  });
-  it('Pi e omp não orientam por item', () => {
-    expect(queueSteerable('pi')).toBe(false);
-    expect(queueSteerable('omp')).toBe(false);
-    expect(queueSteerable('claude')).toBe(true);
   });
 });

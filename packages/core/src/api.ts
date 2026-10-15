@@ -1832,14 +1832,12 @@ export async function searchTranscriptsForServer(s: Server, q: string): Promise<
 // Tira da fila durável uma entrada que o backend desistiu de entregar (a bolha "não chegou").
 // `entryId` é o id CRU da fila — a bolha do chat é `queued-<id>`.
 export async function descartarDaFila(name: string, entryId: string, server?: Server | null): Promise<void> {
-  await sessionFetch<{ ok: boolean }>(server,
-    `/api/sessions/${encodeURIComponent(name)}/queue/${encodeURIComponent(entryId)}`,
-    { method: 'DELETE' },
-  );
+  await sessionFetch<{ ok: boolean }>(server, queuePath(name, entryId), { method: 'DELETE' });
 }
 
-const queuePath = (name: string, entryId: string) =>
-  `/api/sessions/${encodeURIComponent(name)}/queue/${encodeURIComponent(entryId)}`;
+function queuePath(name: string, entryId: string): string {
+  return `/api/sessions/${encodeURIComponent(name)}/queue/${encodeURIComponent(entryId)}`;
+}
 
 /** Troca o texto de uma mensagem que espera na fila. 409 `queue_entry_gone` se ela já saiu. */
 export async function editQueuedMessage(name: string, entryId: string, text: string, server?: Server | null): Promise<void> {

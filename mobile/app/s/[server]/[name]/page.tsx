@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -6,11 +6,9 @@ import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import { parseHostMessage, type HtmlPageRef } from '@hangar/core';
 import { Screen } from '../../../../src/ui/Screen';
 import { Icon } from '../../../../src/ui/Icon';
-import { applyScript, onlyInitial, openPageLink, usePageDocument } from '../../../../src/chat/tools/pageDocument';
-import { pageFromParams } from '../../../../src/chat/tools/pageRoute';
+import { onlyInitial, usePageDocument, usePageWebView } from '../../../../src/chat/tools/pageDocument';
+import { one, pageFromParams } from '../../../../src/chat/tools/pageRoute';
 import * as m from '../../../../src/paraglide/messages';
-
-const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? '';
 
 // Libera a pinça mesmo em página que travou o zoom no viewport: ampliar é o motivo da tela cheia.
 const ALLOW_PINCH = "(()=>{const f=()=>{let v=document.querySelector('meta[name=viewport]');"
@@ -48,16 +46,12 @@ function Shell({ title, serverId, sessionName, children }: { title: string; serv
 
 function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId: string; sessionName: string }) {
   const { state, doc, load, params } = usePageDocument(page, sessionName, serverId);
-  const web = useRef<WebView>(null);
-  const touchedAt = useRef(0);
-  const own = page.ownTheme;
-
-  useEffect(() => { if (!own) web.current?.injectJavaScript(applyScript(params)); }, [params, own]);
+  const { web, applyTheme, touched, openLink } = usePageWebView(params, page.ownTheme);
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     const msg = parseHostMessage(e.nativeEvent.data);
-    if (msg?.kind === 'link') openPageLink(msg.url, touchedAt);
-  }, []);
+    if (msg?.kind === 'link') openLink(msg.url);
+  }, [openLink]);
 
   let body: React.ReactNode;
   if (state === 'loading') {
@@ -75,7 +69,7 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
     );
   } else {
     body = (
-      <View style={styles.flex} onTouchStart={() => { touchedAt.current = Date.now(); }}>
+      <View style={styles.flex} onTouchStart={touched}>
         <WebView
           ref={web}
           source={{ html: doc }}
@@ -85,7 +79,7 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
           onShouldStartLoadWithRequest={onlyInitial}
           setSupportMultipleWindows={false}
           onMessage={onMessage}
-          onLoadEnd={() => { if (!own) web.current?.injectJavaScript(applyScript(params)); }}
+          onLoadEnd={applyTheme}
           injectedJavaScript={ALLOW_PINCH}
           scalesPageToFit
           setBuiltInZoomControls

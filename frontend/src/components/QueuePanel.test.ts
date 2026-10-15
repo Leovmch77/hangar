@@ -12,7 +12,7 @@ function montar(props: Record<string, unknown> = {}) {
   const target = document.createElement('div');
   document.body.appendChild(target);
   const calls = { onEdit: vi.fn(), onCancelEdit: vi.fn(), onSteer: vi.fn(), onRemove: vi.fn(), onReorder: vi.fn() };
-  const comp = mount(QueuePanel, { target, props: { panel: panel(), editingId: null, busy: false, steerable: true, ...calls, ...props } });
+  const comp = mount(QueuePanel, { target, props: { panel: panel(), editingId: null, busy: false, ...calls, ...props } });
   return { target, comp, ...calls };
 }
 
@@ -60,13 +60,6 @@ describe('QueuePanel', () => {
     row.querySelector<HTMLButtonElement>('.qp-cancel')!.click();
     expect(editing.onCancelEdit).toHaveBeenCalledOnce();
     unmount(editing.comp);
-  });
-  it('Orientar fica desativado quando o agente não orienta por mensagem', () => {
-    const { target, comp } = montar({ steerable: false });
-    const steer = target.querySelector<HTMLButtonElement>('.qp-steer')!;
-    expect(steer.disabled).toBe(true);
-    expect(steer.title).toBe(m.queue_panel_steer_unavailable());
-    unmount(comp);
   });
   it('tocar no texto mostra a mensagem inteira', async () => {
     const { target, comp } = montar();

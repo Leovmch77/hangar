@@ -21,6 +21,11 @@ export function pageVariables(): Record<string, string> {
   return themeVariables((name) => cs.getPropertyValue(MAP[name] ?? name));
 }
 
+/** Link pedido pela página: só abre com gesto real, para a página não abrir aba sozinha. */
+export function openPageLink(url: string): void {
+  if (!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive) return;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
 
 export function postTheme(frame: HTMLIFrameElement | undefined, scheme: Scheme, vars: Record<string, string>): void {
   frame?.contentWindow?.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed',

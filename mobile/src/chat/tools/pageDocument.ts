@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Linking } from 'react-native';
+import type { WebView } from 'react-native-webview';
 import { useUnistyles } from 'react-native-unistyles';
 import {
   baseOf, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
@@ -19,7 +20,7 @@ const tokenVars = (t: ThemeTokens): Record<string, string> => ({
   '--chart-4': t.chart[3],
 });
 
-export const applyScript = (p: ThemeParams) => `window.__hangarApply&&window.__hangarApply(${JSON.stringify(p)});true`;
+const applyScript = (p: ThemeParams) => `window.__hangarApply&&window.__hangarApply(${JSON.stringify(p)});true`;
 
 // Só o documento inicial carrega; qualquer navegação da página (link, location, window.open) para.
 // ponytail: no Android a lib libera a navegação se o JS não responder em 250 ms (JS travado deixa
@@ -37,7 +38,7 @@ function remember(key: string, entry: { html: string; reported: number | null })
 }
 
 // Gesto do leitor vale por pouco tempo e por um link só: a página não abre endereço sozinha.
-export const GESTURE_MS = 2000;
+const GESTURE_MS = 2000;
 
 // Altura nova da página: devolve se mudou, e guarda no cache para o cartão voltar sem pular.
 export function rememberReported(key: string, height: number): boolean {
@@ -48,11 +49,23 @@ export function rememberReported(key: string, height: number): boolean {
 }
 
 // Link só logo depois de um toque do leitor, e um por toque: a página não abre endereço sozinha.
-export function openPageLink(url: string, touchedAt: { current: number }): void {
+function openPageLink(url: string, touchedAt: { current: number }): void {
   const recent = Date.now() - touchedAt.current < GESTURE_MS;
   touchedAt.current = 0;
   if (!recent) return;
   Linking.openURL(url).catch((err: unknown) => toast.erro(err instanceof Error ? err.message : String(err)));
+}
+
+// A WebView da página, no cartão e na tela cheia: sem tema próprio, o do app entra ao carregar e a cada troca, sem
+// recarregar; `touched` marca o toque do leitor que libera um link.
+export function usePageWebView(params: ThemeParams, own: boolean) {
+  const web = useRef<WebView>(null);
+  const touchedAt = useRef(0);
+  const applyTheme = useCallback(() => { if (!own) web.current?.injectJavaScript(applyScript(params)); }, [params, own]);
+  useEffect(applyTheme, [applyTheme]);
+  const touched = useCallback(() => { touchedAt.current = Date.now(); }, []);
+  const openLink = useCallback((url: string) => openPageLink(url, touchedAt), []);
+  return { web, applyTheme, touched, openLink };
 }
 
 // Documento da página com o tema do app: a mesma busca e o mesmo cache para o cartão e a tela cheia.

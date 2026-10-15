@@ -493,9 +493,11 @@ test('editar guarda o rascunho uma vez e cancelar o devolve', async () => {
   created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }, { id: 'b', text: 'tchau', ts: 2 }], actions: true }));
   expect(chat.startQueueEdit('a', 'meu rascunho')).toBe('oi');
   expect(chat.startQueueEdit('b', 'oi mudado')).toBe('tchau');
-  expect(chat.use.getState().queueEdit?.entryId).toBe('b');
-  expect(chat.cancelQueueEdit()).toBe('meu rascunho');
+  expect(chat.use.getState().queueEdit).toMatchObject({ entryId: 'b', savedDraft: 'meu rascunho' });
+  chat.cancelQueueEdit();
+  // Sem texto de saída, o Composer devolve o rascunho guardado.
   expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
 });
 
 test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da edição e apagar tira a bolha', async () => {
@@ -511,12 +513,15 @@ test('ações da fila vão ao servidor da conversa; Atualizar igual só sai da e
   }));
 
   chat.startQueueEdit('a', 'rascunho');
-  expect(await chat.submitQueueEdit(' primeira ')).toBe('rascunho');
+  await chat.submitQueueEdit(' primeira ');
   expect(calls).toHaveLength(0);
   expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
 
   chat.startQueueEdit('a', 'rascunho');
-  expect(await chat.submitQueueEdit('primeira mudada')).toBe('rascunho');
+  await chat.submitQueueEdit('primeira mudada');
+  expect(chat.use.getState().queueEdit).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBeNull();
   await chat.moveQueued('a', 1);
   await chat.moveQueued('a', -1); // já é a primeira: nada a pedir
   await chat.steerQueued('b');
@@ -540,7 +545,7 @@ test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha
   vi.stubGlobal('fetch', vi.fn(async () => new Response(
     JSON.stringify({ detail: { code: 'queue_entry_gone', params: {}, msg: 'x' } }), { status: 409 })));
   chat.startQueueEdit('a', '');
-  expect(await chat.submitQueueEdit('oi de novo')).toBeNull();
+  await chat.submitQueueEdit('oi de novo');
   // Fechada aqui, o Composer não vê a saída pelo painel e não avisa de novo.
   expect(chat.use.getState().queueEdit).toBeNull();
   // Rascunho guardado vazio: o texto editado fica no campo, não some.
@@ -551,7 +556,7 @@ test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha
   created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
   chat.startQueueEdit('a', 'meu rascunho');
   expect(chat.use.getState().queueEditExit).toBeNull();
-  expect(await chat.submitQueueEdit('oi mudado')).toBeNull();
+  await chat.submitQueueEdit('oi mudado');
   expect(chat.use.getState().queueEditExit).toBe('meu rascunho');
 });
 

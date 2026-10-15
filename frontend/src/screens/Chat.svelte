@@ -89,7 +89,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import QueuePanel from '../components/QueuePanel.svelte';
   import {
     beginQueueEdit, cancelQueuedMessage, currentQueuePanel, echoInQueuePanel, editQueuedMessage, hiddenByQueuePanel, parseQueuePanel,
-    queueEditLeft, queueEditPayload, queueRemovedBubbleIds, queueSteerable, reorderQueuedMessage, steerQueuedMessage,
+    queueEditExitText, queueEditLeft, queueEditPayload, queueRemovedBubbleIds, reorderQueuedMessage, steerQueuedMessage,
     type QueueEdit, type QueuePanel as QueuePanelModel,
   } from '@hangar/core';
   import { fmtDur } from '../lib/fmt';
@@ -444,6 +444,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Só fora do desktop: a vista desktop do web fica como está (o desktop evolui no nativo).
   const queuePanelShown = $derived(!desktop);
   const queueList = $derived(currentQueuePanel(serverQueue, events));
+  // O eco local que já está no painel some da conversa: senão a mesma mensagem aparece duas vezes.
+  const pendingShown = $derived(queuePanelShown ? pending.filter((p) => !echoInQueuePanel(p.text, queueList)) : pending);
   // A entrada em edição saiu da fila (entregue, orientada ou apagada noutro aparelho): avisa e devolve o campo.
   $effect(() => {
     if (!queueEdit) return;
@@ -2426,11 +2428,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         serverQueue = parseQueuePanel(data);
         // Apagadas noutro aparelho: a bolha delas sai daqui também.
         const gone = queueRemovedBubbleIds(data);
-        if (gone.length) {
-          for (const id of gone) retiredQueuedIds.add(id);
-          events = events.filter((x) => !gone.includes(x.id));
-          rebuildIndex();
-        }
+        for (const id of gone) retiredQueuedIds.add(id);
+        dropQueuedBubbles(gone);
       } catch { quadroFalhou('queue'); }
     });
 
@@ -2836,8 +2835,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       events = events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e);
     }
     if (!r.promoted) return (r.confirmed ?? 0) > 0;
-    events = events.filter((e) => !(e.kind === 'user_msg' && e.id?.startsWith('queued-')));
-    rebuildIndex();
+    dropQueuedBubbles(events.filter((e) => e.kind === 'user_msg' && e.id?.startsWith('queued-')).map((e) => e.id));
     return true;
   }
 
@@ -3232,7 +3230,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       mostrarAviso(formataErro(err));
       return;
     }
-    events = events.filter((e) => e.id !== `queued-${entryId}`);
+    dropQueuedBubbles([`queued-${entryId}`]);
+  }
+
+  // Tira da conversa as bolhas da fila dadas pelo id de bolha (`queued-<id>`).
+  function dropQueuedBubbles(ids: Iterable<string>) {
+    const drop = new Set(ids);
+    if (!drop.size) return;
+    events = events.filter((e) => !drop.has(e.id));
     rebuildIndex();
   }
 
@@ -3268,7 +3273,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     } catch (err) {
       // Saiu da fila: a edição fecha já, com o aviso desta recusa; o efeito da saída não avisa de novo.
       if ((err as { code?: unknown })?.code === 'queue_entry_gone' && queueEdit === edit) {
-        leaveQueueEdit(queueEditLeft(edit, { entries: [], actions: false }, composerText)?.composerText ?? edit.savedDraft);
+        leaveQueueEdit(queueEditExitText(edit, composerText));
       }
       throw err;
     }
@@ -3277,8 +3282,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const removeQueued = (id: string) => queueAction(async () => {
     await cancelQueuedMessage(sessionName, id, sessionServer());
     // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
-    events = events.filter((e) => e.id !== `queued-${id}`);
-    rebuildIndex();
+    dropQueuedBubbles([`queued-${id}`]);
   });
   // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
   const steerQueued = (id: string) => queueAction(() => steerQueuedMessage(sessionName, id, sessionServer()));
@@ -3594,7 +3598,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       plan={planControls}
       footer={chatPlans}
       {stateEvent}
-      pending={queuePanelShown ? pending.filter((p) => !echoInQueuePanel(p.text, queueList)) : pending}
+      pending={pendingShown}
       {sessionName}
       {pluginServers}
       agentesRodando={activity.agents.filter((a) => a.running)}
@@ -3814,7 +3818,6 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         accountPct={contaPior?.janela.pct ?? null}
         accountWindow={contaPior?.janela.rotulo ?? null}
         onOpenAccounts={() => (accountsOpen = true)}
-        {queuePanelShown}
         queueEditing={queueEdit !== null}
         {queueBusy}
         onQueueEditSubmit={submitQueueEdit}
@@ -3823,7 +3826,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         {#snippet queuePanel()}
           {#if queuePanelShown}
             <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
-                        steerable={queueSteerable(sessionProvider)} onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
+                        onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
                         onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued} />
           {/if}
         {/snippet}

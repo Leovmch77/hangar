@@ -567,7 +567,7 @@ export default function ChatScreen() {
                             returned={returned?.route === rota ? returned.value : undefined}
                             onReturnedAdopted={() => setReturned((cur) => (cur?.route === rota ? null : cur))}
                             firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
-                            headless={headless} onStop={handleStop} stopping={stopping} />
+                            headless={headless} onStop={handleStop} stopping={stopping} queuePanel={queuePanel} />
                 </>
               )
             : null}

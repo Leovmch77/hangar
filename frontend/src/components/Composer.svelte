@@ -142,7 +142,6 @@ import { cachePrazo } from '../lib/cachePrazo';
     onOpenAccounts?: () => void;
     // Painel "Na fila" (montado pelo Chat) acima da aba; com ele na tela, Claude e Codex não têm o chip da fila.
     queuePanel?: Snippet;
-    queuePanelShown?: boolean;
     // Edição de uma mensagem da fila: o envio vira "Atualizar" e Esc sai sem mudar nada.
     queueEditing?: boolean;
     // Ação da fila em voo: o Atualizar espera, como os botões do painel.
@@ -169,7 +168,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     sessionJsonl = null,
     sessionCwd = null, sessionBranch = null,
     accountLabel = null, accountPct = null, accountWindow = null, onOpenAccounts,
-    queuePanel, queuePanelShown = false, queueEditing = false, queueBusy = false, onQueueEditSubmit, onQueueEditCancel,
+    queuePanel, queueEditing = false, queueBusy = false, onQueueEditSubmit, onQueueEditCancel,
   }: Props = $props();
   const placeFolder = $derived(status?.repo || (sessionCwd ? sessionCwd.replace(/\/+$/, '').split('/').pop() || '' : ''));
   const placeBranch = $derived(status?.branch || sessionBranch || '');
@@ -520,9 +519,9 @@ import { cachePrazo } from '../lib/cachePrazo';
   // pra mandar Esc, e mensagem digitada fica na fila até alguém responder.
   const podeInterromper = $derived(isWorking || (headless && sessionState === 'awaiting_input'));
 
-  // Com o painel "Na fila" na tela, Claude e Codex se resolvem por ele; o Kimi segue com o chip (fila da TUI).
-  const chipFila = $derived(temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer
-    && !(queuePanelShown && (isCodex || headless || provider === 'claude')));
+  // Com o painel "Na fila" na tela, Claude e Codex se resolvem por ele (o `filaCount` deles vem 0); o Kimi segue com o
+  // chip (fila da TUI).
+  const chipFila = $derived(temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer);
 
   // Com os atalhos de volta na fileira de baixo, a aba pode não ter nada: sessão fora de repo, sem
   // par, sem cache. Faixa vazia pendurada é pior que faixa ausente.

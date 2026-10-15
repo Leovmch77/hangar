@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import { Linking, Pressable, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
@@ -7,7 +7,7 @@ import { frameHeight, pageExpandable, parseHostMessage, reservedHeight, type Htm
 import { toast } from '../../ui/Toast';
 import { Icon } from '../../ui/Icon';
 import * as m from '../../paraglide/messages';
-import { applyScript, onlyInitial, openPageLink, rememberReported, usePageDocument } from './pageDocument';
+import { onlyInitial, rememberReported, usePageDocument, usePageWebView } from './pageDocument';
 import { pageScreenHref } from './pageRoute';
 
 // Página publicada pelo html_render no lugar da chamada, como o cartão do nativo (page_card.rs):
@@ -38,12 +38,7 @@ function LivePageCard({ page, sessionName, serverId }: { page: HtmlPageRef; sess
   const { width: screen } = useWindowDimensions();
   const [width, setWidth] = useState(0);
   const { key, state, doc, reported, setReported, load, params } = usePageDocument(page, sessionName, serverId);
-  const web = useRef<WebView>(null);
-  const touchedAt = useRef(0);
-  const own = page.ownTheme;
-
-  // Tema mudou com a página aberta: ela recebe as variáveis novas sem recarregar.
-  useEffect(() => { if (!own) web.current?.injectJavaScript(applyScript(params)); }, [params, own]);
+  const { web, applyTheme, touched, openLink } = usePageWebView(params, page.ownTheme);
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     const msg = parseHostMessage(e.nativeEvent.data);
@@ -51,9 +46,9 @@ function LivePageCard({ page, sessionName, serverId }: { page: HtmlPageRef; sess
       const next = Math.round(msg.height);
       if (rememberReported(key, next)) setReported((prev) => (prev === next ? prev : next));
     } else if (msg?.kind === 'link') {
-      openPageLink(msg.url, touchedAt);
+      openLink(msg.url);
     }
-  }, [key, setReported]);
+  }, [key, setReported, openLink]);
 
   const onLayout = useCallback((e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width), []);
   const w = width || screen - 2 * theme.base.space[4];
@@ -76,7 +71,7 @@ function LivePageCard({ page, sessionName, serverId }: { page: HtmlPageRef; sess
   }
   return (
     <View style={[styles.page, { height }]} onLayout={onLayout} accessibilityLabel={page.title}
-      onTouchStart={() => { touchedAt.current = Date.now(); }}>
+      onTouchStart={touched}>
       {state === 'loading' ? (
         <View style={styles.loading} accessibilityRole="progressbar">
           <Text style={styles.note}>{m.page_loading({ title: page.title })}</Text>
@@ -93,7 +88,7 @@ function LivePageCard({ page, sessionName, serverId }: { page: HtmlPageRef; sess
           // Sem janela nova: o window.open vira navegação no próprio quadro e o filtro barra.
           setSupportMultipleWindows={false}
           onMessage={onMessage}
-          onLoadEnd={() => { if (!own) web.current?.injectJavaScript(applyScript(params)); }}
+          onLoadEnd={applyTheme}
           scrollEnabled={inside}
           nestedScrollEnabled={inside}
           bounces={false}

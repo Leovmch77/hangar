@@ -5,7 +5,7 @@
     themedPageDocument, type HtmlPageRef, type PageFetchState } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
   import { desktop } from '../lib/desktop.svelte';
-  import { pageVariables, postTheme, readScheme } from '../lib/pageHost';
+  import { openPageLink, pageVariables, postTheme, readScheme } from '../lib/pageHost';
   import HtmlPageDialog from './HtmlPageDialog.svelte';
   import IconMaximize from './icons/IconMaximize.svelte';
   import { getRouteBaseUrl } from '../lib/auth';
@@ -59,13 +59,8 @@
   function onMessage(e: MessageEvent) {
     if (!frame || e.source !== frame.contentWindow) return;
     const msg = parseHostMessage(e.data);
-    if (msg?.kind === 'height') {
-      reported = msg.height;
-    } else if (msg?.kind === 'link'
-      // Só com gesto real: a página não abre aba sozinha.
-      && (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive) {
-      window.open(msg.url, '_blank', 'noopener,noreferrer');
-    }
+    if (msg?.kind === 'height') reported = msg.height;
+    else if (msg?.kind === 'link') openPageLink(msg.url);
   }
 
   $effect(() => {

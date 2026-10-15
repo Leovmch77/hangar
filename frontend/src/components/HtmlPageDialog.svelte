@@ -4,7 +4,7 @@
   import ModalDialog from './ModalDialog.svelte';
   import { PAGE_ZOOM_MAX, PAGE_ZOOM_MIN, pageZoomKey, pageZoomLabel, parseHostMessage, stepPageZoom, wheelZoom,
     themedPageDocument, type PageZoomAction } from '@hangar/core';
-  import { pageVariables, postTheme, readFullscreenMessage, withZoomBridge, type Scheme } from '../lib/pageHost';
+  import { openPageLink, pageVariables, postTheme, readFullscreenMessage, withZoomBridge, type Scheme } from '../lib/pageHost';
 
   let { title, doc, ownTheme, scheme, onClose }:
     { title: string; doc: string; ownTheme: boolean; scheme: Scheme; onClose: () => void } = $props();
@@ -46,10 +46,7 @@
     else if (z?.kind === 'escape') onClose();
     else {
       const msg = parseHostMessage(e.data);
-      // Só com gesto real: a página não abre aba sozinha.
-      if (msg?.kind === 'link' && (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive) {
-        window.open(msg.url, '_blank', 'noopener,noreferrer');
-      }
+      if (msg?.kind === 'link') openPageLink(msg.url);
     }
   }
 

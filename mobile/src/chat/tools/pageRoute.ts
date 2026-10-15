@@ -7,7 +7,8 @@ export function pageScreenHref(serverId: string, sessionName: string, page: Html
   return `/s/${serverId}/${sessionName}/page?${q.toString()}`;
 }
 
-const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? '';
+// Parâmetro de rota do expo-router: repetido vira lista, e vale o primeiro.
+export const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? '';
 
 export function pageFromParams(p: { id?: string | string[]; title?: string | string[]; own?: string | string[] }): HtmlPageRef | null {
   const id = one(p.id);

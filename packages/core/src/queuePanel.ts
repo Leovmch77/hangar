@@ -1,5 +1,6 @@
 // Painel da fila: as mensagens que esperam a vez no Hangar, acima do composer. A lista vem do evento `queue` do
 // servidor (Claude e Codex, com ações); sem ele (Pi, omp, Kimi, modo python) sai das bolhas `queued-`, sem ações.
+import { waitsInQueue } from './history';
 import type { ChatEvent } from './types';
 
 export interface QueuePanelEntry { id: string; text: string; ts: number | null }
@@ -33,8 +34,7 @@ export function queueRemovedBubbleIds(data: unknown): string[] {
 /** Sem o evento do servidor: as bolhas `queued-` que ainda esperam, só leitura. */
 export function derivedQueuePanel(events: ChatEvent[]): QueuePanel {
   const entries = events
-    .filter((e) => e.kind === 'user_msg' && e.id.startsWith(PREFIX) && e.queued_delivered === false
-      && !e.desistiu && !e.queued_confirmed && !e.queued_consumed)
+    .filter((e) => waitsInQueue(e) && e.queued_delivered === false && !e.queued_confirmed)
     .map((e) => ({ id: e.id.slice(PREFIX.length), text: e.text ?? '', ts: e.queued_ts ?? null }));
   return { entries, actions: false };
 }
@@ -71,19 +71,21 @@ export function echoInQueuePanel(text: string, panel: QueuePanel): boolean {
   return t !== '' && panel.entries.some((e) => e.text.trim() === t);
 }
 
+/** O texto do composer ao sair da edição sem gravar: com o rascunho guardado vazio, a edição fica; senão ele volta. */
+export function queueEditExitText(edit: QueueEdit, composerText: string): string {
+  return edit.savedDraft.trim() === '' ? composerText : edit.savedDraft;
+}
+
 /** A mensagem saiu da fila durante a edição: com o rascunho vazio a edição fica no composer; senão o rascunho volta. */
 export function queueEditLeft(edit: QueueEdit, panel: QueuePanel, composerText: string): { composerText: string } | null {
   if (panel.entries.some((e) => e.id === edit.entryId)) return null;
-  return { composerText: edit.savedDraft.trim() === '' ? composerText : edit.savedDraft };
+  return { composerText: queueEditExitText(edit, composerText) };
 }
 
 /** `before_id` da rota para mover uma posição; `null` é o fim; `undefined`, nada a mover. */
 export function moveTarget(entries: QueuePanelEntry[], id: string, delta: -1 | 1): string | null | undefined {
-  const i = entries.findIndex((e) => e.id === id);
-  if (i < 0) return undefined;
-  if (delta < 0) return i === 0 ? undefined : entries[i - 1].id;
-  if (i === entries.length - 1) return undefined;
-  return entries[i + 2]?.id ?? null;
+  const neighbor = entries[entries.findIndex((e) => e.id === id) + delta];
+  return neighbor ? dropTarget(entries, id, neighbor.id, delta > 0) : undefined;
 }
 
 /** `before_id` para soltar `dragId` antes (ou depois, com `after`) de `overId`; `undefined` se a posição não muda. */
@@ -96,7 +98,3 @@ export function dropTarget(entries: QueuePanelEntry[], dragId: string, overId: s
   return before === dragId || before === next ? undefined : before;
 }
 
-/** Pi e omp não têm orientação por mensagem: o botão Orientar fica desativado com dica. */
-export function queueSteerable(provider: string | null | undefined): boolean {
-  return provider !== 'pi' && provider !== 'omp';
-}

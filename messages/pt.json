@@ -1291,7 +1291,6 @@
   "queue_panel_expand": "Expandir a fila",
   "queue_panel_reorder": "Reordenar (arraste ou use as setas)",
   "queue_panel_edit": "Editar no composer",
-  "queue_panel_steer_unavailable": "Este agente não orienta por mensagem",
   "queue_panel_remove": "Apagar da fila",
   "queue_panel_editing": "Editando a mensagem da fila",
   "queue_panel_update": "Atualizar",
