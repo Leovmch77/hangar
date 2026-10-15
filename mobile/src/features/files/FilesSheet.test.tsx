@@ -68,6 +68,7 @@ const mocks = vi.hoisted(() => {
     recarregarDiff: vi.fn().mockResolvedValue(undefined),
     descartar: vi.fn().mockResolvedValue(undefined),
     alternarPasta: vi.fn().mockResolvedValue(undefined),
+    setOnlyModified: vi.fn().mockResolvedValue(undefined),
     trocarEscopo: vi.fn().mockResolvedValue(undefined),
   };
   return { get state() { return snapshot; }, reset, setReady, setFileState, useServers, api };
@@ -83,13 +84,19 @@ vi.mock('./filesStore', () => ({
   entriesOf: () => [],
   listaCortadaOf: () => false,
 }));
-vi.mock('./FileTree', () => ({ FileTree: () => React.createElement('div', null, 'tree') }));
-vi.mock('./FileSearchBar', () => ({ FileSearchBar: () => React.createElement('div', null, 'search') }));
+vi.mock('./FileTree', () => ({
+  FileTree: ({ onToggleFiltro }: { onToggleFiltro: () => void }) =>
+    React.createElement('button', { onClick: onToggleFiltro }, 'toggle-filter'),
+}));
+vi.mock('./FileSearchBar', () => ({
+  FileSearchBar: ({ onBusca }: { onBusca: (q: string, mode: 'names' | 'contents') => void }) =>
+    React.createElement('button', { onClick: () => onBusca('', 'contents') }, 'clear-search'),
+}));
 vi.mock('./FileViewer', () => ({ FileViewer: () => React.createElement('div', null, 'viewer') }));
 vi.mock('./FileEditor', () => ({ FileEditor: () => React.createElement('div', null, 'editor') }));
 vi.mock('../../paraglide/messages', () => ({
   comum_carregando: () => 'Carregando…',
-  arq_sessao_encerrada: () => 'Sessão encerrada',
+  chat_servidor_removido: () => 'Servidor removido',
   comum_voltar: () => 'Voltar',
   arq_aba: () => 'Arquivos',
   arq_buscar: () => 'Buscar',
@@ -106,6 +113,10 @@ describe('FilesSheet — deep-link', () => {
     mocks.api.retain.mockClear();
     mocks.api.release.mockClear();
     mocks.api.abrir.mockClear();
+    mocks.api.buscar.mockClear();
+    mocks.api.setOnlyModified.mockClear();
+    mocks.api.recarregar.mockClear();
+    mocks.api.use.setState.mockClear();
     document.body.innerHTML = '';
   });
 
@@ -142,6 +153,47 @@ describe('FilesSheet — deep-link', () => {
     root.unmount();
   });
 
+  it('encaminha busca vazia ao store em vez de limpar apenas a tela', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      mocks.setReady(true);
+      root.render(React.createElement(FilesSheet));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Buscar')!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'clear-search')!.click();
+    });
+
+    expect(mocks.api.buscar).toHaveBeenCalledWith('', 'contents');
+    expect(mocks.api.use.setState).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('encaminha troca de filtro ao store sem alterar estado diretamente', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      mocks.setReady(true);
+      root.render(React.createElement(FilesSheet));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Arquivos')!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'toggle-filter')!.click();
+    });
+
+    expect(mocks.api.setOnlyModified).toHaveBeenCalledWith(false);
+    expect(mocks.api.use.setState).not.toHaveBeenCalled();
+    expect(mocks.api.recarregar).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
   it('servidor fora da lista mostra aviso e não abre nada', async () => {
     mocks.state.servers.length = 0;
     const container = document.createElement('div');
@@ -151,7 +203,7 @@ describe('FilesSheet — deep-link', () => {
       mocks.setReady(true);
       root.render(React.createElement(FilesSheet));
     });
-    expect(container.textContent).toContain('Sessão encerrada');
+    expect(container.textContent).toContain('Servidor removido');
     expect(mocks.api.retain).not.toHaveBeenCalled();
     expect(mocks.api.abrir).not.toHaveBeenCalled();
     root.unmount();
