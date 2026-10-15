@@ -391,8 +391,8 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   na fila, use o **Orientar** da linha dela. Se o turno terminar antes da entrega, o texto é
   preservado e o app informa a falha; a orientação não inicia outro turno por conta própria.
 - **Slash commands:** `/` abre a lista (`/clear`, `/compact`, …). `/clear` limpa de verdade (zera a
-  fila). Com mensagens esperando no painel, comando de barra é recusado com aviso: oriente ou apague
-  as mensagens antes, para o comando não passar na frente delas nem apagá-las.
+  fila). No Claude com terminal, com mensagens esperando no painel, comando de barra é recusado com
+  aviso: oriente ou apague as mensagens antes, para o comando não passar na frente delas nem apagá-las.
 - **Modelo/esforço:** toque na pill (ex `Opus4.8·1M·high`) → escolhe modelo + esforço (só na sessão).
 - **Codex — modo e skills:** o botão **Normal/Planejar**, ou **Shift+Tab** no campo de mensagem,
   muda o modo nativo da sessão. A troca preserva modelo, esforço e permissões e vale para o próximo
