@@ -98,7 +98,7 @@ async function discover($: EngineInterface, attempt = 0) {
     }
     // Otimista pelo mesmo motivo do `session.start`.
     setBridge({ url, token, sessao });
-    void pull($, { url, token, sessao });
+    void pull($, { url, token, sessao }, true);
   } catch {
     // Sem arquivo, backend fora ou resposta estranha: o plugin fica parado e o tmux segue.
   }
@@ -158,7 +158,8 @@ export async function deliverAgentMessage($: Pick<EngineInterface, "session" | "
   $.ui.log(`hangar: confirmação da mensagem ${msg.id} ao subagente ${msg.to} não chegou (${sent.isDelivered ? "entregue" : "recusada"}): ${failure}`, { to: "debug" });
 }
 
-async function pull($: EngineInterface, ponte: Bridge) {
+/** `discovered`: a ponte veio do `whoami`, e não do ambiente do lançamento. */
+async function pull($: EngineInterface, ponte: Bridge, discovered = false) {
   let espera = REARM_MS;
   try {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
@@ -242,9 +243,15 @@ async function pull($: EngineInterface, ponte: Bridge) {
       // 403 é token de outra vida da sessão: insistir de 50 ms bateria no
       // backend para sempre. 409 é outra instância dona da sessão: espera mais.
       espera = r.status === 409 ? BACKOFF_DONO_MS : BACKOFF_MS;
+      // Chave do `whoami` recusada: o backend trocou (reinício, Python → Rust) e ela morreu com ele. Insistir nela
+      // deixava a sessão sem ponte até ser reaberta; a mesma espera vale para a pergunta nova.
+      if (discovered && (r.status === 403 || r.text.includes("plugin_identity_missing"))) {
+        $.clock.after(espera, () => void discover($));
+        return;
+      }
     }
   } catch {
     espera = BACKOFF_MS;
   }
-  $.clock.after(espera, () => void pull($, ponte));
+  $.clock.after(espera, () => void pull($, ponte, discovered));
 }

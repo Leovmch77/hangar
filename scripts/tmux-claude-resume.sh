@@ -214,12 +214,25 @@ fix_last() {
   echo "$(date '+%F %T') fix-last: last was empty -> $(basename "$f")" >> "$LOG"
 }
 
+# Os `--plugin-dir` que o wrapper do shell e o backend passam, do arquivo que o backend publica (um
+# caminho por linha, o do Hangar primeiro). O restore relança por `env`, que pula a função `claude`
+# do shell: sem isto o plugin do Hangar nem carrega na sessão restaurada.
+_plugin_dirs() {
+  local file="$HOME/.hangar/plugin-dir" dir
+  [ -r "$file" ] || return 0
+  while IFS= read -r dir || [ -n "$dir" ]; do
+    [ -n "$dir" ] || continue
+    if [ -d "$dir" ]; then printf ' --plugin-dir %q' "$dir"
+    else echo "  plugin-dir '$dir' não existe; fica de fora" >> "$LOG"; fi
+  done < "$file"
+}
+
 restore() {
   # Audit trail: the 2026-07-17 boot restored sessions but injected nothing and left no trace to
   # debug — log every decision so the next failure is diagnosable.
   echo "$(date '+%F %T') restore: start (map: $(wc -l < "$MAP" 2>/dev/null || echo 0) entries)" >> "$LOG"
   [ -f "$MAP" ] || return 0
-  local name prov id cfg engine cur cmd cwd home conta
+  local name prov id cfg engine cur cmd cwd home conta acct
   while IFS=$'\t' read -r name prov id cfg engine; do
     # Map written before providers existed: <name>\t<uuid>, claude on the default account.
     if [ -z "${id:-}" ] && [ -n "${prov:-}" ]; then id=$prov; prov=claude; fi
@@ -237,7 +250,7 @@ restore() {
       *) echo "  $name: skipped (pane runs '$cur')" >> "$LOG"; continue ;;
     esac
     case "$prov" in
-      claude) cmd="claude --resume $id" ;;
+      claude) cmd="claude --resume $id$(_plugin_dirs)" ;;
       kimi)   cmd="kimi -S $id" ;;
       pi)     cmd="pi --session $id" ;;
       # O pane do Codex e o lancador, nao o binario: ele sobe o app-server e a TUI juntos, e sem
@@ -262,7 +275,11 @@ restore() {
     # spawns the session; the account is a plain env prefix because the pane already exists (the
     # `tmux new-session -e` the app uses is not available on a restored pane).
     if [ -n "${engine:-}" ]; then cmd="hangar-engine --exec $engine -- $cmd"; fi
-    if [ -n "${cfg:-}" ]; then cmd="env CLAUDE_CONFIG_DIR=$(printf '%q' "$cfg") $cmd"; fi
+    # Sempre por `env`, para a função `claude` do shell não somar um segundo `--plugin-dir`. O pane
+    # restaurado nasce sem o CP_SESSION_NAME que o `tmux new-session -e` carimba; sem conta, a padrão
+    # é a AUSÊNCIA da variável (mesma regra do wrapper), nunca a herdada do servidor tmux.
+    if [ -n "${cfg:-}" ]; then acct="CLAUDE_CONFIG_DIR=$(printf '%q' "$cfg")"; else acct="-u CLAUDE_CONFIG_DIR"; fi
+    cmd="env $acct CP_SESSION_NAME=$(printf '%q' "$name") $cmd"
     if tmux send-keys -t "=$name:." "$cmd" Enter; then
       echo "  $name: injected [$prov] $id${engine:+ engine=$engine}${cfg:+ conta=$cfg}" >> "$LOG"
     else

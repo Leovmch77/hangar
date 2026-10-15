@@ -351,6 +351,15 @@ mod held_routes {
     }
 
     #[tokio::test]
+    async fn plugin_loopback_held_stale_key_is_admitted_by_its_signed_name() {
+        let (_store, _facts, address, _server) = start().await;
+        let stale = json!({"sessao":"renamed","token":mint_keyed(OWNER,"renamed","python-key"),"estado":"working"});
+        assert_eq!(post(address, "state", stale).await.status().as_u16(), 200);
+        let ghost = json!({"sessao":"ghost","token":mint_keyed(OWNER,"ghost","python-key"),"estado":"working"});
+        assert_eq!(post(address, "state", ghost).await.status().as_u16(), 409);
+    }
+
+    #[tokio::test]
     async fn plugin_loopback_held_auth_switch_and_rename_use_the_same_binding() {
         let (store, facts, address, _server) = start().await;
         for token in [OWNER.to_owned(), "guest".into(), machine_key(OWNER), mint(OWNER, "other")] {
