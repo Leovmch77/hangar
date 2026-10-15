@@ -857,9 +857,11 @@ como o instalador já não instalava o Electron, instalação nova no Linux esta
   daria o painel mais fluido, a um pacote de ~250 MB e um build com processos auxiliares. Com o
   Chromium, `control.rs`, `relay.rs`, `server.rs` e o `navsock.py` servem aos dois sistemas sem
   mudar.
-- **Um Chromium por app, um alvo por sessão.** Nasce no primeiro navegador aberto e termina quando
-  o último fecha (e com o app: `PR_SET_PDEATHSIG`). O perfil é persistente
-  (`<config do app>/chromium`), compartilhado entre as sessões como no Electron.
+- **Um Chromium do painel por app, um alvo por sessão.** Nasce no primeiro navegador aberto e termina
+  quando o último fecha (e com o app: `PR_SET_PDEATHSIG`). O perfil é persistente
+  (`<config do app>/chromium`), compartilhado entre as sessões como no Electron. Desde 15/10/2026 as
+  páginas da conversa têm um segundo Chromium, próprio (ver "Página da conversa no Linux: quadro no
+  tamanho dele e Chromium próprio em escala 2").
 - **CDP por pipe, sem porta** (`--remote-debugging-pipe`, fd 3 e 4, mensagens terminadas em NUL),
   sessões multiplexadas por `sessionId`. Respostas resolvem direto da thread de leitura; eventos
   vão à thread da interface, como no WebView2. `browser::cdp::Cdp` é o mesmo nome nos dois
