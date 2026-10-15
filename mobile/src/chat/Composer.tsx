@@ -1064,10 +1064,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     const prev = lastEditRef.current;
     lastEditRef.current = queueEdit;
     if (!prev || queueEdit) return;
-    const next = exitTextRef.current ?? prev.savedDraft;
+    const left = chat.use.getState().queueEditExit;
+    if (left !== null) chat.use.setState({ queueEditExit: null });
+    const next = exitTextRef.current ?? left ?? prev.savedDraft;
     exitTextRef.current = null;
     replaceText(next, next.length);
-  }, [queueEdit, replaceText]);
+  }, [queueEdit, replaceText, chat]);
 
   // A mensagem saiu da fila durante a edição (entregue, orientada ou apagada noutro aparelho).
   useEffect(() => {

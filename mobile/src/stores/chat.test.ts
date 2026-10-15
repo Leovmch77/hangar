@@ -543,8 +543,16 @@ test('recusa da fila vira aviso traduzido uma vez e a edição da que saiu fecha
   expect(await chat.submitQueueEdit('oi de novo')).toBeNull();
   // Fechada aqui, o Composer não vê a saída pelo painel e não avisa de novo.
   expect(chat.use.getState().queueEdit).toBeNull();
+  // Rascunho guardado vazio: o texto editado fica no campo, não some.
+  expect(chat.use.getState().queueEditExit).toBe('oi de novo');
   expect(chat.use.getState().queueError).toBe(m.queue_entry_gone());
   expect(chat.use.getState().queueBusy).toBe(false);
+  // Com rascunho guardado, é ele que volta.
+  created[0].trigger('queue', JSON.stringify({ entries: [{ id: 'a', text: 'oi', ts: 1 }], actions: true }));
+  chat.startQueueEdit('a', 'meu rascunho');
+  expect(chat.use.getState().queueEditExit).toBeNull();
+  expect(await chat.submitQueueEdit('oi mudado')).toBeNull();
+  expect(chat.use.getState().queueEditExit).toBe('meu rascunho');
 });
 
 test('filaCount só conta o Kimi: Claude e Codex usam o painel', () => {

@@ -16,6 +16,7 @@ import {
   parsePluginToast,
   parseQueuePanel,
   queueEditPayload,
+  queueEditLeft,
   queueRemovedBubbleIds,
   currentQueuePanel,
   beginQueueEdit,
@@ -88,6 +89,8 @@ export interface ChatState {
   queuePanel: QueuePanel | null;
   // Mensagem da fila aberta no composer; o rascunho de antes dela fica em `savedDraft`.
   queueEdit: QueueEdit | null;
+  // Texto que o composer recebe quando a edição fechou por a entrada ter saído da fila (null = o rascunho guardado).
+  queueEditExit: string | null;
   // Uma ação da fila por vez: os botões do painel ficam desativados enquanto ela está em voo.
   queueBusy: boolean;
   queueError: string | null;
@@ -157,6 +160,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     pending: [],
     queuePanel: null,
     queueEdit: null,
+    queueEditExit: null,
     queueBusy: false,
     queueError: null,
   }));
@@ -623,6 +627,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         askPiDismissed: null,
         queuePanel: null,
         queueEdit: null,
+        queueEditExit: null,
         loading: true,
       });
       void loadHistory();
@@ -693,7 +698,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const entry = queueEntries().find((e) => e.id === id);
       if (!entry) return draft;
       const next = beginQueueEdit(entry, draft, useChatStore.getState().queueEdit);
-      useChatStore.setState({ queueEdit: next.edit });
+      useChatStore.setState({ queueEdit: next.edit, queueEditExit: null });
       return next.composerText;
     },
     cancelQueueEdit(): string {
@@ -715,7 +720,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         } catch (err) {
           // Saiu da fila: a edição fecha já, com o aviso desta recusa; a saída pelo painel não avisa de novo.
           if ((err as { code?: unknown })?.code === 'queue_entry_gone' && useChatStore.getState().queueEdit === edit) {
-            useChatStore.setState({ queueEdit: null });
+            // Com o rascunho guardado vazio, o texto editado fica no campo, como no PWA (`queueEditLeft`).
+            const left = queueEditLeft(edit, { entries: [], actions: false }, text);
+            useChatStore.setState({ queueEdit: null, queueEditExit: left?.composerText ?? edit.savedDraft });
           }
           throw err;
         }
