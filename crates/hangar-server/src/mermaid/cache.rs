@@ -103,7 +103,13 @@ impl Cache {
         use std::io::Write as _;
         let mut tmp = tempfile::Builder::new().prefix(".").suffix(".tmp").tempfile_in(&self.root)?;
         tmp.write_all(bytes)?;
-        tmp.persist(path).map(drop).map_err(|e| e.error)
+        match tmp.persist(path) {
+            Ok(_) => Ok(()),
+            // No Windows, trocar um arquivo que outro gravador acabou de pôr no lugar dá "acesso negado". O desenho
+            // da mesma chave é o mesmo: vale o que já está lá, e o temporário some com o erro.
+            Err(e) if e.error.kind() == io::ErrorKind::PermissionDenied && path.is_file() => Ok(()),
+            Err(e) => Err(e.error),
+        }
     }
 
     /// Um voo por chave: quem pede a chave que já está sendo desenhada espera o mesmo resultado em vez de
