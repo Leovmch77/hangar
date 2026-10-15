@@ -148,6 +148,27 @@ pub(super) fn fold_lead(live: bool) -> Div {
     else { div().flex_none().w(px(7.)).h(px(19.)) }
 }
 
+/// Recuo das linhas `⎿` da dobra: o ponto (7 px) e o vão (8 px) da linha de cima, para o `⎿` cair sob o título.
+pub(super) const FOLD_SUB_INDENT: f32 = 7. + 8.;
+
+/// Linha de cima da dobra: o ponto e o título num botão, que foca pelo teclado, ativa com Enter/Espaço e leva o rótulo,
+/// como o cabeçalho da chamada.
+pub(super) fn fold_header(id: SharedString, title: String, open: bool, live: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+    div().flex().gap(px(8.)).child(fold_lead(live))
+        .child(Button::new(id).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
+            .accessibility_label(title.clone())
+            .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
+            .on_click(on_click)).into_any_element()
+}
+
+/// Linha `⎿` da dobra recolhida: o que roda agora ou a saída de uma falha.
+pub(super) fn fold_sub(text: String, color: Hsla) -> AnyElement {
+    div().flex().gap(px(8.)).pl(px(FOLD_SUB_INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+        .child(div().flex_none().text_color(theme::faint()).child("⎿"))
+        .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element()
+}
+
 /// Texto do agente na pele Terminal: o ponto branco antes do primeiro parágrafo, como o "● texto" do Claude Code.
 pub(super) fn assistant_text_row(content: Div, line: f32) -> Div {
     div().w_full().flex().items_start().gap(px(8.))
@@ -160,9 +181,9 @@ pub(super) fn assistant_text_row(content: Div, line: f32) -> Div {
 pub(super) fn display_name(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
         "edit" | "multiedit" | "notebookedit" | "apply_patch" => "Update".into(),
-        _ => match (mcp_server(name), name.splitn(3, "__").nth(2)) {
-            (Some(server), Some(tool)) => format!("{server} - {tool} (MCP)"),
-            _ => conversation::tool_display_name(name),
+        _ => match mcp_tool(name) {
+            Some((server, tool)) => format!("{server} - {tool} (MCP)"),
+            None => conversation::tool_display_name(name),
         },
     }
 }
@@ -389,17 +410,11 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
 pub(super) fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
 
 /// O servidor de `mcp__<servidor>__<ferramenta>` como está no nome: é o que a lista publica.
-fn mcp_server_raw(name: &str) -> Option<&str> {
-    let mut parts = name.split("__");
-    (parts.next() == Some("mcp")).then_some(())?;
-    let server = parts.next()?;
-    parts.next()?;
-    Some(server)
-}
+fn mcp_server_raw(name: &str) -> Option<&str> { conversation::mcp_parts(name).map(|(server, _)| server) }
 
-/// O servidor sem o prefixo `hangar-`, como o cartão mostra.
-fn mcp_server(name: &str) -> Option<&str> {
-    mcp_server_raw(name).map(|server| server.strip_prefix("hangar-").unwrap_or(server))
+/// Servidor (sem o prefixo `hangar-`, como o cartão mostra) e ferramenta.
+fn mcp_tool(name: &str) -> Option<(&str, &str)> {
+    conversation::mcp_parts(name).map(|(server, tool)| (server.strip_prefix("hangar-").unwrap_or(server), tool))
 }
 
 pub(super) const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
@@ -435,7 +450,7 @@ pub(super) fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind
         let call = &events[tool.call];
         match kind {
             FoldKind::Read => match editdiff::input_path(call.tool_input.as_ref()) { "" => pathless_reads += 1, path => { files.insert(path); } },
-            FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_server) { if !servers.contains(&server) { servers.push(server); } },
+            FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_tool).map(|(server, _)| server) { if !servers.contains(&server) { servers.push(server); } },
             _ => {}
         }
     }
@@ -570,26 +585,19 @@ impl Hangar {
             let live = folded.iter().rev().find(|t| t.result.is_none() && self.running(t.call)).copied();
             let title = fold_title(&self.chat.events, folded, &folded_kinds, live.is_some());
             let toggle_key = key.clone();
-            // Botão: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo, como o cabeçalho da chamada.
-            let mut block = vec![div().flex().gap(px(8.)).child(fold_lead(live.is_some()))
-                .child(Button::new(SharedString::from(key)).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
-                    .accessibility_label(title.clone())
-                    .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element()];
+            let mut block = vec![fold_header(SharedString::from(key), title, open, live.is_some(),
+                cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))];
             if !open {
                 // Recolhida, a linha mostra o que roda agora e a saída de cada falha, como o Claude Code.
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(15.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
-                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
                     let call = &self.chat.events[tool.call];
                     let summary = conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref());
                     // Comando em voo com o `$` na frente, como o Claude Code desenha.
                     let shell = call.tool_name.as_deref().is_some_and(|name| is_any(name, SHELL_TOOLS));
-                    block.push(sub(if shell { format!("$ {summary}") } else { summary }, theme::muted()));
+                    block.push(fold_sub(if shell { format!("$ {summary}") } else { summary }, theme::muted()));
                 }
                 for tool in folded.iter().filter(|t| t.result.is_some_and(|r| self.chat.events[r].is_error == Some(true))) {
-                    block.push(sub(self.tool_status(*tool).0, theme::danger()));
+                    block.push(fold_sub(self.tool_status(*tool).0, theme::danger()));
                 }
             }
             rows.push(div().flex().flex_col().children(block).into_any_element());
@@ -602,7 +610,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, display_name, fold_kind, fold_title, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
+    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, display_name, fold_kind, fold_title, header_arg, mcp_tool, shell_fold_kind, split_budget, visible_edits};
     use serde_json::json;
 
     #[test]
@@ -730,9 +738,9 @@ mod tests {
 
     #[test]
     fn mcp_server_drops_the_hangar_prefix_like_the_card() {
-        assert_eq!(mcp_server("mcp__hangar-computer-control__objetivo"), Some("computer-control"));
-        assert_eq!(mcp_server("mcp__pmedico__progresso"), Some("pmedico"));
-        assert_eq!(mcp_server("mcp__x"), None);
-        assert_eq!(mcp_server("Bash"), None);
+        assert_eq!(mcp_tool("mcp__hangar-computer-control__objetivo"), Some(("computer-control", "objetivo")));
+        assert_eq!(mcp_tool("mcp__pmedico__progresso__x"), Some(("pmedico", "progresso__x")));
+        assert_eq!(mcp_tool("mcp__x"), None);
+        assert_eq!(mcp_tool("Bash"), None);
     }
 }

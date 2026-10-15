@@ -4,7 +4,7 @@ pub mod route;
 pub mod sse;
 
 use std::time::Duration;
-use reqwest::{Client, Response, StatusCode, header};
+use reqwest::{Client, Method, Response, StatusCode, header};
 use serde_json::{Value, json};
 use url::Url;
 use dto::{ChatEvent, CommandInfo, Delivery, PairResult, SessionInfo, UploadFile, Uploaded};
@@ -423,38 +423,20 @@ impl Api {
 
     // Mutação sem retry: timeout ou queda depois de enviar vira incerteza, nunca repetição.
     pub async fn act(&self, name: &str, path: &[&str], body: Option<Value>, delete: bool, seconds: u64) -> Result<Value, Failure> {
+        self.request(name, if delete { Method::DELETE } else { Method::POST }, path, None, body, seconds).await
+    }
+
+    /// Pedido na rota da sessão com método e consulta próprios; o `act` é o caso `POST`/`DELETE` sem consulta.
+    pub async fn request(&self, name: &str, method: Method, path: &[&str], query: Option<(&str, &str)>, body: Option<Value>, seconds: u64)
+        -> Result<Value, Failure> {
         let mut url = self.endpoint(Some(name), None);
         url.path_segments_mut().expect("validated HTTP base").extend(path);
-        let mut req = if delete { self.client.delete(url) } else { self.client.post(url) };
+        if let Some((key, value)) = query { url.query_pairs_mut().append_pair(key, value); }
+        let mut req = self.client.request(method, url);
         if let Some(body) = body { req = req.json(&body); }
         let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
         r.json().await.map_err(|_| Failure::transport(true))
-    }
-
-    /// Troca o texto da entrada que espera na fila; 409 `queue_entry_gone` se ela já saiu.
-    pub async fn queue_edit(&self, name: &str, id: &str, text: &str) -> Result<Value, Failure> {
-        let mut url = self.endpoint(Some(name), None);
-        url.path_segments_mut().expect("validated HTTP base").extend(["queue", id]);
-        let r = self.client.patch(url).json(&json!({"text": text})).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(true))?;
-        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
-    }
-
-    /// O X do painel: só tira a que espera (`only_waiting`); entrega incerta nunca vira desistência por ele.
-    pub async fn queue_cancel(&self, name: &str, id: &str) -> Result<Value, Failure> {
-        let mut url = self.endpoint(Some(name), None);
-        url.path_segments_mut().expect("validated HTTP base").extend(["queue", id]);
-        url.query_pairs_mut().append_pair("only_waiting", "true");
-        let r = self.client.delete(url).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(true))?;
-        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
-    }
-
-    /// Manda a entrada ao turno em curso; `{"steered": false}` = não havia turno e ela foi entregue (ou foi à frente).
-    pub async fn queue_steer(&self, name: &str, id: &str) -> Result<Value, Failure> { self.act(name, &["queue", id, "steer"], None, false, 30).await }
-
-    /// `before`: id da entrada que passa a vir depois; `None` é o fim da fila.
-    pub async fn queue_reorder(&self, name: &str, id: &str, before: Option<&str>) -> Result<Value, Failure> {
-        self.act(name, &["queue", "reorder"], Some(json!({"id": id, "before_id": before})), false, 30).await
     }
 
     /// Junta `name` e `peers` num grupo (funde os grupos de todos). 409 = o grupo já tem outra tarefa; `replace_task` troca.
@@ -1212,10 +1194,12 @@ mod tests {
             seen
         });
         let api = Api::new(&format!("http://{address}"), "fixture-token").unwrap();
-        api.queue_edit("a b", "e 1", "novo").await.unwrap();
-        api.queue_cancel("a b", "e 1").await.unwrap();
-        assert_eq!(api.queue_steer("a b", "e 1").await.unwrap()["steered"], true);
-        api.queue_reorder("a b", "e 1", None).await.unwrap();
+        use crate::interaction::Action;
+        for action in [Action::QueueEdit("e 1".into(), "novo".into()), Action::QueueCancel("e 1".into()), Action::QueueSteer("e 1".into()),
+            Action::QueueReorder("e 1".into(), None)] {
+            let reply = api.request("a b", action.method(), &action.path(), action.query(), action.queue_body(), action.seconds()).await.unwrap();
+            assert_eq!(reply["steered"], true);
+        }
         assert_eq!(server.await.unwrap(), vec![
             ("PATCH /api/sessions/a%20b/queue/e%201".to_owned(), Some(json!({"text": "novo"}))),
             ("DELETE /api/sessions/a%20b/queue/e%201?only_waiting=true".to_owned(), None),

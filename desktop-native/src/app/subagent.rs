@@ -411,21 +411,15 @@ impl SubConversation {
             let live = folded.iter().rev().find(|t| running(t));
             let title = term::fold_title(&self.events, &calls, &folded_kinds, live.is_some());
             let toggle = key.clone();
-            let mut block = vec![div().flex().gap(px(8.)).child(term::fold_lead(live.is_some()))
-                .child(Button::new(SharedString::from(format!("sub-{key}"))).ghost().flex_1().min_w_0().h_auto().p_0().justify_start().toggled(open)
-                    .accessibility_label(title.clone())
-                    .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.)).text_color(theme::muted()).child(title))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))).into_any_element()];
+            let mut block = vec![term::fold_header(SharedString::from(format!("sub-{key}")), title, open, live.is_some(),
+                cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))];
             if !open {
-                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(15.)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
-                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
-                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
                     let call = &self.events[tool.call];
                     let shell = call.tool_name.as_deref().is_some_and(|name| term::is_any(name, term::SHELL_TOOLS));
-                    block.push(sub(if shell { format!("$ {}", tool.summary) } else { tool.summary.clone() }, theme::muted()));
+                    block.push(term::fold_sub(if shell { format!("$ {}", tool.summary) } else { tool.summary.clone() }, theme::muted()));
                 }
-                for tool in folded.iter().filter(|t| t.tone == Tone::Warning) { block.push(sub(tool.status.clone(), theme::danger())); }
+                for tool in folded.iter().filter(|t| t.tone == Tone::Warning) { block.push(term::fold_sub(tool.status.clone(), theme::danger())); }
             }
             rows.push(div().flex().flex_col().children(block).into_any_element());
             if open { for tool in folded { rows.push(self.render_terminal_tool(tool, cx)); } }

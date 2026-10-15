@@ -1,5 +1,7 @@
 //! Painel da fila do nativo: mesma regra do `packages/core/src/queuePanel.ts` (o nativo não importa o core).
-use crate::api::dto::ChatEvent;
+use std::borrow::Cow;
+
+use crate::api::dto::{ChatEvent, ChatEventExt};
 use serde_json::Value;
 
 const PREFIX: &str = "queued-";
@@ -30,16 +32,34 @@ pub fn removed(data: &Value) -> Vec<String> {
         .filter(|id| !id.is_empty()).map(|id| format!("{PREFIX}{id}")).collect()
 }
 
+/// Porta de `waitsInQueue` (core): no Codex e sem terminal (`process`) a fila é do processo, entregue não espera mais.
+pub fn waits_in_queue(e: &ChatEvent, process: bool) -> bool {
+    e.kind == "user_msg" && e.queued() && e.desistiu != Some(true) && e.queued_consumed != Some(true)
+        && !(process && e.queued_delivered == Some(true))
+}
+
+/// Bolha que entra no painel derivado: espera e ainda não foi entregue.
+fn derived_entry(e: &ChatEvent) -> bool {
+    waits_in_queue(e, false) && e.queued_delivered == Some(false) && e.queued_confirmed != Some(true)
+}
+
 /// Sem o evento (Pi, omp, Kimi, modo `python`): as bolhas da fila que ainda esperam, sem ações.
 pub fn derived(events: &[ChatEvent]) -> QueuePanel {
-    let entries = events.iter().filter(|e| e.kind == "user_msg" && e.id.starts_with(PREFIX) && e.queued_delivered == Some(false)
-        && e.desistiu != Some(true) && e.queued_confirmed != Some(true) && e.queued_consumed != Some(true))
+    let entries = events.iter().filter(|e| derived_entry(e))
         .map(|e| QueueEntry { id: e.id[PREFIX.len()..].to_owned(), text: e.text.clone().unwrap_or_default(), ts: e.queued_ts })
         .collect();
     QueuePanel { entries, actions: false }
 }
 
-pub fn current(server: Option<&QueuePanel>, events: &[ChatEvent]) -> QueuePanel { server.cloned().unwrap_or_else(|| derived(events)) }
+/// O painel do servidor emprestado; sem ele, o derivado das bolhas.
+pub fn current<'a>(server: Option<&'a QueuePanel>, events: &[ChatEvent]) -> Cow<'a, QueuePanel> {
+    server.map_or_else(|| Cow::Owned(derived(events)), Cow::Borrowed)
+}
+
+/// Quantas entradas o painel tem, sem montá-lo.
+pub fn len(server: Option<&QueuePanel>, events: &[ChatEvent]) -> usize {
+    server.map_or_else(|| events.iter().filter(|e| derived_entry(e)).count(), |panel| panel.entries.len())
+}
 
 /// A bolha `queued-<id>` some da conversa enquanto a entrada está no painel.
 pub fn hidden(id: &str, panel: &QueuePanel) -> bool {
@@ -63,8 +83,8 @@ pub fn edit_left(edit: &QueueEdit, panel: &QueuePanel, composer: &str) -> Option
 /// `Some(before_id)` para mover uma posição (`Some(None)` é o fim); `None`, nada a mover.
 pub fn move_target(entries: &[QueueEntry], id: &str, up: bool) -> Option<Option<String>> {
     let i = entries.iter().position(|e| e.id == id)?;
-    if up { return (i > 0).then(|| Some(entries[i - 1].id.clone())); }
-    (i + 1 < entries.len()).then(|| entries.get(i + 2).map(|e| e.id.clone()))
+    let neighbor = if up { i.checked_sub(1)? } else { i + 1 };
+    drop_target(entries, id, &entries.get(neighbor)?.id, !up)
 }
 
 /// Soltar `drag` antes (ou depois, com `after`) de `over`; soltar no próprio lugar não move.
@@ -75,8 +95,6 @@ pub fn drop_target(entries: &[QueueEntry], drag: &str, over: &str, after: bool) 
     let next = entries.get(from + 1).map(|e| e.id.clone());
     (before.as_deref() != Some(drag) && before != next).then_some(before)
 }
-
-pub fn steerable(provider: &str) -> bool { !matches!(provider, "pi" | "omp") }
 
 #[cfg(test)]
 mod tests {
@@ -104,6 +122,8 @@ mod tests {
         assert_eq!((derived.entries.len(), derived.actions), (1, false));
         assert_eq!(derived.entries[0].id, "a");
         assert_eq!(current(Some(&panel(&["z"])), &[queued("a", Some(false))]).entries[0].id, "z");
+        let events = [queued("a", Some(false)), queued("b", Some(true))];
+        assert_eq!((len(None, &events), len(Some(&panel(&["y", "z"])), &events)), (1, 2));
     }
 
     #[test]
@@ -146,6 +166,5 @@ mod tests {
         assert_eq!(drop_target(&e, "a", "c", true), Some(None));
         assert_eq!(drop_target(&e, "a", "b", false), None);
         assert_eq!(drop_target(&e, "a", "a", true), None);
-        assert!(!steerable("pi") && !steerable("omp") && steerable("codex") && steerable("claude"));
     }
 }

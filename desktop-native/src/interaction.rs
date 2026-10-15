@@ -276,6 +276,28 @@ impl Action {
     // Acima da espera do backend (35 s no Codex) para não declarar incerto o que ainda roda lá.
     pub fn seconds(&self) -> u64 { if matches!(self, Action::Answer) { 60 } else { 30 } }
 
+    pub fn method(&self) -> reqwest::Method {
+        match self {
+            Action::Discard(_) | Action::QueueCancel(_) => reqwest::Method::DELETE,
+            Action::QueueEdit(..) => reqwest::Method::PATCH,
+            _ => reqwest::Method::POST,
+        }
+    }
+
+    /// O X do painel só tira a que espera (`only_waiting`): entrega incerta nunca vira desistência por ele.
+    pub fn query(&self) -> Option<(&'static str, &'static str)> {
+        matches!(self, Action::QueueCancel(_)).then_some(("only_waiting", "true"))
+    }
+
+    /// Corpo das ações do painel da fila; `before_id` nulo é o fim da fila.
+    pub fn queue_body(&self) -> Option<Value> {
+        match self {
+            Action::QueueEdit(_, text) => Some(json!({"text": text})),
+            Action::QueueReorder(id, before) => Some(json!({"id": id, "before_id": before})),
+            _ => None,
+        }
+    }
+
     /// Id da entrada da fila em que a ação do painel age.
     pub fn queue_entry(&self) -> Option<&str> {
         match self {

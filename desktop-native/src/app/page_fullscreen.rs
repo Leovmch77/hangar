@@ -5,7 +5,7 @@ use std::{cell::Cell, rc::Rc};
 use super::*;
 use super::page_card::{Miss, PageRef, miss, shot_width};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use super::page_card::{APP_FONTS, GESTURE, HostMsg, Running, forward_key, parse_host, theme_script};
+use super::page_card::{GESTURE, HostMsg, Running, forward_key, parse_host};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::browser::{Engine, Pointer};
 
@@ -85,18 +85,21 @@ pub(super) struct Source {
     pub start: Option<String>,
 }
 
+/// De onde a página vem e para onde vão os quadros: o app, a sessão, o runtime dos pedidos e a janela do motor.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+pub(super) struct Host {
+    pub hangar: WeakEntity<Hangar>,
+    pub api: Api,
+    pub name: String,
+    pub runtime: Arc<Runtime>,
+    pub window: AnyWindowHandle,
+}
+
 // No macOS não há motor: janela, gesto e aperto só servem à página viva.
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(super) struct PageFullscreen {
-    hangar: WeakEntity<Hangar>,
-    api: Api,
-    name: String,
-    runtime: Arc<Runtime>,
-    window: AnyWindowHandle,
-    page: PageRef,
-    html: Option<Rc<str>>,
-    start: Option<String>,
-    live: bool,
+    host: Host,
+    source: Source,
     body: Body,
     zoom: f32,
     wheel: f32,
@@ -121,7 +124,7 @@ impl PageFullscreen {
         self.body = Body::Loading;
         self.seq += 1;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if self.live {
+        if self.source.live {
             self.running = None;
             let starter = match Engine::prepare(window, cx) {
                 Ok(starter) => starter,
@@ -129,9 +132,9 @@ impl PageFullscreen {
             };
             // Sem limite: o motor manda com `try_send` e quadro perdido não volta.
             let (events, received) = async_channel::unbounded();
-            let (url, html, seq, width) = (self.start.clone(), self.html.clone(), self.seq, self.size.stage_w);
+            let (url, html, seq, width) = (self.source.start.clone(), self.source.html.clone(), self.seq, self.size.stage_w);
             // Tema próprio nasce no branco do navegador, como a página foi desenhada.
-            let background = self.page.own_theme.then_some((255, 255, 255));
+            let background = self.source.page.own_theme.then_some((255, 255, 255));
             self._load = cx.spawn(async move |this, cx| {
                 let engine = match url {
                     Some(url) => starter.start_url(url, events).await,
@@ -159,7 +162,7 @@ impl PageFullscreen {
                 if this.update(cx, |this, cx| this.event(event, cx)).is_err() { break; }
             }
         });
-        self.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: String::new(), at: None });
+        self.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: None, at: None });
         self.body = Body::Ready;
         cx.notify();
     }
@@ -173,7 +176,7 @@ impl PageFullscreen {
                 // No Windows é aqui que o quadro vai para a textura.
                 let _ = running.engine.texture_replaced();
                 let engine = Rc::downgrade(&running.engine);
-                let _ = cx.update_window(self.window, move |_, window, _| {
+                let _ = cx.update_window(self.host.window, move |_, window, _| {
                     window.on_next_frame(move |_, _| if let Some(engine) = engine.upgrade() { engine.frame_seen() });
                 });
                 cx.notify();
@@ -189,9 +192,9 @@ impl PageFullscreen {
     fn fetch_shot(&mut self, cx: &mut Context<Self>) {
         let dark = theme::is_dark();
         self.asked_dark = dark;
-        let (api, name, id, seq) = (self.api.clone(), self.name.clone(), self.page.id.clone(), self.seq);
+        let (api, name, id, seq) = (self.host.api.clone(), self.host.name.clone(), self.source.page.id.clone(), self.seq);
         let width = shot_width(self.size.stage_w).to_string();
-        let task = self.runtime.spawn(async move {
+        let task = self.host.runtime.spawn(async move {
             let bytes = api.page(&name, &id, &["shot"], &[("theme", if dark { "dark" } else { "light" }), ("width", &width)]).await?;
             Ok::<_, Failure>(tokio::task::spawn_blocking(move || media::decode(&bytes, 4096, 8192, None)).await.ok().flatten())
         });
@@ -273,20 +276,15 @@ impl Render for PageFullscreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = full_size(viewport(window));
         self.size = size;
-        let title = self.page.title.clone();
+        let title = self.source.page.title.clone();
         // Imagem estática no tema antigo: a do tema novo vem sem fechar o diálogo.
-        if !self.live && self.body == Body::Ready && self.asked_dark != theme::is_dark() {
+        if !self.source.live && self.body == Body::Ready && self.asked_dark != theme::is_dark() {
             self.seq += 1;
             self.fetch_shot(cx);
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(running) = self.running.as_mut().filter(|r| r.framed && !self.page.own_theme && self.page.url.is_none()) {
-            let script = theme_script();
-            if running.theme_sent != script {
-                if running.theme_sent.is_empty() { running.engine.evaluate(&APP_FONTS); }
-                running.engine.evaluate(&script);
-                running.theme_sent = script;
-            }
+        if let Some(running) = self.running.as_mut().filter(|r| r.framed && !self.source.page.own_theme && self.source.page.url.is_none()) {
+            running.push_theme();
         }
         let zoom = self.zoom;
         let header = div().flex().items_center().gap_2().pr(px(36.)).h(px(28.))
@@ -302,8 +300,8 @@ impl Render for PageFullscreen {
                 .child(Button::new("page-full-zoom-in").ghost().small().icon(IconName::Plus)
                     .tooltip(tr_shared("page_zoom_in", &[])).accessibility_label(tr_shared("page_zoom_in", &[])).disabled(zoom >= ZOOM_MAX)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to(ZoomAction::In, cx)))))
-            .when(!self.live, |el| {
-                let (hangar, id) = (self.hangar.clone(), self.page.id.clone());
+            .when(!self.source.live, |el| {
+                let (hangar, id) = (self.host.hangar.clone(), self.source.page.id.clone());
                 el.child(Button::new("page-full-open").ghost().small().icon(IconName::ExternalLink).label(tr_shared("page_open_browser", &[]))
                     .on_click(move |_, _, cx| { let _ = hangar.update(cx, |hangar, cx| hangar.open_page_in_browser(id.clone(), cx)); }))
             });
@@ -348,7 +346,7 @@ impl Render for PageFullscreen {
                     .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))))
                 .into_any_element(),
             // Começa na largura do palco e o zoom amplia a partir dela.
-            Body::Ready if !self.live => match &self.shot {
+            Body::Ready if !self.source.live => match &self.shot {
                 Some((_, image)) => {
                     let natural = image.size(0);
                     let ratio = natural.height.0 as f32 / natural.width.0.max(1) as f32;
@@ -395,18 +393,16 @@ impl Render for PageFullscreen {
 
 /// Abre o diálogo. A entidade cai com ele (Esc, fora, X ou `close_dialog`): o motor fecha alvo e contexto no `Drop`,
 /// a imagem sai do atlas e a vaga do orçamento volta.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn open(hangar: WeakEntity<Hangar>, api: Api, name: String, runtime: Arc<Runtime>, handle: AnyWindowHandle, source: Source,
-    window: &mut Window, cx: &mut App) {
+pub(super) fn open(host: Host, source: Source, window: &mut Window, cx: &mut App) {
     let live = source.live;
     let full = cx.new(|cx| {
-        let pin = hangar.clone();
+        let pin = host.hangar.clone();
         cx.on_release(move |full: &mut PageFullscreen, cx| {
             if let Some((_, image)) = full.shot.take() { cx.drop_image(image, None); }
             if live { let _ = pin.update(cx, |hangar, _| hangar.pages.unpin()); }
         }).detach();
         PageFullscreen {
-            hangar, api, name, runtime, window: handle, page: source.page, html: source.html, start: source.start, live,
+            host, source,
             body: Body::Loading, zoom: 1., wheel: 0., size: full_size(viewport(window)), focus: cx.focus_handle(), origin: Rc::default(),
             gesture: None, pressed: false,
             #[cfg(any(target_os = "linux", target_os = "windows"))]

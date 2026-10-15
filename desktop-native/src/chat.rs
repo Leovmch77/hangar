@@ -233,21 +233,25 @@ impl Chat {
     /// Porta de `queuedMessages` (core): no Codex e sem terminal a fila é do processo, entregue não espera mais.
     pub fn waiting(&self, provider: &str, headless: bool) -> usize {
         let process = provider == "codex" || headless;
-        self.events.iter().filter(|e| e.kind == "user_msg" && e.queued() && e.desistiu != Some(true)
-            && e.queued_consumed != Some(true) && !(process && e.queued_delivered == Some(true))).count()
+        self.events.iter().filter(|e| crate::queue_panel::waits_in_queue(e, process)).count()
     }
 
     /// O evento `queue` do servidor. Quem entrou ou saiu do painel muda de altura na conversa: remede a partir dela.
     pub fn set_queue_panel(&mut self, panel: Option<crate::queue_panel::QueuePanel>) {
-        let before = self.queue_panel();
+        let ids = |chat: &Self| chat.queue_panel().entries.iter().map(|e| e.id.clone()).collect::<HashSet<String>>();
+        let before = ids(self);
         self.queue_server = panel;
-        let after = self.queue_panel();
-        if let Some(i) = self.events.iter().position(|e| crate::queue_panel::hidden(&e.id, &before) != crate::queue_panel::hidden(&e.id, &after)) {
+        let after = ids(self);
+        if let Some(i) = before.symmetric_difference(&after).filter_map(|id| self.position(&format!("queued-{id}"))).min() {
             self.changed_at(i);
         }
     }
 
-    pub fn queue_panel(&self) -> crate::queue_panel::QueuePanel { crate::queue_panel::current(self.queue_server.as_ref(), &self.events) }
+    pub fn queue_panel(&self) -> std::borrow::Cow<'_, crate::queue_panel::QueuePanel> {
+        crate::queue_panel::current(self.queue_server.as_ref(), &self.events)
+    }
+
+    pub fn queue_len(&self) -> usize { crate::queue_panel::len(self.queue_server.as_ref(), &self.events) }
 
     pub fn retire(&mut self, id: &str) {
         self.removed.insert(id.to_owned());

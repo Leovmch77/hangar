@@ -182,7 +182,8 @@ pub fn focus_strips(phase: f32, width: f32) -> Vec<(f32, f32, f32)> {
     let count = (THINKING_FOCUS_WIDTH / FOCUS_STRIP) as usize;
     (0..count).filter_map(|n| {
         let start = n as f32 * FOCUS_STRIP;
-        let alpha = focus_mask(start + FOCUS_STRIP / 2.);
+        // Metade da direita lê o alfa no recorte espelhado: o mesmo valor, bit a bit, e a linha moldada se reaproveita.
+        let alpha = focus_mask(start.min(THINKING_FOCUS_WIDTH - FOCUS_STRIP - start) + FOCUS_STRIP / 2.);
         let (x0, x1) = ((left + start).max(0.), (left + start + FOCUS_STRIP).min(width));
         (x1 > x0 && alpha > 0.).then_some((x0, x1 - x0, alpha))
     }).collect()
@@ -333,5 +334,6 @@ mod tests {
         assert!(strips.iter().all(|&(_, w, _)| (w - 3.).abs() < 1e-4));
         let peak = strips.iter().map(|s| s.2).fold(0., f32::max);
         assert!((peak - focus_mask(34.5).max(focus_mask(37.5))).abs() < 1e-4);
+        assert!((0..12).all(|n| strips[n].2 == strips[23 - n].2), "recortes espelhados têm o mesmo alfa");
     }
 }

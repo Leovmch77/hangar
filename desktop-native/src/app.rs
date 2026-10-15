@@ -135,16 +135,23 @@ fn composer_card(focused: bool) -> Div {
         .border_color(if focused { theme::accent_focus() } else { theme::border_strong() }).bg(theme::boxed()).shadow(theme::card_shadow())
 }
 
-/// O Enviar redondo do compositor. Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
-fn send_button<T: 'static>(id: &'static str, enabled: bool, label: String, cx: &mut Context<T>) -> Button {
+/// Botão na cor do Enviar, e a cor do conteúdo dele. Colado: botão claro com a tinta na cor do fundo; caixa solta:
+/// destaque, como nos mocks.
+fn send_colored<T: 'static>(id: &'static str, enabled: bool, cx: &mut Context<T>) -> (Button, Hsla) {
     let (fill, ink) = match (enabled, theme::is_floating()) {
         (false, _) => (theme::raised(), theme::faint()),
         (true, true) => (theme::accent(), theme::on_accent()),
         (true, false) => (theme::text(), theme::background()),
     };
-    Button::new(id).custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
-        .bg(fill).icon(chrome::small_icon(IconName::ArrowUp, 16., ink))
-        .size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(label).disabled(!enabled)
+    let button = Button::new(id).custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
+        .bg(fill).disabled(!enabled);
+    (button, ink)
+}
+
+/// O Enviar redondo do compositor.
+fn send_button<T: 'static>(id: &'static str, enabled: bool, label: String, cx: &mut Context<T>) -> Button {
+    let (button, ink) = send_colored(id, enabled, cx);
+    button.icon(chrome::small_icon(IconName::ArrowUp, 16., ink)).size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(label)
 }
 
 fn column_box(composer: bool) -> Div {
@@ -2967,18 +2974,15 @@ impl Hangar {
         crate::status::parse(raw, Some(session))
     }
 
-    /// O Kimi conta a fila da TUI, que o chip promove inteira; os outros, o que espera no painel.
+    /// As bolhas da fila que esperam: no Kimi, a fila da TUI que o chip promove inteira.
     fn queued_count(&self) -> usize {
         let (provider, headless) = self.provider();
-        if provider == "kimi" { self.chat.waiting(provider, headless) } else { self.chat.queue_panel().entries.len() }
+        self.chat.waiting(provider, headless)
     }
 
     /// O que ainda vai entrar na conversa: o painel, ou as bolhas da fila quando são mais (mensagem reservada que
     /// o Claude ainda não consumiu fica fora do painel). Segura o "implementar plano" e marca a linha.
-    fn pending_count(&self) -> usize {
-        let (provider, headless) = self.provider();
-        self.queued_count().max(self.chat.waiting(provider, headless))
-    }
+    fn pending_count(&self) -> usize { self.chat.queue_len().max(self.queued_count()) }
 
     /// O chip "N na fila · mandar agora" ficou só para o Kimi: nos outros, o painel orienta por mensagem.
     fn steer_offered(&self) -> bool {
@@ -3042,7 +3046,7 @@ impl Hangar {
             Action::Select(option) => match select_body(&snapshot, Some(*option)) { Some(body) => Some(body), None => return },
             Action::SelectText(option, text) => match select_text_body(&snapshot, *option, text) { Some(body) => Some(body), None => return },
             Action::Submit => match select_body(&snapshot, None) { Some(body) => Some(body), None => return },
-            _ => None,
+            _ => action.queue_body(),
         };
         let tool = (action == Action::Answer).then(|| self.chat.ask.as_ref().and_then(|ask| ask.tool_use_id.clone())).flatten();
         if !self.flight.begin(key.clone(), action.clone(), snapshot.clone()) { return; }
@@ -3052,11 +3056,7 @@ impl Hangar {
         self.runtime.spawn(async move {
             let result = match &action {
                 Action::Cancel => api.interrupt(&session.name, false).await.map(|_| Value::Null),
-                Action::QueueCancel(id) => api.queue_cancel(&session.name, id).await,
-                Action::QueueEdit(id, text) => api.queue_edit(&session.name, id, text).await,
-                Action::QueueSteer(id) => api.queue_steer(&session.name, id).await,
-                Action::QueueReorder(id, before) => api.queue_reorder(&session.name, id, before.as_deref()).await,
-                _ => api.act(&session.name, &action.path(), body, matches!(action, Action::Discard(_)), action.seconds()).await,
+                _ => api.request(&session.name, action.method(), &action.path(), action.query(), body, action.seconds()).await,
             };
             let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, snapshot, result) }).await;
         });
@@ -4411,7 +4411,7 @@ impl Hangar {
                 .child("·").child(div().underline().child(tr("queue_send_action"))))
             .on_click(cx.listener(|this, _, _, cx| this.act(Action::Steer, String::new(), cx))));
         // O painel "Na fila" acima do cartão; o Kimi segue também com o chip (a fila dele é a da TUI).
-        let queue_panel = if readable { self.render_queue_panel(provider, window, cx) } else { None };
+        let queue_panel = if readable { self.render_queue_panel(window, cx) } else { None };
         let queue_row = queue_chip.map(|chip| div().mb(px(8.)).px(px(12.)).py(px(4.)).flex().items_center().gap_2().rounded(px(10.))
             .border_1().border_color(theme::border_strong()).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::List, 14., theme::faint())).child(chip));

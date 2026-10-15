@@ -193,8 +193,20 @@ pub(super) fn forward_key(engine: &Engine, k: &Keystroke, cx: &App) {
 /// Motor vivo da página e o laço que lê os eventos dele; caem juntos.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) struct Running {
-    pub(super) engine: Rc<Engine>, pub(super) _drain: Task<()>, pub(super) framed: bool, pub(super) theme_sent: String,
+    pub(super) engine: Rc<Engine>, pub(super) _drain: Task<()>, pub(super) framed: bool, pub(super) theme_sent: Option<ThemeKey>,
     pub(super) at: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Running {
+    /// Entrega o tema do app à página quando ele mudou desde o último envio; o primeiro leva antes as fontes.
+    pub(super) fn push_theme(&mut self) {
+        let key = theme_key();
+        if self.theme_sent == Some(key) { return; }
+        if self.theme_sent.is_none() { self.engine.evaluate(&APP_FONTS); }
+        self.engine.evaluate(&theme_script());
+        self.theme_sent = Some(key);
+    }
 }
 
 struct PageView {
@@ -315,9 +327,19 @@ pub(super) static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::
         serde_json::to_string(&css).unwrap_or_default())
 });
 
+/// O que o script do tema lê do app: chave igual, script igual, sem montá-lo a cada quadro.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 5] }
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn theme_key() -> ThemeKey {
+    ThemeKey { dark: theme::is_dark(), colors: [theme::text(), theme::muted(), theme::surface(), theme::border(), theme::accent()] }
+}
+
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub(super) fn theme_script() -> String {
+fn theme_script() -> String {
     let vars = json!({
         "--background": "transparent", "--foreground": hex(theme::text()), "--muted-foreground": hex(theme::muted()),
         "--surface": hex(theme::surface()), "--border": hex(theme::border()), "--accent": hex(theme::accent()),
@@ -472,7 +494,7 @@ impl Hangar {
                 if this.update(cx, |this, cx| this.page_event(&owner, event, cx)).is_err() { break; }
             }
         });
-        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: String::new(), at: None });
+        view.running = Some(Running { engine, _drain: drain, framed: false, theme_sent: None, at: None });
         view.state = ViewState::Ready;
         if let Some(old) = self.pages.budget.touch(&id) { self.park_page(&old, cx); }
         cx.notify();
@@ -602,7 +624,9 @@ impl Hangar {
         let source = page_fullscreen::Source { page: view.page.clone(), html: view.html.clone(), live: view.live, start };
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if source.live { for old in self.pages.budget.pin() { self.park_page(&old, cx); } }
-        page_fullscreen::open(cx.entity().downgrade(), api, key.name.clone(), self.runtime.clone(), self.pages.window, source, window, cx);
+        let host = page_fullscreen::Host { hangar: cx.entity().downgrade(), api, name: key.name.clone(), runtime: self.runtime.clone(),
+            window: self.pages.window };
+        page_fullscreen::open(host, source, window, cx);
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -701,13 +725,8 @@ impl Hangar {
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
-            let script = theme_script();
             let follows = !view.page.own_theme && view.page.url.is_none();
-            if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed && r.theme_sent != script) {
-                if running.theme_sent.is_empty() { running.engine.evaluate(&APP_FONTS); }
-                running.engine.evaluate(&script);
-                running.theme_sent = script;
-            }
+            if let Some(running) = view.running.as_mut().filter(|r| follows && r.framed) { running.push_theme(); }
             let engine = view.running.as_ref().map(|r| r.engine.clone());
             let framed = view.running.as_ref().is_some_and(|r| r.framed);
             // O site tem altura fixa e rola por dentro: a roda é sempre dele.
