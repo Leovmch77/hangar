@@ -169,7 +169,9 @@ pub fn resolve_open(request: &SessionOpenRequest, facts: &dyn OpenFacts) -> Resu
         }
     }
 
-    if provider == AgentProvider::Codex && codex_account.is_none() {
+    // A padrão herdada é a mesma escolha de ninguém ter pedido conta: desconectada, troca igual.
+    let unchosen = codex_account.is_none() || (source == AccountSource::Inherited && codex_account.as_deref() == Some("default"));
+    if provider == AgentProvider::Codex && unchosen {
         let connected = facts.codex_logins();
         if let Some(first) = connected.first().filter(|_| !connected.iter().any(|login| login.is_default)) {
             codex_account = Some(first.id.clone());

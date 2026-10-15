@@ -115,7 +115,11 @@ fn reopen_keeps_what_the_change_does_not_name() {
 
 /// Os fatos do cenário: o estado inicial (`state`) e as respostas das bordas (`fakes`) que o
 /// harness deu ao Python (`session_open_contract.py`), lidos do mesmo jeito que o Python os lê.
-struct FixtureFacts { files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value, broken_mode: bool }
+struct FixtureFacts {
+    files: serde_json::Map<String, Value>, dirs: Vec<String>, tmux: Vec<Value>, fakes: Value,
+    /// Desvios que o teste pede e o cenário não tem: settings ilegível e contas Codex conectadas.
+    broken_mode: bool, connected: Vec<resolve::CodexLogin>,
+}
 
 /// A ponte do ditado com o Rust fora, como o harness a responde (`session_open_contract.py:941`).
 const HARNESS_BRIDGE_DOWN: &str = "O servidor Rust de organização está indisponível.";
@@ -130,6 +134,7 @@ impl FixtureFacts {
             tmux: state["tmux_sessions"].as_array().cloned().unwrap_or_default(),
             fakes: fixture["scenario"]["fakes"].clone(),
             broken_mode: false,
+            connected: Vec::new(),
         }
     }
 
@@ -190,7 +195,7 @@ impl resolve::OpenFacts for FixtureFacts {
     }
 
     // Sem serviço de contas Codex no harness: nenhuma conta conectada.
-    fn codex_logins(&self) -> Vec<resolve::CodexLogin> { vec![] }
+    fn codex_logins(&self) -> Vec<resolve::CodexLogin> { self.connected.clone() }
 
     fn claude_quotas(&self) -> Vec<Value> {
         self.fakes["quotas"].as_array().into_iter().flatten().filter(|row| row["provedor"] == "claude").cloned().collect()
@@ -230,6 +235,7 @@ impl resolve::OpenFacts for FixtureFacts {
 
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError> {
         if account_id == "default" { return Ok(format!("{HOME}/.codex")); }
+        if self.connected.iter().any(|login| login.id == account_id) { return Ok(format!("{HOME}/.codex-{account_id}")); }
         Err(OpenError::new(404, "codex_account_not_found", "conta Codex inválida").with_params(json!({"account_id": account_id})))
     }
 
@@ -427,6 +433,18 @@ fn a_codex_session_inherits_the_creator_mode_never_more_permissive() {
     fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
     fixture["scenario"]["steps"][0]["json"]["headless"] = json!(false);
     assert_eq!(resolve_fixture(&fixture).unwrap().spec.permission_mode, Some(PermissionMode::ApproveForMe));
+}
+
+/// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
+#[test]
+fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_codex_creator").unwrap();
+    fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let facts = FixtureFacts { connected: vec![resolve::CodexLogin { id: "trabalho".into(), is_default: false }], ..FixtureFacts::of(&fixture) };
+    let resolved = resolve::resolve_open(&request, &facts).unwrap();
+    assert_eq!(resolved.spec.account, Account::Codex { account_id: "trabalho".into() });
+    assert_eq!(resolved.warnings, ["A conta Codex padrão não está conectada; a sessão usa a conta trabalho."]);
 }
 
 /// D-001 para o Codex: a criadora Codex passa a conta Codex dela.
