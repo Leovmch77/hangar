@@ -145,19 +145,22 @@ impl AccountService {
             .ensure_unused()
             .map_err(|_| "sessao-viva")?;
         let before = oauth(&account.home);
-        let _ = self.claude_cli(&account, &["mcp", "list"]).await;
+        // CLI que nem subiu (ausente, processo recusado) não custou nada: a espera fica para o que rodou.
+        let ran = !matches!(self.claude_cli(&account, &["mcp", "list"]).await, Err("cli_missing" | "cli_failed"));
         if renewed(&before, &oauth(&account.home)) {
             self.quick_renewals.clear(&key);
             self.claude_auth.invalidate(&key);
             return Ok(());
         }
         if quick {
-            let wait = self.quick_renewals.failed(&key, before, now());
-            tracing::warn!(
-                code = "quick_renewal_backoff",
-                wait_s = wait,
-                "renovação rápida não renovou; próxima tentativa automática após a espera"
-            );
+            if ran {
+                let wait = self.quick_renewals.failed(&key, before, now());
+                tracing::warn!(
+                    code = "quick_renewal_backoff",
+                    wait_s = wait,
+                    "renovação rápida não renovou; próxima tentativa automática após a espera"
+                );
+            }
             return Err("renovacao-falhou");
         }
         let operation = super::claude_login::nonce().map_err(|_| "renovacao-falhou")?;
