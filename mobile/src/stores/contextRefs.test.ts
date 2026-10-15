@@ -17,7 +17,7 @@ describe('contextRefs (app)', () => {
     addContextRef(key, q('a'));
     addContextRef(key, q('b'));
     addContextRef(contextRefsKey('srv', 'outra'), q('c'));
-    setContextRefComment(key, 1, 'muda isto');
+    setContextRefComment(key, refs()[1].draftId, 'muda isto');
     expect(refs().map((r) => [textOf(r), r.comment])).toEqual([['a', ''], ['b', 'muda isto']]);
     removeContextRef(key, 0);
     expect(refs().map(textOf)).toEqual(['b']);
@@ -37,9 +37,18 @@ describe('contextRefs (app)', () => {
   it('comentário editado durante o envio não deixa a citação enviada na bandeja', () => {
     addContextRef(key, q('a'));
     const sent = [...contextRefsSnapshot(key)];
-    setContextRefComment(key, 0, 'editado no meio do envio');
+    setContextRefComment(key, refs()[0].draftId, 'editado no meio do envio');
     removeSentContextRefs(key, sent);
     expect(contextRefsSnapshot(key)).toEqual([]);
+  });
+
+  it('comentário segue a citação mesmo quando outra de antes sai da bandeja', () => {
+    addContextRef(key, q('a'));
+    addContextRef(key, q('b'));
+    const b = refs()[1].draftId;
+    removeContextRef(key, 0);
+    setContextRefComment(key, b, 'na b');
+    expect(refs().map((r) => [textOf(r), r.comment])).toEqual([['b', 'na b']]);
   });
 
   it('itens iguais têm identidades diferentes; o comentário guarda o espaço do fim', () => {
@@ -47,7 +56,7 @@ describe('contextRefs (app)', () => {
     addContextRef(key, q('a'));
     const [first, second] = refs();
     expect(first.draftId).not.toBe(second.draftId);
-    setContextRefComment(key, 1, 'deixe ');
+    setContextRefComment(key, second.draftId, 'deixe ');
     removeSentContextRefs(key, [first]);
     expect(refs()).toEqual([{ ...q('a'), comment: 'deixe ', draftId: second.draftId }]);
   });

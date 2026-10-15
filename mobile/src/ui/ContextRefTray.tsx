@@ -11,7 +11,7 @@ import { removeContextRef, setContextRefComment, type DraftContextRef } from '..
 // citação. O lápis abre o comentário; o X tira da bandeja.
 export function ContextRefTray({ refs, draftKey, disabled }: { refs: DraftContextRef[]; draftKey: string; disabled?: boolean }) {
   const { theme } = useUnistyles();
-  const [editing, setEditing] = useState<number | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
   return (
     <View style={styles.tray} accessibilityLabel={m.cite_tray_aria()}>
       {refs.map((ref, i) => {
@@ -22,16 +22,16 @@ export function ContextRefTray({ refs, draftKey, disabled }: { refs: DraftContex
               <Icon name={ref.kind === 'quote' ? 'TextQuote' : 'MousePointerClick'} size={16} color={theme.tokens.accent.base} />
               <Text style={[styles.label, { color: theme.tokens.text.primary }]} numberOfLines={1}>{label}</Text>
               <Pressable
-                onPress={() => setEditing(editing === i ? null : i)}
+                onPress={() => setEditing(editing === ref.draftId ? null : ref.draftId)}
                 style={[styles.btn, { borderColor: theme.tokens.border.subtle }]}
                 accessibilityRole="button"
                 accessibilityLabel={m.cite_edit_comment()}
-                accessibilityState={{ expanded: editing === i }}
+                accessibilityState={{ expanded: editing === ref.draftId }}
               >
                 <Icon name="Pencil" size={16} color={theme.tokens.text.secondary} />
               </Pressable>
               <Pressable
-                onPress={() => { if (editing === i) setEditing(null); removeContextRef(draftKey, i); }}
+                onPress={() => { if (editing === ref.draftId) setEditing(null); removeContextRef(draftKey, i); }}
                 disabled={disabled}
                 style={[styles.btn, { borderColor: theme.tokens.border.subtle }, disabled && styles.disabled]}
                 accessibilityRole="button"
@@ -41,11 +41,11 @@ export function ContextRefTray({ refs, draftKey, disabled }: { refs: DraftContex
                 <Icon name="X" size={16} color={theme.tokens.text.secondary} />
               </Pressable>
             </View>
-            {editing === i ? (
+            {editing === ref.draftId ? (
               <TextInput
                 autoFocus
                 value={ref.comment}
-                onChangeText={(v) => setContextRefComment(draftKey, i, v)}
+                onChangeText={(v) => setContextRefComment(draftKey, ref.draftId, v)}
                 onSubmitEditing={() => setEditing(null)}
                 placeholder={m.cite_comment_placeholder()}
                 placeholderTextColor={theme.tokens.text.muted}

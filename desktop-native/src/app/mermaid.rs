@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn only_busy_offline_and_timeout_offer_retry_and_guests_see_just_the_code() {
         let retry = |reply: MermaidReply| matches!(note(&drawn(reply)), Note::Problem { retry: true, .. });
-        assert!(retry(mermaid_failure(503, "fila cheia".into())));
+        for status in [502, 503, 504] { assert!(retry(mermaid_failure(status, "fila cheia".into())), "{status}"); }
         assert!(retry(MermaidReply::Unavailable(MermaidRetry::Offline)));
         assert!(retry(MermaidReply::Unavailable(MermaidRetry::Timeout)));
         for status in [400, 401, 410, 422, 500] { assert!(!retry(mermaid_failure(status, String::new())), "{status}"); }

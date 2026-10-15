@@ -459,12 +459,7 @@ impl Hangar {
         let starts: Vec<usize> = std::iter::once(0).chain(markdown.match_indices('\n').map(|(at, _)| at + 1)).collect();
         // O pedaço é recortado da fonte, não remontado das linhas: com CRLF, `lines()` tira o `\r` e o pedaço deixaria
         // de ser um trecho da fonte (a citação não acharia onde ele começa).
-        let piece = |from: usize, to: usize| -> String {
-            let start = starts.get(from).copied().unwrap_or(markdown.len()).min(markdown.len());
-            let end = starts.get(to).map_or(markdown.len(), |&at| at - 1).max(start);
-            let slice = &markdown[start..end];
-            slice.strip_suffix('\r').unwrap_or(slice).to_owned()
-        };
+        let piece = |from: usize, to: usize| line_piece(markdown, &starts, from, to).to_owned();
         let mut out = Vec::new();
         let mut cursor = 0;
         let decimal = tr("decimal").chars().next().unwrap_or(',');
@@ -531,5 +526,27 @@ impl Hangar {
             self.list_state.remeasure_items(row..row + 1);
         }
         cx.notify();
+    }
+}
+
+/// As linhas `from..to` recortadas da fonte, sem o terminador da última (`\n` ou `\r\n`). `starts` é o começo de
+/// cada linha na fonte.
+fn line_piece<'a>(markdown: &'a str, starts: &[usize], from: usize, to: usize) -> &'a str {
+    let start = starts.get(from).copied().unwrap_or(markdown.len()).min(markdown.len());
+    let end = starts.get(to).map_or(markdown.len(), |&at| at - 1).max(start);
+    let slice = &markdown[start..end];
+    slice.strip_suffix('\r').unwrap_or(slice)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn line_piece_drops_the_line_terminator() {
+        for md in ["a\nb\nc\n", "a\r\nb\r\nc\r\n"] {
+            let starts: Vec<usize> = std::iter::once(0).chain(md.match_indices('\n').map(|(at, _)| at + 1)).collect();
+            assert_eq!(super::line_piece(md, &starts, 0, 2), if md.contains('\r') { "a\r\nb" } else { "a\nb" });
+            assert_eq!(super::line_piece(md, &starts, 2, 3), "c");
+            assert_eq!(super::line_piece(md, &starts, 1, 9), &md[starts[1]..]);
+        }
     }
 }

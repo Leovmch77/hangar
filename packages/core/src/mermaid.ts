@@ -75,7 +75,8 @@ async function failureFrom(res: Response): Promise<MermaidFailure> {
   } catch { /* corpo não-JSON: fica o status */ }
   const status = res.status;
   if (status === 422) return { kind: 'invalid', code: code || 'mermaid_invalido', message };
-  if (status === 503) return { kind: 'unavailable', code: code || 'mermaid_indisponivel', message };
+  // 502 e 504 vêm do proxy no caminho e passam: indisponível, com Tentar de novo, como o 503.
+  if (status === 502 || status === 503 || status === 504) return { kind: 'unavailable', code: code || 'mermaid_indisponivel', message };
   if (status === 404 || status === 403) return { kind: 'not_offered', code: code || `http_${status}`, message: '' };
   return { kind: 'rejected', code: `http_${status}`, message: '' };
 }

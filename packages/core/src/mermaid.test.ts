@@ -87,6 +87,13 @@ describe('renderMermaid', () => {
     expect(requestMermaid).toHaveBeenCalledTimes(4);
   });
 
+  it('502 e 504 do proxy são indisponibilidade, com Tentar de novo', async () => {
+    for (const [status, src] of [[502, 'p2'], [504, 'p4']] as const) {
+      requestMermaid.mockResolvedValueOnce(json(status, {}));
+      expect(await renderMermaid(src, 'dark')).toMatchObject({ kind: 'unavailable' });
+    }
+  });
+
   it('404 e recusa ao convidado ficam só no código', async () => {
     requestMermaid.mockResolvedValueOnce(json(404, {}));
     expect((await renderMermaid('n4', 'dark')).kind).toBe('not_offered');

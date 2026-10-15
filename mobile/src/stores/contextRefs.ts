@@ -49,8 +49,9 @@ export function removeContextRef(key: string, index: number) {
 
 // Guarda o que a pessoa digitou, sem aparar (aparar a cada tecla comeria o espaço entre palavras no
 // campo controlado): quem apara é a montagem do bloco.
-export function setContextRefComment(key: string, index: number, comment: string) {
-  set(key, (refs) => refs.map((r, i) => (i === index ? { ...r, comment: clampContextRefComment(comment) } : r)));
+// Pelo `draftId`, não pela posição: a posição muda quando outra citação sai da bandeja.
+export function setContextRefComment(key: string, draftId: string, comment: string) {
+  set(key, (refs) => refs.map((r) => (r.draftId === draftId ? { ...r, comment: clampContextRefComment(comment) } : r)));
 }
 
 /** Tira só as enviadas: o que entrou na bandeja durante o envio fica. */

@@ -2294,7 +2294,12 @@ import { cachePrazo } from '../lib/cachePrazo';
                       aria-expanded={editingRef === idx}
                       onclick={() => (editingRef = editingRef === idx ? null : idx)}>✎</button>
               <button type="button" class="cref-btn" aria-label={m.cite_remove()} title={m.cite_remove()}
-                      onclick={() => { if (editingRef === idx) editingRef = null; contextRefsDraft.remove(refsKey, idx); }}>×</button>
+                      onclick={() => {
+                        // A citação em edição segue a dela: tirar uma de antes desloca o índice.
+                        if (editingRef === idx) editingRef = null;
+                        else if (editingRef !== null && idx < editingRef) editingRef -= 1;
+                        contextRefsDraft.remove(refsKey, idx);
+                      }}>×</button>
             </div>
             {#if editingRef === idx}
               <!-- svelte-ignore a11y_autofocus -->

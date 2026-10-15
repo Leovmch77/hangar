@@ -80,7 +80,8 @@ pub enum MermaidRefusal {
 pub fn mermaid_failure(status: u16, message: String) -> MermaidReply {
     match status {
         422 => MermaidReply::Invalid(message),
-        503 => MermaidReply::Unavailable(MermaidRetry::Busy(message)),
+        // 502 e 504 vêm do proxy no caminho e passam: indisponível, como o 503.
+        502..=504 => MermaidReply::Unavailable(MermaidRetry::Busy(message)),
         400 => MermaidReply::Refused(MermaidRefusal::BadRequest),
         401 => MermaidReply::Refused(MermaidRefusal::Unauthorized),
         410 => MermaidReply::Refused(MermaidRefusal::Gone),
