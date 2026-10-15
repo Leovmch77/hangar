@@ -206,8 +206,8 @@ pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens:
 #[derive(Default)]
 pub struct ContextCache {
     entries: Capped<String, Entry>,
-    /// Janela que o Claude informou por conta e modelo respondido (sem a data), e quando.
-    windows: std::collections::HashMap<String, (u64, std::time::Instant)>,
+    /// Janela que o Claude informou por conta e modelo respondido (sem a data), quando e por qual transcript.
+    windows: std::collections::HashMap<String, (u64, std::time::Instant, std::path::PathBuf)>,
 }
 
 /// Validade do aprendido: troca de plano na conta não pode deixar a janela antiga para sempre.
@@ -255,9 +255,13 @@ impl ContextCache {
         let reported = if inputs.engine || variant { None } else {
             inputs.declared.filter(|w| declared_reported && *w > 0).or_else(|| measured(inputs.jsonl).map(|c| c.window))
         };
-        if let (Some(k), Some(w)) = (&key, reported) { self.windows.insert(k.clone(), (w, now)); }
-        let learned = key.and_then(|k| self.windows.get(&k).copied())
-            .filter(|(_, at)| now.saturating_duration_since(*at) < LEARNED_FOR).map(|(w, _)| w);
+        // Reler a mesma informação (mesmo valor, mesma sessão) não a renova: a validade conta de quando foi dada.
+        if let (Some(k), Some(w)) = (&key, reported) {
+            let same = self.windows.get(k).is_some_and(|(old, _, from)| *old == w && from == inputs.jsonl);
+            if !same { self.windows.insert(k.clone(), (w, now, inputs.jsonl.to_path_buf())); }
+        }
+        let learned = key.and_then(|k| self.windows.get(&k))
+            .filter(|(_, at, _)| now.saturating_duration_since(*at) < LEARNED_FOR).map(|(w, _, _)| *w);
         reading_with(inputs, scan, learned)
     }
 
@@ -429,6 +433,8 @@ mod tests {
         assert_eq!(ctx.map(|c| (c.used, c.window)), Some((186_979, WINDOW_1M)), "a nova, no meio do primeiro turno");
         let (ctx, _) = cache.reading(&inputs(&other, None), &scan_tail(&other), false, now);
         assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "outro modelo não herda");
+        // A mesma sessão relida não renova a informação: a validade conta de quando ela foi dada.
+        cache.reading(&inputs(&old, Some(WINDOW_1M)), &scan_tail(&old), true, now + LEARNED_FOR / 2);
         let later = now + LEARNED_FOR + std::time::Duration::from_secs(1);
         let (ctx, _) = cache.reading(&inputs(&new, None), &scan_tail(&new), false, later);
         assert_eq!(ctx.map(|c| c.window), Some(WINDOW_DEFAULT), "aprendido vence: plano trocado não fica para sempre");
