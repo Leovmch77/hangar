@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { configureApi, configureDiag, definirArmazem, _resetRotasForTests, estaDesligado, registrarFalha, registrarSucesso, retryAfterMs } from '@hangar/core';
+import { configureApi, configureDiag, definirArmazem, _resetRotasForTests, estaDesligado, registrarFalha, registrarSucesso, retryAfterMs, retentarAgora } from '@hangar/core';
 import { prefs } from './prefs';
 import * as m from '../paraglide/messages';
 
@@ -98,7 +98,7 @@ beforeEach(() => {
   definirArmazem(cooldownStorage);
   fetchMock = vi.fn(async () => response([]));
   vi.stubGlobal('fetch', fetchMock);
-  useServers.setState({ servers: [], activeId: null, ready: true, aviso: null });
+  useServers.setState({ servers: [], activeId: null, ready: true, vaultReadable: true, aviso: null });
   configureApi({
     getBaseUrl: () => useServers.getState().active()?.baseUrl ?? '',
     getToken: () => useServers.getState().active()?.token ?? null,
@@ -406,7 +406,7 @@ describe('recusas e recuperação da lista', () => {
     rel();
   });
 
-  test.each(['REST', 'SSE'])('403 %s conserva servidor/token, esconde sessões velhas e só retenta por ação explícita', async (transport) => {
+  test.each(['REST', 'SSE'])('403 %s conserva tokens e voltaforeground libera uma tentativa, sem loop', async (transport) => {
     const first = useServers.getState().servers[0];
     useServers.setState({ servers: [first, second] });
     fetchMock.mockImplementation(async (url: string) => response([{ name: url.includes('8766') ? 'stale-second' : 'first', state: 'idle' }], transport === 'REST' && url.includes('8766') ? 403 : 200));
@@ -420,30 +420,46 @@ describe('recusas e recuperação da lista', () => {
     expect(estaDesligado(second.id)).toBe(false);
     const callsToSecond = () => fetchMock.mock.calls.filter(([url]) => String(url).includes('8766')).length;
     const calls = callsToSecond();
+    fetchMock.mockImplementation(async (url: string) => response([], url.includes('8766') ? 403 : 200));
     useSessions.getState().setForeground(false);
     useSessions.getState().setForeground(true);
     await settle();
+    expect(callsToSecond()).toBe(calls + 1);
     rel();
     rel = useSessions.getState().retain();
     await advance(1_800_000);
-    expect(callsToSecond()).toBe(calls);
+    expect(callsToSecond()).toBe(calls + 1);
     fetchMock.mockResolvedValue(response([]));
+    const healthy = created.at(-1)!;
     useSessions.getState().reconnect();
     await settle();
-    expect(callsToSecond()).toBe(calls + 1);
+    expect(callsToSecond()).toBe(calls + 2);
+    expect(healthy.close).not.toHaveBeenCalled();
     rel();
   });
 
-  test.each([404, 405])('SSE %s permanece recusado até trocar a credencial', async (status) => {
+  test.each(['refresh', 'recovered'])('403 é liberado por %s sem reabrir saudável nem antecipar outro prazo', async (action) => {
+    const first = useServers.getState().servers[0];
+    const third = { ...second, id: 'srv3', baseUrl: 'http://localhost:8767' };
+    useServers.setState({ servers: [first, second, third] });
+    prefs.set(outageKey, JSON.stringify({ srv3: { failures: 4, retryAt: Date.now() + 60_000 } }));
+    fetchMock.mockImplementation(async (url: string) => response([], url.includes('8766') ? 403 : 200));
     const rel = useSessions.getState().retain();
     await settle();
-    created[0].onerror?.({ xhrStatus: status });
-    await advance(1_800_000);
-    expect(created).toHaveLength(1);
-    expect(estaDesligado('srv1')).toBe(false);
-    useServers.setState({ servers: [{ ...useServers.getState().servers[0], token: 'fresh' }] });
+    if (action === 'recovered') {
+      registrarFalha(second.id);
+      registrarSucesso(second.id);
+    } else {
+      retentarAgora(second.id);
+      useSessions.getState().refreshServers();
+    }
     await settle();
-    expect(created).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('8766'))).toHaveLength(2);
+    expect(created[0].close).not.toHaveBeenCalled();
+    expect(retryAfterMs(third.id)).toBe(60_000);
+    await advance(5000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(useServers.getState().servers).toEqual([first, second, third]);
     rel();
   });
 
@@ -608,11 +624,35 @@ describe('recusas e recuperação da lista', () => {
     await advance(60_000);
     expect(fetchMock).toHaveBeenCalledTimes(resumeEarly ? 2 : 1);
     fetchMock.mockRejectedValue(new TypeError('offline'));
-    if (resumeEarly) useSessions.getState().reconnect();
-    else useSessions.getState().setForeground(true);
+    if (resumeEarly) {
+      created.at(-1)!.onerror?.({});
+      useSessions.getState().reconnect();
+    } else useSessions.getState().setForeground(true);
     await settle();
     expect(retryAfterMs('srv1')).toBe(2000);
     expect(JSON.parse(prefs.getString(outageKey)!).srv1.failures).toBe(1);
+    rel();
+  });
+
+  test.each([false, true])('503 de GET cancelado não cria recuo HTTP na volta: %s', async (resumeEarly) => {
+    useServers.setState({ activeId: null });
+    const late = deferred<Response>();
+    fetchMock.mockReturnValueOnce(late.promise).mockResolvedValue(response({}, 503));
+    const rel = useSessions.getState().retain();
+    await settle();
+    useSessions.getState().setForeground(false);
+    if (resumeEarly) useSessions.getState().setForeground(true);
+    late.resolve(response({}, 503));
+    await settle();
+    if (!resumeEarly) useSessions.getState().setForeground(true);
+    await settle();
+    expect(created).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    created[0].onerror?.({ xhrStatus: 503 });
+    await advance(1999);
+    expect(created).toHaveLength(1);
+    await advance(1);
+    expect(created).toHaveLength(2);
     rel();
   });
 
@@ -671,20 +711,118 @@ describe('recusas e recuperação da lista', () => {
     rel();
   });
 
-  test.each([408, 429, 500])('HTTP %s responde vivo, sem esfriamento; parse/list_error também não são rede', async (status) => {
+  test.each([400, 404, 405, 410, 408, 429, 500, 502, 503, 530].flatMap((status) =>
+    ['REST', 'SSE'].map((transport) => ({ status, transport }))))('HTTP $status $transport repete com recuo local, sem virar offline ou contar REST + SSE duas vezes', async ({ status, transport }) => {
     useServers.setState({ activeId: null });
-    fetchMock.mockResolvedValue(response({}, status));
+    fetchMock.mockResolvedValue(response({}, transport === 'REST' ? status : 200));
     const rel = useSessions.getState().retain();
     await settle();
-    expect(estaDesligado('srv1')).toBe(false);
-    created[0].onerror?.({ xhrStatus: status });
-    expect(estaDesligado('srv1')).toBe(false);
-    await advance(1000);
+    for (const [index, delay] of [2000, 5000, 30000].entries()) {
+      created[index].onerror?.({ xhrStatus: status });
+      created[index].onerror?.({ xhrStatus: status });
+      expect(estaDesligado('srv1')).toBe(false);
+      expect(retryAfterMs('srv1')).toBe(0);
+      expect(useSessions.getState().byServer[0].error).toBe(m.sessao_erro_servidor());
+      await advance(delay - 1);
+      expect(fetchMock).toHaveBeenCalledTimes(index + 1);
+      expect(useSessions.getState().byServer[0].error).not.toBe('offline');
+      await advance(1);
+      expect(fetchMock).toHaveBeenCalledTimes(index + 2);
+    }
+    rel();
+  });
+
+  test.each([
+    ['REST', false], ['SSE', false], ['REST', true], ['SSE', true],
+  ] as const)('503 %s contínuo, ativo=%s, progride até 30min sem ping/recuperação core zerarem recuo HTTP', async (transport, active) => {
+    useServers.setState({ activeId: active ? 'srv1' : null });
+    // No caso SSE o REST responde JSON inválido: ainda não entregou lista válida.
+    fetchMock.mockResolvedValue(response({}, transport === 'REST' ? 503 : 200));
+    const rel = useSessions.getState().retain();
+    await settle();
+    const delays = [2000, 5000, 30000, 60000, 120000, 240000, 300000, 600000, 1800000, 1800000];
+    for (const [index, delay] of delays.entries()) {
+      created[index].trigger('ping', '');
+      created[index].trigger('list_error', '{}');
+      created[index].trigger('sessions', 'broken-json');
+      created[index].onerror?.({ xhrStatus: 503 });
+      registrarFalha('srv1');
+      registrarSucesso('srv1');
+      await settle();
+      expect(estaDesligado('srv1')).toBe(false);
+      expect(useSessions.getState().byServer[0].error).toBe(m.sessao_erro_servidor());
+      await advance(delay - 1);
+      expect(created).toHaveLength(index + 1);
+      await advance(1);
+      expect(created).toHaveLength(index + 2);
+    }
+    created.at(-1)!.trigger('sessions', '[]');
+    created.at(-1)!.onerror?.({ xhrStatus: 503 });
+    await advance(1999);
+    expect(created).toHaveLength(delays.length + 1);
+    await advance(1);
+    expect(created).toHaveLength(delays.length + 2);
+    rel();
+  });
+
+  test.each(['7', 'Thu, 15 Oct 2026 12:00:07 GMT', 'invalid'])('429 REST respeita Retry-After %s sem mudar o teto do erro seguinte', async (retryAfter) => {
+    useServers.setState({ activeId: null });
+    fetchMock.mockResolvedValue({ ...response({}, 429), headers: new Headers({ 'Retry-After': retryAfter }) });
+    const rel = useSessions.getState().retain();
+    await settle();
+    created[0].onerror?.({ xhrStatus: 429 });
+    const delay = retryAfter === 'invalid' ? 2000 : 7000;
+    fetchMock.mockResolvedValue(response({}, 503));
+    await advance(delay - 1);
+    expect(created).toHaveLength(1);
+    await advance(1);
     expect(created).toHaveLength(2);
-    created[1].trigger('sessions', 'broken-json');
-    created[1].trigger('list_error', '{}');
-    expect(estaDesligado('srv1')).toBe(false);
+    created[1].onerror?.({ xhrStatus: 503 });
+    await advance(4999);
+    expect(created).toHaveLength(2);
+    await advance(1);
+    expect(created).toHaveLength(3);
+    rel();
+  });
+
+  test('voltaforeground ignora prazo HTTP uma vez sem zerar a contagem nem antecipar o core de outra máquina', async () => {
+    const first = useServers.getState().servers[0];
+    useServers.setState({ servers: [first, second], activeId: null });
+    prefs.set(outageKey, JSON.stringify({ srv2: { failures: 4, retryAt: Date.now() + 60_000 } }));
+    fetchMock.mockResolvedValue(response({}, 503));
+    const rel = useSessions.getState().retain();
+    await settle();
+    created[0].onerror?.({ xhrStatus: 503 });
+    await advance(500);
+    useSessions.getState().setForeground(false);
+    useSessions.getState().setForeground(true);
+    await settle();
+    expect(created).toHaveLength(2);
+    expect(retryAfterMs('srv2')).toBe(59_500);
+    created[1].onerror?.({ xhrStatus: 503 });
+    await advance(4999);
+    expect(created).toHaveLength(2);
+    await advance(1);
+    expect(created).toHaveLength(3);
+    rel();
+  });
+
+  test('lista REST válida zera só o recuo HTTP do destino; erro de transporte após HTTP falho não esconde erro', async () => {
+    useServers.setState({ activeId: null });
+    fetchMock.mockResolvedValue(response({}, 503));
+    const rel = useSessions.getState().retain();
+    await settle();
+    created[0].onerror?.({});
     expect(useSessions.getState().byServer[0].error).toBe(m.sessao_erro_servidor());
+    await advance(2000);
+    created[1].onerror?.({ xhrStatus: 503 });
+    fetchMock.mockResolvedValueOnce(response([]));
+    await advance(5000);
+    created[2].onerror?.({ xhrStatus: 503 });
+    await advance(1999);
+    expect(created).toHaveLength(3);
+    await advance(1);
+    expect(created).toHaveLength(4);
     rel();
   });
 

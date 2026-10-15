@@ -72,7 +72,11 @@ export default function Maquinas() {
               // vermelho ali leria como máquina fora do ar, que ninguém mediu.
               right={s.id === activeId ? <StateDot state="idle" /> : null}
             >
-              {error && error !== 'offline' ? <InfoNotice text={error} /> : null}
+              {error && error !== 'offline' ? (
+                <View accessibilityRole="alert" accessibilityLiveRegion="polite">
+                  <InfoNotice text={error} />
+                </View>
+              ) : null}
               <View style={styles.pills}>
                 <Pill icon="Plug" label={m.config_maquinas_testar()} onPress={() => testar(s)} />
               </View>
