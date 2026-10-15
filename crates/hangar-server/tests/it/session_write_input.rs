@@ -280,6 +280,20 @@ async fn headless_native_message_goes_to_the_claude_socket_without_python() {
     panic!("o recibo de recusa não encerrou a operação do recado: {}", String::from_utf8_lossy(&std::fs::read(&state).unwrap_or_default()));
 }
 
+/// A classe do recado não se lê (sem memória de modo): nada foi escrito no socket, então o recado sai pelo cano
+/// como texto comum, em vez de ficar incerto e preso na fila.
+#[tokio::test]
+async fn headless_native_message_without_a_readable_class_goes_through_the_cano() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry().await;
+    registry.bind_lifecycle();
+    open_headless(&registry, dir.path(), "s", "written").await;
+    let (python, server) = serve(registry, Duration::from_secs(5)).await;
+    let (status, body) = post(server, "s", "input", r#"{"text":"[de: par] oi"}"#).await;
+    assert_eq!((status, body["delivered"].as_bool(), body["native"].as_bool()), (200, Some(true), Some(false)), "{body}");
+    assert!(python.diag().iter().all(|d| d["evento"] != "runtime.send_failed"), "{:?}", python.diag());
+}
+
 #[tokio::test]
 async fn headless_input_the_cano_never_confirmed_is_an_error_with_a_code_and_a_diary_line() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);

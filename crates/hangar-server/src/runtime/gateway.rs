@@ -621,20 +621,21 @@ impl RuntimeRegistry {
             && let Some(mode)=source.confirmed {return Ok(class(&mode));}
         let source=read(target.to_owned()).await.map_err(|e|failure(e.0))?.ok_or_else(||failure("runtime_binding"))?;
         if let Some(mode)=source.confirmed {return Ok(class(&mode));}
-        let config=self.config_dir_of(target).await.ok_or_else(||failure("terminal_account_mode_unavailable"))?;
+        let (agent,config)=self.launch_facts_of(target).await.ok_or_else(||failure("terminal_account_mode_unavailable"))?;
         let transcript=source.transcript.clone();
-        let mode=tokio::task::spawn_blocking(move||crate::terminal_facts::unconfirmed_mode(&transcript,&config)).await
+        let mode=tokio::task::spawn_blocking(move||crate::terminal_facts::unconfirmed_mode(&transcript,agent,&config)).await
             .map_err(|_|failure("terminal_mode_unavailable"))?.map_err(|e|failure(e.0))?;
         Ok(class(&mode))
     }
-    /// Pasta da conta da sessão aberta aqui (sem a gravada, a padrão do Claude).
-    async fn config_dir_of(&self,name:&str) -> Option<std::path::PathBuf> {
+    /// Agente com terminal (o argv dele traz o modo de abertura) e pasta da conta da sessão aberta aqui (sem
+    /// a gravada, a padrão do Claude). Sem terminal o modo de abertura já vem confirmado do sidecar.
+    async fn launch_facts_of(&self,name:&str) -> Option<(Option<u32>,std::path::PathBuf)> {
         let entries=self.entries.lock().await;
         let entry=entries.values().find(|entry|entry.name==name)?;
         match &entry.handle {
-            EntryHandle::Terminal {target,..}=>Some(target.metadata.config_dir.clone()),
+            EntryHandle::Terminal {target,..}=>Some((Some(target.metadata.agent_pid),target.metadata.config_dir.clone())),
             EntryHandle::Headless(_)=>entry.runtime_target.as_ref().and_then(|target|target.metadata["config_dir"].as_str().map(std::path::PathBuf::from))
-                .or_else(||std::env::home_dir().map(|home|home.join(".claude"))),
+                .or_else(||std::env::home_dir().map(|home|home.join(".claude"))).map(|config|(None,config)),
             EntryHandle::CodexTerminal {..}=>None,
         }
     }
@@ -812,7 +813,24 @@ impl RuntimeRegistry {
         let claude_recipe=if target.provider=="claude" {
             let procs=self.processes.clone();
             let sid=target.metadata["session_id"].as_str().ok_or_else(||failure("lifecycle_conversation"))?;
-            let (pid,birth)=super::lifecycle::launched_agent(procs.as_ref(),i64::from(target.binding.pid),sid)?;
+            // Em motor o filho do cano é o `hangar-engine` até o exec virar o `claude`, e o cano já escuta antes.
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(15);
+            let agent=loop {
+                match super::lifecycle::launched_agent(procs.as_ref(),i64::from(target.binding.pid),sid) {
+                    Err(error) if error.code=="relaunch_agent_identity" && tokio::time::Instant::now()<deadline=>tokio::time::sleep(Duration::from_millis(50)).await,
+                    found=>break found,
+                }
+            };
+            let (pid,birth)=match agent {
+                Ok(agent)=>agent,
+                Err(error)=>{
+                    if let Err(stop) = queue.shutdown().await {
+                        tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois de não achar o claude do cano");
+                    }
+                    if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&target,&cano,sidecar_dir).await; }
+                    return Err(error);
+                },
+            };
             let process=procs.recipe(pid).map_err(|_|failure("lifecycle_process_read"))?;
             let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&process)?;
             if argv_sid!=sid && !connection.snapshot.init.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).is_some_and(|event|event["session_id"]==sid) {return Err(failure("relaunch_conversation"));}
@@ -2312,23 +2330,28 @@ mod tests {
         assert!(registry.hand_opened("fechada").await,"vida antiga já acabou: o nome volta a ser de quem abrir");
     }
 
-    /// Parity M7: o Claude Code que não grava `sessions/<pid>.json` (ou o arquivo lido no meio da escrita)
-    /// não deixa a sessão em erro a cada tique: sem sinal de troca, a conversa segue a mesma.
-    #[tokio::test]
-    async fn missing_native_record_is_no_conversation_change() {
-        use crate::terminal_input::TerminalBinding;
-        let dir=tempfile::tempdir().unwrap();
-        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+    /// Sessão Claude com terminal "same" registrada, sem tmux nem CLI de verdade.
+    async fn claude_terminal_entry(registry:&RuntimeRegistry,dir:&std::path::Path,agent_pid:u32)->(super::super::terminal::TerminalTarget,super::super::terminal::TerminalHandle) {
         let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
-            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
-            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
-            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+            binding:crate::terminal_input::TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.into(),agent_pid,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.join("B.json"),lease_path:dir.join("B.lock"),projection_dir:dir.into(),transcript:dir.join("new-sid.jsonl"),created:1.0,plugin_key:None};
         let lease=acquire_lease(&target.lease_path).unwrap();
         let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
         let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
         let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
         registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
             mode_source:crate::terminal_facts::ModeSource {binding:crate::terminal_facts::LocalTerminalFacts::binding(&target),transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        (target,handle)
+    }
+
+    /// Parity M7: o Claude Code que não grava `sessions/<pid>.json` (ou o arquivo lido no meio da escrita)
+    /// não deixa a sessão em erro a cada tique: sem sinal de troca, a conversa segue a mesma.
+    #[tokio::test]
+    async fn missing_native_record_is_no_conversation_change() {
+        let dir=tempfile::tempdir().unwrap();
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let (_,handle)=claude_terminal_entry(&registry,dir.path(),77).await;
         assert_eq!(registry.reconcile_claude("same","B","new-sid",7).await.unwrap(),json!({"changed":false}));
         std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
         std::fs::write(dir.path().join("sessions/77.json"),br#"{"pid":77,"sessio"#).unwrap();
@@ -2340,22 +2363,10 @@ mod tests {
     /// lida, decide o transcript ou o modo de abertura (`session_non_plan_mode`).
     #[tokio::test]
     async fn guessed_plan_base_does_not_decide_the_message_class() {
-        use crate::interactions::InteractionBinding;
-        use crate::terminal_input::TerminalBinding;
         let dir=tempfile::tempdir().unwrap();
         let memory=Arc::new(std::sync::Mutex::new(crate::state::permission::PermissionMemory::default()));
         let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()).with_permissions(memory.clone());
-        let binding=InteractionBinding {key:"B".into(),conversation:"new-sid".into(),generation:7};
-        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
-            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
-            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
-            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
-        let lease=acquire_lease(&target.lease_path).unwrap();
-        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
-        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
-        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
-        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
-            mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        let (_,handle)=claude_terminal_entry(&registry,dir.path(),77).await;
         let read=registry.terminal_mode_reader();
         memory.lock().unwrap().observe("new-sid","plan");
         assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed,None,"base suposta não vira `manual`");
@@ -2371,6 +2382,34 @@ mod tests {
         std::fs::write(dir.path().join("settings.json"),r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#).unwrap();
         assert_eq!(registry.message_class(None,"same").await.unwrap(),"bypass");
         handle.stop().await.unwrap();
+    }
+
+    /// Aviso do painel para sessão recém-aberta: sem rodapé lido nem modo no transcript, vale o modo com que
+    /// o CLI nasceu (argv), não o `defaultMode` da conta, que faria o Claude reter o recado.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn panel_notice_to_a_fresh_session_uses_the_launch_mode_before_the_account() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"),r#"{"permissions":{"defaultMode":"auto"}}"#).unwrap();
+        let mut agent=std::process::Command::new("sh").args(["-c","sleep 30; :","claude","--permission-mode","bypassPermissions"]).spawn().unwrap();
+        // Antes do exec o filho ainda tem o argv do teste.
+        const FLAG:&[u8]=b"bypassPermissions";
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        while !std::fs::read(format!("/proc/{}/cmdline",agent.id())).unwrap_or_default().windows(FLAG.len()).any(|w|w==FLAG) {
+            assert!(std::time::Instant::now()<deadline,"o filho não chegou ao exec");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let memory=Arc::new(std::sync::Mutex::new(crate::state::permission::PermissionMemory::default()));
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()).with_permissions(memory);
+        let (target,handle)=claude_terminal_entry(&registry,dir.path(),agent.id()).await;
+        let class=registry.message_class(None,"same").await;
+        // O transcript, quando já traz o modo, é mais novo que o argv e vence.
+        std::fs::write(&target.transcript,"{\"permissionMode\":\"acceptEdits\"}\n").unwrap();
+        let from_transcript=registry.message_class(None,"same").await;
+        agent.kill().unwrap();agent.wait().unwrap();
+        handle.stop().await.unwrap();
+        assert_eq!(class.unwrap(),"bypass");
+        assert_eq!(from_transcript.unwrap(),"prompting");
     }
 
     /// No encerramento do servidor os hubs caem antes do registro: `shutdown` fecha TODAS as sessões

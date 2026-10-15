@@ -219,7 +219,7 @@ fn patch_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,pat
     if meta["key"]!=target.key || meta["session_id"]!=target.metadata["session_id"] || meta["name"]!=target.name
         || recorded_pid!=u64::from(target.binding.pid) {return Ok(json!({"stale":true}));}
     let fields=patch.as_object().ok_or_else(||failure("lifecycle_sidecar_patch"))?;
-    if fields.keys().any(|k|!matches!(k.as_str(),"session_id"|"permission_mode"|"previous_non_plan"|"cano")) {return Err(failure("lifecycle_sidecar_patch"));}
+    if fields.keys().any(|k|!matches!(k.as_str(),"session_id"|"permission_mode"|"previous_non_plan"|"cano"|"problema")) {return Err(failure("lifecycle_sidecar_patch"));}
     meta.as_object_mut().ok_or_else(||failure("lifecycle_sidecar_read"))?.extend(fields.clone());
     let written=serde_json::to_vec(&meta).map_err(|_|failure("lifecycle_sidecar_write"))?;
     super::queue::atomic_write(path,&written).map_err(|_|failure("lifecycle_sidecar_write"))?;
@@ -345,6 +345,22 @@ mod tests {
         let held=task.await.unwrap();
         assert!(gates.enter("session",Duration::ZERO).await.is_err());
         drop(held);assert!(gates.enter("session",Duration::ZERO).await.is_ok());
+    }
+    #[test]
+    fn the_actor_can_persist_and_clear_the_problem_it_reads_from_the_sidecar() {
+        use super::super::protocol::{RuntimeTarget,CanoBinding};
+        use serde_json::json;
+        let dir=claude_sidecar_dir().unwrap();std::fs::create_dir_all(&dir).unwrap();
+        let name="problem-patch";
+        std::fs::write(dir.join(format!("{name}.json")),json!({"key":"K","session_id":"sid","name":name,"cano":{"pid":42},"problema":["headless_nao_subiu","x"]}).to_string()).unwrap();
+        let target=RuntimeTarget {key:"K".into(),generation:1,name:name.into(),provider:"claude".into(),metadata:json!({"session_id":"sid"}),
+            binding:CanoBinding {pid:42,escuta:String::new(),token:String::new(),versao:2},lease_path:dir.join("l"),state_path:dir.join("s"),
+            projection_dir:dir.join("p"),transcript:dir.join("t"),created:0.0};
+        let fell=patch_sidecar(&target,&json!({"problema":["headless_processo_caiu","rc=-9"]})).unwrap();
+        assert_eq!(fell["metadata"]["problema"],json!(["headless_processo_caiu","rc=-9"]));
+        let cleared=patch_sidecar(&target,&json!({"problema":null})).unwrap();
+        assert_eq!((cleared["updated"].clone(),cleared["metadata"]["problema"].clone()),(json!(true),json!(null)));
+        assert_eq!(patch_sidecar(&target,&json!({"name":"other"})).unwrap_err().code,"lifecycle_sidecar_patch");
     }
     #[test]
     fn late_a_cannot_match_b_by_name_alone() {
