@@ -1095,13 +1095,16 @@ async fn codex_preview_goes_to_live_not_to_events() {
     let handle = codex_live_actor(dir.path(),cano,Some(live)).await;
     let mut events = handle.subscribe();
     // A abertura anda a `revision` quando publica a vista pronta, e isso espera a gravação do estado em disco.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let before = loop {
-        let snapshot = handle.snapshot().await.unwrap();
-        if snapshot["view"]["ready"] == true { break snapshot["revision"].as_u64().unwrap(); }
-        assert!(std::time::Instant::now() < deadline, "a abertura do ator não publicou a vista");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    // Sem modelo nem esforço na fixture: com eles o `format_status` muda a vista e publica de novo depois.
+    let mut last = Value::Null;
+    let opened = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            last = handle.snapshot().await.unwrap();
+            if last["view"]["ready"] == true { return last["revision"].as_u64().unwrap(); }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await;
+    let before = opened.unwrap_or_else(|_|panic!("a abertura do ator não publicou a vista; erro: {}",last["error"]));
     while events.try_recv().is_ok() {}
     push.send(delta("olá")).unwrap();
     live_until(&mut rx,"prévia no canal em processo",|s|s.preview == "olá").await;
