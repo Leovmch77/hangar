@@ -785,13 +785,17 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         Action::GiveUpUnproved { now, grace } => {
             let mut given = Vec::new();
             let mut next_due: Option<f64> = None;
+            // Incerta de terminal pode ser tecla já digitada: a finalização dela é do ator do terminal.
+            let uncertain: BTreeSet<String> = state.operations.iter()
+                .filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.status == Status::Unknown && !terminal_input(state, op))
+                .filter_map(|(_, op)| op.entry_id.clone()).collect();
             for row in &mut state.rows {
                 if row["confirmed"] == true || row["desistiu"] == true
                     || row["papel"] == "assistant" || row["steered"] == true { continue; }
                 let id = row_id(row).to_owned();
                 let ops = || state.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id.as_str()));
                 // A não marcada como entregue só entra incerta: fora da espera, nada mais a mexeria.
-                if row["delivered"] != true && !ops().any(|(_, op)| op.status == Status::Unknown) { continue; }
+                if row["delivered"] != true && !uncertain.contains(&id) { continue; }
                 // Escrita em curso: o desfecho é do ator.
                 if ops().any(|(_, op)| op.status == Status::Dispatching) { continue; }
                 let since = ["dispatched_ts","claimed_ts","ts"].iter().find_map(|key| row[*key].as_f64()).unwrap_or(0.0);
