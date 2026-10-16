@@ -61,6 +61,100 @@ fn initialize_then_resume() {
 }
 
 #[test]
+fn clear_starts_a_fresh_headless_conversation_without_sending_a_prompt() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"initialized":true,"ready":true,
+        "cwd":"/work","model":"gpt-6","effort":"high","mode":"plan","permission_mode":"Approve for me","service_tier":"priority"}),1,clock(10.0)).with_store();
+    let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+    let effects = engine.command(clear,clock(11.0)).unwrap();
+    let start = frames(&effects)[0].clone();
+    assert_eq!(start["method"],"thread/start");
+    assert_eq!(start["params"],json!({"cwd":"/work","model":"gpt-6","approvalPolicy":"on-request","sandbox":"workspace-write","serviceTier":"priority"}));
+    assert_eq!(engine.control_view()["deliverable"],false);
+    let opened = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"thread-2","path":"/new.jsonl","turns":[]},"model":"gpt-6"}}),12.0);
+    let settings = frames(&opened)[0].clone();
+    assert_eq!(settings["method"],"thread/settings/update");
+    assert_eq!(settings["params"]["threadId"],"thread-2");
+    assert_eq!(settings["params"]["effort"],"high");
+    assert_eq!(settings["params"]["collaborationMode"]["mode"],"plan");
+    assert!(!opened.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,.. } if operation_id == "clear-1")));
+    let done = line(&mut engine,json!({"id":settings["id"],"result":{}}),13.0);
+    assert!(done.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "clear-1")));
+    assert_eq!(engine.control_view()["thread_id"],"thread-2");
+    assert_eq!(engine.control_view()["deliverable"],true);
+    let sent = engine.command(command(OperationKind::Input,json!({"text":"olá"})),clock(14.0)).unwrap();
+    assert_eq!(frames(&sent)[0]["params"]["threadId"],"thread-2");
+}
+
+#[test]
+fn clear_refused_by_codex_keeps_the_original_thread_usable() {
+    let mut engine = engine();
+    let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+    let start = frames(&engine.command(clear,clock(11.0)).unwrap())[0].clone();
+    let failed = line(&mut engine,json!({"id":start["id"],"error":{"message":"não abriu"}}),12.0);
+    assert!(failed.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "clear-1")));
+    assert_eq!(engine.control_view()["thread_id"],"thread-1");
+    assert_eq!(engine.control_view()["deliverable"],true);
+}
+
+#[test]
+fn clear_late_replies_still_finish_the_thread_and_release_input() {
+    let mut engine = engine();
+    let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+    let start = frames(&engine.command(clear,clock(11.0)).unwrap())[0].clone();
+    engine.apply(EngineInput::Tick,clock(50.0)).unwrap();
+    let opened = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"thread-2","turns":[]}}}),51.0);
+    let settings = frames(&opened)[0].clone();
+    assert_eq!(settings["method"],"thread/settings/update");
+    engine.apply(EngineInput::Tick,clock(90.0)).unwrap();
+    line(&mut engine,json!({"id":settings["id"],"result":{}}),91.0);
+    assert_eq!(engine.control_view()["thread_id"],"thread-2");
+    assert_eq!(engine.control_view()["deliverable"],true);
+}
+
+#[test]
+fn clear_does_not_accept_a_setting_change_that_it_would_overwrite() {
+    let mut engine = engine();
+    let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+    engine.command(clear,clock(11.0)).unwrap();
+    for (kind,payload) in [(OperationKind::SetEffort,json!({"effort":"medium"})),(OperationKind::SetMode,json!({"mode":"plan"})),
+        (OperationKind::SetModel,json!({"model":"outro"})),(OperationKind::SetPermissionMode,json!({"mode":"Full Access"}))] {
+        assert!(engine.command(command(kind,payload),clock(12.0)).is_err());
+    }
+}
+
+#[test]
+fn clear_does_not_release_input_if_restoring_plan_fails() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"initialized":true,"ready":true,
+        "mode":"plan","model":"gpt-6","effort":"high"}),1,clock(10.0)).with_store();
+    let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+    let start = frames(&engine.command(clear,clock(11.0)).unwrap())[0].clone();
+    let opened = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"thread-2","turns":[]}}}),12.0);
+    let settings = frames(&opened)[0].clone();
+    assert_eq!(settings["params"]["collaborationMode"]["mode"],"plan");
+    let failed = line(&mut engine,json!({"id":settings["id"],"error":{"message":"configuração recusada"}}),13.0);
+    assert_eq!(engine.control_view()["thread_id"],"thread-2");
+    assert_eq!(engine.control_view()["deliverable"],false);
+    assert_eq!(engine.view()["problema"],"codex_clear_settings_failed");
+    assert_eq!(engine.control_view()["mode"],"default");
+    assert!(failed.iter().any(|effect|matches!(effect,Effect::Policy { kind,payload,.. } if kind == "session.patch_meta" && payload["mode"] == "default")));
+}
+
+#[test]
+fn clear_refuses_a_running_turn_and_an_open_question() {
+    for waiting in [false,true] {
+        let mut engine = engine();
+        if waiting {
+            request(&mut engine,5,"item/commandExecution/requestApproval",json!({"threadId":"thread-1","command":"pwd"}));
+        } else {
+            line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.5);
+        }
+        let clear = serde_json::from_value(json!({"operation_id":"clear-1","kind":"clear","payload":{}})).unwrap();
+        assert!(engine.command(clear,clock(11.0)).is_err());
+        assert_eq!(engine.control_view()["thread_id"],"thread-1");
+    }
+}
+
+#[test]
 fn takeover_restores_async_question_before_ready() {
     let question = json!({"provider":"codex", "request_id":"async:thread-1:item:0", "is_async":true,
         "questions":[{"id":"answer", "question":"Qual opção?", "options":[]}]});
