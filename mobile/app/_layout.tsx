@@ -13,6 +13,7 @@ import { useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
+import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
 import * as m from '../src/paraglide/messages';
 
 configureCore();
@@ -101,6 +102,7 @@ export default function Layout() {
           <Stack.Screen name="s/[server]/[name]/codex-limits" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/bastao" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
         </Stack>
+        <LiveVoiceRoot />
         <Toaster position="top-center" />
       </GestureHandlerRootView>
     </KeyboardProvider>

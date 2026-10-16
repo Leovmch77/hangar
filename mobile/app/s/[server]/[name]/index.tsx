@@ -26,6 +26,7 @@ import { SessionProblem } from '../../../../src/chat/SessionProblem';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
 import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
+import { useLiveVoice } from '../../../../src/features/voice/liveVoiceStore';
 import { PlanActions } from '../../../../src/chat/PlanActions';
 import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode, currentQueuePanel } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
@@ -339,6 +340,12 @@ export default function ChatScreen() {
   const semTerminal = !!(stateEvent?.headless ?? currentSession?.headless);
   // Só o stream da sessão diz `dead`: aí não há para quem escrever, o composer vira o aviso.
   const dead = stateEvent?.state === 'dead';
+  useEffect(() => {
+    if (servidorSumiu) return;
+    return useLiveVoice.getState().registerChat({ serverId, name,
+      terminal: !!currentSession && !orq && !semTerminal && !soLeitura && !dead && !codexPreThread,
+      controls: !orq && !soLeitura && !dead && !codexPreThread && fetchedSession !== null });
+  }, [serverId, name, servidorSumiu, currentSession, orq, semTerminal, soLeitura, dead, codexPreThread, fetchedSession]);
   const [recarregando, setRecarregando] = useState(false);
   const recarregarBloqueado = stateEvent?.state !== 'idle' || recarregando;
   const recarregar = () => {

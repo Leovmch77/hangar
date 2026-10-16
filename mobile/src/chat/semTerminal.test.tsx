@@ -68,6 +68,11 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   fetchSessionsForServer: vi.fn(async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }]),
   fetchDictationOrganization: vi.fn(async () => 'on'),
+  loadLiveVoiceSettings: vi.fn(async () => ({ enabled: false, codex: false, jev: false, voices: [],
+    settings: { voice: null, codex_account: 'default', organizer: {
+      direct: { model: null, effort: 'medium', tier: null }, plan: { model: null, effort: 'high', tier: null },
+    } }, call: { active: false, client: null },
+  })),
   interrupt: vi.fn(async () => {}),
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
@@ -124,7 +129,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
+    .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' cite_action cite_too_long_aria selection_copy selection_copy_markdown selection_copy_image_url selection_copy_image_urls')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')

@@ -23,6 +23,7 @@ import { useDitado } from '../features/ditado/useDitado';
 import { dictationStyleStore } from '../features/ditado/ditadoEstiloStore';
 import { DictationError, dictationAudio, runDictation, uploadName, type DictationSource } from '../features/ditado/dictationRun';
 import { AudioChip } from './AudioChip';
+import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
 import { CommandSheet, useSessionCommands } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
@@ -1581,6 +1582,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
                 ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
                 : <Icon name="Mic" size={20} color={theme.tokens.text.secondary} />}
           </Pressable>
+
+          <LiveVoiceChatButton serverId={serverId} name={name} />
 
           <View style={styles.spacer} />
 

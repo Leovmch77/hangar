@@ -12,6 +12,7 @@ import { novoEstadoVad, passoVad, registrarDiag } from '@hangar/core';
 import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { dictationStyleStore } from './ditadoEstiloStore';
+import { beginVoiceDictation } from '../voice/audioSession';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
 
@@ -27,6 +28,7 @@ interface Opts {
 
 interface Recording {
   recorder: ManagedRecorder | null;
+  releaseAudio: () => void;
   phase: 'permission' | 'preparing' | 'recording' | 'stopping';
   interrupted: boolean;
   onFim: Opts['onFim'];
@@ -84,6 +86,7 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
       reportRecordingError(recording, e);
     } finally {
       if (recordingRef.current === recording) recordingRef.current = null;
+      recording.releaseAudio();
     }
   }, []);
 
@@ -146,7 +149,8 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
     let complete!: (status: RecordingStatus) => void;
     const finished = new Promise<RecordingStatus>((resolve) => { complete = resolve; });
     const recording: Recording = {
-      recorder: null, phase: 'permission', interrupted: false, onFim, onErroParada, finished,
+      recorder: null, releaseAudio: beginVoiceDictation(),
+      phase: 'permission', interrupted: false, onFim, onErroParada, finished,
     };
     recordingRef.current = recording;
     try {

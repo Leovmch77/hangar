@@ -17,7 +17,10 @@
         },
         "NSLocalNetworkUsageDescription": "Conecta ao seu servidor Hangar na rede local.",
         "NSCameraUsageDescription": "Lê o QR de pareamento do servidor e tira fotos para anexar na conversa.",
-        "NSMicrophoneUsageDescription": "Grava o ditado pro composer.",
+        "NSMicrophoneUsageDescription": "Grava o ditado pro composer e usa o microfone nas chamadas de voz ao vivo.",
+        "UIBackgroundModes": [
+          "audio"
+        ],
         "CFBundleDevelopmentRegion": "pt-BR",
         "CFBundleLocalizations": [
           "pt-BR",
@@ -42,7 +45,11 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH_CONNECT"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -64,7 +71,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Grava o ditado pro composer."
+          "microphonePermission": "Grava o ditado pro composer e usa o microfone nas chamadas de voz ao vivo."
         }
       ],
       [
@@ -73,6 +80,13 @@
           "photosPermission": "Mostra suas fotos recentes para anexar na conversa.",
           "savePhotosPermission": "Salva imagens da conversa nas suas fotos.",
           "isAccessMediaLocationEnabled": false
+        }
+      ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Lê o QR de pareamento do servidor e tira fotos para anexar na conversa.",
+          "microphonePermission": "Grava o ditado pro composer e usa o microfone nas chamadas de voz ao vivo."
         }
       ],
       "./plugins/withPasteInput"
