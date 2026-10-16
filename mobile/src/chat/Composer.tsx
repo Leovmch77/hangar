@@ -721,7 +721,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           // o envio der certo. Comando de barra não leva citação.
           const sentRefs = refsForMessage(contextRefsSnapshot(refsKey), typed);
           const toSend = composeWithContextRefs(sentRefs, typed);
-          if (!toSend) return;
+          if (!toSend || sendingRef.current) return;
+          sendingRef.current = true;
           limparUndo();
           setSending(true);
           void sendText(toSend, revision)
@@ -730,7 +731,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
               setError(msg);
             })
-            .finally(() => setSending(false));
+            .finally(() => { sendingRef.current = false; setSending(false); });
           return;
         }
         setAutoN(Math.ceil(rest / 1000));
