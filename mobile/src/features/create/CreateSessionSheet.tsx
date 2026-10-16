@@ -133,6 +133,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const cotaSelecionada = selectedConfig ? cotaDaConta(cotas, selectedConfig) : undefined;
   // Só a escolha à mão no menu de conta desliga a troca automática por cota esgotada.
   const accountTouched = useRef(false);
+  // D-003: só vai no pedido a conta que a pessoa escolheu (agora ou lembrada de antes). A ativa sem
+  // escolha não vai, e o servidor troca a que estiver a 95% ou mais; a troca automática da tela é essa
+  // mesma regra, então não conta como escolha.
+  const [accountChosen, setAccountChosen] = useState(false);
   // Conta que a troca automática deixou para trás; a pílula avisa até a próxima escolha.
   const [switchedFrom, setSwitchedFrom] = useState('');
   const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
@@ -202,6 +206,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     setConfigs([]);
     setSelectedConfig(null);
     accountTouched.current = false;
+    setAccountChosen(false);
     providerTouched.current = false;
     setSwitchedFrom('');
     setMotores({});
@@ -213,8 +218,9 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       .then((cs) => {
         if (!alive) return;
         setConfigs(cs);
-        const sel = cs.find((c) => c.path === remembered.configDir)?.path ?? cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null;
-        setSelectedConfig(sel);
+        const kept = cs.find((c) => c.path === remembered.configDir)?.path;
+        setAccountChosen(!!kept);
+        setSelectedConfig(kept ?? cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null);
       })
       .catch((cause: unknown) => {
         if (alive) setCatalogError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
@@ -377,7 +383,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     ? { provider: 'codex', model: modelo || null, effort: esforco || null, codex_account: codexAccount, headless }
     : {
       provider,
-      config_dir: provider === 'claude' ? selectedConfig : null,
+      config_dir: provider === 'claude' && accountChosen ? selectedConfig : null,
       engine: provider === 'claude' ? engine || null : null,
       model: (provider === 'claude' || provider === 'pi' || provider === 'kimi' || provider === 'omp') ? modelo || null : null,
       effort: (provider === 'claude' || provider === 'pi' || provider === 'omp') ? esforco || null : null,
@@ -421,6 +427,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     providerTouched.current = true;
     setProvidersError('');
     accountTouched.current = true;
+    setAccountChosen(true);
     setSwitchedFrom('');
     setSelectedConfig(v);
     remember({ configDir: v });

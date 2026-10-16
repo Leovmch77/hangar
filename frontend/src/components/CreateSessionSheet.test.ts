@@ -197,13 +197,26 @@ describe('CreateSessionSheet — conta sugerida pela cota', () => {
     unmount(comp);
   });
 
-  it.each(['indisponível', 'desconhecida'])('mantém a conta ativa com sugestão %s', async (scenario) => {
+  it.each(['indisponível', 'desconhecida'])('mostra a conta ativa com sugestão %s e não a manda (D-003: o servidor decide)', async (scenario) => {
     vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
     if (scenario === 'desconhecida') vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: '/outra-conta' });
     const { comp } = montar();
     await flush();
     await escolherPasta();
     expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBeNull();
+    unmount(comp);
+  });
+
+  it('a conta ativa escolhida à mão é mandada', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#cfg-pick', '.claude-nova');
+    await escolherNoCombo('#cfg-pick', 'atual');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
@@ -241,7 +254,7 @@ describe('CreateSessionSheet — conta sugerida pela cota', () => {
     expect(document.querySelector(selector)!.textContent).toContain(value);
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    expect(onCreate.mock.calls[0]?.[2]).toBeNull();
     expect(onCreate.mock.calls[0]?.[argument]).toBe(value);
     unmount(comp);
   });

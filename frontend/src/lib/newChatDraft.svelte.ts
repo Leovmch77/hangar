@@ -113,6 +113,8 @@ export class NewChatDraft {
   #providerPicked = false;
   // Só a escolha manual de CONTA desliga a troca automática por cota.
   #accountPicked = false;
+  // A sugestão de cota mostrou outra conta que não a ativa: ela vai, senão a sessão nasceria noutra.
+  #accountSuggested = false;
   // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra,
   // desde que nenhuma escolha tenha mudado desde então.
   // `uploaded`: anexo já enviado a esta sessão → caminho no servidor; o reenvio não duplica a cópia.
@@ -403,6 +405,7 @@ export class NewChatDraft {
     const seq = ++this.#cfgSeq;
     this.#modelTouched = false;
     this.#accountPicked = false;
+    this.#accountSuggested = false;
     this.configsLoading = true;
     try {
       const list = await listClaudeConfigs();
@@ -417,6 +420,7 @@ export class NewChatDraft {
         if (seq !== this.#cfgSeq || modelGen !== this.#modSeq || this.#modelTouched || this.provider !== 'claude'
             || !this.configs.some((c) => c.path === path) || path === this.configDir) return;
         this.configDir = path;
+        this.#accountSuggested = true;
         void this.loadModels();
       }).catch(() => { /* sem leitura de cota, fica a conta ativa */ });
     } catch (e) {
@@ -576,7 +580,9 @@ export class NewChatDraft {
           name: sessionName, cwd: target, provider: this.provider,
           // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
           remember_provider: this.#providerPicked || Object.keys(this.providers).length > 0,
-          config_dir: claude ? this.configDir : null,
+          // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais;
+          // a troca automática da esgotada é essa mesma regra, então também não conta como escolha.
+          config_dir: claude && (this.#accountPicked || this.#accountSuggested) ? this.configDir : null,
           codex_account: codex ? this.codexAccount : undefined,
           engine: claude ? this.engine || null : null,
           ...(claude && this.engine && this.engineAccount ? { engine_account: this.engineAccount } : {}),

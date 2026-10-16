@@ -56,7 +56,7 @@ describe('NewChatDraft.send', () => {
     const r = await draft.send('oi');
 
     expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
-      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude', config_dir: '/c' }));
+      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude', config_dir: null }));
     expect(core.sendInputForServer).toHaveBeenCalledWith(srv, 'proj-3', 'oi');
     expect(r).toEqual({ serverId: 'pc', name: 'proj-3' });
   });
@@ -256,6 +256,32 @@ describe('NewChatDraft.switchFromExhausted', () => {
     draft.setConfig('/c');
     draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
     expect(draft.configDir).toBe('/c');
+  });
+
+  it('D-003: só a conta escolhida à mão ou sugerida vai no pedido; a troca da esgotada não', async () => {
+    core.fetchSessionsForServer.mockResolvedValue([]);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj' });
+    core.sendInputForServer.mockResolvedValue(undefined);
+    const sent = () => core.createSessionForServer.mock.calls.at(-1)![1].config_dir;
+
+    const trocada = await ready();
+    trocada.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    await flush();
+    expect(trocada.configDir).toBe('/d');
+    await trocada.send('oi');
+    expect(sent()).toBeNull();
+
+    const escolhida = await ready();
+    escolhida.setConfig('/c');
+    await flush();
+    await escolhida.send('oi');
+    expect(sent()).toBe('/c');
+
+    core.getClaudeAccountSuggestion.mockResolvedValue({ path: '/d' });
+    const sugerida = await ready();
+    expect(sugerida.configDir).toBe('/d');
+    await sugerida.send('oi');
+    expect(sent()).toBe('/d');
   });
 
   it('sem conta com folga fica na atual', async () => {

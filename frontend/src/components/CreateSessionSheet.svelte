@@ -464,6 +464,7 @@
     configs = [];
     selectedConfig = null;
     contaEscolhidaAMao = false;
+    contaSugerida = false;
     motores = {};
     // Zera o estado da linha de conta AQUI porque este `++cfgSeq` invalida qualquer criar/apagar em
     // voo: o `finally` daquela operação só libera o botão se a geração dele ainda for a vigente, e
@@ -493,7 +494,7 @@
             // A sugestão inicial nunca substitui uma escolha feita enquanto a cota era lida.
             if (seq !== cfgSeq || modelGeneration !== modSeq || modelChoiceTouched || !open || loading || contaOcupada
                 || provider !== 'claude' || engine || conversaAlvo || !configs.some((c) => c.path === path)) return;
-            if (path !== selectedConfig) { selectedConfig = path; carregarModelos(); }
+            if (path !== selectedConfig) { selectedConfig = path; contaSugerida = true; carregarModelos(); }
           }).catch(() => { /* Sem leitura de cota, fica a conta ativa ou a primeira disponível. */ });
         }
       })
@@ -894,6 +895,11 @@
   let contaAntesDaEscolha = $state<string | null>(null);
   // Conta escolhida à mão no seletor: a conversa escolhida depois muda para ela, em vez de puxá-la.
   let contaEscolhidaAMao = $state(false);
+  // A sugestão de cota mostrou outra conta que não a ativa: ela vai, senão a sessão nasceria noutra.
+  let contaSugerida = $state(false);
+  // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais.
+  // A troca automática da esgotada é a mesma regra do servidor, então também não conta como escolha.
+  const contaDoPedido = $derived(contaEscolhidaAMao || contaSugerida || conversaAlvo ? selectedConfig : null);
   function escolherConversa(c: ArchiveEntry) {
     if (conversaEscolhida === c.session_id) { conversaEscolhida = ''; return; }
     conversaEscolhida = c.session_id;
@@ -1115,7 +1121,7 @@
         const r = await passarBastao(baton.name, {
           name: body.name,
           cwd: body.cwd,
-          config_dir: body.provider === 'claude' ? selectedConfig : null,
+          config_dir: body.provider === 'claude' ? contaDoPedido : null,
           provider: body.provider,
           remember_provider: rememberProvider,
           ...(body.provider === 'codex' ? { codex_account: account } : {}),
@@ -1142,13 +1148,13 @@
       await salvarPadraoJev();
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
-        await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modeloCriacao || null,
+        await onCreate(name.trim(), picked, contaDoPedido, provider, engine || null, modeloCriacao || null,
                        esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev, worktreeChoice, ...extra);
       } else if (provider === 'claude' && !engine && subagente) {
-        await onCreate(name.trim(), picked, selectedConfig, provider, null, modeloCriacao || null,
+        await onCreate(name.trim(), picked, contaDoPedido, provider, null, modeloCriacao || null,
                        esforco || null, permissao || null, null, requestedHeadless, subagente, jev, worktreeChoice, ...extra);
       } else {
-        await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
+        await onCreate(name.trim(), picked, provider === 'claude' ? contaDoPedido : null, provider,
                        provider === 'claude' ? (engine || null) : null, modeloCriacao || null, esforco || null,
                        provider === 'claude' ? (permissao || null) : null,
                        // Explícitos até o fim: a cadeia posicional passou a ter o `jev` no 12º, e
