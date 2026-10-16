@@ -1165,6 +1165,26 @@ fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl Fn
     (raw, dir, root)
 }
 
+/// Sem o registro a sessão não tem como ser reaberta nem reconhecida pela chave: falhar ao gravá-lo é
+/// falha da abertura, antes do pane, e a worktree que ela criou é desfeita.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unwritten_record_fails_the_open_before_the_pane() {
+    let block = |root: &std::path::Path| {
+        std::fs::create_dir_all(root.join("home/.hangar")).unwrap();
+        std::fs::write(root.join("home/.hangar/session-specs"), "não é pasta").unwrap();
+    };
+    let (raw, _dir, _root) = run_contract_with("create_claude_terminal_default", |_| {}, block);
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(500), json!("erro_criacao_sessao")), "{}", raw["steps"][0]["body"]);
+    assert!(!raw["subprocesses"].as_array().unwrap().iter().any(|p| p["argv"][0] == "new-session"), "nenhum pane sem registro");
+    let (raw, _dir, root) = run_contract_with("create_worktree_new_branch", |_| {}, block);
+    assert_eq!(raw["steps"][0]["status"], 500, "{}", raw["steps"][0]["body"]);
+    let repo = contract::place("<ROOT>/home/pessoal/repo", &root);
+    let branches = std::process::Command::new("git").args(["-C", &repo, "branch", "--list"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "* main", "a branch criada sai junto");
+}
+
 /// A conta do Hangar fica sob a guarda compartilhada desde o `hangar-conta --prep` até o pane: a
 /// exclusão da conta (exclusiva) não passa no meio.
 #[cfg(target_os = "linux")]

@@ -31,6 +31,14 @@ pub fn write(home: &Path, spec: &SessionSpec) -> io::Result<()> {
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(spec)?)
 }
 
+/// A abertura que não nasceu tira o registro que gravou.
+pub fn remove(home: &Path, key: &str) -> io::Result<()> {
+    match std::fs::remove_file(path(home, key)?) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// `Ok(None)` só quando não existe; arquivo ilegível ou de outra versão é erro, nunca um spec inventado.
 pub fn read(home: &Path, key: &str) -> io::Result<Option<SessionSpec>> {
     let bytes = match crate::runtime::queue::read_replaced(&path(home, key)?) {

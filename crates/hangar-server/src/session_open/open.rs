@@ -378,10 +378,18 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     claude::pretrust(&claude::claude_json(host.terminal(), host.home(), config_dir.as_deref()), &spec.cwd, host.terminal().windows);
     diary.step("criar_terminal");
     host.release_name(&spec.name).await?;
+    // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
+    if let Err(error) = super::record::write(host.home(), spec) {
+        diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
+        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
+    }
     if let Err(error) = terminal::spawn(host.mux(), host.terminal(), &pane).await {
         diary.refused("erro", error.code, Some("criar_terminal"), Some(&error.stderr));
         if error.code == terminal::UNCERTAIN {
             return Err(OpenError::new(504, UNCERTAIN, "o tmux não respondeu e a sessão pode ter nascido; confira a lista antes de tentar de novo"));
+        }
+        if let Err(error) = super::record::remove(host.home(), &spec.key) {
+            tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu ficou para trás");
         }
         return Err(creation(match error.code {
             "terminal_morreu_ao_nascer" => format!("o terminal fechou logo depois de abrir: {}", error.stderr),
@@ -392,9 +400,6 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     let born = Born { name: spec.name.clone(), session_id: sid, jsonl: jsonl.clone(),
         permission_mode: spec.permission_mode.map(|m| m.name().to_owned()), remember_provider };
     let warnings = host.born(&born).await;
-    if let Err(error) = super::record::write(host.home(), spec) {
-        tracing::warn!(kind = ?error.kind(), "spec da sessão não gravado; ela nasceu e é adotada pela varredura");
-    }
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": "claude",
         "etapa": "terminal_criado", "operacao": diary.op}));
     Ok((jsonl, warnings, route))
