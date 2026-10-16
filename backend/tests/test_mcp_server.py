@@ -1,3 +1,4 @@
+import base64
 import contextlib
 from pathlib import Path
 
@@ -311,6 +312,33 @@ async def test_html_render_sends_own_theme_only_when_asked(identidade, monkeypat
         assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t"})).is_error
         assert not (await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "own_theme": True})).is_error
     assert "own_theme" not in sent[0] and sent[1]["own_theme"] is True
+
+
+async def test_html_render_draft_returns_the_shot_as_an_image(identidade, monkeypatch, tmp_path):
+    from app import pages_bridge
+    png = tmp_path / "s.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfalso")
+    sent = []
+    draft = {"draft": {"id": "d", "url": "/api/sessions/eu/pages/d", "shot": str(png), "heights": {"360": 90}}}
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or draft)
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "draft": True, "width": 390, "theme": "light"})
+    assert not res.is_error
+    assert sent[0]["width"] == 390 and sent[0]["theme"] == "light"
+    assert res.structured_content == draft, "o Codex lê o resultado estruturado"
+    images = [c for c in res.content if c.type == "image"]
+    assert len(images) == 1 and images[0].mime_type == "image/png"
+    assert base64.b64decode(images[0].data) == png.read_bytes()
+
+
+async def test_html_render_sends_width_and_theme_only_when_asked(identidade, monkeypatch):
+    from app import pages_bridge
+    sent = []
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: sent.append(payload) or {"draft": {"id": "d", "shot": None}})
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("html_render", {"html": "<p></p>", "title": "t", "draft": True})
+    assert not res.is_error and not [c for c in res.content if c.type == "image"], "sem print, sem imagem"
+    assert "width" not in sent[0] and "theme" not in sent[0]
 
 
 async def test_html_render_takes_html_or_url_never_both(identidade, monkeypatch):

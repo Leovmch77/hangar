@@ -301,6 +301,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Canvas o alvo é só a faixa de cabeçalho do card (tiles se sobrepõem livremente); no celular a
   alça mora na trilha do swipe; em tablet na largura desktop o arrasto HTML5 não responde ao
   toque, e ali o caminho é o `PairSheet` (também a alternativa exigida pela WCAG 2.2 SC 2.5.7).
+- **Página da conversa no nativo do Linux: o quadro do screencast nunca estica.** Ele é pintado no
+  tamanho lógico do `metadata` dele, e o screencast reinicia quando o resize assenta. A densidade do
+  quadro é a do processo do Chromium (`--force-device-scale-factor`), nunca a emulada por alvo: as
+  páginas têm um Chromium próprio em escala 2, e o painel fica no de escala 1.
+  [Medição](docs/decisoes/frontend.md#página-da-conversa-no-linux-quadro-no-tamanho-dele-e-chromium-próprio-em-escala-2-15102026).
 - **Bandeja do nativo: fechar ESCONDE a janela, nunca a destrói, e só com bandeja presente.** A tela
   não sobrevive a fechar e reabrir; quem esconde é `Window::set_hidden`, ajuste nosso no GPUI
   vendorizado, chamado de dentro do `should_close` (por isso ele não toca nos callbacks da
@@ -633,6 +638,13 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   estacionado (linha de status, modo de permissão, `dead` sem sidecar nem troca), tudo no Rust. Só
   o modo `python` volta a produzi-los. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#estado-do-claude-sem-terminal-no-feed-do-runtime).
+- **A fila durável ao vivo do chat é do hub do Rust no modo `rust`/`pending`, em qualquer porta.**
+  Um produtor por hub e por geração (`queue_feed.rs`) lê a projeção da fila e publica
+  `message`/`queue_confirmed` pelo retrato; o canal privado os leva à 8768 e ao convidado com login.
+  A conexão interna não abre o `follow`, nem confirma ou segue o Codex: a baixa da fila do Codex sem
+  terminal é pedida pelo hub ao ator, em processo. O `follow` do Python fica com Pi/omp/Kimi e o modo
+  `python`. Contrato e diferenças em
+  [plataforma.md](docs/decisoes/plataforma.md#fila-durável-ao-vivo-no-hub-do-rust).
 - **Com o Rust de pé, o Python não lê o arquivo de estado da fila (`runtime/<chave>.json`).** No
   Windows a leitura no meio da troca do Rust falha e faz a troca falhar. O que precisava dele é do
   Rust (`patch_meta`/`clear_cano` do Claude, `native_message`, recibos na caixa do Rust). O sidecar do

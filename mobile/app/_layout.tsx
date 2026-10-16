@@ -34,12 +34,17 @@ export default function Layout() {
   // Único dono do primeiro plano: os stores conservam transcript, pergunta e rascunho ao sair
   // e ignoram repetição do mesmo estado, então voltar não duplica REST/SSE.
   useEffect(() => {
+    const initial = AppState.currentState ?? 'active';
+    let foreground = initial === 'active';
     const apply = (state: AppStateStatus) => {
       const active = state === 'active';
+      const resumed = active && !foreground;
+      foreground = active;
       setChatsForeground(active);
       useSessions.getState().setForeground(active);
+      if (resumed && !useServers.getState().vaultReadable) void useServers.getState().load();
     };
-    apply(AppState.currentState ?? 'active');
+    apply(initial);
     const subscription = AppState.addEventListener('change', apply);
     return () => subscription.remove();
   }, []);
@@ -60,7 +65,9 @@ export default function Layout() {
     toast.erro(
       aviso.tipo === 'token'
         ? m.servidores_aviso_token({ label: aviso.label })
-        : m.servidores_aviso_persistencia(),
+        : aviso.tipo === 'vault_unread'
+          ? m.servers_warning_vault_unread()
+          : m.servidores_aviso_persistencia(),
     );
     limparAviso();
   }, [aviso, limparAviso]);

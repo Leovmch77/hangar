@@ -26,13 +26,23 @@ return Math.ceil(d.scrollHeight>d.clientHeight?d.scrollHeight:Math.max(d.getBoun
 const LOADED: &str = "Promise.race([new Promise(r=>document.readyState===\"complete\"?r():addEventListener(\"load\",()=>r(),{once:true})),\
 new Promise(r=>setTimeout(r,3000))])";
 
-pub struct Job { pub width: u32, pub theme: Theme, pub shot: Option<PathBuf> }
+/// Uma largura a medir e, com `shot`, a fotografar.
+pub struct Job { pub width: u32, pub theme: Theme, pub shot: Option<Shot> }
+
+/// O print dos clientes sai no dobro e transparente, sobre a conversa deles. O do rascunho é o que o modelo lê, sem a
+/// conversa atrás: em densidade 1, sobre o fundo da conversa no tema do trabalho, e não conta como medição da coluna.
+pub struct Shot { pub path: PathBuf, pub draft: bool }
+
+impl Shot {
+    pub fn cache(path: PathBuf) -> Self { Shot { path, draft: false } }
+    pub fn draft(path: PathBuf) -> Self { Shot { path, draft: true } }
+}
 pub struct Rendered { pub heights: BTreeMap<u32, u32>, pub console: Vec<ConsoleLine> }
 /// Desenho sem rede: o print recortado, ou o `error` que o próprio script devolveu; `blocked` conta as
 /// requisições recusadas.
-pub struct Offline { pub drawn: Result<Shot, String>, pub blocked: u32 }
+pub struct Offline { pub drawn: Result<Drawn, String>, pub blocked: u32 }
 /// PNG em escala 2 do recorte; `width`/`height` em px CSS.
-pub struct Shot { pub png: Vec<u8>, pub width: u32, pub height: u32 }
+pub struct Drawn { pub png: Vec<u8>, pub width: u32, pub height: u32 }
 /// Lado máximo do recorte em px CSS: em escala 2 fica abaixo dos 16384 px por lado do Skia.
 pub const CLIP_MAX: u32 = 8192;
 #[derive(Serialize, Clone, Debug)]
@@ -300,12 +310,18 @@ async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<R
     for job in jobs {
         cdp.call(s, "Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": job.theme.as_str()}]})).await?;
         // Viewport baixa: com ela alta, `scrollHeight` nunca fica abaixo dela e a página curta mediria alta.
-        cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": job.width, "height": super::HEIGHT_MIN, "deviceScaleFactor": 2, "mobile": false})).await?;
+        let draft = job.shot.as_ref().is_some_and(|s| s.draft);
+        let density = if draft { 1 } else { 2 };
+        cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": job.width, "height": super::HEIGHT_MIN, "deviceScaleFactor": density, "mobile": false})).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
         let h = cdp.call(s, "Runtime.evaluate", json!({"expression": MEASURE, "returnByValue": true})).await?;
         let height = measured(&h)?;
-        heights.insert(job.width, height);
-        if let Some(path) = &job.shot {
+        if !draft { heights.insert(job.width, height); }
+        if let Some(Shot { path, .. }) = &job.shot {
+            if !own_theme {
+                let (r, g, b, a) = if draft { let (r, g, b) = job.theme.backdrop(); (r, g, b, 1) } else { (0, 0, 0, 0) };
+                cdp.call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}})).await?;
+            }
             let bytes = png(&mut cdp, s, json!({"x": 0, "y": 0, "width": job.width, "height": height, "scale": 1})).await?;
             super::store::write_atomic(path, &bytes).map_err(|_| ChromeError::Failed("print não gravado"))?;
         }
@@ -330,7 +346,7 @@ async fn offline(url: &str, html: &str, width: u32, theme: Theme, expression: &s
     if let Some(error) = value["error"].as_str() { return Ok(Offline { drawn: Err(error.to_owned()), blocked: cdp.blocked }); }
     let (x, y, w, h) = pixel_clip(&value["clip"]).ok_or(ChromeError::Failed("recorte inválido"))?;
     let png = png(&mut cdp, s, json!({"x": x, "y": y, "width": w, "height": h, "scale": 1})).await?;
-    Ok(Offline { drawn: Ok(Shot { png, width: w, height: h }), blocked: cdp.blocked })
+    Ok(Offline { drawn: Ok(Drawn { png, width: w, height: h }), blocked: cdp.blocked })
 }
 
 /// Recorte em px CSS inteiros que cobre o retângulo pedido: em escala 2 o PNG mede o dobro, exato.
@@ -479,7 +495,7 @@ mod tests {
         for _ in 0..3 {
             let started = std::time::Instant::now();
             let jobs: Vec<Job> = super::super::WIDTHS.iter()
-                .map(|w| Job { width: *w, theme: Theme::Dark, shot: (*w == 728).then(|| dir.path().join("s.png")) }).collect();
+                .map(|w| Job { width: *w, theme: Theme::Dark, shot: (*w == 728).then(|| Shot::cache(dir.path().join("s.png"))) }).collect();
             let r = render(&html, &jobs).await.unwrap();
             eprintln!("render {:?}", started.elapsed());
             assert_eq!(r.heights.len(), super::super::WIDTHS.len());
@@ -493,7 +509,7 @@ mod tests {
         let shot = dir.path().join("s.png");
         let html = super::super::theme::inject("<!doctype html><div style=\"height:333px\"></div><script>console.error('oi')</script>", true);
         dbg!(find());
-        let r = render(&html, &[Job { width: 728, theme: Theme::Dark, shot: Some(shot.clone()) }]).await.unwrap();
+        let r = render(&html, &[Job { width: 728, theme: Theme::Dark, shot: Some(Shot::cache(shot.clone())) }]).await.unwrap();
         dbg!(&r.heights, &r.console, &shot);
         assert_eq!(r.heights[&728], 333);
         assert!(r.console.iter().any(|c| c.level == "error" && c.text.contains("oi")));

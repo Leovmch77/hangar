@@ -114,6 +114,8 @@ fn reply_of(message: &Value) -> Reply {
 
 pub struct Browser {
     wire: Arc<Wire>,
+    /// Escala do processo (`--force-device-scale-factor`): a de todo quadro do screencast.
+    scale: u32,
     /// (sessão, evento) → ouvintes.
     handlers: RefCell<HashMap<(String, String), Vec<Handler>>>,
     /// Evento do navegador (`Target.*`, `CLOSED`) → (sessão dona, ouvinte); sai junto com a sessão dona.
@@ -130,19 +132,34 @@ pub struct Browser {
     _drain: RefCell<Option<Task<()>>>,
 }
 
+/// Qual Chromium compartilhado: o do painel e dos sites (perfil com cookies e login) ou o das páginas que o agente
+/// publica na conversa, que só abrem contextos próprios.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Kind { Panel, Pages }
+
+impl Kind {
+    /// O painel fica em 1 e emula a escala da janela por alvo. As páginas da conversa saem no dobro, reduzidas pela GPU:
+    /// em 1x o texto delas, sobre fundo transparente, só é suavizado em cinza e destoa do texto do app.
+    fn scale(self) -> u32 { match self { Kind::Panel => 1, Kind::Pages => 2 } }
+
+    fn folder(self) -> &'static str { match self { Kind::Panel => "chromium", Kind::Pages => "chromium-pages" } }
+}
+
 thread_local! {
-    static SHARED: RefCell<Weak<Browser>> = RefCell::new(Weak::new());
+    static SHARED: RefCell<[Weak<Browser>; 2]> = RefCell::new([Weak::new(), Weak::new()]);
 }
 
 impl Browser {
     /// O Chromium em uso, ou um novo, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o
     /// espera. Para a interface não congelar enquanto o Chromium nasce.
-    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
-        if let Some(browser) = Self::current() { return Ok(browser); }
+    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor, kind: Kind) -> Result<Rc<Browser>, String> {
+        if let Some(browser) = Self::current(kind) { return Ok(browser); }
         let bin = launch::find()?;
-        let profile = Self::profile()?;
-        let carry = super::carry::prepare(&profile);
-        let browser = Self::spawn(bin, &profile, executor)?;
+        let profile = Self::profile(kind)?;
+        // Cookies trazidos do Chrome são do perfil do painel; o das páginas nem guarda login.
+        let carry = (kind == Kind::Panel).then(|| super::carry::prepare(&profile)).flatten();
+        let browser = Self::spawn(bin, &profile, kind.scale(), executor)?;
         let handshake = browser.handshake(bin, background).boxed_local().shared();
         if let Some(copy) = carry {
             let (ready, weak, background) = (handshake.clone(), Rc::downgrade(&browser), background.clone());
@@ -154,7 +171,7 @@ impl Browser {
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
         *browser.ready.borrow_mut() = Some(handshake);
-        SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
+        SHARED.with(|s| s.borrow_mut()[kind as usize] = Rc::downgrade(&browser));
         Ok(browser)
     }
 
@@ -164,10 +181,10 @@ impl Browser {
         async move { match pending { Some(ready) => ready.await, None => Ok(()) } }
     }
 
-    fn current() -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow().upgrade()).filter(|b| b.alive()) }
+    fn current(kind: Kind) -> Option<Rc<Browser>> { SHARED.with(|s| s.borrow()[kind as usize].upgrade()).filter(|b| b.alive()) }
 
-    fn profile() -> Result<std::path::PathBuf, String> {
-        crate::appearance::dir().map(|d| d.join("chromium")).ok_or_else(|| "sem pasta de configuracao do app".into())
+    fn profile(kind: Kind) -> Result<std::path::PathBuf, String> {
+        crate::appearance::dir().map(|d| d.join(kind.folder())).ok_or_else(|| "sem pasta de configuracao do app".into())
     }
 
     /// As chamadas saem já, nesta ordem: o `getTargets` chega antes de qualquer `createTarget` de quem vier depois, e
@@ -203,8 +220,8 @@ impl Browser {
     }
 
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
-    fn spawn(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let launched = launch::spawn(bin, profile).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
+    fn spawn(bin: &Path, profile: &Path, scale: u32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let launched = launch::spawn(bin, profile, scale).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
         let wire = Wire::new(launched.writer, Some(launched.child));
         let (events, received) = async_channel::unbounded::<Value>();
         let reading = wire.clone();
@@ -212,7 +229,7 @@ impl Browser {
             .spawn(move || read(launched.reader, &reading, &events))
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
-            wire, handlers: RefCell::default(), watchers: RefCell::default(),
+            wire, scale, handlers: RefCell::default(), watchers: RefCell::default(),
             initial: RefCell::default(), owned: RefCell::default(), crashed: RefCell::default(), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
@@ -228,6 +245,8 @@ impl Browser {
     }
 
     pub fn alive(&self) -> bool { self.wire.alive() }
+
+    pub fn scale(&self) -> u32 { self.scale }
 
     /// Este Chromium não serve mais (morreu no meio de uma abertura, não consegue criar página): sai já de cena, para o
     /// próximo pedido subir outro no mesmo perfil sem dois processos nele.
@@ -481,7 +500,7 @@ impl Port {
     /// Chromium de verdade num perfil descartável, sem a interface: os eventos dela são descartados.
     #[cfg(test)]
     pub(in crate::browser) fn launch(profile: &Path) -> (Port, Child) {
-        let launched = launch::spawn(launch::find().unwrap(), profile).unwrap();
+        let launched = launch::spawn(launch::find().unwrap(), profile, Kind::Panel.scale()).unwrap();
         let wire = Wire::new(launched.writer, None);
         // O processo fica com o teste; o fim dele não vai ao diário de quem roda.
         wire.asked.store(true, Ordering::SeqCst);
@@ -665,7 +684,7 @@ mod tests {
     fn page_mode_png_frames_keep_the_transparent_background() {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
-        let launched = launch::spawn(bin, &profile).unwrap();
+        let launched = launch::spawn(bin, &profile, Kind::Pages.scale()).unwrap();
         let wire = Wire::new(launched.writer, None);
         wire.asked.store(true, Ordering::SeqCst);
         let (events, _received) = async_channel::unbounded();

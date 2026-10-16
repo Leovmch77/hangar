@@ -224,6 +224,8 @@ pub struct Appearance {
     pub column: u16,
     pub sidebar_height: SidebarHeight,
     pub navigation: Navigation,
+    /// As abas reúnem as máquinas acompanhadas; ocultá-las não desliga as listas nem os avisos.
+    pub show_remote_tabs: bool,
     /// Largura arrastada da barra cheia (`cp_sidebar_w` do web), uma só para Barra lateral e Conversas; `None` usa a do modo.
     pub sidebar_width: Option<f32>,
     pub sidebar_compact: bool,
@@ -270,7 +272,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
-    navigation: Navigation::Sidebar, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
+    navigation: Navigation::Sidebar, show_remote_tabs: true, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
@@ -293,7 +295,7 @@ impl Appearance {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
             surface_material: self.surface_material,
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
-            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
+            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, show_remote_tabs: self.show_remote_tabs, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             side_width: self.side_width, side_browser_width: self.side_browser_width, terminal_height: self.terminal_height,
             language: self.language, currency: self.currency, hands_free: self.hands_free, skip_chat_confirmations: self.skip_chat_confirmations, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
             code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray, chrome_autofill: self.chrome_autofill, full_chrome: self.full_chrome,
@@ -512,6 +514,16 @@ pub fn changed_on_disk() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_tabs_default_on_and_hidden_choice_survives_reload_and_reset() {
+        let old: Appearance = serde_json::from_str(r#"{"navigation":"tabs"}"#).unwrap();
+        assert!(old.show_remote_tabs);
+        let hidden = Appearance { show_remote_tabs: false, ..old };
+        let loaded: Appearance = serde_json::from_slice(&serde_json::to_vec(&hidden).unwrap()).unwrap();
+        assert!(!loaded.show_remote_tabs);
+        assert!(!loaded.reset_keeping_choices().show_remote_tabs);
+    }
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
 

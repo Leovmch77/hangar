@@ -74,16 +74,16 @@ fn is_shell(bin: &Path) -> bool {
     bin.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("headless-shell") || n.contains("headless_shell"))
 }
 
-pub fn args(bin: &Path, profile: &Path) -> Vec<String> {
+/// `scale`: a escala de todo quadro do processo. A densidade emulada por alvo (`setDeviceMetricsOverride`) muda o
+/// `devicePixelRatio` da página, mas o screencast continua saindo nesta.
+pub fn args(bin: &Path, profile: &Path, scale: u32) -> Vec<String> {
     let mut args = vec![
         "--remote-debugging-pipe".into(),
         format!("--user-data-dir={}", profile.display()),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        // Escala 1 no processo: a do painel vai por alvo (o controlador emula a da janela), porque o processo nasce
-        // às vezes com a janela escondida, que ainda não sabe a escala do monitor, e escala fixa no processo deixava o
-        // painel borrado ou desenhando o dobro do necessário em monitor de escala fracionária.
-        "--force-device-scale-factor=1".into(),
+        // Escala fixa, não a do monitor: o processo nasce às vezes com a janela escondida, que ainda não sabe a escala.
+        format!("--force-device-scale-factor={scale}"),
         // Sem isto a página do agente, que ninguém está olhando, para de rodar timers e de pintar.
         "--disable-background-timer-throttling".into(),
         "--disable-renderer-backgrounding".into(),
@@ -108,7 +108,7 @@ pub struct Launched {
     pub writer: PipeWriter,
 }
 
-pub fn spawn(bin: &Path, profile: &Path) -> io::Result<Launched> {
+pub fn spawn(bin: &Path, profile: &Path, scale: u32) -> io::Result<Launched> {
     // O perfil guarda cookies e sessões logadas: só o dono entra.
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -119,7 +119,7 @@ pub fn spawn(bin: &Path, profile: &Path) -> io::Result<Launched> {
     let (reader, their_out) = io::pipe()?;
     let (fd_in, fd_out) = (their_in.as_raw_fd(), their_out.as_raw_fd());
     let mut command = Command::new(bin);
-    command.args(args(bin, profile)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_file());
+    command.args(args(bin, profile, scale)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_file());
     // SAFETY: só chamadas async-signal-safe entre o fork e o exec.
     unsafe {
         command.pre_exec(move || {
@@ -181,10 +181,11 @@ mod tests {
     #[test]
     fn only_the_full_chrome_asks_for_headless() {
         let profile = Path::new("/p");
-        assert_eq!(args(Path::new("/usr/bin/google-chrome-stable"), profile)[0], "--headless");
-        let shell = args(Path::new("/x/chrome-headless-shell"), profile);
+        assert_eq!(args(Path::new("/usr/bin/google-chrome-stable"), profile, 1)[0], "--headless");
+        let shell = args(Path::new("/x/chrome-headless-shell"), profile, 1);
         assert!(!shell.contains(&"--headless".to_string()));
         assert!(shell.contains(&"--force-device-scale-factor=1".to_string()));
+        assert!(args(Path::new("/x/chrome-headless-shell"), profile, 2).contains(&"--force-device-scale-factor=2".to_string()));
         assert!(shell.contains(&"--password-store=basic".to_string()));
         assert!(shell.contains(&"--allow-insecure-localhost".to_string()));
         assert!(!shell.iter().any(|a| a == "--ignore-certificate-errors"));

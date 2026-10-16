@@ -1378,8 +1378,8 @@ impl Hangar {
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
-        // Com abas (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
-        if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
+        let target = sidebar::Target::new(&self.open_server(), &session.name);
+        if let Some(ix) = self.tab_targets().iter().position(|t| t == &target) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
         self.revision += 1;
         if let Some(t) = self.session_task.take() { t.abort(); }
@@ -1968,8 +1968,8 @@ impl Hangar {
     fn replace_sessions(&mut self, sessions: Vec<SessionInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.selected.clone();
         // Aba com o foco, pela posição na lista antiga: se a sessão dela sumir, o foco não pode ficar numa alça morta.
-        let focused_tab = self.sessions.iter().position(|s| self.tab_focus.get(&s.name).is_some_and(|f| f.is_focused(window)))
-            .map(|ix| (ix, self.sessions[ix].name.clone()));
+        let focused_tab = self.visible_order(cx).into_iter().enumerate().find(|(_, target)| self.is_active_key(&target.server)
+            && self.row_focus(target).is_some_and(|focus| focus.is_focused(window)));
         // Sessão que sumiu da lista acabou de fechar: a conversa dela passa a ser recente.
         let closed = self.sessions.iter().any(|old| !sessions.iter().any(|s| s.name == old.name));
         self.sessions = sessions;
@@ -1981,10 +1981,11 @@ impl Hangar {
             if !self.tab_focus.contains_key(&session.name) { self.tab_focus.insert(session.name.clone(), cx.focus_handle().tab_stop(true)); }
         }
         // O foco passa para a aba que ficou naquela posição; sem abas, volta à raiz para os atalhos seguirem valendo.
-        if let Some((ix, _)) = focused_tab.filter(|(_, name)| !self.tab_focus.contains_key(name)) {
-            match self.sessions.len().checked_sub(1).map(|last| ix.min(last)) {
+        if let Some((ix, _)) = focused_tab.filter(|(_, target)| !self.tab_focus.contains_key(&target.name)) {
+            let targets = self.visible_order(cx);
+            match targets.len().checked_sub(1).map(|last| ix.min(last)) {
                 Some(next) => {
-                    if let Some(focus) = self.tab_focus.get(&self.sessions[next].name) { focus.focus(window, cx); }
+                    if let Some(focus) = self.row_focus(&targets[next]) { focus.focus(window, cx); }
                     self.tabs_scroll.scroll_to_item(next);
                 }
                 None => self.root_focus.focus(window, cx),
@@ -5294,31 +5295,36 @@ impl Hangar {
 
     /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
-    fn render_tabs(&mut self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
         let host = self.server_label(cx);
         let weak = cx.entity().downgrade();
         let active = self.active_key();
-        let tabs = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).filter_map(|session| {
-            let focus = self.tab_focus.get(&session.name)?.clone();
-            // As abas são da lista ativa: sessão de mesmo nome aberta em outra máquina não marca nenhuma.
-            let on = self.open_api.is_none() && selected_name == Some(session.name.as_str());
+        let targets = self.tab_targets();
+        let empty = targets.is_empty();
+        let selected = self.selected_target();
+        let tabs = targets.into_iter().filter_map(|target| {
+            let session = self.target_session(&target)?;
+            let focus = self.row_focus(&target)?.clone();
+            let on = selected.as_ref() == Some(&target);
+            let remote = target.server != active;
+            let machine = self.server_entry(&target.server).map(|s| s.label.as_str()).unwrap_or(&host);
             let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
             // Nome, estado e perguntas por extenso: o ponto só diz o estado pela cor.
-            let mut label = format!("{} · {}", session.name, tr(&format!("chip_{state}")));
+            let mut label = format!("{} · {} · {}", session.name, machine, tr(&format!("chip_{state}")));
             if session.pending_questions > 0 { label.push_str(&format!(" · ? {}", session.pending_questions)); }
             // Trabalhando é a marca animada da lista (parada com movimento reduzido); os outros estados são um ponto na cor dele.
             let mark = if session.state == "working" {
-                self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", session.name), 14., theme::accent())
+                self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", target.id()), 14., theme::accent())
             } else {
                 div().size(px(8.)).mx(px(2.)).flex_shrink_0().rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }).into_any_element()
             };
-            let pick = session.clone();
-            let open = session.clone();
-            let menu_target = sidebar::Target::new(&active, &session.name);
+            let pick = target.clone();
+            let open = target.clone();
+            let menu_target = target.clone();
             let label = self.session_number_label(&menu_target, label);
             let number = self.session_number_badge(&menu_target);
-            Some(div().id(SharedString::from(format!("tab-{}", session.name))).relative().track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
+            Some(div().id(SharedString::from(format!("tab-{}", target.id()))).relative().track_focus(&focus).flex_shrink_0().max_w(px(240.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
                     else { el.border_color(transparent_black()).text_color(theme::muted()).hover(|el| el.bg(theme::hover())) })
@@ -5329,22 +5335,22 @@ impl Hangar {
                 .children(number)
                 .child(chrome::provider_glyph(&session.provider, 14.))
                 .child(div().min_w_0().truncate().text_size(px(13.)).child(session.name.clone()))
+                .when(remote, |el| el.child(div().max_w(px(72.)).truncate().text_size(px(10.)).text_color(theme::faint()).child(machine.to_owned())))
                 .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                     .child(format!("? {}", session.pending_questions))))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select(pick.clone(), window, cx);
-                    this.focus_composer_for(&pick, window, cx);
+                    this.open_target(&pick, window, cx);
                 }))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.select(open.clone(), window, cx);
+                        this.select_target(&open, window, cx);
                         cx.stop_propagation();
                     }
                 }))
                 // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
-                .when(!self.active_invite() && !session.read_only(), |el| self.group_row(el, session, None, 6., cx))
-                .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
+                .when(!self.invite_target(&target) && !session.read_only(), |el| self.group_row(el, session, remote.then_some(target.server.as_str()), 6., cx))
+                .context_menu(sidebar::session_menu(weak.clone(), target.server.clone(), session.clone())))
         }).collect::<Vec<_>>();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
         // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
@@ -5352,17 +5358,16 @@ impl Hangar {
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
-                let active = this.active_key();
-                let names: Vec<&String> = this.sessions.iter().filter(|s| !this.sidebar.is_hidden(&active, &s.name)).map(|s| &s.name).collect();
-                let Some(current) = names.iter().position(|name| this.tab_focus.get(*name).is_some_and(|f| f.is_focused(window))) else { return };
-                let next = (current as isize + step).rem_euclid(names.len() as isize) as usize;
-                if let Some(focus) = this.tab_focus.get(names[next]) { focus.focus(window, cx); }
+                let targets = this.tab_targets();
+                let Some(current) = targets.iter().position(|target| this.row_focus(target).is_some_and(|f| f.is_focused(window))) else { return };
+                let next = (current as isize + step).rem_euclid(targets.len() as isize) as usize;
+                if let Some(focus) = this.row_focus(&targets[next]) { focus.focus(window, cx); }
                 this.tabs_scroll.scroll_to_item(next);
                 cx.stop_propagation();
                 cx.notify();
             }))
             .children(tabs)
-            .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
+            .when(empty && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
         chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .bg(theme::chrome()).border_color(theme::border())
@@ -6075,7 +6080,7 @@ impl Hangar {
     /// Barra lateral ou faixa de abas (em cima ou embaixo), conforme Aparência.
     fn render_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
-        if appearance::get().navigation.tabs() { self.render_tabs(selected_name.as_deref(), window, cx) }
+        if appearance::get().navigation.tabs() { self.render_tabs(window, cx) }
             else { self.render_sidebar(selected_name.as_deref(), window, cx) }
     }
 

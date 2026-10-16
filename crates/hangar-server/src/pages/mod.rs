@@ -19,4 +19,6 @@ impl Theme {
         match s { "dark" => Some(Theme::Dark), "light" => Some(Theme::Light), _ => None }
     }
     pub fn as_str(self) -> &'static str { match self { Theme::Dark => "dark", Theme::Light => "light" } }
+    /// Fundo da conversa nos clientes (`--bg-base` da web, `--code-background` da página).
+    pub fn backdrop(self) -> (u8, u8, u8) { match self { Theme::Dark => (0x10, 0x0e, 0x11), Theme::Light => (0xf8, 0xf6, 0xf2) } }
 }

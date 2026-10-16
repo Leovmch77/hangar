@@ -709,6 +709,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   como lido.
 - **Voz: busca de sessão não espera peer caído.** Peer que falhou fica marcado até responder; só a vigia o tenta de
   novo, vencidos os 30 s. A busca de um pedido (enviar, trocar, ler) pula os marcados.
+- **Voz: a conversa da chamada fica em disco, o diário continua sem texto.** Cada chamada grava
+  `~/.hangar/voz/conversas/<data>_<hora>.md` (modo 600): finais da fala dele e da voz e a mensagem final de cada turno
+  do organizador. O organizador segue `ephemeral` no Codex; falha ao gravar vai ao diário por código e não para a chamada.
+- **Voz: o controle de tela recebe as variáveis de tela que o serviço não tem.** `display_env::fill` completa
+  `WAYLAND_DISPLAY`, `DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` e `XDG_RUNTIME_DIR` pelo `systemctl --user show-environment`
+  (prazo de 3 s) e, sem ele, pela pasta de runtime; o que o processo ou a entrada do `~/.claude.json` já tem vence. É o
+  módulo único para isso no Rust: a abertura de sessões passa a usá-lo também.
 - **Voz: pedido completo tem uma confirmação curta.** Ao encaminhar pedido completo, sobretudo longo ou
   demorado, a voz diz numa frase o que entendeu e aguarda; nunca a cada pedaço de fala nem narrando passos.
   O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação. Como o prompt sozinho não
