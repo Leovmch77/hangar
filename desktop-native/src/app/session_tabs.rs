@@ -13,6 +13,7 @@ pub(super) fn reveal_offset(current: f32, viewport: (f32, f32), tab: (f32, f32))
     else { current }
 }
 
+pub(super) const BAR_HEIGHT: f32 = 38.;
 const REAR_WIDTH: f32 = 88.;
 const OVERLAP: f32 = 12.;
 

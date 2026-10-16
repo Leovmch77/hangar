@@ -5405,7 +5405,7 @@ impl Hangar {
             .children(tabs)
             .when(empty && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
-        chrome::glass_panel(div().id("session-tabs-bar").h(px(38.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
+        chrome::glass_panel(div().id("session-tabs-bar").h(px(session_tabs::BAR_HEIGHT)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .bg(theme::chrome()).border_color(theme::border())
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
@@ -6717,7 +6717,7 @@ impl Render for Hangar {
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
         let nav = if page.is_some() || costs_page || worktrees_page || files_expanded { None }
-            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
+            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(session_tabs::BAR_HEIGHT)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };
