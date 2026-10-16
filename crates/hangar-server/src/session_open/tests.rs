@@ -1136,6 +1136,12 @@ fn the_server_env_reads_the_backend_dotenv_like_python() {
 /// inicializados. Devolve o resultado e a raiz (viva enquanto o `TempDir` viver).
 #[cfg(target_os = "linux")]
 fn run_contract(name: &str, patch: impl FnOnce(&mut Value)) -> (Value, tempfile::TempDir, PathBuf) {
+    run_contract_with(name, patch, |_| {})
+}
+
+/// `run_contract` com `before` mexendo na raiz pronta, logo antes da abertura.
+#[cfg(target_os = "linux")]
+fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl FnOnce(&std::path::Path)) -> (Value, tempfile::TempDir, PathBuf) {
     let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
     patch(&mut fixture["scenario"]);
     let dir = tempfile::tempdir().unwrap();
@@ -1152,10 +1158,27 @@ fn run_contract(name: &str, patch: impl FnOnce(&mut Value)) -> (Value, tempfile:
     }
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
+    before(&root);
     let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
         .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
     let raw = test_runtime().block_on(contract::run(&fixture["scenario"], &root, env));
     (raw, dir, root)
+}
+
+/// A conta do Hangar fica sob a guarda compartilhada desde o `hangar-conta --prep` até o pane: a
+/// exclusão da conta (exclusiva) não passa no meio.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_account_guard_covers_the_preparation() {
+    let (raw, _dir, _root) = run_contract_with("create_claude_terminal_hangar_account", |_| {}, |root| {
+        use std::os::unix::fs::PermissionsExt;
+        let script = concat!("#!/bin/sh\nheld=0\nfor f in \"$HOME\"/.hangar/account-locks/*.lock; do\n",
+            "  [ -e \"$f\" ] && ! flock -n -x \"$f\" true && held=1\ndone\n",
+            "[ $held = 1 ] || { echo 'hangar-conta: a guarda da conta estava livre' >&2; exit 1; }\n");
+        std::fs::write(root.join("bin/hangar-conta"), script).unwrap();
+        std::fs::set_permissions(root.join("bin/hangar-conta"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    });
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
 }
 
 /// Sem resposta do tmux a sessão pode ter nascido: a abertura responde incerta e não desfaz a

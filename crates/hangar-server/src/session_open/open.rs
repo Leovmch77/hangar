@@ -298,24 +298,29 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
                 remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref()).await?) } else { None };
-    // A conta do Hangar se reconcilia antes de abrir; os avisos dela vêm antes dos da abertura.
-    let mut avisos = Vec::new();
-    if let Some(dir) = config_dir.as_deref() && let Some(account) = claude::hangar_account(Path::new(dir)) {
-        let out = host.run(claude::prep_argv(&account, &spec.cwd), Duration::from_secs(120)).await;
-        avisos = claude::prep_result(&account, out.code, &out.stderr)?;
-    }
-    avisos.extend(warnings);
-    // A guarda compartilhada da conta: a exclusão dela espera a sessão que está subindo.
+    // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
+    // (exclusiva) espera a sessão que está subindo.
     let account_home = config_dir.clone().map(PathBuf::from).or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from))
         .unwrap_or_else(|| host.home().join(".claude"));
     let locks = crate::accounts::AccountLocks::new(host.home().join(".hangar").join("account-locks"));
     let key = crate::accounts::AccountKey::new(crate::accounts::Provider::Claude, &account_home)
         .map_err(|e| creation(format!("conta inválida: {e}")))?;
+    let hangar_account = config_dir.as_deref().filter(|dir| claude::hangar_account(Path::new(dir)).is_some());
     let _guard = locks.acquire(&key, crate::accounts::GuardMode::Shared, Instant::now() + Duration::from_secs(5)).await
         .map_err(|e| match e {
             crate::accounts::LockError::Busy => OpenError::new(409, "account_busy", "a conta está ocupada por outra operação"),
             crate::accounts::LockError::Io(e) => creation(format!("trava da conta: {e}")),
         })?;
+    // A conta do Hangar se reconcilia antes de abrir; os avisos dela vêm antes dos da abertura.
+    let mut avisos = Vec::new();
+    if let Some(dir) = hangar_account {
+        // Conferida de novo sob a guarda: a exclusão pode ter passado antes dela.
+        let account = claude::hangar_account(Path::new(dir))
+            .ok_or_else(|| OpenError::plain(404, format!("{dir} não é uma conta criada pelo hangar")))?;
+        let out = host.run(claude::prep_argv(&account, &spec.cwd), Duration::from_secs(120)).await;
+        avisos = claude::prep_result(&account, out.code, &out.stderr)?;
+    }
+    avisos.extend(warnings);
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name);
     let result = terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await;
     let events = diary.end(result.as_ref().err());
