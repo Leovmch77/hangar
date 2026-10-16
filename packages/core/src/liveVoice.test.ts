@@ -135,10 +135,16 @@ describe('protocolo público e níveis puros', () => {
     { field: 'plan', patch: { plan: { path: '/plan-fixture.md', markdown: null } } },
     { field: 'limits', patch: { limits: { five_hour: { used_percent: '25', resets_at: null }, seven_day: null } } },
     { field: 'context', patch: { context: { used: '12', window: null } } },
+    { field: 'context.window', patch: { context: { used: 12, window: '200000' } } },
     { field: 'followed', patch: { followed: [{ server: 'peer-fixture' }] } },
     { field: 'server', patch: { server: null } },
   ])('continua recusando estrutura malformada ($field) mesmo com enum futuro', ({ patch }) => {
     expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: { ...fullState, mode: 'future-mode', ...patch } }))).toBeNull();
+  });
+
+  it('preserva context.window nulo no protocolo JSON', () => {
+    const incoming = { ...state, context: { used: 12, window: null } };
+    expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: incoming }))).toEqual({ type: 'state', state: incoming });
   });
 
   it('aceita o retrato completo e não aceita started público ou state incompleto', () => {

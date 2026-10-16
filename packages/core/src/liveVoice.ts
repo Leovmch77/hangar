@@ -36,7 +36,7 @@ export interface LiveVoiceState {
   error: { code: string; text: string } | null;
   plan: { path: string; markdown: string } | null;
   effective: { model: string | null; effort: string | null; tier: string | null } | null;
-  context: { used: number; window: number | null } | null;
+  context: { used: number; 'window': number | null } | null;
   limits: { five_hour: LiveVoiceRateWindow; seven_day: LiveVoiceRateWindow };
   backstage: { kind: 'heard' | 'result' | 'answer' | null; text: string }[];
   thought: string;
@@ -112,7 +112,7 @@ export function isLiveVoiceState(value: unknown): value is LiveVoiceState {
     && (value.error === null || object(value.error) && typeof value.error.code === 'string' && typeof value.error.text === 'string')
     && (value.plan === null || object(value.plan) && typeof value.plan.path === 'string' && typeof value.plan.markdown === 'string')
     && (value.effective === null || object(value.effective) && nullableString(value.effective.model) && nullableString(value.effective.effort) && nullableString(value.effective.tier))
-    && (value.context === null || object(value.context) && finite(value.context.used) && nullableNumber(value.context.window))
+    && (value.context === null || object(value.context) && finite(value.context.used) && nullableNumber(value.context['window']))
     && object(value.limits) && rateWindow(value.limits.five_hour) && rateWindow(value.limits.seven_day)
     && Array.isArray(value.backstage) && value.backstage.every(v => object(v) && typeof v.text === 'string' && (v.kind === null || v.kind === 'heard' || v.kind === 'result' || v.kind === 'answer'))
     && typeof value.thought === 'string'
