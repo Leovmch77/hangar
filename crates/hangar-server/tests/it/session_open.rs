@@ -47,10 +47,10 @@ async fn the_private_claude_bridge_opens_what_entered_python_directly() {
         let request = if secret { request.header("x-hangar-internal", SECRET) } else { request };
         async move { request.body(body.to_string()).send().await.unwrap() }
     };
-    let codex = serde_json::json!({"request": {"name": "s1", "cwd": "/x", "provider": "codex"}, "guest_root": null});
+    let codex = serde_json::json!({"request": {"name": "s1", "cwd": "/x", "provider": "codex"}, "guest": null});
     assert_eq!(open(codex.clone(), false).await.status(), 404, "sem o segredo a ponte não existe");
     assert_eq!(open(codex, true).await.status(), 421);
-    let claude = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "claude", "headless": false}, "guest_root": null});
+    let claude = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "claude", "headless": false}, "guest": null});
     let refused: Value = serde_json::from_str(&open(claude, true).await.text().await.unwrap()).unwrap();
     assert_eq!(refused["detail"]["code"], "erro_cwd_inexistente", "a recusa é a da abertura do Rust");
 }
