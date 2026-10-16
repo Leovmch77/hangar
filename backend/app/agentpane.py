@@ -96,7 +96,9 @@ def resolve_target(name: str) -> Optional[str]:
     """`"%3"` = o pane do agente. `None` = nao sei, e o chamador usa o alvo antigo."""
     agora = time.monotonic()
     achado = _cache.get(name)
-    if achado and agora - achado[1] < _TTL:
+    # Quem recria a sessão (o Rust) não invalida este cache: o pane guardado só vale se ainda for dela.
+    if achado and agora - achado[1] < _TTL and (achado[0] is None or tmux._run(
+            ["tmux", "display-message", "-p", "-t", achado[0], "#{session_name}"]).stdout.strip() == name):
         return achado[0]
 
     # Ordena com o pane ATIVO na frente: o desempate tem que ser o MESMO do

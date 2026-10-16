@@ -188,3 +188,17 @@ def test_kill_e_recria_mesma_sessao_invalida_o_cache_quente(sessao, monkeypatch)
     # (`=nome:0.0`), entao o que prova a invalidacao aqui e o pane_pid resolvido por ele.
     assert agentpane.resolve_target(sessao) == _alvo_esperado(sessao, novo)
     assert tmux.pane_pid(sessao) == novo["pid"]
+
+
+def test_sessao_recriada_por_fora_nao_usa_o_pane_do_cache(sessao, monkeypatch):
+    # TMX-008: quem recria a sessão agora é o Rust, que não invalida este cache. O `%N` guardado
+    # só vale enquanto ainda for desta sessão.
+    monkeypatch.setattr(agentpane, "_pane_do_agente", lambda pid, children: True)
+    velho = tmux.list_panes_of(sessao)[0]
+    _segunda_janela(sessao)
+    assert agentpane.resolve_target(sessao) == _alvo_esperado(sessao, velho)
+    assert tmux._run(["tmux", "kill-session", "-t", f"={sessao}"]).returncode == 0
+    assert tmux._run(["tmux", "new-session", "-d", "-s", sessao, "sleep 600"]).returncode == 0
+    _segunda_janela(sessao)
+    novo = tmux.list_panes_of(sessao)[0]
+    assert tmux.pane_pid(sessao) == novo["pid"]
