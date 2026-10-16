@@ -141,7 +141,7 @@ describe('FileViewer — erros de documento', () => {
       await act(async () => open!.click());
       expect(openPdf).toHaveBeenCalledExactlyOnceWith(
         'http://b:8765/api/sessions/fixture-files/file?path=docs%2Fmanual.pdf',
-        { Authorization: 'Bearer token-b' }, 'manual.pdf',
+        { Authorization: 'Bearer token-b' }, 'manual.pdf', expect.any(Function),
       );
     }
     act(() => root.unmount());

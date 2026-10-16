@@ -61,10 +61,10 @@ afterEach(() => { Platform.OS = originalOS; });
 
 const doc = { uri: 'https://a.test/api/sessions/s/uploads/manual.pdf', headers: { Authorization: 'Bearer token-a' }, name: 'manual.pdf', kind: 'pdf' as const };
 
-function render() {
+function render(name = doc.name) {
   const container = document.createElement('div');
   const root = createRoot(container);
-  act(() => root.render(createElement(DocumentViewer, { doc, onClose: vi.fn() })));
+  act(() => root.render(createElement(DocumentViewer, { doc: { ...doc, name }, onClose: vi.fn() })));
   return { container, root };
 }
 
@@ -121,6 +121,45 @@ describe('DocumentViewer PDF', () => {
       await act(async () => finish());
       expect(native.open).toHaveBeenCalledTimes(1);
       expect(button.disabled).toBe(false);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([
+    ['', 'documento.pdf'], ['.', 'documento.pdf'], ['..', 'documento.pdf'],
+    ['../manual final.pdf', '.._manual_final.pdf'], ['relatório.pdf', 'relat_rio.pdf'],
+  ])('nome %j vira um arquivo seguro %s, nunca uma pasta', async (name, expected) => {
+    const { container, root } = render(name);
+    try {
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="native_pdf_open"]')!.click());
+      expect(native.open).toHaveBeenCalledTimes(1);
+      expect(native.open.mock.calls[0][1].data.split('/').at(-1)).toBe(expected);
+      expect(native.move.mock.calls.at(-1)?.[1].split('/').at(-1)).toBe(expected);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each(['close', 'leave'] as const)('%s durante o download não abre o leitor depois', async (action) => {
+    let finish!: () => void;
+    native.download.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { container, root } = render();
+    try {
+      act(() => container.querySelector<HTMLButtonElement>('button[aria-label="native_pdf_open"]')!.click());
+      expect(native.download).toHaveBeenCalledTimes(1);
+      act(() => root.render(action === 'close' ? createElement(DocumentViewer, { doc: null, onClose: vi.fn() }) : null));
+      await act(async () => finish());
+      expect(native.open).not.toHaveBeenCalled();
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('ausência de leitor mostra a mensagem própria sem a exceção nativa', async () => {
+    native.open.mockRejectedValueOnce(Object.assign(new Error(
+      'android.content.ActivityNotFoundException: No Activity found to handle Intent { act=android.intent.action.VIEW typ=application/pdf }',
+    ), { code: 'ERR_UNEXPECTED' }));
+    const { container, root } = render();
+    try {
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="native_pdf_open"]')!.click());
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe('arq_pdf_sem_leitor');
+      expect(container.textContent).not.toContain('ActivityNotFoundException');
+      expect(container.textContent).not.toContain('No Activity found');
     } finally { act(() => root.unmount()); }
   });
 

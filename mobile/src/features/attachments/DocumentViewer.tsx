@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Platform, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { WebView } from 'react-native-webview';
@@ -101,20 +101,25 @@ export function DocumentViewer({ doc, onClose }: { doc: DocumentItem | null; onC
 export function PdfReader({ uri, headers, name }: Pick<DocumentItem, 'uri' | 'headers' | 'name'>) {
   const { theme } = useUnistyles();
   const busy = useRef(false);
+  const mounted = useRef(true);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState('');
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const open = async () => {
     if (busy.current) return;
     busy.current = true;
     setOpening(true);
     setError('');
     try {
-      await openPdfFile(uri, headers, name);
+      await openPdfFile(uri, headers, name, () => mounted.current);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       busy.current = false;
-      setOpening(false);
+      if (mounted.current) setOpening(false);
     }
   };
   return (
