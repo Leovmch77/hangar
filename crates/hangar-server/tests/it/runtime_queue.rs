@@ -7,6 +7,241 @@ fn fill(store:&mut Store, count:usize, prefix:&str) {
 }
 fn receipts(state:&State) -> usize { state.operations.keys().filter(|key|key.starts_with("call::")).count() }
 
+#[test]
+fn queued_batch_store_combines_all_waiting_in_one_durable_entry() {
+    let dir=tempfile::tempdir().unwrap();
+    let path=dir.path().join("state");
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda"),("c","terceira")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    let batch=store.exec(1,"batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(batch.as_array().unwrap().len(),1);
+    assert_eq!(batch[0]["text"],"primeira\nsegunda\nterceira");
+    assert_eq!(batch[0]["batch_entries"].as_array().unwrap().iter().map(|row|row["id"].as_str().unwrap()).collect::<Vec<_>>(),["a","b","c"]);
+    assert_eq!(store.state().rows.len(),1);
+    let id=batch[0]["id"].as_str().unwrap().to_owned();
+    store.exec(1,"append-d",clock(),Action::Append {text:"depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("d".into())}).unwrap();
+    drop(store);
+    let mut reopened=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    reopened.exec(1,"recover",clock(),Action::Recover).unwrap();
+    let retry=reopened.exec(1,"retry",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(retry[0]["id"],id);
+    assert_eq!(retry[0]["text"],"primeira\nsegunda\nterceira");
+    assert_eq!(retry[0]["batch_entries"].as_array().unwrap().len(),3);
+    assert_eq!(reopened.state().rows.iter().find(|row|row["id"]=="d").unwrap()["delivered"],false);
+}
+
+#[test]
+fn queued_batch_store_excludes_peer_messages_commands_and_reserved_answers() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"reserved",clock(),Action::ReserveAsyncAnswer {entry_id:"answer".into(),text:"resposta reservada".into(),payload:json!({"kind":"dispatch_async_answer"})}).unwrap();
+    for (id,text) in [("a","primeira"),("peer","[de: colega] recado"),("command","/clear"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    let batch=store.exec(1,"batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(batch[0]["text"],"primeira\nsegunda");
+    for id in ["peer","command","answer"] {
+        assert_eq!(store.state().rows.iter().find(|row|row["id"]==id).unwrap()["delivered"],false);
+    }
+    let peer=store.exec(1,"next",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(peer[0]["id"],"peer");
+    assert!(peer[0].get("batch_entries").is_none());
+}
+
+#[test]
+fn queued_batch_receipt_requires_the_full_prompt_and_confirms_every_member() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();
+    let state_path=dir.path().join("state");
+    let path=dir.path().join("chat.jsonl");
+    std::fs::write(&path,"").unwrap();
+    let mut index=ReceiptIndex::new("claude","sid");
+    let cursor=index.capture(&path).unwrap();
+    let mut store=Store::open(&state_path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","ok"),("b","ok\ncontinua")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("prepare-{id}"),clock(),Action::Prepare {id:id.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":1}}),entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("defer-{id}"),clock(),Action::Finish {id:id.into(),status:Status::Deferred,result:json!({"operation_id":id,"disposition":"deferred","payload":{"cleanup":"not_needed"}})}).unwrap();
+    }
+    let claimed=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    let row=claimed[0].clone();
+    let id=row["id"].as_str().unwrap().to_owned();
+    store.exec(1,"prepare",clock(),Action::Prepare {id:"delivery".into(),payload:json!({"kind":"input"}),entry_id:Some(id.clone())}).unwrap();
+    store.exec(1,"cursor",clock(),Action::BindDispatch {id:"delivery".into(),cursor:json!(cursor)}).unwrap();
+    store.exec(1,"begin",clock(),Action::BeginDispatch {id:"delivery".into(),wire_id:"wire".into(),staged:false}).unwrap();
+    let partial=format!("{}\n",json!({"type":"user","uuid":"partial","sessionId":"sid","message":{"content":"ok"}}));
+    std::fs::write(&path,&partial).unwrap();
+    index.scan(&path).unwrap();
+    assert!(index.match_after(&path,&cursor,&row,&store.state().used_occurrences).unwrap().is_none(),"uma parte isolada não confirma o lote");
+    let after_partial=index.capture(&path).unwrap();
+    // Uma concorrente real mantém o recibo usado vivo; sem ela a poda pode descartá-lo.
+    store.exec(1,"duplicate-row",clock(),Action::Append {text:"ok\nok\ncontinua".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("duplicate".into())}).unwrap();
+    store.exec(1,"duplicate-op",clock(),Action::Prepare {id:"duplicate".into(),payload:json!({"kind":"input"}),entry_id:Some("duplicate".into())}).unwrap();
+    store.exec(1,"duplicate-cursor",clock(),Action::BindDispatch {id:"duplicate".into(),cursor:json!(after_partial)}).unwrap();
+    store.exec(1,"duplicate-begin",clock(),Action::BeginDispatch {id:"duplicate".into(),wire_id:"duplicate-wire".into(),staged:false}).unwrap();
+    std::fs::write(&path,format!("{partial}{}\n",json!({"type":"user","uuid":"complete","sessionId":"sid","message":{"content":"ok\nok\ncontinua"}}))).unwrap();
+    index.scan(&path).unwrap();
+    let proof=index.match_after(&path,&cursor,&row,&store.state().used_occurrences).unwrap().unwrap();
+    assert_eq!(store.exec(1,"proof",clock(),Action::ConfirmOccurrence {id:"delivery".into(),proof:proof.clone()}).unwrap(),true);
+    assert_eq!(store.exec(1,"proof-again",clock(),Action::ConfirmOccurrence {id:"delivery".into(),proof}).unwrap(),false);
+    for member in ["a","b"] {assert!(store.state().operations[member].status==Status::Confirmed);}
+    let batch=store.state().rows.iter().find(|row|row["id"]==id).unwrap();
+    assert!(batch["batch_entries"].as_array().unwrap().iter().all(|entry|entry["confirmed"]==true));
+    assert!(index.match_after(&path,&after_partial,&json!({"text":"ok\nok\ncontinua"}),&store.state().used_occurrences).unwrap().is_none(),"a mesma ocorrência não confirma outra entrada");
+    drop(store);
+    let mut reopened=Store::open(&state_path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    reopened.exec(1,"recover",clock(),Action::Recover).unwrap();
+    assert!(!reopened.state().rows.iter().any(|row|row["id"]=="a" || row["id"]=="b"),"as intenções agrupadas não reaparecem");
+    assert_eq!(reopened.state().rows.iter().find(|row|row["id"]==id).unwrap()["confirmed"],true);
+    assert_ne!(reopened.state().rows.iter().find(|row|row["id"]=="duplicate").unwrap()["confirmed"],true);
+}
+
+#[test]
+fn queued_batch_store_keeps_member_intents_until_the_batch_is_confirmed() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("prepare-{id}"),clock(),Action::Prepare {id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("defer-{id}"),clock(),Action::Finish {id:id.into(),status:Status::Deferred,result:json!({"operation_id":id,"disposition":"deferred"})}).unwrap();
+    }
+    store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    fill(&mut store,300,"after-batch");
+    for id in ["a","b"] {assert!(store.state().operations.contains_key(id),"a intenção de {id} continua ligada ao lote pendente");}
+}
+
+#[test]
+fn queued_batch_store_sealed_text_cannot_be_edited_between_unwritten_attempts() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    let batch=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    let id=batch[0]["id"].as_str().unwrap().to_owned();
+    store.exec(1,"unwritten",clock(),Action::SetDelivered {entry_id:id.clone(),value:false,steered:false}).unwrap();
+    assert_eq!(store.exec(1,"edit",clock(),Action::Edit {entry_id:id.clone(),text:"alterada".into()}).unwrap(),"not_waiting");
+    let retry=store.exec(1,"retry",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(retry[0]["id"],id);
+    assert_eq!(retry[0]["text"],"primeira\nsegunda");
+}
+
+#[test]
+fn queued_batch_store_refuses_oversized_text_before_claiming_any_member() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for id in ["a","b"] {
+        store.exec(1,id,clock(),Action::Append {text:"x".repeat(hangar_server::runtime::protocol::MAX_FRAME/2),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    assert!(store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).is_err(),"o separador faz o texto ultrapassar o limite do transporte");
+    assert!(store.state().rows.iter().all(|row|row["delivered"]==false && row.get("batch_entries").is_none()));
+}
+
+#[test]
+fn queued_batch_receipt_an_image_only_member_is_not_proven_by_the_other_text() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();
+    let path=dir.path().join("chat.jsonl");std::fs::write(&path,"").unwrap();
+    let mut index=ReceiptIndex::new("claude","sid");let cursor=index.capture(&path).unwrap();
+    let image="\u{1f4ce} imagem: /anexo/prova.png";
+    let row=json!({"text":format!("{image}\nsegunda"),"batch_entries":[{"id":"a","text":image},{"id":"b","text":"segunda"}]});
+    std::fs::write(&path,format!("{}\n",json!({"type":"user","uuid":"partial","sessionId":"sid","message":{"content":"segunda"}}))).unwrap();
+    index.scan(&path).unwrap();
+    assert!(index.match_after(&path,&cursor,&row,&Default::default()).unwrap().is_none(),"tirar os anexos não pode apagar um membro inteiro da prova");
+}
+
+#[test]
+fn queued_batch_store_recovery_never_splits_or_requeues_a_possibly_written_batch() {
+    for staged in [false,true] {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+        for (id,text) in [("a","primeira"),("b","segunda")] {
+            store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+        }
+        let batch=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+        let id=batch[0]["id"].as_str().unwrap().to_owned();
+        store.exec(1,"prepare",clock(),Action::Prepare {id:"delivery".into(),payload:json!({"kind":"input"}),entry_id:Some(id.clone())}).unwrap();
+        store.exec(1,"begin",clock(),Action::BeginDispatch {id:"delivery".into(),wire_id:"wire".into(),staged}).unwrap();
+        store.exec(1,"recover",clock(),Action::Recover).unwrap();
+        let retry=store.exec(1,"retry",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+        if staged {assert_eq!(retry[0]["id"],id);assert_eq!(retry[0]["text"],"primeira\nsegunda");}
+        else {assert_eq!(retry,json!([]));assert!(store.state().operations["delivery"].status==Status::Unknown);}
+        assert_eq!(store.state().rows.len(),1);
+    }
+}
+
+#[test]
+fn queued_batch_receipt_a_claimed_batch_is_not_a_legacy_delivery() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("chat.jsonl");
+    let at=chrono::DateTime::from_timestamp(clock().epoch_s as i64,0).unwrap().to_rfc3339();
+    std::fs::write(&path,format!("{}\n",json!({"type":"user","uuid":"earlier","sessionId":"sid","timestamp":at,"message":{"content":"primeira\nsegunda"}}))).unwrap();
+    let mut index=ReceiptIndex::new("claude","sid");index.scan(&path).unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    let batch=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    let id=batch[0]["id"].as_str().unwrap().to_owned();
+    let (occurrence,normalized_text)=index.match_legacy(&batch[0],&Default::default()).unwrap();
+    assert_eq!(store.exec(1,"legacy-proof",clock(),Action::ConfirmLegacy {entry_id:id,occurrence,normalized_text}).unwrap(),false,"reservar não prova que o lote foi escrito");
+    assert_ne!(store.state().rows[0]["confirmed"],true);
+}
+
+#[test]
+fn queued_batch_store_review_sealed_batch_refuses_all_panel_changes() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+    }
+    let batch=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();let id=batch[0]["id"].as_str().unwrap().to_owned();
+    store.exec(1,"unwritten",clock(),Action::SetDelivered {entry_id:id.clone(),value:false,steered:false}).unwrap();
+    store.exec(1,"later",clock(),Action::Append {text:"depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into())}).unwrap();
+    for (call,action) in [
+        ("move",Action::Reorder {entry_id:id.clone(),before_id:None}),
+        ("move-before",Action::Reorder {entry_id:"later".into(),before_id:Some(id.clone())}),
+        ("promote",Action::Promote {entry_id:id.clone()}),
+        ("edit",Action::Edit {entry_id:id.clone(),text:"mudou".into()}),
+        ("cancel",Action::Cancel {entry_id:id.clone()}),
+    ] {assert_eq!(store.exec(1,call,clock(),action).unwrap(),"not_waiting","{call}");}
+    assert_eq!(store.state().rows[0]["id"],id);
+    assert_eq!(store.state().rows[0]["text"],"primeira\nsegunda");
+}
+
+#[test]
+fn queued_batch_store_review_single_message_keeps_its_identity_and_cut() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"a",clock(),Action::Append {text:"primeira\ncontinua".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("a".into())}).unwrap();
+    let first=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(first[0]["id"],"a");assert_eq!(first[0]["text"],"primeira\ncontinua");
+    store.exec(1,"unwritten",clock(),Action::SetDelivered {entry_id:"a".into(),value:false,steered:false}).unwrap();
+    store.exec(1,"later",clock(),Action::Append {text:"depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into())}).unwrap();
+    let retry=store.exec(1,"retry",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(retry[0]["text"],"primeira\ncontinua","a tentativa já reservada não absorve uma chegada posterior");
+    assert_eq!(retry[0]["id"],"a");
+    assert_eq!(store.state().rows.iter().find(|row|row["id"]=="later").unwrap()["delivered"],false);
+}
+
+#[test]
+fn queued_batch_store_review_cli_echo_confirms_all_member_ids() {
+    let dir=tempfile::tempdir().unwrap();
+    let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (id,text) in [("a","primeira"),("b","segunda")] {
+        store.exec(1,id,clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("prepare-{id}"),clock(),Action::Prepare {id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into())}).unwrap();
+        store.exec(1,&format!("defer-{id}"),clock(),Action::Finish {id:id.into(),status:Status::Deferred,result:json!({"disposition":"deferred"})}).unwrap();
+    }
+    let batch=store.exec(1,"claim:batch",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();let id=batch[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(store.exec(1,"echo",clock(),Action::Confirm {entry_ids:vec![id.clone()]}).unwrap(),1);
+    for member in ["a","b"] {assert!(store.state().operations[member].status==Status::Confirmed,"o eco confirma {member}");}
+    assert!(store.state().rows[0]["batch_entries"].as_array().unwrap().iter().all(|row|row["confirmed"]==true));
+    assert_eq!(store.exec(1,"echo-again",clock(),Action::Confirm {entry_ids:vec![id]}).unwrap(),0);
+}
+
 /// O roteiro e o resultado vêm do Python (backend/tests/test_runtime_queue.py): a poda tem de
 /// deixar o mesmo estado nos dois donos.
 #[test]

@@ -9,13 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
+mod batch;
+
 const CALL_PREFIX: &str = "call::";
 const CAP: usize = 1000;
 const VERSION: u32 = 2;
 /// Janela de chamadas recentes que nunca sai: cobre a repetição da mesma chamada e o ACK atrasado
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
 const RECENT_CALLS: u64 = 256;
-const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
+const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage", "batch_id",
     "preserve_binding", "queued", "already_confirmed", "disposition", "draft",
     // A repetição da reabertura em bypass só se reconhece por estes campos (`reopen_claude`).
     "reopened", "mode", "current", "previous_non_plan"];
@@ -173,7 +175,8 @@ impl State {
     /// usada só sai quando nenhuma operação restante pode casá-la.
     pub fn compact(&mut self) {
         let cutoff = self.next_seq.saturating_sub(RECENT_CALLS);
-        let open_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] != true).filter_map(|r| r["id"].as_str()).collect();
+        let open_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] != true)
+            .flat_map(|row|std::iter::once(row_id(row)).chain(row["batch_entries"].as_array().into_iter().flatten().map(row_id))).collect();
         let held = |key: &str, op: &Operation| op.seq >= cutoff || !key.starts_with(CALL_PREFIX)
             && (!matches!(op.status, Status::Accepted | Status::Rejected | Status::Confirmed)
                 || op.entry_id.as_deref().is_some_and(|id| open_rows.contains(id)));
@@ -213,6 +216,7 @@ pub enum Action {
     AppendLocal { text:String, entry_id:Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] confirms:Option<String> },
     Claim { min_ts:f64, limit:Option<usize>, entry_id:Option<String> },
+    ClaimBatch { min_ts:f64 },
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
     GiveUp { entry_id:String },
@@ -494,7 +498,7 @@ fn entry_was_materialized(state:&State,entry:&str)->bool {
         || state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry)
             && (op.entry_materialized || terminal_input(state,op) && !op.wire_attempts.is_empty()))
         || state.operations.iter().any(|(call,receipt)|call.starts_with(CALL_PREFIX) && (matches!(receipt.payload["kind"].as_str(),Some("append"|"append_local"))
-            && receipt.result["id"]==entry || receipt.payload["kind"]=="claim"
+            && receipt.result["id"]==entry || matches!(receipt.payload["kind"].as_str(),Some("claim"|"claim_batch"))
             && receipt.result.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==entry))
             || receipt.payload["kind"]=="remove" && receipt.payload["entry_id"]==entry && receipt.result==true))
 }
@@ -533,7 +537,7 @@ fn stale_terminal_intent(op:&Operation)->bool {
 fn waiting_index(state:&State,entry:&str)->Result<usize,&'static str> {
     match state.rows.iter().position(|row|row_id(row)==entry) {
         None=>Err("absent"),
-        Some(index) if !waiting_row(state,&state.rows[index])=>Err("not_waiting"),
+        Some(index) if state.rows[index]["batch_entries"].is_array() || !waiting_row(state,&state.rows[index])=>Err("not_waiting"),
         Some(index)=>Ok(index),
     }
 }
@@ -566,7 +570,7 @@ fn needs_terminal_recovery(state:&State)->bool {
     state.operations.iter().any(|(key,op)| {
         if !key.starts_with(CALL_PREFIX) && terminal_input(state,op)
             && (!op.entry_materialized || matches!(op.status,Status::Deferred|Status::Rejected) && !op.terminal_finalized) {return true;}
-        key.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim"
+        key.starts_with("call::terminal:queue:") && matches!(op.payload["kind"].as_str(),Some("claim"|"claim_batch"))
             && op.result.as_array().is_some_and(|claimed|state.rows.iter().any(|row|claimed.iter().any(|item|row_id(item)==row_id(row))
                 && row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && !terminal_protected(state,row_id(row),"")))
     })
@@ -605,6 +609,7 @@ fn confirm_row(state:&mut State,id:&str) {
     for (_,op) in state.operations.iter_mut().filter(|(key,op)|!key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id)) {
         op.status = Status::Confirmed;
     }
+    batch::confirm_members(state,id);
     release_terminal_write_barrier(state);
 }
 
@@ -731,6 +736,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if let Some(source) = confirms { confirm_local_command(state,&source); }
             row
         }
+        Action::ClaimBatch { min_ts } => batch::claim(state,min_ts,clock,call_id)?,
         Action::Claim { min_ts, limit, entry_id } => {
             let mut claimed = Vec::new();
             for row in &mut state.rows {
@@ -822,12 +828,15 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         // desfecho (o eco e o `result` podem vir antes do `Finish`) e resgata a desistida.
         Action::Confirm { entry_ids } => {
             let mut count = 0;
+            let mut confirmed = Vec::new();
             for row in &mut state.rows {
                 if entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true {
                     row["confirmed"] = json!(true); count += 1;
                     row.as_object_mut().unwrap().remove("desistiu");
+                    confirmed.push(row_id(row).to_owned());
                 }
             }
+            for id in confirmed {batch::confirm_members(state,&id);}
             json!(count)
         }
         Action::Prune { min_ts } => {
@@ -1001,9 +1010,11 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if !proof.validates(&cursor,row) { return Err(invalid("prova de entrega não corresponde ao despacho")); }
             row["delivered"] = json!(true); row["confirmed"] = json!(true);
             row.as_object_mut().unwrap().remove("desistiu");
+            let entry=row_id(row).to_owned();
             state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation,
                 "conversation":proof.occurrence.conversation,"file_identity":proof.occurrence.file_identity,"offset":proof.occurrence.offset}));
             state.operations.get_mut(&id).unwrap().status = Status::Confirmed;
+            batch::confirm_members(state,&entry);
             release_terminal_write_barrier(state);
             json!(true)
         }
@@ -1044,7 +1055,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 .filter_map(|op|op.payload["logical_id"].as_str()).collect();
             let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed|Status::Rejected)
                 || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
-            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|["call::terminal:queue:","call::claim:","call::steer-claim:"]
+            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|op.payload["kind"]=="claim_batch" || ["call::terminal:queue:","call::claim:","call::steer-claim:"]
                     .iter().any(|prefix|call.starts_with(prefix)) && op.payload["kind"]=="claim")
                 .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
             // Só o claim do executor (terminal ou drain sem terminal), sem despacho, prova ausência de efeito.
@@ -1111,10 +1122,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
 /// A mais recente vem primeiro, para a perdida mais antiga não levar a linha da que chegou.
 pub(crate) fn legacy_rows(state: &State) -> Vec<Value> {
     let dispatched: BTreeSet<&str> = state.operations.values().filter_map(|op|op.entry_id.as_deref()).collect();
-    let claimed: BTreeSet<&str> = state.operations.iter().filter(|(key,op)|key.starts_with(CALL_PREFIX) && op.payload["kind"] == "claim")
+    let claimed: BTreeSet<&str> = state.operations.iter().filter(|(key,op)|key.starts_with(CALL_PREFIX) && matches!(op.payload["kind"].as_str(),Some("claim"|"claim_batch")))
         .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
     let mut rows: Vec<Value> = state.rows.iter().filter(|r|r["delivered"] == true && r["confirmed"] != true && r["desistiu"] != true
-        && r["papel"] != "assistant" && !dispatched.contains(row_id(r)) && !claimed.contains(row_id(r))).cloned().collect();
+        && r["papel"] != "assistant" && !r["batch_entries"].is_array() && !dispatched.contains(row_id(r)) && !claimed.contains(row_id(r))).cloned().collect();
     rows.sort_by(|a,b|b["ts"].as_f64().unwrap_or(0.0).total_cmp(&a["ts"].as_f64().unwrap_or(0.0)));
     rows
 }
@@ -1122,9 +1133,13 @@ pub(crate) fn legacy_rows(state: &State) -> Vec<Value> {
 pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {
     let raw = row["text"].as_str().unwrap_or("").trim();
     let stripped = crate::transcript::history::strip_attach(raw);
-    let mut lines: BTreeSet<_> = [raw,stripped.trim()].into_iter()
-        .flat_map(|text|std::iter::once(text).chain(text.split('\n')))
-        .map(str::trim).filter(|text|!text.is_empty()).map(str::to_owned).collect();
+    let mut lines: BTreeSet<_> = if row["batch_entries"].is_array() {
+        // Só o pedido completo confirma o lote, mesmo se uma parte isolada já apareceu antes.
+        std::iter::once(raw.to_owned()).filter(|text|!text.is_empty()).collect()
+    } else {
+        [raw,stripped.trim()].into_iter().flat_map(|text|std::iter::once(text).chain(text.split('\n')))
+            .map(str::trim).filter(|text|!text.is_empty()).map(str::to_owned).collect()
+    };
     let shrunk: Vec<_> = lines.iter().map(|text| {
         let mut out = String::new();
         let mut chars = text.chars().peekable();
