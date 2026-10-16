@@ -1682,6 +1682,9 @@ impl Hangar {
                     let back = !self.list_online;
                     self.list_online = true;
                     if back { self.server_back(window, cx); }
+                    // A lista pode chegar só pelo stream (a primeira leitura falhou com o backend subindo): sem esta leitura
+                    // o botão da voz nasce escondido e nenhuma reconexão o traz de volta.
+                    self.refresh_voice_gate(cx);
                 }
             }
             Payload::Stream(Update::Offline(error)) => {
