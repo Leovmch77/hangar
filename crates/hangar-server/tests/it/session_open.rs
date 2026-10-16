@@ -55,6 +55,11 @@ async fn the_private_claude_bridge_opens_what_entered_python_directly() {
     let claude = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "claude", "headless": false}, "guest": null});
     let refused: Value = serde_json::from_str(&open(claude, true).await.text().await.unwrap()).unwrap();
     assert_eq!(refused["detail"]["code"], "erro_cwd_inexistente", "a recusa é a da abertura do Rust");
+    // O pedido torto é recusa de validação, não "o Rust não atende": o 421 o faria parecer o Rust fora.
+    let bogus = open(serde_json::json!({"request": {"name": "s1", "cwd": "/x", "bogus": 1}, "guest": null}), true).await;
+    assert_eq!(bogus.status(), 422);
+    let refused: Value = serde_json::from_str(&bogus.text().await.unwrap()).unwrap();
+    assert_eq!(refused["detail"]["code"], "erro_corpo_invalido");
 }
 
 /// O bastão do dono vai ao Python com a marca de que o Rust abre a sucessora Claude com terminal; a

@@ -552,9 +552,14 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Ok(bytes) = to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
-    let Ok(envelope) = serde_json::from_slice::<Value>(&bytes) else { return StatusCode::MISDIRECTED_REQUEST.into_response() };
-    let Ok(request) = SessionOpenRequest::parse(envelope["request"].to_string().as_bytes()) else {
-        return StatusCode::MISDIRECTED_REQUEST.into_response();
+    // Pedido torto é recusa de validação; o 421 fica só para o que o Rust não atende.
+    let envelope = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(envelope) => envelope,
+        Err(error) => return reply(&OpenError::invalid_body(&error.to_string())),
+    };
+    let request = match SessionOpenRequest::parse(envelope["request"].to_string().as_bytes()) {
+        Ok(request) => request,
+        Err(error) => return reply(&error),
     };
     let guest = match bridge_guest(&envelope, &AccountEnvironment::capture().claude_base) {
         Ok(guest) => guest,
