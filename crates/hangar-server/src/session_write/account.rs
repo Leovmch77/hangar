@@ -107,11 +107,18 @@ impl Between for MoveConversation {
     }
     fn check<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> BoxFuture<'a,Result<(),RuntimeError>> {
         Box::pin(async move {
-            let Some((_,destination))=self.paths(from,to,sid) else {return Ok(())};
-            if destination.exists() || destination.with_extension("").exists() {
+            if let Some((_,destination))=self.paths(from,to,sid) && (destination.exists() || destination.with_extension("").exists()) {
                 return Err(RuntimeError::new("erro_conversa_ja_na_conta","a conta destino ja tem esta conversa"));
             }
-            Ok(())
+            // A confiança na pasta é por conta: sem ela o terminal abre no aviso, em "No, exit". O arquivo
+            // é o que o CLI daquela conta lê, pela mesma regra do `-e CLAUDE_CONFIG_DIR` (S-07). Antes de
+            // encerrar: confiar a mais numa troca recusada não muda nada.
+            let terminal=crate::session_open::terminal::TerminalEnv { windows:self.windows,program:String::new(),display:Vec::new(),
+                server_config_dir:self.env.base.get("CLAUDE_CONFIG_DIR").filter(|v|!v.is_empty()).cloned(),
+                default_config_dir:self.env.home.join(".claude"),birth:std::time::Duration::ZERO };
+            let file=crate::session_open::claude::claude_json(&terminal,&self.env.home,to.account.config_dir());
+            crate::session_open::claude::pretrust(&file,&to.cwd,self.windows)
+                .map_err(|e|RuntimeError::new("reopen_pretrust_failed",&format!("a pasta não pôde ser confiada na conta nova ({e}); nada foi reaberto")))
         })
     }
     fn apply<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> BoxFuture<'a,Result<(),RuntimeError>> {
@@ -121,13 +128,6 @@ impl Between for MoveConversation {
                     .map_err(|_|io_refusal("erro_mover_conversa","a conversa não foi movida".into()))?
                     .map_err(|e|io_refusal("erro_mover_conversa",format!("nao consegui mover a conversa de conta ({e}); ela ficou na conta de antes")))?;
             }
-            // A confiança na pasta é por conta: sem ela o terminal abre no aviso, em "No, exit". O arquivo
-            // é o que o CLI daquela conta lê, pela mesma regra do `-e CLAUDE_CONFIG_DIR` (S-07).
-            let terminal=crate::session_open::terminal::TerminalEnv { windows:self.windows,program:String::new(),display:Vec::new(),
-                server_config_dir:self.env.base.get("CLAUDE_CONFIG_DIR").filter(|v|!v.is_empty()).cloned(),
-                default_config_dir:self.env.home.join(".claude"),birth:std::time::Duration::ZERO };
-            let file=crate::session_open::claude::claude_json(&terminal,&self.env.home,to.account.config_dir());
-            crate::session_open::claude::pretrust(&file,&to.cwd,self.windows);
             Ok(())
         })
     }

@@ -1132,14 +1132,14 @@ fn the_folder_is_pretrusted_and_a_foreign_default_model_is_dropped() {
     let home = tempfile::tempdir().unwrap();
     let file = home.path().join(".claude.json");
     std::fs::write(&file, r#"{"numStartups": 3, "projects": {"/x": {"allowedTools": []}}}"#).unwrap();
-    claude::pretrust(&file, "/x", false);
+    claude::pretrust(&file, "/x", false).unwrap();
     let data: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(data, json!({"numStartups": 3, "projects": {"/x": {"allowedTools": [], "hasTrustDialogAccepted": true}}}));
     let before = std::fs::metadata(&file).unwrap().modified().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    claude::pretrust(&file, "/x", false);
+    claude::pretrust(&file, "/x", false).unwrap();
     assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before, "já confiada não reescreve");
-    claude::pretrust(&file, "C:\\x\\y", true);
+    claude::pretrust(&file, "C:\\x\\y", true).unwrap();
     let data: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(data["projects"]["C:/x/y"]["hasTrustDialogAccepted"], true, "barra normal no Windows");
 
@@ -1232,7 +1232,7 @@ fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
     assert_eq!(argv[argv.iter().position(|a| a == "-c").unwrap() + 1], absolute);
     let transcript = claude::transcript(&spec, "sid", &home.join(".claude/projects"));
     assert_eq!(transcript.parent().unwrap().file_name().unwrap().to_string_lossy(), hangar_workspace::worktrees::sanitize_cwd(&absolute));
-    claude::pretrust(&home.join(".claude.json"), &spec.cwd, false);
+    claude::pretrust(&home.join(".claude.json"), &spec.cwd, false).unwrap();
     let trusted: Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
     assert_eq!(trusted["projects"][&absolute]["hasTrustDialogAccepted"], true);
 }

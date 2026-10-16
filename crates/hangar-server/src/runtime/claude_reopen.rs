@@ -655,6 +655,10 @@ impl RuntimeRegistry {
                 let mut terminal={let (home,base)=(env.home.clone(),env.base.clone());tokio::task::spawn_blocking(move||TerminalEnv::local(&home,&base)).await
                     .map_err(|_|refused("reopen_terminal_env","o ambiente do terminal não pôde ser lido"))?};
                 terminal.program=watcher.mux_program();
+                // A pasta não confiada prende o terminal novo no "trust this folder?", e a reabertura sairia
+                // pela confirmação, com a causa errada.
+                crate::session_open::claude::pretrust(&crate::session_open::claude::claude_json(&terminal,&env.home,next.account.config_dir()),&next.cwd,terminal.windows)
+                    .map_err(|e|refused("reopen_pretrust_failed",&format!("a pasta não pôde ser confiada na conta ({e}); nada foi reaberto")))?;
                 let runtime=super::codex_launch::runtime_config(&env);
                 let roots=crate::session_open::claude::plugin_roots(&env.home);
                 let bridge=self.policy_plugin_bridge();
@@ -723,7 +727,6 @@ impl RuntimeRegistry {
         let mode=next.permission_mode.map(PermissionMode::name).unwrap_or_default();
         match start {
             Start::Terminal(pane,terminal)=>{
-                crate::session_open::claude::pretrust(&crate::session_open::claude::claude_json(&terminal,&env.home,next.account.config_dir()),&next.cwd,terminal.windows);
                 let watcher=self.watcher_ref().ok_or_else(||refused("runtime_binding","sem a vigia do terminal"))?;
                 if let Err(error)=crate::session_open::terminal::spawn(&watcher.spawn_mux(),&terminal,&pane).await {
                     self.drop_failed_terminal(name).await?;

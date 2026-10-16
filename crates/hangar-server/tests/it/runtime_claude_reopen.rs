@@ -660,3 +660,14 @@ async fn a_spec_not_written_after_the_reopen_is_told_to_the_caller() {
     assert!(!reopened.warnings.is_empty(),"o registro não gravado aparece");
 }
 
+/// SF4: a pasta que não pôde ser confiada na conta deixaria o terminal novo preso no "trust this folder?":
+/// recusa antes de encerrar, com o código próprio.
+#[tokio::test]
+async fn a_folder_that_cannot_be_trusted_refuses_before_anything_stops() {
+    let fx = fixture();
+    std::fs::write(fx.home.join(".claude.json"),"{torto").unwrap();
+    let (outcome,args) = to_terminal(&fx,json!({})).await;
+    assert_eq!(outcome,Err(("reopen_pretrust_failed".into(),false)));
+    assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}
+

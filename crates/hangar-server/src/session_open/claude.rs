@@ -220,8 +220,8 @@ pub fn prep_result(account: &str, code: Option<i32>, stderr: &str) -> Result<Vec
 static PRETRUST: Mutex<()> = Mutex::new(());
 
 /// `_pretrust_cwd`: a pasta nasce confiada no `.claude.json` que a sessão lê (senão ela nasce presa
-/// no "trust this folder?", invisível para o app). Já confiada não reescreve; falha só vai ao log.
-pub fn pretrust(file: &Path, cwd: &str, windows: bool) {
+/// no "trust this folder?", invisível para o app). Já confiada não reescreve; a falha volta a quem chamou.
+pub fn pretrust(file: &Path, cwd: &str, windows: bool) -> Result<(), String> {
     let _guard = PRETRUST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let result = (|| -> Result<(), String> {
         let mut data: Value = match std::fs::read(file) {
@@ -239,7 +239,8 @@ pub fn pretrust(file: &Path, cwd: &str, windows: bool) {
         let text = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
         crate::runtime::queue::atomic_write(file, text.as_bytes()).map_err(|e| e.to_string())
     })();
-    if let Err(error) = result { tracing::warn!(file = %file.display(), error, "pré-confiar a pasta falhou; o diálogo aparece na sessão"); }
+    if let Err(error) = &result { tracing::warn!(file = %file.display(), error, "pré-confiar a pasta falhou; o diálogo aparece na sessão"); }
+    result
 }
 
 /// Ids que a API da Anthropic aceita (`default_model._ANTHROPIC`).

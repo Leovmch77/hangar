@@ -94,6 +94,11 @@ impl Diary {
         }
         self.events.push(e);
     }
+    /// A pasta não confiada deixa a sessão presa no "trust this folder?": a criação segue, e o diário conta.
+    fn trust_failed(&mut self, detail: &str) {
+        self.events.push(json!({"evento": "sessao.confiar_pasta_falhou", "nivel": "aviso", "sessao": self.session(), "provider": self.provider,
+            "etapa": "confiar_pasta", "detalhe": detail, "operacao": self.op}));
+    }
     fn end(mut self, error: Option<&OpenError>) -> Vec<Value> {
         let ms = self.started.elapsed().as_millis() as u64;
         self.events.push(match error {
@@ -565,7 +570,9 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
     let route = engine_route(host, spec)?;
     spec.conversation = Some(sid.clone());
     diary.step("confiar_pasta");
-    claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd, host.terminal().windows);
+    if let Err(error) = claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd, host.terminal().windows) {
+        diary.trust_failed(&error);
+    }
     // Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
     host.release_name(&spec.name).await?;
     // S-40: a primeira mensagem já está na fila durável quando a criação responde; quem sobe a sessão
@@ -684,8 +691,8 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     };
     diary.step("confiar_pasta");
     match spec.provider {
-        AgentProvider::Claude => claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd,
-            host.terminal().windows),
+        AgentProvider::Claude => if let Err(error) = claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()),
+            &spec.cwd, host.terminal().windows) { diary.trust_failed(&error); },
         AgentProvider::Kimi => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             agents::kimi_pretrust(&agents::kimi_home(host.home(), host.env()), &spec.cwd, now);
