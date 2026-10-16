@@ -1,6 +1,6 @@
 //! Python falso das rotas de Git/arquivos: contexto, diário e o resto contado como repasse.
 #![allow(dead_code)]
-use crate::fake::{SECRET, config, spawn_server};
+use crate::fake::{SECRET, config};
 use axum::{
     Router,
     body::Bytes,
@@ -21,6 +21,7 @@ pub struct Fixture {
     pub hits: Arc<AtomicUsize>,
     /// Corpos recebidos em `/internal/diag`.
     pub diags: Diags,
+    _home: Option<tempfile::TempDir>,
 }
 
 impl Fixture {
@@ -41,6 +42,10 @@ impl Fixture {
 }
 
 pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
+    fixture_with_home(root,context_ok,None).await
+}
+
+pub async fn fixture_with_home(root: &std::path::Path, context_ok: bool, home: Option<&std::path::Path>) -> Fixture {
     let hits = Arc::new(AtomicUsize::new(0));
     let diags: Diags = Arc::default();
     let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl"),"git_cwd":root}});
@@ -102,7 +107,12 @@ pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Fixture { addr: spawn_server(config(upstream, "127.0.0.1")).await, hits, diags }
+    let isolated_home=home.is_none().then(||tempfile::tempdir().unwrap());
+    let home=home.unwrap_or_else(||isolated_home.as_ref().unwrap().path());
+    let mut state=hangar_server::routes::AppState::new(config(upstream,"127.0.0.1"));
+    state.origins_home=home.into();
+    let addr=crate::fake::spawn_state(state).await;
+    Fixture { addr, hits, diags,_home:isolated_home }
 }
 
 /// Corpo do 503 de Git/arquivos: mesmo formato das outras rotas do Rust, com o motivo em `params`.

@@ -26,6 +26,8 @@ pub struct Session {
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
+    pub git_cwd: Option<String>,
+    #[serde(default)]
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub jsonl: Option<String>,
@@ -119,12 +121,20 @@ pub fn main_repo_of(root: &str) -> String {
     let dot = Path::new(root).join(".git");
     if dot.is_file()
         && let Ok(raw) = std::fs::read(&dot)
-        && let Some(target) = String::from_utf8_lossy(&raw).trim().strip_prefix("gitdir: ")
+        && let Some(target) = String::from_utf8_lossy(&raw)
+            .trim()
+            .strip_prefix("gitdir: ")
     {
         // normpath: com `worktree.useRelativePaths` o ponteiro vem com `..`.
         let gitdir = normpath(&Path::new(root).join(target));
-        if gitdir.parent().and_then(Path::file_name).is_some_and(|n| n == "worktrees")
-            && let Some(main) = gitdir.parent().and_then(Path::parent).and_then(Path::parent)
+        if gitdir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "worktrees")
+            && let Some(main) = gitdir
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
         {
             return text(main);
         }
@@ -181,7 +191,10 @@ pub fn try_removed_at(file: &Path) -> std::io::Result<HashMap<String, String>> {
     };
     let map: HashMap<String, Value> = serde_json::from_slice(&raw)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(map.into_iter().filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned()))).collect())
+    Ok(map
+        .into_iter()
+        .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned())))
+        .collect())
 }
 
 /// Pasta sumida: o repo que ainda a lista, pelo mapa de remoções, pela irmã ou subindo.
@@ -428,7 +441,11 @@ impl Probe {
             Ok(out) => Some(out),
             Err(e) => {
                 // Sem o detalhe: o stderr do git pode citar caminhos do usuário.
-                tracing::warn!(command = args[0], status = e.status, "worktrees: git falhou");
+                tracing::warn!(
+                    command = args[0],
+                    status = e.status,
+                    "worktrees: git falhou"
+                );
                 self.failed = true;
                 None
             }
@@ -436,7 +453,9 @@ impl Probe {
     }
 
     fn ok(&mut self, cwd: &str, args: &[&str]) -> Option<String> {
-        self.git(cwd, args).filter(|o| o.code == 0).map(|o| o.stdout)
+        self.git(cwd, args)
+            .filter(|o| o.code == 0)
+            .map(|o| o.stdout)
     }
 
     fn log(&mut self, cwd: &str, rev: &str, n: usize) -> Vec<Value> {
@@ -462,7 +481,14 @@ fn ignored_lost(probe: &mut Probe, path: &str, main: &str) -> Vec<String> {
     let out = probe
         .ok(
             path,
-            &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
         )
         .unwrap_or_default();
     let mut lost = out
@@ -512,10 +538,11 @@ fn inside(s: &Session, real_path: &Path) -> bool {
     {
         return true;
     }
-    s.cwd
-        .as_deref()
+    [s.cwd.as_deref(), s.git_cwd.as_deref()]
+        .into_iter()
+        .flatten()
         .filter(|c| !c.is_empty())
-        .is_some_and(|c| real(Path::new(c)).starts_with(real_path))
+        .any(|c| real(Path::new(c)).starts_with(real_path))
 }
 
 /// Como o `sanitize_cwd` do registry: o Claude indexa a pasta assim.
@@ -537,7 +564,13 @@ pub fn sanitize_cwd(cwd: &str) -> String {
 pub fn is_conversation_file(name: &str) -> bool {
     name.strip_suffix(".jsonl").is_some_and(|stem| {
         stem.len() == 36
-            && stem.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() })
+            && stem.char_indices().all(|(i, c)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    c == '-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
     })
 }
 
@@ -575,14 +608,29 @@ pub fn status(
     let base = branch
         .as_deref()
         .and_then(|b| repo.base_of(cwd, b, &mut probe));
+    let head_ref = branch
+        .as_deref()
+        .map_or("HEAD".into(), |b| format!("refs/heads/{b}"));
+    let head = probe
+        .ok(
+            cwd,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{head_ref}^{{commit}}"),
+            ],
+        )
+        .map(|head| head.trim().to_owned());
+    probe.failed |= head.is_none();
     let (mut ahead, mut behind, mut ancestor) = (0u64, 0u64, false);
     let mut commits = Vec::new();
     let mut last = Vec::new();
-    if let (Some(branch), Some(base)) = (&branch, &base)
+    if let (Some(branch), Some(base), Some(head)) = (&branch, &base, &head)
         && branch != base
     {
         // Nome curto perde para uma tag homônima, e o commit dela pareceria já mesclado.
-        let range = format!("{base}...refs/heads/{branch}");
+        let range = format!("{base}...{head}");
         if let Some(out) = probe.ok(cwd, &["rev-list", "--left-right", "--count", &range]) {
             let mut n = out
                 .split_whitespace()
@@ -592,14 +640,16 @@ pub fn status(
             // Recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
             ancestor = ahead == 0 && behind > 0;
         }
-        commits = probe.log(cwd, &format!("{base}..refs/heads/{branch}"), 3);
+        commits = probe.log(cwd, &format!("{base}..{head}"), 3);
         if ahead > 0 && !commits.is_empty() {
             // O primeiro do `base..branch` é a ponta da branch.
             last = vec![commits[0].clone()];
         }
     }
     if last.is_empty() && (exists || branch.is_some()) {
-        let reference = branch.as_deref().map_or("HEAD".into(), |b| format!("refs/heads/{b}"));
+        let reference = branch
+            .as_deref()
+            .map_or("HEAD".into(), |b| format!("refs/heads/{b}"));
         last = probe.log(cwd, &reference, 1);
     }
     let mut dirty_files = Vec::new();
@@ -613,8 +663,18 @@ pub fn status(
             })
             .collect();
     }
-    // Apagar o upstream também acontece sem merge: não autoriza excluir os commits locais.
-    let merged = ancestor;
+    // O provedor só complementa a prova local; sua indisponibilidade não desfaz a ancestralidade.
+    let external = if !probe.failed && !ancestor && ahead > 0 {
+        match (branch.as_deref(), base.as_deref()) {
+            (Some(branch), Some(base)) => {
+                crate::worktree_merge::probe(Path::new(cwd), branch, base)
+            }
+            _ => crate::worktree_merge::Proof::default(),
+        }
+    } else {
+        crate::worktree_merge::Proof::default()
+    };
+    let merged = ancestor || external.merged;
     let ignored = if exists {
         ignored_lost(&mut probe, path, main)
     } else {
@@ -636,10 +696,19 @@ pub fn status(
     let size = exists
         .then(|| disk_usage(path, created_at, measure))
         .flatten();
+    if merged && exists {
+        let current = probe
+            .ok(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .map(|head| head.trim().to_owned());
+        let current_branch = git::head_info(Some(path)).0;
+        probe.failed |= current != head || current_branch != branch;
+    }
     let failed = probe.failed;
     json!({
         "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
-        "main_branch": repo.main_branch,
+        "main_branch": repo.main_branch, "head": head,
+        "merge_method": if ancestor { Some("ancestor") } else if external.merged { Some("pull_request") } else { None },
+        "merge_problem": external.problem,
         // Leitura que falhou deixa dirty/ignored zerados: a situação nunca pode parecer segura.
         "merged": merged && !failed, "degraded": failed,
         "ahead": ahead, "behind": behind, "dirty": dirty_files.len(),
@@ -657,12 +726,150 @@ pub fn status(
 
 /// Situação de uma pasta sem saber o repositório: o mesmo `status()` sem `main` do Python.
 pub fn status_of(path: &str, sessions: &[Session], measure: bool, bases: &[String]) -> Value {
-    let root = if is_dir(path) { repo_root_of(path) } else { None };
+    let root = if is_dir(path) {
+        repo_root_of(path)
+    } else {
+        None
+    };
     let main = match root {
         Some(root) => main_repo_of(&root),
         None => main_of_missing(path),
     };
     status(path, sessions, &Repo::read(&main), measure, bases)
+}
+
+#[derive(Clone, Default)]
+pub struct Discovery {
+    pub repos: Vec<String>,
+    pub partial: bool,
+}
+
+type DiscoveryCache = HashMap<Vec<String>, (Instant, Discovery)>;
+static DISCOVERY: LazyLock<Mutex<DiscoveryCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const DISCOVERY_TTL: Duration = Duration::from_secs(30);
+const DISCOVERY_LIMIT: usize = 20_000;
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(2);
+
+fn scan_repositories(locations: &[String], roots: &[String]) -> Discovery {
+    let start = Instant::now();
+    let mut scan = Discovery::default();
+    let mut pending = locations
+        .iter()
+        .map(|p| real(Path::new(p)))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut repos = HashSet::new();
+    let mut inspected = 0;
+    'scan: while let Some(path) = pending.pop() {
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        inspected += 1;
+        if inspected > DISCOVERY_LIMIT || start.elapsed() > DISCOVERY_BUDGET {
+            scan.partial = true;
+            break;
+        }
+        if path.join(".git").exists() {
+            let main = text(&real(Path::new(&main_repo_of(&text(&path)))));
+            if roots.iter().any(|root| within(Path::new(&main), root)) {
+                repos.insert(main);
+            }
+        }
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(_) => {
+                scan.partial = true;
+                continue;
+            }
+        };
+        for entry in entries {
+            inspected += 1;
+            if inspected > DISCOVERY_LIMIT || start.elapsed() > DISCOVERY_BUDGET {
+                scan.partial = true;
+                break 'scan;
+            }
+            let Ok(entry) = entry else {
+                scan.partial = true;
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                scan.partial = true;
+                continue;
+            };
+            if kind.is_symlink() || !kind.is_dir() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                scan.partial = true;
+                continue;
+            };
+            let link = false;
+            #[cfg(windows)]
+            let link = {
+                use std::os::windows::fs::MetadataExt;
+                link || meta.file_attributes() & 0x400 != 0
+            };
+            if link || !meta.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let child = entry.path();
+            if name == ".git" {
+                continue;
+            }
+            // Um repositório com nome de artefato continua sendo um repositório.
+            if matches!(
+                name.as_ref(),
+                "node_modules" | "target" | ".venv" | "venv" | "__pycache__" | ".cache"
+            ) && !child.join(".git").exists()
+            {
+                continue;
+            }
+            pending.push(child);
+        }
+    }
+    scan.repos = repos.into_iter().collect();
+    scan.repos.sort();
+    scan
+}
+
+/// Repositórios autorizados, inclusive quando já não há conversa recente deles.
+pub fn discover_repositories(roots: &[String]) -> Discovery {
+    let mut locations = roots.to_vec();
+    if let Some(home) = crate::home()
+        && let Ok(settings) = crate::worktree_settings::load_default()
+        && let Ok(location) = settings.location_path(&home)
+        && location.is_dir()
+        && roots.iter().any(|root| within(&location, root))
+    {
+        locations.push(text(&location));
+    }
+    locations.sort();
+    locations.dedup();
+    let mut key = roots.to_vec();
+    key.sort();
+    key.push(String::new());
+    key.extend(locations.iter().cloned());
+    let mut cache = DISCOVERY.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((at, scan)) = cache.get(&key)
+        && at.elapsed() < DISCOVERY_TTL
+    {
+        return scan.clone();
+    }
+    let scan = scan_repositories(&locations, roots);
+    if cache.len() >= 16 {
+        cache.clear();
+    }
+    cache.insert(key, (Instant::now(), scan.clone()));
+    scan
+}
+
+/// Ausência de repositórios não esconde uma varredura que ficou incompleta.
+pub fn discovery_problem(roots: &[String]) -> Option<&'static str> {
+    discover_repositories(roots)
+        .partial
+        .then_some("worktree_discovery_incomplete")
 }
 
 /// `roots`: só repos dentro delas. `repo`: só o desse repositório, mesmo sem sessão aberta.
@@ -680,12 +887,18 @@ pub fn list_all(
     };
     wanted.sort_unstable();
     wanted.dedup();
+    let discovery = if repo.is_none() {
+        roots.map(discover_repositories).unwrap_or_default()
+    } else {
+        Discovery::default()
+    };
     let mut mains = wanted
         .into_iter()
         .filter_map(repo_root_of)
         // realpath: o mesmo repo por um symlink apareceria duas vezes.
         .map(|root| text(&real(Path::new(&main_repo_of(&root)))))
         .collect::<Vec<_>>();
+    mains.extend(discovery.repos);
     mains.sort();
     mains.dedup();
     let repos = mains
@@ -720,13 +933,16 @@ pub fn list_all(
             });
         }
     });
-    let mut results = results.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter();
+    let mut results = results
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter();
     Value::Array(
         repos
             .iter()
             .map(|r| {
                 let worktrees = results.by_ref().take(r.admins.len()).collect::<Vec<_>>();
-                json!({"repo": r.main, "worktrees": worktrees})
+                json!({"repo": r.main, "worktrees": worktrees, "discovery_partial": discovery.partial})
             })
             .collect(),
     )
@@ -751,7 +967,9 @@ fn allowed_scan_root(path: &str, roots: &[String]) -> Result<()> {
 /// que a registra, se ele estiver numa raiz.
 fn registered_in_allowed_repo(path: &str, roots: &[String]) -> bool {
     let main = if is_dir(path) {
-        let Some(root) = repo_root_of(path) else { return false };
+        let Some(root) = repo_root_of(path) else {
+            return false;
+        };
         if real(Path::new(&root)) != real(Path::new(path)) {
             return false;
         }
@@ -868,7 +1086,12 @@ fn measure(key: SizeKey) {
             } else {
                 tracing::warn!("worktrees: não medi o espaço de uma worktree");
             }
-            let size = Size { bytes: None, biggest: None, error: true, partial: false };
+            let size = Size {
+                bytes: None,
+                biggest: None,
+                error: true,
+                partial: false,
+            };
             (Instant::now() + SIZE_RETRY, size)
         }
     };
@@ -915,7 +1138,10 @@ fn tree_size(path: &Path) -> std::io::Result<Size> {
         }
     }
     if skipped > 0 {
-        tracing::warn!(skipped, "worktrees: pastas ilegíveis ao medir; o total é parcial");
+        tracing::warn!(
+            skipped,
+            "worktrees: pastas ilegíveis ao medir; o total é parcial"
+        );
     }
     Ok(Size {
         bytes: Some(total),
@@ -934,10 +1160,13 @@ fn entry_tree(entry: &std::fs::DirEntry, skipped: &mut usize) -> u64 {
         return 0;
     }
     if !kind.is_dir() {
-        return entry.metadata().map(|m| entry_bytes(&m)).unwrap_or_else(|_| {
-            *skipped += 1;
-            0
-        });
+        return entry
+            .metadata()
+            .map(|m| entry_bytes(&m))
+            .unwrap_or_else(|_| {
+                *skipped += 1;
+                0
+            });
     }
     let mut total = 0;
     let mut stack = vec![entry.path()];
@@ -970,6 +1199,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discovery_finds_repositories_without_recent_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let main = root.join("group/repository");
+        let linked = dir.path().join("old-worktree");
+        std::fs::create_dir_all(&main).unwrap();
+        let empty = dir.path().join("empty-gitconfig");
+        std::fs::write(&empty, "").unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", &empty)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", dir.path())
+                .env("GIT_AUTHOR_NAME", "Teste")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Teste")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "core.hooksPath", ""]);
+        run(&["config", "commit.gpgSign", "false"]);
+        run(&["commit", "--allow-empty", "-m", "Base"]);
+        run(&[
+            "worktree",
+            "add",
+            "-b",
+            "old-feature",
+            linked.to_str().unwrap(),
+            "main",
+        ]);
+        let rows = list_all(&[], &[], Some(&[text(&root)]), None, false, &[]);
+        let repos = rows.as_array().unwrap();
+        assert_eq!(
+            repos.len(),
+            1,
+            "Repositório antigo deve aparecer sem conversa recente"
+        );
+        assert_eq!(repos[0]["repo"], text(&real(&main)));
+        let worktrees = repos[0]["worktrees"].as_array().unwrap();
+        assert_eq!(
+            worktrees.len(),
+            1,
+            "Checkout principal deve ficar fora das worktrees"
+        );
+        assert_eq!(worktrees[0]["path"], text(&linked));
+        let head = worktrees[0]["head"]
+            .as_str()
+            .expect("SHA completo para revalidar a exclusão");
+        assert_eq!(
+            head.len(),
+            40,
+            "Identidade do commit não pode levar quebra de linha"
+        );
+    }
+
+    #[test]
+    fn discovery_preserves_real_repositories_named_like_build_artifacts_and_reports_incomplete_reads()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let repo = root.join("target");
+        std::fs::create_dir_all(&repo).unwrap();
+        let config = dir.path().join("gitconfig");
+        std::fs::write(&config, "").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .arg(&repo)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            discover_repositories(&[text(&root)]).repos,
+            vec![text(&real(&repo))]
+        );
+        let invalid_root = dir.path().join("not-a-directory");
+        std::fs::write(&invalid_root, "file").unwrap();
+        assert_eq!(
+            discovery_problem(&[text(&invalid_root)]),
+            Some("worktree_discovery_incomplete")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_a_link_outside_the_authorized_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let external = dir.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir_all(external.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("linked")).unwrap();
+        let discovery = discover_repositories(&[text(&root)]);
+        assert!(discovery.repos.is_empty());
+        assert!(!discovery.partial);
+    }
+
+    #[test]
     fn sanitize_matches_the_registry() {
         assert_eq!(sanitize_cwd("/home/x/ação/"), "-home-x-a--o");
         assert_eq!(sanitize_cwd("/"), "-");
@@ -978,7 +1317,10 @@ mod tests {
 
     #[test]
     fn normpath_is_lexical() {
-        assert_eq!(normpath(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+        assert_eq!(
+            normpath(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
         assert_eq!(normpath(Path::new("../../x")), PathBuf::from("../../x"));
         assert_eq!(normpath(Path::new("/../x")), PathBuf::from("/x"));
     }

@@ -246,6 +246,14 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   própria, e a sua pasta principal só muda quando você mesclar. A tela **Worktrees** lista cada
   uma (mesclada ou quantos commits à frente, o que não foi commitado) e apaga as mescladas e
   limpas; as conversas dela continuam e podem ser retomadas na pasta principal.
+- **Preferências de worktrees no app nativo:** em **Configurações → Worktrees**, escolha a pasta
+  das novas worktrees de cada servidor. Deixe vazia para usar a pasta de worktrees do Hangar;
+  as existentes continuam onde estão. A limpeza automática começa desligada. É possível ligá-la
+  por dias de inatividade, por integração na base ou por ausência de commits adicionais.
+  A proteção de arquivos locais permite conservar alterações não commitadas, apenas arquivos
+  versionados editados ou quaisquer arquivos locais, incluindo ignorados. Nas duas primeiras
+  opções, arquivos ignorados como `.env` podem ser apagados. A limpeza automática conserva as
+  branches e as conversas e não remove worktrees em uso ou bloqueadas.
 - **Trocar:** toque no título (mobile) / clique na sidebar (desktop).
 - **Renomear:** **toque longo** no nome (sidebar/desktop) → edita inline → Enter salva.
   Não quebra o histórico (resolve por `/proc`, não pelo nome).

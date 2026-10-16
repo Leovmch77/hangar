@@ -59,6 +59,7 @@ mod files;
 mod settings;
 mod mention;
 mod server_config;
+mod worktree_settings;
 mod invite;
 mod pair_accept;
 mod external;
@@ -257,6 +258,7 @@ enum Payload {
     Harness(harness::HarnessReply),
     // Notificações e Anexos: rascunho do servidor e horas silenciosas da conexão atual.
     ServerConfig(server_config::ServerConfigReply),
+    WorktreeSettings(worktree_settings::WorktreeSettingsReply),
     Sync(sync::SyncReply),
     Connect(connect::ConnectReply),
     // Configuração compartilhada: fala com várias máquinas, cada uma pelo token dela.
@@ -649,6 +651,7 @@ pub struct Hangar {
     session_picker: session_picker::SessionPicker,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
+    worktree_settings: worktree_settings::WorktreeSettings,
     sync: sync::Sync,
     connect: connect::Connect,
     shared: shared_config::SharedConfig,
@@ -971,6 +974,7 @@ impl Hangar {
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
+            worktree_settings: worktree_settings::WorktreeSettings::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), worktrees: Default::default(), artifacts: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
             terminal: None, terminal_serial: 0,
@@ -1842,6 +1846,7 @@ impl Hangar {
             Payload::Orchestration(reply) => { self.receive_orchestration(reply, cx); return; }
             Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }
             Payload::Harness(reply) => { self.receive_harness(reply, cx); return; }
+            Payload::WorktreeSettings(reply) => { self.receive_worktree_settings(reply, window, cx); return; }
             Payload::ServerConfig(reply) => {
                 // A configuração gravada é da ativa: só vale para os avisos quando a conversa aberta é dela.
                 if matches!(&reply, server_config::ServerConfigReply::QuietSaved(..) | server_config::ServerConfigReply::Saved(..))

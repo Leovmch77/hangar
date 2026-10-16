@@ -26,6 +26,10 @@ pub(super) struct WorktreeStatus {
     #[serde(default)]
     pub main_branch: Option<String>,
     pub merged: bool,
+    #[serde(default)]
+    pub merge_method: Option<String>,
+    #[serde(default)]
+    pub merge_problem: Option<String>,
     /// Leitura que falhou: dirty/ignored podem estar zerados sem ser verdade.
     #[serde(default)]
     pub degraded: bool,
@@ -62,6 +66,14 @@ pub(super) struct WorktreeStatus {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(super) struct WorktreeRepo { pub repo: String, pub worktrees: Vec<WorktreeStatus> }
+
+#[derive(Clone, Debug, Deserialize)]
+struct WorktreeSnapshot { repos: Vec<WorktreeRepo>, #[serde(default)] warning: Option<String> }
+
+fn merge_notice(worktree: &WorktreeStatus) -> Option<String> {
+    worktree.merge_problem.as_deref().filter(|problem| !problem.trim().is_empty()).map(|problem|
+        tr(if problem == "worktree_merge_base_unconfirmed" { "worktree_merge_base_unconfirmed" } else { "worktree_merge_check_failed" }))
+}
 
 /// Branches da pasta principal (`/api/fs/branches`), para a base e o "Continuar uma branch".
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -353,6 +365,7 @@ pub(super) struct Worktrees {
     size_tries: u32,
     /// Repositórios cujo fetch falhou na última atualização.
     fetch_failed: Vec<String>,
+    discovery_incomplete: bool,
 }
 
 impl Worktrees {
@@ -370,6 +383,29 @@ impl Worktrees {
             }
         }
         true
+    }
+
+    fn take_snapshot(&mut self, seq: u64, result: Result<WorktreeSnapshot, String>) -> bool {
+        if seq != self.repos.seq { return false; }
+        match result {
+            Err(error) => self.take_list(seq, Err(error)),
+            Ok(mut snapshot) => {
+                self.discovery_incomplete = snapshot.warning.as_deref() == Some("worktree_discovery_incomplete");
+                // Uma busca parcial não confirma que os repositórios ou worktrees ausentes desapareceram.
+                if self.discovery_incomplete {
+                    if let Some(previous) = self.repos.ok() {
+                        for repo in previous {
+                            if let Some(current) = snapshot.repos.iter_mut().find(|current| current.repo == repo.repo) {
+                                for worktree in &repo.worktrees {
+                                    if !current.worktrees.iter().any(|current| current.path == worktree.path) { current.worktrees.push(worktree.clone()); }
+                                }
+                            } else { snapshot.repos.push(repo.clone()); }
+                        }
+                    }
+                }
+                self.take_list(seq, Ok(snapshot.repos))
+            }
+        }
     }
 
     fn take_detail(&mut self, seq: u64, result: Result<WorktreeStatus, String>) -> bool {
@@ -425,6 +461,9 @@ impl Hangar {
     pub(super) fn worktrees_reconnected(&mut self, cx: &mut Context<Self>) {
         if self.worktrees.view.is_none() { self.worktrees = Default::default(); return; }
         self.worktrees.cache.clear();
+        self.worktrees.repos.reset();
+        self.worktrees.discovery_incomplete = false;
+        self.worktrees.fetch_failed.clear();
         self.worktrees.open = None;
         self.load_worktrees(false, cx);
     }
@@ -433,14 +472,15 @@ impl Hangar {
     fn load_worktrees(&mut self, then_fetch: bool, cx: &mut Context<Self>) {
         let seq = self.worktrees.repos.start();
         self.server_get(vec!["worktrees".into()], vec![], 30, cx, move |this, result, cx| {
-            let parsed = result.and_then(|v| serde_json::from_value::<Vec<WorktreeRepo>>(v["repos"].clone())
+            if seq != this.worktrees.repos.seq { return; }
+            let parsed = result.and_then(|v| serde_json::from_value::<WorktreeSnapshot>(v)
                 .map_err(|_| Failure::local("invalid_response")));
-            if let Ok(repos) = &parsed {
-                if then_fetch { this.fetch_worktrees(repos.iter().map(|r| r.repo.clone()).collect(), cx); }
-                if repos.iter().flat_map(|r| &r.worktrees).any(|w| w.size_pending) { this.poll_sizes(cx); }
+            if let Ok(snapshot) = &parsed {
+                if then_fetch { this.fetch_worktrees(snapshot.repos.iter().map(|r| r.repo.clone()).collect(), cx); }
+                if snapshot.repos.iter().flat_map(|r| &r.worktrees).any(|w| w.size_pending) { this.poll_sizes(cx); }
                 else { this.worktrees.size_tries = 0; }
             }
-            this.worktrees.take_list(seq, parsed.map_err(|e| Self::failure(&e)));
+            this.worktrees.take_snapshot(seq, parsed.map_err(|e| Self::failure(&e)));
             cx.notify();
         });
         cx.notify();
@@ -806,6 +846,8 @@ impl Hangar {
 
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
+            .when(self.worktrees.discovery_incomplete, |el| el.child(note_box(tr("worktree_discovery_incomplete"), theme::warning())
+                .id("worktree-discovery-warning").role(Role::Status)))
             .children(self.worktrees.fetch_failed.iter().map(|repo| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", &base_name(repo))]), theme::warning())));
         let repos = match &self.worktrees.repos.value {
             None => return page.child(div().py(px(40.)).flex().items_center().justify_center().gap(px(10.)).text_color(theme::muted())
@@ -1088,7 +1130,8 @@ impl Hangar {
                     .accessibility_label(tr_shared("worktree_copiar_caminho", &[]))
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))))
             .child(div().p(px(10.)).rounded(px(8.)).bg(theme::inset()).text_color(state.color()).child(state.verdict(&st)))
-            .when(st.degraded, |el| el.child(note_box(tr_shared("worktree_leitura_incompleta", &[]), theme::warning())));
+            .when(st.degraded, |el| el.child(note_box(tr_shared("worktree_leitura_incompleta", &[]), theme::warning())))
+            .when_some(merge_notice(&st), |el, notice| el.child(note_box(notice, theme::warning()).id("worktree-merge-warning").role(Role::Status)));
         let me = self.current_session();
         let sessions = (!st.sessions.is_empty()).then(|| div().flex().flex_col().gap(px(8.))
             .child(section(tr_shared("worktree_sessoes_aqui", &[])))
@@ -1430,7 +1473,7 @@ const COL_SIZE: f32 = 76.;
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_size, lost_files, merged_batch, one_path_body, ready, slug, state_of, sum_label, title, tr_shared, is_agent, BatchRun, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
+    use super::{fmt_size, lost_files, merged_batch, one_path_body, ready, slug, state_of, sum_label, title, tr_shared, is_agent, merge_notice, WorktreeSnapshot, BatchRun, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
     use serde_json::json;
 
     fn st(v: serde_json::Value) -> WorktreeStatus { serde_json::from_value(v).unwrap() }
@@ -1438,6 +1481,40 @@ mod tests {
     fn base(path: &str) -> serde_json::Value {
         json!({"path": path, "repo": "/r", "exists": true, "branch": "x", "base": "main", "merged": false,
                "ahead": 0, "dirty": 0, "ignored": [], "sessions": [], "closed": 0})
+    }
+
+    #[test]
+    fn worktree_settings_partial_discovery_keeps_known_repositories_and_warning() {
+        let mut wt = Worktrees::default();
+        let complete = wt.repos.start();
+        wt.take_list(complete, Ok(vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
+        let partial = wt.repos.start();
+        let snapshot = serde_json::from_value::<WorktreeSnapshot>(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap();
+        assert!(wt.take_snapshot(partial, Ok(snapshot)));
+        assert!(wt.discovery_incomplete);
+        assert_eq!(wt.repos.ok().unwrap()[0].worktrees[0].path, "/r/a");
+        let partial_update = wt.repos.start();
+        assert!(wt.take_snapshot(partial_update, Ok(serde_json::from_value(json!({"repos": [
+            {"repo": "/r", "worktrees": [base("/r/b")]}
+        ], "warning": "worktree_discovery_incomplete"})).unwrap())));
+        let mut paths: Vec<_> = wt.repos.ok().unwrap()[0].worktrees.iter().map(|w| w.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["/r/a", "/r/b"]);
+        let full = wt.repos.start();
+        assert!(wt.take_snapshot(full, Ok(serde_json::from_value(json!({"repos": []})).unwrap())));
+        assert!(!wt.discovery_incomplete);
+        assert!(wt.repos.ok().unwrap().is_empty());
+        assert!(!wt.take_snapshot(partial, Ok(serde_json::from_value(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap())));
+        assert!(!wt.discovery_incomplete);
+    }
+    #[test]
+    fn worktree_settings_pr_lookup_failure_is_visible_without_changing_git_state() {
+        let mut raw = base("/r/a");
+        raw["merge_problem"] = json!("worktree_merge_host_timeout");
+        let worktree = st(raw);
+        assert_eq!(state_of(&worktree), WtState::Active);
+        assert!(merge_notice(&worktree).is_some());
+        assert_eq!(worktree.merge_problem.as_deref(), Some("worktree_merge_host_timeout"));
     }
 
     #[test]
