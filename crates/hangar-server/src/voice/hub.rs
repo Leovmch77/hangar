@@ -36,6 +36,9 @@ struct LiveCall {
     link: DeviceLink,
 }
 
+/// Espera depois de uma leitura falha da lista de vozes.
+const VOICE_LIST_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct VoiceHub {
     home: PathBuf,
     claude_dir: PathBuf,
@@ -50,6 +53,9 @@ pub struct VoiceHub {
     /// Dois aparelhos abrindo juntos não sobem duas chamadas.
     opening: tokio::sync::Mutex<()>,
     next: AtomicU64,
+    /// Vozes que o Codex instalado aceita, lidas dele uma vez, e quando a última leitura falhou. A trava assíncrona faz
+    /// pedidos simultâneos esperarem a mesma leitura em vez de subir um app-server cada.
+    voices: tokio::sync::Mutex<(Option<Vec<String>>, Option<std::time::Instant>)>,
 }
 
 /// O que a conexão do aparelho recebe ao virar dono.
@@ -73,10 +79,33 @@ impl VoiceHub {
     /// Sem a chave do Jev do ambiente: o teste nunca fala com o Jev de verdade.
     pub fn with_parts(p: TestParts) -> Self {
         Self { home: p.home, claude_dir: p.claude_dir, env_jev_key: None, grace: p.grace, accounts: p.accounts, spawn: p.spawn,
-            own: OnceLock::new(), live: Mutex::new(None), opening: tokio::sync::Mutex::new(()), next: AtomicU64::new(0) }
+            own: OnceLock::new(), live: Mutex::new(None), opening: tokio::sync::Mutex::new(()), next: AtomicU64::new(0),
+            voices: tokio::sync::Mutex::new((None, None)) }
     }
 
     pub fn home(&self) -> &Path { &self.home }
+
+    /// As vozes do Codex e se a lista é dele (`true`) ou a fixa de reserva. A primeira leitura sobe um app-server e fica
+    /// guardada; falha espera `VOICE_LIST_RETRY` antes de tentar de novo.
+    pub async fn voices(&self, st: &AppState, account: &str) -> (Vec<String>, bool) {
+        let mut cache = self.voices.lock().await;
+        if let Some(known) = &cache.0 { return (known.clone(), true); }
+        let fixed = || (VOICES.map(str::to_owned).to_vec(), false);
+        if cache.1.is_some_and(|at| at.elapsed() < VOICE_LIST_RETRY) { return fixed(); }
+        let read = match self.spawn_for(st, account).await {
+            Ok(spawn) => super::rpc::fetch_voices(spawn, std::time::Duration::from_secs(8)).await,
+            Err(_) => None,
+        };
+        match read {
+            Some(list) => { super::log(format!("voice list read count={}", list.len())); cache.0 = Some(list.clone()); (list, true) }
+            None => { super::log("voice list unreadable: fixed list"); cache.1 = Some(std::time::Instant::now()); fixed() }
+        }
+    }
+
+    /// A voz salva pode ir à chamada: pela lista do Codex já lida, ou por ele mesmo na abertura.
+    fn voice_allowed(&self, voice: &str) -> bool {
+        self.voices.try_lock().map_or(true, |cache| super::rpc::voice_allowed(cache.0.as_deref(), voice))
+    }
 
     pub fn claude_dir(&self) -> &Path { &self.claude_dir }
 
@@ -139,7 +168,7 @@ impl VoiceHub {
         let context = if name.is_empty() { "Nenhuma sessão aberta na tela.".to_owned() } else { format!("A sessão na tela agora é {name}.") };
         let hangar_mcp = own.voice_mcp(&st.cfg.internal_secret);
         if hangar_mcp.is_none() { super::log("voice mcp off: no random bytes for the signature"); }
-        let options = CallOptions { voice: chosen.voice.filter(|v| VOICES.contains(&v.as_str())), context, cwd: None, target: name,
+        let options = CallOptions { voice: chosen.voice.filter(|v| self.voice_allowed(v)), context, cwd: None, target: name,
             organizer: chosen.organizer, tools: tools_for(&caps), handoff_same_thread: true, voice_dir: settings::voice_dir(&self.home),
             audio_grace: self.grace, hangar_mcp, command_limit: super::call::COMMAND_LIMIT, result_silence: super::organizer::RESULT_SILENCE };
         let (events_tx, events) = async_channel::unbounded();

@@ -595,7 +595,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   "Voz no app nativo".
 - **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
   saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
-  microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
+  microfone: o `finish_plan` confirmado entra na própria fila de silêncio (`plan_gate`, a mesma regra do
+  `send_to_session`) e cai se ele voltar a falar noutro turno. A resposta da ferramenta só sai com a entrega
+  real ("Plano entregue à sessão") ou com o motivo da falha, nunca antes. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 - **Voz: o organizador tem o acesso de uma sessão.** `danger-full-access` com cwd em
   `~/.hangar/voz/arquivos` (fixa, nunca apagada), que só guarda rascunhos; ele lê e edita qualquer
   arquivo pelo caminho completo. Destrutivo pede o sim falado pela regra do prompt e depois roda,
@@ -716,6 +718,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `WAYLAND_DISPLAY`, `DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` e `XDG_RUNTIME_DIR` pelo `systemctl --user show-environment`
   (prazo de 3 s) e, sem ele, pela pasta de runtime; o que o processo ou a entrada do `~/.claude.json` já tem vence. É o
   módulo único para isso no Rust: a abertura de sessões passa a usá-lo também.
+- **Voz: a lista de vozes é a do Codex instalado.** O servidor lê `thread/realtime/listVoices` uma vez (app-server da
+  conta escolhida, prazo de 5 s) e guarda: usa `v3` quando vem (Codex 0.163.0+, 16 vozes a mais) e `v1` quando não
+  vem, porque o Codex anterior valida a v3 pela v1. Sem leitura, vale a lista fixa `settings::VOICES`. A mesma lista
+  valida o `PUT` e a abertura da chamada; os clientes só mostram o que o servidor manda.
 - **Voz: pedido completo tem uma confirmação curta.** Ao encaminhar pedido completo, sobretudo longo ou
   demorado, a voz diz numa frase o que entendeu e aguarda; nunca a cada pedaço de fala nem narrando passos.
   O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação. Como o prompt sozinho não
