@@ -1349,7 +1349,7 @@ async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
 }
 
 /// T-014 (D-014): na subida o Rust abre sozinho o Codex sem terminal que é dele e tem o que fazer (fila
-/// pendente ou cano vivo), como o `register_codex_sessions` que o Python pedia; o parado sem pendência
+/// pendente ou cano vivo), sem o Python pedir; o parado sem pendência
 /// fica fechado e o próximo envio o abre. Nada fica sem dono depois de o Rust voltar.
 #[tokio::test]
 async fn the_rust_boot_opens_its_codex_headless_with_pending_input() {

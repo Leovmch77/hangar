@@ -827,71 +827,27 @@ def test_codex_headless_stays_python_while_rust_does_not_announce_it(birth, monk
     assert_legacy("c1")         # o cliente Python do Codex segue permitido
 
 
-def _codex_opened(codex_birth):
-    # Codex sem terminal com processo vivo: é a sessão sem terminal que o Python ainda reabre quando o Rust volta.
+def test_rust_back_after_a_crash_takes_the_codex_headless_without_python_opening(codex_birth, monkeypatch):
+    # T-014 (D-014): o Rust novo adota sozinho o Codex sem terminal de cano vivo; o registro daqui sai sem
+    # `open`, e nada de reabertura falha ou interrompida no diário.
     import os
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
     codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
     first = LockingTransport()
-    return codex_birth.build_codex(first), first
-
-
-def test_rust_dying_during_reopen_is_an_interruption_not_a_passage(codex_birth, monkeypatch):
-    # Três quedas seguidas: o Rust novo morre no meio da reabertura. Isso é interrupção (o próximo
-    # Rust ou a retomada pelo Python decide), não adoção recusada nem fechamento sem confirmação.
-    import http.client
-    from app import diag
-    events = []
-    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
-    owner, first = _codex_opened(codex_birth)
-
-    class Dying(LockingTransport):
-        async def op(self, descriptor, command, operation_id, clock):
-            self.ops.append((command["kind"], descriptor))
-            if command["kind"] == "open":
-                raise http.client.RemoteDisconnected("Remote end closed connection without response")
-            raise ConnectionRefusedError("Rust fora do ar")
-
+    owner = codex_birth.build_codex(first)
+    second = LockingTransport()
     async def scenario():
         owner.loop = asyncio.get_running_loop()
         await owner.ensure_open("cx")
         first.lease.close()
         await owner.enter_pending()
-        await _enter(owner, Dying())
+        await _enter(owner, second)
     asyncio.run(scenario())
+    assert second.kinds() == [] and owner.mode == "rust" and not owner.managed_queue("cx")
     names = {evento for evento, _ in events}
-    assert "runtime.adoption_failed" not in names and "runtime.detach_unconfirmed" not in names
-    assert ("runtime.reopen_interrupted", "aviso") in events
-    assert "runtime.close_unconfirmed" not in names     # Rust morto que nem escuta não segura a trava
-
-
-@pytest.mark.parametrize("failure", [TimeoutError("timed out"), ConnectionResetError("handler caiu")])
-def test_live_rust_failing_reopen_stays_an_error(codex_birth, monkeypatch, failure):
-    # Prazo estourado ou conexão derrubada com o Rust de pé não é queda: nenhum Rust novo vai
-    # reabrir a sessão. E o `close` recusado com o processo vivo também fica no diário.
-    from app import diag
-    events = []
-    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
-    owner, first = _codex_opened(codex_birth)
-
-    class Stuck(LockingTransport):
-        alive = True
-
-        async def op(self, descriptor, command, operation_id, clock):
-            self.ops.append((command["kind"], descriptor))
-            if command["kind"] == "open":
-                raise failure
-            raise ConnectionRefusedError("listener fechado")
-
-    async def scenario():
-        owner.loop = asyncio.get_running_loop()
-        await owner.ensure_open("cx")
-        first.lease.close()
-        await owner.enter_pending()
-        await _enter(owner, Stuck())
-    asyncio.run(scenario())
-    assert ("runtime.reopen_failed", "erro") in events
-    assert ("runtime.reopen_interrupted", "aviso") not in events
-    assert ("runtime.close_unconfirmed", "erro") in events
+    assert not names & {"runtime.reopen_failed", "runtime.reopen_interrupted", "runtime.registration_failed"}
 
 
 def test_connection_error_outside_an_opening_is_not_a_rust_crash(monkeypatch):
@@ -1003,7 +959,9 @@ def test_warm_sessions_skips_codex_sessions_of_the_rust(codex_birth, monkeypatch
     assert called == ["cx"]
 
 
-def test_rust_up_registers_live_codex_headless_in_rust(codex_birth):
+def test_rust_up_leaves_live_codex_headless_to_the_rust(codex_birth):
+    # T-014: o Rust adota sozinho na subida o Codex sem terminal com cano vivo ou fila pendente; o Python
+    # não pede a abertura.
     import os
     codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
     owner = _pending_owner(codex_birth)
@@ -1016,8 +974,8 @@ def test_rust_up_registers_live_codex_headless_in_rust(codex_birth):
         owner.configure_transport(transport, CODEX_OWNS)
         await owner.adoption_task
     asyncio.run(scenario())
-    assert transport.kinds() == ["open"] and transport.commands[0]["descriptor"]["name"] == "cx"
-    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
+    assert transport.kinds() == [] and owner.mode == "rust"
+    assert not owner.managed_queue("cx")
 
 
 def test_codex_with_terminal_never_waits_for_the_rust_in_pending(codex_birth, tmp_path):
