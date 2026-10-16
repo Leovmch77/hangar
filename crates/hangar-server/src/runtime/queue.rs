@@ -1211,7 +1211,7 @@ pub fn read_replaced(path: &Path) -> io::Result<Vec<u8>> {
         attempts += 1;
         match std::fs::read(path) {
             Err(error) if cfg!(windows) && matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
-                && (attempts < 100 || std::time::Instant::now() < deadline) => if attempts < 100 {
+                && (attempts <= 100 || std::time::Instant::now() < deadline) => if attempts <= 100 {
                     std::thread::yield_now()
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(1))
