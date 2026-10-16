@@ -153,6 +153,8 @@ _STOPPED_MANY_RE = re.compile(r'\d+ background agents were stopped by the user: 
 
 
 def _stopped_agents(texto, id_: str, ts=None) -> Optional[list[ChatEvent]]:
+    if isinstance(texto, list):
+        texto = "\n".join(b.get("text", "") for b in texto if isinstance(b, dict) and b.get("type") == "text")
     if not isinstance(texto, str):
         return None
     if m := _STOPPED_ONE_RE.fullmatch(texto.strip()):

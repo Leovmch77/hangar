@@ -194,15 +194,12 @@ impl ActivityFold {
         match event.kind.as_str() {
             "tool_result" => {
                 let Some(id) = tool_key(event) else { return false };
-                // Parada pelo usuário: o aviso do Claude Code traz só a descrição do agente, sem task-id.
+                // Parada pelo usuário: o aviso do Claude Code traz só a descrição, sem task-id. Cada citação fecha o
+                // lançamento aberto mais antigo com ela; dois com a mesma descrição não saem juntos.
                 if let Some(stopped) = id.strip_prefix("task:stopped:") {
-                    let mut changed = false;
-                    for (call, desc) in &self.agent_descs {
-                        if desc == stopped && self.background.values().any(|c| c == call) {
-                            changed |= super::record_completion(&mut self.resulted, call.clone(), event.ts);
-                        }
-                    }
-                    return changed;
+                    let open = self.agents.iter().map(|a| a.id.clone()).find(|call| self.agent_descs.get(call).is_some_and(|d| d == stopped)
+                        && self.background.values().any(|c| c == call) && !self.resulted.contains_key(call));
+                    return open.is_some_and(|call| super::record_completion(&mut self.resulted, call, event.ts));
                 }
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((self.woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { return false; }

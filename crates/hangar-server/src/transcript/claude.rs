@@ -418,9 +418,6 @@ fn attachment(obj: &Map<String, Value>, uid: &str) -> Vec<ChatEvent> {
     let Some(att) = obj.get("attachment").and_then(Value::as_object) else { return Vec::new() };
     let atype = att.get("type").and_then(Value::as_str);
     if atype == Some("queued_command") {
-        if let Some(stopped) = att.get("prompt").and_then(Value::as_str).and_then(|p| stopped_agents(p, uid, ts(obj))) {
-            return stopped;
-        }
         let parts: Vec<&str> = match att.get("prompt") {
             Some(Value::Array(blocks)) => blocks
                 .iter()
@@ -431,6 +428,10 @@ fn attachment(obj: &Map<String, Value>, uid: &str) -> Vec<ChatEvent> {
             _ => Vec::new(),
         };
         let joined = parts.join("\n");
+        let prompt = att.get("prompt").and_then(Value::as_str).unwrap_or(&joined);
+        if let Some(stopped) = stopped_agents(prompt, uid, ts(obj)) {
+            return stopped;
+        }
         let text = strip(&joined);
         if text.is_empty() || is_command_meta(text) {
             return Vec::new();
@@ -755,6 +756,11 @@ mod tests {
             "content": "Background agent \"Validar a tela\" was stopped by the user."}));
         assert_eq!(one.iter().map(|e| e.tool_use_id.as_deref()).collect::<Vec<_>>(), vec![Some("task:stopped:Validar a tela")]);
         assert!(one[0].id.starts_with("queued-stopped:") && one[0].id.ends_with(":0"));
+        let blocks = feed(json!({"type": "attachment", "uuid": "u-b", "timestamp": "2026-10-16T10:31:21.479Z",
+            "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                "prompt": [{"type": "text", "text": "Background agent \"Validar a tela\" was stopped by the user."}]}}));
+        assert_eq!(blocks.iter().map(|e| (e.id.as_str(), e.tool_use_id.as_deref())).collect::<Vec<_>>(),
+            vec![("u-b:0", Some("task:stopped:Validar a tela"))]);
     }
 
     #[test]

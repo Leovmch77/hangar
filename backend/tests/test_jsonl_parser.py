@@ -568,6 +568,10 @@ def test_parada_de_agentes_pelo_usuario_fecha_cada_um_pela_descricao():
     [um] = parse_line(json.dumps({"type": "queue-operation", "operation": "enqueue",
         "content": 'Background agent "Validar a tela" was stopped by the user.'}))
     assert um.tool_use_id == "task:stopped:Validar a tela"
+    [blocos] = parse_line(json.dumps({"type": "attachment", "uuid": "u-b", "timestamp": "2026-10-16T10:31:21.479Z",
+        "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                       "prompt": [{"type": "text", "text": 'Background agent "Validar a tela" was stopped by the user.'}]}}))
+    assert (blocos.id, blocos.tool_use_id) == ("u-b:0", "task:stopped:Validar a tela")
 
 
 def test_entrega_sem_terminal_anexo_e_remove_viram_uma_bolha():

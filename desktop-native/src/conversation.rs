@@ -345,10 +345,13 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                     }
                     continue;
                 }
-                // Parada pelo usuário: o aviso do Claude Code traz só a descrição do agente, sem task-id.
+                // Parada pelo usuário: o aviso do Claude Code traz só a descrição, sem task-id. Cada citação fecha o
+                // lançamento aberto mais antigo com ela; dois com a mesma descrição não saem juntos.
                 if let Some(stopped) = id.strip_prefix("task:stopped:") {
-                    for (&call, desc) in &agent_descs {
-                        if desc == stopped && background.values().any(|&c| c == call) { record_completion(&mut resulted, call, event.ts); }
+                    let open = agents.iter().map(|a: &AgentRun| a.id.as_str()).find(|call| agent_descs.get(call).is_some_and(|d| d == stopped)
+                        && background.values().any(|c| c == call) && !resulted.contains_key(call));
+                    if let Some(call) = open.and_then(|call| agent_descs.get_key_value(call).map(|(k, _)| *k)) {
+                        record_completion(&mut resulted, call, event.ts);
                     }
                     continue;
                 }
@@ -888,11 +891,15 @@ mod tests {
     fn stop_by_the_user_ends_the_background_agent_by_its_description() {
         let launch = answered("r", "t1", "Async agent launched successfully.\nagentId: ag-1 (use it)");
         let mut events = vec![agent("a", "t1", json!({"description": "Validar a tela"})), launch,
-            agent("b", "t2", json!({"description": "Outra"})), answered("q", "t2", "Async agent launched successfully.\nagentId: ag-2 (use it)")];
-        events.push(ChatEvent { tool_use_id: Some("task:stopped:Validar a tela".into()), result: Some("task-notification".into()),
-            ts: Some(9.0), ..ev("tool_result", "s") });
-        assert_eq!(running(&events), vec!["t2".to_string()], "só o agente com a descrição parada sai");
+            agent("b", "t2", json!({"description": "Outra"})), answered("q", "t2", "Async agent launched successfully.\nagentId: ag-2 (use it)"),
+            agent("c", "t3", json!({"description": "Validar a tela"})), answered("p", "t3", "Async agent launched successfully.\nagentId: ag-3 (use it)")];
+        let stop = |id: &str, at: f64| ChatEvent { tool_use_id: Some("task:stopped:Validar a tela".into()), result: Some("task-notification".into()),
+            ts: Some(at), ..ev("tool_result", id) };
+        events.push(stop("s", 9.0));
+        assert_eq!(running(&events), vec!["t2".to_string(), "t3".to_string()], "a citação fecha só o mais antigo com a descrição");
         assert_eq!(fold_activity(&events).agents.iter().find(|a| a.id == "t1").unwrap().finished_at, Some(9.0));
+        events.push(stop("s2", 10.0));
+        assert_eq!(running(&events), vec!["t2".to_string()]);
     }
 
     #[test]

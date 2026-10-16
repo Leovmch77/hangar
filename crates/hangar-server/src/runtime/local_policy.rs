@@ -182,13 +182,14 @@ mod batch_tests {
     fn queued_batch_receipt_terminal_text_with_the_raw_path_also_proves_delivery() {
         // A TUI pode receber o path como texto, sem anexar a imagem: o texto inteiro também prova.
         let dir=tempfile::tempdir().unwrap();let image=dir.path().join("test.png");std::fs::write(&image,b"image-bytes").unwrap();
-        let text=format!("nossa mas era pra ser assim \u{2014} \u{1f4ce} imagem: {}",image.display());
+        let text=format!("nossa em C:\\\\Sistemas \u{2014} \u{1f4ce} imagem: {}",image.display());
         let mut rows=json!([{"id":"batch","text":text,"batch_entries":[{"id":"a"}]}]);
         batch_validator("claude-terminal".into(),json!({}))(&mut rows).unwrap();
         assert!(rows[0]["batch_image_receipt"].is_string());
         for (index,(content,expected)) in [
             (json!(text),true),
-            (json!("nossa mas era pra ser assim"),false),
+            (json!(text.replace("\\\\","\\")),true),
+            (json!("nossa em C:\\Sistemas"),false),
         ].into_iter().enumerate() {
             let path=dir.path().join(format!("t{index}.jsonl"));std::fs::write(&path,"").unwrap();
             let mut receipts=super::super::receipt::ReceiptIndex::new("claude","sid");let cursor=receipts.capture(&path).unwrap();
