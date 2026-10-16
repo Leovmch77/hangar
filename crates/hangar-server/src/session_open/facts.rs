@@ -303,6 +303,12 @@ fn codex_error(error: AccountError) -> OpenError {
 }
 
 /// `cliproxy.local()`: endereço do CLIProxyAPI desta máquina; `None` sem config utilizável.
+/// `cliproxy.is_local_engine`: o motor aponta para o CLIProxyAPI desta máquina.
+pub(crate) fn local_engine(env: &AccountEnvironment, engine: &str) -> bool {
+    let cfg = &engines_of(env)[engine];
+    cliproxy_base(&env.home).is_some_and(|local| normalize_base(cfg["base_url"].as_str().unwrap_or("")) == local)
+}
+
 fn cliproxy_base(home: &Path) -> Option<String> {
     let text = std::fs::read_to_string(home.join(".cli-proxy-api").join("config.yaml")).ok()?;
     let config: Value = serde_saphyr::from_str(&text).ok()?;

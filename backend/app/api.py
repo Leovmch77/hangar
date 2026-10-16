@@ -64,7 +64,7 @@ from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, 
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
-from app.pqueue import (PromptQueue, _saida_local, _transcript_start_ts, committed_user_lines,
+from app.pqueue import (PromptQueue, _transcript_start_ts, committed_user_lines,
                         fila_interna_pendente, linha_mais_parecida)
 from app.prune import prune_loop as _prune_loop
 from app.chain import ThenLink
@@ -2258,98 +2258,14 @@ class ModoExecucaoBody(_StrictBody):
     terminal: bool = Field(strict=True)
 
 
-_OCUPADA = {
-    "erro_sessao_iniciando": "a sessão ainda está iniciando — espere ela ficar pronta",
-    "erro_sessao_esperando_resposta": "há uma permissão ou pergunta esperando resposta",
-    "erro_sessao_trabalhando": "a sessão está trabalhando — espere ela terminar",
-    "erro_fila_pendente": "há mensagens na fila esperando entrega",
-}
-
-
-async def _motivo_ocupada(name: str, headless: bool) -> str | None:
-    """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
-    if headless:
-        from app.runtime_adapter import runtime_data
-        from app import runtime_coordinator
-        coordinator = runtime_coordinator.current()
-        try:
-            view = coordinator.source_view(name) if coordinator is not None else None
-        except RuntimeError:
-            return "erro_sessao_iniciando"
-        view = view if view is not None else runtime_data(name)
-        if view is not None:
-            state = view.get("public_state") or {}
-            if not view.get("initialized") or view.get("iniciando"):
-                return "erro_sessao_iniciando"
-            if state.get("state") == "awaiting_input" or view.get("pending") or view.get("question"):
-                return "erro_sessao_esperando_resposta"
-            if state.get("state") == "working" or view.get("in_progress"):
-                return "erro_sessao_trabalhando"
-            if state.get("state") not in ("idle", "dead"):
-                return "erro_sessao_iniciando"
-            # Entregue sem confirmação não segura a troca: ociosa, o ator já conferiu o transcript, e a
-            # que não chegou (limite da conta, desistida) prendia a sessão para sempre. Quem reinicia
-            # o processo a devolve à fila (`_requeue_unanswered`).
-        else:
-            sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
-            if sess is not None and sess.vivo:
-                if sess.iniciando:
-                    return "erro_sessao_iniciando"
-                if sess.pending or sess.question:
-                    return "erro_sessao_esperando_resposta"
-                if sess.in_progress:
-                    return "erro_sessao_trabalhando"
-    else:
-        info = next((i for i in await registry.list_with_state() if i.name == name), None)
-        if info is not None and info.state == "awaiting_input":
-            return "erro_sessao_esperando_resposta"
-        if info is not None and info.state != "idle":
-            return "erro_sessao_trabalhando"
-    fila = await asyncio.to_thread(PromptQueue(name).load)
-    if any(e.get("delivered") is False for e in fila):
-        return "erro_fila_pendente"
-    return None
-
-
-def _requeue_unanswered(name: str) -> int:
-    """Volta à fila a mensagem entregue que a sessão ociosa nunca confirmou: o processo que a
-    recebeu não a gravou, e a vida nova (outra conta, outro modo) precisa responder. Só sob a trava
-    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam.
-
-    Volta como linha NOVA: a antiga carrega a operação já aceita no diário da fila, e o drain com o
-    mesmo id devolveria a resposta guardada sem enviar nada. A antiga é confirmada (sai da tela).
-    O que já está no transcript só tinha a confirmação atrasada: é confirmado, nunca reenviado."""
-    meta = headless_sessions.load(name)
-    if meta is None:
-        return 0
-    committed = committed_user_lines(str(get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)))
-    if committed is None:
-        _log.warning("transcript de %s ilegível: mensagens sem confirmação ficam como estão", name)
-        return 0
-    queue = PromptQueue(name)
-    requeued = 0
-    for row in queue.load():
-        if (row.get("delivered") is not True or row.get("confirmed") or row.get("desistiu")
-                or _saida_local(row)):
-            continue
-        text, row_id = row.get("text") or "", str(row.get("id"))
-        if text.strip() and text.strip() not in committed:
-            queue.append(text, pre_transcript=bool(row.get("pre_transcript")))
-            requeued += 1
-        queue.confirm_delivered(apenas=lambda r, row_id=row_id: str(r.get("id")) == row_id)
-    if requeued:
-        _log.info("%d mensagem(ns) sem confirmação de %s voltaram à fila", requeued, name)
-    return requeued
-
-
 @app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def recarregar_sessao(name: str):
-    """Recicla o processo de uma sessão Claude sem terminal na mesma conversa (`--resume`): é o
-    jeito de ela reler MCP, hooks e settings da conta. Só ociosa e sem nada em aberto."""
+    """Recarregar a sessão é do Rust (Claude e Codex, com e sem terminal); aqui fica a recuperação da
+    transferência que falhou ao restaurar, que o Python conduz, e a recusa sem o Rust."""
     from app.conversation_transfer import transfer_for_session, TransferPhase, recover_transfer, TransferError, public_error
     record = await asyncio.to_thread(transfer_for_session, name)
     if record and record.phase == TransferPhase.RESTORE_FAILED:
-        operation = asyncio.create_task(_durante_troca(name, recover_transfer(registry, record), transfer=True))
+        operation = asyncio.create_task(_durante_troca(name, recover_transfer(registry, record)))
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
@@ -2359,84 +2275,24 @@ async def recarregar_sessao(name: str):
                 raise
         except TransferError as exc:
             raise HTTPException(exc.status, detail=public_error(exc)) from None
-    from app.conversation_transfer import transfer_operation, require_available
-    info = await _cached_info(name)
-    if info and info.provider == "claude" and not _headless(name):
-        return await _durante_troca(name, _reload_terminal(name))
-    try:
-        async with transfer_operation(name):
-            await asyncio.to_thread(require_available, name)
-            return await _reload_session(name)
-    except TransferError as exc:
-        raise HTTPException(exc.status, detail=public_error(exc)) from None
-
-
-def _pane_came_up(name: str) -> bool:
-    """`new-session` volta 0 mesmo quando o comando morre ao nascer: conta o pane vivo após o boot."""
-    from app.terminal_input import _wait_input_ready
-    _wait_input_ready(name, timeout=10.0)
-    return tmux.has_session(name)
-
-
-async def _reload_terminal(name: str):
-    """Claude com terminal: o pane fecha e reabre na mesma conversa com o comando montado agora (plugin,
-    nome e token do lançador), pelas duas metades da troca de modo, sem subir o processo sem terminal."""
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, False)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-        try:
-            sidecar = await asyncio.to_thread(registry.para_headless, name, modo)
-        except KillFailed as e:
-            raise HTTPException(500, str(e))
-        except ValueError as e:
-            raise HTTPException(409, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
-        except OSError as e:
-            # O `para_headless` já tentou devolver o pane; o texto diz se a sessão sobreviveu.
-            raise HTTPException(500, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
-        # Daqui em diante o processo antigo já saiu: falha nenhuma pode deixar a sessão sem processo.
-        try:
-            await asyncio.to_thread(registry.para_terminal, name)
-            if await asyncio.to_thread(_pane_came_up, name):
-                return {"ok": True}
-            problema = "o terminal fechou logo depois de abrir"
-        except Exception as e:
-            problema = str(e) or type(e).__name__
-        _log.warning("recarregar: o terminal de %s não reabriu (%s); segue sem terminal", name, problema)
-        if not await asyncio.to_thread(headless_sessions.exists, name):
-            await asyncio.to_thread(headless_sessions.restaurar, sidecar)
-        hl.acordar(name)
-        raise HTTPException(502, detail=erro("erro_recarregar_sem_terminal",
-                                             f"o terminal não reabriu ({problema}); a sessão seguiu sem terminal",
-                                             erro=problema))
-
-
-async def _reload_session(name: str):
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if info.provider == "codex":
-        # Reiniciar o Codex é do Rust (`codex_relaunch`): aqui só chega com ele fora.
+    if info.provider in ("claude", "codex"):
         raise registry_mod.SessionOpenNeedsRust()
-    if info.provider != "claude" or not _headless(name):
-        raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
-                                             "recarregar só vale para sessão Claude sem terminal"))
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, True)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        await hl.recarregar(name)
-    return {"ok": True}
+    raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
+                                         "recarregar só vale para sessão Claude sem terminal"))
 
 
 @app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def modo_execucao(name: str, body: ModoExecucaoBody):
-    """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
-    Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
-    return await _durante_troca(name, _trocar_modo(name, body))
+    """Trocar entre terminal e sem terminal é do Rust; aqui só as recusas sem ele."""
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider in ("claude", "codex"):
+        raise registry_mod.SessionOpenNeedsRust()
+    raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
 
 
 async def _python_owns_headless() -> None:
@@ -2459,7 +2315,7 @@ async def _recover_pending_transfers() -> None:
     from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
     for record in await asyncio.to_thread(list_incomplete):
         try:
-            await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
+            await _durante_troca(record.name, recover_transfer(registry, record))
         except TransferError:
             pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
         except Exception:
@@ -2508,25 +2364,10 @@ async def _boot_sessions(runtime) -> None:
         await _python_owns_headless()
 
 
-async def _durante_troca(name: str, troca, *, transfer: bool = False):
-    from app.conversation_transfer import transfer_operation, require_available, TransferError, public_error
-    if transfer:
-        return await _during_transfer_life(name, troca)
-    try:
-        async with transfer_operation(name):
-            await asyncio.to_thread(require_available, name)
-            return await _during_transfer_life(name, troca, require_idle=True)
-    except TransferError as exc:
-        troca.close()
-        raise HTTPException(exc.status, detail=public_error(exc)) from None
-    except BaseException:
-        troca.close()       # corrotina que nunca rodou não pode ficar sem await
-        raise
-
-
-async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):
-    # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
-    # revogaria o convite de uma sessão que continua viva. O Rust a segura no meio ("não sei", 503).
+async def _durante_troca(name: str, troca):
+    """A transferência Claude→Codex (e a recuperação dela) muda a identidade da sessão (sidecar <->
+    pane tmux); sem atualizar, a varredura revogaria o convite de uma sessão que continua viva. O
+    Rust a segura no meio ("não sei", 503)."""
     if name in share_bridge.changing_mode:
         return await troca
     share_bridge.changing_mode.add(name)
@@ -2535,12 +2376,6 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
         from app import runtime_coordinator
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.managed_queue(name):
-            async def check_idle():
-                motivo = await _motivo_ocupada(name, _headless(name))
-                if motivo:
-                    raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-            if require_idle:
-                return await coordinator.change(name, lambda: troca, preflight=check_idle)
             return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
@@ -2553,61 +2388,13 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
                 try:
                     guest_users.set_life(name, life)
                 except Exception:
-                    # Não troca o resultado da troca de modo pelo erro de gravar o dono.
+                    # Não troca o resultado da troca pelo erro de gravar o dono.
                     _log.exception("[guests] dono de %s nao acompanhou a troca de modo", name)
             await asyncio.to_thread(_move_life)
         finally:
             share_bridge.changing_mode.discard(name)
             await asyncio.to_thread(share_bridge.mode_change, name, False)
             await asyncio.to_thread(_invalidate_lists)
-
-
-async def _trocar_modo(name: str, body: ModoExecucaoBody):
-    info = await _cached_info(name)
-    if not info:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if info.provider == "codex":
-        if info.headless != body.terminal:
-            return {"ok": True, "terminal": body.terminal}
-        # A troca de modo do Codex é do Rust (`codex_relaunch`): aqui só chega com ele fora.
-        raise registry_mod.SessionOpenNeedsRust()
-    if info.provider != "claude":
-        raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
-    headless = _headless(name)
-    if headless != body.terminal:
-        return {"ok": True, "terminal": body.terminal}
-    hl = get_adapter(CLAUDE_HEADLESS)
-    # A trava de entrega do headless: nenhum drain sobe processo no meio da troca.
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        if headless:
-            await asyncio.to_thread(_requeue_unanswered, name)
-            try:
-                await asyncio.to_thread(registry.para_terminal, name)
-            except ValueError as e:
-                if headless_sessions.exists(name):
-                    hl.acordar(name)   # sidecar restaurado: religa o processo que a troca matou
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-        else:
-            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-            try:
-                await asyncio.to_thread(registry.para_headless, name, modo)
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-            try:
-                await hl.ensure_running(name, esperar_pronta=False)
-            except Exception as e:
-                _log.warning("troca para sem terminal: processo nao subiu name=%s; voltando ao terminal", name, exc_info=True)
-                try:
-                    await asyncio.to_thread(registry.para_terminal, name)
-                except Exception:
-                    _log.exception("troca para sem terminal: volta ao terminal falhou name=%s", name)
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-    return {"ok": True, "terminal": body.terminal}
 
 
 class AccountMoveBody(_StrictBody):
@@ -2638,68 +2425,30 @@ class AccountMoveBody(_StrictBody):
         return self
 
 
-# Continuar reenvia o contexto inteiro no primeiro turno: conta quase no fim acaba nele. A partir de
-# LOW a tela avisa e pede confirmação; a partir de FULL não aceita.
-ACCOUNT_LOW_PCT = 95.0
-ACCOUNT_FULL_PCT = 99.0
-
-
-def _account_targets(atual: str | None) -> list[dict]:
-    """Contas Claude para onde a conversa pode ir, sem a atual: a de mais folga primeiro, sem
-    leitura de cota depois e as cheias no fim. `pct` é a janela mais cheia (None = sem leitura)."""
-    from app import cotas
-    lidas = {c.id.removeprefix("claude:"): c for c in cotas.cotas_claude()
-             if c.estado == "lida" and c.janelas}
-    out = []
-    for c in list_config_dirs(ordered=False):
-        if atual and Path(c.path).resolve() == Path(atual).resolve():
-            continue
-        cota = lidas.get(c.path)
-        pct = max(j.pct for j in cota.janelas) if cota else None
-        out.append({"path": c.path, "label": c.label, "pct": pct,
-                    "low": pct is not None and pct >= ACCOUNT_LOW_PCT,
-                    "full": pct is not None and pct >= ACCOUNT_FULL_PCT})
-    return sorted(out, key=lambda d: (d["full"], d["pct"] is None, d["pct"] or 0))
-
-
 @app.get("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
 async def contas_destino(name: str):
-    info = await _cached_info(name)
-    if not info:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    atual = ((headless_sessions.load(name) or {}).get("config_dir") if info.headless else
-             str(_session_config_dir(name) or Path.home() / ".claude"))
-    # No motor, mesmo o diretório atual é um destino: ele volta para a conta Claude sem mover nada.
-    return await asyncio.to_thread(_account_targets, None if info.engine else atual)
+    """As contas de destino e a troca de conta são do Rust."""
+    raise registry_mod.SessionOpenNeedsRust()
 
 
 @app.post("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
 async def trocar_conta(name: str, body: AccountMoveBody):
-    """A mesma conversa continua noutra conta Claude, com o mesmo nome: para o processo, muda o
-    transcript de conta e reabre com `--resume`. Só ociosa, como a troca de modo."""
-    if body.credential_id is not None:
-        from app.conversation_transfer import transfer_claude_to_codex, TransferError, public_error
-        operation = asyncio.create_task(_durante_troca(name, transfer_claude_to_codex(
-            registry, name, body.credential_id, body.source_life, body.model, body.effort,
-            source_jsonl=body.source_jsonl), transfer=True))
+    """A troca de conta Claude é do Rust; aqui fica a transferência da conversa para o Codex."""
+    if body.credential_id is None:
+        raise registry_mod.SessionOpenNeedsRust()
+    from app.conversation_transfer import transfer_claude_to_codex, TransferError, public_error
+    operation = asyncio.create_task(_durante_troca(name, transfer_claude_to_codex(
+        registry, name, body.credential_id, body.source_life, body.model, body.effort,
+        source_jsonl=body.source_jsonl)))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
         try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            try:
-                await operation
-            finally:
-                raise
-        except TransferError as exc:
-            raise HTTPException(exc.status, detail=public_error(exc)) from None
-    if body.engine_account is not None:
-        return await _durante_troca(name, _trocar_conta(name, None, engine_account=body.engine_account))
-    alvo = next((d for d in await asyncio.to_thread(_account_targets, None) if d["path"] == body.config_dir), None)
-    if alvo is None:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    if alvo["full"]:
-        raise HTTPException(409, detail=erro("erro_conta_cheia", f"a conta {alvo['label']} está em {alvo['pct']:.0f}% da cota",
-                                             conta=alvo["label"], pct=alvo["pct"]))
-    return await _durante_troca(name, _trocar_conta(name, body.config_dir))
+            await operation
+        finally:
+            raise
+    except TransferError as exc:
+        raise HTTPException(exc.status, detail=public_error(exc)) from None
 
 
 def _engine_fast_selection(name: str) -> tuple[str | None, str]:
@@ -2725,278 +2474,6 @@ def _engine_fast_selection(name: str) -> tuple[str | None, str]:
         current = registry_mod._escolhas_status(Path(jsonl).stem)[0]
         model = current or model
     return model, procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") or "default"
-
-
-async def _trocar_conta(name: str, destino: str | None, *, engine_account: str | None = None,
-                       model: str | None = None, effort: str | None = None,
-                       context_window: int | None = None, engine_models: list[dict] | None = None,
-                       service_tier: str | None = None):
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        # A troca anterior pode ter mudado motor, conta e transporte enquanto este pedido esperava.
-        await asyncio.to_thread(_invalidate_lists)
-        info = await _cached_info(name)
-        if not info:
-            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-        if info.provider != "claude":
-            raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude troca de conta por esta rota"))
-        headless = _headless(name)
-        current_meta = headless_sessions.load(name) if headless else None
-        if current_meta is not None:
-            info = info.model_copy(update={"engine": current_meta.get("engine"),
-                                           "engine_account": current_meta.get("engine_account"),
-                                           "headless": True})
-        # Read-only estacionada à espera do terminal protegido: a troca a reabre no terminal, nunca "ok" parada.
-        parked = bool((current_meta or {}).get("read_only"))
-        if service_tier is not None:
-            current_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-            if not await asyncio.to_thread(cliproxy.supports_fast, info.engine, current_model):
-                raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        elif engine_account is not None:
-            if not info.engine:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", "esta sessão não usa o CLIProxyAPI local"))
-            if (model is not None or effort is not None) and info.engine_account != engine_account:
-                raise HTTPException(409, detail=erro("erro_cliproxy_conta", "a conta da sessão mudou; atualize a lista de modelos"))
-            account = await asyncio.to_thread(_fixed_engine_account, info.engine, engine_account)
-        elif info.engine:
-            try:
-                local_engine = cliproxy.is_local_engine(engines.listar().get(info.engine, {}))
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            if not local_engine:
-                raise HTTPException(409, detail=erro("erro_conta_so_claude", "só conta Claude ou motor CLIProxyAPI local troca de conta"))
-        atual = ((current_meta or {}).get("config_dir") if headless else
-                 str(_session_config_dir(name) or Path.home() / ".claude"))
-        if engine_account is None and not info.engine and atual and Path(atual).resolve() == Path(destino).resolve() and not parked:
-            return {"ok": True, "config_dir": destino}
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        chosen_model = None
-        if engine_account is not None:
-            source_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-            source_model = model or source_model or engines.listar()[info.engine]["model"]
-            base = source_model.split("/", 1)[-1]
-            from app.cliproxy_accounts import prefix_model
-            try:
-                chosen_model = prefix_model(base, account["prefix"])
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            account_models = engine_models if engine_models is not None else await _engine_models(info.engine, fresco=True)
-            try:
-                cliproxy.validate_models(engines.listar()[info.engine], chosen_model, account, account_models)
-                model_args.validar("claude", chosen_model, effort)
-            except (ValueError, KeyError) as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            if info.engine_account == engine_account and model is None and effort is None and not parked:
-                return {"ok": True, "engine_account": engine_account}
-        # Terminal passa por sem terminal parada: o sidecar guarda as escolhas e a conta, e nenhum
-        # processo sobe até a conversa estar no lugar.
-        if headless:
-            cano = (((headless_sessions.load(name) or {}).get("cano")) or {}).get("pid")
-            pids = await asyncio.to_thread(_arvore_de, cano)
-            await hl.parar(name)
-        else:
-            pane = await asyncio.to_thread(registry._pane_of, name)
-            pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
-            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-            try:
-                extra = {"for_account_move": True} if info.engine else {}
-                await asyncio.to_thread(registry.para_headless, name, modo,
-                                        target_config_dir=destino or atual, **extra)
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
-        # Read-only não roda sem terminal: se o terminal não voltar, ela fica parada, não "segue".
-        read_only = bool((headless_sessions.load(name) or {}).get("read_only"))
-
-        def parada(motivo: str) -> HTTPException:
-            return HTTPException(409, detail=erro("erro_troca_conta_parada",
-                                                  f"o terminal protegido não voltou ({motivo}); a sessão read-only ficou parada até reabrir no terminal",
-                                                  erro=motivo))
-
-        async def reabrir() -> str | None:
-            """Reabre como estava; devolve o motivo quando o terminal não voltou (a sessão segue sem terminal, ou parada se read-only)."""
-            if headless and not read_only:
-                if engine_account is not None or info.engine:
-                    try:
-                        if await hl.ensure_running(name, require_initialize=True) is None:
-                            raise RuntimeError("a sessão não reabriu")
-                    except Exception as exc:
-                        return str(exc)
-                else:
-                    hl.acordar(name)
-                return None
-            expected_meta = headless_sessions.load(name)
-            started = False
-            try:
-                kwargs = {"engine_models": account_models} if engine_account is not None else {}
-                await asyncio.to_thread(registry.para_terminal, name, **kwargs)
-                started = True
-                if engine_account is not None or info.engine:
-                    if expected_meta is None:
-                        raise RuntimeError("não consegui conferir a identidade da sessão retomada")
-                    await asyncio.to_thread(registry.wait_for_claude, name, expected_meta)
-                return None
-            except Exception as e:
-                _log.exception("troca de conta: terminal de %s não voltou", name)
-                if started and expected_meta is not None:
-                    pane = await asyncio.to_thread(registry._pane_of, name)
-                    new_pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
-                    if (await asyncio.to_thread(registry_mod.tmux.has_session, name)
-                            and not await asyncio.to_thread(registry_mod.tmux.kill_session, name)):
-                        raise HTTPException(409, detail=erro("erro_troca_conta", "a reabertura falhou e o terminal não encerrou para restaurar a sessão")) from e
-                    if not await asyncio.to_thread(_saiu, new_pids):
-                        raise HTTPException(409, detail=erro("erro_troca_conta", "o Claude novo não saiu; restauração recusada para não duplicar a conversa")) from e
-                    headless_sessions.restaurar(expected_meta)
-                if engine_account is None and not info.engine and not read_only:
-                    hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
-                return str(e)
-
-        # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o arquivo na conta de
-        # origem, com o mesmo id, e o processo novo teria companhia no mesmo .jsonl.
-        if not await asyncio.to_thread(_saiu, pids):
-            if (motivo := await reabrir()) and read_only:
-                raise parada(motivo)
-            raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu; a sessão segue na conta de antes",
-                                                 erro="processo vivo"))
-        falha = None
-        original_meta = None
-        movida: tuple[str, str, str | None] | None = None
-        try:
-            if headless:
-                await asyncio.to_thread(_requeue_unanswered, name)
-            meta = headless_sessions.load(name)
-            if meta is None:
-                raise RuntimeError("sessão sem o arquivo de estado")
-            original_meta = dict(meta)
-            jsonl = Path(hl.transcript_path_de(meta))
-            if service_tier is not None:
-                if current_model is not None:
-                    original_meta["model"] = current_model
-                changes = {"service_tier": service_tier, "problema": None,
-                           **({"model": current_model} if current_model is not None else {})}
-            elif engine_account is not None:
-                changes = {"engine_account": engine_account, "engine_credential_id": account["credential_id"],
-                           "engine_account_base_url": account["base_url"],
-                           "model": chosen_model, "problema": None}
-                if model is not None:
-                    changes["context_window"] = context_window
-                if effort is not None:
-                    changes["effort"] = effort
-            else:
-                if (jsonl.exists() and Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
-                        != Path(destino).resolve()
-                        and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)):
-                    movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
-                changes = {"config_dir": destino, "problema": None}
-                if info.engine:
-                    changes.update(engine=None, engine_account=None, engine_credential_id=None,
-                                   engine_account_base_url=None, model=None, context_window=None, service_tier=None)
-                # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
-                await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
-            # O aviso da conta anterior (limite batido, sem login) não vale na nova.
-            if headless_sessions.update(name, **changes) is None:
-                raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
-            hl.esquecer_problema(name)
-        except FileExistsError:
-            falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
-        except Exception as e:
-            _log.exception("mover conversa de %s para %s falhou", name, destino)
-            onde = "na conta de antes"
-            if movida:
-                # A conversa já foi, mas a sessão continua apontando para a conta de antes: ela volta junto.
-                try:
-                    await asyncio.to_thread(move_conversation, *movida)
-                except Exception:
-                    _log.exception("troca de conta: a conversa de %s ficou em %s", name, destino)
-                    onde = f"em {destino}, mas a sessão aponta para a conta de antes"
-            if original_meta is not None:
-                try:
-                    headless_sessions.restaurar(original_meta)
-                except OSError:
-                    _log.exception("troca de conta: não consegui restaurar as escolhas de %s", name)
-                    onde = "com o arquivo de estado da sessão indisponível"
-            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta ({e}); ela ficou {onde}", erro=str(e)))
-        motivo_terminal = await reabrir()
-        if motivo_terminal and falha is None and original_meta is not None and (engine_account is not None or info.engine):
-            rollback_error = None
-            try:
-                await hl.parar(name)
-                if movida:
-                    await asyncio.to_thread(move_conversation, *movida)
-                headless_sessions.restaurar(original_meta)
-                rollback_error = await reabrir()
-                if rollback_error and not headless and not read_only:
-                    hl.acordar(name)
-            except Exception as exc:
-                rollback_error = str(exc)
-                _log.exception("troca de conta: restauração da sessão %s falhou", name)
-            message = "a troca falhou; as escolhas anteriores foram restauradas"
-            if rollback_error:
-                message = "a troca falhou e a sessão anterior não reabriu"
-            if rollback_error and read_only:
-                falha = parada(rollback_error)
-            else:
-                falha = HTTPException(409, detail=erro("erro_troca_conta", message,
-                                                      erro=motivo_terminal, rollback_error=rollback_error))
-        await asyncio.to_thread(registry._forget, name)
-    if falha:
-        raise falha
-    if motivo_terminal and read_only:
-        raise parada(motivo_terminal)
-    if motivo_terminal:
-        raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
-                                             erro=motivo_terminal))
-    if service_tier is not None:
-        return {"ok": True, "service_tier": service_tier}
-    return {"ok": True, "engine_account": engine_account} if engine_account is not None else {"ok": True, "config_dir": destino}
-
-
-def _arvore_de(pid: object) -> list[int]:
-    """O processo e os descendentes dele; sem pid legível, nenhum."""
-    try:
-        root = int(pid)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return []
-    return [root, *procinfo._descendant_pids(root)]
-
-
-def _saiu(pids: list[int]) -> bool:
-    """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
-    windows = os.name == "nt"
-    # No Windows a árvore sai em décimos de segundo quando sai; quem passou de 1,5 s (neto fora do
-    # psmux, servidor MCP preso) não sai sozinho, e esperar 15 s por ele só atrasa a troca.
-    prazo = 1.5 if windows else 15.0
-    registry_mod._esperar_saida(pids, prazo)
-    vivos = [p for p in pids if procinfo.pid_vivo(p)]
-    if vivos and windows:
-        taskkill = procinfo.taskkill_path()
-        if not taskkill:
-            _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
-        else:
-            # Uma chamada para todos e sem /T: o /T segue o ppid de agora, e num pid já reaproveitado
-            # levaria junto a árvore de um processo alheio. Os netos já estão na foto tirada antes de parar.
-            try:
-                r = subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
-                                   capture_output=True, text=True, errors="replace", timeout=10)
-                if r.returncode != 0:
-                    _log.warning("troca de conta: taskkill saiu com %s: %s", r.returncode,
-                                 (r.stderr or r.stdout or "").strip()[:400])
-            except (OSError, subprocess.SubprocessError):
-                _log.warning("troca de conta: não consegui matar os processos %s", vivos, exc_info=True)
-    elif vivos:
-        import signal
-        for p in vivos:
-            try:
-                os.kill(p, signal.SIGKILL)
-            except OSError:
-                _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
-    if vivos:
-        _log.warning("troca de conta: processos %s não saíram em %.1f s; tentei matá-los", vivos, prazo)
-        registry_mod._esperar_saida(vivos, 3.0)
-    return not any(procinfo.pid_vivo(p) for p in pids)
 
 
 class RenameBody(_StrictBody):
@@ -3981,6 +3458,11 @@ def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict
     from app import runtime_coordinator
     from app.runtime_adapter import run_sync
     coordinator = runtime_coordinator.current()
+    # Claude com terminal, com o Rust de pé: o Rust o adota e entrega, numa fila só (um sentido).
+    if _rust_mode(coordinator) and not _headless(name) and _provider_of(name) == "claude" and (
+            rust := runtime_coordinator.rust_claude(name, "input", "POST", json.dumps({"text": text, "steer": False}).encode())):
+        reply = json.loads(rust[1] or b"{}")
+        return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}
     if coordinator is not None and coordinator.managed_runtime(name):
         return run_sync(lambda: _send_managed(name, text, coordinator.slot(name).binding.provider,
             track_entry=track_entry), coordinator.loop)
@@ -6098,17 +5580,8 @@ class CodexServiceTierBody(_StrictBody):
 @app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
     if _provider_of(name) == "claude":
-        info = await _cached_info(name)
-        model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-        if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
-            raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        await asyncio.to_thread(_recusa_se_painel_aberto, name)
-        operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
-        try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            await operation
-            raise
+        # O Fast do Claude reabre a sessão com o tier novo: é do Rust.
+        raise registry_mod.SessionOpenNeedsRust()
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
     try:
@@ -9138,15 +8611,8 @@ def answer(name: str, body: AnswerBody):
 async def model_effort(name: str, body: ModelEffortBody):
     info = await _cached_info(name)
     if info and info.engine_account:
-        if body.scope != "session":
-            raise HTTPException(409, detail=erro("erro_cliproxy_modelo_rota",
-                                                 "a conta ChatGPT fixa não altera o padrão global de modelo ou esforço"))
-        if body.model is not None:
-            await engine_model_set(name, EngineModelBody(model=body.model, effort=body.effort))
-        elif body.effort is not None:
-            await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
-                                                   effort=body.effort))
-        return {"ok": True, "scope": "session", "result": None}
+        # A conta ChatGPT fixa troca modelo e esforço reabrindo a sessão: é do Rust.
+        raise registry_mod.SessionOpenNeedsRust()
     if _headless(name):
         if _loop_servidor is None or not _loop_servidor.is_running():
             raise HTTPException(503, detail=erro("erro_modelo_indisponivel", "servidor sem loop pra aplicar"))
@@ -9322,7 +8788,8 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
             _log.warning("permissão: %s recusou bypass sem reiniciar (%s); reabrindo em bypass", name, e)
             ficou = None
         if alvo == "bypassPermissions" and ficou != alvo:
-            return await _bypass_reopen(name, info)
+            # Entrar em bypass reabrindo a sessão é do Rust.
+            raise registry_mod.SessionOpenNeedsRust()
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
         from app.runtime_adapter import runtime_data
@@ -9331,7 +8798,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
     await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
-        return await _bypass_reopen(name, info)
+        raise registry_mod.SessionOpenNeedsRust()
     tracking_key = _tracking_key_perm(name, info)
     try:
         inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
@@ -9370,73 +8837,6 @@ def _bypass_no_ciclo(name: str) -> bool:
     agent = registry_mod._pid_do_agente((registry._pane_of(name) or {}).get("pid"))
     cmd = " ".join(procinfo._cmdline(agent).split()).replace("--permission-mode=", "--permission-mode ") if agent else ""
     return any(f in cmd for f in _FLAGS_BYPASS)
-
-
-async def _bypass_reopen(name: str, info):
-    # Com o Rust dono, dentro da barreira a sessão já foi fechada e a vista dele (trabalhando,
-    # pergunta pendente) não é mais lida: a ociosidade se confere antes de fechar.
-    motivo = await _motivo_ocupada(name, _headless(name))
-    if motivo:
-        raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
-    return await _durante_troca(name, _reabrir_em_bypass(name, info))
-
-
-async def _reabrir_em_bypass(name: str, info):
-    """Reabre a mesma conversa (`--resume`) já em bypass, como a troca de conta. Só ociosa."""
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        # Uma troca que esperava na trava pode ter mudado o transporte da sessão.
-        await asyncio.to_thread(_invalidate_lists)
-        headless = _headless(name)
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
-        if headless:
-            antes = headless_sessions.load(name) or {}
-            await asyncio.to_thread(_requeue_unanswered, name)
-            await hl.parar(name)
-            if headless_sessions.update(name, permission_mode="bypassPermissions",
-                                        previous_non_plan="bypassPermissions") is None:
-                hl.acordar(name)
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", "não gravei o modo novo no arquivo de estado da sessão"))
-            try:
-                await hl.ensure_running(name, require_initialize=True)
-            except Exception as e:
-                _log.exception("permissão: %s não reabriu em bypass; voltando ao modo de antes", name)
-                # O processo pode ter subido em bypass e seguir vivo (initialize recusado): sem
-                # parar, ele continua em bypass com o arquivo dizendo outro modo.
-                try:
-                    await hl.parar(name)
-                except Exception as stop_error:
-                    # Processo talvez vivo em bypass: o arquivo segue dizendo bypass, não o modo de antes.
-                    _log.exception("permissão: %s não parou depois de falhar em bypass", name)
-                    raise HTTPException(409, detail=erro("erro_permissao_reabrir",
-                        f"a sessão não reabriu em bypass ({e}) e não parou ({stop_error}); ela pode seguir em bypass",
-                        erro=str(e), stop_error=str(stop_error))) from e
-                headless_sessions.update(name, permission_mode=antes.get("permission_mode"),
-                                         previous_non_plan=antes.get("previous_non_plan"))
-                hl.acordar(name)
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"a sessão não reabriu em bypass e voltou ao modo de antes: {e}", erro=str(e)))
-        else:
-            try:
-                await asyncio.to_thread(registry.para_headless, name, "bypassPermissions")
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"não reabri em bypass: {e}", erro=str(e)))
-            try:
-                await asyncio.to_thread(registry.para_terminal, name)
-            except Exception as e:
-                _log.exception("permissão: terminal de %s não voltou após reabrir em bypass", name)
-                if headless_sessions.exists(name):
-                    hl.acordar(name)
-                    msg = f"o terminal não voltou; a sessão seguiu sem terminal, em bypass: {e}"
-                else:
-                    msg = f"o terminal não voltou e a sessão ficou sem processo: {e}"
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", msg, erro=str(e)))
-    _perm_modes_cache.pop(_cache_key_perm(name, info), None)
-    return {"mode": "bypassPermissions", "current": "bypassPermissions",
-            "previous_non_plan": "bypassPermissions", "reopened": True}
 
 
 # ── Catalogo de modelos de uma sessao Claude Code ───────────────────────────────────────────────
@@ -9747,14 +9147,12 @@ async def engine_model_set(name: str, body: EngineModelBody):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if not info.engine:
         raise HTTPException(400, detail=erro("erro_rota_so_motor", "esta rota so existe pra sessoes que rodam num motor"))
+    if info.engine_account:
+        # A conta ChatGPT fixa troca o modelo reabrindo a sessão: é do Rust.
+        raise registry_mod.SessionOpenNeedsRust()
     # fresco=True: a validacao promete "recusa aqui em vez de deixar a falha aparecer so no proximo
     # turno", e essa promessa nao sobrevive ao cache de 5 min (ver _engine_models).
-    account_models = await _engine_models(info.engine, fresco=True)
-    modelos = account_models
-    if info.engine_account:
-        from app.cliproxy_accounts import models_for
-        account = await asyncio.to_thread(_fixed_engine_account, info.engine, info.engine_account)
-        modelos = models_for(account_models, account["prefix"])
+    modelos = await _engine_models(info.engine, fresco=True)
     catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
     if not any(m["id"] == catalog_id for m in modelos):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
@@ -9765,13 +9163,6 @@ async def engine_model_set(name: str, body: EngineModelBody):
     if tier == "priority" and not await asyncio.to_thread(cliproxy.supports_fast, info.engine, body.model):
         raise HTTPException(409, detail=erro("erro_fast_indisponivel", "Desligue Fast antes de escolher um modelo que não o suporta"))
 
-    if info.engine_account:
-        selected = next(m for m in modelos if m["id"] == catalog_id)
-        window = 1_000_000 if catalog_id != body.model else selected.get("context_length")
-        await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
-                                               model=body.model, effort=body.effort,
-                                               context_window=window, engine_models=account_models))
-        return {"ok": True, "model": body.model}
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
         # nada a repor no settings.json. O esforço vai como `/effort <x>` pelo stdin.

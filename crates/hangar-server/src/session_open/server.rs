@@ -1,7 +1,6 @@
 //! A abertura no servidor: o `POST /api/sessions` do dono e do convidado com login, o bastão do dono,
 //! a ponte privada por onde o Python repassa o que entrou direto nele (Connect) e o `OpenHost`
-//! com os serviços do Rust e o que ainda mora no Python (o registro em espera e o `then` do nome
-//! reusado).
+//! com os serviços do Rust.
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,6 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::future::BoxFuture;
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 use super::claude::PluginBridge;
@@ -100,6 +98,25 @@ pub fn claim_guest(claude_base: &Path, session: &str, guest: &str, life: Option<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
 }
 
+/// `guest_users.set_life`: a vida nova da sessão que o convidado criou, sob a mesma `guests.lock`.
+/// Sem dono gravado não há o que mudar; ilegível não é sobrescrito.
+pub fn guest_set_life(claude_base: &Path, session: &str, life: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let lock = std::fs::OpenOptions::new().read(true).append(true).create(true).open(claude_base.join("guests.lock"))?;
+    lock.lock()?;
+    let path = claude_base.join("guests.json");
+    let mut state = match crate::runtime::queue::read_replaced(&path) {
+        Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().filter(Value::is_object)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "guests.json ilegível"))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some(owner) = state["sessions"].get_mut(session).filter(|o| o.is_object()) else { return Ok(()) };
+    if owner["life"] == life { return Ok(()); }
+    owner["life"] = json!(life);
+    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
+}
+
 /// O convidado do envelope da ponte: `guest` ausente ou nulo é o dono; o id, o convidado dele.
 pub fn bridge_guest(envelope: &Value, claude_base: &Path) -> Result<Option<LoginGuest>, OpenError> {
     let malformed = || OpenError::new(400, "erro_corpo_invalido", "guest é o id do convidado ou null");
@@ -142,20 +159,6 @@ impl ServerHost {
             (env, terminal)
         }).await.unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
         Self { st, env, terminal, mux: ProcessMux::default() }
-    }
-
-    /// `POST` JSON a uma rota interna do Python; `Err` com o motivo, sem o corpo.
-    async fn internal(&self, path: &str, body: Value) -> Result<Value, String> {
-        let request = axum::http::Request::post(format!("http://{}{path}", self.st.cfg.upstream))
-            .header("x-hangar-internal", &self.st.cfg.internal_secret).header("content-type", "application/json")
-            .body(Body::from(body.to_string())).map_err(|e| e.to_string())?;
-        let response = tokio::time::timeout(Duration::from_secs(30), self.st.http.request(request)).await
-            .map_err(|_| "prazo".to_owned())?.map_err(|e| format!("conexão: {e}"))?;
-        let status = response.status();
-        let bytes = http_body_util::Limited::new(response.into_body(), 1 << 20).collect().await
-            .map_err(|_| "corpo".to_owned())?.to_bytes();
-        if !status.is_success() { return Err(format!("status {}", status.as_u16())); }
-        serde_json::from_slice(&bytes).map_err(|_| "json".to_owned())
     }
 
     /// O dono da sessão que o convidado com login abriu vai ao `guests.json`. Falhou: a sessão sai
@@ -275,14 +278,9 @@ impl OpenHost for ServerHost {
                 return Err(OpenError::new(503, "erro_lista_indisponivel", format!("a fila da sessão antiga não foi apagada: {error}"))
                     .with_params(json!({"detalhe": "fila_antiga"})));
             }
-            // ponytail: o registro em espera do coordenador ainda mora no Python e só ele vai por esta
-            // chamada; sai quando o registro de sessões passar ao Rust.
-            let path = format!("/internal/sessions/{}/release", crate::groups::exit::segment(name));
-            self.internal(&path, json!({})).await.map(|_| ()).map_err(|cause| {
-                tracing::warn!(cause, "registro em espera e `then` do nome reusado não limpos");
-                OpenError::new(503, "erro_lista_indisponivel", "o estado do nome reusado não foi limpo; tente de novo")
-                    .with_params(json!({"detalhe": "python_release"}))
-            })
+            // Com o Rust de pé o registro dos terminais Claude é dele (a adoção): no Python não há
+            // registro em espera a soltar.
+            Ok(())
         })
     }
 

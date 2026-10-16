@@ -157,6 +157,9 @@ pub async fn serve_until_with_guest(
                     home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
                     mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
                 registry.bind_watcher(watcher.clone());
+                // Os Claude com terminal que já tinham fila aqui: o Rust os adota, sem esperar o Python.
+                { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; }); }
                 Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
             }
             _ => None,

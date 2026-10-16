@@ -31,7 +31,16 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
     let (forward,owner)=gate(&st,peer,&req);
     let Some(runtime)=st.state.runtime.get().cloned().filter(|_|owner) else {return pass(&st,req,&forward).await;};
     let Some(name)=session_name(req.uri().path()) else {return pass(&st,req,&forward).await;};
-    let target=match enter_then_find(&runtime,&name,st.write_gate_wait).await {
+    // Claude com terminal ainda sem ator aqui: o Rust o adota agora, em vez de mandar ao Python.
+    let found=match enter_then_find(&runtime,&name,st.write_gate_wait).await {
+        Ok(None)=>match runtime.adopt_now(&name).await {
+            Some(Ok(()))=>enter_then_find(&runtime,&name,st.write_gate_wait).await,
+            Some(Err(error))=>{let mut response=json_response(StatusCode::CONFLICT,detail_body(public_code(&error.code),&error.message,json!({})));cors(req.headers(),response.headers_mut());return response},
+            None=>Ok(None),
+        },
+        other=>other,
+    };
+    let target=match found {
         Ok(Some((held,target))) if target.provider=="claude"=>(held,target),
         Ok(_)=>return pass(&st,req,&forward).await,
         Err(_)=>{let mut response=json_response(StatusCode::CONFLICT,super::busy_body());cors(req.headers(),response.headers_mut());return response},
@@ -48,6 +57,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         }
     } else {None};
     // A tarefa carrega o passe só pelo comando; o freeze nunca espera o próprio pedido.
+    let life_st=st.clone();
     let job=tokio::spawn(async move {
         let reply=match &target.handle {
             EntryHandle::Terminal {handle,..}=>handle.control(id.clone(),if set {"set_permission_mode"} else {"permission_modes"}.into(),if let Some(mode)=&mode {json!({"mode":mode})} else {json!({"probe":probe})}).await?,
@@ -68,7 +78,10 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         drop(held);
         let terminal_reopen=target.terminal && reply.payload["requires_reopen"]==true && reply.payload["cycle_closed"]==true;
         let headless_reopen=!target.terminal && reply.disposition==Disposition::Rejected && reply.payload["permission_boot_rejected"]==true;
-        if set && mode.as_deref()==Some("bypassPermissions") && (terminal_reopen || headless_reopen) && reply.payload["uncertain"]!=true {
+        if set && mode.as_deref()==Some("bypassPermissions") && terminal_reopen && reply.payload["uncertain"]!=true {
+            return Ok(crate::session_write::relaunch::during_life_change(&life_st,&name,bypass_reopen(&runtime,&name)).await);
+        }
+        if set && mode.as_deref()==Some("bypassPermissions") && headless_reopen && reply.payload["uncertain"]!=true {
             return runtime.reopen_claude(name,target.key,target.generation,id).await.map(|value|(StatusCode::OK,value));
         }
         Ok(result(reply))
@@ -79,6 +92,24 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         Err(_)=>(StatusCode::SERVICE_UNAVAILABLE,detail_body("lifecycle_panic","não consegui confirmar o modo de permissão",json!({}))),
     };
     let mut response=json_response(status,body);cors(&headers,response.headers_mut());response
+}
+/// Bypass fora do ciclo do terminal: a sessão reabre pelo spec já em bypass. A falha depois de encerrar
+/// volta pelo spec de antes (S-21) e diz onde a sessão ficou.
+async fn bypass_reopen(runtime:&crate::runtime::gateway::RuntimeRegistry,name:&str)->(StatusCode,Value) {
+    use crate::session_open::{ChangeReason,PermissionMode,SessionChange};
+    let change=SessionChange {reason:ChangeReason::Bypass,surface:None,account:None,permission_mode:Some(PermissionMode::BypassPermissions),model:None,effort:None,service_tier:None};
+    match runtime.reopen_claude_session(name,change,None).await {
+        Some(Ok(_))=>(StatusCode::OK,json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true})),
+        Some(Err(failure))=>{
+            let error=&failure.error;
+            if let Some(message)=crate::runtime::claude_reopen::busy_message(&error.code) {
+                return (StatusCode::CONFLICT,detail_body(&error.code,&format!("para entrar em bypass a sessão reinicia: {message}"),json!({})));
+            }
+            let message=if failure.stopped {error.message.clone()} else {format!("não reabri em bypass: {}",error.message)};
+            (StatusCode::CONFLICT,detail_body("erro_permissao_reabrir",&message,json!({"erro":error.message,"code":error.code})))
+        },
+        None=>(StatusCode::CONFLICT,detail_body("erro_permissao_reabrir","não reabri em bypass: a sessão não está aberta aqui",json!({}))),
+    }
 }
 pub async fn modes(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request)->Response {serve(st,peer,req,false).await}
 pub async fn set_mode(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request)->Response {serve(st,peer,req,true).await}

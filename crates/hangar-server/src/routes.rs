@@ -405,7 +405,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(fallback.clone()))
         .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(fallback.clone()))
-        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::engine::service_tier).fallback(fallback.clone()))
         .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(fallback.clone()))
         .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(fallback.clone()))
         .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(fallback.clone()))
@@ -498,6 +498,11 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         // Relançar o Codex do Rust (troca de modo e reinício) é dele do começo ao fim; o resto segue ao Python.
         .route("/api/sessions/{name}/modo-execucao", axum::routing::post(crate::session_write::relaunch::mode).fallback(pass_any))
         .route("/api/sessions/{name}/recarregar", axum::routing::post(crate::session_write::relaunch::reload).fallback(pass_any))
+        // Trocar de conta (e a conta ChatGPT fixa, o modelo e o esforço dela) reabre o Claude pelo spec no Rust.
+        .route("/api/sessions/{name}/conta", get(crate::session_write::account::targets_route).fallback(pass_any))
+        .route("/api/sessions/{name}/conta", axum::routing::post(crate::session_write::account::switch_route))
+        .route("/api/sessions/{name}/engine/model", axum::routing::post(crate::session_write::engine::model).fallback(pass_any))
+        .route("/api/sessions/{name}/model-effort", axum::routing::post(crate::session_write::engine::effort).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))

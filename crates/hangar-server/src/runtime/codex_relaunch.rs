@@ -84,7 +84,7 @@ async fn hold<'a>(gates:&'a IngressGates,name:&'a str) -> Result<Held<'a>,Runtim
 /// Transferência de conversa sem fase final para este nome: pelo `transfer_id` do sidecar ou pelo índice
 /// por sessão. Pelo índice só vale o registro desta vida (`source_life` = `k:<chave>`, o `_belongs` do
 /// Python): o de outra vida de mesmo nome não segura a troca. Registro ilegível conta como em curso.
-fn transfer_open(home:&Path,name:&str,sidecar_transfer:Option<&str>,key:Option<&str>) -> bool {
+pub(crate) fn transfer_open(home:&Path,name:&str,sidecar_transfer:Option<&str>,key:Option<&str>) -> bool {
     let base = home.join(".hangar").join("conversation-transfers");
     let open = |id:&str,marked:bool| -> bool {
         let id = id.to_ascii_lowercase();

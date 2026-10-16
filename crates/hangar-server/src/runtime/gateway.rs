@@ -318,6 +318,8 @@ impl RuntimeRegistry {
     /// `true` quando reabriu. Uma tentativa por pedido; a de outra operação no meio (fechar, trocar de
     /// modo) vence, pela barreira da chave.
     async fn reopen_if_failed(&self,name:&str) -> Result<bool,RuntimeError> {
+        // Uma troca em curso (porta fechada) é quem decide a vida da sessão: nada a reabrir por cima dela.
+        let Ok(_pass) = self.ingress.enter(name,Duration::ZERO).await else { return Ok(false) };
         let found = self.entries.lock().await.iter().find(|(_,entry)|entry.name == name)
             .map(|(key,entry)|(key.clone(),entry.generation,entry.handle.clone(),entry.provider.clone()));
         let Some((key,generation,handle,provider)) = found else {
@@ -352,9 +354,45 @@ impl RuntimeRegistry {
     /// `ensure_running` do Python antes de toda operação) e, com a vigia ligada, o Codex é adotado agora.
     /// `None` = não é sessão sem ator do Rust.
     pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        // Pela porta, como as escritas: no meio de uma troca (porta fechada) abrir ou adotar subiria a vida
+        // antiga por cima da que está nascendo.
+        let _pass = match self.ingress.enter(name,Duration::ZERO).await {
+            Ok(pass)=>pass,
+            Err(_)=>return Some(Err(RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"))),
+        };
         if let Some(opened) = self.open_claude_headless(name,true).await { return Some(opened); }
         let watcher = self.watcher.get()?.clone();
-        watcher.adopt_now(self,name).await
+        if let Some(adopted) = watcher.adopt_now(self,name).await { return Some(adopted); }
+        watcher.adopt_claude(self,name).await
+    }
+    pub(super) fn report(&self,event:&'static str,name:&str,code:&str,reason:&'static str) { self.diag.report(event,name,code,reason); }
+    pub(super) fn watcher_ref(&self) -> Option<Arc<super::codex_terminal::Watcher>> { self.watcher.get().cloned() }
+    pub(super) fn policy_plugin_bridge(&self) -> Option<crate::session_open::claude::PluginBridge> { self.policy.plugin_bridge() }
+    pub(super) fn live_channel(&self,name:&str) -> LiveSender { self.live_sender(name) }
+    /// O retrato confirmado do modo da conversa (memória do Rust), sem leitura incerta.
+    pub(super) fn permission_view(&self,conversation:&str) -> Option<crate::state::permission::PermissionView> {
+        self.permissions.as_ref()?.lock().ok()?.get(conversation)
+    }
+    /// Geração e vista do Claude sem terminal aberto aqui com esse nome.
+    pub(super) async fn claude_headless_view(&self,name:&str) -> Option<(u64,Value)> {
+        let found=self.entries.lock().await.values().find_map(|entry|match &entry.handle {
+            EntryHandle::Headless(handle) if entry.name==name && entry.provider=="claude"=>Some((entry.generation,handle.clone())),
+            _=>None,
+        });
+        let (generation,handle)=found?;
+        handle.view().await.ok().map(|view|(generation,view))
+    }
+    /// Alvo e ator do Claude com terminal aberto aqui com esse nome.
+    pub(super) async fn claude_terminal_entry(&self,name:&str) -> Option<(super::terminal::TerminalTarget,super::terminal::TerminalHandle)> {
+        self.entries.lock().await.values().find_map(|entry|match &entry.handle {
+            EntryHandle::Terminal {target,handle} if entry.name==name && target.generation==entry.generation=>Some((target.clone(),handle.clone())),
+            _=>None,
+        })
+    }
+    /// Fecha a entrada sob a barreira da chave; o processo segue vivo.
+    pub(super) async fn close_claude_entry(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        self.close_locked(key,generation,false).await
     }
     /// `DELETE` que entra pelo Python: `None` = não é Codex com terminal do Rust.
     pub async fn kill_codex_terminal(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
@@ -1200,14 +1238,20 @@ impl RuntimeRegistry {
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
+        // O mesmo pane com outra chave seriam dois atores escrevendo no mesmo terminal.
+        let twin=self.entries.lock().await.values().any(|e|e.name==target.name && matches!(&e.handle,EntryHandle::Terminal {target:old,..}
+            if old.key!=target.key && old.binding.pane==target.binding.pane && old.binding.created==target.binding.created));
+        if twin {return Err(failure("runtime_binding"));}
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
         self.open_terminal_locked(target).await
     }
     async fn open_terminal_locked(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone(),e.mods_life));
         let handle=match existing {
-            Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
-                && old.metadata==target.metadata && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
+            // A mesma vida, descrita pelo Rust (adoção) ou pelo Python (texto que nasce lá): o pane, a
+            // conversa, o agente e a fila são os mesmos; a impressão digital e o programa do multiplexador
+            // podem ser escritos de outro jeito.
+            Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && same_terminal_life(&old,&target)=>{
                 // Reabertura da mesma vida: se o nome saiu do `Mods`, a sessão volta a ser ligada, na vida da
                 // entrada, que é a que o `close` esquece. Nome com outra vida fica com ela: é uma sessão mais
                 // nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento.
@@ -2174,6 +2218,13 @@ fn refuse(status:StatusCode,key:Option<&str>,check:&'static str) -> Response {
         tracing::warn!(status=status.as_u16(),key=%key.unwrap_or(""),check=%check,"runtime recusou envelope");
     }
     status.into_response()
+}
+
+fn same_terminal_life(old:&super::terminal::TerminalTarget,new:&super::terminal::TerminalTarget) -> bool {
+    old.key==new.key && old.name==new.name && old.binding.pane==new.binding.pane && old.binding.created==new.binding.created
+        && old.binding.conversation==new.binding.conversation && old.binding.generation==new.binding.generation
+        && old.metadata.agent_pid==new.metadata.agent_pid && old.metadata.agent_birth==new.metadata.agent_birth
+        && old.transcript==new.transcript && old.state_path==new.state_path && old.projection_dir==new.projection_dir && old.lease_path==new.lease_path
 }
 
 fn json_response(status:StatusCode,value:Value) -> Response {

@@ -940,7 +940,7 @@ fn the_claude_pane_is_the_one_python_launched() {
         let bridge = claude::PluginBridge { port: 8765, secret: "segredo".into() };
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: Some(&bridge), bridge_key: &"a".repeat(32),
             runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
-            read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None };
+            read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
         let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
         // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
         let inner = |words: Vec<String>| words.iter().enumerate()
@@ -1117,7 +1117,7 @@ fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
     for (prompt, tail) in [("olá", vec!["--permission-mode", "bypassPermissions", "olá"]),
                            ("-v e depois", vec!["--permission-mode", "bypassPermissions", "--", "-v e depois"])] {
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt), engine_route: None };
+            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt), engine_route: None, resume: false, allow_bypass: false };
         let command = claude::pane(&resolved.spec, "sid", &ctx).command;
         assert_eq!(command[command.len() - tail.len()..], tail.iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]);
     }
@@ -1138,7 +1138,7 @@ fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
     let absolute = home.join("work/proj").to_string_lossy().into_owned();
     assert_eq!(spec.cwd, absolute);
     let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
     let argv = terminal::new_session_argv(&terminal::tests::machine_at(&home.join(".claude").to_string_lossy()), &claude::pane(&spec, "sid", &ctx));
     assert_eq!(argv[argv.iter().position(|a| a == "-c").unwrap() + 1], absolute);
     let transcript = claude::transcript(&spec, "sid", &home.join(".claude/projects"));
@@ -1184,7 +1184,7 @@ fn a_fixed_chatgpt_account_resolves_and_routes_the_engine() {
     let route = facts::fixed_account(&crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::from_map(
         [("HOME".to_owned(), home.to_string_lossy().into_owned())].into())), "gpt", "work").unwrap();
     let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
     let command = claude::pane(&spec, "sid", &claude::ClaudeContext { engine_route: Some(&route), ..ctx }).command;
     let home_text = home.join(".codex-work").to_string_lossy().into_owned();
     assert_eq!(command[..12], ["hangar-engine", "--exec", "gpt", "--account", "work", "--account-home", &home_text,

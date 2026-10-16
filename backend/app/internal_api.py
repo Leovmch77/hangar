@@ -148,14 +148,6 @@ async def rust_diag(request: Request) -> dict:
     return {"ok": True}
 
 
-@router.post("/sessions/{name}/release")
-async def session_release(name: str) -> dict:
-    """Nome reusado por uma sessão que o Rust abre: o registro em espera daqui não passa à nova."""
-    from app.api import registry
-    await internal_thread(registry.release_name, name)
-    return {"ok": True}
-
-
 @router.post("/list/facts")
 async def list_facts(request: Request) -> dict:
     """Fatos da lista para o Rust (`list/facts.rs`): ele manda as linhas que descobriu, a contagem
