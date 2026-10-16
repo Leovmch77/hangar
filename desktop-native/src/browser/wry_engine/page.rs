@@ -165,7 +165,9 @@ impl Page {
         }
         self.frames.seen();
         if let Some(texture) = self.frames.shown() {
-            let bounds = pixel_aligned(bounds, (texture.width(), texture.height()), scale, frame_scale);
+            // A WebView2 desenha na densidade pedida: os pixels dão o tamanho lógico do quadro.
+            let frame = (texture.width() as f32 / frame_scale, texture.height() as f32 / frame_scale);
+            let bounds = crate::browser::frame_rect(bounds, frame, scale);
             window.paint_surface(bounds, texture);
         }
     }
@@ -226,16 +228,4 @@ fn rasterize(view: &wry::WebView, scale: f32) {
         c.SetRasterizationScale(scale as f64)
     });
     if let Err(e) = result { eprintln!("[pagina] escala da WebView2 nao aplicada: {}", e.message()); }
-}
-
-/// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
-/// textura e o texto perde a nitidez. Quadro de outro tamanho (resize em curso) estica até o cartão.
-fn pixel_aligned(bounds: Bounds<Pixels>, (tw, th): (u32, u32), scale: f32, frame_scale: f32) -> Bounds<Pixels> {
-    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
-    let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
-    let fits = (tw as f32 - f32::from(bounds.size.width) * frame_scale).abs() <= 2. * frame_scale
-        && (th as f32 - f32::from(bounds.size.height) * frame_scale).abs() <= 2. * frame_scale;
-    let size = if fits { size(snap(px(tw as f32 / frame_scale)), snap(px(th as f32 / frame_scale))) }
-        else { size(snap(bounds.size.width), snap(bounds.size.height)) };
-    Bounds { origin, size }
 }

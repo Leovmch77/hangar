@@ -301,6 +301,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Canvas o alvo é só a faixa de cabeçalho do card (tiles se sobrepõem livremente); no celular a
   alça mora na trilha do swipe; em tablet na largura desktop o arrasto HTML5 não responde ao
   toque, e ali o caminho é o `PairSheet` (também a alternativa exigida pela WCAG 2.2 SC 2.5.7).
+- **Página da conversa no nativo do Linux: o quadro do screencast nunca estica.** Ele é pintado no
+  tamanho lógico do `metadata` dele, e o screencast reinicia quando o resize assenta. A densidade do
+  quadro é a do processo do Chromium (`--force-device-scale-factor`), nunca a emulada por alvo: as
+  páginas têm um Chromium próprio em escala 2, e o painel fica no de escala 1.
+  [Medição](docs/decisoes/frontend.md#página-da-conversa-no-linux-quadro-no-tamanho-dele-e-chromium-próprio-em-escala-2-15102026).
 - **Bandeja do nativo: fechar ESCONDE a janela, nunca a destrói, e só com bandeja presente.** A tela
   não sobrevive a fechar e reabrir; quem esconde é `Window::set_hidden`, ajuste nosso no GPUI
   vendorizado, chamado de dentro do `should_close` (por isso ele não toca nos callbacks da

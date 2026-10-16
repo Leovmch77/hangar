@@ -21,15 +21,26 @@ use serde_json::{Value, json};
 
 use super::{
     launch,
-    pipe::{Acker, Browser, CLOSED, Session},
+    pipe::{Acker, Browser, CLOSED, Kind, Session},
 };
 use crate::browser::{Event, Pointer, keys::{key_event, modifier_bits}, model};
 
-/// Último quadro do screencast, já na GPU.
+/// Último quadro do screencast, já na GPU, com o tamanho em px CSS da página que ele mostra.
 struct Shown {
     texture: wgpu::Texture,
     device: wgpu::Device,
+    page: Option<(f32, f32)>,
 }
+
+/// Tamanho em px CSS da página que um quadro mostra, pelo `metadata` dele (`deviceWidth` × `deviceHeight`). Os pixels
+/// do quadro não dizem: a densidade deles é a do processo do Chromium, não a emulada.
+fn page_size(metadata: &Value) -> Option<(f32, f32)> {
+    let side = |key: &str| metadata[key].as_f64().filter(|v| v.is_finite() && *v > 0.).map(|v| v as f32);
+    Some((side("deviceWidth")?, side("deviceHeight")?))
+}
+
+/// Um quadro chegado: base64, número para a confirmação e o tamanho da página.
+type Arrived = (String, Value, Option<(f32, f32)>);
 
 /// Dividido com a thread de leitura do pipe, que só guarda o quadro, e com a que o decodifica: nada passa pela interface.
 struct Surface {
@@ -48,8 +59,8 @@ struct Surface {
 
 #[derive(Default)]
 struct Slot {
-    /// Último quadro chegado (base64 e número para a confirmação): o que chega antes de ele ser decodificado o substitui.
-    data: Option<(String, Value)>,
+    /// Último quadro chegado: o que chega antes de ele ser decodificado o substitui.
+    data: Option<Arrived>,
     /// Há um `Event::Frame` que a tela ainda não desenhou: o próximo quadro espera, sem decodificar à toa.
     unseen: bool,
     /// Número do quadro decodificado, confirmado quando a tela o desenhar.
@@ -62,7 +73,7 @@ struct Slot {
 
 impl Slot {
     /// O quadro a decodificar agora: só o mais recente, e só depois de a tela ter desenhado o anterior.
-    fn next(&mut self) -> Option<(String, Value)> { if self.unseen { None } else { self.data.take() } }
+    fn next(&mut self) -> Option<Arrived> { if self.unseen { None } else { self.data.take() } }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(PoisonError::into_inner) }
@@ -111,8 +122,9 @@ impl Surface {
         let id = params["sessionId"].take();
         let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return (self.ack)(id) };
         trace::add(&trace::ARRIVED, 1);
+        let page = page_size(&params["metadata"]);
         let mut slot = lock(&self.slot);
-        if let Some((_, old)) = slot.data.replace((data, id)) { slot.owed.push(old); }
+        if let Some((_, old, _)) = slot.data.replace((data, id, page)) { slot.owed.push(old); }
         drop(slot);
         self.wake.notify_one();
     }
@@ -121,7 +133,7 @@ impl Surface {
         // Buffers da thread, reaproveitados de um quadro para o outro: um quadro do painel tem megabytes.
         let (mut bytes, mut pixels) = (Vec::new(), Vec::new());
         loop {
-            let (data, id) = {
+            let (data, id, page) = {
                 let mut slot = lock(&self.slot);
                 loop {
                     if slot.closed { return; }
@@ -130,7 +142,7 @@ impl Surface {
                 }
             };
             let started = std::time::Instant::now();
-            match self.upload(&data, &mut bytes, &mut pixels) {
+            match self.upload(&data, page, &mut bytes, &mut pixels) {
                 Ok(()) => {
                     trace::add(&trace::DECODED, 1);
                     trace::add(&trace::DECODE_US, started.elapsed().as_micros() as u64);
@@ -158,7 +170,7 @@ impl Surface {
         self.wake.notify_one();
     }
 
-    fn upload(&self, data: &str, bytes: &mut Vec<u8>, pixels: &mut Vec<u8>) -> Result<(), String> {
+    fn upload(&self, data: &str, page: Option<(f32, f32)>, bytes: &mut Vec<u8>, pixels: &mut Vec<u8>) -> Result<(), String> {
         bytes.clear();
         base64::engine::general_purpose::STANDARD.decode_vec(data, bytes).map_err(|e| e.to_string())?;
         let (width, height) = if self.format == image::ImageFormat::Jpeg {
@@ -201,7 +213,7 @@ impl Surface {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        *shown = Some(Shown { texture, device });
+        *shown = Some(Shown { texture, device, page });
         Ok(())
     }
 }
@@ -250,8 +262,8 @@ pub struct Engine {
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
-    /// Desenhada no dobro da tela (página e site da conversa).
-    double: bool,
+    /// Página e site da conversa: a escala do processo, em que o quadro sai; o painel segue a da janela.
+    page_scale: Option<f32>,
     /// Zoom da tela cheia: a página vê `1/zoom` do espaço em densidade `zoom` vezes maior; o quadro não muda de tamanho.
     zoom: Cell<f32>,
     /// Contexto próprio da página da conversa, fechado junto com ela.
@@ -265,23 +277,28 @@ impl Engine {
         Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone() })
     }
 
-    /// Sobe o Chromium agora, sem esperar ele responder.
-    pub fn warm(_window: &Window, cx: &App) -> Result<Warm, String> {
-        Browser::shared_async(cx.foreground_executor(), cx.background_executor()).map(|browser| Warm { _browser: browser })
+    /// Sobe o Chromium do painel agora, sem esperar ele responder.
+    pub fn warm(_window: &Window, cx: &App) -> Result<Warm, String> { Self::warm_kind(cx, Kind::Panel) }
+
+    /// Sobe o Chromium das páginas da conversa agora, sem esperar ele responder.
+    pub fn warm_pages(_window: &Window, cx: &App) -> Result<Warm, String> { Self::warm_kind(cx, Kind::Pages) }
+
+    fn warm_kind(cx: &App, kind: Kind) -> Result<Warm, String> {
+        Browser::shared_async(cx.foreground_executor(), cx.background_executor(), kind).map(|browser| Warm { _browser: browser })
     }
 }
 
 impl Starter {
     /// O navegador do painel: sobe o Chromium (se ainda não há um) e abre o alvo desta sessão sem travar a interface.
     pub fn start(self, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
-        async move { self.fresh(async |browser| self.open(browser, None, None, events.clone(), true).await).await }
+        async move { self.fresh(Kind::Panel, async |browser| self.open(browser, None, None, events.clone(), true).await).await }
     }
 
     /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
     /// no próprio alvo, como o painel. Nasce sem travar a interface.
     pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
-            let engine = self.fresh(async |browser| self.open(browser, None, None, events.clone(), false).await).await?;
+            let engine = self.fresh(Kind::Panel, async |browser| self.open(browser, None, None, events.clone(), false).await).await?;
             engine.load(&url);
             Ok(engine)
         }
@@ -292,7 +309,7 @@ impl Starter {
     pub fn start_page(self, html: Rc<str>, width: f32, background: Option<(u8, u8, u8)>, events: async_channel::Sender<Event>)
         -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
-            self.fresh(async |browser| {
+            self.fresh(Kind::Pages, async |browser| {
                 let created = self.browser_call(browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
                 let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
                 let opened = self.open(browser, Some(context.clone()), Some((html.clone(), width, background)), events.clone(), false).await;
@@ -306,19 +323,19 @@ impl Starter {
     /// Abre no Chromium compartilhado e, se ele morreu no meio ou não consegue mais criar página (o zygote caiu e toda
     /// página nova cai ao nascer), descarta esse processo e tenta uma vez num novo. Aberturas simultâneas esperam o mesmo
     /// processo novo: o `shared_async` devolve o que já está subindo.
-    async fn fresh(&self, open: impl AsyncFn(&Rc<Browser>) -> Result<Engine, String>) -> Result<Engine, String> {
-        let browser = self.browser().await?;
+    async fn fresh(&self, kind: Kind, open: impl AsyncFn(&Rc<Browser>) -> Result<Engine, String>) -> Result<Engine, String> {
+        let browser = self.browser(kind).await?;
         match open(&browser).await {
             Err(e) if !browser.alive() || e.starts_with(BORN_DEAD) => {
                 browser.retire(&e);
-                open(&self.browser().await?).await
+                open(&self.browser(kind).await?).await
             }
             opened => opened,
         }
     }
 
-    async fn browser(&self) -> Result<Rc<Browser>, String> {
-        let browser = Browser::shared_async(&self.executor, &self.background)?;
+    async fn browser(&self, kind: Kind) -> Result<Rc<Browser>, String> {
+        let browser = Browser::shared_async(&self.executor, &self.background, kind)?;
         browser.ready().await?;
         Ok(browser)
     }
@@ -375,7 +392,7 @@ impl Starter {
             _ if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer")) }
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
-                surface, dead, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
+                surface, dead, page_scale: (!panel).then(|| browser.scale() as f32), context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
                 pressed: Cell::new(false), zoom: Cell::new(1.),
             }),
             Err(e) => { surface.close(); Err(e) }
@@ -621,8 +638,9 @@ impl Engine {
     }
 
     fn fit(&self, size: Size<Pixels>, scale: f32) -> Fit {
-        let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
-        Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double,
+        // Densidade emulada acima da do processo não chega ao quadro: a página só rasterizaria pixels jogados fora.
+        let frame_scale = self.page_scale.unwrap_or(scale);
+        Fit { session: self.session.clone(), window: self.window, decoration: self.decoration,
             w: f32::from(size.width), h: f32::from(size.height), frame_scale, zoom: self.zoom.get() }
     }
 
@@ -639,18 +657,30 @@ impl Engine {
         let Some((size, scale)) = self.placed.get() else { return };
         let fit = self.fit(size, scale);
         fit.apply(true);
-        // Página parada: o quadro do reinício sai antes do relayout, no zoom anterior, e os que vêm sem confirmação
-        // no meio da série são descartados; nenhum outro chega sozinho. Reiniciar depois de assentar manda o atual.
-        let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
-        self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.restart(); } }).detach();
+        self.settle(turn, fit, false);
+    }
+
+    /// Página parada não manda quadro sozinha, e o que o screencast manda ao ser pedido sai antes do relayout, no
+    /// tamanho ou zoom anterior; os que vêm sem confirmação no meio de uma série são descartados. Depois de assentar, se
+    /// nada mudou e a página segue à vista: aplica o tamanho (`apply`, o do arrasto) e reinicia o screencast.
+    fn settle(&self, turn: u64, fit: Fit, apply: bool) {
+        let (resizes, visible, background) = (self.resizes.clone(), self.visible.clone(), self.background.clone());
+        let current = move || resizes.get() == turn && visible.get();
+        let wait = move || background.timer(Duration::from_millis(RESIZE_SETTLE_MS));
+        self.executor.spawn(async move {
+            if apply {
+                wait().await;
+                if !current() { return; }
+                fit.apply(true);
+            }
+            wait().await;
+            if current() { fit.restart(); }
+        }).detach();
     }
 
     /// Chamado na pintura da página, a cada quadro visível.
     pub fn place(&self, bounds: Bounds<Pixels>, window: &mut Window) {
         let scale = window.scale_factor();
-        // A página da conversa é desenhada no dobro da tela e reduzida pela GPU: em 1x o Chromium sem janela só suaviza o
-        // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
-        let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
         let resized = self.placed.get() != Some((bounds.size, scale));
         let first = !self.visible.replace(true);
         if resized { self.placed.set(Some((bounds.size, scale))); }
@@ -658,14 +688,10 @@ impl Engine {
             let fit = self.fit(bounds.size, scale);
             let turn = self.resizes.get() + 1;
             self.resizes.set(turn);
-            if first {
-                // O tamanho aplicado antes de esconder pode ter ficado para trás (ajuste pendente descartado).
-                fit.apply(true);
-            } else {
-                // Durante um arrasto o quadro antigo estica até o painel; o Chromium só recebe o tamanho em que ele parou.
-                let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
-                self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.apply(true); } }).detach();
-            }
+            // O tamanho aplicado antes de esconder pode ter ficado para trás (ajuste pendente descartado). Durante um
+            // arrasto o Chromium só recebe o tamanho em que ele parou.
+            if first { fit.apply(true); }
+            self.settle(turn, fit, !first);
         }
         // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.seen();
@@ -673,10 +699,16 @@ impl Engine {
         let shown = {
             let mut latest = lock(&self.surface.shown);
             if latest.as_ref().is_some_and(|s| Some(&s.device) != device.as_ref()) { *latest = None; }
-            latest.as_ref().map(|s| s.texture.clone())
+            latest.as_ref().map(|s| (s.texture.clone(), s.page))
         };
-        // Esticado até o painel: durante um resize o quadro do tamanho antigo cobre tudo até chegar o do novo.
-        if let Some(texture) = shown { window.paint_surface(pixel_aligned(bounds, &texture, scale, frame_scale), Arc::new(texture)); }
+        let Some((texture, page)) = shown else { return };
+        // Tela emulada pelo `layout` do agente: o painel já encaixou a moldura na proporção dela, e o quadro estica até
+        // ela. Fora isso o quadro fica no tamanho da página que ele mostra (vezes o zoom da tela cheia), que nem sempre é
+        // o da moldura (resize em curso).
+        let zoom = self.zoom.get();
+        let frame = page.filter(|_| !self.session.viewport.held.get()).map(|(w, h)| (w * zoom, h * zoom))
+            .unwrap_or((f32::from(bounds.size.width), f32::from(bounds.size.height)));
+        window.paint_surface(crate::browser::frame_rect(bounds, frame, scale), Arc::new(texture));
     }
 
     /// A tela desenhou o último quadro: o próximo já pode ser decodificado.
@@ -743,11 +775,11 @@ fn zoomed_metrics(w: f32, h: f32, frame_scale: f32, zoom: f32) -> (u32, u32, f32
 }
 
 /// Tamanho e escala da página no painel, e como pedir ao Chromium.
-struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, w: f32, h: f32, frame_scale: f32, zoom: f32 }
+struct Fit { session: Rc<Session>, window: i64, decoration: f32, w: f32, h: f32, frame_scale: f32, zoom: f32 }
 
 impl Fit {
     fn apply(&self, resized: bool) {
-        let Fit { session, window, decoration, double, w, h, frame_scale, zoom } = self;
+        let Fit { session, window, decoration, w, h, frame_scale, zoom } = self;
         if resized {
             let size = json!({"width": w.round() as i64, "height": (h + decoration).round() as i64});
             drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
@@ -776,19 +808,6 @@ impl Fit {
     }
 }
 
-/// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
-/// textura inteira e o texto da página perde a nitidez.
-fn pixel_aligned(bounds: Bounds<Pixels>, texture: &wgpu::Texture, scale: f32, frame_scale: f32) -> Bounds<Pixels> {
-    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
-    let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
-    let fits = (texture.width() as f32 - f32::from(bounds.size.width) * frame_scale).abs() <= 2. * frame_scale
-        && (texture.height() as f32 - f32::from(bounds.size.height) * frame_scale).abs() <= 2. * frame_scale;
-    // Durante um resize o quadro antigo ainda tem outro tamanho: aí ele estica até o painel, como antes.
-    let size = if fits { size(snap(px(texture.width() as f32 / frame_scale)), snap(px(texture.height() as f32 / frame_scale))) }
-        else { size(snap(bounds.size.width), snap(bounds.size.height)) };
-    Bounds { origin, size }
-}
-
 impl Drop for Engine {
     fn drop(&mut self) {
         self.surface.close();
@@ -809,7 +828,7 @@ mod tests {
     #[test]
     fn only_the_latest_frame_is_decoded_after_the_last_one_was_drawn() {
         let mut slot = Slot::default();
-        let frame = |d: &str| Some((d.to_owned(), serde_json::Value::Null));
+        let frame = |d: &str| Some((d.to_owned(), serde_json::Value::Null, None));
         slot.data = frame("a");
         slot.data = frame("b");
         assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
@@ -820,6 +839,14 @@ mod tests {
         slot.unseen = false;
         assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("d"));
         assert_eq!(slot.next(), None);
+    }
+
+    #[test]
+    fn page_size_comes_from_the_frame_metadata() {
+        let meta = json!({"deviceWidth": 718, "deviceHeight": 485, "pageScaleFactor": 1});
+        assert_eq!(super::page_size(&meta), Some((718., 485.)));
+        assert_eq!(super::page_size(&json!({})), None);
+        assert_eq!(super::page_size(&json!({"deviceWidth": 0, "deviceHeight": 485})), None);
     }
 
     #[test]
