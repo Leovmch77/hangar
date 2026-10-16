@@ -99,6 +99,17 @@ pub fn to_restore(snap: &Snapshot, current: MuxStart, live: &HashSet<String>) ->
     Some(snap.sessions.iter().filter(|(_, e)| !live.contains(&e.name)).map(|(k, e)| (k.clone(), e.clone())).collect())
 }
 
+/// T-019: o psmux sobe um servidor por sessão (o `#{start_time}` é o da mais nova e `#{server_sessions}` vem
+/// vazio), então fim normal e queda não se distinguem com o Rust de pé. A decisão é uma só, na subida:
+/// `Some(true)` restaura, `Some(false)` só fotografa daí em diante, `None` = o psmux não respondeu ainda.
+pub fn windows_startup(current: MuxStart, snap: &Snapshot) -> Option<bool> {
+    match current {
+        MuxStart::Unknown => None,
+        MuxStart::NoServer => Some(!snap.sessions.is_empty()),
+        MuxStart::Started(_) => Some(false),
+    }
+}
+
 /// O servidor da fotografia acabou porque a única sessão dele terminou (o agente saiu, o tmux fecha a
 /// sessão e sai junto): fechamento, não queda, e a fotografia esvazia. `last_count`: as sessões dele na
 /// última volta desta execução. Com duas ou mais sumindo juntas, no desligamento do sistema ou sem a
@@ -357,16 +368,21 @@ async fn restore_one(host: &super::server::ServerHost, key: &str, entry: &Entry)
 }
 
 /// A cada `EVERY`: com outro servidor do multiplexador que o da fotografia (a subida depois do reboot, ou o
-/// tmux que caiu com o Rust de pé), reabre o que ele perdeu; com o mesmo, fotografa.
+/// tmux que caiu com o Rust de pé), reabre o que ele perdeu; com o mesmo, fotografa. No Windows decide só
+/// na subida (`windows_startup`).
 pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::ffi::OsString) {
     let mut snap = read(&home);
     let (mut attempts, mut done) = (std::collections::HashMap::new(), HashSet::new());
     let mut last_count: Option<u64> = None;
     let mut known = HashMap::new();
+    let mut windows: Option<bool> = None;
     loop {
         let (current, count) = mux_now(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
-        let same = matches!(current, MuxStart::Started(at) if snap.mux_started == Some(at));
+        if cfg!(windows) && windows.is_none() { windows = windows_startup(current, &snap); }
+        let same = if cfg!(windows) { windows == Some(false) } else { matches!(current, MuxStart::Started(at) if snap.mux_started == Some(at)) };
+        // Restaurando no Windows: volta tudo o que não está vivo, como na subida sem servidor.
+        let current = if cfg!(windows) && windows == Some(true) { MuxStart::NoServer } else { current };
         hold(&snap, same);
         match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
             (true, _) => {
@@ -402,10 +418,16 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                 }
                 // Só com nada mais a tentar o servidor de agora (o restore pode tê-lo subido) passa a ser o da
                 // fotografia; antes disso as entradas ficam, e um reinício só do Rust não reabre nada.
-                if settle(&results, &mut attempts, &mut done) && let MuxStart::Started(at) = mux_start(&program).await {
-                    snap.mux_started = Some(at);
-                    attempts.clear();
-                    done.clear();
+                if settle(&results, &mut attempts, &mut done) {
+                    if cfg!(windows) {
+                        windows = Some(false);
+                        attempts.clear();
+                        done.clear();
+                    } else if let MuxStart::Started(at) = mux_start(&program).await {
+                        snap.mux_started = Some(at);
+                        attempts.clear();
+                        done.clear();
+                    }
                 }
             }
         }
@@ -453,6 +475,19 @@ mod tests {
             service_tier: None, permission_mode: Some(mode), subagent_model: None, customizations: None, jev: false, read_only: false,
             worktree: None, creator: None, created_at: 1.0, conversation: Some("c1".into()) };
         super::super::record::write(home, &spec).unwrap();
+    }
+
+    /// T-019: no Windows só a subida do Rust sem nenhum servidor psmux e com sessões na fotografia
+    /// restaura; com servidor vivo nunca, e sem resposta do psmux a decisão espera.
+    #[test]
+    fn on_windows_only_a_start_without_any_psmux_server_restores() {
+        let full = Snapshot { mux_started: Some(10), sessions: BTreeMap::from([("k".repeat(32), entry("s1", Some("c1")))]) };
+        let empty = Snapshot::default();
+        assert_eq!(windows_startup(MuxStart::NoServer, &full), Some(true));
+        assert_eq!(windows_startup(MuxStart::NoServer, &empty), Some(false));
+        assert_eq!(windows_startup(MuxStart::Started(99), &full), Some(false), "servidor vivo: nada volta");
+        assert_eq!(windows_startup(MuxStart::Started(10), &full), Some(false));
+        assert_eq!(windows_startup(MuxStart::Unknown, &full), None);
     }
 
     /// RET-148: o servidor que saiu porque a única sessão dele terminou (o agente saiu) não traz nada de
