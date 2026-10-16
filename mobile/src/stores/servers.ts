@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
-import { esquecerRota, reconcilePairEntries, registrarDiag } from '@hangar/core';
+import { esquecerRota, mergeImportedMachines, reconcilePairEntries, registrarDiag } from '@hangar/core';
 import type { ExternalPair, InviteRedeemResult, LanInfo, PairAttach, Server } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
@@ -52,6 +52,7 @@ export interface ServersState {
   load(): Promise<void>;
   add(s: Omit<Server, 'id' | 'label'> & { label?: string }): Server;
   addInvite(result: InviteRedeemResult, activate?: boolean): Server;
+  appendImported(servers: Server[]): Server[];
   remove(id: string): void;
   update(id: string, patch: Partial<Pick<Server, 'label' | 'baseUrl'>>): void;
   setActive(id: string): void;
@@ -193,6 +194,15 @@ export const useServers = create<ServersState>((set, get) => {
       };
     });
     return s;
+  },
+  appendImported(servers) {
+    let added: Server[] = [];
+    change((p) => {
+      const merged = mergeImportedMachines(p, servers);
+      added = merged.added;
+      return { servers: merged.servers, activeId: merged.activeId };
+    }, false);
+    return added;
   },
   addInvite(result, activate = true) {
     const base = result.address.replace(/\/+$/, '');

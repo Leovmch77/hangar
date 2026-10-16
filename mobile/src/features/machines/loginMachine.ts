@@ -1,10 +1,12 @@
 import { errorDetail, getSessions, probeServerResponse, type Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
+import { discoverSavedMachines } from './importMachines';
 import * as m from '../../paraglide/messages';
 
 export async function verifyLoginMachine(server: Server, resolveName: boolean): Promise<void> {
   await getSessions(server);
+  void discoverSavedMachines();
   if (!resolveName) return;
 
   try {

@@ -35,11 +35,47 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+function loginNetwork(handle: (url: string, init: RequestInit) => Response | Promise<Response>) {
+  mocks.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+    if (url.endsWith('/api/peers')) return json([]);
+    if (url.endsWith('/api/peers/app-list')) return json({ rev: 'r1', servers: [] });
+    return handle(url, init);
+  });
+}
+
 describe('verifyLoginMachine', () => {
+  test.each([true, false])('descobre após autenticar, inclusive cadastro existente: resolveName=%s', async (resolveName) => {
+    const machine = addMachine('fixture-preserved');
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url === `${baseUrl}/api/peers/app-list`) return json({ rev: 'r1', servers: [
+        { id: 'found', label: 'fixture-found', address: 'https://found.test', token: 'found-token', disabled: false, invite: false },
+      ] });
+      if (url.endsWith('/api/peers')) return json([]);
+      if (url.endsWith('/api/sessions')) return json([]);
+      return json({ identificador: 'found-name', lan_url: '' });
+    });
+    await verifyLoginMachine(machine, resolveName);
+    await new Promise<void>((r) => setImmediate(r));
+    expect(useServers.getState().servers.find((s) => s.baseUrl === 'https://found.test'))
+      .toMatchObject({ label: 'found-name', token: 'found-token' });
+    expect(useServers.getState().activeId).toBe(machine.id);
+    if (!resolveName) expect(useServers.getState().servers[0].label).toBe('fixture-preserved');
+  });
+
+  test('falha auxiliar avisa sem rejeitar login nem remover máquina autenticada', async () => {
+    const machine = addMachine();
+    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions')
+      ? json([]) : json({ detail: 'do-not-show-machine-token' }, 503));
+    await expect(verifyLoginMachine(machine, false)).resolves.toBeUndefined();
+    await new Promise<void>((r) => setImmediate(r));
+    expect(useServers.getState().servers).toEqual([machine]);
+    expect(mocks.warning).toHaveBeenCalled();
+    expect(JSON.stringify(mocks.warning.mock.calls)).not.toContain('do-not-show-machine-token');
+  });
   test('autenticação recusada propaga o erro sem consultar identidade', async () => {
     const machine = addMachine();
     const paths: string[] = [];
-    mocks.fetch.mockImplementation(async (url: string) => {
+    loginNetwork(async (url: string) => {
       paths.push(url);
       return json({ detail: 'invalid-token' }, 401);
     });
@@ -55,7 +91,7 @@ describe('verifyLoginMachine', () => {
     const machine = addMachine();
     const other = useServers.getState().add({ baseUrl: 'https://other.test', token: 'other-token' });
     const paths: string[] = [];
-    mocks.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+    loginNetwork(async (url: string, init: RequestInit) => {
       paths.push(url);
       expect(new Headers(init.headers).get('Authorization')).toBe('Bearer machine-token');
       if (url === `${baseUrl}/api/sessions`) return json([]);
@@ -75,7 +111,7 @@ describe('verifyLoginMachine', () => {
 
   test('identificador vazio mantém o IP completo', async () => {
     const machine = addMachine();
-    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions')
+    loginNetwork(async (url: string) => url.endsWith('/api/sessions')
       ? json([]) : json({ identificador: '  ', lan_url: '' }));
 
     await verifyLoginMachine(machine, true);
@@ -89,7 +125,7 @@ describe('verifyLoginMachine', () => {
     addMachine('fixture-nickname');
     const machine = useServers.getState().add({ baseUrl, token: 'renewed-token', label: '10.0.2.2' });
     const paths: string[] = [];
-    mocks.fetch.mockImplementation(async (url: string) => { paths.push(url); return json([]); });
+    loginNetwork(async (url: string) => { paths.push(url); return json([]); });
 
     await verifyLoginMachine(machine, false);
     await useServers.getState().load();
@@ -107,7 +143,7 @@ describe('verifyLoginMachine', () => {
     ['tempo esgotado', () => { throw new DOMException('identity-timeout', 'TimeoutError'); }, 'identity-timeout'],
   ] as const)('%s avisa a causa sem desfazer login nem truncar o IP', async (_name, identity, cause) => {
     const machine = addMachine();
-    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions') ? json([]) : identity());
+    loginNetwork(async (url: string) => url.endsWith('/api/sessions') ? json([]) : identity());
 
     await expect(verifyLoginMachine(machine, true)).resolves.toBeUndefined();
 

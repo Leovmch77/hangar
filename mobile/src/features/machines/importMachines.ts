@@ -1,0 +1,70 @@
+import {
+  confirmImportedMachine, discoverMachineCandidates, machineImportIssue, mergeImportedMachines, parseMachineImportPayload,
+  type MachineImportIssue, type MachineImportResult, type Server,
+} from '@hangar/core';
+import { useServers } from '../../stores/servers';
+import { toast } from '../../ui/Toast';
+import * as m from '../../paraglide/messages';
+
+export function machineImportIssueMessage(issue: MachineImportIssue): string {
+  const messages = {
+    source_peers: m.machine_import_source_peers, source_app_list: m.machine_import_source_app_list,
+    peer_token: m.machine_import_peer_token, candidate: m.machine_import_candidate, invalid_item: m.machine_import_invalid_item,
+  };
+  let reason = `${messages[issue.stage]()}${issue.status ? ` (HTTP ${issue.status})` : ''}`;
+  if (issue.machine) reason = m.machine_import_issue_machine({ machine: issue.machine, reason });
+  if (issue.source) reason = m.machine_import_issue_source({ source: issue.source, reason });
+  return reason;
+}
+
+async function ensureHydrated(): Promise<void> {
+  if (!useServers.getState().vaultReadable) await useServers.getState().load();
+  if (!useServers.getState().vaultReadable) throw new Error('machine_import_vault_unread');
+}
+
+export async function importMachines(candidates: Server[]): Promise<MachineImportResult> {
+  await ensureHydrated();
+  const issues: MachineImportIssue[] = [];
+  const valid = candidates.flatMap((server) => {
+    try { return parseMachineImportPayload(JSON.stringify([server])); }
+    catch { issues.push(machineImportIssue('invalid_item', undefined, server.baseUrl)); return []; }
+  });
+  const newUrls = new Set(mergeImportedMachines(useServers.getState(), valid).added.map((s) => s.baseUrl));
+  const pending = new Map<string, Server[]>();
+  for (const server of valid) {
+    if (!newUrls.has(server.baseUrl)) continue;
+    const alternatives = pending.get(server.baseUrl) ?? [];
+    if (!alternatives.some((s) => s.token === server.token)) alternatives.push(server);
+    pending.set(server.baseUrl, alternatives);
+  }
+  const results = await Promise.all([...pending.values()].map(async (alternatives) => {
+    for (const server of alternatives) {
+      try { return await confirmImportedMachine(server); }
+      catch (error) { issues.push(machineImportIssue('candidate', error, server.baseUrl)); }
+    }
+    return null;
+  }));
+  // Revalida após a rede e conserva a ordem da lista, não a velocidade das respostas.
+  await ensureHydrated();
+  const confirmed = results.filter((server): server is Server => server !== null);
+  return { added: confirmed.length ? useServers.getState().appendImported(confirmed) : [], issues };
+}
+
+export async function discoverSavedMachines(sources?: Server[]): Promise<MachineImportResult> {
+  let result: MachineImportResult;
+  try {
+    await ensureHydrated();
+    const snapshot = [...(sources ?? useServers.getState().servers)];
+    const discovered = await discoverMachineCandidates(snapshot, () => useServers.getState().servers);
+    const imported = await importMachines(discovered.candidates);
+    result = { added: imported.added, issues: [...discovered.issues, ...imported.issues] };
+  } catch {
+    toast.aviso(useServers.getState().vaultReadable ? m.mobile_machines_invalid_response() : m.servers_warning_vault_unread());
+    return { added: [], issues: [{ stage: 'invalid_item' }] };
+  }
+  if (result.issues.length) {
+    const causes = result.issues.map(machineImportIssueMessage);
+    toast.aviso(`${m.machine_import_warning({ count: result.issues.length })} ${causes.join(' ')}`);
+  }
+  return result;
+}

@@ -2,6 +2,7 @@ export * from './api';
 export * from './esfriamento';
 export * from './sessions';
 export * from './servers';
+export * from './machineImport';
 export * from './rota';
 export * from './share';
 export * from './accountLogin';

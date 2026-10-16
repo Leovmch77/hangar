@@ -7,6 +7,11 @@ export function redirectSystemPath({ path }: { path: string; initial: boolean })
   try {
     const url = new URL(path);
     const isApp = url.protocol === 'hangar:';
+    if (isApp && url.hostname === 'importar') {
+      if (url.username || url.password || url.port || url.pathname && url.pathname !== '/'
+        || path.split('#')[0].includes('?')) return '/importar';
+      return `/importar${url.hash}`;
+    }
     const isInvitePath = url.pathname === '/convite' || url.pathname.startsWith('/convite/');
     if (isApp && url.host !== 'convite' && url.pathname.startsWith('/convite/') && !url.username && !url.password) {
       // Conserva query e fragmento para validar o convite inteiro.
