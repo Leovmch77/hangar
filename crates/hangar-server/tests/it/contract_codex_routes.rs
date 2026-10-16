@@ -17,6 +17,13 @@ use hangar_server::session_write::codex::{permission_answer, skip_answer};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+#[test]
+fn clear_with_an_open_terminal_panel_has_the_same_409_as_other_pane_controls() {
+    let (status,body) = hangar_server::session_write::codex::compact_answer(&Err(RuntimeError::new("terminal_panel_open","painel aberto")));
+    assert_eq!(status.as_u16(),409);
+    assert_eq!(body["detail"]["code"],"erro_terminal_aberto");
+}
+
 fn golden() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../backend/tests/fixtures/contract/golden/codex_routes.json");
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -126,7 +133,13 @@ async fn headless_codex_routes_match_the_python_golden() {
         if sent["body"]["interaction_id"] == "<shown>" { sent["body"]["interaction_id"] = show(&store, case); }
         let (status, body) = call(server, &sent, OWNER).await;
         assert_eq!(python.hits_to(&format!("/api/sessions/s/{}", case["route"].as_str().unwrap())), 0, "{}: foi ao Python", case["name"]);
-        assert_eq!((status, &body), (case["expect"]["status"].as_u64().unwrap() as u16, &case["expect"]["body"]), "{}", case["name"]);
+        let mut expected = case["expect"]["body"].clone();
+        // O modo Python conserva seu catálogo antigo; a conversa nova é controle exclusivo do Rust.
+        if case["route"] == "commands" && case["expect"]["status"] == 200 {
+            expected.as_array_mut().unwrap().insert(0,json!({"name":"clear","display":"/clear","source":"builtin",
+                "description":"Limpa o histórico da conversa","destructive":true}));
+        }
+        assert_eq!((status, &body), (case["expect"]["status"].as_u64().unwrap() as u16, &expected), "{}", case["name"]);
         registry.close("k", 1).await.unwrap();
     }
 }

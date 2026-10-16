@@ -231,6 +231,7 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     state.voice.set_self(listener.local_addr()?, &state.cfg.auth_token);
     let public_v6 = state.public_v6.take();
     let state = Arc::new(state);
+    let _worktree_sweep=crate::AbortOnDrop(crate::worktree_policy::spawn(state.clone()));
     let v6_state = state.clone();
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
@@ -678,13 +679,17 @@ pub(crate) async fn pass_any(
         return response;
     }
     if crate::worktree_routes::matches(req.method(), req.uri().path()) {
-        let (forward, who) = who(&st, peer, &req);
+        let (_forward, who) = who(&st, peer, &req);
         // Convidado segue ao Python, que o recusa como antes.
         if matches!(who, Some(Caller::Owner)) {
             let headers = req.headers().clone();
-            let mut response = crate::worktree_routes::public(st, req, forward).await;
+            let mut response = crate::worktree_routes::public(st, req).await;
             cors(&headers, response.headers_mut());
             return response;
+        }
+        if matches!(&who,Some(Caller::Guest(_)))
+            && !matches!(req.uri().path(),"/api/worktrees"|"/api/worktrees/detail") {
+            return crate::session_write::json_response(StatusCode::FORBIDDEN,serde_json::json!({"detail":"worktrees pertencem ao dono"}));
         }
     }
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {

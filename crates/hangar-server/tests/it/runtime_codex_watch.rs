@@ -712,7 +712,7 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"userAgent": "hangar/{} (x)"}}
     elif method in ("thread/start", "thread/resume"):
-        thread = params.get("threadId") or thread
+        thread = params.get("threadId") or "thread-new"
         # Sem modelo na resposta: vale o do arquivo da sessão que a troca gravou.
         result = {{"thread": {{"id": thread, "path": "/tmp/rollout.jsonl", "status": {{"type": "idle"}}}}}}
     elif method == "thread/read":
@@ -1210,4 +1210,55 @@ async fn clear_of_a_codex_terminal_of_the_rust_stays_in_the_rust() {
     assert_ne!(response.text().await.unwrap(), "from-python");
     assert_eq!(python.hits_to("/api/sessions/cx-proof/input"), 0, "a fila do Codex com terminal é do Rust: o /clear nunca vai ao Python");
     finish(&mut [&mut app,&mut tui]);
+}
+
+#[tokio::test]
+async fn clear_of_a_headless_codex_opens_a_new_thread_without_turn_start() {
+    crate::use_cano_bin();
+    let fx = fixture();
+    let registry = relaunch_registry(&fx).await;
+    let log = fx.root.join("codex-methods.jsonl");
+    fake_headless_codex(&fx.root.join("bin"),&log);
+    fx.put_sidecar("cx-h",json!({"name":"cx-h","provider":"codex","headless":true,"key":"k-clear","thread_id":"thread-1",
+        "cwd":fx.root,"codex_home":fx.home.join(".codex"),"permission_mode":"Full Access","model":"gpt-test","effort":"high"}));
+    registry.bind_watcher(fx.watcher());
+    assert!(matches!(registry.adopt_now("cx-h").await,Some(Ok(()))));
+    let ready_until = Instant::now() + Duration::from_secs(5);
+    while fx.queue_json("k-clear")["runtime_state"]["view"]["ready"] != true {
+        assert!(Instant::now() < ready_until,"o Codex terminou de abrir");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (python,server) = serve_owner(registry.clone()).await;
+    let generation = fx.queue_json("k-clear")["generation"].as_u64().unwrap();
+    let handle = registry.handle("k-clear",generation).await.unwrap();
+    let hold = handle.hold_turns().await.unwrap();
+    handle.queue("waiting".into(),Action::Append { text:"mensagem esperando".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("waiting".into()) }).await.unwrap();
+    for text in ["/clear argumento","/clear"] {
+        let refused = crate::fake::client().post(format!("http://{server}/api/sessions/cx-h/input"))
+            .header("authorization",format!("Bearer {}",crate::fake::OWNER)).header("content-type","application/json")
+            .body(json!({"text":text}).to_string()).send().await.unwrap();
+        assert_eq!(refused.status().as_u16(),400);
+    }
+    assert_eq!(handle.view().await.unwrap()["thread_id"],"thread-1");
+    let rows = handle.queue("still-waiting".into(),Action::Load).await.unwrap();
+    assert!(rows.as_array().unwrap().iter().any(|row|row["id"] == "waiting" && row["delivered"] == false));
+    handle.queue("cancel".into(),Action::Cancel { entry_id:"waiting".into() }).await.unwrap();
+    drop(hold);
+    let response = crate::fake::client().post(format!("http://{server}/api/sessions/cx-h/input"))
+        .header("authorization",format!("Bearer {}",crate::fake::OWNER)).header("content-type","application/json")
+        .body(r#"{"text":"/clear"}"#).send().await.unwrap();
+    assert_eq!(response.status().as_u16(),200,"{}",response.text().await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fx.sidecar("cx-h").unwrap()["thread_id"] != "thread-new" {
+        assert!(Instant::now() < deadline,"a conversa nova foi gravada");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sidecar = fx.sidecar("cx-h").unwrap();
+    assert_eq!(sidecar["key"],"k-clear");
+    assert_eq!(sidecar["effort"],"high");
+    let methods:Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert!(methods.iter().any(|method|method["method"] == "thread/start"));
+    assert!(!methods.iter().any(|method|method["method"] == "turn/start"));
+    assert_eq!(python.hits_to("/api/sessions/cx-h/input"),0);
+    registry.close_with_kill("k-clear",generation).await.unwrap();
 }

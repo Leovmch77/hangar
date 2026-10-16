@@ -132,7 +132,7 @@ pub(crate) fn recheck_command(dest: &Path, options: &run::Options, token_saved: 
         format!("powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" {}", dest.join("install.ps1").display(), args.join(" "))
     } else {
         // O primeiro argumento do bootstrap é a pasta; o `install.sh` já roda de dentro dela.
-        let script = dest.join("install.sh").display().to_string().replace('\'', r"'\''");
+        let script = format!("{}/install.sh", dest.to_string_lossy().trim_end_matches('/')).replace('\'', r"'\''");
         format!("bash '{script}' {}", args[1..].join(" "))
     }
 }

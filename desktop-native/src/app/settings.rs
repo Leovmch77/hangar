@@ -14,13 +14,13 @@ mod appearance_page;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     General, Appearance, Diary, About, Migration,
-    Servers, Sync, Connect, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Advanced,
+    Servers, Sync, Connect, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Worktrees, Advanced,
 }
 
 impl Page {
     const DEVICE: [Page; 4] = [Page::General, Page::Appearance, Page::Diary, Page::About];
-    const SERVER: [Page; 14] = [Page::Servers, Page::Sync, Page::Connect, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
-        Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Advanced];
+    const SERVER: [Page; 15] = [Page::Servers, Page::Sync, Page::Connect, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
+        Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Worktrees, Page::Advanced];
 
     /// As seções da navegação, na ordem dela; a voz abre uma pelo `key`.
     pub(super) fn sections() -> impl Iterator<Item = Page> { Self::DEVICE.into_iter().chain(Self::SERVER) }
@@ -30,7 +30,7 @@ impl Page {
             Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about", Page::Migration => "migration",
             Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
             Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Jev => "jev", Page::Windows => "windows", Page::Notifications => "notifications",
-            Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Advanced => "advanced",
+            Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Worktrees => "worktrees", Page::Advanced => "advanced",
         }
     }
 
@@ -40,7 +40,7 @@ impl Page {
             Page::About => IconName::Info, Page::Migration => IconName::Activity, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
             Page::Voice => IconName::Mic, Page::Jev => IconName::Zap, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
-            Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Advanced => IconName::SlidersHorizontal,
+            Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Worktrees => IconName::GitBranch, Page::Advanced => IconName::SlidersHorizontal,
         }
     }
 
@@ -111,6 +111,9 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("voice_local_cmd", Some("voice_local_cmd_help")), ("voice_max_chars", Some("voice_max_chars_help"))]),
     (Page::Notifications, &[("server_notify_finished", Some("server_notify_finished_help")), ("server_short_turn", Some("server_short_turn_help")),
         ("server_notify_dead", Some("server_notify_dead_help")), ("server_stall", Some("server_stall_help")), ("server_quiet", Some("server_quiet_why"))]),
+    (Page::Worktrees, &[("worktree_settings_location", Some("worktree_settings_location_help")),
+        ("worktree_settings_inactive", Some("worktree_settings_inactive_help")), ("worktree_settings_merged", Some("worktree_settings_merged_help")),
+        ("worktree_settings_unchanged", Some("worktree_settings_unchanged_help")), ("worktree_settings_keep", Some("worktree_settings_keep_help"))]),
     (Page::Attachments, &[("server_keep_attachments", Some("server_keep_attachments_help"))]),
     (Page::Windows, &[("computer_control_enable", Some("computer_control_enable_hint")),
         ("computer_control_install", None), ("computer_control_dir", None), ("computer_control_target", Some("computer_control_target_hint")),
@@ -493,6 +496,7 @@ impl Hangar {
     pub(super) fn relabel_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_ui.search.update(cx, |input, cx| input.set_placeholder(tr("settings_search"), window, cx));
         self.sync_type_picks(window, cx);
+        self.relabel_worktree_settings(window, cx);
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -838,6 +842,7 @@ impl Hangar {
             Page::Accounts => self.render_accounts(accounts_wide, window, cx),
             Page::Orchestration => self.render_orchestration(cx),
             Page::Shortcuts => self.render_shortcuts_page(cx),
+            Page::Worktrees => self.render_worktree_settings(window, cx),
             Page::Harnesses => self.render_harness(cx),
             Page::Voice | Page::Jev | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
             Page::Servers => self.render_machines(window.viewport_size().width, cx),

@@ -3,7 +3,7 @@ import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CodexModelsResponse, ModelOptionsResponse, Server, SessionInfo, StateEvent } from '@hangar/core';
-import { SessionSettingsButton } from '../../chat/SessionSettings';
+import { SessionSettingsButton, SessionSettingsControl } from '../../chat/SessionSettings';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -107,7 +107,43 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => { for (const root of roots.splice(0)) root.unmount(); }); });
 
+describe('Modelos na folha de ajustes real', () => {
+  it.each([
+    { key: 'id', items: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] },
+    { key: 'hint', items: [{ label: 'Modelo', hint: 'pi/a' }, { label: 'Modelo', hint: 'omp/b' }] },
+    { key: 'label', items: [{ label: 'A' }, { label: 'B' }] },
+    { key: 'empty-id', items: [{ id: '', label: 'criar_padrao' }, { id: 'b', label: 'B' }] },
+  ])('clique na mesma linha após reordenar seleciona o modelo original por $key', async ({ items }) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    roots.push(root);
+    const select = vi.fn();
+    const render = (catalog: typeof items) => createElement(SessionSettingsControl, {
+      open: true, onOpen: () => {}, onClose: () => {},
+      model: { display: 'modelo', items: catalog, select },
+      effort: { hidden: true, items: [], select: async () => {} },
+      fast: { hidden: true, on: false, available: false, toggle: async () => {} },
+    });
+    await act(async () => root.render(render(items)));
+    const firstModel = container.querySelector<HTMLButtonElement>('[role="radio"]')!;
+    await act(async () => root.render(render([items[1], items[0]])));
+    await act(async () => firstModel.click());
+    expect(select).toHaveBeenCalledExactlyOnceWith(items[0]);
+  });
+});
+
 describe('Fast na folha de ajustes real', () => {
+  it('chip do chat conserva modelo, contexto e esforço e mostra Fast só quando ligado', async () => {
+    state.statusLine = '🤖 GPT·1M (high) │ 💬 1k/1k 4k/1M';
+    const { container, close } = await mount();
+    const chip = () => container.querySelector<HTMLButtonElement>('[aria-label="composer_session_settings"]')!;
+    expect(chip().textContent).toBe('GPT · 1M high');
+    await act(async () => toggle(container).click());
+    await close();
+    expect(chip().textContent).toBe('GPT · 1M high · native_ctl_fast');
+    expect(api.tier).toHaveBeenCalledExactlyOnceWith('sess', 'priority', state.servers[0]);
+  });
+
   it.each([
     { tiers: [{ id: 'priority', hidden: false }], available: true },
     { tiers: [{ id: 'priority' }], available: true },

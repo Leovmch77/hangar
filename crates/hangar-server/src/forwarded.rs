@@ -29,6 +29,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Commands
     } else if method == Method::POST && path == crate::mermaid::PATH {
         Owned::Mermaid
+    } else if crate::worktree_routes::matches(method, &path) {
+        Owned::Worktrees
     } else if crate::plans::routes::matches(method, &path) {
         Owned::Plans
     } else {
@@ -46,9 +48,10 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
+        Owned::Worktrees => crate::worktree_routes::public(st, req).await,
         Owned::Plans => crate::plans::routes::serve(&st, req).await,
     }
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Catalog, Commands, Mermaid, Plans }
+enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees }

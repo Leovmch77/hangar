@@ -5,6 +5,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Claude e Codex enviam a fila comum em lote, com e sem terminal.** A reserva atômica reúne
+  as mensagens que já esperam, na ordem, com `\n`; entradas posteriores ficam para o próximo
+  turno. Recados, comandos, respostas reservadas e Orientar individual conservam seus caminhos.
+  O lote mantém os IDs originais e só confirma com prova do pedido completo. Falha anterior à
+  escrita conserva a mesma reserva; escrita possível impede reenvio automático. Texto e imagens
+  que ultrapassam o transporte são recusados antes da reserva, mantendo a fila editável.
+  Ver [agrupamento da fila](#agrupamento-durável-da-fila-15102026).
+
 - **O recibo de `prompt.submit` confere o resultado, não só a ausência de exceção.** O Claude
   também recusa a entrada resolvendo a promessa com `drop`. Nesse caso o plugin responde
   `submitted` com `ok: false` e `dropped: true`, e o escritor Rust pode seguir pelo composer e Enter. Resposta
@@ -147,6 +155,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Codex: `/compact` chama `thread/compact/start`, fora da fila de prompts.** A troca entre
   terminal e sem terminal preserva a thread e suas escolhas; só confirma quando o destino
   carregou a conversa. Assinar eventos com `thread/resume` não sobrescreve sandbox nem aprovação.
+
+- **Codex: `/clear` abre outra conversa, nunca vira prompt.** Sem terminal, o ator chama
+  `thread/start` e restaura esforço e modo antes de liberar o envio; com terminal, dirige o
+  `/clear` da TUI e confirma a troca da thread. Turno, pergunta ou mensagem esperando na fila
+  impedem a limpeza. Conta, pasta e chave da sessão continuam as mesmas. Ver
+  [limpeza da conversa Codex](#codex-clear-abre-outra-conversa).
 
 - **`omp` é um FORK do Pi** — mesmo JSONL, mesmas extensões, e as diferenças pequenas já custaram
   bugs calados (binário próprio, raiz `~/.omp/agent`, sem `--session-id`, outros nomes de evento,
@@ -517,7 +531,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Claude com terminal segura a mensagem no Hangar durante o turno.** Com o Claude fora de `idle`
   (registro nativo, depois o estado do plugin, depois o marcador de hook), o `/input` grava a
   entrada na fila do Hangar (`terminal_turn_hold`, `delivered:false`) em vez de digitá-la. A fila
-  drena com o Claude parado, composer legível e sem pergunta, uma por vez, no tique do ator; a
+  drena com o Claude parado, composer legível e sem pergunta, um lote por vez, no tique do ator; a
   entrega que encontrou o Claude parado faz a próxima esperar até 3 s (`turn_start_wait`) pelo
   turno que ela abriu. Recado com socket nativo (`[de: …]`, `[grupo: …]`, `[painel: …]`) e comando
   de barra não são segurados, e o recado passa no meio do turno mesmo atrás de mensagem segurada. Com
@@ -1221,6 +1235,34 @@ backend), 3 rodadas, mediana, arquivo em cache: `limit=400` 0,71 s → 0,36 s; `
 transcripts reais × 3 limites comparados com o atalho desligado, zero diferenças. O relógio do
 anexo pulado continua contando porque decide o `ts` herdado por linha sem timestamp e por entrada
 de fila sem `ts`.
+
+## Codex: /clear abre outra conversa
+
+Em 16/10/2026, o `/input` do Codex só distinguia `/compact`: `/clear` passava pela preparação
+de skills e seguia como texto de `turn/start`. O teste do terminal verificava somente que o
+pedido não chegava ao Python, sem conferir conversa nova.
+
+O comando agora entra pelo mesmo tratamento no HTTP e nas entregas internas. No sem terminal,
+`thread/start` conserva pasta, modelo, sandbox, aprovação e Fast; `thread/settings/update`
+restaura esforço e colaboração. Alterações de configuração durante essa sequência são recusadas.
+Resposta tardia ainda termina a sequência. Falha ao abrir conserva a conversa anterior;
+falha ao restaurar impede o envio, registra o modo padrão da thread nova e pede recarregar e
+conferir as escolhas. A fila pendente nunca é descartada para limpar.
+
+No terminal, a sequência compartilha a trava do pane, recusa menu, modo de cópia e rascunho,
+confere o `/clear` digitado e só repete Enter se o comando exato ainda estiver no composer.
+Aceitação exige outra thread publicada pelo ator. A TUI conserva a decisão sobre a conversa nova.
+
+Prova no Linux com codex-cli 0.162.1, conta e configuração temporárias, app-server e TUI reais,
+usando um provedor HTTP local sem credenciais: uma mensagem antes, `/clear` e outra depois.
+Nos dois modos o UUID mudou, a segunda chamada ao provedor não continha o marcador anterior e
+o comando não virou pedido ao modelo. No sem terminal, o esforço `high` continuou aplicado.
+A captura da TUI depois da limpeza mostrou o composer vazio e nenhum texto da conversa anterior.
+O `thread/start` devolveu `path` antes de existir o rollout: a descoberta conserva esse caminho,
+e o hub pode trocar o histórico antes da primeira mensagem, sem exigir `is_file`.
+
+Regressões cobrem abertura, recusa, respostas tardias, configuração concorrente, falha de
+restauração de Plan, envio seguinte à thread nova, persistência do sidecar e proteção do composer.
 
 ## Codex: compactação e ida ao terminal
 
@@ -4402,8 +4444,8 @@ O corte do painel de agentes do #137 continua valendo.
 - Quem diz "parado" é o `InputFacts.idle` (`terminal_facts.rs`): registro nativo `status: idle`;
   sem ele, o estado do plugin vivo; sem ele, o marcador de hook. A tela só decide sem nenhum dos três.
 - Logo depois de uma entrega o registro nativo ainda diz `idle` por um tique: sem a espera do
-  `turn_start_wait` (3 s, armada só quando a entrega encontrou o Claude parado), a segunda mensagem
-  sairia junto com a primeira num turno curto. O Orientar no meio do turno não arma a espera.
+  `turn_start_wait` (3 s, armada só quando a entrega encontrou o Claude parado), o próximo lote
+  poderia sair antes de o turno reservado aparecer ocupado. O Orientar no meio do turno não arma a espera.
 - O recado de outra sessão pelo socket nativo continua no meio do turno: é o canal do próprio
   Claude Code para isso, e segurá-lo atrasaria a conversa entre sessões. O socket existe em toda
   sessão recente, mas só o texto com prefixo de recado vai por ele; por isso a condição de segurar é
@@ -4431,7 +4473,7 @@ O corte do painel de agentes do #137 continua valendo.
 (16/10/2026, Claude Code 2.1.301.) `GET /api/sessions/{name}/commands` do Claude passou a ser
 composto no Rust (`commands/`). O Python perdeu o compositor, os scans, a sonda e sua ponte de
 filtro. Nas portas que atende, conserva autenticação e repasse por `forwarded`; sem Rust,
-responde 503 `commands_need_rust_server`. O contrato interno é 72 nos dois lados. O catálogo
+responde 503 `commands_need_rust_server`. O contrato interno é 73 nos dois lados. O catálogo
 do Codex conserva o handler que já tinha.
 
 O desaparecimento de `/reload-plugins` tinha duas causas: a reserva Python não o incluía e a
@@ -4469,3 +4511,33 @@ O scan reaproveita os metadados da entrada do diretório no Windows, onde essa l
 consulta extra por arquivo. Links simbólicos continuam sendo seguidos explicitamente. No cache
 da sonda, leitura do resultado e registro da execução compartilham a trava da publicação: uma
 resposta publicada nesse intervalo não pode disparar uma segunda sonda da mesma assinatura.
+
+## Agrupamento durável da fila (15/10/2026)
+
+O usuário confirmou que as partes de um pedido devem chegar juntas: enviar só a primeira no
+fim do turno permitia ao agente começar a responder antes de receber o restante. O servidor
+Rust reserva todas as mensagens comuns já esperando, na ordem do painel, e une os textos com
+uma quebra de linha. Não há espera para capturar mensagens futuras. Recados, comandos, respostas
+reservadas e Orientar individual conservam seus canais.
+
+`ClaimBatch` grava uma linha com identidade própria e os IDs originais. Uma mensagem só também
+sela o corte, conservando seu ID. A reserva não pode ser editada ou reordenada. Ausência comprovada
+de escrita permite retentar o mesmo lote; entrega possível conserva a tentativa incerta. Recuperar
+o diário não rematerializa os membros. A confirmação exige o texto inteiro e confirma todos os
+IDs; a prova por imagem inclui o texto completo e os hashes dos bytes, tanto no formato original
+quanto no formato da TUI do Claude, que retira o path e acrescenta `[Image #1]`.
+
+O preparo e a validação acontecem antes da persistência da reserva. Claude sem terminal conserva
+os blocos de imagem preparados para o despacho e para retomadas, sem reler arquivos que podem ter
+mudado. Codex conserva o input preparado. O tamanho inclui a serialização do frame; no terminal
+o transporte leva texto e referências, e a TUI lê os arquivos. Recusa de tamanho deixa os membros
+editáveis, com problema visível; editar ou apagar permite nova tentativa. Arquivos especiais não
+são lidos como imagens. Confirmado o lote, os bytes preparados saem da linha e os recibos de
+reserva guardam só os IDs, para não multiplicar anexos no diário.
+
+Provas automatizadas: reserva, corte unitário, recuperação, entrega incerta, recibo integral,
+tamanho de texto/JSON/imagens, preservação dos bytes, arquivo especial, entrega nos quatro modos,
+chegada posterior, dois consumidores, reconexão e histórico único. O retrato do hub conserva a
+retirada de até toda a capacidade da fila numa publicação, impedindo que quadros atrasados de
+membros desse corte ressuscitem suas bolhas. A prova real usa processos dos CLIs e modelo local
+controlado, com três partes e imagem; não depende de Orientar.

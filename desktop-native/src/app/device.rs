@@ -260,6 +260,7 @@ impl Hangar {
             }
             Page::Accounts => self.accounts_opened(cx),
             Page::Orchestration => self.orchestration_opened(cx),
+            Page::Worktrees => self.worktree_settings_opened(cx),
             Page::Shortcuts => self.shortcuts_opened(cx),
             Page::Harnesses => self.harness_opened(cx),
             Page::Voice | Page::Jev | Page::Notifications | Page::Attachments | Page::Advanced => self.server_config_opened(page, cx),
@@ -564,7 +565,13 @@ impl Hangar {
         for (input, key) in [(self.address.clone(), "server"), (self.token.clone(), "token"), (self.command_search.clone(), "commands_search")] {
             input.update(cx, |input, cx| input.set_placeholder(tr(key), window, cx));
         }
-        for input in self.ask_form.inputs.clone() { input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)); }
+        for input in self.ask_form.inputs.clone() {
+            match input {
+                AnyInputState::Input(input) => input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)),
+                AnyInputState::Textarea(input) => input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)),
+                _ => unreachable!("a resposta é um campo simples ou multilinha"),
+            }
+        }
         if let Some(input) = self.device.channel_input.clone() {
             input.update(cx, |input, cx| input.set_placeholder(tr("settings_channel_branch_placeholder"), window, cx));
         }

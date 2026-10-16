@@ -51,7 +51,7 @@ pub enum WriteOutcome { Written, NotWritten, Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort, SetServiceTier,
-    SetPermissionMode, Compact, ListModels, ListSkills, ReadRateLimits, ReadSettings,
+    SetPermissionMode, Compact, Clear, ListModels, ListSkills, ReadRateLimits, ReadSettings,
     SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Cwd, Detach,
     /// Interna: só o ator a cria, a partir da entrada reservada que a fila devolveu.
     DispatchAsyncAnswer,
