@@ -35,13 +35,13 @@ def tree(children):
 
 def surfaces():
     pm = tree([
-        text("PM-10001 · Melhoria · Prioridade média", dimColor=True),
+        text("DEMO-10001 · Melhoria · Prioridade média", dimColor=True),
         text("Migrar o processamento para o serviço de tarefas", bold=True),
         text("Resolvido e Revisada", color="green"),
         text("Responsável: Pessoa de exemplo\nVersão: 1.2.3\nAtualizada: 15/10/2026"),
         text("Descrição", bold=True),
         text("Centralizar o processamento, as pendências e as notificações no serviço de tarefas. Acompanhar a execução pelo painel do projeto."),
-        {"type": "Link", "props": {"href": "https://example.com/PM-10001", "label": "Abrir no Jira"}},
+        {"type": "Link", "props": {"href": "https://example.com/DEMO-10001", "label": "Abrir no Jira"}},
         {"type": "Box", "props": {"flexDirection": "row", "gap": 2}, "children": [
             button("Atualizar dados", "refresh", variant="primary"), button("Copiar chave", "copy", plain=True)]},
     ])
@@ -58,8 +58,8 @@ def surfaces():
                    {"type": "Box", "children": [text("  "), {"type": "Raster", "props": {"columns": 20, "rows": 1, "cells": cells}}, text("  30%")]},
                    {"type": "Input", "props": {"key": "filter", "label": "Filtro", "placeholder": "Digite para filtrar"}, "press": {"plugin": "proof", "key": "filter"}}])
     panes = [{"id": key, "title": title, "columns": 100, "tree": body} for key, title, body in (
-        ("mr", "MR", mr), ("pm", "PM-10001", pm), ("jenkins", "Jenkins", jenkins))]
-    return {"source": "surface", "above": tree([text("PM-10001 · servicos · Configuração", dimColor=True)]),
+        ("mr", "MR", mr), ("pm", "DEMO-10001", pm), ("jenkins", "Jenkins", jenkins))]
+    return {"source": "surface", "above": tree([text("DEMO-10001 · servicos · Configuração", dimColor=True)]),
             "panes": [] if STATE["removed"] else panes, "shown_id": None if STATE["removed"] else STATE["active"]}
 
 

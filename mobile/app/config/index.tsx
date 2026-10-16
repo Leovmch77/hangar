@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, Text, TextInput, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { MenuView } from '@react-native-menu/menu';
 import { serverColor } from '@hangar/core';
@@ -9,6 +9,7 @@ import { SettingsMenuGroup, SettingsMenuItem } from '../../src/features/config/S
 import { useSettingsColors } from '../../src/features/config/colors';
 import { Icon, type IconName } from '../../src/ui/Icon';
 import { ownServers, useServers } from '../../src/stores/servers';
+import { useSessions } from '../../src/stores/sessions';
 import * as m from '../../src/paraglide/messages';
 
 type Page = { route: string; icon: IconName; title: () => string; rows: Array<() => string> };
@@ -109,14 +110,21 @@ export default function ConfigIndex() {
 /** "• nome ⌄" do grupo Servidor: troca a máquina que o grupo configura, como a lista de Servidores. */
 function ServerPicker() {
   const c = useSettingsColors();
+  const { theme } = useUnistyles();
+  const byServer = useSessions((s) => s.byServer);
   const todos = useServers((s) => s.servers);
   const servers = useMemo(() => ownServers(todos), [todos]);
   const activeId = useServers((s) => s.activeId);
   const active = servers.find((s) => s.id === activeId) ?? null;
   if (!active) return null;
+  const bucket = byServer.find((b) => b.server.id === activeId);
+  const color = bucket?.error ? theme.tokens.status.error : bucket?.loaded ? theme.tokens.status.success : theme.tokens.text.muted;
+  const connectionLabel = bucket?.error
+    ? bucket.error === 'offline' ? m.lista_servidor_offline({ label: active.label }) : `${active.label}, ${bucket.error}`
+    : bucket?.loaded ? `${active.label}, ${m.native_connected()}` : active.label;
   const label = (
-    <View style={styles.picker}>
-      <View style={[styles.dot, { backgroundColor: serverColor(active.id) }]} />
+    <View style={styles.picker} accessible={servers.length < 2} accessibilityLabel={connectionLabel}>
+      <View style={[styles.dot, { backgroundColor: color }]} />
       <Text style={[styles.pickerText, { color: c.text }]} numberOfLines={1}>{active.label}</Text>
       {servers.length > 1 ? <Icon name="ChevronDown" size={12} color={c.muted} /> : null}
     </View>
@@ -135,7 +143,7 @@ function ServerPicker() {
       }))}
       onPressAction={({ nativeEvent }) => useServers.getState().setActive(nativeEvent.event)}
     >
-      <Pressable accessibilityRole="button" accessibilityLabel={m.native_settings_switch_server()} hitSlop={8}>
+      <Pressable accessibilityRole="button" accessibilityLabel={connectionLabel} accessibilityHint={m.native_settings_switch_server()} hitSlop={8}>
         {label}
       </Pressable>
     </MenuView>
