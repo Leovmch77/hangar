@@ -492,9 +492,9 @@ import { cachePrazo } from '../lib/cachePrazo';
   let somaQuad = 0;
   let nQuad = 0;
 
-  /** Teto de seguranca: 3 min por RELOGIO DE PAREDE. Nao usar recSeconds — ele vem de setInterval,
-   *  que o navegador limita em aba escondida, exatamente o caso que este teto existe pra cobrir. */
-  const TETO_MS = 3 * 60_000;
+  // Teto de seguranca do maos livres: vem da config do servidor (`ditadoEstilo.ceilingMs`) e e
+  // medido por RELOGIO DE PAREDE. Nao usar recSeconds — ele vem de setInterval, que o navegador
+  // limita em aba escondida, exatamente o caso que este teto existe pra cobrir.
 
   function pararPorMotivo(motivo: MotivoFim) {
     if (!recording || motivoDoFim) return;   // primeiro motivo vence; nao encerra duas vezes
@@ -537,7 +537,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   // de recError/recSeconds).
   let contagem = $state<number | null>(null);
   let contagemTimer: ReturnType<typeof setInterval> | undefined;
-  // Prazo por RELOGIO DE PAREDE (mesma decisao do TETO_MS acima, agora aplicada tambem aqui):
+  // Prazo por RELOGIO DE PAREDE (mesma decisao do teto acima, agora aplicada tambem aqui):
   // guarda o INSTANTE-ALVO do envio, nao um contador de setInterval. Um setInterval cru derrete
   // em aba escondida (Chrome Android cai pra ~1 tick/min) -- os "3s pra cancelar" virariam ~3min
   // com o envio acontecendo de celular no bolso.
@@ -1847,6 +1847,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     vadEstado = maosLivres ? novoEstadoVad() : undefined;
     motivoDoFim = null;
     recIniciadoEm = Date.now();
+    if (maosLivres) void ditadoEstilo.refreshCeiling();
     somaQuad = 0;
     nQuad = 0;
     if (maosLivres) void segurarTela();
@@ -1855,7 +1856,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       startMediaRecorder(stream);
       recTimer = setInterval(() => {
         recSeconds++;
-        if (maosLivres && Date.now() - recIniciadoEm >= TETO_MS) pararPorMotivo('teto');
+        if (maosLivres && Date.now() - recIniciadoEm >= ditadoEstilo.ceilingMs) pararPorMotivo('teto');
       }, 1000);
       startMeter(stream);
     } catch (err) {

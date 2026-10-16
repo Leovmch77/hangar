@@ -261,14 +261,14 @@ impl Pages {
         }
     }
 
-    /// Conversa com página: o Chromium sobe já, em paralelo ao resto, e não no primeiro desenho do cartão (que pode nem
-    /// estar à vista). Sem página, ele é solto e nada sobe.
+    /// Conversa com página: o Chromium das páginas sobe já, em paralelo ao resto, e não no primeiro desenho do cartão
+    /// (que pode nem estar à vista). Sem página, ele é solto e nada sobe.
     pub fn warm(&mut self, wanted: bool, window: &Window, cx: &App) {
         #[cfg(target_os = "linux")]
         {
             if !wanted || !self.live { self.warm = None; return; }
             if self.warm.is_some() { return; }
-            match Engine::warm(window, cx) {
+            match Engine::warm_pages(window, cx) {
                 Ok(warm) => self.warm = Some(warm),
                 Err(error) => eprintln!("[pagina] Chromium não subiu antes da página: {error}"),
             }
@@ -328,24 +328,31 @@ pub(super) static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::
         serde_json::to_string(&css).unwrap_or_default())
 });
 
+/// Cores do app que a página recebe, uma tabela só para a chave e o script. O que o app não tem (`--info`, gráficos)
+/// fica com o padrão do esquema que o servidor guardou na página.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn palette() -> [(&'static str, Hsla); 10] {
+    [("--foreground", theme::text()), ("--muted-foreground", theme::muted()), ("--surface", theme::surface()),
+        ("--border", theme::border()), ("--accent", theme::accent()), ("--accent-foreground", theme::on_accent()),
+        ("--danger", theme::danger()), ("--warning", theme::warning()), ("--success", theme::success()),
+        ("--code-background", theme::inset())]
+}
+
 /// O que o script do tema lê do app: chave igual, script igual, sem montá-lo a cada quadro.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Copy, PartialEq)]
-pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 5] }
+pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 10] }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn theme_key() -> ThemeKey {
-    ThemeKey { dark: theme::is_dark(), colors: [theme::text(), theme::muted(), theme::surface(), theme::border(), theme::accent()] }
-}
+fn theme_key() -> ThemeKey { ThemeKey { dark: theme::is_dark(), colors: palette().map(|(_, c)| c) } }
 
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn theme_script() -> String {
-    let vars = json!({
-        "--background": "transparent", "--foreground": hex(theme::text()), "--muted-foreground": hex(theme::muted()),
-        "--surface": hex(theme::surface()), "--border": hex(theme::border()), "--accent": hex(theme::accent()),
-        "--font-sans": format!("\"{}\", system-ui, sans-serif", theme::SANS), "--font-mono": format!("\"{}\", ui-monospace, monospace", theme::MONO),
-    });
+    let mut vars: serde_json::Map<String, Value> = palette().into_iter().map(|(name, c)| (name.to_owned(), hex(c).into())).collect();
+    vars.insert("--background".into(), "transparent".into());
+    vars.insert("--font-sans".into(), format!("\"{}\", system-ui, sans-serif", theme::SANS).into());
+    vars.insert("--font-mono".into(), format!("\"{}\", ui-monospace, monospace", theme::MONO).into());
     let params = json!({"theme": if theme::is_dark() { "dark" } else { "light" }, "styles": {"variables": vars}});
     format!("window.__hangarApply&&window.__hangarApply({params})")
 }
@@ -755,7 +762,8 @@ impl Hangar {
                 }
             }).absolute().inset_0();
             let cover = (!framed).then(|| match view.last_frame.clone() {
-                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+                // Tirado no tamanho em que saiu da tela: o cartão pode ter mudado desde então, e esticado ele deformava.
+                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Contain).into_any_element(),
                 None => loading().into_any_element(),
             });
             let focused = view.focus.clone();

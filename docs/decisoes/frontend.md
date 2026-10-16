@@ -857,9 +857,11 @@ como o instalador já não instalava o Electron, instalação nova no Linux esta
   daria o painel mais fluido, a um pacote de ~250 MB e um build com processos auxiliares. Com o
   Chromium, `control.rs`, `relay.rs`, `server.rs` e o `navsock.py` servem aos dois sistemas sem
   mudar.
-- **Um Chromium por app, um alvo por sessão.** Nasce no primeiro navegador aberto e termina quando
-  o último fecha (e com o app: `PR_SET_PDEATHSIG`). O perfil é persistente
-  (`<config do app>/chromium`), compartilhado entre as sessões como no Electron.
+- **Um Chromium do painel por app, um alvo por sessão.** Nasce no primeiro navegador aberto e termina
+  quando o último fecha (e com o app: `PR_SET_PDEATHSIG`). O perfil é persistente
+  (`<config do app>/chromium`), compartilhado entre as sessões como no Electron. Desde 15/10/2026 as
+  páginas da conversa têm um segundo Chromium, próprio (ver "Página da conversa no Linux: quadro no
+  tamanho dele e Chromium próprio em escala 2").
 - **CDP por pipe, sem porta** (`--remote-debugging-pipe`, fd 3 e 4, mensagens terminadas em NUL),
   sessões multiplexadas por `sessionId`. Respostas resolvem direto da thread de leitura; eventos
   vão à thread da interface, como no WebView2. `browser::cdp::Cdp` é o mesmo nome nos dois
@@ -867,8 +869,8 @@ como o instalador já não instalava o Electron, instalação nova no Linux esta
 - **O painel pinta o screencast.** Cada quadro (PNG) é decodificado na thread de leitura e
   gravado numa textura do device wgpu da GPUI, a mesma a cada quadro (`paint_surface`); o ack sai
   dali mesmo. Painel escondido para o screencast; o controlador mantém a página em 1280×800 para
-  o `shot`. O quadro é esticado até o painel: no resize, o do tamanho antigo cobre tudo até chegar
-  o do novo, em vez de deixar sobra vazia.
+  o `shot`. O quadro é pintado no tamanho da página que ele mostra, não esticado até o painel
+  (ver "Página da conversa no Linux: quadro no tamanho dele e Chromium próprio em escala 2").
 - **PNG, não JPEG (05/10/2026).** O JPEG q85 borrava o texto. Medido com Chrome 154 sem janela,
   página de 890×764 com animação e texto: JPEG 59,6 quadros/s e 65 KB por quadro, PNG 59,8
   quadros/s e 84 KB. A tela remota do celular tem screencast próprio e não mudou.
@@ -1076,3 +1078,37 @@ vista desktop do web não ganhou o painel: o desktop evolui no nativo. Comportam
   saiu da fila".
 - No celular o arrasto é por eventos de ponteiro na alça (o arrasto HTML5 não segue o dedo); no
   app, as ações ficam no toque longo e também como ações de acessibilidade da linha.
+
+## Página da conversa no Linux: quadro no tamanho dele e Chromium próprio em escala 2 (15/10/2026)
+
+A página publicada pelo agente saía deformada ao mudar o tamanho da janela ou da coluna, e
+continuava deformada: o quadro de antes do resize era esticado até a moldura nova, e com a página
+parada nenhum outro chegava. Medido no app nativo com uma página de abas, lista e grade, janela de
+1920 para 1400 px de largura: 4 s depois a moldura media 720×487 e mostrava o quadro de 1238×422,
+com os círculos virados elipses.
+
+- **O quadro é pintado no tamanho da página que ele mostra**, recortado pela moldura, nunca
+  esticado (`browser::frame_rect`). O tamanho lógico vem do `metadata` do próprio quadro
+  (`deviceWidth` × `deviceHeight`, vezes o zoom da tela cheia): os pixels não dizem, porque a
+  densidade deles é a do processo. Durante um resize sobra área vazia por um instante, como num
+  iframe, em vez de texto deformado. Só a tela emulada pelo `layout` do agente no painel continua
+  esticada até a moldura encaixada (o tamanho é dele, não do painel).
+- **Depois de assentar o resize o screencast reinicia** (`stopScreencast` + `startScreencast`),
+  como já fazia o zoom: o quadro que o Chromium manda ao ser pedido pode sair antes do relayout, e
+  página parada não manda outro. No Windows a WebView2 já reiniciava a cada resize.
+- **Só a escala do processo chega ao screencast.** `Emulation.setDeviceMetricsOverride` com
+  `deviceScaleFactor` 2 muda o `devicePixelRatio` da página para 2, mas o quadro sai na escala do
+  `--force-device-scale-factor`; o parâmetro `scale` do override também não muda o quadro.
+  Medido no `chrome-headless-shell` com viewport de 600×300: processo 1 e densidade emulada 2
+  dão quadro de 600×300; processo 2 dá 1200×600. Desde que o processo passou a nascer em escala 1
+  (o painel emula a da janela), a página da conversa, pensada para sair no dobro, saía em 1x e era
+  ampliada pela GPU: em monitor de escala 1,25 o texto dela ficava borrado ao lado do texto do app.
+- **As páginas da conversa têm um Chromium próprio em escala 2** (`pipe::Kind::Pages`, perfil
+  `<config do app>/chromium-pages`). Elas já abriam cada uma num contexto próprio, sem os cookies
+  do painel, então não perdem nada. A densidade emulada da página é a do processo dela: acima disso
+  ela só rasterizaria pixels jogados fora. O custo é um processo a mais enquanto houver conversa com
+  página aberta, e ele sobe junto com a conversa (`warm_pages`).
+- **Continua em 1x:** o painel do navegador (o processo dele ficou em escala 1 por desempenho, e em
+  monitor de escala fracionária o quadro é ampliado pela GPU) e o site da conversa (modo `url`),
+  que precisa do login do perfil do painel e por isso abre no Chromium dele.
+

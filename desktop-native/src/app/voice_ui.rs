@@ -494,6 +494,25 @@ pub(super) fn dock_line(action: Option<&OrganizerAction>, progress: Option<&str>
         .or_else(|| target.map(|name| tr("side_voice_session").replace("{name}", name)))
 }
 
+/// O cartão da voz no painel. Altura e entrelinha fixas por linha: borda 1 + 12 + 16 + 8 + 20 + 8 + 16 + 12 = 93 cabe em
+/// `VOICE_DOCK_H`; com a entrelinha padrão, a última linha passava da altura e era cortada.
+pub(super) fn dock_card(equalizer: Div, status: String, color: Hsla, time: Option<String>, line: Option<String>) -> Stateful<Div> {
+    div().id("side-voice").debug_selector(|| "voice-dock".into()).h(px(VOICE_DOCK_H)).flex_shrink_0().overflow_hidden().px_4().py(px(12.))
+        .border_t_1().border_color(theme::border()).flex().flex_col().gap(px(8.))
+        .child(chrome::section_label(tr("side_voice")).h(px(16.)).line_height(px(16.)))
+        .child(div().h(px(20.)).flex().items_center().gap(px(10.))
+            .child(equalizer)
+            .child(div().flex_1().min_w_0().truncate().text_sm().line_height(px(20.)).font_weight(FontWeight::MEDIUM).text_color(color).child(status))
+            .children(time.map(|time| div().flex_shrink_0().text_xs().line_height(px(16.)).text_color(theme::faint()).child(time))))
+        .children(line.map(|text| div().debug_selector(|| "voice-dock-line".into()).h(px(16.)).truncate().text_xs().line_height(px(16.))
+            .text_color(theme::muted()).child(text)))
+}
+
+/// A sobra embaixo das seções: o medidor ocupa ela inteira e o cartão encosta no topo dela, logo abaixo das Ações.
+pub(super) fn dock_slot(measure: impl IntoElement, card: Option<Stateful<Div>>) -> Div {
+    div().flex_1().min_h_0().relative().overflow_hidden().flex().flex_col().child(measure).children(card)
+}
+
 pub(super) fn call_clock(elapsed: Duration) -> String {
     let s = elapsed.as_secs();
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{:02}:{:02}", s / 60, s % 60) }
@@ -1265,7 +1284,7 @@ impl Hangar {
         row.children(equalizer(level, self.voice.frame, min, max).map(|h| div().w(px(width)).h(px(h)).rounded_full().bg(color)))
     }
 
-    /// Cartão compacto da chamada no pé do painel lateral: ocupa só a sobra embaixo das seções. A sobra é medida a cada
+    /// Cartão compacto da chamada logo abaixo das seções do painel lateral, dentro da sobra embaixo delas. A sobra é medida a cada
     /// quadro e o cartão some quando não cabe, em vez de empurrar o painel ou criar rolagem.
     pub(super) fn render_voice_dock(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.voice.call.as_ref()?;
@@ -1279,16 +1298,8 @@ impl Hangar {
             if flipped { cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); }); }
         }, |_, _, _, _| {}).absolute().inset_0();
         let line = dock_line(self.voice.action.as_ref(), self.voice.progress.as_deref(), self.voice.target.as_ref().map(|(_, name)| name.as_str()));
-        let card = div().id("side-voice").h(px(VOICE_DOCK_H)).flex_shrink_0().overflow_hidden().px_4().py(px(14.))
-            .border_t_1().border_color(theme::border()).flex().flex_col().gap(px(8.))
-            .child(chrome::section_label(tr("side_voice")))
-            .child(div().flex().items_center().gap(px(10.))
-                .child(self.render_equalizer(3., 18., 3.))
-                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(self.voice_state_color()).child(self.voice_status()))
-                .children(self.call_time().map(|time| div().flex_shrink_0().text_xs().text_color(theme::faint()).child(time))))
-            .children(line.map(|text| div().truncate().text_xs().text_color(theme::muted()).child(text)));
-        Some(div().flex_1().min_h_0().relative().overflow_hidden().flex().flex_col().justify_end()
-            .child(measure).when(shown, |el| el.child(card)).into_any_element())
+        let card = dock_card(self.render_equalizer(3., 18., 3.), self.voice_status(), self.voice_state_color(), self.call_time(), line);
+        Some(dock_slot(measure, shown.then_some(card)).into_any_element())
     }
 
     /// Só o que foi medido: contexto da thread do organizador e janelas da conta. Sem dado, nada aparece.
@@ -1684,6 +1695,30 @@ mod tests {
         assert_eq!(tail[0].chars().count(), 10);
         assert!(tail[0].ends_with('…'));
         assert!(thought_tail("a\nb\nc\nd", 3, 140) == ["b", "c", "d"]);
+    }
+
+    /// Painel com Ações em cima e a sobra embaixo, como no `render_side` durante a chamada.
+    struct Panel { actions: f32 }
+
+    impl gpui::Render for Panel {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            let card = dock_card(div().w(px(20.)).h(px(18.)), "Pode falar — microfone ligado".into(), theme::text(), Some("01:05".into()),
+                Some("Na sessão voz-correcoes".into()));
+            div().size_full().flex().flex_col()
+                .child(div().debug_selector(|| "actions".into()).h(px(self.actions)).flex_shrink_0())
+                .child(dock_slot(div().absolute().inset_0(), Some(card)))
+        }
+    }
+
+    #[gpui::test]
+    fn voice_dock_sits_right_under_the_actions_and_shows_its_last_line_whole(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Panel { actions: 300. });
+        cx.simulate_resize(gpui::size(px(360.), px(800.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| { let _ = window.draw(cx); });
+        let (actions, card, line) = (cx.debug_bounds("actions").unwrap(), cx.debug_bounds("voice-dock").unwrap(), cx.debug_bounds("voice-dock-line").unwrap());
+        assert_eq!(card.top(), actions.bottom(), "encosta nas Ações, não no pé do painel");
+        assert!(line.bottom() <= card.bottom(), "a última linha cabe no cartão: {:?} > {:?}", line.bottom(), card.bottom());
     }
 
     #[test]

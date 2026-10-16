@@ -386,6 +386,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut speaking: Option<(String, Instant)> = None;
     let mut out = Speech::default();
     let mut ack = organizer::WaitAck::default();
+    let mut transcript = super::transcript::Transcript::open(&options.voice_dir, chrono::Local::now());
     // Comandos do organizador em curso, por item: turno e prazo (um turno pode rodar mais de um).
     let mut running_commands: std::collections::HashMap<String, (String, Instant)> = std::collections::HashMap::new();
     let outcome = loop {
@@ -1040,7 +1041,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             }
                         }
                         // Fala que fechou depois da delegação sem ser só a final dela: o envio desse turno não sai sem ela.
+                        "thread/realtime/transcript/done" if params["role"] == "assistant" => {
+                            transcript.line(super::transcript::Who::Voice, params["text"].as_str().unwrap_or_default(), chrono::Local::now());
+                        }
                         "thread/realtime/transcript/done" if params["role"] == "user" => {
+                            transcript.line(super::transcript::Who::User, params["text"].as_str().unwrap_or_default(), chrono::Local::now());
                             // A final costuma chegar segundos depois da fala, quando a voz responde: sem pedaço recente ela é
                             // fechamento da fala anterior e não pode segurar nem cortar o resumo.
                             if last_user_delta.is_some_and(|at| at.elapsed() < LATE_FINAL) { last_user_voice = Some(Instant::now()); }
@@ -1100,6 +1105,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             if let Some(input) = results.turn_completed() { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                         }
                         "item/completed" if params["item"]["type"] == "agentMessage" && params["item"]["phase"] != "commentary" => {
+                            transcript.line(super::transcript::Who::Organizer, params["item"]["text"].as_str().unwrap_or_default(), chrono::Local::now());
                             // O Codex já repassou esta mensagem à voz (fala o que o organizador escreve); repetir com
                             // appendSpeech fazia ela falar o resultado duas vezes. Sem aparelho o repasse se perde: fica guardada.
                             if results.take_summary(params["turnId"].as_str().unwrap_or_default())
@@ -1696,6 +1702,36 @@ mod tests {
         push_speech(&push, "turn-9", "pode falar os resultados");
         quiet(&push, "q9", "turn-9", false);
         until(&mut seen, "resumo depois do sim", summary_of("deploy")).await;
+    }
+
+    /// A conversa fica em disco: a fala dele, a da voz e a resposta do organizador, na ordem em que fecharam.
+    #[tokio::test]
+    async fn the_call_conversation_is_saved_to_a_file() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options(json!([]));
+        opts.voice_dir = dir.path().to_path_buf();
+        let voice = Voice::start(opts, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        crate::voice::test_support::push_user_audio(&push, "me fala");
+        push.send(json!({"method": "thread/realtime/transcript/done", "params": {"threadId": "t1", "role": "user", "text": "me fala o status"}})).unwrap();
+        push.send(json!({"method": "item/completed", "params": {"threadId": "t1", "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "m1", "text": "Tudo verde na hangar."}}})).unwrap();
+        push.send(json!({"method": "thread/realtime/transcript/done", "params": {"threadId": "t1", "role": "assistant", "text": "Tudo verde na hangar."}})).unwrap();
+        voice.session_result("x".into(), "y".into());
+        until(&mut seen, "o laço andou", summary_of_any).await;
+        let file = std::fs::read_dir(dir.path().join("conversas")).unwrap().next().unwrap().unwrap().path();
+        let text = std::fs::read_to_string(file).unwrap();
+        let order: Vec<&str> = ["**Você:** me fala o status", "**Organizador:** Tudo verde na hangar.", "**Voz:** Tudo verde na hangar."]
+            .into_iter().filter(|part| text.contains(part)).collect();
+        assert_eq!(order.len(), 3, "{text}");
+    }
+
+    fn summary_of_any(m: &Value) -> bool {
+        m["method"] == "turn/start" && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.starts_with("[RESULTADO"))
     }
 
     /// O caso de 15/10 (18:09 a 18:22, seis vezes): a final atrasada do "sim", sem fala nova, cortava o resumo que acabava de

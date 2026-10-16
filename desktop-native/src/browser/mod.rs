@@ -67,10 +67,38 @@ pub fn unzoom(p: gpui_kit::Point<gpui_kit::Pixels>, zoom: f32) -> gpui_kit::Poin
     gpui_kit::point(gpui_kit::px(f32::from(p.x) / z), gpui_kit::px(f32::from(p.y) / z))
 }
 
+/// Retângulo em pixels inteiros da tela onde o quadro do screencast é pintado, em `size` px lógicos: posição ou
+/// largura fracionada faz a GPU reamostrar a textura e o texto perde a nitidez. Sempre no tamanho do próprio quadro, a
+/// partir do canto do cartão, que recorta o que sobra: o quadro de antes de um resize esticado até a moldura nova
+/// deformava a página até o próximo chegar.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn frame_rect(bounds: gpui_kit::Bounds<gpui_kit::Pixels>, (w, h): (f32, f32), scale: f32) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    use gpui_kit::{Bounds, point, px, size};
+    let snap = |v: f32| px((v * scale).round() / scale);
+    Bounds { origin: point(snap(f32::from(bounds.origin.x)), snap(f32::from(bounds.origin.y))), size: size(snap(w), snap(h)) }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{unzoom, valid_zoom};
-    use gpui_kit::{point, px};
+    use super::{frame_rect, unzoom, valid_zoom};
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn frame_of_another_size_keeps_its_own_size() {
+        let card = Bounds { origin: point(px(10.), px(20.)), size: size(px(720.), px(487.)) };
+        // Quadro de antes do resize: fica no tamanho dele, recortado pelo cartão.
+        let old = frame_rect(card, (1238., 422.), 1.);
+        assert_eq!(old.origin, point(px(10.), px(20.)));
+        assert_eq!(old.size, size(px(1238.), px(422.)), "quadro antigo não estica até o cartão");
+    }
+
+    #[test]
+    fn frame_rect_snaps_to_device_pixels() {
+        let card = Bounds { origin: point(px(10.3), px(20.6)), size: size(px(100.), px(50.)) };
+        let r = frame_rect(card, (100.3, 50.), 1.5);
+        assert_eq!(r.origin, point(px(10.), px(31. / 1.5)));
+        assert_eq!(r.size, size(px(100.), px(50.)));
+    }
 
     #[test]
     fn unzoom_divides_screen_points() {

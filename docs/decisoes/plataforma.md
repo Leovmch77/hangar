@@ -920,6 +920,44 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   cartão, para Ctrl+W e F2 ficarem com a página. Na PWA e no app não há atalho: a web desktop está
   congelada e o celular não tem teclado de atalho.
 
+## Rascunho da página devolve o print, e o tema da página tem a paleta completa (15/10/2026)
+
+- **O rascunho (`html_render` com `draft=true`) devolve o print como bloco de imagem do MCP**, além do
+  resultado estruturado de antes (o `shot` com o caminho continua nele). `width` (240 a 1600, padrão
+  728) e `theme` (`dark`/`light`, padrão `dark`) escolhem o print, para o agente conferir a versão de
+  celular e a clara. As larguras de coluna (360, 728, 1000) continuam medidas no escuro.
+  - O print do rascunho sai em densidade 1 e sobre o fundo da conversa do tema pedido: o modelo lê a
+    imagem sem a conversa atrás, e com fundo transparente o texto claro do escuro sumia. É um trabalho
+    de render à parte, que não conta como medição da coluna, e mora num arquivo próprio
+    (`<id>.draft.png`), fora do cache que os clientes leem no dobro e transparente.
+  - A largura, o tema e o print são do Rust. O servidor MCP ainda é do Python: a tool só repassa os dois
+    campos e põe o PNG que o Rust gravou num `CallToolResult`, como o `shot` do navegador já fazia. A
+    anotação de retorno continua `dict`: é dela que sai o `outputSchema`, e o resultado estruturado é o
+    que o Codex lê.
+- **Paleta completa.** Além das cores-base (`--foreground`, `--muted-foreground`, `--surface`,
+  `--border`, `--accent`, `--accent-foreground`, `--danger`, `--warning`, `--success`, `--info`,
+  `--code-background`, `--chart-1` a `--chart-6`), a página tem os nomes comuns de tema de componente:
+  `--card`, `--popover`, `--muted`, `--secondary`, `--primary`, `--input`, `--ring`, `--destructive`,
+  `--code-foreground` e as superfícies suaves `--accent-surface`, `--destructive-surface` e
+  `--warning-surface`.
+  - O `-foreground` de `--destructive`, `--warning`, `--success` e `--info` é o texto sobre a cor cheia, com
+    contraste de pelo menos 4,5:1: o fundo da conversa sobre as cores claras do escuro, branco sobre as escuras do
+    claro. Antes ele era a própria cor, e `background: var(--destructive); color: var(--destructive-foreground)`
+    sumia. Sobre a superfície suave o texto é a própria cor.
+  - As derivadas saem das base por `var()` e `color-mix()` num `:where(:root)` do CSS base: seguem o tema
+    do app e a troca ao vivo, e a página ou o cliente sobrescrevem (especificidade zero).
+  - O bloco de tema guarda os padrões de cada esquema (`data-dark`, `data-light`: cores, raio e
+    fontes). A troca ao vivo (`__hangarApply`) e o documento montado pela PWA e pelo app partem deles e
+    aplicam as cores do cliente por cima; o `data-base`, que vem depois, só tem CSS sem variável que o
+    cliente mande. Antes ele trazia as fontes padrão e sobrescrevia as do cliente: a Geist que o nativo
+    manda virava `-apple-system` (medido no Chromium).
+  - Antes, a troca reescrevia o bloco só com o que o cliente mandava. O nativo manda menos que a lista, e
+    depois da troca `--danger`, `--success`, `--code-background` e os gráficos ficavam vazios (medido no
+    Chromium com as cores que o nativo enviava). O nativo agora manda também acento-sobre, perigo,
+    aviso, sucesso e fundo de código. O que o app não tem (`--info`, `--chart-5/6`) fica com o padrão
+    do esquema.
+  - O app do celular passa as fontes que usa: a do sistema e a mono do tema dele.
+
 ## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
 
 (25/09/2026, pedido do usuário.) Levar a configuração de uma máquina para outras, só manual.
@@ -1837,8 +1875,9 @@ para 91–92 ms/s ([medicao-5b.md](../migracao-rust/parte5-codex/medicao-5b.md))
   (parada, encerrada, abrindo) é `idle` sem problema, como no Python. O `close` de uma vida que
   acabou com erro e a abertura que falhou deixam o erro até a próxima abertura.
 - Dono único: o hub descarta os seis do Python com `state_python_leak`; o Python não os produz
-  (`_estado_do_rust(provider, name)`), mantém o `tail_pump` da conexão interna (confirma a fila) e
-  não alimenta as fontes de prévia do Codex (`_push_channels`). Trocar de modo é troca de provider
+  (`_estado_do_rust(provider, name)`) e não alimenta as fontes de prévia do Codex
+  (`_push_channels`). A confirmação da fila saiu do `tail_pump` da conexão interna para o hub
+  (ver [Fila durável ao vivo no hub do Rust](#fila-durável-ao-vivo-no-hub-do-rust)). Trocar de modo é troca de provider
   no `sse.py` e religa o hub. O canal privado serve os seis ao convidado e ao Connect.
 - A lista lê o `state` do feed em `Published` pela chave do rollout; sem chat aberto vale o fato do
   Python. Claude sem terminal entrou no mesmo feed na C1 (seção abaixo).
@@ -1875,6 +1914,39 @@ Limites conhecidos:
 - O problema da última vida vem só do sidecar durável; erro que não chegou ao sidecar não aparece.
 - O retrato dos fatos é lido dentro do laço do feed, antes de publicar: um Python travado atrasa
   o estado ao vivo em até 1 s (o prazo do pedido) a cada 25 s, ou a cada 5 s depois de uma falha.
+
+## Fila durável ao vivo no hub do Rust
+
+(15/10/2026, contrato 70.) As bolhas `queued-`/`local-` do chat aberto (`message` e
+`queue_confirmed`) saem de um produtor por hub e por geração (`queue_feed.rs`), no lugar do
+`PromptQueue.follow` que a conexão interna abria no Python. Ele lê a projeção
+`<conta Claude>/.hangar-queue/<nome>.jsonl`, acorda pelo observador da pasta e por um batimento de
+5 s, pula a rodada com a mesma marca de arquivo e publica pelo retrato do hub. O canal privado leva
+as bolhas a quem entrou pelo Python (Connect 8768, convidado com login próprio); a conexão interna
+não abre o `follow`, não chama `_confirm_codex_queue` nem segue o rollout do Codex. A baixa da fila do
+Codex sem terminal é pedida pelo hub ao ator, em processo, ao nascer e a cada `user_msg` do rollout.
+O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
+
+- Motivo: a confirmação do Codex fazia a volta Rust → Python → Rust (`op confirm`), e uma linha
+  ruim na fila derrubava a conexão interna inteira (estatísticas, mods, navegador).
+- Diferença do Python, que fixava o corte ao abrir: hub aberto antes da primeira linha do
+  transcript procura o início da conversa a cada rodada, como o painel, e a bolha da conversa
+  anterior que perde o corte sai do retrato (`queue_cut_arrives_with_the_first_transcript_line`).
+  Também sai a mensagem enviada antes dessa primeira linha (o primeiro prompt da sessão nova): é o
+  corte do painel, do `/history` e do aparelho que abria depois no Python. O aparelho aberto a
+  mantém até o transcript trazê-la. Erro ao abrir o transcript, menos o que ainda não nasceu, vai ao
+  diário (`queue_start_unreadable`) a cada rodada, com limite.
+- Prova de paridade: `backend/tests/fixtures/contract/golden/queue_follow.json` (40 cenários) e
+  `queue_start_ts.json` (19 inícios de conversa), gravados do `follow` real por
+  `gen_queue_follow.py`; o teste do Rust compara nome e `data` byte a byte. O serde_json do projeto
+  já escreve o número como o pydantic (`1e+20`, `1.5e-7`, `1000000000000000.0`).
+- Diferenças aceitas, todas defeito do Python: a troca de conversa esvazia a fila do retrato e
+  descarta quadro da geração anterior; o retrato não entrega nota local com mais de 30 s; o teto de
+  32 só descarta confirmada ou nota local; linha que não é objeto, `text` que não é texto, `ts` que o
+  `float()` recusa, `NaN`/`Infinity` e `id` objeto ou lista pulam só aquela linha (um aviso
+  `queue_line_skipped` por minuto e sessão); U+2028, U+2029 e U+0085 crus não quebram a linha; no
+  início da conversa, `time` bool não conta; dono que entra num hub só de convidados não recebe a
+  fila de novo.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
@@ -2533,8 +2605,9 @@ arquivo do `/history`), com o recorte da conversa atual do `/history`, publicada
 repetida para quem chega depois (`LATEST`). `actions` é o registro dizer que o Rust escreve na
 sessão (entrada saudável); sem ele os botões somem. Quem entra pela 8766/8768 recebe o evento pelo
 canal privado do estado, repassado sem mudança pelo Python (`_RUST_STATE_EVENTS`). As bolhas
-`queued-` do Python (`pqueue.follow`) continuam: são elas que viram a bolha de usuário quando a
-mensagem sai da fila.
+`queued-` continuam: são elas que viram a bolha de usuário quando a mensagem sai da fila. Com o Rust
+dono do estado, quem as publica é o produtor da fila do hub (`queue_feed.rs`); o `pqueue.follow` do
+Python fica com Pi, omp, Kimi e o modo `python`.
 
 - Rotas do painel, todas no Rust e todas por mensagem ao ator da sessão, nunca ao `Store`:
   `DELETE /queue/{id}?only_waiting=true`, `PATCH /queue/{id}` (`{"text"}`),
@@ -2547,7 +2620,8 @@ mensagem sai da fila.
   na projeção e não entra. Sem isso a bolha da apagada ficava nos outros aparelhos.
 - O retrato do hub também esquece a apagada: ao gravar o `queue`, as bolhas `queued-<id>` de
   `removed` saem da lista que repete `message`/`queue_confirmed` a quem chega depois, e o id fica
-  lembrado (os últimos 256) para um quadro atrasado do `pqueue.follow` não voltar a gravá-la. Na
+  lembrado (os últimos 256) para um quadro que o produtor da fila do hub (`queue_feed`) leu antes da
+  exclusão não voltar ao retrato nem aos aparelhos abertos. Na
   prova de ponta a ponta (14/10/2026), o aparelho que abriu o chat depois de um
   `DELETE ?only_waiting=true` recebia o `queue` com `entries: []` e, atrás dele, as bolhas das
   apagadas com `queued_delivered: false`: "2 na fila" sem botões no nativo. O `removed` do

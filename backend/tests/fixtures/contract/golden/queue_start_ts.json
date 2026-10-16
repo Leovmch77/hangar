@@ -1,0 +1,109 @@
+{
+ "_meta": {
+  "commit": "e2f675b7493a178e35464893d01728d90f59db0c",
+  "command": "uv run python tests/fixtures/contract/gen_queue_follow.py",
+  "sources": [
+   "backend/app/pqueue.py",
+   "backend/app/models.py",
+   "backend/app/sse.py"
+  ]
+ },
+ "cases": [
+  {
+   "name": "iso_z_na_primeira",
+   "content": "{\"type\":\"user\",\"timestamp\":\"2026-09-21T14:13:20.000Z\"}\n",
+   "result": 1790000000.0
+  },
+  {
+   "name": "pula_linha_sem_ts",
+   "content": "{\"type\":\"permission-mode\"}\n{\"timestamp\":\"2026-09-21T14:13:20Z\"}\n",
+   "result": 1790000000.0
+  },
+  {
+   "name": "iso_com_fuso",
+   "content": "{\"timestamp\":\"2026-09-21T11:13:20-03:00\"}\n",
+   "result": 1790000000.0
+  },
+  {
+   "name": "iso_sem_fuso_vale_utc_aqui",
+   "content": "{\"timestamp\":\"2026-09-21T14:13:20\"}\n",
+   "result": 1790000000.0
+  },
+  {
+   "name": "iso_invalido_segue_para_a_proxima",
+   "content": "{\"timestamp\":\"ontem\"}\n{\"timestamp\":\"2026-09-21T14:13:20Z\"}\n",
+   "result": 1790000000.0
+  },
+  {
+   "name": "iso_invalido_nao_olha_message",
+   "content": "{\"timestamp\":\"ontem\",\"message\":{\"timestamp\":1790000000000}}\n{\"time\":1790000001000}\n",
+   "result": 1790000001.0
+  },
+  {
+   "name": "pi_message_ms",
+   "content": "{\"type\":\"message\",\"message\":{\"timestamp\":1790000000500}}\n",
+   "result": 1790000000.5
+  },
+  {
+   "name": "pi_message_texto_ignorado",
+   "content": "{\"message\":{\"timestamp\":\"1790000000500\"}}\n{\"time\":1790000002000}\n",
+   "result": 1790000002.0
+  },
+  {
+   "name": "kimi_time_ms",
+   "content": "{\"time\":1790000000250}\n",
+   "result": 1790000000.25
+  },
+  {
+   "name": "kimi_created_at_ms",
+   "content": "{\"created_at\":1790000000750}\n",
+   "result": 1790000000.75
+  },
+  {
+   "name": "time_vence_created_at",
+   "content": "{\"created_at\":1790000000750,\"time\":1790000003000}\n",
+   "result": 1790000003.0
+  },
+  {
+   "name": "ts_zero_segue",
+   "content": "{\"time\":0}\n{\"time\":1790000004000}\n",
+   "result": 1790000004.0
+  },
+  {
+   "name": "ts_negativo_segue",
+   "content": "{\"time\":-5}\n{\"time\":1790000004000}\n",
+   "result": 1790000004.0
+  },
+  {
+   "name": "linhas_nao_json",
+   "content": "lixo\n\n[1]\n{\"time\":1790000005000}\n",
+   "result": null,
+   "error": "AttributeError"
+  },
+  {
+   "name": "sem_ts_nenhum",
+   "content": "{\"type\":\"x\"}\n{\"type\":\"y\"}\n",
+   "result": 0.0
+  },
+  {
+   "name": "vazio",
+   "content": "",
+   "result": 0.0
+  },
+  {
+   "name": "ausente",
+   "content": null,
+   "result": null
+  },
+  {
+   "name": "bool_nao_conta",
+   "content": "{\"time\":true}\n{\"time\":1790000006000}\n",
+   "result": 0.001
+  },
+  {
+   "name": "utf8_invalido_na_linha",
+   "content_b64": "eyJ4Ijoi/yJ9CnsidGltZSI6MTc5MDAwMDAwNzAwMH0K",
+   "result": 1790000007.0
+  }
+ ]
+}

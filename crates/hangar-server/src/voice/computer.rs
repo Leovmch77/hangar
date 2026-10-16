@@ -88,7 +88,17 @@ pub fn launch_from(home: &Path, windows: bool, process_env: impl Fn(&str) -> Opt
 }
 
 /// Bloqueia (lê arquivos): quem chama faz fora da thread da tela.
-pub fn launch() -> Result<Launch, String> { launch_from(&home()?, cfg!(windows), |key| std::env::var(key).ok()) }
+pub fn launch() -> Result<Launch, String> {
+    launch_from(&home()?, cfg!(windows), |key| std::env::var(key).ok()).map(|l| with_display(l, crate::display_env::fill()))
+}
+
+/// O agente de tela recusa sem `HYPRLAND_INSTANCE_SIGNATURE`; o serviço pode ter nascido sem ela. A entrada registrada vence.
+fn with_display(mut launch: Launch, missing: Vec<(String, String)>) -> Launch {
+    for (key, value) in missing {
+        if !launch.env.iter().any(|(k, _)| *k == key) { launch.env.push((key, value.into())); }
+    }
+    launch
+}
 
 pub fn initialize_params() -> Value {
     json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hangar-native-voice", "version": "1"}})
@@ -229,6 +239,13 @@ mod tests {
             assert!(envs.contains(&(key.to_owned(), None)), "{key} chega ao filho");
         }
         assert!(envs.contains(&("LLM_MODEL".to_owned(), Some("m".into()))));
+    }
+
+    #[test]
+    fn missing_display_vars_reach_the_agent_without_overriding_the_entry() {
+        let launch = Launch { program: "hcc".into(), args: Vec::new(), env: vec![("DISPLAY".into(), ":9".into())] };
+        let got = with_display(launch, vec![("DISPLAY".into(), ":1".into()), ("HYPRLAND_INSTANCE_SIGNATURE".into(), "abc_1".into())]);
+        assert_eq!(got.env, [("DISPLAY".to_owned(), OsString::from(":9")), ("HYPRLAND_INSTANCE_SIGNATURE".to_owned(), OsString::from("abc_1"))]);
     }
 
     #[test]

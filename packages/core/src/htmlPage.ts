@@ -80,8 +80,11 @@ export function pageUrls(base: string, session: string, id: string) {
   };
 }
 
+// As cores-base que o cliente tira do próprio tema; as derivadas (`--card`, `--primary`, `--ring`…) a página calcula
+// delas, e a que o cliente não tem (`--info`, `--chart-5/6`) fica com o padrão do esquema guardado na página.
 const VARS = ['--foreground', '--muted-foreground', '--surface', '--border', '--accent', '--accent-foreground',
-  '--danger', '--warning', '--success', '--code-background', '--chart-1', '--chart-2', '--chart-3', '--chart-4', '--font-sans', '--font-mono'];
+  '--danger', '--warning', '--success', '--code-background', '--chart-1', '--chart-2', '--chart-3', '--chart-4',
+  '--font-sans', '--font-mono'];
 
 // Lê do app (por nome da variável da página) o valor real do tema; vazio fica com o padrão injetado.
 export function themeVariables(get: (name: string) => string): Record<string, string> {
@@ -90,14 +93,18 @@ export function themeVariables(get: (name: string) => string): Record<string, st
   return out;
 }
 
-const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/;
+const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)"([^>]*)>)[\s\S]*?(<\/style>)/;
+const unquote = (v: string) => v.replaceAll('&quot;', '"');
 
-// Troca só o conteúdo do bloco de tema que o servidor injeta; o data-base fica para as trocas seguintes. Uma regra
-// para a PWA e o app.
+// Troca só o conteúdo do bloco de tema que o servidor injeta; os atributos ficam para as trocas seguintes. Parte das
+// cores do esquema guardadas pelo servidor (`data-dark`/`data-light`, ausentes em página antiga) e aplica as do app
+// por cima, como a troca ao vivo da página. Uma regra para a PWA e o app.
 export function themedPageDocument(html: string, scheme: 'dark' | 'light', vars: Record<string, string>): string {
-  const css = `:root{color-scheme:${scheme};${Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')}}`;
-  return html.replace(THEME_BLOCK,
-    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
+  const own = Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';');
+  return html.replace(THEME_BLOCK, (_all, open: string, base: string, attrs: string, close: string) => {
+    const defaults = new RegExp(` data-${scheme}="([^"]*)"`).exec(attrs)?.[1] ?? '';
+    return `${open}:root{color-scheme:${scheme};${unquote(defaults)}${own}}${unquote(base)}${close}`;
+  });
 }
 
 // Fonte da página: o servidor já tira o tema e a ponte. Erro HTTP sobe para a tela mostrar.

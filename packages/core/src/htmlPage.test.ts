@@ -26,6 +26,19 @@ describe('htmlPage', () => {
     expect(pageUrls('http://h', 's 1', 'a').source).toBe('http://h/api/sessions/s%201/pages/a?raw=1&source=1');
   });
 
+  it('parte dos padrões do esquema guardados na página e aplica as cores do app por cima', () => {
+    const doc = '<style id="hangar-theme" data-base=":root{--radius:10px}" data-dark="--info:#5b9cf5;--foreground:#ddd;" '
+      + 'data-light="--info:#2f6fd6;--foreground:#222;">velho</style>';
+    const out = themedPageDocument(doc, 'light', { '--foreground': '#111' });
+    // A do cliente vem depois e vence; a que o cliente não manda fica com o padrão do esquema, não some.
+    expect(out).toContain(':root{color-scheme:light;--info:#2f6fd6;--foreground:#222;--foreground:#111}:root{--radius:10px}');
+    expect(out).toContain('data-dark="--info:#5b9cf5;--foreground:#ddd;"');
+    expect(themedPageDocument(doc, 'dark', {})).toContain(':root{color-scheme:dark;--info:#5b9cf5;--foreground:#ddd;}');
+    // Fonte padrão vem antes e a do cliente vence.
+    const fonts = '<style id="hangar-theme" data-base="body{}" data-dark="--font-sans:Padrão;">x</style>';
+    expect(themedPageDocument(fonts, 'dark', { '--font-sans': 'Geist' })).toContain(':root{color-scheme:dark;--font-sans:Padrão;--font-sans:Geist}body{}');
+  });
+
   it('reconhece a tool do hangar e só ela', () => {
     expect(isHtmlRenderTool('mcp__hangar__html_render')).toBe(true);
     for (const n of ['hangar__html_render', 'hangar.html_render', 'hangar/html_render', 'mcp__hangar.html_render']) {

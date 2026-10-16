@@ -85,6 +85,9 @@ impl Store {
         self.root.join(key).join(format!("{id}.{}.{width}.png", theme.as_str()))
     }
 
+    /// Print do rascunho, um por id, fora do cache que os clientes leem.
+    pub fn draft_shot_path(&self, key: &str, id: &str) -> PathBuf { self.root.join(key).join(format!("{id}.draft.png")) }
+
     /// Apaga a pasta cujo transcript não está vivo há `GONE_AFTER`, e rascunhos com mais de `DRAFT_TTL`.
     /// Os dois lados são comparados canonicalizados: `~/.claude-<conta>` é link do `~/.claude`.
     pub fn sweep(&self, live_jsonl: &HashSet<String>, now: SystemTime) {

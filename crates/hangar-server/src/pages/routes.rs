@@ -13,7 +13,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::chrome::{self, Job};
+use super::chrome::{self, Job, Shot};
 use super::store::{NewPage, Store};
 use super::{HEIGHT_MAX, HEIGHT_MIN, HTML_MAX_CHARS, TITLE_MAX_CHARS, Theme, WIDTHS, images, theme};
 use crate::routes::{AppState, INFO_REASON, cors, gate, pass, route_failed};
@@ -22,6 +22,8 @@ const MESSAGE: &str = "Mostrada ao leitor acima da resposta. Não mencione nem d
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
 const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const SHOT_WIDTH: u32 = 728;
+const DRAFT_WIDTH_MIN: u32 = 240;
+const DRAFT_WIDTH_MAX: u32 = 1600;
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 const URL_HEIGHT: u32 = 640;
 const HANGAR_PORTS: [u16; 3] = [8765, 8766, 8768];
@@ -42,6 +44,11 @@ pub struct PublishBody {
     draft: bool,
     #[serde(default)]
     own_theme: bool,
+    /// Rascunho: largura (240 a 1600) e tema (`dark`/`light`) do print.
+    #[serde(default)]
+    width: Option<i64>,
+    #[serde(default)]
+    theme: Option<String>,
 }
 
 fn json_reply(status: StatusCode, value: Value) -> Response {
@@ -121,6 +128,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     if title_chars == 0 || title_chars > TITLE_MAX_CHARS { return fail("erro_pagina_invalida", "title precisa ter de 1 a 200 caracteres"); }
     if b.height.is_some_and(|h| !(i64::from(HEIGHT_MIN)..=i64::from(HEIGHT_MAX)).contains(&h)) { return fail("erro_pagina_invalida", "height fica entre 80 e 2000"); }
     let height = b.height.map(|h| h as u32);
+    let (shot_width, shot_theme) = match draft_view(b.draft, b.width, b.theme.as_deref()) { Ok(v) => v, Err(v) => return v };
     // Rascunho de site só confere o endereço: sem o login do Jefferson o servidor nem abriria.
     if b.draft && let Some(url) = &site { return json!({"ok": true, "result": {"draft": {"url": url}}}); }
     let info = match st.info(&b.session).await {
@@ -159,10 +167,8 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
             return fail("erro_pagina_nao_gravada", "a gravação caiu no servidor");
         }
     };
-    let shot = draft.then(|| st.pages.shot_path(&key, &id, Theme::Dark, SHOT_WIDTH));
-    let jobs: Vec<Job> = WIDTHS.iter()
-        .map(|w| Job { width: *w, theme: Theme::Dark, shot: if *w == SHOT_WIDTH { shot.clone() } else { None } })
-        .collect();
+    let shot = draft.then(|| st.pages.draft_shot_path(&key, &id));
+    let jobs = render_jobs(shot.clone(), shot_width, shot_theme);
     let rendered = chrome::render_with(bin, &html, &jobs, own_theme).await;
     let (heights, console) = match &rendered {
         Ok(r) => (r.heights.clone(), r.console.clone()),
@@ -191,6 +197,28 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     }
     json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme},
         "message": MESSAGE, "browser": browser, "browser_reason": browser_reason}})
+}
+
+/// Largura e tema do print do rascunho: a coluna do desktop no escuro, ou o que o agente pedir para conferir a página
+/// no celular ou no tema claro. Só o rascunho tira print.
+fn draft_view(draft: bool, width: Option<i64>, theme: Option<&str>) -> Result<(u32, Theme), Value> {
+    if !draft && (width.is_some() || theme.is_some()) { return Err(fail("erro_pagina_invalida", "width e theme só valem com draft")); }
+    let width = match width {
+        None => SHOT_WIDTH,
+        Some(w) if (i64::from(DRAFT_WIDTH_MIN)..=i64::from(DRAFT_WIDTH_MAX)).contains(&w) => w as u32,
+        Some(_) => return Err(fail("erro_pagina_invalida", "width fica entre 240 e 1600")),
+    };
+    let theme = match theme {
+        None => Theme::Dark,
+        Some(t) => Theme::parse(t).ok_or_else(|| fail("erro_pagina_invalida", "theme é dark ou light"))?,
+    };
+    Ok((width, theme))
+}
+
+/// As larguras de coluna, medidas no escuro, e, no rascunho, o print na largura e no tema pedidos.
+fn render_jobs(draft_shot: Option<PathBuf>, width: u32, theme: Theme) -> Vec<Job> {
+    let measured = WIDTHS.iter().map(|w| Job { width: *w, theme: Theme::Dark, shot: None });
+    measured.chain(draft_shot.map(|path| Job { width, theme, shot: Some(Shot::draft(path)) })).collect()
 }
 
 /// Modo URL: só o endereço vai para o disco; sem medição nem print.
@@ -333,7 +361,7 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let Some(found) = found else { return expired(&headers) };
     let Some((html, own_theme, path, ready, bin)) = found else { return no_html(&headers) };
     if !ready {
-        if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(path.clone()) }], own_theme).await {
+        if let Err(e) = chrome::render_with(bin, &html, &[Job { width, theme, shot: Some(Shot::cache(path.clone())) }], own_theme).await {
             let mut r = json_reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_pagina_sem_imagem", "msg": e.reason()}}));
             cors(&headers, r.headers_mut());
             return r;
@@ -398,6 +426,45 @@ mod tests {
         // Link morto não: a casca abre só o que veio do próprio iframe, e só http(s).
         assert!(OPEN_LINK.contains("e.source===f.contentWindow") && OPEN_LINK.contains("/^https?:/i.test(d.params.url)"));
         assert!(OPEN_LINK.contains("window.open(d.params.url,\"_blank\",\"noopener\")"));
+    }
+
+    #[test]
+    fn draft_view_takes_width_and_theme() {
+        assert_eq!(draft_view(true, None, None).unwrap(), (728, Theme::Dark));
+        assert_eq!(draft_view(true, Some(390), Some("light")).unwrap(), (390, Theme::Light));
+        assert_eq!(draft_view(true, Some(240), None).unwrap().0, 240);
+        assert_eq!(draft_view(true, Some(1600), None).unwrap().0, 1600);
+        let code = |v: Value| v["error"]["code"].as_str().unwrap().to_owned();
+        for (w, t) in [(Some(239), None), (Some(1601), None), (Some(-1), None), (None, Some("sepia"))] {
+            assert_eq!(code(draft_view(true, w, t).unwrap_err()), "erro_pagina_invalida", "{w:?} {t:?}");
+        }
+        assert_eq!(code(draft_view(false, Some(390), None).unwrap_err()), "erro_pagina_invalida", "largura só vale no rascunho");
+        assert_eq!(code(draft_view(false, None, Some("light")).unwrap_err()), "erro_pagina_invalida", "tema só vale no rascunho");
+        assert!(draft_view(false, None, None).is_ok());
+    }
+
+    #[test]
+    fn render_jobs_measure_the_column_widths_and_shoot_the_asked_view() {
+        let jobs = render_jobs(Some(PathBuf::from("/x/s.png")), 390, Theme::Light);
+        let measured: Vec<_> = jobs.iter().filter(|j| j.shot.is_none()).map(|j| (j.width, j.theme)).collect();
+        assert_eq!(measured, WIDTHS.iter().map(|w| (*w, Theme::Dark)).collect::<Vec<_>>());
+        let shooting: Vec<_> = jobs.iter().filter_map(|j| j.shot.as_ref().map(|s| (j.width, j.theme, s.draft))).collect();
+        assert_eq!(shooting, vec![(390, Theme::Light, true)], "o print do rascunho é o do modelo");
+        assert!(render_jobs(None, 728, Theme::Dark).iter().all(|j| j.shot.is_none()));
+    }
+
+    /// O print do rascunho sai na largura e no tema pedidos, em densidade 1. `HANGAR_DRAFT_SHOT` guarda o PNG para ver.
+    #[tokio::test]
+    #[ignore = "sobe o Chrome da máquina"]
+    async fn draft_shot_follows_the_asked_width_and_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("s.png");
+        let html = theme::inject("<!doctype html><p>claro ou escuro</p><div style=\"background:var(--accent);height:40px\"></div>", true);
+        let r = chrome::render(&html, &render_jobs(Some(shot.clone()), 390, Theme::Light)).await.unwrap();
+        assert_eq!(image::image_dimensions(&shot).unwrap().0, 390, "densidade 1 na largura pedida");
+        assert!(!r.heights.contains_key(&390), "o print do rascunho não é medição de coluna");
+        let png = std::fs::read(&shot).unwrap();
+        if let Some(keep) = std::env::var_os("HANGAR_DRAFT_SHOT") { std::fs::write(keep, &png).unwrap(); }
     }
 
     #[test]

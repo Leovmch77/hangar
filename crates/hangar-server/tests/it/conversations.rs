@@ -102,18 +102,15 @@ async fn devices_share_one_internal_connection_and_late_one_gets_snapshot() {
     messages(&mut a, 1).await;
     wait_until(|| fake.side_conns() == 1).await;
 
-    // `stats` segue do Python; `state` de Claude com terminal é do `Monitor` do Rust.
+    // `stats` segue do Python; `state` de Claude com terminal é do `Monitor` do Rust, e a fila, do
+    // produtor do hub (testes em `side.rs`).
     let state = r#"{"turns":3}"#;
-    let queued = r#"{"kind":"user_msg","id":"queued-7","text":"na fila"}"#;
     fake.push_side("stats", state);
-    fake.push_side("message", queued);
     assert_eq!(next_named(&mut a, "stats").await.data, state);
-    assert_eq!(id_of(&next_named(&mut a, "message").await), "queued-7");
 
     let mut b = sse(open_events(srv, "s", "", &[]).await);
     assert_eq!(id_of(&messages(&mut b, 1).await[0]), "u0");
     assert_eq!(next_named(&mut b, "stats").await.data, state);
-    assert_eq!(id_of(&next_named(&mut b, "message").await), "queued-7");
 
     assert_eq!(fake.side_conns(), 1);
     assert_eq!(fake.side_apps(), vec!["1".to_string()]);

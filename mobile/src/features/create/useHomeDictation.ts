@@ -52,6 +52,7 @@ export function useHomeDictation(server: Server, onText: (text: string) => void)
   // Cancelar para o microfone e joga o áudio fora, sem transcrever nem guardar para "de novo".
   const discard = useRef(false);
   const { gravando, rms, iniciar, parar } = useDitado({
+    server,
     onFim: (file) => {
       if (discard.current) { discard.current = false; return; }
       void transcribe(file);

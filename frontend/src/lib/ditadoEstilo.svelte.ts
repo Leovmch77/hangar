@@ -1,6 +1,6 @@
 import { SvelteMap } from 'svelte/reactivity';
 import { getConfig, patchConfig, type EstiloDitado, ehEstilo, fetchDictationOrganization,
-  type DictationOrganization, type Server } from '@hangar/core';
+  dictationCeilingMs, type DictationOrganization, type Server } from '@hangar/core';
 
 // Estilo do ditado, vivendo perto do microfone e nao enterrado nas Configuracoes: a decisao "isto
 // aqui e um comando rapido" ou "isto e um pedido inteiro" muda ANTES de falar, e ninguem abre modal
@@ -14,6 +14,8 @@ import { getConfig, patchConfig, type EstiloDitado, ehEstilo, fetchDictationOrga
 const PADRAO: EstiloDitado = 'prosa';
 
 let atual = $state<EstiloDitado>(PADRAO);
+// Teto do ditado mãos livres; até a config chegar vale o padrão do core.
+let ceilingMs = dictationCeilingMs(undefined);
 let carregado = false;
 let carregando: Promise<void> | null = null;
 // Contador de ESCRITAS, mesmo padrão de geração do criarConfigServidor. Existe porque GET e PATCH
@@ -36,10 +38,21 @@ export const ditadoEstilo = {
    *  nao esta pronto simplesmente nao manda estilo — e o backend le a config, como sempre fez. */
   get pronto(): boolean { return carregado; },
 
+  get ceilingMs(): number { return ceilingMs; },
+
   /** Le do servidor DE NOVO, mesmo ja tendo lido. A pill mostrava valor velho por horas: o app le
    *  a config uma vez por carga de pagina, e uma troca feita noutra aba/aparelho nunca chegava —
    *  a tela dizia "So limpar" e o ditado voltava em briefing (visto ao vivo 21/08/2026). Chamado
    *  ao ABRIR o popover: e o instante em que a pessoa vai olhar a lista, e o custo e um GET. */
+  /** Relido a cada gravação: o teto pode ter mudado na tela de Voz. Falha mantém o último. */
+  async refreshCeiling(): Promise<void> {
+    try {
+      ceilingMs = dictationCeilingMs((await getConfig()).campos);
+    } catch {
+      // O ditado não espera a config.
+    }
+  },
+
   revalidar(): Promise<void> {
     carregado = false;
     return this.carregar();
@@ -63,6 +76,7 @@ export const ditadoEstilo = {
           // Só pinta se NENHUMA troca começou enquanto este GET estava em voo: o que ele traz é o
           // valor de antes dela, e o do usuário é mais novo que o do servidor lido.
           if (ehEstilo(v) && escritas === escritasNoInicio) atual = v;
+          ceilingMs = dictationCeilingMs(cfg.campos);
           carregado = true;
         })
         // Falha de leitura NAO pode travar o microfone: fica o padrao, e o proximo clique no chip
@@ -97,6 +111,7 @@ export const ditadoEstilo = {
    *  anterior e as corridas ficam impossíveis de montar. */
   _zerarParaTeste(): void {
     atual = PADRAO;
+    ceilingMs = dictationCeilingMs(undefined);
     carregado = false;
     carregando = null;
     escritas = 0;
