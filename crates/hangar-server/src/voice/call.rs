@@ -460,7 +460,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         if let Some(text) = ack.due(Instant::now(), last_user_voice) {
             if out.away { log("wait ack skipped: away"); } else { speak(&rpc, &thread, &mut out, text.to_owned(), "wait ack").await; }
         }
-        if let Some(((id, session), text)) = plan_gate.due(Instant::now()) {
+        if plan_call.is_none() && let Some(((id, session), text)) = plan_gate.due(Instant::now()) {
             log(format!("plan sent bytes={}", text.len()));
             let _ = events.send(VoiceEvent::SendPlan { session, text }).await;
             planner.sent();
@@ -712,6 +712,13 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 // máquina: nos dois casos o conteúdo vai junto.
                                 let away = target_cwd.is_none() || organizer::squash(&destination) != organizer::squash(&target);
                                 let text = finish_request(&path, action, away.then_some(content.as_str()));
+                                // Um plano por vez: o confirmado agora substitui o que ainda esperava, e esse recebe resposta.
+                                for ((old, _), _) in plan_gate.user_spoke() {
+                                    let _ = rpc.respond(old, tool_reply("Substituído por uma confirmação mais nova; este não foi enviado.", false)).await;
+                                }
+                                if let Some((old, _)) = plan_call.take() {
+                                    let _ = rpc.respond(old, tool_reply("O envio anterior do plano segue em curso; o resultado dele não será confirmado aqui.", true)).await;
+                                }
                                 match plan_gate.offer((id.clone(), destination.clone()), &destination, text, Instant::now()) {
                                     Ok(_) => "plan-held",
                                     Err(((id, _), why)) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-plan" }
@@ -812,6 +819,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             "refused-session-name"
                         }
                         ToolCall::SetMode(mode) => {
+                            for ((old, _), _) in plan_gate.user_spoke() {
+                                let _ = rpc.respond(old, tool_reply("O modo mudou antes do envio; o plano não foi enviado e continua guardado.", false)).await;
+                            }
                             let mut note = switch_mode(&mut planner, mode, &target, &mut gate, &rpc, events).await;
                             if let Some(warn) = apply_models(&rpc, &thread, &mut applied, &models, mode, &defaults, &mut effective, events).await { note = format!("{note} {warn}"); }
                             let _ = rpc.respond(id, tool_reply(note, true)).await;
