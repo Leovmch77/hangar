@@ -577,7 +577,7 @@ print(home + "\t" + achada)' "$configs" "$conta")
         exit 2
     fi
     # Os demais providers dependem de pane; parar antes do POST evita criação incoerente.
-    if [[ -n "$headless" && -n "$provider" && "$provider" != "claude" && "$provider" != "codex" ]]; then
+    if [[ "$headless" == "true" && -n "$provider" && "$provider" != "claude" && "$provider" != "codex" ]]; then
         echo "erro: --headless só vale com provider claude ou codex (veio: $provider)" >&2
         exit 2
     fi
