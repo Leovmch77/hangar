@@ -439,7 +439,7 @@ type UnknownKey = (String, String, String);
 static UNKNOWN_COUNTS: LazyLock<std::sync::Mutex<std::collections::HashMap<UnknownKey, usize>>> = LazyLock::new(Default::default);
 
 /// Mesmo lugar do `log_paths.base()` do Python: o log é do Hangar da máquina, não da conta.
-fn log_base() -> Option<std::path::PathBuf> {
+pub(crate) fn log_base() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         let root = std::env::var_os("LOCALAPPDATA").filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from)
             .or_else(|| std::env::home_dir().map(|home| home.join("AppData").join("Local")))?;

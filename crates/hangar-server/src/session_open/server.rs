@@ -149,10 +149,13 @@ impl OpenHost for ServerHost {
     }
 
     fn diary(&self, events: Vec<Value>) {
-        let host = ServerHost { st: self.st.clone(), env: self.env.clone(), terminal: self.terminal.clone(), mux: ProcessMux::default() };
-        tokio::spawn(async move {
-            if let Err(cause) = host.internal("/internal/diag/events", json!({"events": events})).await {
-                tracing::warn!(cause, "diário da criação não gravado");
+        let Some(dir) = crate::diag::diary_dir() else {
+            tracing::warn!("diário da criação sem pasta de logs; não gravado");
+            return;
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::diag::write_diary(&dir, &events, chrono::Local::now()) {
+                tracing::warn!(kind = ?error.kind(), "diário da criação não gravado");
             }
         });
     }

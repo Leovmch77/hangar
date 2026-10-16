@@ -29,20 +29,6 @@ def _post(path, body):
     return TestClient(api_mod.app, client=("127.0.0.1", 50000)).post(path, json=body, headers={"X-Hangar-Internal": SECRET})
 
 
-def test_the_open_diary_keeps_the_rust_events_in_order_and_refuses_others():
-    events = [{"evento": "sessao.criar.inicio", "nivel": "ok", "operacao": "ab"},
-              {"evento": "sessao.criar_recusada", "nivel": "erro", "sessao": "s1", "provider": "claude",
-               "etapa": "criar_terminal", "codigo": "terminal_morreu_ao_nascer", "detalhe": "exit 127", "operacao": "ab"},
-              {"evento": "sessao.criar.fim", "nivel": "erro", "codigo": "excecao", "ms": 12, "operacao": "ab"}]
-    with patch("app.internal_api.diag.registrar") as registrar:
-        assert _post("/internal/diag/events", {"events": events}).status_code == 200
-        assert _post("/internal/diag/events", {"events": [{"evento": "api.servidor", "nivel": "ok"}]}).status_code == 400
-        assert _post("/internal/diag/events", {"events": [{**events[0], "texto": "conversa"}]}).status_code == 400
-    calls = [c for c in registrar.call_args_list if c.args[0].startswith("sessao.")]
-    assert [c.args[:2] for c in calls] == [("sessao.criar.inicio", "ok"), ("sessao.criar_recusada", "erro"), ("sessao.criar.fim", "erro")]
-    assert calls[1].kwargs["detalhe"] == "exit 127"
-
-
 def test_release_and_born_touch_only_what_lives_here(monkeypatch):
     released = []
     monkeypatch.setattr(api_mod.registry, "release_name", released.append)

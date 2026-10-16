@@ -149,31 +149,6 @@ async def rust_diag(request: Request) -> dict:
     return {"ok": True}
 
 
-_OPEN_EVENTS = {"sessao.criar.inicio", "sessao.criar_etapa", "sessao.criada", "sessao.criar.fim", "sessao.criar_recusada"}
-_OPEN_FIELDS = {"evento", "nivel", "sessao", "provider", "etapa", "codigo", "detalhe", "ms", "erro_tipo", "operacao"}
-
-
-@router.post("/diag/events")
-async def open_diag(request: Request) -> dict:
-    """Os eventos de uma abertura que o Rust fez (`sessao.criar*`), na ordem; o arquivo é daqui."""
-    raw = await request.body()
-    try:
-        body = json.loads(raw) if len(raw) <= 65536 else None
-        events = body.get("events") if isinstance(body, dict) else None
-        if (not isinstance(events, list) or len(events) > 32 or not all(
-                isinstance(e, dict) and set(e) <= _OPEN_FIELDS and e.get("evento") in _OPEN_EVENTS
-                and e.get("nivel") in ("ok", "aviso", "erro")
-                and all(isinstance(v, (str, int)) and not isinstance(v, bool) and len(str(v)) <= 300 for v in e.values())
-                for e in events)):
-            raise ValueError("eventos inválidos")
-    except (ValueError, RecursionError):
-        raise HTTPException(400) from None
-    for e in events:
-        fields = dict(e)
-        diag.registrar(fields.pop("evento"), fields.pop("nivel"), **fields)
-    return {"ok": True}
-
-
 @router.post("/sessions/{name}/release")
 async def session_release(name: str) -> dict:
     """Nome reusado por uma sessão que o Rust abre: a fila, o `then` e os caches daqui não passam à
