@@ -147,6 +147,8 @@ impl Switcher {
         let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
         match outcome {
             Outcome::Switched { label,explicit } => {
+                // Na conta nova o limite é outro, mesmo com o mesmo reset arredondado.
+                if let Ok(mut handled) = self.handled.lock() { handled.remove(&hit.name); }
                 tracing::info!(session=%hit.name,window=%hit.limit.window,to=%label,explicit,"limite de uso: sessão reaberta em outra conta");
                 report("switched","limite de uso: a sessão reabriu na conta de mais folga e recebeu o recado para continuar");
                 // O limite vence a conta escolhida pela pessoa, e isso fica registrado.
@@ -361,6 +363,17 @@ mod tests {
         Switcher::default().handle(&fake,hit(2000.0)).await;
         assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}")]);
         assert_eq!(fake.diary(),vec!["switched"]);
+    }
+
+    #[tokio::test]
+    async fn the_new_account_hitting_a_limit_with_the_same_reset_switches_again() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit(2000.0)).await;
+        // O reset é arredondado: a conta nova bate o limite dela com o mesmo `resetsAt`.
+        switcher.handle(&fake,hit(2000.0)).await;
+        let reopens:Vec<String> = fake.log().into_iter().filter(|line|line.starts_with("reopen")).collect();
+        assert_eq!(reopens,vec!["reopen /c","reopen /b"]);
     }
 
     #[tokio::test]
