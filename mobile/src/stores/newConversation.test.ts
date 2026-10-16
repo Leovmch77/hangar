@@ -198,6 +198,19 @@ describe('newConversation', () => {
     expect(attempt()?.body.name).toBe(name);
   });
 
+  it('409 erro_nome_em_uso é recusa definitiva: volta ao rascunho e nunca recupera a sessão antiga pelo nome', async () => {
+    calls.create.mockRejectedValue(Object.assign(httpError(409, 'já existe uma sessão com esse nome'), { code: 'erro_nome_em_uso' }));
+    await beginAttempt('server-a', input);
+    expect(attempt()).toMatchObject({ phase: 'draft', text: 'oi' });
+    expect(issue()).toEqual({ kind: 'rejected', message: 'já existe uma sessão com esse nome' });
+
+    const name = attempt()!.body.name;
+    calls.sessions.mockResolvedValue([{ name, cwd: '/repo/mobile', provider: 'codex', state: 'idle' }]);
+    await recoverAttempt('server-a');
+    expect(issue()?.kind).toBe('rejected');
+    expect(adoptCandidate('server-a', attempt()!.id)).toBe(false);
+  });
+
   it('nome explícito é gravado antes do POST e não ganha sufixo nem troca após conflito', async () => {
     const create = deferred<SessionInfo>();
     calls.create.mockReturnValue(create.promise);

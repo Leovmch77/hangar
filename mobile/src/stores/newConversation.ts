@@ -189,8 +189,11 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     session = await createSessionForServer(server, creating.body);
   } catch (cause) {
     const status = statusOf(cause);
-    // 4xx definitivo não criou nada; 409, 408, 5xx e rede podem ter criado.
-    const rejected = status !== null && status >= 400 && status < 500 && status !== 408 && status !== 409;
+    // 4xx definitivo não criou nada; 409, 408, 5xx e rede podem ter criado. Nome em uso é recusa:
+    // a sessão com esse nome é outra, e recuperá-la pelo nome mandaria a mensagem para a conversa errada.
+    const nameInUse = (cause as { code?: unknown } | null)?.code === 'erro_nome_em_uso';
+    const rejected = nameInUse
+      || (status !== null && status >= 400 && status < 500 && status !== 408 && status !== 409);
     if (!apply(creating, { type: rejected ? 'create_rejected' : 'create_unknown' })) return;
     setIssue(serverId, rejected
       ? { kind: 'rejected', message: messageOf(cause) }
