@@ -160,7 +160,7 @@ Python desse caminho em vez de portar os quatro serviços soltos.
 - `GET /commands` do Claude (leitura): implementado em `commands/`, com sonda compartilhada,
   cache, embutidos, scans, lista da sessão sem terminal e filtro em processo. O contexto do
   terminal vem da descoberta e do ambiente do agente no Rust. Saíram o compositor Python e a
-  operação `hidden` da ponte; o modo `python` responde 503. Contrato interno 72. A migração
+  operação `hidden` da ponte; o modo `python` responde 503. Contrato interno 73. A migração
   conserva o limite anterior do filtro: ele decide "plugin ligado" pelas camadas de
   `settings*.json`, sem as configurações gerenciadas nem os plugins passados por flag.
   Contrato e provas em [catálogo de comandos e reload-plugins](../../decisoes/harnesses.md#catálogo-de-comandos-e-reload-plugins).

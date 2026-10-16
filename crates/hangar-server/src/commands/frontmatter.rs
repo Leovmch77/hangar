@@ -22,6 +22,7 @@ struct Document {
     nodes: Vec<Node>,
     values: Vec<Option<Value>>,
     pending: VecDeque<usize>,
+    mapping_work_left: usize,
 }
 
 pub(super) fn parse(yaml: &str) -> Option<Value> {
@@ -95,6 +96,8 @@ fn document(yaml: &str) -> Option<(Document, usize)> {
             nodes,
             values,
             pending: VecDeque::new(),
+            // Aliases podem repetir o mesmo mapa exponencialmente durante os merges.
+            mapping_work_left: 1_000_000,
         },
         root?,
     ))
@@ -216,6 +219,7 @@ impl Document {
         let mut path = HashSet::new();
         let mut result = Vec::new();
         while let Some(action) = actions.pop() {
+            self.mapping_work_left = self.mapping_work_left.checked_sub(1)?;
             match action {
                 Action::Leave(id) => {
                     path.remove(&id);
@@ -436,4 +440,26 @@ fn timestamp(text: &str) -> Option<()> {
         return None;
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn yaml_merge_expansion_is_bounded_and_preserves_normal_precedence() {
+        let merged = |levels| {
+            let mut yaml = String::from("base: &a0 {description: herdada}\n");
+            for level in 1..=levels {
+                let previous = level - 1;
+                yaml.push_str(&format!(
+                    "map{level}: &a{level} {{<<: [*a{previous}, *a{previous}]}}\n"
+                ));
+            }
+            yaml.push_str(&format!("<<: *a{levels}\ndescription: própria\n"));
+            yaml
+        };
+        assert_eq!(parse(&merged(4)).unwrap()["description"], "própria");
+        assert!(parse(&merged(24)).is_none());
+    }
 }
