@@ -921,6 +921,98 @@ fn the_claude_pane_is_the_one_python_launched() {
     assert_eq!(compared, 26);
 }
 
+/// Pi, omp e Kimi que o Python lançou: o pane do `agents::pane` sobre o spec dá o mesmo `-e` e o
+/// mesmo comando, menos o S-63 e a chave. S-58/S-73: o `env CP_PI_SESSION=… OMP_PROFILE=…` do
+/// comando do omp vira `-e`, e o Pi ganha o `CP_PI_SESSION` que não tinha.
+#[test]
+fn the_pi_omp_and_kimi_panes_are_the_ones_python_launched() {
+    let stamp = Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_").unwrap();
+    let mut compared = 0;
+    for (name, fixture) in create_fixtures() {
+        let Some(tmux) = fixture["result"]["subprocesses"].as_array().into_iter().flatten()
+            .find(|p| p["prog"] == "tmux" && p["argv"][0] == "new-session") else { continue };
+        let python: Vec<String> = tmux["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
+        let Some(agent) = ["pi", "omp", "kimi"].into_iter().find(|p| python.contains(&format!("CP_PROVIDER={p}"))) else { continue };
+        let mut spec = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("{name}: {e}")).spec;
+        // A pasta do Pi é a do caminho absoluto: a raiz do cenário vira `/r`.
+        spec.cwd = spec.cwd.replace("<ROOT>", "/r");
+        let runtime = fixture["scenario"]["state"]["files"]["<ROOT>/home/.claude/runtime-config.json"].clone();
+        let ctx = agents::AgentContext { home: std::path::Path::new("/r/home"), server_env: &Default::default(), runtime_config: &runtime,
+            read_only: None, windows: false };
+        let pane = agents::pane(&spec, agents::Conversation::New("<uuid:1>"), &ctx).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &pane);
+        let (mut env, mut words) = launched_pane(&python);
+        let at = words.iter().position(|w| w == agent).unwrap();
+        let first = (0..at).rev().take_while(|&i| words[i].contains('=')).last().unwrap_or(at);
+        let moved: Vec<String> = words.drain(first..at).collect();
+        if !moved.is_empty() { assert_eq!(words.remove(first - 1), "env", "{name}"); }
+        env.extend(moved.iter().filter_map(|w| w.split_once('=')).map(|(k, v)| (k.to_owned(), v.to_owned())));
+        if agent == "pi" { env.push(("CP_PI_SESSION".into(), "<uuid:1>".into())); }
+        let (our_env, _) = launched_pane(&ours);
+        let our_words: Vec<String> = shell_words(&terminal::tests::undo_not_inherited(ours.last().unwrap())).into_iter()
+            .map(|w| stamp.replace(&w.replace("/--r-", "/-<ROOT_SANITIZED>-").replace("/r/", "<ROOT>/"), "<iso-file>_").into_owned()).collect();
+        assert_eq!(our_env, env, "{name}: -e");
+        assert_eq!(our_words, words, "{name}: comando");
+        compared += 1;
+    }
+    assert_eq!(compared, 6);
+}
+
+/// Retomar com o verbo de cada agente (test_omp_adapter, test_pi_registry, `registry.create`): Pi pelo
+/// mesmo `--session-id`, omp pelo caminho (`-r`), Kimi por `--session <session_…>`; id torto recusado.
+#[test]
+fn pi_omp_and_kimi_resume_with_their_own_verb() {
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+    let home = tempfile::tempdir().unwrap();
+    let base = resolve_fixture(&create_fixtures().into_iter().find(|(n, _)| n == "create_pi_terminal").unwrap().1).unwrap().spec;
+    let runtime = json!({});
+    let ctx = agents::AgentContext { home: home.path(), server_env: &Default::default(), runtime_config: &runtime, read_only: None, windows: false };
+    let command = |spec: &SessionSpec, conversation| agents::pane(spec, conversation, &ctx).map(|p| (p.command, p.env));
+    let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let (pi, env) = command(&base, agents::Conversation::Resume(ID)).unwrap();
+    assert_eq!(pi, words(&["pi", "--session-id", ID, "--model", "anthropic/claude-sonnet-4", "--thinking", "low"]));
+    assert!(env.contains(&("CP_PI_SESSION".into(), ID.into())));
+    assert_eq!(command(&base, agents::Conversation::Resume("x; rm -rf /")).unwrap_err().msg, "session_id invalido");
+
+    let omp = SessionSpec { provider: AgentProvider::Omp, cwd: "/w".into(), model: None, effort: None,
+        account: Account::Omp { profile: "trabalho".into(), config_dir: None }, ..base.clone() };
+    let dir = home.path().join(".omp/profiles/trabalho/agent/sessions/--w--");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("2026-09-06T15-51-00-640Z_{ID}.jsonl"));
+    std::fs::write(&file, "").unwrap();
+    let (resumed, env) = command(&omp, agents::Conversation::Resume(ID)).unwrap();
+    assert_eq!(resumed, words(&["omp", "-r", &file.to_string_lossy()]));
+    assert!(env.contains(&("CP_PI_SESSION".into(), ID.into())) && env.contains(&("OMP_PROFILE".into(), "trabalho".into())));
+    let bare = SessionSpec { account: Account::Default, ..omp.clone() };
+    assert_eq!(command(&bare, agents::Conversation::Resume(ID)).unwrap_err().msg, "transcript do omp nao encontrado para retomar");
+    // O omp grava o principal em `sessions/-/`: o mesmo nome em outra pasta da raiz também vale.
+    let elsewhere = home.path().join(".omp/agent/sessions/-");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join(format!("2026-09-07T10-00-00-000Z_{ID}.jsonl")), "").unwrap();
+    assert_eq!(command(&bare, agents::Conversation::Resume(ID)).unwrap().0[2], elsewhere.join(format!("2026-09-07T10-00-00-000Z_{ID}.jsonl")).to_string_lossy());
+
+    let kimi = SessionSpec { provider: AgentProvider::Kimi, model: Some("kimi-k3".into()), effort: None, ..base };
+    let (new, env) = command(&kimi, agents::Conversation::New(ID)).unwrap();
+    assert_eq!(new, words(&["kimi", "--model", "kimi-k3"]));
+    assert!(!env.iter().any(|(k, _)| k == "CP_PI_SESSION"), "o Kimi não aceita id escolhido");
+    let sid = format!("session_{ID}");
+    assert_eq!(command(&kimi, agents::Conversation::Resume(&sid)).unwrap().0, words(&["kimi", "--session", &sid, "--model", "kimi-k3"]));
+    assert_eq!(command(&kimi, agents::Conversation::Resume(ID)).unwrap_err().msg, "session_id invalido");
+}
+
+/// `kimi_sessions.pretrust_cwd` (test_kimi_sessions::test_pretrust_writes_workspace_trust_once): grava
+/// `{root, trustedAt}` na chave do CLI uma vez; já confiada não reescreve.
+#[test]
+fn the_kimi_folder_is_pretrusted_once() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("workspace-trust").join(crate::list::discover_other::kimi_workdir_key("/w/proj"));
+    agents::kimi_pretrust(home.path(), "/w/proj", 1000);
+    agents::kimi_pretrust(home.path(), "/w/proj", 2000);
+    let written: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written, json!({"root": "/w/proj", "trustedAt": 1000}));
+}
+
 /// `_pretrust_cwd` e `default_model.drop_foreign` (test_registry, test_default_model): a pasta
 /// confiada no arquivo, já confiada sem reescrever; modelo de motor fora dos dois `settings.json`.
 #[test]

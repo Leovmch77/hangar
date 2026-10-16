@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 
+use super::agents::{self, Conversation};
 use super::claude::{self, PluginBridge};
-use super::terminal::{self, Mux, TerminalEnv};
-use super::{Account, OpenCaller, OpenError, Resolved, SessionSpec};
+use super::terminal::{self, Mux, PaneSpec, TerminalEnv};
+use super::{Account, AgentProvider, OpenCaller, OpenError, Resolved, SessionSpec};
 
 /// Saída de um programa que a abertura roda (`hangar-conta`, a sonda do `bwrap`).
 #[derive(Clone, Debug, Default)]
@@ -19,7 +20,7 @@ pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr
 
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
-pub struct Born { pub name: String, pub jsonl: String, pub remember_provider: bool }
+pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool }
 
 pub trait OpenHost: Send + Sync {
     /// A pasta pessoal do dono (registros, `~/.claude.json`, `~/.hangar`).
@@ -57,20 +58,20 @@ pub fn uuid4(hex: &str) -> String {
 }
 
 /// Os eventos do diário de uma criação, na ordem do `registry.create` (`@diag.rastrear`).
-struct Diary { events: Vec<Value>, op: String, started: Instant, name: String }
+struct Diary { events: Vec<Value>, op: String, started: Instant, name: String, provider: &'static str }
 
 impl Diary {
-    fn new(op: String, name: &str) -> Self {
-        Self { events: vec![json!({"evento": "sessao.criar.inicio", "nivel": "ok", "operacao": op})], op, started: Instant::now(), name: name.into() }
+    fn new(op: String, name: &str, provider: &'static str) -> Self {
+        Self { events: vec![json!({"evento": "sessao.criar.inicio", "nivel": "ok", "operacao": op})], op, started: Instant::now(), name: name.into(), provider }
     }
     fn session(&self) -> Value { if self.name.is_empty() { Value::Null } else { Value::from(self.name.clone()) } }
     fn step(&mut self, etapa: &str) {
-        let mut e = json!({"evento": "sessao.criar_etapa", "nivel": "ok", "sessao": self.session(), "provider": "claude", "etapa": etapa, "operacao": self.op});
+        let mut e = json!({"evento": "sessao.criar_etapa", "nivel": "ok", "sessao": self.session(), "provider": self.provider, "etapa": etapa, "operacao": self.op});
         if e["sessao"].is_null() { e.as_object_mut().unwrap().remove("sessao"); }
         self.events.push(e);
     }
     fn refused(&mut self, level: &str, code: &str, etapa: Option<&str>, detail: Option<&str>) {
-        let mut e = json!({"evento": "sessao.criar_recusada", "nivel": level, "sessao": self.session(), "provider": "claude", "operacao": self.op});
+        let mut e = json!({"evento": "sessao.criar_recusada", "nivel": level, "sessao": self.session(), "provider": self.provider, "operacao": self.op});
         match (etapa, detail) {
             // S-15: falha de lançamento leva a etapa, o código e o stderr resumido.
             (Some(etapa), detail) => { e["etapa"] = etapa.into(); e["codigo"] = code.into(); e["detalhe"] = detail.unwrap_or("").into(); }
@@ -91,11 +92,13 @@ impl Diary {
 
 /// Recusas que o Python dava dentro do `registry.create` (depois do `sessao.criar.inicio`): o
 /// diário as registra igual. As de antes (validação da API) não deixam evento de criação.
-pub fn refusal_diary(op: String, name: &str, error: &OpenError) -> Option<Vec<Value>> {
+pub fn refusal_diary(op: String, name: &str, provider: &'static str, error: &OpenError) -> Option<Vec<Value>> {
     let in_use = error.code == Some("erro_nome_em_uso");
     let invalid = error.code == Some("erro_criacao_sessao") && error.msg.starts_with("nome invalido");
-    if !(in_use || invalid) { return None; }
-    let mut diary = Diary::new(op, if invalid { "" } else { name });
+    let agent = error.code == Some("erro_criacao_sessao")
+        && ["sessao sem terminal so vale para provider claude ou codex", "Nome de perfil OMP inválido"].contains(&error.msg.as_str());
+    if !(in_use || invalid || agent) { return None; }
+    let mut diary = Diary::new(op, if invalid { "" } else { name }, provider);
     diary.step("validar");
     if in_use { diary.refused("aviso", "nome_ja_em_uso", None, None); }
     Some(diary.end(Some(error)))
@@ -246,16 +249,16 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
     }
 }
 
-/// O corpo de `CreatedSessionInfo` de uma sessão Claude com terminal que acabou de nascer.
-fn created_body(spec: &SessionSpec, jsonl: &str, warnings: Vec<String>, route: Option<&claude::EngineRoute>) -> Value {
+/// O corpo de `CreatedSessionInfo` de uma sessão com terminal que acabou de nascer.
+fn created_body(spec: &SessionSpec, jsonl: Option<&str>, warnings: Vec<String>, route: Option<&claude::EngineRoute>) -> Value {
     let engine = match &spec.account { Account::Engine { name, .. } => Value::from(name.clone()), _ => Value::Null };
     // Worktree ligada: o `.git` dela é arquivo. A branch que já era a da pasta fica na pasta.
     let linked = spec.worktree.is_some() && Path::new(&spec.cwd).join(".git").is_file();
     let head = json!({
         "name": spec.name, "lifecycle_id": null, "transfer_id": null, "transfer_phase": null, "cwd": spec.cwd,
-        "jsonl": jsonl, "provider": "claude", "headless": false, "engine": engine, "engine_account": route.map(|r| r.account.clone()),
+        "jsonl": jsonl, "provider": spec.provider.name(), "headless": false, "engine": engine, "engine_account": route.map(|r| r.account.clone()),
         "codex_home": null, "codex_service_tier": null, "conta": route.map(|r| r.credential_id.clone()), "state": "idle", "last_activity": null,
-        "last_reply": null, "last_reply_at": null, "tracked": true,
+        "last_reply": null, "last_reply_at": null, "tracked": jsonl.is_some(),
         "branch": spec.worktree.as_ref().map(|w| w.branch.clone()),
         "worktree": linked,
         "worktree_path": linked.then(|| spec.cwd.clone()),
@@ -295,14 +298,22 @@ impl WorktreeUndo {
 /// desfaz se o registro falhar).
 pub struct Opened { pub body: Value, pub undo: Option<WorktreeUndo>, pub key: String }
 
-/// Abre a sessão Claude com terminal do spec resolvido.
-pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
+/// O provedor pedido, para o diário das recusas de antes da resolução.
+pub fn requested_provider(request: &super::SessionOpenRequest) -> &'static str {
+    request.provider.as_deref().and_then(AgentProvider::parse).map_or("claude", AgentProvider::name)
+}
+
+/// O que esta abertura atende: sessão com terminal de todo provedor menos o Codex.
+pub fn opens_here(spec: &SessionSpec) -> bool { spec.surface == super::Surface::Terminal && spec.provider != AgentProvider::Codex }
+
+/// Abre a sessão com terminal do spec resolvido (Claude, Pi, omp e Kimi).
+pub async fn open_terminal(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
     let Resolved { mut spec, mut warnings, initial_prompt, remember_provider } = resolved;
     let _claim = NameClaim::take(host.home(), &spec.name)?;
     let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let engine = matches!(spec.account, Account::Engine { .. });
     // CRI-025: modelo de motor deixado no `settings.json` faria a sessão Anthropic nascer nele.
-    if !engine { warnings.extend(claude::drop_foreign_model(host.home(), spec.account.config_dir())); }
+    if !engine && spec.provider == AgentProvider::Claude { warnings.extend(claude::drop_foreign_model(host.home(), spec.account.config_dir())); }
     let mut undo = None;
     if let Some(wt) = spec.worktree.clone() {
         let root = allowed_root(host, caller, &spec.cwd, &runtime)?;
@@ -320,7 +331,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, &runtime).await {
-        Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo, key: spec.key.clone() }),
+        Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, jsonl.as_deref(), warnings, route.as_ref()), undo, key: spec.key.clone() }),
         // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
         Err(error) => {
             if let Some(undo) = undo && error.code != Some(UNCERTAIN) { undo.undo().await?; }
@@ -330,7 +341,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
 }
 
 async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
-                remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+                remember_provider: bool, runtime: &Value) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref()).await?) } else { None };
     // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
@@ -341,11 +352,17 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     let key = crate::accounts::AccountKey::new(crate::accounts::Provider::Claude, &account_home)
         .map_err(|e| creation(format!("conta inválida: {e}")))?;
     let hangar_account = config_dir.as_deref().filter(|dir| claude::hangar_account(Path::new(dir)).is_some());
-    let _guard = locks.acquire(&key, crate::accounts::GuardMode::Shared, Instant::now() + Duration::from_secs(5)).await
-        .map_err(|e| match e {
-            crate::accounts::LockError::Busy => OpenError::new(409, "account_busy", "a conta está ocupada por outra operação"),
-            crate::accounts::LockError::Io(e) => creation(format!("trava da conta: {e}")),
-        })?;
+    // O Kimi não lê a conta Claude: nem trava nem reconciliação.
+    let reads_account = spec.provider != AgentProvider::Kimi;
+    let hangar_account = hangar_account.filter(|_| reads_account);
+    let _guard = match reads_account {
+        true => Some(locks.acquire(&key, crate::accounts::GuardMode::Shared, Instant::now() + Duration::from_secs(5)).await
+            .map_err(|e| match e {
+                crate::accounts::LockError::Busy => OpenError::new(409, "account_busy", "a conta está ocupada por outra operação"),
+                crate::accounts::LockError::Io(e) => creation(format!("trava da conta: {e}")),
+            })?),
+        false => None,
+    };
     // A conta do Hangar se reconcilia antes de abrir; os avisos dela vêm antes dos da abertura.
     let mut avisos = Vec::new();
     if let Some(dir) = hangar_account {
@@ -358,7 +375,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     }
     avisos.extend(warnings);
     progress_step(&spec.name, "criando", json!({}));
-    let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name);
+    let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
     let result = terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await;
     let events = diary.end(result.as_ref().err());
     host.diary(events);
@@ -367,22 +384,9 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     Ok((jsonl, avisos, route))
 }
 
-/// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
-async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
-                       remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
-    diary.step("validar");
-    // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
-    match terminal::presence(host.mux(), host.terminal(), &spec.name).await {
-        (terminal::Presence::Absent, _) => {}
-        (terminal::Presence::Present, _) => {
-            diary.refused("aviso", "nome_ja_em_uso", None, None);
-            return Err(name_in_use());
-        }
-        (terminal::Presence::Unknown, stderr) => return Err(mux_unavailable(&stderr)),
-    }
-    host.leave_old_group(&spec.name).await?;
-    diary.step("preparar_comando");
-    let sid = host.new_session_id();
+/// O pane do Claude, o transcript da conversa nova e a rota da conta ChatGPT fixa do motor.
+async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_only: Option<&[String]>, initial_prompt: Option<&str>,
+                     runtime: &Value) -> Result<(PaneSpec, String, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let effective_dir = config_dir.clone().or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).cloned())
         .unwrap_or_else(|| host.home().join(".claude").to_string_lossy().into_owned());
@@ -409,10 +413,61 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     let key = host.new_bridge_key();
     let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: bridge.as_ref(), bridge_key: &key, runtime_config: runtime,
         server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref() };
-    let pane = claude::pane(spec, &sid, &ctx);
-    let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
+    let pane = claude::pane(spec, sid, &ctx);
+    let jsonl = claude::transcript(spec, sid, &host.server_projects()).to_string_lossy().into_owned();
+    Ok((pane, jsonl, route))
+}
+
+/// `hangar-skills-sync`: a skill instalada no Claude vale já nesta sessão de Pi, omp ou Kimi. Nunca
+/// impede a abertura.
+async fn sync_skills(host: &dyn OpenHost) {
+    let out = host.run(vec!["hangar-skills-sync".into()], Duration::from_secs(30)).await;
+    if out.code != Some(0) {
+        tracing::warn!(code = ?out.code, stderr = %out.stderr.trim(), "ponte de skills não refeita antes de abrir a sessão");
+    }
+}
+
+/// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
+async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
+                       remember_provider: bool, runtime: &Value) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+    diary.step("validar");
+    let claude = spec.provider == AgentProvider::Claude;
+    if !claude { sync_skills(host).await; }
+    // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
+    match terminal::presence(host.mux(), host.terminal(), &spec.name).await {
+        (terminal::Presence::Absent, _) => {}
+        (terminal::Presence::Present, _) => {
+            diary.refused("aviso", "nome_ja_em_uso", None, None);
+            return Err(name_in_use());
+        }
+        (terminal::Presence::Unknown, stderr) => return Err(mux_unavailable(&stderr)),
+    }
+    host.leave_old_group(&spec.name).await?;
+    diary.step("preparar_comando");
+    let sid = host.new_session_id();
+    let mut warnings = Vec::new();
+    let (pane, jsonl, route) = if claude {
+        let (pane, jsonl, route) = claude_plan(host, spec, &sid, read_only, initial_prompt, runtime).await?;
+        (pane, Some(jsonl), route)
+    } else {
+        let ctx = agents::AgentContext { home: host.home(), server_env: host.env(), runtime_config: runtime, read_only,
+            windows: host.terminal().windows };
+        if initial_prompt.is_some_and(|p| !p.is_empty()) {
+            warnings.push(format!("O prompt inicial não vai no comando do {}: mande-o como a primeira mensagem.", spec.provider.name()));
+        }
+        // O transcript nasce no 1º turno, num layout próprio: nada a semear.
+        (agents::pane(spec, Conversation::New(&sid), &ctx)?, None, None)
+    };
     diary.step("confiar_pasta");
-    claude::pretrust(&claude::claude_json(host.terminal(), host.home(), config_dir.as_deref()), &spec.cwd, host.terminal().windows);
+    match spec.provider {
+        AgentProvider::Claude => claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd,
+            host.terminal().windows),
+        AgentProvider::Kimi => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            agents::kimi_pretrust(&agents::kimi_home(host.home(), host.env()), &spec.cwd, now);
+        }
+        _ => {}
+    }
     diary.step("criar_terminal");
     host.release_name(&spec.name).await?;
     // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
@@ -434,9 +489,9 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         }));
     }
     diary.step("limpar_estado_anterior");
-    let born = Born { name: spec.name.clone(), jsonl: jsonl.clone(), remember_provider };
-    let warnings = host.born(&born).await;
-    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": "claude",
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider };
+    warnings.extend(host.born(&born).await);
+    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));
     Ok((jsonl, warnings, route))
 }

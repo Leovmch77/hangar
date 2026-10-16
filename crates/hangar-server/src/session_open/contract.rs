@@ -204,6 +204,10 @@ impl OpenHost for Host {
     fn born<'a>(&'a self, born: &'a Born) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
             self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "share", "op": "session_died", "args": {"name": born.name}}));
+            if born.remember_provider {
+                let base = crate::accounts::environment::AccountEnvironment::from_map(self.env.clone()).claude_base;
+                super::server::remember_provider(&base, born.provider.name()).expect("provedor lembrado");
+            }
             Vec::new()
         })
     }
@@ -233,7 +237,9 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     for step in substituted["steps"].as_array().into_iter().flatten() {
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
         let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
-        if request.provider.as_deref().is_some_and(|p| p != "claude") || request.headless == Some(true) { return json!({"not_ours": true}); }
+        if request.provider.as_deref() == Some("codex") || (request.headless == Some(true) && !matches!(request.provider.as_deref(), Some("pi" | "omp" | "kimi"))) {
+            return json!({"not_ours": true});
+        }
         let runtime = tokio::runtime::Handle::current();
         let (facts_env, facts_root, facts_record, quotas) = (env.clone(), root.to_owned(), record.clone(),
             fakes["quotas"].as_array().cloned().unwrap_or_default());
@@ -245,14 +251,13 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
             super::resolve_open(&request_for_facts, &OpenCaller::Owner, &Facts { local, quotas, record: facts_record })
         }).await.unwrap();
         let (status, body) = match resolved {
-            Ok(resolved) if resolved.spec.provider != super::AgentProvider::Claude || resolved.spec.surface != super::Surface::Terminal =>
-                return json!({"not_ours": true}),
-            Ok(resolved) => match super::open::open_claude_terminal(&host, resolved, &OpenCaller::Owner).await {
+            Ok(resolved) if !super::open::opens_here(&resolved.spec) => return json!({"not_ours": true}),
+            Ok(resolved) => match super::open::open_terminal(&host, resolved, &OpenCaller::Owner).await {
                 Ok(opened) => (200, opened.body),
                 Err(error) => (error.status, error.body()),
             },
             Err(error) => {
-                if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, &error) { host.diary(events); }
+                if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, super::open::requested_provider(&request), &error) { host.diary(events); }
                 (error.status, error.body())
             }
         };

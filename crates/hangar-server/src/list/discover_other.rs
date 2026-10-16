@@ -249,7 +249,7 @@ fn omp_agent_dir(profile: Option<&str>, dirs: &Dirs) -> PathBuf {
 }
 
 /// Pasta das sessões Pi de um cwd: só separador vira `-` (`getDefaultSessionDirPath` do Pi).
-fn pi_cwd_slug(cwd: &str) -> String {
+pub(crate) fn pi_cwd_slug(cwd: &str) -> String {
     let resolved = absolute(cwd);
     let trimmed = resolved.strip_prefix(['/', '\\']).unwrap_or(&resolved);
     format!("--{}--", trimmed.replace(['/', '\\', ':'], "-"))

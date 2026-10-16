@@ -605,14 +605,22 @@ def _rule_only_python(expected: dict, raw: dict, scenario: dict) -> None:
         for e in side.get("diary", []):
             if e.get("evento") == "sessao.criar.fim":
                 e.pop("erro_tipo", None)
+                e.pop("causa_tipo", None)
     return None
 
 
+# Recusas que o Python dava dentro do `registry.create`, com a trava da conta já tomada; o Rust as dá
+# na resolução.
+_REFUSED_BEFORE_LOCK = ("sessao sem terminal so vale para provider claude ou codex", "Nome de perfil OMP inválido")
+
+
 def _rule_name_before_lock(expected: dict, raw: dict, scenario: dict) -> bool | None:
-    """Ordem: o nome inválido ou em uso é recusado antes de tocar a conta; o Python já tinha
-    tomado a trava dela e deixava o arquivo de trava vazio."""
+    """Ordem: o nome inválido ou em uso (e o que o Python recusava dentro do `registry.create`) é
+    recusado antes de tocar a conta; o Python já tinha tomado a trava dela e deixava o arquivo vazio."""
     detail = (raw.get("steps") or [{}])[0].get("body", {}).get("detail")
-    refused = isinstance(detail, dict) and (detail.get("code") == "erro_nome_em_uso" or str(detail.get("msg", "")).startswith("nome invalido"))
+    msg = str(detail.get("msg", "")) if isinstance(detail, dict) else ""
+    refused = isinstance(detail, dict) and (detail.get("code") == "erro_nome_em_uso" or msg.startswith("nome invalido")
+                                            or msg in _REFUSED_BEFORE_LOCK)
     if not refused:
         return None
     locks = [p for p in expected.get("records", {}) if "/home/.hangar/account-locks/" in p]
@@ -637,10 +645,63 @@ def _rule_s40(expected: dict, raw: dict, scenario: dict) -> bool | None:
     return found
 
 
+def _created_agent(raw: dict) -> list[tuple[dict, str]]:
+    """Os `new-session` de Pi, omp e Kimi, com o provedor."""
+    out = []
+    for p in _new_sessions(raw):
+        provider = next((a.split("=", 1)[1] for a in p["argv"] if a.startswith("CP_PROVIDER=")), None)
+        if provider in ("pi", "omp", "kimi"):
+            out.append((p, provider))
+    return out
+
+
+def _rule_skills_sync(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """Matriz, item 16: Pi, omp e Kimi abrem com as skills sincronizadas (`hangar-skills-sync`); o
+    Python refazia a ponte no próprio processo, e o omp ficava de fora."""
+    synced = [p for p in raw.get("subprocesses", []) if p.get("prog") == "hangar-skills-sync"]
+    raw["subprocesses"] = [p for p in raw.get("subprocesses", []) if p.get("prog") != "hangar-skills-sync"]
+    return bool(synced) if _created_agent(raw) else None
+
+
+def _rule_pi_session_env(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """S-58/S-73: `CP_PI_SESSION` (Pi e omp) e `OMP_PROFILE` vão por `-e`, também no Windows e no Pi
+    aberto pelo app; o Python punha `env CP_PI_SESSION=… OMP_PROFILE=…` no comando do omp."""
+    created = [(p, prov) for p, prov in _created_agent(raw) if prov in ("pi", "omp")]
+    found = True
+    for p, provider in created:
+        argv, kept, moved = p["argv"], [], []
+        i = 0
+        while i < len(argv):
+            if argv[i] == "-e" and i + 1 < len(argv) and argv[i + 1].split("=", 1)[0] in ("CP_PI_SESSION", "OMP_PROFILE"):
+                moved.append(argv[i + 1])
+                i += 2
+                continue
+            kept.append(argv[i])
+            i += 1
+        sid = next((m.split("=", 1)[1] for m in moved if m.startswith("CP_PI_SESSION=")), None)
+        command = kept[-1]
+        found = found and bool(sid) and (f"--session-id {sid}" in command or f"_{sid}.jsonl" in command)
+        if provider == "omp" and moved:
+            words = command.split(" ")
+            at = words.index("omp")
+            command = " ".join(words[:at] + ["env", *moved] + words[at:])
+        kept[-1] = command
+        p["argv"] = kept
+        name = argv[argv.index("-s") + 1]
+        session = raw.get("tmux_sessions", {}).get(name)
+        if session:
+            session["command"] = command
+            for m in moved:
+                session.get("env", {}).pop(m.split("=", 1)[0], None)
+    return found if created else None
+
+
 RUST_DIFFERENCES = (
     ("S-40", _rule_s40),
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
+    ("S-58/S-73 (CP_PI_SESSION e OMP_PROFILE por -e)", _rule_pi_session_env),
+    ("matriz item 16 (skills sincronizadas)", _rule_skills_sync),
     ("matriz item 2 (CP_SESSION_KEY)", _rule_session_key),
     ("variáveis de tela (display_env)", _rule_display_env),
     ("registro do spec (Task 3)", _rule_spec_record),

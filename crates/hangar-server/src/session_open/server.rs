@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use super::claude::PluginBridge;
 use super::open::{Born, OpenHost, ProgramOutput};
 use super::terminal::{Mux, ProcessMux, TerminalEnv};
-use super::{AgentProvider, OpenCaller, OpenError, SessionOpenRequest, Surface};
+use super::{OpenCaller, OpenError, SessionOpenRequest};
 use crate::accounts::environment::AccountEnvironment;
 use crate::routes::AppState;
 
@@ -268,11 +268,11 @@ impl OpenHost for ServerHost {
             if let Some(share) = &self.st.share {
                 crate::share::pair_routes::session_died(self.st.clone(), share.clone(), Arc::new(crate::share::pair_routes::Direct), &born.name).await;
             }
-            self.st.list.seed(&born.name, &born.jsonl);
+            if let Some(jsonl) = &born.jsonl { self.st.list.seed(&born.name, jsonl); }
             self.st.list.invalidate();
             if !born.remember_provider { return Vec::new(); }
-            let base = self.env.claude_base.clone();
-            match tokio::task::spawn_blocking(move || remember_provider(&base, "claude")).await {
+            let (base, provider) = (self.env.claude_base.clone(), born.provider.name());
+            match tokio::task::spawn_blocking(move || remember_provider(&base, provider)).await {
                 Ok(Ok(())) => Vec::new(),
                 Ok(Err(error)) => vec![format!("A sessão foi criada, mas não consegui lembrar o provedor: {error}")],
                 Err(error) => vec![format!("A sessão foi criada, mas não consegui lembrar o provedor: {error}")],
@@ -298,7 +298,12 @@ impl OpenHost for ServerHost {
 
 /// Pedido que a decisão do Rust nem olha: provedor ou modo explícitos que não são do Rust ainda.
 fn explicitly_other(request: &SessionOpenRequest) -> bool {
-    request.provider.as_deref().is_some_and(|p| p != "claude") || request.headless == Some(true)
+    match request.provider.as_deref() {
+        Some("codex") => true,
+        // Pi, omp e Kimi sem terminal: a recusa é da resolução.
+        Some("pi" | "omp" | "kimi") => false,
+        _ => request.headless == Some(true),
+    }
 }
 
 pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
@@ -334,12 +339,12 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(error) => {
-            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, &error) { host.diary(events); }
+            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, super::open::requested_provider(&request), &error) { host.diary(events); }
             return Decision::Refused(error);
         }
     };
-    if resolved.spec.provider != AgentProvider::Claude || resolved.spec.surface != Surface::Terminal { return Decision::NotOurs; }
-    match super::open::open_claude_terminal(&host, resolved, &caller).await {
+    if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
+    match super::open::open_terminal(&host, resolved, &caller).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
     }

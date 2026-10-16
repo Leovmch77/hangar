@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::session_open::claude::PluginBridge;
 use hangar_server::session_open::local::{LocalHost, dotenv};
-use hangar_server::session_open::open::open_claude_terminal;
-use hangar_server::session_open::{AgentProvider, OpenCaller, OpenError, SessionOpenRequest, Surface, facts::LocalFacts, resolve_open};
+use hangar_server::session_open::open::{open_terminal, opens_here};
+use hangar_server::session_open::{OpenCaller, OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -85,14 +85,13 @@ fn main() -> ExitCode {
         Ok(resolved) => resolved,
         Err(error) => return refused(&error),
     };
-    let claude_terminal = resolved.spec.provider == AgentProvider::Claude && resolved.spec.surface == Surface::Terminal;
-    if command == "open" && claude_terminal {
+    if command == "open" && opens_here(&resolved.spec) {
         // A mesma abertura do servidor (D-013): token e porta do `.env` dele, para a ponte do plugin
         // valer quando ele voltar.
         let bridge = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty())
             .map(|token| PluginBridge { port: server.get("CP_PORT").and_then(|p| p.parse().ok()).unwrap_or(8765), secret: token.clone() });
         let host = LocalHost::new(server_env(std::env::vars(), &server), bridge);
-        return match runtime.block_on(open_claude_terminal(&host, resolved, &OpenCaller::Owner)) {
+        return match runtime.block_on(open_terminal(&host, resolved, &OpenCaller::Owner)) {
             Ok(opened) => {
                 println!("{}", opened.body);
                 ExitCode::SUCCESS
