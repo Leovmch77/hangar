@@ -123,6 +123,7 @@ def _ambiente(tmp_path, cwd):
         "CP_PORT": "0",
     })
     env.pop("CP_SESSION_NAME", None)
+    env.pop("CP_SESSION_KEY", None)
     (tmp_path / "home").mkdir()
     return env
 
@@ -279,6 +280,52 @@ def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     # nao fica para tras.
     assert _espera(lambda: not pid_vivo(meta["app_pid"])), "o app-server sobreviveu ao lancador"
     assert not _sidecar(env, "sess").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_sessao_nova_grava_a_chave_do_spec_que_o_pane_recebeu(tmp_path):
+    # O Rust cria o pane com a chave do spec: sem ela no sidecar a adoção sorteia outra e o registro
+    # da sessão (indexado pela chave) fica sem dono.
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["CP_SESSION_KEY"] = "a" * 32
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd)],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(_sidecar(env, "sess").exists), "o sidecar nunca apareceu"
+        meta = json.loads(_sidecar(env, "sess").read_text())
+    finally:
+        proc.wait(timeout=20)
+    assert meta.get("key") == "a" * 32
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_encerrar_a_sessao_nao_conta_como_queda_do_app_server(tmp_path):
+    # S-24: fechar o terminal derruba app-server e TUI quase juntos; o servidor saindo primeiro não é
+    # queda (nem aviso, nem ressubida).
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "20"
+    tui_pid_file = tmp_path / "tui.pid"
+    env["FAKE_TUI_PID"] = str(tui_pid_file)
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd)],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: tui_pid_file.exists() and tui_pid_file.read_text().strip()), "a TUI não subiu"
+        assert _espera(_sidecar(env, "sess").exists), "o sidecar nunca apareceu"
+        meta = json.loads(_sidecar(env, "sess").read_text())
+        os.kill(meta["app_pid"], signal.SIGTERM)
+        time.sleep(0.7)
+        os.kill(int(tui_pid_file.read_text()), signal.SIGTERM)
+        _, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert "o app-server saiu com codigo" not in stderr
+    assert "ressubido" not in stderr
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
