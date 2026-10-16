@@ -723,12 +723,14 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           const toSend = composeWithContextRefs(sentRefs, typed);
           if (!toSend) return;
           limparUndo();
+          setSending(true);
           void sendText(toSend, revision)
             .then(() => { removeSentContextRefs(refsKey, sentRefs); setError(''); setBar(null); })
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
               setError(msg);
-            });
+            })
+            .finally(() => setSending(false));
           return;
         }
         setAutoN(Math.ceil(rest / 1000));
