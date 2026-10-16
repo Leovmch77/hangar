@@ -28,6 +28,21 @@
     },
     "android": {
       "package": "com.hangar.mobile",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": false,
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [
+            {
+              "scheme": "https",
+              "host": "*.ts.net",
+              "port": "8443",
+              "pathPrefix": "/convite/"
+            }
+          ]
+        }
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#141617",
         "foregroundImage": "./assets/android-icon-foreground.png",
