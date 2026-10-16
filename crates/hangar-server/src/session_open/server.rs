@@ -337,6 +337,14 @@ impl OpenHost for ServerHost {
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
 
+    fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>> {
+        Box::pin(async move {
+            let produced = self.st.list.snapshot().await.map_err(|e| OpenError::new(503, "erro_lista_indisponivel",
+                "a lista de sessões está indisponível").with_params(json!({"detalhe": e.code})))?;
+            Ok(produced.rows.iter().filter_map(|row| Some((row.name.clone(), row.jsonl.clone()?))).collect())
+        })
+    }
+
     fn wake(&self, name: &str) {
         let Some(runtime) = self.st.state.runtime.get().cloned() else {
             tracing::warn!(session = %name, "sem o registro do runtime: a sessão sem terminal sobe no primeiro envio");
@@ -513,4 +521,51 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Decision::Refused(error) => reply(&error),
         Decision::NotOurs => StatusCode::MISDIRECTED_REQUEST.into_response(),
     }
+}
+
+/// `POST /api/archive/{project}/{session_id}/resume`: a conversa do Arquivo volta numa sessão nova, pela
+/// resolução da criação (S-08). Dono pela porta pública ou pelo repasse do Python (Connect).
+pub async fn serve_archive_resume(st: &Arc<AppState>, project: &str, sid: &str, bytes: &[u8]) -> Response {
+    let body = match super::archive::ArchiveBody::parse(bytes) {
+        Ok(body) => body,
+        Err(error) => return reply(&error),
+    };
+    let st = st.clone();
+    let (project, sid) = (project.to_owned(), sid.to_owned());
+    // Tarefa própria: cliente que desconecta não deixa a conversa movida de conta sem a sessão.
+    let answer = tokio::spawn(async move {
+        let host = ServerHost::new(st.clone()).await;
+        let live = host.live_sessions().await?;
+        let (env, runtime, server_projects) = (host.env.clone(), tokio::runtime::Handle::current(), host.server_projects());
+        let (p, s) = (project.clone(), sid.clone());
+        let planned = tokio::task::spawn_blocking(move || {
+            let facts = super::facts::LocalFacts::new(env.clone(), runtime);
+            let config_dirs = super::OpenFacts::config_dirs(&facts)?;
+            let w = super::archive::Where { home: &env.home, env: &env.base, server_projects: &server_projects, config_dirs: &config_dirs, live: &live };
+            let plan = super::archive::plan(&w, &facts, &p, &s, body)?;
+            let resolved = super::resolve_open(&plan.request, &OpenCaller::Owner, &facts)?;
+            Ok::<_, OpenError>((plan, resolved))
+        }).await.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a resolução da retomada não terminou")));
+        let (plan, resolved) = planned?;
+        let _progress = super::open::Progress::track(&resolved.spec.name);
+        super::archive::open(&host, plan, resolved, &project, &sid).await
+    }).await.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a retomada não terminou")));
+    match answer {
+        Ok(body) => crate::session_write::json_response(StatusCode::OK, body),
+        Err(error) => reply(&error),
+    }
+}
+
+/// A rota pública do Arquivo: só o dono; o resto segue ao Python, que recusa.
+pub async fn archive_resume(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+                            axum::extract::Path((project, sid)): axum::extract::Path<(String, String)>, req: Request) -> Response {
+    let (fwd, owner) = crate::routes::gate(&st, peer, &req);
+    if !owner { return crate::routes::pass(&st, req, &fwd).await; }
+    let headers = req.headers().clone();
+    let Ok(bytes) = to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else {
+        return crate::session_write::too_large(&headers);
+    };
+    let mut response = serve_archive_resume(&st, &project, &sid, &bytes).await;
+    crate::routes::cors(&headers, response.headers_mut());
+    response
 }

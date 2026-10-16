@@ -490,6 +490,8 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         .route("/api/sessions/creation-progress", get(crate::session_open::server::creation_progress).fallback(pass_any))
         // Bastão do dono: o Python prepara o dossiê e a sucessora Claude com terminal nasce aqui.
         .route("/api/sessions/{name}/bastao", axum::routing::post(crate::session_open::server::bastao).fallback(pass_any))
+        // Retomar do Arquivo e o `/resume` ao vivo: a abertura e a reabertura do Rust, com a conversa que já existe.
+        .route("/api/archive/{project}/{session_id}/resume", axum::routing::post(crate::session_open::server::archive_resume).fallback(pass_any))
         // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.
         .route("/api/broadcast", axum::routing::post(crate::session_write::input::broadcast).fallback(pass_any))
         .route("/api/sessions/{name}/permission-modes", get(crate::session_write::permissions::modes).fallback(pass_any))

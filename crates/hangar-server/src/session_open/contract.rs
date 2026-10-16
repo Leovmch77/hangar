@@ -255,6 +255,19 @@ impl OpenHost for Host {
     fn wake(&self, name: &str) {
         self.record.lock().unwrap().runtime_requests.push(json!({"op": "claude_headless.acordar", "name": name}));
     }
+    /// O transcript que a lista do Python dava aos panes Claude do cenário: o id do comando, na conta do pane.
+    fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>> {
+        Box::pin(async move {
+            let sessions = self.mux.sessions.lock().unwrap().clone();
+            Ok(sessions.into_iter().filter_map(|(name, s)| {
+                let words: Vec<&str> = s["command"].as_str()?.split_whitespace().collect();
+                let sid = words.windows(2).find(|w| matches!(w[0], "--session-id" | "--resume")).map(|w| w[1])?;
+                let config = s["env"]["CLAUDE_CONFIG_DIR"].as_str().map_or_else(|| self.home.join(".claude"), PathBuf::from);
+                let project = hangar_workspace::worktrees::sanitize_cwd(s["cwd"].as_str()?);
+                Some((name, config.join("projects").join(project).join(format!("{sid}.jsonl")).to_string_lossy().into_owned()))
+            }).collect())
+        })
+    }
 }
 
 /// Roda os passos do cenário (só `POST /api/sessions`) pela abertura do Rust. `{"not_ours": true}`
@@ -275,6 +288,37 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
         fakes: fakes.clone(), record: record.clone() };
     let mut steps = Vec::new();
     for step in substituted["steps"].as_array().into_iter().flatten() {
+        let path = step["path"].as_str().unwrap_or_default().to_owned();
+        let archive = path.strip_prefix("/api/archive/").and_then(|r| r.strip_suffix("/resume")).and_then(|r| r.split_once('/'))
+            .map(|(p, s)| (p.to_owned(), s.to_owned()));
+        if let (true, Some((project, sid))) = (step["method"] == "POST", archive) {
+            let live = host.live_sessions().await.unwrap_or_default();
+            let (facts_env, facts_root, facts_record, quotas, facts_fakes) = (env.clone(), root.to_owned(), record.clone(),
+                fakes["quotas"].as_array().cloned().unwrap_or_default(), fakes.clone());
+            let (runtime, server_projects, home) = (tokio::runtime::Handle::current(), host.server_projects(), home.clone());
+            let body = if step["json"].is_null() { String::new() } else { step["json"].to_string() };
+            let (p, s) = (project.clone(), sid.clone());
+            let planned = tokio::task::spawn_blocking(move || {
+                let local = super::facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(facts_env.clone()), runtime)
+                    .with_terminal(crate::list::mux::Mux::with_program(facts_root.join("bin/tmux"), Duration::from_secs(2)),
+                        std::sync::Arc::new(crate::list::procs::ProcFs::with_root(proc_root(&facts_root))));
+                let facts = Facts { local, quotas, fakes: facts_fakes, record: facts_record };
+                let config_dirs = facts.config_dirs()?;
+                let w = super::archive::Where { home: &home, env: &facts_env, server_projects: &server_projects, config_dirs: &config_dirs, live: &live };
+                let plan = super::archive::plan(&w, &facts, &p, &s, super::archive::ArchiveBody::parse(body.as_bytes())?)?;
+                let resolved = super::resolve_open(&plan.request, &OpenCaller::Owner, &facts)?;
+                Ok::<_, OpenError>((plan, resolved))
+            }).await.unwrap();
+            let (status, body) = match planned {
+                Ok((plan, resolved)) => match super::archive::open(&host, plan, resolved, &project, &sid).await {
+                    Ok(body) => (200, body),
+                    Err(error) => (error.status, error.body()),
+                },
+                Err(error) => (error.status, error.body()),
+            };
+            steps.push(json!({"method": "POST", "path": path, "status": status, "body": body}));
+            continue;
+        }
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
         let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
         let runtime = tokio::runtime::Handle::current();

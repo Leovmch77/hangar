@@ -85,4 +85,8 @@ impl OpenHost for LocalHost {
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
     // O comando local só abre sessão com terminal.
     fn wake(&self, _name: &str) {}
+    // Sem o servidor não há lista: o comando local não retoma conversa.
+    fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>> {
+        Box::pin(async { Err(OpenError::new(503, "erro_lista_indisponivel", "retomar conversa precisa do servidor no ar")) })
+    }
 }

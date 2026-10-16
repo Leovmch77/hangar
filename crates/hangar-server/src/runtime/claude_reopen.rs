@@ -151,7 +151,7 @@ fn legacy_terminal_spec(target:&TerminalTarget,name:&str,cwd:String) -> Result<(
         permission_mode:flag("--permission-mode").as_deref().and_then(PermissionMode::claude),
         subagent_model:if engine {None} else {env("CLAUDE_CODE_SUBAGENT_MODEL")},customizations:None,
         jev:env("HANGAR_JEV").as_deref()==Some("on"),read_only:env("HANGAR_ORQ_READ_ONLY").as_deref()==Some("1"),
-        worktree:None,creator:None,created_at:target.created };
+        worktree:None,creator:None,created_at:target.created,conversation:Some(target.binding.conversation.clone()) };
     Ok((spec,settings))
 }
 
