@@ -6,6 +6,17 @@ use std::path::{Path, PathBuf};
 
 /// Só as vozes que o realtime v3 aceita; as outras derrubam a chamada.
 pub const VOICES: [&str; 9] = ["arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"];
+/// As 16 vozes que o Codex 0.163.0 juntou à v3: sem a lista dele, salvar uma delas não é recusado.
+pub const V3_ADDED: [&str; 16] = ["aube", "bubbie", "haetsal", "hanul", "himari", "leher", "miko", "neer", "porto", "rindo", "rio",
+    "rivage", "selva", "sonna", "tinta", "viola"];
+
+/// Salvar recusa a voz: fora da lista do Codex quando ela foi lida (`codex`), ou, sem ela, fora das vozes v3 conhecidas.
+pub fn voice_refused(codex: Option<&[String]>, voice: &str) -> bool {
+    match codex {
+        Some(list) => !list.iter().any(|v| v == voice),
+        None => !VOICES.contains(&voice) && !V3_ADDED.contains(&voice),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PairDto { #[serde(default)] pub model: Option<String>, #[serde(default = "default_effort")] pub effort: String, #[serde(default)] pub tier: Option<String> }
@@ -103,6 +114,15 @@ pub fn write_settings(home: &Path, s: &VoiceSettings) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saving_refuses_by_the_codex_list_and_without_it_by_the_known_v3_voices() {
+        let codex = vec!["sol".to_owned()];
+        assert!(voice_refused(Some(&codex), "aube"), "a lista do Codex manda: um Codex antigo não tem a aube");
+        assert!(!voice_refused(Some(&codex), "sol"));
+        assert!(!voice_refused(None, "aube") && !voice_refused(None, "sol"), "sem a lista, as v3 conhecidas passam");
+        assert!(voice_refused(None, "alloy"), "voz da v2 nunca serve à v3");
+    }
+
     use super::*;
 
     #[test]

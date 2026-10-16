@@ -133,7 +133,11 @@ for n, line in enumerate(sys.stdin, 2):
 
 #[tokio::test]
 async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both() {
-    let public = TcpListener::bind("[::1]:0").await.unwrap();
+    let public = match TcpListener::bind("[::1]:0").await {
+        // A porta pública continua num endereço específico quando o host não tem loopback IPv6.
+        Err(error) if error.kind()==std::io::ErrorKind::AddrNotAvailable=>TcpListener::bind("127.0.0.2:0").await.unwrap(),
+        result=>result.unwrap(),
+    };
     let public_addr = public.local_addr().unwrap();
     let cfg = Config { listen: public_addr, upstream: "127.0.0.1:1".parse().unwrap(),
         internal_secret: "internal".into(), auth_token: "owner".into(), log_path: None,
@@ -214,6 +218,6 @@ async fn removed_pure_reduce_rpc_is_rejected() {
         "plugin_question":null,"plugin_state":null,"hook_state":null,"hook_grace":8,"status_line":null}});
     let r = reqwest::Client::new().post(url).header("x-hangar-internal", "internal").body(body.to_string()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 71);
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 72);
     task.abort();
 }

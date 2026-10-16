@@ -33,7 +33,7 @@ async fn health_answers_without_token_and_with_cors() {
     assert!(terminal.starts_with("127.0.0.1:"), "{terminal}");
     // Grupos: o Python só passa a pedir ao Rust quando a saúde diz que ele os atende.
     assert!(v["groups"].is_boolean(), "{v}");
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 71);
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 72);
 }
 
 #[tokio::test]
@@ -315,83 +315,146 @@ async fn pooled_connection_is_dropped_before_uvicorn_closes_it() {
     assert_eq!(accepted.load(Ordering::SeqCst), before + 1, "ociosa além do prazo, abre outra");
 }
 
-/// Upstream que escreve o corpo em muitos pedaços pequenos, como o uvicorn faz com resposta
-/// grande ou em streaming (o asyncio liga TCP_NODELAY, então cada pedaço sai na hora).
-async fn spawn_chunked_upstream(pieces: usize, size: usize) -> std::net::SocketAddr {
+/// A primeira parte só libera o restante por sinal, mantendo os dois sockets do repasse vivos.
+async fn spawn_chunked_upstream(
+    pieces: usize,
+    size: usize,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<std::net::SocketAddr>,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let up = listener.local_addr().unwrap();
+    let (connected, peer) = tokio::sync::mpsc::channel(1);
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let released = release.clone();
     tokio::spawn(async move {
         loop {
-            let (mut s, _) = listener.accept().await.unwrap();
-            s.set_nodelay(true).unwrap();
+            let (mut stream, peer) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+            let connected = connected.clone();
+            let release = released.clone();
             tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let Ok(n) = s.read(&mut chunk).await else { return };
-                    if n == 0 {
+                let mut head = Vec::new();
+                let mut byte = [0; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if stream.read_exact(&mut byte).await.is_err() {
                         return;
                     }
-                    buf.extend_from_slice(&chunk[..n]);
-                    while let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        buf.drain(..i + 4);
-                        let head = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
-                        if s.write_all(head).await.is_err() {
-                            return;
-                        }
-                        let mut piece = format!("{size:x}\r\n").into_bytes();
-                        piece.extend(std::iter::repeat_n(b'x', size));
-                        piece.extend_from_slice(b"\r\n");
-                        for _ in 0..pieces {
-                            if s.write_all(&piece).await.is_err() {
-                                return;
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                        if s.write_all(b"0\r\n\r\n").await.is_err() {
-                            return;
-                        }
-                    }
+                    head.push(byte[0]);
                 }
+                // As tarefas auxiliares do servidor podem consultar fatos antes da prova.
+                if !head.starts_with(b"GET /x ") {
+                    let _=stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
+                connected.send(peer).await.unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut piece = format!("{size:x}\r\n").into_bytes();
+                piece.extend(std::iter::repeat_n(b'x', size));
+                piece.extend_from_slice(b"\r\n");
+                stream.write_all(&piece).await.unwrap();
+                release.notified().await;
+                for _ in 1..pieces {
+                    stream.write_all(&piece).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+                stream.write_all(b"0\r\n\r\n").await.unwrap();
             });
         }
     });
-    up
+    (up, peer, release)
 }
 
-/// Mediana de 5 pedidos, cada um numa conexão nova lida como o curl lê (buffer grande até o
-/// fim do chunked), em ms.
-async fn median_ms(addr: std::net::SocketAddr) -> f64 {
-    let mut times = Vec::new();
-    for _ in 0..5 {
-        let t = std::time::Instant::now();
-        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        s.set_nodelay(true).unwrap();
-        s.write_all(format!("GET /x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer {OWNER}\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        let mut got = Vec::new();
-        let mut buf = vec![0u8; 102_400];
-        while !got.ends_with(b"0\r\n\r\n") {
-            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
-            assert!(n > 0, "conexão fechou antes do fim");
-            got.extend_from_slice(&buf[..n]);
+async fn chunk(reader: &mut tokio::io::BufReader<tokio::net::TcpStream>) -> Option<Vec<u8>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let size = usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap();
+    let mut bytes = vec![0; size];
+    reader.read_exact(&mut bytes).await.unwrap();
+    let mut end = [0; 2];
+    reader.read_exact(&mut end).await.unwrap();
+    assert_eq!(&end, b"\r\n");
+    (size > 0).then_some(bytes)
+}
+
+/// Duplica só a referência ao socket: a conexão sinalizada continua aberta e impede reuso da tupla.
+#[cfg(target_os = "linux")]
+fn live_socket(local: std::net::SocketAddr, peer: std::net::SocketAddr) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+        let entry = entry.unwrap();
+        let Some(fd) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // O descritor pode ser de outro teste ou fechar durante a enumeração; só a duplicata é nossa.
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            continue;
         }
-        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
+        let socket = socket2::SockRef::from(&owned);
+        if socket.local_addr().ok().and_then(|a| a.as_socket()) == Some(local)
+            && socket.peer_addr().ok().and_then(|a| a.as_socket()) == Some(peer)
+        {
+            return owned;
+        }
     }
-    times.sort_by(f64::total_cmp);
-    times[2]
+    panic!("socket da prova não encontrado: {local} -> {peer}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_chunked_body_is_not_held_by_nagle() {
-    // Sem TCP_NODELAY o pedaço pequeno do fim espera o ACK atrasado do cliente a cada resposta.
-    // Essa espera é o ACK atrasado inteiro (40 ms); com a CPU disputada do runner, o repasse em debug
-    // chega a 20 ms sem ela. O limite fica entre os dois.
+    use tokio::io::AsyncBufReadExt;
     let (pieces, size) = (300, 1000);
-    let up = spawn_chunked_upstream(pieces, size).await;
-    let srv = spawn_server(config(up, "127.0.0.1")).await;
-    let direct = median_ms(up).await;
-    let proxied = median_ms(srv).await;
-    assert!(proxied < direct + 30.0, "repasse {proxied:.1} ms contra {direct:.1} ms direto");
+    let (up, mut peers, release) = spawn_chunked_upstream(pieces, size).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut state = hangar_server::routes::AppState::new(config(up, "127.0.0.1"));
+    state.origins_home = home.path().into();
+    let srv = spawn_state(state).await;
+    tokio::time::timeout(Duration::from_secs(5),async {
+        let mut stream=tokio::net::TcpStream::connect(srv).await.unwrap();
+        stream.set_nodelay(true).unwrap();
+        #[cfg(target_os="linux")]
+        let client=stream.local_addr().unwrap();
+        stream.write_all(format!("GET /x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer {OWNER}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut reader=tokio::io::BufReader::new(stream);
+        let mut head=String::new();
+        loop {
+            let mut line=String::new(); reader.read_line(&mut line).await.unwrap();
+            assert!(!line.is_empty(),"resposta fechou antes do cabeçalho");
+            head.push_str(&line); if line=="\r\n" {break;}
+        }
+        assert!(head.starts_with("HTTP/1.1 200"));
+        assert!(head.to_ascii_lowercase().contains("transfer-encoding: chunked"));
+        let mut body=chunk(&mut reader).await.unwrap();
+        assert_eq!(body,vec![b'x';size]);
+        let upstream_peer=peers.recv().await.unwrap();
+        // A mesma pausa que invalidava a mediana não muda a configuração nem o conteúdo entregue.
+        std::thread::sleep(Duration::from_millis(80));
+        // A inspeção de sockets do processo usa /proc no Linux; o contrato HTTP completo roda também no Windows.
+        #[cfg(target_os="linux")]
+        for (label,local,peer) in [("porta pública",srv,client),("conector ao upstream",upstream_peer,up)] {
+            let owned=live_socket(local,peer); let socket=socket2::SockRef::from(&owned);
+            assert!(socket.tcp_nodelay().unwrap(),"TCP_NODELAY desligado: {label}");
+            // Controle negativo: a sonda detecta Nagle no mesmo socket, sem modificar outra conexão.
+            socket.set_tcp_nodelay(false).unwrap();
+            assert!(!socket.tcp_nodelay().unwrap(),"controle negativo: {label}");
+            socket.set_tcp_nodelay(true).unwrap();
+        }
+        #[cfg(not(target_os="linux"))]
+        let _=upstream_peer;
+        release.notify_one();
+        while let Some(bytes)=chunk(&mut reader).await {body.extend(bytes);}
+        assert_eq!(body,vec![b'x';pieces*size]);
+    }).await.expect("repasse chunked não concluiu a prova em 5 s");
 }

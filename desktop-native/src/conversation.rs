@@ -41,6 +41,17 @@ impl Item {
 
 const GROUP_MIN: usize = 3;
 
+fn hidden_message(event: &ChatEvent) -> bool {
+    let text = event.text.as_deref().or(event.result.as_deref()).unwrap_or("");
+    match event.kind.as_str() {
+        "assistant_msg" => text.trim().is_empty() && event.tool_input.is_none() && event.orq.is_none()
+            && event.image_count.unwrap_or(0) == 0 && event.is_error != Some(true),
+        "user_msg" => crate::cards::peer_message(text).is_some_and(|peer|
+            peer.scope == crate::cards::PeerScope::Panel && peer.from.eq_ignore_ascii_case("revisão do PR")),
+        _ => false,
+    }
+}
+
 fn tool_key(event: &ChatEvent) -> Option<&str> {
     event.tool_use_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
 }
@@ -142,7 +153,9 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
             continue;
         }
         flush_run(&mut run, &mut items);
-        items.push(if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) });
+        if !hidden_message(event) {
+            items.push(if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) });
+        }
     }
     flush_run(&mut run, &mut items);
     flush_thinking(&mut thinking, &mut items);
@@ -211,6 +224,17 @@ pub struct AgentRun {
     pub subagent_type: Option<String>, pub model: Option<String>, pub prompt: Option<String>, pub running: bool,
     /// O `agentId` que o resultado do Agent traz: o nome do arquivo do subagente no disco.
     pub agent_id: Option<String>,
+    pub started_at: Option<f64>,
+    pub finished_at: Option<f64>,
+}
+
+impl AgentRun {
+    pub fn elapsed(&self, now: f64) -> Option<std::time::Duration> {
+        let start = self.started_at.filter(|at| at.is_finite() && *at > 0.)?;
+        let end = if self.running { now } else { self.finished_at? };
+        if !end.is_finite() { return None; }
+        std::time::Duration::try_from_secs_f64((end - start).max(0.)).ok()
+    }
 }
 
 /// Bash com `run_in_background: true`: o comando cru e o rótulo sem o encanamento.
@@ -274,14 +298,23 @@ fn wakes(input: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
     !shutdown && (to == key || key.strip_prefix("teammate:").is_some_and(|name| to == "*" || name == to))
 }
 
+fn record_completion<K: Eq + std::hash::Hash>(map: &mut HashMap<K, Option<f64>>, key: K, at: Option<f64>) -> bool {
+    use std::collections::hash_map::Entry;
+    match map.entry(key) {
+        Entry::Vacant(entry) => { entry.insert(at); true }
+        Entry::Occupied(mut entry) if entry.get().is_none() && at.is_some() => { entry.insert(at); true }
+        Entry::Occupied(_) => false,
+    }
+}
+
 /// Agentes e shells de fundo, dobrados dos eventos como o `createActivityFolder` do web. Refeito a cada troca do
 /// conjunto de eventos, então `/clear` e histórico novo não carregam nada do anterior.
 pub fn fold_activity(events: &[ChatEvent]) -> Activity {
-    let mut resulted: HashSet<&str> = HashSet::new();
+    let mut resulted: HashMap<&str, Option<f64>> = HashMap::new();
     // Id do trabalho em segundo plano (agentId, id do shell) -> tool_use_id do lançamento.
     let mut background: HashMap<String, &str> = HashMap::new();
     // Fim que chegou antes do lançamento: o par fecha quando ele aparecer.
-    let mut finished_early: HashSet<String> = HashSet::new();
+    let mut finished_early: HashMap<String, Option<f64>> = HashMap::new();
     // Bash de fundo esperando a resposta de lançamento; outro resultado com a mesma frase não conta.
     let mut shell_pending: HashSet<&str> = HashSet::new();
     // Colega de equipe -> hora do último SendMessage para ele; aviso de ocioso anterior chegou atrasado.
@@ -295,8 +328,8 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
     // Tarefas pelo número sequencial do TaskCreate; o `bool` marca a apagada. A lista do último TodoWrite vence.
     let mut created: Vec<(ActivityTask, bool)> = Vec::new();
     let mut whole: Option<Vec<(ActivityTask, bool)>> = None;
-    fn finish<'a>(id: String, background: &HashMap<String, &'a str>, resulted: &mut HashSet<&'a str>, early: &mut HashSet<String>) {
-        match background.get(&id) { Some(&call) => { resulted.insert(call); } None => { early.insert(id); } }
+    fn finish<'a>(id: String, at: Option<f64>, background: &HashMap<String, &'a str>, resulted: &mut HashMap<&'a str, Option<f64>>, early: &mut HashMap<String, Option<f64>>) {
+        match background.get(&id) { Some(&call) => { record_completion(resulted, call, at); } None => { record_completion(early, id, at); } }
     }
     for (i, event) in events.iter().enumerate() {
         match event.kind.as_str() {
@@ -313,7 +346,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                 }
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { continue; }
-                    finish(task.to_owned(), &background, &mut resulted, &mut finished_early);
+                    finish(task.to_owned(), event.ts, &background, &mut resulted, &mut finished_early);
                     continue;
                 }
                 let text = event.result.as_deref().unwrap_or("");
@@ -325,7 +358,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                     if let Some(agent) = shown_agent_id(launched, text) { agent_ids.insert(id, agent); }
                     if text_launch || launched.is_some() {
                         if let Some(agent) = launched {
-                            if finished_early.remove(agent) { resulted.insert(id); }
+                            if let Some(at) = finished_early.remove(agent) { record_completion(&mut resulted, id, at); }
                             background.insert(agent.to_owned(), id);
                         }
                         continue;
@@ -333,19 +366,19 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                 }
                 if shell_pending.remove(id) {
                     if let Some(shell) = word_after(text, "Command running in background with ID:") {
-                        if finished_early.remove(shell) { resulted.insert(id); }
+                        if let Some(at) = finished_early.remove(shell) { record_completion(&mut resulted, id, at); }
                         background.insert(shell.to_owned(), id);
                         continue;
                     }
                     // Pediu fundo e não foi: este resultado já é o final.
                 }
-                resulted.insert(id);
+                record_completion(&mut resulted, id, event.ts);
             }
             "user_msg" => {
                 let text = event.text.as_deref().unwrap_or("");
                 if !text.contains("<task-notification>") { continue; }
                 let Some(task) = text.split_once("<task-id>").and_then(|(_, rest)| rest.split_once("</task-id>")).map(|(id, _)| id.trim()) else { continue };
-                finish(task.to_owned(), &background, &mut resulted, &mut finished_early);
+                finish(task.to_owned(), event.ts, &background, &mut resulted, &mut finished_early);
             }
             "tool_use" => {
                 let input = event.tool_input.as_ref();
@@ -398,7 +431,8 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                         } else { desc };
                         agent_calls.insert(id);
                         agents.push(AgentRun { call: i, id: id.to_owned(), description, subagent_type: text("subagent_type"),
-                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None });
+                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None,
+                            started_at: event.ts, finished_at: None });
                     }
                     Some("Bash") if input.and_then(|v| v.get("run_in_background")).and_then(Value::as_bool) == Some(true) => {
                         shell_pending.insert(id);
@@ -413,10 +447,11 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
         }
     }
     for agent in &mut agents {
-        agent.running = !resulted.contains(agent.id.as_str());
+        agent.running = !resulted.contains_key(agent.id.as_str());
+        agent.finished_at = resulted.get(agent.id.as_str()).copied().flatten();
         agent.agent_id = agent_ids.get(agent.id.as_str()).map(|a| (*a).to_owned());
     }
-    for shell in &mut shells { shell.running = !resulted.contains(shell.id.as_str()); }
+    for shell in &mut shells { shell.running = !resulted.contains_key(shell.id.as_str()); }
     agents.sort_by_key(|a| !a.running);
     shells.sort_by_key(|s| !s.running);
     let tasks = whole.unwrap_or(created).into_iter().filter(|(_, deleted)| !deleted).map(|(task, _)| task).collect();
@@ -622,7 +657,7 @@ mod tests {
     use core::prelude::v1::test;
     use serde_json::json;
 
-    fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), ..Default::default() } }
+    fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), text: Some(id.into()), ..Default::default() } }
 
     #[test]
     fn thought_summary_drops_markdown_marks() {

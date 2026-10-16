@@ -208,6 +208,7 @@ pub(crate) struct DialogProps {
     width: Pixels,
     max_width: Option<Pixels>,
     margin_top: Option<Pixels>,
+    centered: bool,
     close_button: bool,
 
     overlay: bool,
@@ -220,6 +221,7 @@ impl Default for DialogProps {
     fn default() -> Self {
         Self {
             margin_top: None,
+            centered: false,
             width: px(448.),
             max_width: None,
             overlay: true,
@@ -459,6 +461,12 @@ impl Dialog {
         self
     }
 
+    /// Centraliza o diálogo pela altura real do conteúdo.
+    pub fn centered(mut self) -> Self {
+        self.props.centered = true;
+        self
+    }
+
     /// Sets the width of the dialog, defaults to 448px.
     ///
     /// The dialog is never wider than the viewport minus a margin on each side.
@@ -672,6 +680,7 @@ impl RenderOnce for Dialog {
                                     point(window_paddings.left + x, window_paddings.top + y),
                                 )
                                 .margin(margin)
+                                .when(self.props.centered, |positioner| positioner.centered())
                                 .child(
                                     v_flex()
                                         .id(layer_ix)

@@ -5,12 +5,13 @@ use std::{borrow::Cow, collections::{HashMap, HashSet}, rc::Rc};
 use std::sync::Arc;
 use std::time::Duration;
 use gpui_kit::*;
-use gpui_kit::component::{input::{Input, InputEvent, InputState}, Sizable};
+use gpui_kit::component::{button::Button, input::{Input, InputEvent, InputState}, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::{json, Value};
 use crate::theme;
 
 mod btw;
+pub mod presentation;
 
 /// Medidas dos mods são em células de terminal; estas são as da fonte mono de 12 px.
 pub const CELL_W: f32 = 7.2;
@@ -23,9 +24,9 @@ pub fn is_empty(tree: &Value) -> bool { !tree.is_object() || tree["type"] == "en
 /// Clique num botão de mod: (site, botão). O site é `above-prompt` ou o id do painel.
 pub type Press = Rc<dyn Fn(&str, &Control, &mut Window, &mut App)>;
 
-/// Uma ação sobre o painel de id dado: trocar de aba (`Show`) ou fechar pelo `✕` (`Close`).
+/// Uma ação sobre o painel de id dado: trocar de aba ou minimizar no app.
 pub type PaneAction = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-pub type Close = PaneAction;
+pub type Minimize = PaneAction;
 
 /// O que o app manda ao backend para achar um botão ou um campo de mod: o mod que o desenhou e a `key`, que só é
 /// única dentro do mod.
@@ -199,14 +200,15 @@ pub fn older_server_retry(action: &'static str, body: &Value, status: Option<u16
 
 /// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba, a largura da faixa
 /// (`columns`) e o hover: quem avisa o app do ponteiro e os trechos com o ponteiro em cima. Sem `press`, botão é só
-/// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
+/// rótulo. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
 pub struct View<'a> {
     pub press: Option<Press>,
-    /// Sem ele (sessão só leitura), o painel não tem `✕`.
-    pub close: Option<Close>,
+    pub minimize: Option<Minimize>,
     pub show: Show,
     /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
     pub tabs_scroll: &'a ScrollHandle,
+    /// O app conserva o deslocamento mesmo quando outra aba ou a pergunta ocupa o lugar.
+    pub body_scrolls: Option<&'a HashMap<String, ScrollHandle>>,
     pub columns: Option<f64>,
     pub hover: Option<Hover>,
     pub hovered: &'a HashSet<String>,
@@ -515,21 +517,19 @@ pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
     Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c, &Spot::root())).into_any_element())
 }
 
-/// O `✕` do lugar: fecha o painel da frente, como a marca do engine no terminal.
-fn close_mark(site: &str, view: &View) -> Option<AnyElement> {
-    let close = view.close.clone()?;
+/// Minimizar é uma preferência visual do app; o painel continua aberto no mod.
+fn minimize_control(site: &str, view: &View) -> Option<AnyElement> {
+    let minimize = view.minimize.clone()?;
     let site = site.to_owned();
-    Some(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
-        .text_color(theme::muted()).child("✕")
-        .on_click(move |_, window, cx| close(&site, window, cx)).into_any_element())
+    Some(Button::new(SharedString::from(format!("plg-minimize-{site}"))).outline().xsmall()
+        .label(crate::i18n::tr("plugin_minimize"))
+        .on_click(move |_, window, cx| minimize(&site, window, cx)).into_any_element())
 }
 
 /// Largura máxima de uma aba, em células: título maior que isso sai cortado com reticências.
 const TAB_MAX_CELLS: f32 = 24.;
 
-/// Fileira das abas: um título por painel, o ativo em destaque, e um `✕` só à direita. Cada aba tem largura máxima,
-/// com o título cortado, e a fileira rola de lado quando não cabe (como o `overflow-x: auto` do web): toda aba fica ao
-/// alcance, e o `✕` não sai da tela.
+/// Abas com rolagem horizontal; a ação de minimizar permanece fora da área rolável.
 fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
     let row = div().id("plg-tabs").flex().flex_row().items_center().gap_1().flex_1().min_w_0().overflow_x_scroll().track_scroll(view.tabs_scroll)
         .children(panes.iter().map(|p| {
@@ -537,20 +537,21 @@ fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
             let title = p["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
             let on = id == active;
             let tab = div().id(SharedString::from(format!("plg-tab-{id}"))).flex_shrink_0().max_w(px(TAB_MAX_CELLS * CELL_W))
-                .px(px(CELL_W)).rounded(px(4.))
-                .when(on, |el| el.bg(theme::raised()).font_weight(FontWeight::SEMIBOLD))
-                .when(!on, |el| el.text_color(theme::muted()).cursor_pointer())
+                .font_family(theme::SANS).text_sm().px_3().py_2().border_b_2()
+                .border_color(if on { theme::accent() } else { transparent_black() })
+                .when(on, |el| el.text_color(theme::text()).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |el| el.text_color(theme::muted()).cursor_pointer().hover(|el| el.text_color(theme::text()).bg(theme::raised())))
                 .child(div().min_w_0().truncate().child(title));
             match (!on).then(|| view.show.clone()) {
                 Some(show) => tab.on_click(move |_, window, cx| show(&id, window, cx)).into_any_element(),
                 None => tab.into_any_element(),
             }
         }));
-    div().flex().items_center().justify_between().gap_2().child(row).children(close_mark(active, view)).into_any_element()
+    div().h(px(44.)).flex_shrink_0().flex().items_center().justify_between().gap_2().px_3().border_b_1().border_color(theme::border())
+        .child(row).children(minimize_control(active, view)).into_any_element()
 }
 
-/// Os painéis dos mods, acima da faixa como o terminal os abre. Com mais de um, uma fileira de abas e só o ativo
-/// desenhado; com um só, título e `✕`. O corpo rola dentro de `max_h`.
+/// A altura pertence ao espaço da interface, não ao conteúdo da aba. O corpo rola por dentro.
 pub fn panes(panes: &[Value], active: Option<&str>, view: &View, max_h: f32) -> Option<AnyElement> {
     let pane = panes.iter().find(|p| p["id"].as_str() == active)?;
     let id = pane["id"].as_str().unwrap_or("").to_owned();
@@ -560,15 +561,18 @@ pub fn panes(panes: &[Value], active: Option<&str>, view: &View, max_h: f32) -> 
     }
     let header = if panes.len() > 1 { tabs(panes, &id, view) } else {
         let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
-        div().flex().items_center().justify_between().gap_2()
+        div().h(px(44.)).flex_shrink_0().px_3().border_b_1().border_color(theme::border()).flex().items_center().justify_between().gap_2()
             .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
-            .children(close_mark(&id, view)).into_any_element()
+            .children(minimize_control(&id, view)).into_any_element()
     };
     let c = Ctx { site: &id, view, place: pane["columns"].as_f64(), links: Default::default() };
     // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
-    Some(frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
+    Some(div().font_family(theme::SANS).text_size(px(13.)).line_height(px(20.)).text_color(theme::text())
+        .rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
+        .flex().flex_col().min_h_0().h(px(max_h)).flex_shrink_0().w_full().overflow_hidden()
         .child(header)
-        .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
+        .child(div().id(SharedString::from(format!("plg-body-{id}"))).relative().flex_1().min_h_0().p_4().overflow_y_scroll()
+            .when_some(view.body_scrolls.and_then(|scrolls| scrolls.get(&id)), |el, scroll| el.track_scroll(scroll))
             .child(node(&pane["tree"], &c, &Spot::root())))
         .into_any_element())
 }
@@ -610,11 +614,12 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
             };
             div().w_full().min_w_0().when(p["dimColor"] == true, |el| el.opacity(0.6)).child(body).into_any_element()
         }
-        "Code" => div().whitespace_normal().text_color(theme::muted()).child(text_of(&p["source"])).into_any_element(),
+        "Code" => div().font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H))
+            .whitespace_normal().text_color(theme::muted()).child(text_of(&p["source"])).into_any_element(),
         "Link" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
             let shown = if label.is_empty() { text_of(&p["href"]) } else { label };
-            let base = div().text_color(theme::accent()).underline();
+            let base = div().text_color(theme::accent_text()).underline();
             match safe_href(&p["href"]) {
                 Some(href) => {
                     let n = c.links.get();
@@ -627,11 +632,10 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
         }
         "Button" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
-            // `plain` sai como no terminal: texto, sem pílula.
-            let base = div().flex_shrink_0()
-                .when(p["plain"] != true, |el| el.px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()))
+            let base = div().flex_shrink_0().font_family(theme::SANS).text_size(px(12.)).line_height(px(18.))
+                .px_2().py_1().rounded(px(6.)).border_1().border_color(theme::border()).bg(theme::raised())
                 .when(p["dimColor"] == true, |el| el.opacity(0.6))
-                .when(p["variant"] == "primary", |el| el.text_color(theme::accent()))
+                .when(p["variant"] == "primary", |el| el.bg(theme::accent()).text_color(theme::on_accent()).border_color(theme::accent()))
                 // Estilo do rótulo como no web, das props ou do `hover` do escopo; o fundo vence o da pílula.
                 .when_some(color(&p["color"]), |el, fg| el.text_color(fg))
                 .when_some(color(&p["backgroundColor"]), |el, bg| el.bg(bg))
@@ -643,7 +647,7 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                 (Some(button), Some(press)) => {
                     let site = c.site.to_owned();
                     base.id(SharedString::from(format!("plg-{site}-{}-{}", button.plugin, button.key))).cursor_pointer()
-                        .hover(|el| el.underline())
+                        .hover(|el| el.border_color(theme::accent()))
                         .on_click(move |_, window, cx| press(&site, &button, window, cx))
                         .child(label).into_any_element()
                 }
@@ -732,7 +736,8 @@ fn box_background(p: &Value, place: Hsla) -> Option<Hsla> {
 fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     if p["display"] == "none" { return div().into_any_element(); }
     let kids = children(v);
-    let mut el = div().flex().min_w_0();
+    let mut el = div().flex().min_w_0()
+        .when(raster_row(v).is_some(), |el| el.font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)));
     el = match p["flexDirection"].as_str() {
         Some("column") => el.flex_col(),
         Some("column-reverse") => el.flex_col_reverse(),
@@ -881,7 +886,7 @@ fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx, at: &Spot) -> AnyElemen
                 .when(i < last, |el| el.overflow_hidden())
                 .children(els)
         }));
-    div().flex().flex_row().min_w_0()
+    div().font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).flex().flex_row().min_w_0()
         .children(head)
         .child(scaled)
         .child(div().flex().flex_row().flex_shrink_0().opacity(0.).children(frame.after.iter().enumerate().map(|(i, n)| node(n, c, &at.child(i, at.lit)))))
@@ -909,6 +914,9 @@ fn text(p: &Value, kids: &[Value], c: &Ctx, at: &Spot) -> AnyElement {
     if let Some(text) = truncate.then(|| plain_deep(kids)).flatten() {
         return el.child(div().truncate().child(text)).into_any_element();
     }
+    if !truncate && kids.iter().all(|kid| kid.is_string() || kid.is_number()) {
+        return el.child(div().min_w_0().child(plain_deep(kids).unwrap_or_default())).into_any_element();
+    }
     el.children(kids.iter().enumerate().map(|(i, k)| node(k, c, &at.child(i, at.lit)))).into_any_element()
 }
 
@@ -929,7 +937,7 @@ fn plain_deep(kids: &[Value]) -> Option<String> {
 /// coluna mais estreita cada trecho encolhe na proporção das suas células, sem rolar de lado.
 fn raster(p: &Value) -> AnyElement {
     let columns = p["columns"].as_u64().unwrap_or(0) as usize;
-    let mut grid = raster_track(columns).flex_col();
+    let mut grid = raster_track(columns).font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).flex_col();
     for runs in raster_runs(p) {
         grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
             div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
