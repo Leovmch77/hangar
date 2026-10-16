@@ -689,7 +689,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(out["removed"], path);
+        let removed_path = out["removed"].as_str().unwrap();
+        assert_eq!(Path::new(removed_path), wt.as_path());
         assert!(!wt.exists());
         git(
             Path::new(repo),
@@ -697,7 +698,7 @@ mod tests {
         );
         let map = worktrees::try_removed_at(&dir.path().join(".hangar/worktrees-removidas.json"))
             .unwrap();
-        assert_eq!(map[path], repo);
+        assert_eq!(Path::new(map.get(removed_path).unwrap()), Path::new(repo));
         assert!(
             remove(
                 repo,
