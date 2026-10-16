@@ -34,10 +34,15 @@ const native = vi.hoisted(() => {
     constructor() { Peer.all.push(this); }
     connect() { this.connectionState = 'connected'; this.onconnectionstatechange?.(); }
   }
-  return { Peer, Stream, start: vi.fn(), stop: vi.fn(), media: vi.fn(), listeners: new Set<(event: { reason: string }) => void>() };
+  return { Peer, Stream, start: vi.fn(), stop: vi.fn(), media: vi.fn(), microphonePermission: vi.fn(), androidPermission: vi.fn(),
+    platform: { OS: 'ios', Version: 18 }, listeners: new Set<(event: { reason: string }) => void>() };
 });
-vi.mock('react-native', () => ({ Platform: { OS: 'ios', Version: 18 }, PermissionsAndroid: {} }));
-vi.mock('react-native-webrtc', () => ({ RTCPeerConnection: native.Peer, mediaDevices: { getUserMedia: native.media } }));
+vi.mock('react-native', () => ({ Platform: native.platform,
+  PermissionsAndroid: { PERMISSIONS: { POST_NOTIFICATIONS: 'android.permission.POST_NOTIFICATIONS', BLUETOOTH_CONNECT: 'android.permission.BLUETOOTH_CONNECT' },
+    RESULTS: { GRANTED: 'granted' }, request: native.androidPermission },
+}));
+vi.mock('react-native-webrtc', () => ({ RTCPeerConnection: native.Peer, mediaDevices: { getUserMedia: native.media },
+  permissions: { request: native.microphonePermission } }));
 vi.mock('../../../modules/live-voice-audio', () => ({ default: {
   start: native.start, stop: native.stop,
   addListener: (name: string, listener: (event: { reason: string }) => void) => {
@@ -98,6 +103,9 @@ beforeEach(async () => {
   native.start.mockReset().mockResolvedValue(undefined);
   native.stop.mockReset().mockResolvedValue(undefined);
   native.media.mockReset().mockImplementation(async () => new native.Stream());
+  native.microphonePermission.mockReset().mockResolvedValue(true);
+  native.androidPermission.mockReset().mockResolvedValue('granted');
+  native.platform.OS = 'ios'; native.platform.Version = 18;
   native.listeners.clear(); native.Peer.all = []; NativeSocket.all = [];
   importGate = Promise.resolve();
   startGate = Promise.resolve();
@@ -261,6 +269,43 @@ describe('restauração com o transporte real e prazo desde o store', () => {
     expect(useLiveVoice.getState().view.phase).toBe('live');
     return socket;
   }
+
+  test.each(['android', 'ios'])('%s: permissões demoradas e volta ao app não usam deadline antigo do store', async os => {
+    native.platform.OS = os; native.platform.Version = os === 'android' ? 33 : 18;
+    const stages = os === 'android' ? ['notification', 'bluetooth', 'microphone'] : ['microphone'];
+    const waiting = new Map(stages.map(stage => [stage, { entered: deferred<void>(), grant: deferred<void>() }]));
+    native.androidPermission.mockImplementation(async (permission: string) => {
+      const gate = waiting.get(permission === 'android.permission.POST_NOTIFICATIONS' ? 'notification' : 'bluetooth')!;
+      gate.entered.resolve(); await gate.grant.promise; return 'granted';
+    });
+    native.microphonePermission.mockImplementation(async () => {
+      const gate = waiting.get('microphone')!;
+      gate.entered.resolve(); await gate.grant.promise; return true;
+    });
+    openA(); const starting = useLiveVoice.getState().start();
+    for (const gate of waiting.values()) {
+      await gate.entered.promise;
+      await vi.advanceTimersByTimeAsync(90000);
+      useLiveVoice.getState().setForeground(false);
+      useLiveVoice.getState().setForeground(true);
+      expect(useLiveVoice.getState().view).toMatchObject({ phase: 'connecting', error: null });
+      expect(audio.useVoiceAudioState.getState().voiceActive).toBe(true);
+      expect(native.media).not.toHaveBeenCalled();
+      expect(native.start).not.toHaveBeenCalled();
+      expect(NativeSocket.all).toHaveLength(0);
+      gate.grant.resolve();
+    }
+    await starting;
+    useLiveVoice.getState().setForeground(false);
+    useLiveVoice.getState().setForeground(true);
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'connecting', error: null });
+    expect(native.microphonePermission).toHaveBeenCalledExactlyOnceWith({ name: 'microphone' });
+    expect(native.media).toHaveBeenCalledOnce();
+    const socket = NativeSocket.all[0]; socket.open(); native.Peer.all[0].connect();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'live', error: null });
+    expect(socket.close).not.toHaveBeenCalled();
+  });
 
   test.each(['sheet', 'notification'] as const)('Encerrar por %s publica audio_restore do Native.stop real sem stop duplicado', async source => {
     const socket = await live();

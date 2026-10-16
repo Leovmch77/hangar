@@ -43,12 +43,14 @@ const rtc = vi.hoisted(() => {
     Peer, Stream, offer, getUserMedia: vi.fn<() => Promise<Stream>>(),
     nativeStart: vi.fn<() => Promise<void>>(), nativeStop: vi.fn<() => Promise<void>>(),
     platform: { OS: 'ios', Version: 18 }, requestPermission: vi.fn<(permission: string) => Promise<string>>(),
+    microphonePermission: vi.fn<(descriptor: { name: string }) => Promise<boolean>>(),
     clock: undefined as ReturnType<typeof setInterval> | undefined,
     ticks: new Set<() => void>(),
     listeners: new Set<(event: { reason: string }) => void>(), removes: [] as ReturnType<typeof vi.fn>[],
   };
 });
-vi.mock('react-native-webrtc', () => ({ RTCPeerConnection: rtc.Peer, mediaDevices: { getUserMedia: rtc.getUserMedia } }));
+vi.mock('react-native-webrtc', () => ({ RTCPeerConnection: rtc.Peer, mediaDevices: { getUserMedia: rtc.getUserMedia },
+  permissions: { request: rtc.microphonePermission } }));
 vi.mock('react-native', () => ({
   Platform: rtc.platform,
   PermissionsAndroid: { PERMISSIONS: { POST_NOTIFICATIONS: 'android.permission.POST_NOTIFICATIONS', BLUETOOTH_CONNECT: 'android.permission.BLUETOOTH_CONNECT' },
@@ -117,6 +119,7 @@ beforeEach(() => {
   rtc.getUserMedia.mockReset().mockImplementation(async () => new rtc.Stream());
   rtc.platform.OS = 'ios'; rtc.platform.Version = 18;
   rtc.requestPermission.mockReset().mockResolvedValue('granted');
+  rtc.microphonePermission.mockReset().mockResolvedValue(true);
   rtc.nativeStart.mockReset().mockImplementation(async () => {
     if (rtc.clock === undefined) rtc.clock = setInterval(() => { for (const tick of rtc.ticks) tick(); }, 100);
   });
@@ -174,6 +177,117 @@ describe('logs WebRTC pela abertura pública da chamada', () => {
     expect(enable).not.toHaveBeenCalled();
     logger.debug('getStats-dev-marker');
     expect(output.mock.calls.map(args => args.join(' ')).join('\n')).toContain('getStats-dev-marker');
+  });
+});
+
+describe('permissões fora do orçamento de abertura', () => {
+  it.each([
+    { os: 'android', stages: ['notification'] },
+    { os: 'android', stages: ['bluetooth'] },
+    { os: 'android', stages: ['microphone'] },
+    { os: 'android', stages: ['notification', 'bluetooth', 'microphone'] },
+    { os: 'ios', stages: ['microphone'] },
+  ])('$os: espera mais de 60s por $stages e só depois captura e fica live', async ({ os, stages }) => {
+    rtc.platform.OS = os; rtc.platform.Version = os === 'android' ? 33 : 18;
+    const waiting = new Map(stages.map(stage => [stage, { entered: deferred<void>(), grant: deferred<void>() }]));
+    rtc.requestPermission.mockImplementation(async permission => {
+      const stage = permission === 'android.permission.POST_NOTIFICATIONS' ? 'notification' : 'bluetooth';
+      const gate = waiting.get(stage);
+      if (gate) { gate.entered.resolve(); await gate.grant.promise; }
+      return 'granted';
+    });
+    rtc.microphonePermission.mockImplementation(async () => {
+      const gate = waiting.get('microphone');
+      if (gate) { gate.entered.resolve(); await gate.grant.promise; }
+      return true;
+    });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null);
+    for (const gate of waiting.values()) {
+      await gate.entered.promise;
+      await vi.advanceTimersByTimeAsync(90000);
+      expect(handlers.phase).toHaveBeenLastCalledWith('connecting');
+      expect(handlers.failed).not.toHaveBeenCalled();
+      expect(rtc.getUserMedia).not.toHaveBeenCalled();
+      expect(rtc.nativeStart).not.toHaveBeenCalled();
+      expect(Socket.all).toHaveLength(0);
+      gate.grant.resolve();
+    }
+    await starting;
+    expect(rtc.microphonePermission).toHaveBeenCalledExactlyOnceWith({ name: 'microphone' });
+    expect(rtc.getUserMedia).toHaveBeenCalledExactlyOnceWith({ audio: true, video: false });
+    Socket.all[0].open(); rtc.Peer.all[0].connect();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handlers.phase).toHaveBeenLastCalledWith('live');
+    expect(handlers.failed).not.toHaveBeenCalled();
+  });
+
+  it.each(['android', 'ios'])('%s: microfone negado ou erro conserva a causa e não abre captura', async os => {
+    rtc.platform.OS = os; rtc.platform.Version = os === 'android' ? 33 : 18;
+    rtc.microphonePermission.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('microphone_request_failed'));
+    const { call, handlers } = makeCall();
+    await call.start(server, null);
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('microphone', undefined);
+    await call.start(server, null);
+    expect(handlers.failed).toHaveBeenLastCalledWith('microphone', 'microphone_request_failed');
+    expect(handlers.failed).toHaveBeenCalledTimes(2);
+    expect(rtc.getUserMedia).not.toHaveBeenCalled();
+    expect(rtc.nativeStart).not.toHaveBeenCalled();
+    expect(Socket.all).toHaveLength(0);
+  });
+
+  it('permissão demorada concede 60s novos para a captura pendente, não tempo ilimitado', async () => {
+    const permission = deferred<boolean>(), entered = deferred<void>(), capturing = deferred<void>();
+    rtc.microphonePermission.mockImplementationOnce(() => { entered.resolve(); return permission.promise; });
+    rtc.getUserMedia.mockImplementationOnce(() => { capturing.resolve(); return new Promise<InstanceType<typeof rtc.Stream>>(() => {}); });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null); await entered.promise;
+    await vi.advanceTimersByTimeAsync(90000);
+    expect(handlers.failed).not.toHaveBeenCalled();
+    permission.resolve(true); await capturing.promise;
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(handlers.failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    expect(rtc.nativeStart).not.toHaveBeenCalled();
+    expect(Socket.all).toHaveLength(0);
+  });
+
+  it.each([
+    { stage: 'notification', os: 'android', version: 33 },
+    { stage: 'bluetooth', os: 'android', version: 31 },
+    { stage: 'microphone', os: 'android', version: 30 },
+    { stage: 'microphone', os: 'ios', version: 18 },
+  ])('$os $stage: stop e nova geração ignoram concessão tardia', async ({ stage, os, version }) => {
+    rtc.platform.OS = os; rtc.platform.Version = version;
+    const { call, handlers } = makeCall();
+    for (const replace of [false, true]) {
+      const entered = deferred<void>(), android = deferred<string>(), microphone = deferred<boolean>();
+      let granted: Promise<unknown>, grant: () => void;
+      if (stage === 'microphone') {
+        rtc.microphonePermission.mockImplementationOnce(() => { entered.resolve(); return microphone.promise; });
+        granted = microphone.promise; grant = () => microphone.resolve(true);
+      } else {
+        rtc.requestPermission.mockImplementationOnce(() => { entered.resolve(); return android.promise; });
+        granted = android.promise; grant = () => android.resolve('granted');
+      }
+      const starting = call.start(server, null); await entered.promise;
+      await vi.advanceTimersByTimeAsync(90000);
+      if (replace) await call.start(server, null);
+      else await call.stop();
+      await starting;
+      const captures = rtc.getUserMedia.mock.calls.length, sockets = Socket.all.length;
+      grant(); await granted;
+      expect(rtc.getUserMedia).toHaveBeenCalledTimes(captures);
+      expect(Socket.all).toHaveLength(sockets);
+      expect(handlers.failed).not.toHaveBeenCalled();
+      if (replace) {
+        Socket.all.at(-1)!.open(); rtc.Peer.all.at(-1)!.connect();
+        expect(handlers.phase).toHaveBeenLastCalledWith('live');
+        expect(Socket.all.at(-1)!.close).not.toHaveBeenCalled();
+      }
+      await call.stop();
+    }
   });
 });
 

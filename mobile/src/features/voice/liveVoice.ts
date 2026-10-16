@@ -1,5 +1,5 @@
 import { PermissionsAndroid, Platform } from 'react-native';
-import { mediaDevices, RTCPeerConnection, type MediaStream } from 'react-native-webrtc';
+import { mediaDevices, permissions as mediaPermissions, RTCPeerConnection, type MediaStream } from 'react-native-webrtc';
 import {
   LIVE_VOICE_CAPS, liveVoiceBarLevel, liveVoiceRms, liveVoiceUrlForServer, parseLiveVoiceMessage,
   registrarDiag, type LiveVoiceAudioSample, type LiveVoiceClientMessage, type LiveVoiceHandlers,
@@ -37,7 +37,7 @@ type Attempt = {
   audioRevision: number;
   samples: Map<string, LiveVoiceAudioSample>;
   cleanup?: Promise<void>;
-  openingDeadline: number;
+  openingDeadline?: number;
   openingTimer?: ReturnType<typeof setTimeout>;
   cancelStart(): void;
   disconnectedAt?: number;
@@ -72,7 +72,7 @@ export class LiveVoiceCall {
 
   private current(call: Attempt): boolean {
     if (this.attempt !== call || call.closed) return false;
-    if (!call.live && Date.now() >= call.openingDeadline) {
+    if (!call.live && call.openingDeadline !== undefined && Date.now() >= call.openingDeadline) {
       this.fail(call, 'opening_timeout', undefined, true);
       return false;
     }
@@ -115,6 +115,9 @@ export class LiveVoiceCall {
         const parsed = new URL(url);
         if ((parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') || !parsed.hostname) throw new Error();
       } catch { this.fail(call, 'failed', 'invalid_server_url'); return; }
+      // A decisão nos diálogos é da pessoa; o prazo volta a contar só na captura.
+      clearTimeout(call.openingTimer);
+      call.openingDeadline = undefined;
       failure = 'notifications_permission';
       if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
         const permission = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
@@ -128,6 +131,11 @@ export class LiveVoiceCall {
         if (!this.current(call)) return;
       }
       failure = 'microphone';
+      const microphone = await mediaPermissions.request({ name: 'microphone' });
+      if (!this.current(call)) return;
+      if (microphone !== true) { this.fail(call, failure); return; }
+      call.openingDeadline = Date.now() + OPENING_MS;
+      call.openingTimer = setTimeout(() => { this.current(call); }, OPENING_MS);
       const media = await mediaDevices.getUserMedia({ audio: true, video: false });
       if (!this.current(call)) { releaseMedia(media); return; }
       call.media = media;

@@ -81,7 +81,7 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
   let generation = 0;
   let call: LiveVoiceCall | null = null;
   let stopping: Promise<void> = Promise.resolve();
-  let opening: { token: number; deadline: number; timer: ReturnType<typeof setTimeout>; cancel(): void } | null = null;
+  let opening: { token: number; deadline?: number; timer: ReturnType<typeof setTimeout>; cancel(): void } | null = null;
   let userMuted = false;
   let settingsOpen = false;
   let navigator: { navigate: Navigation } | null = null;
@@ -311,7 +311,7 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
       const cancelled = new Promise<void>(resolve => { cancel = resolve; });
       const valid = () => {
         if (generation !== token) return false;
-        if (Date.now() < deadline) return true;
+        if (opening?.deadline === undefined || Date.now() < opening.deadline) return true;
         void end({ code: 'opening_timeout' });
         return false;
       };
@@ -331,8 +331,11 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
           const instance = new LiveVoiceCall(handlers(token));
           call = instance;
           instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
-          // A partir daqui o transporte confere o mesmo prazo também pelo tick nativo.
-          if (opening?.token === token) clearTimeout(opening.timer);
+          // O transporte assume a preparação e arma outro prazo após os diálogos de permissão.
+          if (opening?.token === token) {
+            clearTimeout(opening.timer);
+            opening.deadline = undefined;
+          }
           await instance.start(server, screen(), deadline);
           if (generation !== token) return;
           instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
@@ -453,7 +456,7 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
     setRoute(route) { set({ route }); publishScreen(); },
     setForeground(foreground) {
       set({ foreground });
-      if (foreground && opening && get().view.phase === 'connecting' && Date.now() >= opening.deadline)
+      if (foreground && opening?.deadline !== undefined && get().view.phase === 'connecting' && Date.now() >= opening.deadline)
         void end({ code: 'opening_timeout' });
       publishScreen();
     },
