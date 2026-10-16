@@ -61,7 +61,12 @@ esac
 
 impl Fixture {
     async fn registry(&self) -> Arc<RuntimeRegistry> {
-        let map = [("HOME",self.home.to_string_lossy().into_owned()),("PATH",std::env::var("PATH").unwrap())].into_iter().map(|(k,v)|(k.to_owned(),v)).collect();
+        // `hangar-engine` falso à frente: a sessão de motor não depende do que esta máquina tem instalado.
+        let bin = self.home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_executable(&bin.join("hangar-engine"),"#!/bin/sh\nexit 0\n");
+        let path = format!("{}:{}",bin.display(),std::env::var("PATH").unwrap());
+        let map = [("HOME",self.home.to_string_lossy().into_owned()),("PATH",path)].into_iter().map(|(k,v)|(k.to_owned(),v)).collect();
         let registry = crate::runtime_open::registry_with(|registry|registry.with_codex_environment(AccountEnvironment::from_map(map))).await;
         registry.bind_watcher(Arc::new(Watcher::new(WatchConfig { home:self.home.clone(),queue_dir:self.queue.clone(),
             mux:Mux::with_program(&self.tmux,Duration::from_secs(5)),mux_program:self.tmux.clone().into_os_string() }).with_scope_probe(Vec::new)));
@@ -320,4 +325,103 @@ async fn an_open_transfer_record_refuses_the_resume() {
     let refused = registry.resume_claude_session("s1",SID).await.expect("é sessão Claude daqui").unwrap_err();
     assert_eq!((refused.error.code.as_str(),refused.stopped),("session_transfer_busy",false));
     assert!(fx.args().is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}
+
+/// Sem terminal parada com `extra` no sidecar, levada ao terminal: o resultado e o comando pedido.
+async fn to_terminal(fx:&Fixture,extra:Value) -> (Result<(),(String,bool)>,Vec<String>) {
+    fx.transcript();
+    let mut meta = json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null});
+    for (field,value) in extra.as_object().unwrap() { meta[field] = value.clone(); }
+    fx.put_sidecar(meta);
+    let registry = fx.registry().await;
+    let outcome = registry.reopen_claude_session("s1",mode_switch(true),None).await.expect("é sessão Claude daqui")
+        .map(|_|()).map_err(|f|(f.error.code,f.stopped));
+    if outcome.is_ok() { registry.close(&"ab".repeat(16),2).await.unwrap(); fx.finish(); }
+    (outcome,fx.args())
+}
+
+fn command(args:&[String]) -> String { args.last().cloned().unwrap_or_default() }
+
+/// CRA-015/TMX-073/RET-015: o motor que sumiu do `engines.json` volta na conta Anthropic, sem o modelo,
+/// o esforço, a janela e o Fast dele: reaplicá-los numa conta Anthropic criaria uma sessão inviável.
+#[tokio::test]
+async fn an_engine_gone_from_the_catalog_reopens_on_the_anthropic_account_without_its_choices() {
+    let fx = fixture();
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"gone","model":"gpt-5.4","effort":"high","context_window":400000,"service_tier":"default"})).await;
+    assert_eq!(outcome,Ok(()));
+    let command = command(&args);
+    assert!(!command.contains("hangar-engine") && !command.contains("--model") && !command.contains("--effort"),"conta Anthropic, sem a escolha do motor: {command}");
+    let spec:Value = serde_json::from_slice(&std::fs::read(fx.home.join(format!(".hangar/session-specs/{}.json","ab".repeat(16)))).unwrap()).unwrap();
+    assert_eq!((spec["account"]["kind"].as_str(),spec["service_tier"].is_null()),(Some("default"),true));
+}
+
+/// CRA-015/RET-015: com a conta ChatGPT fixa, o motor que sumiu recusa antes de encerrar.
+#[tokio::test]
+async fn a_fixed_account_engine_gone_from_the_catalog_refuses_before_anything_stops() {
+    let fx = fixture();
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"gone","engine_account":"acc","model":"gpt-5.4"})).await;
+    assert_eq!(outcome,Err(("reopen_engine_missing".into(),false)));
+    assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}
+
+/// RET-019: sem motor, o id de motor herdado de um `/model` não vira `--model` na conta Anthropic.
+#[tokio::test]
+async fn a_foreign_model_without_an_engine_reopens_on_the_account_default() {
+    let fx = fixture();
+    let (outcome,args) = to_terminal(&fx,json!({"model":"gpt-5.4"})).await;
+    assert_eq!(outcome,Ok(()));
+    assert!(!command(&args).contains("--model"),"{}",command(&args));
+}
+
+/// RET-020: o modelo malformado é recusado antes de encerrar, pela mesma regra da criação.
+#[tokio::test]
+async fn a_malformed_model_refuses_before_anything_stops() {
+    let fx = fixture();
+    let (outcome,args) = to_terminal(&fx,json!({"model":"claude-x;touch /tmp/y"})).await;
+    assert_eq!(outcome,Err(("reopen_model_invalid".into(),false)));
+    assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}
+
+fn engines(fx:&Fixture,base:&str) {
+    std::fs::write(fx.home.join(".claude/engines.json"),json!({"e":{"base_url":base,"model":"gpt-5.4","api_key":"x"}}).to_string()).unwrap();
+}
+
+/// CRA-016/TMX-075/RET-021: o Fast vai ao terminal só onde há suporte: `priority` sem ele recusa antes
+/// de encerrar, `default` sem ele some do comando.
+#[tokio::test]
+async fn the_fast_tier_needs_support_before_the_terminal_reopens() {
+    let fx = fixture();
+    engines(&fx,"http://example.invalid/v1");
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4","service_tier":"priority"})).await;
+    assert_eq!(outcome,Err(("launch_service_tier".into(),false)));
+    assert!(args.is_empty());
+    let fx = fixture();
+    engines(&fx,"http://example.invalid/v1");
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4","service_tier":"default"})).await;
+    assert_eq!(outcome,Ok(()));
+    assert!(command(&args).contains("hangar-engine") && !command(&args).contains("--service-tier"),"{}",command(&args));
+}
+
+/// CRA-027/TMX-075: com Fast, o `CLAUDE_CODE_EXTRA_BODY` inválido nas escolhas do projeto recusa antes de
+/// encerrar (o pré-voo do `engines.service_tier_settings`); válido, o tier vai ao comando.
+#[tokio::test]
+async fn an_invalid_engine_body_refuses_the_fast_reopen_before_anything_stops() {
+    let proxy = |fx:&Fixture| {
+        std::fs::create_dir_all(fx.home.join(".cli-proxy-api")).unwrap();
+        std::fs::write(fx.home.join(".cli-proxy-api/config.yaml"),"port: 8317\napi-keys:\n  - k\n").unwrap();
+        engines(fx,"http://127.0.0.1:8317/v1");
+    };
+    let fx = fixture();
+    proxy(&fx);
+    std::fs::create_dir_all(fx.cwd.join(".claude")).unwrap();
+    std::fs::write(fx.cwd.join(".claude/settings.json"),json!({"env":{"CLAUDE_CODE_EXTRA_BODY":"{torto"}}).to_string()).unwrap();
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4","service_tier":"priority"})).await;
+    assert_eq!(outcome,Err(("reopen_engine_body".into(),false)));
+    assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+    let fx = fixture();
+    proxy(&fx);
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4","service_tier":"priority"})).await;
+    assert_eq!(outcome,Ok(()));
+    assert!(command(&args).contains("--service-tier priority"),"{}",command(&args));
 }

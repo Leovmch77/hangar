@@ -129,6 +129,91 @@ fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&V
     Ok(())
 }
 
+/// `default_model.anthropic`: alias, id da Anthropic (Bedrock e Vertex incluídos) ou ARN do Bedrock.
+static ANTHROPIC:std::sync::LazyLock<regex::Regex>=std::sync::LazyLock::new(||regex::Regex::new(
+    r"(?i)\A(?:(?:[a-z]{2,}\.)?(?:anthropic\.)?claude-[\w.:@-]+|arn:aws[\w-]*:bedrock:\S+|default|best|opus|opusplan|sonnet|haiku|fable)(?:\[1m\])?\z").unwrap());
+
+/// O que a vida nova leva e a CLI recusaria, conferido antes de encerrar a antiga (o `_comando_terminal` e o
+/// `para_headless` do Python): o motor que sumiu, o modelo malformado ou de outro provedor, o Fast sem
+/// suporte e o corpo do motor ilegível. Bloqueante.
+fn preflight(env:&crate::accounts::environment::AccountEnvironment,next:&mut SessionSpec,settings:Option<&Value>,
+             runtime:tokio::runtime::Handle) -> Result<(),RuntimeError> {
+    use crate::session_open::OpenFacts;
+    let facts=crate::session_open::facts::LocalFacts::new(env.clone(),runtime);
+    if let Account::Engine { name,account,config_dir,.. }=&next.account && !facts.engines().contains(name) {
+        if account.is_some() {return Err(refused("reopen_engine_missing","motor da conta ChatGPT fixa indisponível; nada foi reaberto"));}
+        // A escolha lida é do motor: numa conta Anthropic ela criaria uma sessão inviável.
+        tracing::warn!(session=%next.name,engine=%name,"motor sumiu do catálogo; a sessão volta na conta Anthropic");
+        next.account=config_dir.clone().map_or(Account::Default,|config_dir|Account::Claude { config_dir });
+        (next.model,next.effort,next.service_tier)=(None,None,None);
+    }
+    if let Some(model)=next.model.as_deref() && !crate::session_open::resolve::valid_model(model) {
+        return Err(refused("reopen_model_invalid","model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)"));
+    }
+    let engine=match &next.account {Account::Engine { name,.. }=>Some(name.clone()),_=>None};
+    if engine.is_none() && next.model.as_deref().is_some_and(|model|!ANTHROPIC.is_match(model.trim())) {
+        tracing::warn!(session=%next.name,"modelo que não é da Anthropic; a sessão volta no padrão da conta");
+        next.model=None;
+    }
+    if let Some(tier)=next.service_tier && !facts.supports_fast(engine.as_deref(),next.model.as_deref()) {
+        if tier==crate::session_open::ServiceTier::Priority {
+            return Err(refused("launch_service_tier","service_tier exige Claude com motor GPT no CLIProxyAPI local"));
+        }
+        next.service_tier=None;
+    }
+    if next.service_tier.is_some() {engine_body(env,next.account.config_dir(),std::path::Path::new(&next.cwd),settings)?;}
+    Ok(())
+}
+
+/// O pré-voo do `engines.service_tier_settings`: o `CLAUDE_CODE_EXTRA_BODY` que o lançador do motor vai
+/// ler (ambiente do servidor, escolhas da conta, do projeto e locais, e as da sessão) tem de ser um objeto.
+fn engine_body(env:&crate::accounts::environment::AccountEnvironment,config_dir:Option<&str>,cwd:&std::path::Path,explicit:Option<&Value>) -> Result<(),RuntimeError> {
+    let bad=|what:&str|refused("reopen_engine_body",&format!("{what}; nada foi reaberto"));
+    let read=|path:&std::path::Path|->Result<Value,RuntimeError> {
+        let value=match std::fs::read(path) {
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(json!({})),
+            Err(_)=>return Err(bad("settings: arquivo ilegível ou JSON inválido")),
+            Ok(raw)=>serde_json::from_slice::<Value>(&raw).map_err(|_|bad("settings: arquivo ilegível ou JSON inválido"))?,
+        };
+        if !value.is_object() || value.get("env").is_some_and(|e|!e.is_object()) {return Err(bad("settings: esperado um objeto JSON com env como objeto"));}
+        Ok(value)
+    };
+    let cwd=&std::fs::canonicalize(cwd).unwrap_or_else(|_|cwd.to_owned());
+    let project=cwd.join(".claude");
+    let mut paths=vec![config_dir.map_or_else(||env.claude_base.clone(),PathBuf::from).join("settings.json"),project.join("settings.json"),project.join("settings.local.json")];
+    let root=local_settings_root(cwd,&env.home);
+    if &root!=cwd {paths.push(root.join(".claude").join("settings.local.json"));}
+    let mut extra=Value::from(env.base.get("CLAUDE_CODE_EXTRA_BODY").map_or("{}",String::as_str));
+    for path in paths { if let Some(value)=read(&path)?["env"].get("CLAUDE_CODE_EXTRA_BODY") {extra=value.clone();} }
+    if let Some(value)=explicit.and_then(|e|e["env"].get("CLAUDE_CODE_EXTRA_BODY")) {extra=value.clone();}
+    let Value::String(text)=extra else {return Err(bad("CLAUDE_CODE_EXTRA_BODY: esperado texto JSON"))};
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(_))=>Ok(()),
+        Ok(_)=>Err(bad("CLAUDE_CODE_EXTRA_BODY: esperado um objeto JSON")),
+        Err(_)=>Err(bad("CLAUDE_CODE_EXTRA_BODY: JSON inválido")),
+    }
+}
+
+/// `_local_settings_root`: o Claude lê o `settings.local.json` da raiz Git no POSIX, só com a raiz do usuário.
+fn local_settings_root(cwd:&std::path::Path,home:&std::path::Path) -> PathBuf {
+    #[cfg(unix)] {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid lê a identidade do processo.
+        let uid=unsafe {libc::geteuid()};
+        let home=std::fs::canonicalize(home).unwrap_or_else(|_|home.to_owned());
+        for root in cwd.ancestors() {
+            if !root.join(".git").exists() {continue;}
+            if root==home {return cwd.to_owned();}
+            let mut entries=vec![root.to_owned(),root.join(".git")];
+            if root.join(".claude").exists() {entries.push(root.join(".claude"));}
+            let owned=entries.iter().all(|path|std::fs::metadata(path).is_ok_and(|m|m.uid()==uid));
+            return if owned {root.to_owned()} else {cwd.to_owned()};
+        }
+    }
+    #[cfg(not(unix))] let _=home;
+    cwd.to_owned()
+}
+
 /// Spec de um Claude com terminal aberto antes do registro, lido do processo vivo: o que o `para_headless`
 /// do Python lia do `/proc`. Só para essas sessões; a reabertura grava o spec dali em diante.
 fn legacy_terminal_spec(target:&TerminalTarget,name:&str,cwd:String) -> Result<(SessionSpec,Option<Value>),RuntimeError> {
@@ -260,6 +345,9 @@ impl RuntimeRegistry {
         let mut next=current.spec.with(&change);
         next.conversation=Some(sid.clone());
         if let Some(between)=between {between.adjust(&mut next);}
+        {let (env,mut spec,settings,handle)=(self.codex_environment(),next,current.settings.clone(),tokio::runtime::Handle::current());
+            next=tokio::task::spawn_blocking(move||preflight(&env,&mut spec,settings.as_ref(),handle).map(|()|spec)).await
+                .map_err(|_|ReopenFailure::refused(refused("reopen_preflight","a subida nova não pôde ser conferida")))?.map_err(ReopenFailure::refused)?;}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
         let start=self.prepare_start(name,&next,&current,&sid).await.map_err(ReopenFailure::refused)?;
         match self.stop_claude(name,&current,next.surface).await {

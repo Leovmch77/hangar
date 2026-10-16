@@ -116,6 +116,8 @@ pub struct Resolved {
 
 /// `model_args.ID_OK`, com o `\Z` do Python: quebra de linha no fim é recusada.
 static MODEL_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9._:~/\[\]-]{1,128}\z").unwrap());
+/// O id de modelo que pode ir à linha de comando: a regex e sem `-` na frente.
+pub(crate) fn valid_model(model: &str) -> bool { MODEL_OK.is_match(model) && !model.starts_with('-') }
 static CODEX_EFFORT_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[a-z]{2,32}\z").unwrap());
 const EFFORT_CLAUDE: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const EFFORT_PI: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
