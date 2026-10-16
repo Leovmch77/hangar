@@ -29,23 +29,12 @@ def _post(path, body):
     return TestClient(api_mod.app, client=("127.0.0.1", 50000)).post(path, json=body, headers={"X-Hangar-Internal": SECRET})
 
 
-def test_release_and_born_touch_only_what_lives_here(monkeypatch):
+def test_release_touches_only_what_lives_here(monkeypatch):
     released = []
     monkeypatch.setattr(api_mod.registry, "release_name", released.append)
     assert _post("/internal/sessions/s%201/release", {}).json() == {"ok": True}
     assert released == ["s 1"]
-    from app import permission_mode, runtime_config
-    from app.registry import SessionRegistry
-    applied = []
-    monkeypatch.setattr(runtime_config, "get", lambda key: "pi" if key == "last_session_provider" else None)
-    monkeypatch.setattr(runtime_config, "aplicar", applied.append)
-    body = {"session_id": "11111111-1111-4111-8111-111111111111", "jsonl": "/p/x.jsonl", "permission_mode": "acceptEdits",
-            "remember_provider": "claude"}
-    assert _post("/internal/sessions/s1/born", body).json() == {"avisos": []}
-    assert SessionRegistry._jsonl_cache["s1"] == "/p/x.jsonl"
-    assert permission_mode._launch_modes[body["session_id"]] == "acceptEdits"
-    assert applied == [{"last_session_provider": "claude"}]
-    assert _post("/internal/sessions/s1/born", {**body, "texto": 1}).status_code == 400
+    assert _post("/internal/sessions/s1/born", {}).status_code == 404, "o nascimento é todo do Rust"
 
 
 def _body(**kw):

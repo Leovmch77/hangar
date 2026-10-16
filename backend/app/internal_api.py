@@ -19,7 +19,6 @@ from app.mensagens import erro
 from app.sse import merged_events
 
 _LOOPBACK = {"127.0.0.1", "::1"}
-_log = logging.getLogger(__name__)
 
 # Só na memória: no os.environ ele iria para toda sessão que o backend sobe.
 _secret: str | None = None
@@ -156,40 +155,6 @@ async def session_release(name: str) -> dict:
     from app.api import registry
     await internal_thread(registry.release_name, name)
     return {"ok": True}
-
-
-@router.post("/sessions/{name}/born")
-async def session_born(name: str, request: Request) -> dict:
-    """A sessão que o Rust abriu nasceu: o transcript dela no cache daqui, o modo de lançamento para
-    o aviso do painel, a lista daqui refeita e o provedor lembrado (o `runtime-config.json` é daqui)."""
-    raw = await request.body()
-    try:
-        body = json.loads(raw) if len(raw) <= 8192 else None
-        if (not isinstance(body, dict) or set(body) != {"session_id", "jsonl", "permission_mode", "remember_provider"}
-                or not isinstance(body["session_id"], str) or not isinstance(body["jsonl"], str)
-                or not isinstance(body["permission_mode"], (str, type(None)))
-                or body["remember_provider"] not in (None, "claude", "codex", "pi", "omp", "kimi")):
-            raise ValueError("sessão inválida")
-    except (ValueError, RecursionError):
-        raise HTTPException(400) from None
-
-    def apply() -> list[str]:
-        from app import api, permission_mode, runtime_config
-        from app.registry import SessionRegistry
-        SessionRegistry._jsonl_cache[name] = body["jsonl"]
-        if body["permission_mode"]:
-            permission_mode.remember_launch_mode(body["session_id"], body["permission_mode"])
-        api.invalidate_local_lists()
-        provider = body["remember_provider"]
-        if provider is None or runtime_config.get("last_session_provider") == provider:
-            return []
-        try:
-            runtime_config.aplicar({"last_session_provider": provider})
-        except Exception as exc:  # noqa: BLE001 — a sessão já existe; o aviso volta na resposta
-            _log.warning("não consegui lembrar o provedor da sessão %s: %s", name, exc)
-            return [f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]
-        return []
-    return {"avisos": await internal_thread(apply)}
 
 
 @router.post("/list/facts")

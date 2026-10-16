@@ -19,8 +19,7 @@ pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr
 
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
-pub struct Born { pub name: String, pub session_id: String, pub jsonl: String, pub permission_mode: Option<String>,
-    pub remember_provider: bool }
+pub struct Born { pub name: String, pub jsonl: String, pub remember_provider: bool }
 
 pub trait OpenHost: Send + Sync {
     /// A pasta pessoal do dono (registros, `~/.claude.json`, `~/.hangar`).
@@ -397,8 +396,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         }));
     }
     diary.step("limpar_estado_anterior");
-    let born = Born { name: spec.name.clone(), session_id: sid, jsonl: jsonl.clone(),
-        permission_mode: spec.permission_mode.map(|m| m.name().to_owned()), remember_provider };
+    let born = Born { name: spec.name.clone(), jsonl: jsonl.clone(), remember_provider };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": "claude",
         "etapa": "terminal_criado", "operacao": diary.op}));

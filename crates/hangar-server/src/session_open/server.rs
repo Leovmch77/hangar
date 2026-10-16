@@ -43,6 +43,24 @@ pub fn server_env(mut process: BTreeMap<String, String>, dotenv: &Path) -> BTree
     process
 }
 
+/// `runtime_config.aplicar({"last_session_provider": …})`: o mesmo arquivo e a mesma troca atômica do
+/// Python (temporário na pasta, troca, 0600), que relê pela data do arquivo. Igual não regrava;
+/// ilegível não é sobrescrito.
+pub fn remember_provider(claude_base: &Path, provider: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let path = claude_base.join("runtime-config.json");
+    let mut config = match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().filter(Value::is_object)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "runtime-config.json ilegível"))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
+    };
+    if config["last_session_provider"] == provider { return Ok(()); }
+    config["last_session_provider"] = json!(provider);
+    std::fs::create_dir_all(claude_base)?;
+    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&config)?)
+}
+
 impl ServerHost {
     pub fn new(st: Arc<AppState>) -> Self {
         let env = AccountEnvironment::from_map(server_env(std::env::vars().collect(), Path::new(".env")));
@@ -135,15 +153,12 @@ impl OpenHost for ServerHost {
             }
             self.st.list.seed(&born.name, &born.jsonl);
             self.st.list.invalidate();
-            let path = format!("/internal/sessions/{}/born", crate::groups::exit::segment(&born.name));
-            let body = json!({"session_id": born.session_id, "jsonl": born.jsonl, "permission_mode": born.permission_mode,
-                "remember_provider": born.remember_provider.then_some("claude")});
-            match self.internal(&path, body).await {
-                Ok(reply) => serde_json::from_value(reply["avisos"].clone()).unwrap_or_default(),
-                Err(cause) => {
-                    tracing::warn!(cause, "o Python não recebeu a sessão nova");
-                    born.remember_provider.then(|| format!("A sessão foi criada, mas não consegui lembrar o provedor: {cause}")).into_iter().collect()
-                }
+            if !born.remember_provider { return Vec::new(); }
+            let base = self.env.claude_base.clone();
+            match tokio::task::spawn_blocking(move || remember_provider(&base, "claude")).await {
+                Ok(Ok(())) => Vec::new(),
+                Ok(Err(error)) => vec![format!("A sessão foi criada, mas não consegui lembrar o provedor: {error}")],
+                Err(error) => vec![format!("A sessão foi criada, mas não consegui lembrar o provedor: {error}")],
             }
         })
     }

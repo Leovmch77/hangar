@@ -1164,17 +1164,12 @@ async def _pair_sweep_loop() -> None:
         await asyncio.sleep(_PAIR_SWEEP_S)
 
 
-def invalidate_local_lists() -> None:
-    """A parte daqui do `_invalidate_lists`, sem perguntar ao Rust (quem chama pode ser o próprio Rust)."""
-    with _list_lock:
-        _list_snap["snap"] = None
-    invalidate_recent_list()
-
-
 def _invalidate_lists() -> None:
     """Descarta o snapshot cru e a lista decorada do refresher: quem pedir /api/sessions depois de
     uma mudança de membro ou de modo recalcula em vez de ver a sessão como era."""
-    invalidate_local_lists()
+    with _list_lock:
+        _list_snap["snap"] = None
+    invalidate_recent_list()
     if registry_mod._rust_caches():
         # A mudança já aconteceu: a falha fica no diário (`lista.ponte`), o retrato do Rust vence
         # em 2 s e quem procura a sessão nova pede descoberta mais nova (`newer_than`).

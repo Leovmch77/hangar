@@ -1134,6 +1134,23 @@ fn the_name_is_checked_again_in_tmux_before_any_effect() {
     assert!(!spawned, "nenhum new-session sem a conferência");
 }
 
+/// O provedor lembrado vai ao `runtime-config.json` sem mexer no resto dele; o mesmo valor não regrava
+/// e o arquivo ilegível fica como está, com a falha devolvida.
+#[test]
+fn the_remembered_provider_keeps_the_rest_of_the_runtime_config() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("runtime-config.json");
+    server::remember_provider(home.path(), "claude").unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(), json!({"last_session_provider": "claude"}));
+    std::fs::write(&file, json!({"scan_roots": "~/a", "last_session_provider": "codex", "nested": {"x": [1]}}).to_string()).unwrap();
+    server::remember_provider(home.path(), "claude").unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(),
+        json!({"scan_roots": "~/a", "last_session_provider": "claude", "nested": {"x": [1]}}));
+    std::fs::write(&file, "{quebrado").unwrap();
+    assert!(server::remember_provider(home.path(), "claude").is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{quebrado");
+}
+
 /// O `backend/.env` que o pydantic do Python lê (sem exportar) vale para a abertura do Rust: a
 /// variável do processo vence a do arquivo, e só as `CP_*` entram.
 #[test]
