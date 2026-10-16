@@ -138,3 +138,42 @@ async fn a_terminal_whose_mode_was_never_known_is_refused_before_anything_stops(
     assert!(!fx.sidecar_path("s1").exists());
     fx.finish();
 }
+
+async fn post(server:std::net::SocketAddr,route:&str,body:Value) -> (u16,Value) {
+    let response = crate::fake::client().post(format!("http://{server}/api/sessions/s1/{route}"))
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type", "application/json")
+        .body(body.to_string()).send().await.unwrap();
+    let status = response.status().as_u16();
+    (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn the_mode_route_answers_like_python_and_never_reaches_it() {
+    let fx = fixture();
+    let key = "cd".repeat(16);
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,"permission_mode":"acceptEdits","cano":null}));
+    let registry = fx.registry().await;
+    let (python, server) = crate::runtime_codex_watch::serve_owner(registry.clone()).await;
+    assert_eq!(post(server,"modo-execucao",json!({"terminal":false})).await,(200,json!({"ok":true,"terminal":false})),"o modo em que já está");
+    assert_eq!(post(server,"modo-execucao",json!({"terminal":true})).await,(200,json!({"ok":true,"terminal":true})));
+    assert_eq!(python.hits_to("/api/sessions/s1/modo-execucao"),0,"o Python não troca o modo do Claude");
+    registry.close(&key,2).await.unwrap();
+    fx.finish();
+}
+
+#[tokio::test]
+async fn a_message_waiting_in_the_queue_holds_the_reload_with_the_python_code() {
+    let fx = fixture();
+    let key = "ef".repeat(16);
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,"permission_mode":"manual","cano":null}));
+    std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+    std::fs::write(fx.queue.join(format!("runtime/{key}.json")),json!({"key":key,"owner_key":key,"generation":1,"name":"s1",
+        "rows":[{"id":"1","text":"oi","delivered":false}]}).to_string()).unwrap();
+    let registry = fx.registry().await;
+    let (_python, server) = crate::runtime_codex_watch::serve_owner(registry).await;
+    let (status,body) = post(server,"recarregar",json!({})).await;
+    assert_eq!((status,body["detail"]["code"].as_str()),(409,Some("erro_fila_pendente")));
+    assert_eq!(body["detail"]["msg"],"há mensagens na fila esperando entrega");
+    assert!(fx.sidecar_path("s1").exists(),"nada mudou");
+}

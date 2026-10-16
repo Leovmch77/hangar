@@ -58,8 +58,12 @@ pub struct Reopened { pub spec:Option<SessionSpec>, pub changed:bool }
 /// Recusa (`stopped: false`: nada mudou) ou falha depois de encerrar a vida antiga (a mensagem diz onde a
 /// sessão ficou).
 #[derive(Debug)]
-pub struct ReopenFailure { pub error:RuntimeError, pub stopped:bool }
-impl ReopenFailure { fn refused(error:RuntimeError) -> Self { Self { error,stopped:false } } }
+pub struct ReopenFailure { pub error:RuntimeError, pub stopped:bool, pub landed:Option<Surface> }
+impl ReopenFailure {
+    fn refused(error:RuntimeError) -> Self { Self { error,stopped:false,landed:None } }
+    /// A vida antiga saiu e a sessão terminou em `landed` (`None`: sem processo).
+    pub fn ended_without_terminal(&self,from_terminal:bool) -> bool { self.stopped && from_terminal && self.landed==Some(Surface::Headless) }
+}
 
 /// O que uma troca faz entre encerrar a vida antiga e dar a partida na nova (mover a conversa de conta):
 /// `check` antes de qualquer efeito, `apply` com o processo antigo já fora, `undo` se a vida nova falhar.
@@ -91,6 +95,28 @@ async fn wait_gone(lives:Vec<(i64,f64)>,limit:Duration) -> Result<(),RuntimeErro
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// A política que a CLI aplica ao bypass (`permissions.disableBypassPermissionsMode`), lida antes de
+/// encerrar a vida antiga: a conta, o projeto, a gerenciada da máquina e as escolhas da sessão. Arquivo
+/// ilegível recusa (CRA-066).
+fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&Value>,env:&std::collections::BTreeMap<String,String>) -> Result<(),RuntimeError> {
+    let forbids=|value:&Value|value["permissions"]["disableBypassPermissionsMode"]=="disable";
+    let mut paths=vec![config.join("settings.json"),cwd.join(".claude/settings.json"),cwd.join(".claude/settings.local.json")];
+    if cfg!(target_os="linux") {paths.push(PathBuf::from("/etc/claude-code/managed-settings.json"));}
+    if cfg!(target_os="macos") {paths.push(PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"));}
+    if cfg!(windows) {
+        let program_files=env.get("ProgramFiles").ok_or_else(||refused("relaunch_policy_source","a pasta de programas do Windows não é conhecida"))?;
+        paths.push(PathBuf::from(program_files).join("ClaudeCode/managed-settings.json"));
+    }
+    for path in paths {
+        let bytes=match std::fs::read(&path) {Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(refused("relaunch_policy_read","a política de permissões não pôde ser lida; nada foi reaberto"))};
+        let value:Value=serde_json::from_slice(&bytes).map_err(|_|refused("relaunch_policy_read","a política de permissões não pôde ser lida; nada foi reaberto"))?;
+        if forbids(&value) {return Err(refused("relaunch_policy_forbids_bypass","a política de permissões desta máquina ou conta proíbe o bypass"));}
+    }
+    if settings.is_some_and(forbids) {return Err(refused("relaunch_policy_forbids_bypass","as escolhas desta sessão proíbem o bypass"));}
+    Ok(())
 }
 
 /// Spec de um Claude com terminal aberto antes do registro, lido do processo vivo: o que o `para_headless`
@@ -132,6 +158,9 @@ impl RuntimeRegistry {
         }
     }
 
+    /// A sessão Claude `name` está sem terminal (tem sidecar)? `None` com o sidecar ilegível.
+    pub async fn claude_headless(&self,name:&str) -> Option<bool> { self.claude_sidecar(name).await.ok().map(|meta|meta.is_some()) }
+
     /// Reabre a sessão Claude `name` com a mudança. `None` = não é sessão Claude daqui (nem sidecar nem pane
     /// com uma conversa Claude), e a rota segue o caminho de sempre. Troca de modo para o modo em que a
     /// sessão já está não toca em nada (`changed: false`).
@@ -160,10 +189,10 @@ impl RuntimeRegistry {
         if let Err(error)=self.stop_claude(name,&current,next.surface).await {
             // O processo antigo que não saiu não é reaberto por cima: seriam dois Claude na mesma conversa.
             let stopped=error.code=="reopen_process_alive";
-            return Err(ReopenFailure { error,stopped });
+            return Err(ReopenFailure { error,stopped,landed:None });
         }
         if let Some(between)=between && let Err(error)=between.apply(&current.spec,&next,&current.sid).await {
-            return Err(ReopenFailure { error:self.restore_claude(name,&current,error).await,stopped:true });
+            return Err(self.restore_claude(name,&current,error).await);
         }
         match self.start_claude(name,&next,&current,start).await {
             Ok(())=>{
@@ -178,9 +207,9 @@ impl RuntimeRegistry {
                 if let Some(between)=between && let Err(undo)=between.undo(&current.spec,&next,&current.sid).await {
                     let error=RuntimeError::new(&error.code,&format!("{}; {}",error.message,undo.message));
                     super::actor::mark_live_error(&self.live_channel(name),&error.code,&error.message);
-                    return Err(ReopenFailure { error,stopped:true });
+                    return Err(ReopenFailure { error,stopped:true,landed:None });
                 }
-                Err(ReopenFailure { error:self.restore_claude(name,&current,error).await,stopped:true })
+                Err(self.restore_claude(name,&current,error).await)
             },
         }
     }
@@ -250,6 +279,10 @@ impl RuntimeRegistry {
     async fn prepare_start(&self,name:&str,next:&SessionSpec,current:&Current) -> Result<Start,RuntimeError> {
         let env=self.codex_environment();
         let mode=next.permission_mode.ok_or_else(||refused("permission_mode_unknown","o modo de permissão da sessão não é conhecido; nada foi reaberto"))?;
+        if mode==PermissionMode::BypassPermissions {
+            let config=next.account.config_dir().map_or_else(||env.claude_base.clone(),PathBuf::from);
+            bypass_policy(&config,std::path::Path::new(&next.cwd),current.settings.as_ref(),&env.base)?;
+        }
         let previous_non_plan=current.previous_non_plan.as_deref().and_then(PermissionMode::claude)
             .filter(|_|mode==PermissionMode::Plan);
         let route=match &next.account {
@@ -387,7 +420,7 @@ impl RuntimeRegistry {
 
     /// Falhou depois de encerrar: a sessão volta pelo spec de antes; sem terminal, se nem o terminal de antes
     /// voltar. O erro diz onde ela ficou.
-    async fn restore_claude(&self,name:&str,current:&Current,error:RuntimeError) -> RuntimeError {
+    async fn restore_claude(&self,name:&str,current:&Current,error:RuntimeError) -> ReopenFailure {
         let mut tries=vec![current.spec.clone()];
         if current.spec.surface==Surface::Terminal && !current.spec.read_only {
             let mut headless=current.spec.clone();headless.surface=Surface::Headless;tries.push(headless);
@@ -405,14 +438,14 @@ impl RuntimeRegistry {
             match back {
                 Ok(())=>{
                     let place=if spec.surface==current.spec.surface {"a sessão voltou como estava"} else {"a sessão seguiu sem terminal"};
-                    return RuntimeError::new(&error.code,&format!("{}; {place}",error.message));
+                    return ReopenFailure { error:RuntimeError::new(&error.code,&format!("{}; {place}",error.message)),stopped:true,landed:Some(spec.surface) };
                 },
                 Err(restore)=>tracing::warn!(session=%name,code=%restore.code,"a sessão não voltou pelo spec de antes"),
             }
         }
         let message=format!("{}; a sessão não voltou e ficou sem processo",error.message);
         super::actor::mark_live_error(&self.live_channel(name),&error.code,&message);
-        RuntimeError::new(&error.code,&message)
+        ReopenFailure { error:RuntimeError::new(&error.code,&message),stopped:true,landed:None }
     }
 
     async fn remove_claude_sidecar(&self,name:&str) -> Result<(),RuntimeError> {

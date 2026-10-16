@@ -1,6 +1,7 @@
-//! `POST /modo-execucao` e `/recarregar` do Codex do Rust: a troca de modo e o reinício rodam no Rust do
-//! começo ao fim (`runtime::codex_relaunch`), com o corpo e os códigos da rota Python (`api.py`). Sessão
-//! que não é Codex do Rust segue ao Python como chegou.
+//! `POST /modo-execucao` e `/recarregar`: a troca de modo e o reinício rodam no Rust do começo ao fim, o
+//! Codex pela `runtime::codex_relaunch` e o Claude pela reabertura do spec (`runtime::claude_reopen`), com o
+//! corpo e os códigos da rota Python (`api.py`). Sessão que não é de nenhum dos dois (Pi, omp, Kimi) segue
+//! ao Python como chegou, e a transferência por recuperar também.
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,17 +16,8 @@ use super::input::json_content_type;
 use super::{BODY_LIMIT, busy_body, forward_whole, invalid_body, json_response, session_name, too_large};
 use crate::routes::{AppState, cors, gate, pass};
 use crate::runtime::protocol::RuntimeError;
-
-type Outcome = Option<Result<Value, RuntimeError>>;
-
-/// Numa tarefa própria: o cliente que desiste não corta no meio uma troca já admitida (a porta reabre
-/// só quando ela termina).
-async fn detached(work: impl Future<Output = Outcome> + Send + 'static) -> Outcome {
-    tokio::spawn(work).await.unwrap_or_else(|error| {
-        tracing::error!(code = PANICKED, error = %error, "troca de modo ou reinício do Codex interrompido no meio");
-        Some(Err(RuntimeError::new(PANICKED, "A troca parou no meio; confira o estado da sessão antes de tentar de novo.")))
-    })
-}
+use crate::runtime::claude_reopen::{ReopenFailure,Reopened};
+use crate::session_open::{ChangeReason,SessionChange,Surface};
 
 /// Pânico no meio da troca: não se sabe em que fase parou, então nunca é "não troquei".
 const PANICKED: &str = "relaunch_panicked";
@@ -83,11 +75,23 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         return forward_whole(&st, parts, bytes, &fwd).await;
     };
     let panels = Some(st.term.clone());
-    let outcome = detached(async move { runtime.relaunch_codex(&name, terminal, panels).await }).await;
+    let home = st.list.env().dirs.as_ref().map(|dirs| dirs.home.clone());
+    let outcome = detached_relaunch(async move {
+        if let Some(codex) = runtime.relaunch_codex(&name, terminal, panels).await { return Some(Relaunched::Codex(codex)); }
+        if home.as_deref().is_some_and(|home| crate::runtime::codex_relaunch::transfer_open(home, &name, None, None)) {
+            return Some(Relaunched::Codex(Err(RuntimeError::new("session_transfer_busy", "a sessão está trocando de agente"))));
+        }
+        let surface = if terminal { Surface::Terminal } else { Surface::Headless };
+        let change = SessionChange { reason: ChangeReason::ModeSwitch, surface: Some(surface), account: None, permission_mode: None,
+            model: None, effort: None, service_tier: None };
+        runtime.reopen_claude_session(&name, change, None).await.map(|r| Relaunched::Claude(r, !terminal))
+    }).await;
     let (status, body) = match outcome {
         None => return forward_whole(&st, parts, bytes, &fwd).await,
-        Some(Ok(value)) => (StatusCode::OK, value),
-        Some(Err(error)) => mode_refusal(&error),
+        Some(Relaunched::Codex(Ok(value))) => (StatusCode::OK, value),
+        Some(Relaunched::Codex(Err(error))) => mode_refusal(&error),
+        Some(Relaunched::Claude(Ok(_), _)) => (StatusCode::OK, json!({"ok": true, "terminal": terminal})),
+        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal("não troquei de modo", &failure),
     };
     // A identidade da sessão mudou (ou pode ter mudado no meio de uma falha).
     st.list.invalidate();
@@ -101,15 +105,52 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let runtime = st.state.runtime.get().cloned();
     let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path()))
         else { return pass(&st, req, &fwd).await };
-    let outcome = detached(async move { runtime.restart_codex(&name).await }).await;
+    let home = st.list.env().dirs.as_ref().map(|dirs| dirs.home.clone());
+    let outcome = detached_relaunch(async move {
+        if let Some(codex) = runtime.restart_codex(&name).await { return Some(Relaunched::Codex(codex)); }
+        // A transferência que falhou ao restaurar é recuperada pelo Recarregar, no Python que a conduz.
+        if home.as_deref().is_some_and(|home| crate::runtime::codex_relaunch::transfer_open(home, &name, None, None)) { return None; }
+        let from_terminal = runtime.claude_headless(&name).await.is_none_or(|headless| !headless);
+        let change = SessionChange { reason: ChangeReason::Reload, surface: None, account: None, permission_mode: None,
+            model: None, effort: None, service_tier: None };
+        runtime.reopen_claude_session(&name, change, None).await.map(|r| Relaunched::Claude(r, from_terminal))
+    }).await;
     let (status, body) = match outcome {
         None => return pass(&st, req, &fwd).await,
-        Some(Ok(value)) => (StatusCode::OK, value),
-        Some(Err(error)) => reload_refusal(&error),
+        Some(Relaunched::Codex(Ok(value))) => (StatusCode::OK, value),
+        Some(Relaunched::Codex(Err(error))) => reload_refusal(&error),
+        Some(Relaunched::Claude(Ok(_), _)) => (StatusCode::OK, json!({"ok": true})),
+        Some(Relaunched::Claude(Err(failure), from_terminal)) if failure.ended_without_terminal(from_terminal) =>
+            (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &failure.error.message,
+                json!({"erro": failure.error.message, "code": failure.error.code}))),
+        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal("não recarreguei", &failure),
     };
+    st.list.invalidate();
     let mut response = json_response(status, body);
     cors(req.headers(), response.headers_mut());
     response
+}
+
+enum Relaunched { Codex(Result<Value, RuntimeError>), Claude(Result<Reopened, ReopenFailure>, bool) }
+
+/// Numa tarefa própria, como a do Codex: a troca admitida termina mesmo que o cliente desista.
+async fn detached_relaunch(work: impl Future<Output = Option<Relaunched>> + Send + 'static) -> Option<Relaunched> {
+    tokio::spawn(work).await.unwrap_or_else(|error| {
+        tracing::error!(code = PANICKED, error = %error, "troca de modo ou recarga interrompida no meio");
+        Some(Relaunched::Codex(Err(RuntimeError::new(PANICKED, "A troca parou no meio; confira o estado da sessão antes de tentar de novo."))))
+    })
+}
+
+/// O `HTTPException` do `_trocar_modo`/`_reload_terminal` do Claude: ocupada é o motivo com a frase do app;
+/// o resto é 409 `erro_troca_modo` com o código de origem em `params.code`.
+pub fn claude_refusal(verb: &str, failure: &ReopenFailure) -> (StatusCode, Value) {
+    let error = &failure.error;
+    if error.code == "session_transfer_busy" { return (StatusCode::CONFLICT, busy_body()); }
+    if let Some(message) = crate::runtime::claude_reopen::busy_message(&error.code) {
+        return (StatusCode::CONFLICT, super::detail_body(&error.code, message, json!({})));
+    }
+    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("{verb}: {}", error.message),
+        json!({"erro": error.message, "code": error.code})))
 }
 
 #[cfg(test)]
@@ -143,7 +184,8 @@ mod tests {
     #[tokio::test]
     async fn a_panic_mid_switch_is_an_uncertain_phase_not_a_refusal() {
         let crash = true;
-        let outcome = detached(async move { if crash { panic!("no meio") } None }).await.unwrap().unwrap_err();
+        let Some(Relaunched::Codex(Err(outcome))) = detached_relaunch(async move { if crash { panic!("no meio") } None }).await
+            else { panic!("o pânico vira erro com código") };
         assert_eq!(outcome.code, PANICKED);
         for (status, body) in [mode_refusal(&outcome), reload_refusal(&outcome)] {
             assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::INTERNAL_SERVER_ERROR, Some(PANICKED)));
