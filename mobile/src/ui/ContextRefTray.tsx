@@ -45,6 +45,8 @@ export function ContextRefTray({ refs, draftKey, disabled }: { refs: DraftContex
               <TextInput
                 autoFocus
                 value={ref.comment}
+                // Durante o envio o comentário já foi junto: editar agora seria apagado com a citação.
+                editable={!disabled}
                 onChangeText={(v) => setContextRefComment(draftKey, ref.draftId, v)}
                 onSubmitEditing={() => setEditing(null)}
                 placeholder={m.cite_comment_placeholder()}
