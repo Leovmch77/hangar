@@ -123,3 +123,26 @@ async fn a_claude_without_proof_of_its_conversation_is_refused_with_a_code() {
     assert_eq!(refused,Some(Err("claude_terminal_conversation_unproved".into())));
     finish(&mut agent);
 }
+
+#[tokio::test]
+async fn at_startup_only_the_claude_terminals_that_had_a_queue_are_adopted() {
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let key = "cd".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
+    let registry = fx.registry().await;
+    let watcher = fx.watcher();
+    watcher.register_claude_terminals(&registry).await;
+    assert!(registry.terminal_view("s1").await.is_none(),"sem fila aqui, espera a primeira escrita");
+    std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+    hangar_server::runtime::queue::Store::open(&fx.queue.join(format!("runtime/{key}.json")),&fx.queue,
+        hangar_server::runtime::queue::State::new(&key,3,"s1",vec![])).unwrap();
+    watcher.register_claude_terminals(&registry).await;
+    let (found,_) = registry.terminal_view("s1").await.expect("a que já tinha fila é adotada");
+    assert_eq!(found,key);
+    registry.close(&key,3).await.unwrap();
+    finish(&mut agent);
+}

@@ -144,6 +144,32 @@ impl Watcher {
         Some(self.open_claude(registry, name, &pane, proven).await)
     }
 
+    /// Na subida: adota cada Claude com terminal que já tinha fila aqui (a chave do pane com estado
+    /// gravado, ou o vínculo que o Python deu à vida dele); o resto espera a primeira escrita. Falha de
+    /// uma não impede as outras e vai ao diário.
+    pub async fn register_claude_terminals(&self, registry: &RuntimeRegistry) {
+        let Ok(panes) = self.cfg.mux.list_panes().await else { return };
+        let mut names: Vec<(String, Pane)> = Vec::new();
+        for pane in panes.iter().filter(|p| !p.hidden && p.provider.as_deref().is_none_or(|p| p == "claude")) {
+            if !names.iter().any(|(n, _)| *n == pane.session) { names.push((pane.session.clone(), pane.clone())); }
+        }
+        for (name, pane) in names {
+            if registry.has_entry(None, &name).await { continue; }
+            let shown = self.mux_text(&["show-environment", "-t", &format!("={name}"), "CP_SESSION_KEY"]).await.unwrap_or_default();
+            let target = pane.target().unwrap_or_else(|| format!("={name}:"));
+            let (queue, owned, created) = (self.cfg.queue_dir.clone(), name.clone(), pane.session_created.unwrap_or(0));
+            let durable = match session_key(&shown) {
+                Some(key) => { let path = super::codex_terminal::queue_files(&queue, &key).0; tokio::task::spawn_blocking(move || path.exists()).await.unwrap_or(false) }
+                None => tokio::task::spawn_blocking(move || legacy_key(&queue, &owned, &target, created).is_some()).await.unwrap_or(false),
+            };
+            if !durable { continue; }
+            if let Some(Err(error)) = self.adopt_claude(registry, &name).await {
+                tracing::warn!(session = %name, code = %error.code, "Claude com terminal não adotado na subida");
+                registry.report("runtime.registration_failed", &name, &error.code, "o Claude com terminal não foi adotado na subida do Rust");
+            }
+        }
+    }
+
     async fn open_claude(&self, registry: &RuntimeRegistry, name: &str, pane: &Pane, proven: Proven) -> Result<(), RuntimeError> {
         let created = pane.session_created.ok_or_else(|| refused("claude_terminal_pane", "o multiplexador não informou quando a sessão nasceu"))?;
         let target_pane = pane.target().unwrap_or_else(|| format!("={name}:"));
