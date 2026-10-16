@@ -9,18 +9,24 @@ import type { AggSession } from '@hangar/core';
 const calls = vi.hoisted(() => ({
   replace: vi.fn(),
   release: vi.fn(),
+  reads: 0,
+  dismiss: null as null | (() => void),
   rows: [
     { name: 'shared', state: 'idle', serverId: 'srv1', serverLabel: 'first-server', serverColor: '#000' },
     { name: 'shared', state: 'idle', serverId: 'srv2', serverLabel: 'second-server', serverColor: '#000' },
   ] as AggSession[],
 }));
 vi.mock('../stores/sessions', () => ({
-  useSessions: Object.assign((select: (state: { rows: AggSession[] }) => unknown) => select({ rows: calls.rows }), {
+  useSessions: Object.assign((select: (state: { rows: AggSession[] }) => unknown) => { calls.reads++; return select({ rows: calls.rows }); }, {
     getState: () => ({ retain: () => calls.release }),
   }),
 }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ replace: calls.replace }) }));
-vi.mock('../ui/Sheet', () => ({ Sheet: ({ open, children }: { open: boolean; children: React.ReactNode }) => open ? children : null }));
+// Como o TrueSheet: os filhos ficam montados com a folha fechada; o fim do fechamento avisa por onDismiss.
+vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDismiss }: { children: React.ReactNode; onDismiss: () => void }) => {
+  calls.dismiss = onDismiss;
+  return children;
+} }));
 vi.mock('../ui/StateDot', () => ({ StateDot: () => null }));
 vi.mock('../paraglide/messages', () => ({ sessao_trocar_de: () => 'sessao_trocar_de' }));
 vi.mock('react-native', async (original) => ({
@@ -60,5 +66,27 @@ describe('SessionPickerSheet', () => {
       await act(async () => root.unmount());
     }
     expect(calls.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('fechada não assina a lista nem desenha as linhas; ao fechar, mantém as linhas até a folha sumir', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const render = (open: boolean) => act(async () => {
+      root.render(React.createElement(SessionPickerSheet, { open, atual: 'shared', serverId: 'srv1', onClose: () => {} }));
+    });
+    try {
+      calls.reads = 0;
+      await render(false);
+      expect(calls.reads).toBe(0);
+      expect(container.querySelectorAll('button')).toHaveLength(0);
+      await render(true);
+      expect(container.querySelectorAll('button')).toHaveLength(2);
+      await render(false);
+      expect(container.querySelectorAll('button')).toHaveLength(2);
+      await act(async () => calls.dismiss!());
+      expect(container.querySelectorAll('button')).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount());
+    }
   });
 });

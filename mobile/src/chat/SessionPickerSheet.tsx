@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -22,46 +22,56 @@ export function SessionPickerSheet({
   atual: string;
   serverId: string;
 }) {
-  const { theme } = useUnistyles();
-  const router = useRouter();
-  const rows = useSessions((s) => s.rows);
+  // O TrueSheet desenha os filhos mesmo fechado: a lista só existe da abertura até a folha sumir.
+  const [shown, setShown] = useState(open);
+  if (open && !shown) setShown(true);
   useEffect(() => {
     if (!open) return;
     const release = useSessions.getState().retain();
     return () => release();
   }, [open]);
+
+  return (
+    <Sheet open={open} sizes={['medium', 'large']} onDismiss={() => { setShown(false); onClose(); }} scrollable>
+      {shown ? <PickerList onClose={onClose} atual={atual} serverId={serverId} /> : null}
+    </Sheet>
+  );
+}
+
+function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: string; serverId: string }) {
+  const { theme } = useUnistyles();
+  const router = useRouter();
+  const rows = useSessions((s) => s.rows);
   const ordenadas = sortSessions(rows) as AggSession[];
 
   return (
-    <Sheet open={open} sizes={['medium', 'large']} onDismiss={onClose} scrollable>
-      <ScrollView contentContainerStyle={styles.inner}>
-        <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.sessao_trocar_de()}</Text>
-        {ordenadas.map((s) => (
-          <Pressable
-            key={`${s.serverId}::${s.name}`}
-            onPress={() => {
-              onClose();
-              router.replace(`/s/${s.serverId}/${s.name}` as never);
-            }}
-            style={styles.item}
-            accessibilityRole="button"
-            accessibilityLabel={s.name}
-            accessibilityState={{ selected: s.name === atual && s.serverId === serverId }}
+    <ScrollView contentContainerStyle={styles.inner}>
+      <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.sessao_trocar_de()}</Text>
+      {ordenadas.map((s) => (
+        <Pressable
+          key={`${s.serverId}::${s.name}`}
+          onPress={() => {
+            onClose();
+            router.replace(`/s/${s.serverId}/${s.name}` as never);
+          }}
+          style={styles.item}
+          accessibilityRole="button"
+          accessibilityLabel={s.name}
+          accessibilityState={{ selected: s.name === atual && s.serverId === serverId }}
+        >
+          <StateDot state={s.state} />
+          <Text
+            style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: s.name === atual && s.serverId === serverId ? '700' : '500' }]}
+            numberOfLines={1}
           >
-            <StateDot state={s.state} />
-            <Text
-              style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: s.name === atual && s.serverId === serverId ? '700' : '500' }]}
-              numberOfLines={1}
-            >
-              {s.name}
-            </Text>
-            <Text style={[styles.servidor, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-              {s.serverLabel}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-    </Sheet>
+            {s.name}
+          </Text>
+          <Text style={[styles.servidor, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+            {s.serverLabel}
+          </Text>
+        </Pressable>
+      ))}
+    </ScrollView>
   );
 }
 

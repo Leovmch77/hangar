@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 import Animated, { Easing, useAnimatedProps, useFrameCallback, useReducedMotion, useSharedValue, type SharedValue } from 'react-native-reanimated';
 import Svg, { Path } from 'react-native-svg';
 
@@ -10,6 +10,11 @@ const DRAW = 0.72;
 const LOOP = 0.9;
 const CYCLE = 3.2;
 const ease = Easing.bezierFn(0.23, 1, 0.32, 1);
+// Cada quadro redesenha o SVG; 20 por segundo bastam para o giro e esquentam bem menos o aparelho.
+const FRAME_S = 0.05;
+
+// Marca fora da vista (tela por baixo da pilha, gaveta fechada) para no quadro em que está.
+export const WorkingMarkPaused = createContext(false);
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 
@@ -65,15 +70,22 @@ function Arco({ k, t }: { k: number; t: SharedValue<number> }) {
 // Escala desenhada na geometria, não em transform: o quadro inteiro roda na thread de UI.
 export function WorkingMark({ size = 16, color }: { size?: number; color: string }) {
   const reduced = useReducedMotion();
+  const paused = useContext(WorkingMarkPaused);
+  const running = !reduced && !paused;
   const t = useSharedValue(reduced ? -1 : 0);
+  // O relógio do quadro zera a cada religada: a base faz a marca seguir de onde parou.
+  const base = useSharedValue(0);
   const frame = useFrameCallback((f) => {
-    t.value = f.timeSinceFirstFrame / 1000;
-  }, !reduced);
-  // O autostart só vale na montagem: ligar "Reduzir movimento" com a marca na tela também a para.
+    const now = base.value + f.timeSinceFirstFrame / 1000;
+    if (now >= t.value && now - t.value < FRAME_S) return;
+    t.value = now;
+  }, running);
+  // O autostart só vale na montagem: ligar "Reduzir movimento" ou sair da vista também a para.
   useEffect(() => {
-    frame.setActive(!reduced);
+    if (!running) base.value = Math.max(0, t.value);
+    frame.setActive(running);
     if (reduced) t.value = -1;
-  }, [reduced, frame, t]);
+  }, [running, reduced, frame, t, base]);
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeLinecap="round" pointerEvents="none">
       {ARCS.map((_, k) => <Arco key={k} k={k} t={t} />)}

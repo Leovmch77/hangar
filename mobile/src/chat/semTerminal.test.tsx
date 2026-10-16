@@ -188,7 +188,8 @@ beforeEach(() => {
 });
 afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
-const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {} }));
+const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {},
+  holders: 0, retain: () => { sessionsState.holders++; return () => { sessionsState.holders--; }; } }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
@@ -303,7 +304,11 @@ vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () =>
 vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
 vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
 vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn(async () => {}) }));
-vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
+const previewTexts = vi.hoisted(() => [] as string[]);
+vi.mock('./PreviewBubble', () => ({ PreviewBubble: ({ text }: { text: string }) => { previewTexts.push(text); return null; } }));
+// Conta os renders da tela: o KeyboardBar é filho direto dela, sem memo.
+const screenRenders = vi.hoisted(() => ({ n: 0 }));
+vi.mock('./KeyboardBar', () => ({ KeyboardBar: () => { screenRenders.n++; return null; } }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
@@ -407,6 +412,24 @@ describe('ações e atualização da conversa na rota', () => {
       expect(navigation.dismissTo).toHaveBeenLastCalledWith({ pathname: '/', params: { compose: '1' } });
       await act(async () => button(container, 'drawer-navigation-close')!.click());
       expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('a conversa mantém a lista de sessões viva enquanto está aberta, com a gaveta fechada', async () => {
+    const { root } = await render(createElement(ChatScreen));
+    expect(sessionsState.holders).toBe(1);
+    act(() => root.unmount());
+    expect(sessionsState.holders).toBe(0);
+  });
+
+  it('prévia chegando redesenha só a lista, não a tela inteira', async () => {
+    const { root } = await render(createElement(ChatScreen));
+    try {
+      const antes = screenRenders.n;
+      previewTexts.length = 0;
+      await act(async () => chatStore('s1', 'sess').use.setState({ preview: 'parcial' }));
+      expect(previewTexts).toContain('parcial');
+      expect(screenRenders.n).toBe(antes);
     } finally { act(() => root.unmount()); }
   });
 

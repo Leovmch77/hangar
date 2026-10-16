@@ -149,6 +149,22 @@ test('um message com 2 sessões → order() com 2 slots ordenados como o front (
   expect(useSessions.getState().rows).toHaveLength(2);
 });
 
+test('linha que não mudou mantém o mesmo objeto quando outra sessão do servidor muda', async () => {
+  useSessions.getState().retain();
+  await settle();
+  const es = created[0] as unknown as FakeES & { trigger: (t: string, d: string) => void };
+  const beta = { name: 'beta', state: 'idle', jsonl: '/tmp/beta.jsonl', pair_peers: ['x'] };
+  es.trigger('sessions', JSON.stringify([beta, { name: 'alpha', state: 'idle', jsonl: '/tmp/alpha.jsonl' }]));
+  const before = useSessions.getState().rows;
+  es.trigger('sessions', JSON.stringify([beta, { name: 'alpha', state: 'working', jsonl: '/tmp/alpha.jsonl' }]));
+  const after = useSessions.getState().rows;
+  const pick = (rows: typeof after, name: string) => rows.find((r) => r.name === name);
+  expect(pick(after, 'beta')).toBe(pick(before, 'beta'));
+  expect(pick(after, 'alpha')).not.toBe(pick(before, 'alpha'));
+  expect(pick(after, 'alpha')?.state).toBe('working');
+  expect(useSessions.getState().byServer[0].sessions).toContain(pick(before, 'beta'));
+});
+
 test('mensagem malformada mantém última lista e mostra erro de dados, não queda de rede', async () => {
   useSessions.getState().retain();
   await settle();

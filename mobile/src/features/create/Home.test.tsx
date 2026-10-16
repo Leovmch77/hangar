@@ -22,6 +22,7 @@ vi.mock('react-native', async (original) => ({
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: calls.push, setParams: calls.setParams }),
   useLocalSearchParams: () => calls.params,
+  useIsFocused: () => true,
   useFocusEffect: (callback: () => void | (() => void)) => useEffect(() => calls.focused ? callback() : undefined, [callback, calls.focused]),
 }));
 vi.mock('../../stores/servers', async () => {
@@ -30,7 +31,7 @@ vi.mock('../../stores/servers', async () => {
 });
 vi.mock('../../stores/sessions', async () => {
   const { create } = await import('zustand');
-  return { useSessions: create(() => ({ rows: [{ state: 'working' }, { state: 'idle' }, { state: 'dead' }] })) };
+  return { useSessions: create(() => ({ rows: [{ state: 'working' }, { state: 'idle' }, { state: 'dead' }], retain: () => () => {} })) };
 });
 vi.mock('../../stores/aparencia', async () => {
   const { create } = await import('zustand');

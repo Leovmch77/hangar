@@ -1,11 +1,12 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, Keyboard, PanResponder, Platform, Text, View } from 'react-native';
 import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DrawerLayoutMethods } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Screen } from '../src/ui/Screen';
+import { WorkingMarkPaused } from '../src/ui/WorkingMark';
 import { Icon } from '../src/ui/Icon';
 import { SessionsDrawer } from '../src/features/sessions/SessionsDrawer';
 import { SessionList } from '../src/features/sessions/SessionList';
@@ -19,10 +20,13 @@ import { useAparencia, type HomeScreen } from '../src/stores/aparencia';
 
 export default function Index() {
   const router = useRouter();
+  const focused = useIsFocused();
   const params = useLocalSearchParams<{ compose?: string | string[] }>();
   const compose = Array.isArray(params.compose) ? params.compose[0] : params.compose;
   const activeId = useServers((s) => s.activeId);
   const count = useSessions((s) => s.rows.filter((row) => row.state !== 'dead').length);
+  // O contador lê a lista também com a gaveta fechada e a tela de nova conversa à frente.
+  useEffect(() => useSessions.getState().retain(), []);
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const drawer = useRef<DrawerLayoutMethods>(null);
@@ -68,7 +72,9 @@ export default function Index() {
     </Pressable>
   );
 
+  // Com o chat por cima, as marcas desta tela param.
   return (
+    <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
       <SessionsDrawer ref={drawer} onClose={closeDrawer} onNewConversation={newFromDrawer} onOpenServers={() => setServersOpen(true)}>
         <View style={styles.bar} {...swipe.panHandlers}>
@@ -89,6 +95,7 @@ export default function Index() {
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
     </Screen>
+    </WorkingMarkPaused.Provider>
   );
 }
 
