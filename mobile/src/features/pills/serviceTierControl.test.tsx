@@ -108,6 +108,17 @@ beforeEach(() => {
 afterEach(() => { act(() => { for (const root of roots.splice(0)) root.unmount(); }); });
 
 describe('Fast na folha de ajustes real', () => {
+  it('chip do chat conserva modelo, contexto e esforço e mostra Fast só quando ligado', async () => {
+    state.statusLine = '🤖 GPT·1M (high) │ 💬 1k/1k 4k/1M';
+    const { container, close } = await mount();
+    const chip = () => container.querySelector<HTMLButtonElement>('[aria-label="composer_session_settings"]')!;
+    expect(chip().textContent).toBe('GPT · 1M high');
+    await act(async () => toggle(container).click());
+    await close();
+    expect(chip().textContent).toBe('GPT · 1M high · native_ctl_fast');
+    expect(api.tier).toHaveBeenCalledExactlyOnceWith('sess', 'priority', state.servers[0]);
+  });
+
   it.each([
     { tiers: [{ id: 'priority', hidden: false }], available: true },
     { tiers: [{ id: 'priority' }], available: true },

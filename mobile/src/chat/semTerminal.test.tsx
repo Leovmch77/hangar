@@ -132,7 +132,7 @@ vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
     .concat(' composer_ditado_cru composer_ditado_versao composer_ditado_trocando native_dictation_draft_changed composer_voice_send_cancelled composer_voice_starting native_queue_discard_message')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
-    .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
+    .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint criar_mais_opcoes')
     .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria')
     // Telas do redesign (Nova conversa, folha de anexo, lista de tarefas, uso na inicial).
     .concat(' ask_perguntas chat_abrir_terminal_codex chat_carregando_historico chat_codex_buffering chat_historico_antigo chat_sem_historico_anterior chat_sem_thread_codex chat_sem_thread_codex_hint chat_sessao_encerrada chat_sse_recusado chat_sse_tentar composer_adicionar_ao_chat composer_adicionar_arquivos composer_camera composer_fotos composer_sem_acesso_camera comum_falha_envio_opcao comum_voltar criar_retomar ctx_anexos_da_sessao')
@@ -566,12 +566,12 @@ const newConversationProps = (server: object) => ({
     onClick: () => openFolder(folderOpener as never),
   }, 'repo'),
   bottomPills: null,
-  providerChip: (openOptions: () => void) => createElement('button', { onClick: openOptions }, 'Codex'),
-  resume: null, notices: null, options: null,
+  providerChip: createElement('button', null, 'Codex'),
+  resume: null, notices: null,
   body: { cwd: '/repo', provider: 'codex' as const }, blocked: false,
 });
 
-it('opções e pasta da Nova conversa recebem foco e devolvem ao seletor que abriu, preservando o rascunho', async () => {
+it('painel de pasta da Nova conversa devolve foco ao seletor e preserva o rascunho', async () => {
   firstInput.attempt = null;
   vi.mocked(AccessibilityInfo.sendAccessibilityEvent).mockClear();
   const { container, root } = await render(createElement(NewConversation, newConversationProps({ id: 's1' })));
@@ -580,21 +580,14 @@ it('opções e pasta da Nova conversa recebem foco e devolvem ao seletor que abr
     field.value = 'primeira mensagem';
     field.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  // "Mais opções" vem do menu nativo do chip: a folha foca o Fechar ao abrir.
-  act(() => button(container, 'Codex')!.click());
   expect(AccessibilityInfo.sendAccessibilityEvent).not.toHaveBeenCalled();
-  act(() => sheetEvents.presented?.());
-  const close = button(container, 'nova_conversa_opcoes_fechar')!;
-  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(close, 'focus');
-  act(() => close.click());
-  act(() => sheetEvents.dismissed?.());
-  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
   // O painel de pasta devolve o foco à pílula que o abriu.
   const opener = button(container, 'repo')!;
   act(() => opener.click());
   expect(container.textContent).toContain('painel-pastas');
   act(() => panelEvents.dismissed?.());
   expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(opener, 'focus');
+  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
   expect(field.value).toBe('primeira mensagem');
   act(() => root.unmount());
 });
