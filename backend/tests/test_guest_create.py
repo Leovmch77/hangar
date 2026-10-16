@@ -170,20 +170,17 @@ def test_rename_survives_guest_claim_failure(ana, monkeypatch):
     assert (tmp / "bastao-novo").read_text() == "b"
 
 
-def test_mode_switch_result_survives_guest_life_failure(ana, monkeypatch):
-    from fastapi.testclient import TestClient
+def test_transfer_result_survives_guest_life_failure(ana, monkeypatch):
+    import asyncio
     from app import api
 
-    async def troca(name, body):
-        return {"ok": True, "terminal": False}
+    async def troca():
+        return {"ok": True}
 
     def boom(session, life):
         raise OSError("disco cheio")
-    monkeypatch.setattr(api.settings, "auth_token", "secret")
-    monkeypatch.setattr(api, "_trocar_modo", troca)
     monkeypatch.setattr(api, "session_life", lambda n: "k:novo")
     monkeypatch.setattr(api.share_bridge, "set_life", lambda n, life: None)
+    monkeypatch.setattr(api.share_bridge, "mode_change", lambda n, on: None)
     monkeypatch.setattr(guest_users, "set_life", boom)
-    r = TestClient(api.app).post("/api/sessions/proj/modo-execucao", json={"terminal": False},
-                                 headers={"Authorization": "Bearer secret"})
-    assert r.status_code == 200 and r.json() == {"ok": True, "terminal": False}
+    assert asyncio.run(api._durante_troca("proj", troca())) == {"ok": True}

@@ -170,7 +170,7 @@ def test_mode_change_holds_the_invite_and_moves_its_life(monkeypatch, bridge):
     async def troca():
         seen.append(("durante", "s" in share_bridge.changing_mode, list(bridge.calls)))
         return "feito"
-    assert asyncio.run(api._during_transfer_life("s", troca())) == "feito"
+    assert asyncio.run(api._durante_troca("s", troca())) == "feito"
     assert seen == [("durante", True, [("mode_change_begin", {"name": "s"})])]
     assert bridge.calls == [("mode_change_begin", {"name": "s"}), ("set_life", {"name": "s", "life": "k:novo"}),
                             ("mode_change_end", {"name": "s", "source_life": None})]

@@ -812,18 +812,13 @@ class RuntimeCoordinator:
                     _registration_failed("runtime.registration_failed", meta["name"], exc)
 
     async def register_claude_sessions(self):
-        """Sessões Claude do estado durável. Python dono: registra todas nele. Rust de pé: o sem
-        terminal ele reconhece sozinho; o terminal registra e segue pela adoção."""
-        terminals = await self._register_durable_terminals(owned=None if self.transport is None else True)
-        if self.transport is None:
-            from app.adapters.claude_headless import sessions as claude_sessions
-            await self._prepare_listed("claude", await asyncio.to_thread(claude_sessions.list_all))
+        """Sessões Claude do estado durável. Python dono: registra todas nele. Rust de pé: ele adota
+        sozinho as com e sem terminal na subida."""
+        if self.transport is not None:
             return
-        for binding in terminals:
-            try:
-                await self.prepare_session(binding.name, "claude")
-            except Exception as exc:
-                _registration_failed("runtime.reopen_failed", binding.name, exc, rust_dead=not self._rust_alive())
+        await self._register_durable_terminals(owned=None)
+        from app.adapters.claude_headless import sessions as claude_sessions
+        await self._prepare_listed("claude", await asyncio.to_thread(claude_sessions.list_all))
 
     async def register_codex_sessions(self):
         """Rust dono do Codex sem terminal: abre nele os canos vivos e os mortos com entrada não
@@ -1781,7 +1776,7 @@ class RuntimeCoordinator:
             if key is not None and self.slots[key].awaiting_identity:
                 self.names.pop(name, None)
 
-    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, preflight=None, kill=False):
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False, kill=False):
         """Administração da sessão. Do Rust: barreira → `close` (a trava e a fila voltam ao Python,
         sem cliente no cano) → ação → nova vida gravada na fila → `open` no Rust, salvo `stopped`
         ou sem processo para abrir. `reopen` só vale para o caminho Python."""
@@ -1791,7 +1786,7 @@ class RuntimeCoordinator:
         if self.in_lifecycle(slot):
             if slot.phase == Phase.Rust and slot.change is not None:
                 # Ação aninhada depois de reaberta (a volta atrás de uma troca de conta): fecha antes.
-                await self._close_for_change(name, slot, preflight=preflight)
+                await self._close_for_change(name, slot)
             return await action()
         if remove and slot.awaiting_identity:
             # Registro em espera nunca teve posse nem dono no Rust: fechar só solta o nome.
@@ -1805,7 +1800,7 @@ class RuntimeCoordinator:
                     raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")
                 from_rust, closed = slot.phase == Phase.Rust, None
                 if from_rust:
-                    closed = await self._close_for_change(name, slot, preflight=preflight, kill=kill)
+                    closed = await self._close_for_change(name, slot, kill=kill)
                 elif remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
@@ -1865,7 +1860,7 @@ class RuntimeCoordinator:
             await self.prepare_session(current.binding.name, current.binding.provider)
         return result
 
-    async def _close_for_change(self, name, slot, preflight=None, kill=False):
+    async def _close_for_change(self, name, slot, kill=False):
         """Fecha no Rust e devolve a trava e a fila ao Python sem cliente no cano. A vista do Rust,
         relida agora, fica guardada: é ela que diz se a sessão estava ociosa (transferência)."""
         try:
@@ -1875,8 +1870,6 @@ class RuntimeCoordinator:
             slot.cache_valid = False        # quem lê a ociosidade recusa por estado desconhecido
             from app import diag
             diag.registrar("runtime.refresh_failed", "aviso", sessao=name, **failure_reason(exc))
-        if preflight is not None:
-            await preflight()
         reply = await self.detach(name, restore=False, **({"kill": True} if kill else {}))
         slot.change_from_rust = True
         return reply

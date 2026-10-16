@@ -1,7 +1,6 @@
 //! A abertura no servidor: o `POST /api/sessions` do dono e do convidado com login, o bastão do dono,
 //! a ponte privada por onde o Python repassa o que entrou direto nele (Connect) e o `OpenHost`
-//! com os serviços do Rust e o que ainda mora no Python (o registro em espera e o `then` do nome
-//! reusado).
+//! com os serviços do Rust.
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,6 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::future::BoxFuture;
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 use super::claude::PluginBridge;
@@ -144,20 +142,6 @@ impl ServerHost {
         Self { st, env, terminal, mux: ProcessMux::default() }
     }
 
-    /// `POST` JSON a uma rota interna do Python; `Err` com o motivo, sem o corpo.
-    async fn internal(&self, path: &str, body: Value) -> Result<Value, String> {
-        let request = axum::http::Request::post(format!("http://{}{path}", self.st.cfg.upstream))
-            .header("x-hangar-internal", &self.st.cfg.internal_secret).header("content-type", "application/json")
-            .body(Body::from(body.to_string())).map_err(|e| e.to_string())?;
-        let response = tokio::time::timeout(Duration::from_secs(30), self.st.http.request(request)).await
-            .map_err(|_| "prazo".to_owned())?.map_err(|e| format!("conexão: {e}"))?;
-        let status = response.status();
-        let bytes = http_body_util::Limited::new(response.into_body(), 1 << 20).collect().await
-            .map_err(|_| "corpo".to_owned())?.to_bytes();
-        if !status.is_success() { return Err(format!("status {}", status.as_u16())); }
-        serde_json::from_slice(&bytes).map_err(|_| "json".to_owned())
-    }
-
     /// O dono da sessão que o convidado com login abriu vai ao `guests.json`. Falhou: a sessão sai
     /// com a worktree que ela criou, como no `_kill_unclaimed`.
     async fn claim(&self, mut opened: super::open::Opened, guest: &LoginGuest) -> Result<super::open::Opened, OpenError> {
@@ -275,14 +259,9 @@ impl OpenHost for ServerHost {
                 return Err(OpenError::new(503, "erro_lista_indisponivel", format!("a fila da sessão antiga não foi apagada: {error}"))
                     .with_params(json!({"detalhe": "fila_antiga"})));
             }
-            // ponytail: o registro em espera do coordenador ainda mora no Python e só ele vai por esta
-            // chamada; sai quando o registro de sessões passar ao Rust.
-            let path = format!("/internal/sessions/{}/release", crate::groups::exit::segment(name));
-            self.internal(&path, json!({})).await.map(|_| ()).map_err(|cause| {
-                tracing::warn!(cause, "registro em espera e `then` do nome reusado não limpos");
-                OpenError::new(503, "erro_lista_indisponivel", "o estado do nome reusado não foi limpo; tente de novo")
-                    .with_params(json!({"detalhe": "python_release"}))
-            })
+            // Com o Rust de pé o registro dos terminais Claude é dele (a adoção): no Python não há
+            // registro em espera a soltar.
+            Ok(())
         })
     }
 

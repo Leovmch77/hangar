@@ -499,7 +499,8 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         .route("/api/sessions/{name}/modo-execucao", axum::routing::post(crate::session_write::relaunch::mode).fallback(pass_any))
         .route("/api/sessions/{name}/recarregar", axum::routing::post(crate::session_write::relaunch::reload).fallback(pass_any))
         // Trocar de conta (e a conta ChatGPT fixa, o modelo e o esforço dela) reabre o Claude pelo spec no Rust.
-        .route("/api/sessions/{name}/conta", get(crate::session_write::account::targets_route).post(crate::session_write::account::switch_route).fallback(pass_any))
+        .route("/api/sessions/{name}/conta", get(crate::session_write::account::targets_route).fallback(pass_any))
+        .route("/api/sessions/{name}/conta", axum::routing::post(crate::session_write::account::switch_route))
         .route("/api/sessions/{name}/engine/model", axum::routing::post(crate::session_write::engine::model).fallback(pass_any))
         .route("/api/sessions/{name}/model-effort", axum::routing::post(crate::session_write::engine::effort).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
