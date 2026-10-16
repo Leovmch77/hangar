@@ -221,6 +221,8 @@ pub struct Watcher {
     /// Relançamentos seguidos que falharam do sidecar antigo, por nome, com a hora da última falha (o
     /// `TETO_SUBIDAS` do Python).
     pub(super) legacy_failures:tokio::sync::Mutex<BTreeMap<String,(u8,std::time::Instant)>>,
+    /// O prefixo do escopo do systemd do pane que o Rust cria; os testes nunca rodam o `systemd-run`.
+    scope_probe:fn()->Vec<String>,
 }
 
 /// Sidecar do desenho antigo (terminal sem `endpoint`): a escrita o relança pelo lançador.
@@ -406,7 +408,15 @@ fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeErr
 }
 
 impl Watcher {
-    pub fn new(cfg:WatchConfig) -> Self { Self { cfg,misses:Default::default(),death_after:DEATH_AFTER,legacy_failures:Default::default() } }
+    pub fn new(cfg:WatchConfig) -> Self {
+        Self { cfg,misses:Default::default(),death_after:DEATH_AFTER,legacy_failures:Default::default(),scope_probe:crate::session_open::terminal::systemd_scope }
+    }
+    pub fn with_scope_probe(mut self,probe:fn()->Vec<String>) -> Self { self.scope_probe = probe; self }
+    /// O multiplexador que cria panes, com o escopo desta vigia.
+    pub(super) fn spawn_mux(&self) -> crate::session_open::terminal::ProcessMux {
+        crate::session_open::terminal::ProcessMux { probe:self.scope_probe,..Default::default() }
+    }
+    pub(super) fn mux_program(&self) -> String { self.cfg.mux_program.to_string_lossy().into_owned() }
     /// Prazo de ausência antes da morte; os testes encurtam.
     pub fn with_death_after(mut self,after:Duration) -> Self { self.death_after = after; self }
 

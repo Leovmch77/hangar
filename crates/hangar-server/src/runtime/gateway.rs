@@ -344,7 +344,36 @@ impl RuntimeRegistry {
     pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
         if let Some(opened) = self.open_claude_headless(name,true).await { return Some(opened); }
         let watcher = self.watcher.get()?.clone();
-        watcher.adopt_now(self,name).await
+        if let Some(adopted) = watcher.adopt_now(self,name).await { return Some(adopted); }
+        watcher.adopt_claude(self,name).await
+    }
+    pub(super) fn watcher_ref(&self) -> Option<Arc<super::codex_terminal::Watcher>> { self.watcher.get().cloned() }
+    pub(super) fn policy_plugin_bridge(&self) -> Option<crate::session_open::claude::PluginBridge> { self.policy.plugin_bridge() }
+    pub(super) fn live_channel(&self,name:&str) -> LiveSender { self.live_sender(name) }
+    /// O retrato confirmado do modo da conversa (memória do Rust), sem leitura incerta.
+    pub(super) fn permission_view(&self,conversation:&str) -> Option<crate::state::permission::PermissionView> {
+        self.permissions.as_ref()?.lock().ok()?.get(conversation)
+    }
+    /// Geração e vista do Claude sem terminal aberto aqui com esse nome.
+    pub(super) async fn claude_headless_view(&self,name:&str) -> Option<(u64,Value)> {
+        let found=self.entries.lock().await.values().find_map(|entry|match &entry.handle {
+            EntryHandle::Headless(handle) if entry.name==name && entry.provider=="claude"=>Some((entry.generation,handle.clone())),
+            _=>None,
+        });
+        let (generation,handle)=found?;
+        handle.view().await.ok().map(|view|(generation,view))
+    }
+    /// Alvo e ator do Claude com terminal aberto aqui com esse nome.
+    pub(super) async fn claude_terminal_entry(&self,name:&str) -> Option<(super::terminal::TerminalTarget,super::terminal::TerminalHandle)> {
+        self.entries.lock().await.values().find_map(|entry|match &entry.handle {
+            EntryHandle::Terminal {target,handle} if entry.name==name && target.generation==entry.generation=>Some((target.clone(),handle.clone())),
+            _=>None,
+        })
+    }
+    /// Fecha a entrada sob a barreira da chave; o processo segue vivo.
+    pub(super) async fn close_claude_entry(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        self.close_locked(key,generation,false).await
     }
     /// `DELETE` que entra pelo Python: `None` = não é Codex com terminal do Rust.
     pub async fn kill_codex_terminal(&self,name:&str) -> Option<Result<Value,RuntimeError>> {

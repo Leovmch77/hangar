@@ -460,7 +460,8 @@ async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_on
     let bridge = host.bridge();
     let key = host.new_bridge_key();
     let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: bridge.as_ref(), bridge_key: &key, runtime_config: runtime,
-        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref() };
+        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref(),
+        resume: false, allow_bypass: false };
     let pane = claude::pane(spec, sid, &ctx);
     let jsonl = claude::transcript(spec, sid, &host.server_projects()).to_string_lossy().into_owned();
     Ok((pane, jsonl, route))
@@ -481,7 +482,7 @@ async fn sync_skills(host: &dyn OpenHost) {
 
 /// O sidecar do Claude sem terminal com os campos que o Python grava (`sessions.save`): os dois lados
 /// ainda o leem, e um revert não pode reabrir a sessão em modo errado.
-fn headless_sidecar(spec: &SessionSpec, sid: &str, previous_non_plan: Option<PermissionMode>, settings: Option<&Value>,
+pub(crate) fn headless_sidecar(spec: &SessionSpec, sid: &str, previous_non_plan: Option<PermissionMode>, settings: Option<&Value>,
                     route: Option<&claude::EngineRoute>) -> Value {
     let (engine, context_window) = match &spec.account {
         Account::Engine { name, context_window, .. } => (Some(name.clone()), *context_window),

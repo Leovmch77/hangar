@@ -289,7 +289,7 @@ pub struct ProcessMux { pub timeout: Duration, pub probe: fn() -> Vec<String> }
 impl Default for ProcessMux { fn default() -> Self { Self { timeout: Duration::from_secs(5), probe: systemd_scope } } }
 
 /// Bloqueante: a primeira chamada roda o `systemd-run` da sondagem.
-fn systemd_scope() -> Vec<String> {
+pub(crate) fn systemd_scope() -> Vec<String> {
     #[cfg(unix)]
     { crate::runtime::process::scope_prefix().iter().map(|a| a.to_string_lossy().into_owned()).collect() }
     #[cfg(not(unix))]
