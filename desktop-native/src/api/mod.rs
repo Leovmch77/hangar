@@ -139,6 +139,23 @@ fn envelope_code(body: Option<&Value>) -> Option<String> {
     body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
+/// A chave da frase de um código da abertura ou da troca de vida da sessão, e a da família dele.
+fn session_life_key(code: &str) -> Option<(&str, Option<&'static str>)> {
+    let family = [("lifecycle_", "session_lifecycle_failed"), ("relaunch_", "session_relaunch_failed"), ("heal_", "session_heal_failed")]
+        .into_iter().find(|(prefix, _)| code.starts_with(prefix)).map(|(_, key)| key);
+    match code {
+        "session_patch_stale" | "session_patch_owner" | "session_patch_field" | "session_clear_cano_pid" => Some(("session_record_failed", None)),
+        "codex_terminal_starting" | "runtime_unhealthy" | "erro_cliproxy_conta" | "erro_codex_catalogo_invalido" | "erro_codex_escolha_invalida"
+        | "erro_codex_nao_reiniciou" | "erro_codex_reiniciando" | "erro_conta_criadora" | "erro_corpo_invalido" | "erro_criadora_ilegivel"
+        | "erro_modo_desconhecido" | "erro_modo_padrao_ilegivel" | "erro_perfil_so_omp" | "erro_permissao_ocupada" | "erro_permissao_picker"
+        | "erro_plano_fora_da_tela" | "erro_recarregar_so_sem_terminal" | "erro_nome_em_uso" | "erro_cwd_inexistente"
+        | "erro_config_dir_invalido" | "erro_fora_da_pasta" | "erro_motor_invalido" | "erro_motor_sem_claude" | "erro_permissao_invalida"
+        | "erro_permissao_so_claude" | "erro_provedor_offline" | "erro_provider_sessao_invalido" | "erro_conta_reconciliacao_falhou"
+        | "erro_grupo_limpeza_falhou" => Some((code, None)),
+        _ => family.map(|key| (code, Some(key))),
+    }
+}
+
 fn failure_detail(body: Option<Value>, status: u16) -> String {
     body.and_then(|value| value.get("detail").and_then(|detail| match detail {
         Value::String(message) => Some(message.clone()),
@@ -166,6 +183,14 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
+            // Abertura e troca de vida da sessão no Rust: a frase do web; etapa interna sem frase própria leva a da família.
+            if let Some((key, family)) = fields.get("code").and_then(Value::as_str).and_then(session_life_key) {
+                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
+                if let Some(message) = crate::i18n::tr_web(key, &params).or_else(|| family.and_then(|f| crate::i18n::tr_web(f, &params))) {
+                    return Some(message);
+                }
             }
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_run_code_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
@@ -1058,6 +1083,20 @@ mod tests {
                 assert!(catalog[code].as_str().unwrap().contains(expected));
             }
         }
+    }
+
+    #[test]
+    fn session_open_and_lifecycle_refusals_use_the_web_sentence() {
+        for code in ["codex_terminal_starting", "runtime_unhealthy", "erro_conta_criadora", "erro_criadora_ilegivel",
+            "erro_modo_padrao_ilegivel", "erro_cliproxy_conta", "session_patch_stale", "lifecycle_busy", "heal_not_needed",
+            "relaunch_policy_forbids_bypass", "lifecycle_kill", "relaunch_ipc", "heal_backoff"] {
+            let text = failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "texto-do-servidor"}})), 409);
+            assert!(text != "texto-do-servidor" && text != code, "{code}: {text}");
+        }
+        let text = failure_detail(Some(json!({"detail": {"code": "erro_codex_escolha_invalida", "params": {"erro": "xhigh"}, "msg": "x"}})), 422);
+        assert!(text != "x" && text.contains("xhigh"), "{text}");
+        let text = failure_detail(Some(json!({"detail": {"code": "erro_cwd_inexistente", "params": {"cwd": "/sumiu"}, "msg": "x"}})), 400);
+        assert!(text != "x" && text.contains("/sumiu"), "{text}");
     }
 
     #[test]
