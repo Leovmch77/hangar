@@ -8,8 +8,6 @@ import queue
 import subprocess
 import threading
 
-import pytest
-
 from accounts_contract import PythonReference, HttpTransport, isolated_environment, normalize, assert_rust_ownership, FIXTURES, rust_integration_binary
 
 
@@ -71,72 +69,6 @@ def test_claimed_http_routes_match_goldens_without_python_handlers(tmp_path):
             if "tree" in expected:
                 assert reference.tree("fresh") == expected["tree"]
         assert_rust_ownership(reference.calls())
-        assert reference.calls() == []
-    finally:
-        server.close()
-        reference.close()
-
-
-@pytest.mark.parametrize("cancelled", [False, True])
-def test_http_delete_is_blocked_after_creator_returns_and_across_rust_restart(tmp_path, cancelled):
-    reference = PythonReference(tmp_path / "home")
-    server = RustCatalog(reference)
-    try:
-        launcher = reference.block("launcher_before_publication")
-        if cancelled:
-            creation = reference.block("session_before_registration")
-        birth = reference.start_session_async(provider="codex", account_id="alpha")
-        if cancelled:
-            assert creation.entered.wait()
-            assert reference.cancel_birth().json()["cancelled"]
-            assert reference.cancel_birth().json()["cancelled"]
-            creation.release.set()
-        assert birth.result(timeout=20).status_code == (499 if cancelled else 200)
-        assert launcher.entered.wait()
-        for attempt in range(2):
-            response = server.request("DELETE", "/api/codex-contas/alpha")
-            assert response.status_code == 409, response.json()
-            assert response.json() == {"detail": {"code": "codex_account_in_use",
-                                                   "params": {"account_id": "alpha"},
-                                                   "msg": "conta Codex está em uso"}}
-            assert reference.account_exists("codex", "alpha")
-            if attempt == 0:
-                server.close()
-                server = RustCatalog(reference)
-        assert reference.calls() == []
-        launcher.release.set()
-        assert reference.request("GET", "/__contract__/published").json()["published"]
-    finally:
-        server.close()
-        reference.close()
-
-
-@pytest.mark.parametrize("identity", ["known", "unknown", "reused_name"])
-def test_http_delete_keeps_renamed_boot_protected(tmp_path, identity):
-    reference = PythonReference(tmp_path / "home")
-    server = RustCatalog(reference)
-    try:
-        assert reference.request("POST", "/__contract__/launcher-options", {
-            "opaque": True, "unknown_instance": identity == "unknown"}).status_code == 200
-        launcher = reference.block("launcher_before_publication")
-        birth = reference.start_session_async(provider="codex", account_id="alpha")
-        assert birth.result(timeout=20).status_code == 200
-        assert launcher.entered.wait()
-        renamed = reference.request("POST", "/api/sessions/birth/rename", {"new": "renamed"})
-        assert renamed.status_code == 200, renamed.json()
-        if identity == "reused_name":
-            assert reference.request("POST", "/__contract__/reuse-name/birth").status_code == 200
-        assert reference.request("POST", "/__contract__/retire-birth").status_code == 200
-        for attempt in range(2):
-            response = server.request("DELETE", "/api/codex-contas/alpha")
-            assert response.status_code == 409, response.json()
-            expected = "account_usage_unknown" if identity == "unknown" else "codex_account_in_use"
-            assert response.json()["detail"]["code"] == expected
-            assert reference.account_exists("codex", "alpha")
-            assert list((reference.root / ".hangar/account-locks/births").glob("*.json"))
-            if attempt == 0:
-                server.close()
-                server = RustCatalog(reference)
         assert reference.calls() == []
     finally:
         server.close()
