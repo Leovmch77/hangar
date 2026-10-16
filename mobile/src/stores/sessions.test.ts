@@ -660,7 +660,7 @@ describe('recusas e recuperação da lista', () => {
     rel();
   });
 
-  test('recarregar módulos restaura o prazo MMKV em vez de iniciar outra tentativa', async () => {
+  test('reiniciar o estado da lista restaura o prazo MMKV em vez de iniciar outra tentativa', async () => {
     const server = useServers.getState().servers[0];
     useServers.setState({ activeId: null });
     fetchMock.mockRejectedValue(new TypeError('offline'));
@@ -669,17 +669,13 @@ describe('recusas e recuperação da lista', () => {
     created[0].onerror?.({});
     release();
     const stored = prefs.getString(outageKey);
-    vi.resetModules();
-    const core = await import('@hangar/core');
-    const reopenedServers = (await import('./servers')).useServers;
-    const reopened = await import('./sessions');
-    reopenedServers.setState({ servers: [server], activeId: null, ready: true });
-    core.definirArmazem(cooldownStorage);
-    core.configureApi({
-      getBaseUrl: () => '', getToken: () => null, onUnauthorized: () => {}, origin: null,
-      createEventSource: fakeCreateEventSource as any,
-    });
-    const rel = reopened.useSessions.getState().retain();
+    expect(stored).toBeDefined();
+    // Desliga só o armazenamento antes de zerar a memória: o reset não apaga o prazo guardado.
+    definirArmazem(null);
+    _resetSessionsForTests();
+    definirArmazem(cooldownStorage);
+    useServers.setState({ servers: [server], activeId: null, ready: true });
+    const rel = useSessions.getState().retain();
     await settle();
     expect(prefs.getString(outageKey)).toBe(stored);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -687,9 +683,8 @@ describe('recusas e recuperação da lista', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(core.retryAfterMs(server.id)).toBe(5000);
+    expect(retryAfterMs(server.id)).toBe(5000);
     rel();
-    reopened._resetSessionsForTests();
   });
 
   test('máquina recente limita recuo de rede a 30s; ping confirma vida sem zerar recuo local nem reabrir stream', async () => {

@@ -434,11 +434,10 @@ impl Hangar {
         window.subscribe(&input, cx, move |_, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { secondary, shift: false } = event { on_enter(*secondary, window, cx); }
         }).detach();
-        let top = window.viewport_size().height / 6.;
         let focus = input.read(cx).focus_handle(cx);
         window.open_dialog(cx, move |dialog, _, cx| {
             let (finish, next) = (save.clone(), save.clone());
-            super::popup::dialog(dialog).w(px(560.)).margin_top(top)
+            super::popup::dialog(dialog).w(px(560.)).centered()
                 .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr_shared("cite_reply_title", &[])))
                 .child(div().id("ref-editor-excerpt").max_h(px(200.)).overflow_y_scroll().pl(px(10.)).py(px(2.)).border_l_2()
                     .border_color(theme::accent()).child(chat_text(&excerpt, cx).text_color(theme::muted())))
