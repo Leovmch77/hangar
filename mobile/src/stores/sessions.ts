@@ -123,10 +123,54 @@ function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<Se
   );
 }
 
+// Cada publicação traz o JSON do servidor inteiro: sem reaproveitar o que não mudou, toda linha
+// ganha objeto novo e o memo do SessionRow não segura nada.
+const sessionJson = new WeakMap<SessionInfo, string>();
+function reuseUnchanged(prev: SessionInfo[] | null | undefined, next: SessionInfo[]): SessionInfo[] {
+  const byName = new Map((prev ?? []).map((p) => [p.name, p]));
+  let same = !!prev && prev.length === next.length;
+  const out = next.map((item, i) => {
+    const json = JSON.stringify(item);
+    const old = byName.get(item.name);
+    if (old && sessionJson.get(old) === json) {
+      if (prev![i] !== old) same = false;
+      return old;
+    }
+    same = false;
+    sessionJson.set(item, json);
+    return item;
+  });
+  return same ? prev! : out;
+}
+
+let stableRows = new Map<string, AggSession>();
+function sameRow(a: AggSession, b: AggSession): boolean {
+  const ka = Object.keys(a) as (keyof AggSession)[];
+  return ka.length === Object.keys(b).length && ka.every((k) => a[k] === b[k]);
+}
+function stabilizeRows(agg: { rows: AggSession[]; byServer: ServerBucket[] }) {
+  const next = new Map<string, AggSession>();
+  const seen = new Map<AggSession, AggSession>();
+  const keep = (row: AggSession) => {
+    let out = seen.get(row);
+    if (out) return out;
+    const key = `${row.serverId}::${row.name}::${row.outside ? 'outside' : ''}`;
+    const prev = stableRows.get(key);
+    out = prev && sameRow(prev, row) ? prev : row;
+    seen.set(row, out);
+    next.set(key, out);
+    return out;
+  };
+  const byServer = agg.byServer.map((b) => ({ ...b, sessions: b.sessions.map(keep) }));
+  const rows = agg.rows.map(keep);
+  stableRows = next;
+  return { rows, byServer };
+}
+
 function recompute(set: (p: Partial<SessionsState>) => void) {
   hidden = sweepHidden(hidden, slots);
   const agg = aggregateSessions(serversCache, slots, hidden);
-  aggCache = { ...placeExternalRows(agg), loading: agg.loading };
+  aggCache = { ...stabilizeRows(placeExternalRows(agg)), loading: agg.loading };
   const byServerRecord: Record<string, AggSession[]> = {};
   for (const b of aggCache.byServer) byServerRecord[b.server.id] = b.sessions;
   set({
@@ -272,7 +316,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
       if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
-      slots.set(s.id, { sessions, error: null });
+      slots.set(s.id, { sessions: reuseUnchanged(slots.get(s.id)?.sessions, sessions), error: null });
       recompute(set);
     } catch (error) {
       if (!isCurrent(attempt)) return;
@@ -302,7 +346,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
         const sessions: unknown = JSON.parse(e.data);
         if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
         receivedList();
-        slots.set(s.id, { sessions: sessions as SessionInfo[], error: null });
+        slots.set(s.id, { sessions: reuseUnchanged(slots.get(s.id)?.sessions, sessions as SessionInfo[]), error: null });
         if (falhaDados) registrarDiag({ evento: 'lista.voltou', tela: 'lista' }, s.baseUrl);
         falhaDados = false;
       } catch {
@@ -514,6 +558,7 @@ export function _resetSessionsForTests() {
   hidden = new Map<string, string | null>();
   serversCache = [];
   aggCache = { rows: [], byServer: [], loading: false };
+  stableRows = new Map();
   pairSync.reset();
   pairSync = newPairSync();
   storeGet = null;

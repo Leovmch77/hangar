@@ -188,7 +188,8 @@ beforeEach(() => {
 });
 afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
-const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {} }));
+const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {},
+  holders: 0, retain: () => { sessionsState.holders++; return () => { sessionsState.holders--; }; } }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
@@ -410,6 +411,13 @@ describe('ações e atualização da conversa na rota', () => {
       await act(async () => button(container, 'drawer-navigation-close')!.click());
       expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
     } finally { act(() => root.unmount()); }
+  });
+
+  it('a conversa mantém a lista de sessões viva enquanto está aberta, com a gaveta fechada', async () => {
+    const { root } = await render(createElement(ChatScreen));
+    expect(sessionsState.holders).toBe(1);
+    act(() => root.unmount());
+    expect(sessionsState.holders).toBe(0);
   });
 
   it('prévia chegando redesenha só a lista, não a tela inteira', async () => {

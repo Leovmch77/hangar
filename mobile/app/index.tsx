@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, Keyboard, PanResponder, Platform, Text, View } from 'react-native';
 import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -25,6 +25,8 @@ export default function Index() {
   const compose = Array.isArray(params.compose) ? params.compose[0] : params.compose;
   const activeId = useServers((s) => s.activeId);
   const count = useSessions((s) => s.rows.filter((row) => row.state !== 'dead').length);
+  // O contador lê a lista também com a gaveta fechada e a tela de nova conversa à frente.
+  useEffect(() => useSessions.getState().retain(), []);
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const drawer = useRef<DrawerLayoutMethods>(null);

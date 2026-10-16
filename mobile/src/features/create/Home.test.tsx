@@ -31,7 +31,7 @@ vi.mock('../../stores/servers', async () => {
 });
 vi.mock('../../stores/sessions', async () => {
   const { create } = await import('zustand');
-  return { useSessions: create(() => ({ rows: [{ state: 'working' }, { state: 'idle' }, { state: 'dead' }] })) };
+  return { useSessions: create(() => ({ rows: [{ state: 'working' }, { state: 'idle' }, { state: 'dead' }], retain: () => () => {} })) };
 });
 vi.mock('../../stores/aparencia', async () => {
   const { create } = await import('zustand');

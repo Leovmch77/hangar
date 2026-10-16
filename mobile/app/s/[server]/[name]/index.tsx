@@ -232,6 +232,9 @@ export default function ChatScreen() {
     wasPreThread.current = codexPreThread;
   }, [codexPreThread, currentSession?.tracked, chat]);
 
+  // A lista alimenta provedor, pergunta e pasta desta tela; a gaveta fechada não a segura mais.
+  useEffect(() => useSessions.getState().retain(), []);
+
   // O "Ouvir" das bolhas toca num player de módulo; sair da conversa cala a voz.
   useEffect(() => () => pararTts(), []);
 

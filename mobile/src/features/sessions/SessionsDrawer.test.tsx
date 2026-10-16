@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useContext, type ReactNode } from 'react';
+import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
 
@@ -27,24 +27,24 @@ vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
 }));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../ui/Glass', () => ({ Glass: () => createElement('span', { 'data-testid': 'glass' }) }));
-vi.mock('./SessionList', async () => {
-  const { WorkingMarkPaused } = await import('../../ui/WorkingMark');
-  return { SessionList: () => createElement('span', { 'data-paused': String(useContext(WorkingMarkPaused)) }) };
-});
+vi.mock('./SessionList', () => ({ SessionList: () => createElement('span', { 'data-testid': 'list' }) }));
 
 import { SessionsDrawer } from './SessionsDrawer';
 
-it('vidro e marcas da gaveta só existem depois que ela começa a abrir', async () => {
+it('vidro e lista da gaveta só existem depois que ela começa a abrir', async () => {
   const container = document.createElement('div');
   const root = createRoot(container);
   await act(async () => root.render(createElement(SessionsDrawer, { onClose: () => {}, onOpenServers: () => {}, children: 'tela' })));
   const glass = () => container.querySelector('[data-testid="glass"]');
-  const paused = () => container.querySelector('[data-paused]')!.getAttribute('data-paused');
+  const list = () => container.querySelector('[data-testid="list"]');
   expect(glass()).toBeNull();
-  expect(paused()).toBe('true');
+  expect(list()).toBeNull();
   drawer.progress.value = 0.2;
   await act(async () => drawer.reactions.forEach((r) => r()));
   expect(glass()).not.toBeNull();
-  expect(paused()).toBe('false');
+  expect(list()).not.toBeNull();
+  drawer.progress.value = 0;
+  await act(async () => drawer.reactions.forEach((r) => r()));
+  expect(list()).toBeNull();
   act(() => root.unmount());
 });
