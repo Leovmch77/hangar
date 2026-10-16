@@ -588,9 +588,16 @@ impl Hangar {
         };
         let (server, connection, tx) = (self.active_key(), self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            // Leitura que falhou é `None` = sem mudança; só uma resposta válida liga ou desliga.
-            let gate = api.server_read(&["voice", "settings"], &[], 8).await;
-            if let Err(error) = &gate { crate::voice::log(format!("gate read failed status={:?}", error.status)); }
+            // Leitura que falhou é `None` = sem mudança; só uma resposta válida liga ou desliga. Esta leitura é a única que
+            // mostra o botão da voz (o painel não abre sem ele): falha tenta de novo, senão o botão some até reconectar.
+            let mut gate = api.server_read(&["voice", "settings"], &[], 8).await;
+            for wait in [3, 10, 30] {
+                let Err(error) = &gate else { break };
+                crate::voice::log(format!("gate read failed status={:?} retry_in={wait}s", error.status));
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                gate = api.server_read(&["voice", "settings"], &[], 8).await;
+            }
+            if let Err(error) = &gate { crate::voice::log(format!("gate read failed status={:?} gave_up", error.status)); }
             let accounts = api.server_read(&["credenciais"], &[], 15).await.ok().map(|v| codex_accounts(&v));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceGate(server, gate.ok(), accounts) }).await;
         });
