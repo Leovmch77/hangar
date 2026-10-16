@@ -150,7 +150,8 @@ pub(crate) const TOASTS_KEPT: usize = 20;
 /// Bolhas da fila que o retrato guarda para quem abre o chat depois; acima disso sai a confirmada mais velha.
 const QUEUE_KEPT: usize = 32;
 /// Ids apagados lembrados para recusar um quadro atrasado deles.
-const RETIRED_KEPT: usize = 256;
+// Um único corte pode retirar toda a fila; seus quadros antigos ainda podem chegar do produtor.
+const RETIRED_KEPT: usize = crate::runtime::queue::CAP;
 pub(crate) const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
 /// Tempo que resta a um aviso: o 0 seria "sem prazo" para o app, então quem está no último
 /// milissegundo ainda leva 1.
@@ -2207,6 +2208,67 @@ mod tests {
         assert_eq!(again["removed"], serde_json::json!([]), "{again}");
         close_hub(&lease.hub);
         assert!(lease.hub.queue_watch.lock().unwrap().is_none(), "a vigia sai com o hub");
+    }
+
+    #[test]
+    fn queued_batch_history_large_cut_does_not_resurrect_late_member_frames() {
+        let mut cache=SideCache::default();
+        let removed:Vec<_>=(0..1000).map(|n|format!("part-{n}")).collect();
+        let data=serde_json::json!({"entries":[],"removed":removed}).to_string();
+        cache.record("queue",&data,&sse_frame("queue",&data,None),false);
+        for id in removed {assert!(!queue(&mut cache,"message",&format!("queued-{id}"),None),"membro selado reapareceu: {id}");}
+    }
+
+    #[tokio::test]
+    async fn queued_batch_history_two_consumers_and_reconnect_see_one_prompt() {
+        use crate::runtime::{queue::{Action,State,Store},protocol::ClockSample};
+        let dir=tempfile::tempdir().unwrap();let projection=dir.path().join("projection");
+        let ts=crate::queue_feed::wall_now();let clock=ClockSample {monotonic_s:0.0,epoch_s:ts};
+        let mut store=Store::open(&dir.path().join("state"),&projection,State::new("key",1,"fila",vec![])).unwrap();
+        for id in ["a","b","c"] {store.exec(1,id,clock,Action::Append {text:id.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into())}).unwrap();}
+        let ctx=SideCtx {queue_dir:Some(projection.clone()),..test_ctx()};
+        let binding=queue_binding(dir.path(),"chat");let jsonl=binding.jsonl.clone();
+        let lease=ctx.hubs.acquire("fila",binding.clone(),&ctx);
+        let mut first=lease.hub.tx.subscribe();let mut second=lease.hub.tx.subscribe();
+        let info:InternalInfo=serde_json::from_value(serde_json::json!({"provider":"claude","jsonl":jsonl,"session_key":"chat","history":{"queue":crate::runtime::queue::projection_path(&projection,"fila")}})).unwrap();
+        lease.hub.learn_queue(&info);
+        queue_frame(&mut first,"queued-c","queued_delivered").await;
+        queue_frame(&mut second,"queued-c","queued_delivered").await;
+        tokio::time::timeout(Duration::from_secs(10),async {loop {
+            let ready=lease.hub.cache.lock().unwrap().latest.iter().flatten().any(|frame| {
+                if !frame.starts_with(b"event: queue\r\n") {return false;}
+                let frame=String::from_utf8_lossy(frame);let data=frame.lines().find_map(|line|line.strip_prefix("data: ")).unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()["entries"].as_array().is_some_and(|rows|rows.len()==3)
+            });
+            if ready {break;}tokio::task::yield_now().await;
+        }}).await.unwrap();
+        let (panel_first,panel_second)=(first.resubscribe(),second.resubscribe());
+        let rows=store.exec(1,"batch",clock,Action::ClaimBatch {min_ts:0.0}).unwrap();
+        let id=rows[0]["id"].as_str().unwrap().to_owned();
+        let next_panel=|mut rx:broadcast::Receiver<Out>| async move {tokio::time::timeout(Duration::from_secs(10),async move {loop {
+            if let Ok(Out::Side(frame))=rx.recv().await && frame.starts_with(b"event: queue\r\n") {
+                let frame=String::from_utf8_lossy(&frame);let data=frame.lines().find_map(|line|line.strip_prefix("data: ")).unwrap();
+                let value:serde_json::Value=serde_json::from_str(data).unwrap();
+                if value["removed"].as_array().is_some_and(|ids|ids.len()==3) {break value;}
+            }
+        }}).await.unwrap()};
+        // Os dois consumidores conservam a mesma remoção dos IDs originais.
+        let (a,b)=tokio::join!(next_panel(panel_first),next_panel(panel_second));
+        assert_eq!(a["removed"],b["removed"]);
+        let echo=serde_json::json!({"type":"user","uuid":"echo","timestamp":ts+1.0,"message":{"role":"user","content":"a\nb\nc"}});
+        std::fs::write(&jsonl,format!("{echo}\n")).unwrap();
+        store.exec(1,"confirmed",clock,Action::Confirm {entry_ids:vec![id.clone()]}).unwrap();
+        queue_frame(&mut first,&format!("queued-{id}"),"queue_confirmed").await;
+        queue_frame(&mut second,&format!("queued-{id}"),"queue_confirmed").await;
+        let snapshot=lease.hub.attach(None).await.unwrap();
+        let replay=snapshot.frames.iter().map(|frame|String::from_utf8_lossy(frame).into_owned()).collect::<String>();
+        for member in ["a","b","c"] {assert!(!replay.contains(&format!("\"id\":\"queued-{member}\"")));}
+        assert_eq!(replay.matches(&format!("\"id\":\"queued-{id}\"")).count(),1);
+        let request=crate::transcript::history::HistoryRequest {provider:Provider::Claude,jsonl,queue:Some(crate::runtime::queue::projection_path(&projection,"fila")),limit:None,tail_window:crate::transcript::history::TAIL_WINDOW};
+        let history=crate::transcript::history::merged_history(&request).unwrap();
+        assert_eq!(history.len(),1,"o histórico conserva apenas o eco real: {history:?}");
+        drop(snapshot);
+        close_hub(&lease.hub);
     }
 
     #[test]

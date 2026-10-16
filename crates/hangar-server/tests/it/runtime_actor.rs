@@ -100,6 +100,158 @@ async fn no_sse_runtime_still_drains() {
     assert_eq!(server.await.unwrap(),1);
 }
 
+async fn queued_batch_runtime_case(provider:&str,headless:bool,race:bool) {
+    let dir=tempfile::tempdir().unwrap();let transcript=dir.path().join("chat.jsonl");let claude=provider=="claude";
+    std::fs::write(&transcript,if claude {String::new()}else{format!("{}\n",json!({"type":"session_meta","payload":{"id":"thread-1"}}))}).unwrap();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let (push,mut pushed)=tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (sent,mut received)=tokio::sync::mpsc::unbounded_channel::<Value>();let written=transcript.clone();
+    let server=tokio::spawn(async move {
+        let (stream,_)=listener.accept().await.unwrap();let (read,mut write)=stream.into_split();let mut reader=BufReader::new(read);
+        let mut header=String::new();reader.read_line(&mut header).await.unwrap();
+        let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":claude,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,
+            "inflight":if claude {json!({})}else{json!({"codex":{"thread-1":{"turnId":"current","complete":true}}})}});
+        write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();let mut number=0;
+        loop {
+            let mut raw=String::new();
+            tokio::select! {
+                Some(line)=pushed.recv()=>{
+                    if write.write_all(format!("{}\n",json!({"type":"cano_output","frame":line.to_string()})).as_bytes()).await.is_err(){break;}
+                },
+                n=reader.read_line(&mut raw)=>{
+                    if n.unwrap_or(0)==0 {break;}
+                    let envelope:Value=serde_json::from_str(&raw).unwrap();let frame:Value=serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+                    write.write_all(format!("{}\n",json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"})).as_bytes()).await.unwrap();
+                    let input=if claude {frame["type"]=="user"}else{frame["method"]=="turn/start"};
+                    if input {
+                        number+=1;
+                        let record=if claude {json!({"type":"user","uuid":format!("user-{number}"),"sessionId":"sid-1","message":frame["message"]})}
+                            else{json!({"type":"response_item","payload":{"type":"message","role":"user","id":format!("user-{number}"),"content":[{"type":"input_text","text":frame["params"]["input"][0]["text"]}]}})};
+                        use std::io::Write;
+                        writeln!(std::fs::OpenOptions::new().append(true).open(&written).unwrap(),"{record}").unwrap();
+                        sent.send(frame.clone()).unwrap();
+                    }
+                    if frame.get("id").is_some() && frame.get("method").is_some() {
+                        let reply=json!({"id":frame["id"],"result":if input {json!({"turn":{"id":"next","status":"inProgress"}})}else{json!({"data":[]})}});
+                        write.write_all(format!("{}\n",json!({"type":"cano_output","frame":reply.to_string()})).as_bytes()).await.unwrap();
+                        if input {
+                            let started=json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"next","status":"inProgress","items":[]}}});
+                            write.write_all(format!("{}\n",json!({"type":"cano_output","frame":started.to_string()})).as_bytes()).await.unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let metadata=json!({"name":"session","headless":headless,"initialized":true,"ready":true,"connected":true,"subscribed":true,"session_id":"sid-1","thread_id":"thread-1","rollout_path":transcript,"permission_mode":if claude {"bypassPermissions"}else{"Full Access"}});
+    let target=RuntimeTarget {key:"key".into(),generation:1,name:"session".into(),provider:provider.into(),metadata:metadata.clone(),binding:CanoBinding {pid:42,escuta:format!("tcp:{address}"),token:"fixture".into(),versao:2},
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),transcript,created:0.0};
+    let lease=acquire_lease(&target.lease_path).unwrap();let store=Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let engine=RuntimeEngine::new(provider,metadata,1,clock_fixture()).unwrap();
+    let handle=RuntimeActor::spawn(target.clone(),QueueActor::start(store,lease),cano::connect(&target.binding).await.unwrap(),engine);
+    let image=dir.path().join("image.png");std::fs::write(&image,b"image-bytes").unwrap();
+    let first=if race {format!("primeira \u{1f4ce} imagem: {}",image.display())}else{"primeira".into()};
+    let expected=format!("{first}\nsegunda\nterceira");
+    for (id,text) in [("a",first.as_str()),("b","segunda"),("c","terceira")] {
+        let reply=handle.command(RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text})}).await.unwrap();
+        assert_eq!(reply.disposition,Disposition::Deferred);
+    }
+    assert!(received.try_recv().is_err(),"nenhum envio durante o turno");
+    let complete=|id:&str|if claude {json!({"type":"result","subtype":"success","is_error":false})}else{json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":id,"status":"completed","items":[]}}})};
+    let mut raced=false;
+    push.send(complete("current")).unwrap();
+    if race {
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {loop {
+            if queue_state(dir.path()).rows.iter().any(|row|row["batch_entries"].is_array()) {break;}
+            tokio::task::yield_now().await;
+        }}).await.unwrap();
+        let later=handle.command(RuntimeCommand {operation_id:"later".into(),kind:OperationKind::Input,payload:json!({"text":"depois"})}).await.unwrap();
+        assert_eq!(later.disposition,Disposition::Deferred,"a mensagem posterior não toma o turno reservado");raced=true;
+    }
+    let frame=tokio::time::timeout(std::time::Duration::from_secs(10),received.recv()).await.unwrap().unwrap();
+    let text=|frame:&Value|if claude {frame["message"]["content"][0]["text"].clone()}else{frame["params"]["input"][0]["text"].clone()};
+    assert_eq!(text(&frame),expected);
+    handle.confirm().await.unwrap();
+    let state=queue_state(dir.path());let batch=state.rows.iter().find(|row|row["text"]==expected).unwrap();
+    assert_eq!(batch["confirmed"],true);
+    assert!(batch["batch_entries"].as_array().unwrap().iter().all(|entry|entry["confirmed"]==true));
+    assert!(received.try_recv().is_err(),"um único despacho para o lote");
+    tokio::time::timeout(std::time::Duration::from_secs(10),async {
+        while handle.view().await.unwrap()["in_progress"]!=true {tokio::task::yield_now().await;}
+    }).await.expect("o provedor publicou o turno que começou");
+    if !raced {let later=handle.command(RuntimeCommand {operation_id:"later".into(),kind:OperationKind::Input,payload:json!({"text":"depois"})}).await.unwrap();assert_eq!(later.disposition,Disposition::Deferred);}
+    push.send(complete("next")).unwrap();
+    let next=tokio::time::timeout(std::time::Duration::from_secs(10),received.recv()).await.unwrap().unwrap();
+    assert_eq!(text(&next),"depois");
+    handle.stop().await.unwrap();server.await.unwrap();
+}
+
+fn clock_fixture()->ClockSample {ClockSample {monotonic_s:0.0,epoch_s:1_800_000_000.0}}
+
+#[tokio::test]
+async fn queued_batch_runtime_claude_headless_sends_one_prompt() {queued_batch_runtime_case("claude",true,false).await;}
+#[tokio::test]
+async fn queued_batch_runtime_codex_headless_sends_one_prompt() {queued_batch_runtime_case("codex",true,false).await;}
+#[tokio::test]
+async fn queued_batch_runtime_codex_terminal_sends_one_prompt() {queued_batch_runtime_case("codex",false,false).await;}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn queued_batch_runtime_new_input_after_the_cut_waits_for_the_next_turn() {queued_batch_runtime_case("claude",true,true).await;}
+
+#[tokio::test]
+async fn queued_batch_runtime_reservation_is_an_internal_operation() {
+    let (handle,server,_dir)=setup(true).await;
+    let result=handle.queue("outside-claim".into(),Action::ClaimBatch {min_ts:0.0}).await;
+    assert_eq!(result.unwrap_err().code,"operation_internal");
+    handle.stop().await.unwrap();server.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_batch_runtime_oversized_batch_stays_editable_and_retries_after_edit() {
+    oversized_batch_case("x",MAX_FRAME/2).await;
+}
+
+#[tokio::test]
+async fn queued_batch_runtime_json_expansion_stays_editable() {
+    oversized_batch_case("\"",MAX_FRAME/4+1).await;
+}
+
+async fn oversized_batch_case(character:&str,count:usize) {
+    let dir=tempfile::tempdir().unwrap();
+    let rows=["a","b"].into_iter().map(|id|json!({"id":id,"text":character.repeat(count),"ts":1.0,"delivered":true})).collect();
+    drop(Store::open(&dir.path().join("key.queue-state.json"),&dir.path().join("projection"),State::new("key",1,"session",rows)).unwrap());
+    let (handle,server,dir)=setup_recovered(true,false,false,Some(dir),false).await;
+    let hold=handle.hold_turns().await.unwrap();
+    for id in ["a","b"] {
+        handle.queue(id.into(),Action::SetDelivered {entry_id:id.into(),value:false,steered:false}).await.unwrap();
+    }
+    drop(hold);
+    let snapshot=tokio::time::timeout(std::time::Duration::from_secs(60),async {
+        loop {
+            let snapshot=handle.snapshot().await.unwrap();
+            if !snapshot["error"].is_null() || snapshot["view"]["public_state"]["problema"]=="queue_batch_too_large" {break snapshot;}
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("limite do lote aparece no estado");
+    assert!(snapshot["error"].is_null(),"limite de texto não torna a sessão doente: {}",snapshot["error"]);
+    assert_eq!(snapshot["view"]["public_state"]["problema"],"queue_batch_too_large");
+    assert!(queue_state(dir.path()).rows.iter().all(|row|row["delivered"]==false));
+    let hold=handle.hold_turns().await.unwrap();
+    assert_eq!(handle.queue("edit-a".into(),Action::Edit {entry_id:"a".into(),text:"curta".into()}).await.unwrap(),"edited");
+    handle.queue("edit-b".into(),Action::Edit {entry_id:"b".into(),text:"outra".into()}).await.unwrap();
+    drop(hold);
+    tokio::time::timeout(std::time::Duration::from_secs(60),async {
+        loop {
+            let state=queue_state(dir.path());
+            if state.rows.iter().any(|row|row["text"]=="curta\noutra" && state.operations.get(row["id"].as_str().unwrap()).is_some_and(|op|op.status==Status::Accepted)) {break;}
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("a edição libera uma nova tentativa sem reiniciar a sessão");
+    assert!(handle.snapshot().await.unwrap()["error"].is_null());
+    assert!(handle.view().await.unwrap()["public_state"]["problema"].is_null());
+    handle.stop().await.unwrap();assert_eq!(server.await.unwrap(),1);
+}
+
 #[tokio::test]
 async fn confirmed_prompt_does_not_consume_next_echo() {
     use hangar_server::runtime::receipt::ReceiptIndex;
@@ -2101,11 +2253,10 @@ mod terminal_async {
         assert!(starts.lock().unwrap().is_empty(),"nenhum turn/start durante o seletor");
         assert!(!accepted(dir.path(),"ordinary"));
         drop(hold);
-        until("a entrada da fila sai quando o seletor termina",||accepted(dir.path(),"ordinary")).await;
+        until("o lote sai quando o seletor termina",||starts.lock().unwrap().first().is_some_and(|text|text=="segue\ndireta")).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let sent = starts.lock().unwrap().clone();
-        assert_eq!(sent.first().map(String::as_str),Some("segue"),"a da fila sai primeiro: {sent:?}");
-        assert_eq!(sent.iter().filter(|text|*text == "segue").count(),1,"exatamente uma vez: {sent:?}");
+        assert_eq!(sent,vec!["segue\ndireta".to_owned()],"o lote conserva a ordem e sai exatamente uma vez");
         handle.stop().await.unwrap();
         drop(push);
         server.abort();
