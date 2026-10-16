@@ -153,7 +153,8 @@ async fn first_written(lines:&mut tokio::sync::mpsc::UnboundedReceiver<String>,t
     let deadline = tokio::time::Instant::now() + within;
     loop {
         let line = tokio::time::timeout_at(deadline,lines.recv()).await.ok()??;
-        if let Some(text) = texts.iter().find(|text|line.contains(**text)) { return Some((*text).to_owned()); }
+        // A fila entrega em lote: vários textos na mesma linha, e quem vem antes é o que aparece antes nela.
+        if let Some((_,text)) = texts.iter().filter_map(|text|line.find(*text).map(|at|(at,*text))).min() { return Some(text.to_owned()); }
     }
 }
 
