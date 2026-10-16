@@ -4685,6 +4685,7 @@
   "native_sending": "Sending…",
   "native_delivered": "Sent. Waiting for confirmation in the conversation.",
   "native_queued": "Queued",
+  "native_queue_panel_direct": "Send right away while it works",
   "native_queue_panel_steered": "Message sent to the current turn.",
   "native_delivering": "Delivered to the agent; awaiting confirmation",
   "native_delivery_failed": "The message did not reach the agent.",

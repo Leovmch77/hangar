@@ -41,8 +41,25 @@ impl QueueUi {
     pub(super) fn on_select(&mut self) { self.collapsed = false; self.drop = None; self.dragged = None; }
 }
 
+/// "Mandar direto enquanto trabalha": só Claude e Codex têm o Orientar por mensagem, e só com o agente trabalhando.
+pub(super) fn sends_direct(enabled: bool, state: &str, provider: &str) -> bool {
+    enabled && state == "working" && matches!(provider, "claude" | "codex")
+}
+
 impl Hangar {
     fn queue_busy(&self) -> bool { self.selected_key().is_some_and(|key| self.flight.busy(&key)) }
+
+    /// O envio desta conversa sai como Orientar, sem esperar no painel.
+    pub(super) fn queue_sends_direct(&self) -> bool {
+        sends_direct(appearance::get().steer_while_working, &self.chat.state.state, self.provider().0)
+    }
+
+    fn set_queue_direct(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut next = appearance::get();
+        next.steer_while_working = on;
+        self.apply_appearance(next, true, cx);
+        cx.notify();
+    }
 
     pub(super) fn queue_edit_active(&self) -> bool {
         self.queue.edit.as_ref().is_some_and(|(key, _)| Some(key) == self.selected_key().as_ref())
@@ -140,10 +157,12 @@ impl Hangar {
             .child(tr_shared("queue_panel_editing", &[])))
     }
 
-    /// O painel; sem mensagem esperando ele não existe.
+    /// O painel; sem mensagem esperando ele só aparece com o "mandar direto" ligado e o agente trabalhando, para desligar.
     pub(super) fn render_queue_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panel = self.chat.queue_panel();
-        if panel.entries.is_empty() { return None; }
+        let direct = appearance::get().steer_while_working;
+        let supports = matches!(self.provider().0, "claude" | "codex");
+        if panel.entries.is_empty() && !self.queue_sends_direct() { return None; }
         // Uma cópia por quadro, dividida pelas linhas e pelos handlers de setas e de soltar.
         let (entries, actions): (Rc<[QueueEntry]>, bool) = (panel.entries.iter().cloned().collect(), panel.actions);
         drop(panel);
@@ -160,14 +179,18 @@ impl Hangar {
             .child(div().flex_1().min_w_0().child(tr("queued")))
             .child(div().font_family(theme::MONO).text_color(theme::faint()).child(entries.len().to_string()))
             .child(chrome::small_icon(if expanded { IconName::ChevronDown } else { IconName::ChevronUp }, 14., theme::faint()));
-        let list = expanded.then(|| {
+        let list = (expanded && !entries.is_empty()).then(|| {
             let rows: Vec<AnyElement> = (0..entries.len()).map(|i| self.render_queue_row(&entries, actions, i, window, cx)).collect();
             div().id("queue-panel-list").max_h(px(LIST_MAX)).overflow_y_scroll().flex().flex_col().gap(px(1.)).px(px(6.)).pb(px(6.))
                 .children(rows)
         });
+        // Fora do cabeçalho: clicar na caixinha não abre nem fecha o painel.
+        let toggle = supports.then(|| Checkbox::new("queue-direct").small().label(tr("queue_panel_direct")).checked(direct)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_direct(*checked, cx))));
+        let top = div().flex().items_center().gap(px(6.)).pr(px(10.)).child(div().flex_1().min_w_0().child(header)).children(toggle);
         // Mesmo material do cartão do composer, colado acima dele.
         let body = div().id("queue-panel").flex().flex_col().rounded(px(12.)).border_1().border_color(theme::border_strong())
-            .bg(theme::boxed()).child(header).children(list);
+            .bg(theme::boxed()).child(top).children(list);
         Some(div().mb(px(6.)).child(chrome::glass_panel(body, px(12.))).into_any_element())
     }
 
@@ -248,5 +271,19 @@ impl Hangar {
                 .tooltip(tr_shared("queue_panel_remove", &[])).accessibility_label(tr_shared("queue_panel_remove", &[])).disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.act(Action::QueueCancel(remove.clone()), remove.clone(), cx))))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sends_direct;
+
+    #[test]
+    fn direct_send_only_while_claude_or_codex_works_with_the_option_on() {
+        assert!(sends_direct(true, "working", "claude"));
+        assert!(sends_direct(true, "working", "codex"));
+        assert!(!sends_direct(false, "working", "claude"), "desligada, a mensagem espera na fila");
+        assert!(!sends_direct(true, "idle", "claude"), "parado, o envio comum já entra na hora");
+        assert!(!sends_direct(true, "working", "kimi"), "o Kimi não tem Orientar por mensagem");
     }
 }

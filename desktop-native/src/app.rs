@@ -2542,6 +2542,7 @@ impl Hangar {
         self.action_feedback.remove(&key);
         // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
         let group = if steer { None } else { self.group_targets(&key, &text) };
+        let steer = steer || group.is_none() && !command && self.queue_sends_direct();
         // Sem terminal, o `/btw` só sai traduzido e com o plugin anunciando que o atende; mesmo com a lista de
         // comandos ainda vazia (sem `blocked_command`), nunca vai cru ao Claude Code.
         let surface_btw = group.is_none() && self.plugin_source == Some(crate::plugin_ui::UiSource::Surface) && composer::side_question(&text);

@@ -4685,6 +4685,7 @@
   "native_sending": "Enviando…",
   "native_delivered": "Enviado. Aguardando confirmação na conversa.",
   "native_queued": "Na fila",
+  "native_queue_panel_direct": "Mandar direto enquanto trabalha",
   "native_queue_panel_steered": "Mensagem mandada ao turno atual.",
   "native_delivering": "Entregue ao agente; aguardando confirmação",
   "native_delivery_failed": "A mensagem não chegou ao agente.",
