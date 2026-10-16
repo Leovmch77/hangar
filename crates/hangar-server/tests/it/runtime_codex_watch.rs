@@ -1305,3 +1305,45 @@ async fn a_missing_or_corrupt_transfer_record_is_a_visible_error() {
     std::fs::write(records.join(format!("{id}.json")),r#"{"phase":"prepared"}"#).unwrap();
     assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_terminal_not_ready".into())),"em curso: espera");
 }
+
+/// O sidecar da sessão diz a vida dela; sem multiplexador.
+struct KeyProbe(std::sync::Mutex<String>);
+impl hangar_server::share::life::LifeProbe for KeyProbe {
+    fn birth<'a>(&'a self,_:&'a str) -> futures_util::future::BoxFuture<'a,Option<u64>> { Box::pin(async { None }) }
+    fn has_session<'a>(&'a self,_:&'a str) -> futures_util::future::BoxFuture<'a,Option<bool>> { Box::pin(async { Some(true) }) }
+    fn sidecar(&self,_:&str) -> Option<(String,bool)> { Some((self.0.lock().unwrap().clone(),false)) }
+    fn sidecar_exists(&self,_:&str) -> bool { true }
+}
+
+/// CDX-099: a troca de modo do Codex passa pela troca de vida, como o `_durante_troca` do Python: o
+/// convite da sessão segue a vida nova (também quando a troca falha, que pode ter mudado a vida).
+#[tokio::test]
+async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
+    use hangar_server::share::{ShareState,life::{LifeFacts,Lives},pairs::PairStore,store::{Kind,ShareStore}};
+    let fx = fixture();
+    let registry = registry().await;
+    registry.bind_watcher(fx.watcher());
+    // Sem terminal parado e sem `cwd`: o Rust tenta abrir e falha, com resposta própria.
+    fx.put_sidecar("cx-h",json!({"name":"cx-h","provider":"codex","headless":true,"key":"k-h","thread_id":"t"}));
+    // Sem a fotografia do Python a varredura dos convites não revoga nada; só a troca move o convite.
+    let probe = Arc::new(KeyProbe(std::sync::Mutex::new("k-old".into())));
+    let facts = Arc::new(LifeFacts::default());
+    let share = Arc::new(ShareState { store:ShareStore::open(fx.root.join("shares.json"),Arc::new(||100.0)),
+        pairs:PairStore::open(fx.root.join("external_pairs.json")),lives:Lives::new(probe.clone(),facts),
+        tailscale:Arc::new(hangar_server::share::tunnel::Real),tunnel:Default::default() });
+    share.store.create_redeemed("cx-h",Some("k:k-old".into()),Kind::Share).unwrap();
+    let (_python, upstream) = crate::fake::spawn_fake().await;
+    let mut state = hangar_server::routes::AppState::new(crate::fake::config(upstream, "127.0.0.1"));
+    state.share = Some(share.clone());
+    assert!(state.state.runtime.set(registry).is_ok());
+    let server = crate::fake::spawn_state(state).await;
+    *probe.0.lock().unwrap() = "k-new".into();
+    let response = crate::fake::client().post(format!("http://{server}/api/sessions/cx-h/modo-execucao"))
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type", "application/json")
+        .body(json!({"terminal":true}).to_string()).send().await.unwrap();
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap();
+    assert_eq!(status,409,"a troca do Codex falhou aqui, no Rust: {body}");
+    let lives:Vec<Option<String>> = share.store.all().into_iter().filter(|s|s.session=="cx-h").map(|s|s.life).collect();
+    assert_eq!(lives,vec![Some("k:k-new".into())],"o convite foi para a vida nova");
+}
