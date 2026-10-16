@@ -65,12 +65,13 @@ impl Hangar {
         for (index, group) in self.tab_groups().iter().enumerate() {
             let Some(member) = group.members.iter().position(|t| t == target) else { continue; };
             let viewport = self.tabs_scroll.bounds();
-            if let Some(bounds) = self.tabs_scroll.bounds_for_item(index) && viewport.size.width > px(6.) {
+            if let Some(bounds) = self.tabs_scroll.bounds_for_item(index) {
                 let (left, width) = group.slot(member).unwrap_or((0., f32::from(bounds.size.width)));
                 let start = bounds.left() + px(left + if member > 0 { OVERLAP } else { 0. });
                 let end = bounds.left() + px(left + width);
                 let offset = self.tabs_scroll.offset();
-                let x = reveal_offset(f32::from(offset.x), (f32::from(viewport.left() + px(3.)), f32::from(viewport.right() - px(3.))),
+                let inset = px((f32::from(viewport.size.width) / 2.).min(3.));
+                let x = reveal_offset(f32::from(offset.x), (f32::from(viewport.left() + inset), f32::from(viewport.right() - inset)),
                     (f32::from(start), f32::from(end)));
                 self.tabs_scroll.set_offset(point(px(x), offset.y));
             } else { self.tabs_scroll.scroll_to_item(index); }
