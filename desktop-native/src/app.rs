@@ -6450,7 +6450,7 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), panes: &self.plugin_panes, minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             body_scrolls: self.selected_key().as_ref().and_then(|key| self.plugin_body_scrolls.get(key)),
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
