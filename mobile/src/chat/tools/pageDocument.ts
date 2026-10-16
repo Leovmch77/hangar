@@ -121,11 +121,18 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
   }, [key, load]);
 
   // Tema próprio: a página fica como foi desenhada, sem as cores do app.
-  const doc = useMemo(() => (raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
+  const doc = useMemo(() => withDeviceViewport(raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
   // Fonte: a página como o agente escreveu (o servidor tira o tema e a ponte). Erro sobe para a tela mostrar.
   const loadSource = useCallback(async () => {
     if (!base) throw new Error('no-server');
     return fetchPageSource(pageUrls(base, sessionName, page.id).source, { Authorization: auth });
   }, [base, auth, sessionName, page.id]);
   return { key, state, doc, reported, setReported, load, params, loadSource };
+}
+
+// Sem meta viewport o WebView do iOS desenha a página com 980 pt de largura e a encolhe inteira.
+export function withDeviceViewport(doc: string): string {
+  if (!doc || /<meta[^>]+name\s*=\s*["']?viewport/i.test(doc)) return doc;
+  const meta = '<meta name="viewport" content="width=device-width, initial-scale=1">';
+  return /<head[^>]*>/i.test(doc) ? doc.replace(/<head[^>]*>/i, (h) => h + meta) : meta + doc;
 }

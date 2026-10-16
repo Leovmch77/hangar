@@ -1,0 +1,21 @@
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@hangar/core', () => ({}));
+vi.mock('../../stores/servers', () => ({ useServers: () => null }));
+
+describe('withDeviceViewport', async () => {
+  const { withDeviceViewport } = await import('./pageDocument');
+  const meta = '<meta name="viewport" content="width=device-width, initial-scale=1">';
+
+  it('põe a largura da tela logo depois do <head>', () => {
+    expect(withDeviceViewport('<html><head><title>x</title></head><body></body></html>'))
+      .toBe(`<html><head>${meta}<title>x</title></head><body></body></html>`);
+  });
+  it('sem <head>, põe no começo', () => {
+    expect(withDeviceViewport('<div>oi</div>')).toBe(`${meta}<div>oi</div>`);
+  });
+  it('não mexe em página que já define o viewport', () => {
+    const doc = '<head><meta name="viewport" content="width=400"></head>';
+    expect(withDeviceViewport(doc)).toBe(doc);
+  });
+});
