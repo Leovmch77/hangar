@@ -293,11 +293,17 @@ Status: ready-for-agent
 
 ### Task 14: Troca de conta quando a sessão bate o limite (R8, D-002)
 
-Status: needs-info
+Status: ready-for-agent (depois da Task 10, que traz a Task 8)
 
-- [ ] **Step 1: Sinal de limite**
-  Conferir no binário instalado do Claude Code qual evento indica "limite atingido" (hook ou evento
-  do stream) numa sessão `cx-*`, e qual janela esgotou.
+- [x] **Step 1: Sinal de limite**
+  `sinal-de-limite.md` (arquivos de fase). Claude com terminal: linha do transcript com
+  `isApiErrorMessage`, `apiError:"usage_limit_reached"` e `apiErrorParams.rate_limit_info`
+  (`rateLimitType` `five_hour`/`seven_day`, `resetsAt`), lida no fim de turno com `motivo:"error"` do
+  plugin; 23 casos reais nesta máquina. Claude sem terminal: `assistant` com
+  `api_error:"usage_limit_reached"` + `result` com `is_error`/429. Codex: `error` com
+  `codexErrorInfo:"usageLimitExceeded"`, `willRetry:false`, janela pelo último
+  `account/rateLimits/updated`. O Rust hoje trata `rateLimitExceeded` (throttle temporário) como
+  limite de uso: corrigir, senão troca de conta sem precisar.
 - [ ] **Step 2: Troca automática**
   `reopen_session` com `SessionChange{account, motivo: limit_switch}` na conta de mais folga +
   mensagem de continuar; sem rodar em círculo; sessão em motor fica de fora.
