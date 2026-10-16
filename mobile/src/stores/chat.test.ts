@@ -55,7 +55,7 @@ function fakeCreateEventSource(url: string): unknown {
     close: fake.close,
     // setter do store escreve AQUI; fake.fail() lê daqui
     get onerror() {
-      return fake.onerror;
+      return null;
     },
     set onerror(fn: ((e: unknown) => void) | null) {
       fake.onerror = fn;
@@ -158,6 +158,64 @@ test('confirmação retira apenas o eco da fila e preserva índices no próximo 
   expect(chat.use.getState().events[0].text).toBe('atualizado');
   created[0].trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
   expect(chat.use.getState().events).toHaveLength(2);
+});
+
+test('mods recebem retrato e delta, preservam ordem e limpam no reset', async () => {
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const first = { id: 'first', title: 'first', tree: { type: 'Text', children: ['one'] } };
+  const second = { id: 'second', tree: { type: 'Text', children: ['two'] } };
+  created[0].trigger('plugin_ui', JSON.stringify({ above: { type: 'Text', children: ['band'] }, panes: [first, second], source: 'surface' }));
+  expect(chat.use.getState().pluginUi?.panes.map(p => p.id)).toEqual(['first', 'second']);
+  created[0].trigger('plugin_ui_delta', JSON.stringify({ panes: [{ id: 'second', same: true }], source: 'surface', shown_id: 'second' }));
+  expect(chat.use.getState().pluginUi?.above).toEqual({ type: 'Text', children: ['band'] });
+  expect(chat.use.getState().pluginUi?.panes.map(p => p.id)).toEqual(['second']);
+  expect(chat.use.getState().pluginUi?.panes[0].tree).toEqual(second.tree);
+  expect(chat.use.getState().pluginUi?.shownId).toBe('second');
+  created[0].trigger('plugin_ui_delta', JSON.stringify({ above: null, panes: [] }));
+  expect(chat.use.getState().pluginUi?.above).toBeNull();
+  expect(chat.use.getState().pluginUi?.panes).toEqual([]);
+  created[0].trigger('reset', '');
+  expect(chat.use.getState().pluginUi).toBeNull();
+  expect(chat.use.getState().pluginUiError).toBeNull();
+});
+
+test('delta de mod sem base desta conexão expõe erro, conserva vista e reconecta', async () => {
+  vi.useFakeTimers();
+  try {
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    created[0].trigger('plugin_ui', JSON.stringify({ above: { type: 'Text', children: ['saved'] }, panes: [] }));
+    const saved = chat.use.getState().pluginUi;
+    created[0].fail();
+    await vi.advanceTimersByTimeAsync(3000);
+    created[1].trigger('plugin_ui_delta', JSON.stringify({ panes: [] }));
+    expect(chat.use.getState().pluginUi).toBe(saved);
+    expect(chat.use.getState().pluginUiError).toBeTruthy();
+    expect(created[1].close).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(created.length).toBeGreaterThanOrEqual(3);
+    created.at(-1)!.trigger('plugin_ui', JSON.stringify({ above: null, panes: [] }));
+    expect(chat.use.getState().pluginUiError).toBeNull();
+    expect(chat.use.getState().pluginUi?.above).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('mods são isolados por servidor e ignoram quadros de fonte fechada', async () => {
+  const first = chatStore('srv1', 'sess');
+  const other = chatStore('srv2', 'sess');
+  first.retain();
+  other.retain();
+  await tick();
+  created[0].trigger('plugin_ui', JSON.stringify({ above: { type: 'Text', children: ['first'] }, panes: [] }));
+  expect(other.use.getState().pluginUi).toBeNull();
+  first.release();
+  created[0].trigger('plugin_ui', JSON.stringify({ above: null, panes: [] }));
+  expect(first.use.getState().pluginUi?.above).toEqual({ type: 'Text', children: ['first'] });
 });
 
 test('(b) reset zera tudo e recarrega o history novo', async () => {

@@ -370,6 +370,17 @@ pub fn create_worktree(
     new_branch: bool,
     base: Option<&str>,
 ) -> Result<Value> {
+    let home = crate::home().ok_or_else(|| error(503, "pasta pessoal indisponível"))?;
+    let settings = crate::worktree_settings::load_default()?;
+    let location = settings.location_path(&home)?;
+    create_worktree_at(cwd, branch, name, root, new_branch, base, &location)
+}
+
+/// A localização é recebida pela API para manter o estado e os testes isolados por servidor.
+pub fn create_worktree_at(
+    cwd: &Path, branch: &str, name: &str, root: &Path,
+    new_branch: bool, base: Option<&str>, location: &Path,
+) -> Result<Value> {
     if !new_branch {
         option_like(branch)?;
     }
@@ -416,16 +427,13 @@ pub fn create_worktree(
             return Ok(json!([cwd.to_string_lossy(), false]));
         }
     }
-    if name.contains(['/', '\\', '\0']) || name == ".." {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) || matches!(name, "." | "..") {
         return Err(error(400, "nome inválido"));
     }
-    let target = repo.parent().unwrap_or(&repo).join(format!(
-        "{}-{name}",
-        repo.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    if !target.starts_with(&root) {
-        return Err(error(400, "worktree fora da raiz autorizada"));
-    }
+    let main = main_root(cwd, &repo, &root);
+    let parent = location.join(main.file_name().unwrap_or_default());
+    std::fs::create_dir_all(&parent).map_err(|_| error(500, "não consegui criar a pasta de worktrees"))?;
+    let target = parent.join(name);
     if target.symlink_metadata().is_ok() {
         return Err(error(409, "destino da worktree já existe"));
     }

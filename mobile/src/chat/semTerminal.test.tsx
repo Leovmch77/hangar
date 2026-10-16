@@ -10,8 +10,15 @@ const appLifecycle = vi.hoisted(() => ({
   currentState: 'active' as import('react-native').AppStateStatus,
   listeners: new Set<(state: import('react-native').AppStateStatus) => void>(),
 }));
-vi.mock('react-native', async (original) => ({
-  ...await original<object>(),
+const layouts = vi.hoisted(() => new Map<string, (event: import('react-native').LayoutChangeEvent) => void>());
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return {
+  ...native,
+  View: ({ onLayout, testID, ...props }: import('react-native').ViewProps) => {
+    if (onLayout && testID) layouts.set(testID, onLayout);
+    return createElement(native.View, { ...props, onLayout, ...{ 'data-testid': testID } });
+  },
   AppState: {
     get currentState() { return appLifecycle.currentState; },
     addEventListener: (_type: string, listener: (state: import('react-native').AppStateStatus) => void) => {
@@ -31,7 +38,8 @@ vi.mock('react-native', async (original) => ({
     'aria-disabled': accessibilityState?.disabled, 'aria-busy': accessibilityState?.busy,
     'aria-expanded': accessibilityState?.expanded, 'aria-selected': accessibilityState?.selected,
   }, children),
-}));
+  };
+});
 
 // A tela monta o painel da fila e o passa ao Composer; aqui ele vem vazio.
 const noQueue: QueuePanel = { entries: [], actions: false };
@@ -91,7 +99,7 @@ vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }))
 vi.mock('react-native-keyboard-controller', () => ({
   KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children),
   // O KeyboardBar do chat lê o estado do teclado; nestes testes ele está sempre fechado.
-  useKeyboardState: <T,>(select: (s: { isVisible: boolean }) => T) => select({ isVisible: false }),
+  useKeyboardState: <T,>(select: (s: { isVisible: boolean; height: number }) => T) => select({ isVisible: false, height: 0 }),
 }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
 vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
@@ -122,7 +130,7 @@ vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, T
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
-  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
+  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
@@ -277,7 +285,7 @@ vi.mock('../stores/newConversation', async (original) => {
 
 // Lista isolada: a bolha só registra o texto recebido, pra provar o que chega nela.
 const bubbleTexts = vi.hoisted(() => [] as string[]);
-vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string }) => { bubbleTexts.push(text); return null; } }));
+vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string }) => { bubbleTexts.push(text); return null; }, mkMarkdownStyle: () => ({}) }));
 vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
 // Anexos da bolha puxam módulos nativos (gesture-handler, expo-audio, expo-file-system) que o node não carrega.
 vi.mock('./ImageThumb', () => ({ ImageThumb: () => null }));
@@ -285,6 +293,7 @@ vi.mock('./AudioChip', () => ({ AudioChip: ({ uri }: { uri: string }) => createE
 vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () => null }));
 vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
 vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
+vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn(async () => {}) }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
@@ -294,7 +303,7 @@ vi.mock('../stores/aparencia', () => ({ useAparencia: (sel: (s: unknown) => unkn
 vi.mock('@legendapp/list/react-native', () => ({
   LegendList: ({ data, renderItem, keyExtractor, ListFooterComponent }: {
     data: unknown[]; renderItem: (a: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string; ListFooterComponent?: ReactNode;
-  }) => createElement('div', null, ...data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item }))), ListFooterComponent),
+  }) => createElement('div', null, ...data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item }))), createElement('div', { 'data-testid': 'message-footer' }, ListFooterComponent)),
 }));
 
 vi.mock('react-native-enriched-markdown', () => ({
@@ -321,6 +330,7 @@ import { AccessibilityInfo, Alert } from 'react-native';
 import { retainDraftAttachment } from './draftAttachments';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import { useServers } from '../stores/servers';
+import { useMods } from '../stores/mods';
 import { readDictation, readDraft, setDictationInFlight, writeDictation, writeDraft } from '../stores/drafts';
 
 async function render(el: ReturnType<typeof createElement>) {
@@ -378,6 +388,41 @@ describe('ações e atualização da conversa na rota', () => {
         onerror: null, onopen: null, readyState: 1 }) });
   });
   afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
+
+  it('lista reserva o espaço real dos mods e volta ao vidro do composer quando eles saem', async () => {
+    layouts.clear();
+    const { container, root } = await render(createElement(ChatScreen));
+    const measure = (id: string, height: number) => act(() => layouts.get(id)!({ nativeEvent: { layout: { x: 0, y: 0, width: 390, height } } } as import('react-native').LayoutChangeEvent));
+    const viewport = () => container.querySelector<HTMLElement>('[data-testid="chat-viewport"]')!;
+    const footerHasHeight = (height: number) => [...container.querySelectorAll<HTMLElement>('[data-testid="message-footer"] div')].some(el => el.style.height === `${height}px`);
+    try {
+      measure('chat-dock', 120);
+      expect(viewport().style.marginBottom).toBe('-100px');
+      expect(footerHasHeight(120)).toBe(true);
+      act(() => {
+        useMods.setState({ visible: true });
+        chatStore('s1', 'sess').use.setState({ pluginUi: {
+          above: { type: 'Box', props: { flexDirection: 'column' }, children: Array.from({ length: 5 }, (_, i) => ({ type: 'Text', children: [`mod-${i}`] })) },
+          panes: [], shownId: null, source: 'surface', columns: 110,
+        } });
+      });
+      measure('mods-dock', 121);
+      measure('chat-dock', 241);
+      expect(viewport().style.marginBottom).toBe('0px');
+      expect(viewport().style.overflow).toBe('hidden');
+      expect(footerHasHeight(241)).toBe(false);
+      expect(footerHasHeight(120)).toBe(false);
+      act(() => useMods.setState({ visible: false }));
+      measure('mods-dock', 0);
+      measure('chat-dock', 120);
+      expect(viewport().style.marginBottom).toBe('-100px');
+      expect(footerHasHeight(120)).toBe(true);
+    } finally {
+      act(() => root.unmount());
+      useMods.setState({ visible: false });
+      layouts.clear();
+    }
+  });
 
   it.each([true, false])('cancelar opções só devolve pendente depois de interrupt aceito: %s', async (accepted) => {
     let finish!: () => void;

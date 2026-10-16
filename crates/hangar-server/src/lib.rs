@@ -54,6 +54,7 @@ pub mod voice;
 pub mod plans;
 mod forwarded;
 pub mod worktree_routes;
+pub mod worktree_policy;
 mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
