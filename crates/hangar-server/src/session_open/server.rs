@@ -400,9 +400,25 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
         }
     };
     if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
+    if let super::Account::Codex { account_id } = &resolved.spec.account { codex_preparation_warning(st, account_id).await; }
     match super::open::open_session(&host, resolved, &caller).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
+    }
+}
+
+/// `_codex_require_idle_preparation`: conta Codex adicional com a sincronização fora de `ready` abre
+/// assim mesmo; o estado fica no log.
+async fn codex_preparation_warning(st: &AppState, account_id: &str) {
+    let Ok(account) = st.accounts.resolve(crate::accounts::Provider::Codex, account_id) else { return };
+    if account.is_default { return; }
+    let status = match crate::accounts::http::bridge(st) {
+        Ok(bridge) => st.accounts.preparation_status(&account, &bridge).await,
+        Err(error) => return tracing::warn!(code = error.code, "conta Codex {account_id}: sincronização não lida antes de abrir"),
+    };
+    if status["status"] != "ready" {
+        let issues: Vec<&str> = status["issues"].as_array().into_iter().flatten().filter_map(|i| i["code"].as_str()).collect();
+        tracing::warn!("conta Codex {account_id} com sincronização {}; pendências: {issues:?}", status["status"]);
     }
 }
 

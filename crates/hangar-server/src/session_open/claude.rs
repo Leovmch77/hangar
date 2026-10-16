@@ -207,7 +207,11 @@ pub fn prep_argv(account: &str, cwd: &str) -> Vec<String> {
 /// Saída do `hangar-conta --prep`: os avisos vão à resposta; falha é recusa com o motivo dele.
 pub fn prep_result(account: &str, code: Option<i32>, stderr: &str) -> Result<Vec<String>, super::OpenError> {
     let lines = || stderr.lines().filter_map(|l| l.trim().strip_prefix("hangar-conta: ")).map(str::to_owned);
-    if code == Some(0) { return Ok(lines().collect()); }
+    if code == Some(0) {
+        let warnings: Vec<String> = lines().collect();
+        for warning in &warnings { tracing::warn!("conta {account}: {warning}"); }
+        return Ok(warnings);
+    }
     let cause = lines().last().unwrap_or_else(|| stderr.trim().chars().take(200).collect());
     Err(super::OpenError::new(500, "erro_conta_reconciliacao_falhou", format!("não consegui reconciliar a conta {account}: {cause}"))
         .with_params(json!({"nome_conta": account, "erro": cause})))
@@ -258,8 +262,11 @@ pub fn drop_foreign_model(home: &Path, config_dir: Option<&str>) -> Vec<String> 
         let written = serde_json::to_string_pretty(&Value::Object(data)).map(|t| t + "\n").map_err(std::io::Error::other)
             .and_then(|t| crate::runtime::queue::atomic_write(&path, t.as_bytes()));
         match written {
-            Ok(()) => warnings.push(format!("O modelo padrão '{model}' do settings.json não é da Anthropic \
-                (provavelmente veio de um /model numa sessão de motor) e foi removido.")),
+            Ok(()) => warnings.push({
+                tracing::warn!("modelo padrão '{model}' não é da Anthropic; removido do settings.json");
+                format!("O modelo padrão '{model}' do settings.json não é da Anthropic \
+                (provavelmente veio de um /model numa sessão de motor) e foi removido.")
+            }),
             Err(e) => warnings.push(format!("Não consegui tirar do settings.json um modelo que não é da Anthropic: {}: {e}", path.display())),
         }
     }

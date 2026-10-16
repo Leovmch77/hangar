@@ -208,6 +208,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     if !explicit_account && provider == AgentProvider::Claude && !truthy(&request.engine)
         && let Some((switched, warning)) = quota_switch(config_dir.as_deref(), &facts.claude_quotas())
     {
+        tracing::warn!("create_session {}: {warning}", request.name.as_deref().unwrap_or_default());
         config_dir = Some(switched);
         warnings.push(warning);
         source = AccountSource::Quota;

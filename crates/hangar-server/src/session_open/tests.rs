@@ -1154,6 +1154,35 @@ fn the_folder_is_pretrusted_and_a_foreign_default_model_is_dropped() {
     assert_eq!(std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(), r#"{"model": "opus[1m]"}"#);
 }
 
+/// CRI-111: o que a criação mudou sozinha fica também no log do servidor, como no Python: a conta
+/// trocada pela cota, o modelo estrangeiro tirado do `settings.json` e o aviso da reconciliação.
+#[test]
+fn what_the_creation_changed_by_itself_is_in_the_log() {
+    #[derive(Clone)] struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(data); Ok(data.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move || capture.clone()).finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_quota_switch").unwrap();
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let warning = resolve::resolve_open(&request, &OWNER, &FixtureFacts::of(&fixture)).unwrap().warnings.remove(0);
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), r#"{"model": "gpt-6"}"#).unwrap();
+    claude::drop_foreign_model(home.path(), None);
+    claude::prep_result("b", Some(0), "hangar-conta: plugin x atualizado\n").unwrap();
+    let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    for expected in [format!("create_session s1: {warning}"), "modelo padrão 'gpt-6' não é da Anthropic; removido do settings.json".into(),
+                     "conta b: plugin x atualizado".into()] {
+        assert!(text.contains(&expected), "falta {expected:?} em {text}");
+    }
+}
+
 /// O auxiliar do Jev de antes da configuração única vem do `jev_texto_*` sem o `/chat/completions`.
 #[test]
 fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
