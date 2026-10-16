@@ -2611,8 +2611,13 @@ impl Hangar {
             return false;
         };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
-        // No Claude com terminal o `/steer` ignora o texto: a mensagem entra na fila e a primeira que espera é orientada.
-        let terminal_claude = steer && self.selected_key().as_ref() == Some(&key) && self.provider() == ("claude", false);
+        // No Claude com terminal o `/steer` ignora o texto e orienta a primeira que espera: a mensagem entra na fila e
+        // sai junto com as que já esperavam (uma orientação por mensagem). A sessão é a da mensagem, não a aberta.
+        let selected = self.selected_key().as_ref() == Some(&key);
+        let kind = self.sessions_of(&key.server).iter().find(|s| s.name == key.name).map(|s| (s.provider == "claude", s.headless))
+            .or_else(|| selected.then(|| { let (provider, headless) = self.provider(); (provider == "claude", headless) }));
+        let terminal_claude = steer && kind == Some((true, false));
+        let waiting = if selected { self.queued_count() } else { 0 };
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = match group {
@@ -2620,7 +2625,7 @@ impl Hangar {
                 None if terminal_claude => match api.send(&key.name, &text).await {
                     Ok(delivery) if !delivery.delivered => {
                         // Orientar recusado deixa a mensagem à vista no painel "Na fila", como sem a opção.
-                        let _ = api.steer_waiting(&key.name).await;
+                        for _ in 0..=waiting { if api.steer_waiting(&key.name).await.is_err() { break; } }
                         Ok(delivery)
                     }
                     other => other,
