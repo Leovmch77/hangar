@@ -123,6 +123,11 @@ export function SessionList({ onClose, onOpenServers }: Props) {
 
   const excluir = useCallback(
     (s: AggSession) => {
+      const server = useServers.getState().servers.find((server) => server.id === s.serverId);
+      if (server?.invite) {
+        useServers.getState().remove(server.id);
+        return;
+      }
       const key = `${s.serverId}::${s.name}`;
       if (deleting.current.has(key)) return;
       const reservation = { confirmed: false };
