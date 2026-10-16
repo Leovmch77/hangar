@@ -21,6 +21,7 @@ import * as m from '../../src/paraglide/messages';
 type CredentialGroup = ReturnType<typeof credentialGroup>;
 type IdentityRow = { key: string; group: CredentialGroup; title: string; description: string; account: CodexAccount | null; credential: Credencial | null; engineName?: string };
 const EngineEditor = lazy(() => import('../../src/features/accounts/EngineEditor').then(module => ({ default: module.EngineEditor })));
+const accountPlanMeta = (email: string, plan: string) => `${email} · ${plan.charAt(0).toUpperCase()}${plan.slice(1)}`;
 
 export default function Contas() {
   const server = useServers((state) => state.active());
@@ -97,7 +98,7 @@ function ServerAccounts({ server }: { server: Server | null }) {
   const accountStatus = (account: CodexAccount, credential?: Credencial) => {
     const auth = account.auth;
     return auth.status === 'connected'
-      ? (auth.email && auth.plan ? m.contas_email_plano({ email: auth.email, max: auth.plan }) : auth.email ?? m.codex_ui_account())
+      ? (auth.email && auth.plan ? accountPlanMeta(auth.email, auth.plan) : auth.email ?? m.codex_ui_account())
       : auth.status === 'disconnected' ? m.contas_nao_conectada()
       : codexCliAusente(account) ? m.codex_ui_cli_ausente()
       : (credential && motivoLoginIndisponivel(credential)) || m.codex_ui_unknown();
@@ -113,7 +114,7 @@ function ServerAccounts({ server }: { server: Server | null }) {
     if (auth === 'none' || credential.login?.loggedIn === false) return m.contas_nao_conectada();
     if (auth === 'api_key') return m.contas_tipo_chave();
     const base = credential.login?.email && credential.login.plano
-      ? m.contas_email_plano({ email: credential.login.email, max: credential.login.plano })
+      ? accountPlanMeta(credential.login.email, credential.login.plano)
       : credential.apelido || credential.nome_natural || credential.nome;
     // Sem a causa, o nome sozinho parece login conferido.
     if (naoConferido) return `${base} · ${naoConferido}`;

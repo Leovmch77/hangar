@@ -21,11 +21,11 @@ export interface CotaContaResumo {
 /** Números da última leitura boa com o `motivo` da falha nova: por que não atualizaram. */
 export function motivoCotaAntiga(c: Pick<CotaContaResumo, 'estado' | 'motivo'> | null | undefined): string | null {
   const motivo = c?.estado === 'lida' ? c.motivo : null;
-  const causa = motivo ? causaDaFalha(motivo) : null;
+  const causa = motivo ? quotaFailureReason(motivo) : null;
   return causa ? m.cota_nao_atualizou({ causa }) : null;
 }
 
-function causaDaFalha(motivo: string): string | null {
+export function quotaFailureReason(motivo: string): string | null {
   // Conta ocupada por login, renovação ou redefinição: não houve leitura que falhou.
   if (motivo === 'sessao-viva') return null;
   if (motivo === 'sem-resposta') return m.cota_causa_sem_resposta();

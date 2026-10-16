@@ -78,6 +78,24 @@ async function fill(container: HTMLElement, label: string, value: string) {
   await act(async () => { target.value = value; target.dispatchEvent(new Event('input', { bubbles: true })); });
 }
 
+describe('metadados do plano da conta', () => {
+  it.each([
+    ['claude', 'max', 'Max'], ['claude', 'pro', 'Pro'], ['claude', 'prolite', 'Prolite'], ['codex', 'Plus', 'Plus'],
+  ] as const)('mostra o nome do plano %s/%s sem multiplicador inventado', async (kind, plan, label) => {
+    const email = 'plan@example.com';
+    calls.credentials.mockResolvedValue(kind === 'claude'
+      ? [{ ...claude, login: { estado: 'ok', loggedIn: true, email, plano: plan } }] : [codex]);
+    calls.accounts.mockResolvedValue(kind === 'claude' ? [] : [{
+      id: 'work', credential_id: 'codex:/work', name: 'Trabalho', home: '/work', is_default: false,
+      auth: { method: 'oauth', status: 'connected', email, plan }, sync: { status: 'ready', trust_pending: false, issues: [] },
+    }]);
+    const view = await show();
+    const meta = [...view.container.querySelectorAll('span')].find(node => node.textContent?.startsWith(`${email} ·`));
+    expect(meta?.textContent).toBe(`${email} · ${label}`);
+    expect(meta?.textContent).not.toMatch(/×|maxx|prox/);
+  });
+});
+
 describe('integração das contas Claude', () => {
   it('abre criação pelo cabeçalho e autentica o nome retornado na mesma máquina, mantendo Codex', async () => {
     calls.credentials.mockResolvedValue([claude, codex, provider]);

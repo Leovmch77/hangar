@@ -1,18 +1,20 @@
 import { Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { formatElapsed, motivoCotaAntiga, resetsIn, type Credencial } from '@hangar/core';
+import { formatElapsed, motivoCotaAntiga, quotaFailureReason, resetsIn, type Credencial } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 export function AccountUsage({ credential }: { credential: Credencial }) {
   const q = credential.cota;
   const windows = q?.estado === 'lida' ? q.janelas.filter(w => Number.isFinite(w.pct)) : [];
   const note = !q ? m.mobile_accounts_quota_absent()
-    : q.estado === 'sem_credencial' ? m.mobile_accounts_quota_missing()
-    : q.estado === 'expirada' ? m.mobile_accounts_quota_expired()
+    : q.estado === 'sem_credencial' || q.estado === 'expirada'
+      ? q.motivo === 'sessao-viva' ? m.native_accounts_quota_live_session()
+      : q.motivo === 'renovacao-falhou' ? m.native_accounts_quota_open_session() : m.native_accounts_quota_sign_in()
     : q.estado === 'indisponivel' ? m.mobile_accounts_quota_unavailable()
     : !windows.length ? m.mobile_accounts_quota_empty() : '';
   const age = q?.idade_s ?? (q?.ts != null ? Math.max(0, Date.now() / 1000 - q.ts) : null);
-  const cause = motivoCotaAntiga(q);
+  const cause = q?.estado === 'lida' ? motivoCotaAntiga(q)
+    : q?.estado === 'indisponivel' && q.motivo ? quotaFailureReason(q.motivo) : null;
   return (
     <View style={styles.block}>
       {note ? <Text style={styles.muted}>{note}</Text> : null}
@@ -30,8 +32,7 @@ export function AccountUsage({ credential }: { credential: Credencial }) {
         );
       })}
       {age != null && Number.isFinite(age) ? <Text style={styles.muted}>{m.mobile_accounts_quota_age({ age: formatElapsed(age) })}</Text> : null}
-      {cause ? <Text style={styles.warning}>{cause}</Text>
-        : q?.motivo ? <Text style={styles.muted}>{m.mobile_accounts_quota_reason({ reason: q.motivo })}</Text> : null}
+      {cause ? <Text style={styles.warning}>{cause}</Text> : null}
     </View>
   );
 }
