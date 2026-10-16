@@ -313,8 +313,14 @@ impl RuntimeRegistry {
     /// A fila do Claude para já, no mesmo passo do aviso: o que estiver nela iria para a conta esgotada.
     pub fn usage_limit(&self,hit:LimitHit) {
         let Some(sink) = self.limits.get() else { return };
-        if hit.provider == "claude" { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).insert(hit.name.clone()); }
-        let _ = sink.send(hit);
+        let name = hit.name.clone();
+        if hit.provider == "claude" { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).insert(name.clone()); }
+        // Segurada antes de enviar (a troca pode soltar antes de esta linha voltar); sem o vigia, ninguém soltaria.
+        if sink.send(hit).is_err() {
+            self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).remove(&name);
+            tracing::warn!(session=%name,"aviso de limite sem o vigia da troca de conta; a fila segue entregando");
+            self.diag.report("runtime.limit_sink_closed",&name,"limit_sink_closed","o vigia da troca de conta não recebeu o aviso de limite");
+        }
     }
     pub fn limit_held(&self,name:&str) -> bool { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).contains(name) }
     /// Fim da troca (feita ou não): a fila volta a entregar, a começar pelo recado de continuar.
