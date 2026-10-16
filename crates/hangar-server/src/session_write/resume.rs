@@ -67,6 +67,23 @@ fn conversations(project: &Path) -> Vec<(PathBuf, f64)> {
     out
 }
 
+#[derive(Debug, PartialEq)]
+enum Choice { Ambiguous(Vec<Value>), Pick(String), Busy(Option<String>) }
+
+/// A escolha sem `session_id`: com outra sessão na pasta e mais de uma candidata, quem escolhe é a pessoa.
+fn choose(found: &[(PathBuf, f64)], in_use: &dyn Fn(&Path) -> Option<String>, siblings: bool) -> Choice {
+    let stem = |path: &Path| path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_owned();
+    if siblings && found.len() > 1 {
+        return Choice::Ambiguous(found.iter().map(|(path, mtime)| json!({"session_id": stem(path), "mtime": mtime,
+            "preview": preview(path), "in_use": in_use(path).is_some()})).collect());
+    }
+    // S-19: a conversa que outra sessão já escreve nunca é a escolhida.
+    match found.iter().find(|(path, _)| in_use(path).is_none()) {
+        Some((path, _)) => Choice::Pick(stem(path)),
+        None => Choice::Busy(found.first().and_then(|(path, _)| in_use(path))),
+    }
+}
+
 fn reply(status: StatusCode, body: Value, headers: &axum::http::HeaderMap) -> Response {
     let mut response = json_response(status, body);
     cors(headers, response.headers_mut());
@@ -135,14 +152,10 @@ async fn resume(st: &Arc<AppState>, runtime: &crate::runtime::gateway::RuntimeRe
                 names.dedup();
                 names.iter().any(|n| *n != name)
             }).unwrap_or(false);
-            let candidates: Vec<Value> = found.iter().map(|(path, mtime)| json!({"session_id": path.file_stem().and_then(|s| s.to_str()),
-                "mtime": mtime, "preview": preview(path), "in_use": in_use(path).is_some()})).collect();
-            if siblings && candidates.len() > 1 { return (StatusCode::OK, json!({"ambiguous": true, "candidates": candidates})); }
-            // S-19: a conversa que outra sessão já escreve nunca é a escolhida.
-            match found.iter().find(|(path, _)| in_use(path).is_none()) {
-                Some((path, _)) => path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_owned(),
-                None => return refused(StatusCode::CONFLICT, "erro_conversa_viva", "conversa já está aberta",
-                    json!({"sessao": in_use(&found[0].0)})),
+            match choose(&found, &in_use, siblings) {
+                Choice::Ambiguous(candidates) => return (StatusCode::OK, json!({"ambiguous": true, "candidates": candidates})),
+                Choice::Pick(sid) => sid,
+                Choice::Busy(other) => return refused(StatusCode::CONFLICT, "erro_conversa_viva", "conversa já está aberta", json!({"sessao": other})),
             }
         }
     };
@@ -168,6 +181,19 @@ async fn resume(st: &Arc<AppState>, runtime: &crate::runtime::gateway::RuntimeRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_automatic_choice_never_takes_a_conversation_another_session_writes() {
+        let found = vec![(PathBuf::from("/p/a.jsonl"), 3.0), (PathBuf::from("/p/b.jsonl"), 2.0)];
+        let a_taken = |p: &Path| (p == Path::new("/p/a.jsonl")).then(|| "outra".to_owned());
+        assert_eq!(choose(&found, &a_taken, false), Choice::Pick("b".into()), "S-19: a mais recente é de outra sessão");
+        let all_taken = |_: &Path| Some("outra".to_owned());
+        assert_eq!(choose(&found, &all_taken, false), Choice::Busy(Some("outra".into())));
+        let free = |_: &Path| None;
+        assert_eq!(choose(&found, &free, false), Choice::Pick("a".into()));
+        assert!(matches!(choose(&found, &free, true), Choice::Ambiguous(c) if c.len() == 2), "outra sessão na pasta: a pessoa escolhe");
+        assert_eq!(choose(&found[..1], &free, true), Choice::Pick("a".into()), "uma só candidata não é ambígua");
+    }
 
     #[test]
     fn the_body_takes_only_session_id() {
