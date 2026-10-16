@@ -216,7 +216,9 @@ impl Switcher {
         // Só o aviso que não pede troca fica guardado. Na conta nova o limite é outro (mesmo com o mesmo reset
         // arredondado); a troca que falhou, sem folga ou ocupada tenta de novo no próximo turno parado, e o aviso
         // velho relido é barrado pela conta gasta e pelo `limit_switch_stale`.
-        if !matches!(outcome,Outcome::Stayed(code) if code != "limit_switch_no_room") && let Ok(mut handled) = self.handled.lock() {
+        // A conta trocada pela pessoa no meio da espera também esquece: o limite dela é outro.
+        if !matches!(outcome,Outcome::Stayed(code) if !matches!(code,"limit_switch_no_room" | "limit_switch_stale"))
+            && let Ok(mut handled) = self.handled.lock() {
             handled.remove(&hit.name);
         }
         match &outcome {
@@ -668,6 +670,19 @@ mod tests {
         *fake.on_pause.lock().unwrap() = Some("/b".into());
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"pause".into(),"cancel e1".into(),"release".into()]);
+    }
+
+    /// A conta que a pessoa escolheu durante a espera bate o limite com o mesmo reset arredondado: troca.
+    #[tokio::test]
+    async fn the_account_chosen_while_waiting_switches_when_it_hits_the_same_reset() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().push(Reopen::Busy("erro_sessao_trabalhando".into()));
+        *fake.on_pause.lock().unwrap() = Some("/b".into());
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        *fake.quotas.lock().unwrap() = Ok(vec![quota("/a",100.0),quota("/b",100.0),quota("/c",20.0)]);
+        switcher.handle(&fake,hit("/b",2000.0)).await;
+        assert_eq!(fake.diary().last().map(String::as_str),Some("switched"),"{:?}",fake.diary());
     }
 
     #[test]
