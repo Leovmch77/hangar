@@ -2172,6 +2172,28 @@ fn the_archive_moves_the_conversation_to_the_asked_account_and_back_only_on_a_cl
     assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "incerta: a conversa fica com a sessão que pode ter nascido");
 }
 
+/// SO1: a sessão da fotografia cujo terminal não nasce guarda o spec dela (plugins, worktree, criadora): é a
+/// mesma sessão, que volta na próxima passada ou pela mão.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_snapshot_entry_whose_terminal_fails_keeps_its_spec() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let key = "ab".repeat(16);
+    let spec = json!({"version": 1, "key": key, "name": "velho", "cwd": "<ROOT>/work/proj", "provider": "claude", "surface": "terminal",
+        "account": {"kind": "default"}, "account_source": "default", "model": "opus", "effort": "high", "service_tier": null,
+        "permission_mode": "bypassPermissions", "subagent_model": null, "customizations": null, "jev": true, "read_only": false,
+        "worktree": null, "creator": "mae", "created_at": 1.0, "conversation": SID});
+    let (_, raw, _dir, root) = run_resume_patched("archive_resume_claude", |s| {
+        s["state"]["files"][format!("<ROOT>/home/.hangar/session-specs/{key}.json")] = spec.clone();
+        s["fakes"]["tmux_new_session"] = json!({"rc": 1, "stderr": "boom"});
+        s["steps"] = json!([{"call": "restore", "key": key,
+            "entry": {"name": "proj", "provider": "claude", "conversation": SID, "permission_mode": "acceptEdits"}}]);
+    }, |_| {});
+    assert_ne!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    let kept: Value = serde_json::from_slice(&std::fs::read(root.join(format!("home/.hangar/session-specs/{key}.json"))).expect("o spec ficou")).unwrap();
+    assert_eq!((kept["model"].as_str(), kept["creator"].as_str()), (Some("opus"), Some("mae")));
+}
+
 /// A sessão da fotografia volta pelo spec inteiro (modelo, modo da hora em que caiu, Jev, chave), na conversa
 /// em que estava e com o comando direto no `new-session`; o grupo e a fila do nome, que são dela, ficam.
 #[cfg(target_os = "linux")]

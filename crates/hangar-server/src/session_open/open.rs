@@ -698,6 +698,8 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     }
     diary.step("criar_terminal");
     if !restore { host.release_name(&spec.name).await?; }
+    // A sessão que volta já tem registro (plugins, worktree, criadora): a falha do pane o devolve como estava.
+    let previous = restore.then(|| super::record::read(host.home(), &spec.key).ok().flatten()).flatten();
     // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
     if let Err(error) = super::record::write(host.home(), spec) {
         diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
@@ -725,8 +727,12 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         if error.code == terminal::UNCERTAIN {
             return Err(OpenError::new(504, UNCERTAIN, "o tmux não respondeu e a sessão pode ter nascido; confira a lista antes de tentar de novo"));
         }
-        if let Err(error) = super::record::remove(host.home(), &spec.key) {
-            tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu ficou para trás");
+        let undone = match &previous {
+            Some(previous) => super::record::write(host.home(), previous),
+            None => super::record::remove(host.home(), &spec.key),
+        };
+        if let Err(error) = undone {
+            tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu não voltou ao de antes");
         }
         if let Some(path) = &queued && let Err(error) = std::fs::remove_file(path) {
             tracing::warn!(kind = ?error.kind(), "prompt inicial da abertura que não nasceu ficou na fila");
