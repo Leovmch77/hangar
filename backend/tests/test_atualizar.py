@@ -1420,12 +1420,13 @@ def rust(repo, tmp_path, monkeypatch):
             "binario_35": binario_35, "ultimo_35": ultimo_35, "topo": _rev(obra, "HEAD")}
 
 
-def test_topo_sem_binario_para_no_ultimo_commit_do_contrato_publicado(repo, rust):
+def test_topo_sem_binario_para_no_commit_do_binario_publicado(repo, rust):
+    # Nem o commit seguinte de mesmo contrato: o código dele rodaria com o binário de antes.
     final = atualizar.executar()
     assert final["ok"] is True
-    assert _rev(repo, "HEAD") == rust["ultimo_35"] != rust["topo"]
+    assert _rev(repo, "HEAD") == rust["binario_35"] != rust["ultimo_35"]
     assert final["avisos"] == ["versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
-                               f"build falhou); atualizado até {rust['ultimo_35'][:8]}"]
+                               f"build falhou); atualizado até {rust['binario_35'][:8]}"]
     assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-latest"]
     # O download usa o manifesto da escolha, e a tela (também no Reiniciar) é compilada aqui.
     assert rust["preparo"]["release"][2] is rust["manifesto"]
@@ -1439,7 +1440,7 @@ def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
         "linux-x86_64": {"commit": rust["binario_35"], "protocol": 35},
         "windows-x86_64": {"commit": rust["topo"], "protocol": 36}}
     final = atualizar.executar()
-    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["binario_35"]
 
 
 @pytest.mark.parametrize("platforms", [{"windows-x86_64": {"protocol": 36}}, None, []])

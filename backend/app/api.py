@@ -6973,9 +6973,26 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
 _ALVOS_AUSENTES_AVISADOS: set[str] = set()
+# Por alvo: (instante, até onde o código pode ir, binário instalado diferente do publicado). Rede e o
+# hash do binário não cabem no polling de 2 s da tela.
+_PUBLICADO: dict[str, tuple[float, str, bool]] = {}
+_PUBLICADO_TTL_S = 300
 
 
-def _mudancas_pendentes() -> list[dict] | None:
+def _publicado(destino: str, procurar: bool) -> tuple[str, bool]:
+    """O commit do binário Rust publicado para este sistema e se o instalado aqui é outro."""
+    agora = time.monotonic()
+    guardado = _PUBLICADO.get(destino)
+    if guardado and not procurar and agora - guardado[0] < _PUBLICADO_TTL_S:
+        return guardado[1], guardado[2]
+    ate, release = atualizar.pinned_target(destino)
+    # Sem como conferir, a lista mostra o topo, como antes; é o motor que avisa o motivo.
+    valor = (ate or f"origin/{destino}", atualizar.rust_release.stale(release))
+    _PUBLICADO[destino] = (agora, *valor)
+    return valor
+
+
+def _mudancas_pendentes(ate: str | None = None) -> list[dict] | None:
     """Os commits que entraram em `origin/<alvo>` e ainda não estão aqui — o changelog da tela.
 
     Título de commit, e não um `CHANGELOG.md` mantido à mão: as mensagens deste repo já são
@@ -6986,7 +7003,7 @@ def _mudancas_pendentes() -> list[dict] | None:
     é o motor que diz o motivo. Lista vazia ali seria "Tudo em dia" sem sinal nenhum.
     """
     destino = atualizar.alvo()
-    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{destino}", timeout=30)
+    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..{ate or f'origin/{destino}'}", timeout=30)
     if p.returncode != 0:
         # Uma vez por alvo enquanto falhar: o polling da tela passa aqui a cada 2s.
         if destino not in _ALVOS_AUSENTES_AVISADOS:
@@ -7024,11 +7041,14 @@ async def get_atualizacao(procurar: bool = False):
         if procurar:
             atualizar._git("fetch", "origin", timeout=120)
         pre = atualizar.checar()
-        mudancas = _mudancas_pendentes()
+        # Só até o commit do binário Rust publicado: o código depois dele rodaria com o binário de antes.
+        ate, servidor_velho = _publicado(atualizar.alvo(), procurar)
+        mudancas = _mudancas_pendentes(ate)
         # Checkout fora da branch do alvo (campo esvaziado na branch de teste, ou branch já contida
         # na main) não tem commit a puxar, mas tem troca a fazer.
         troca = atualizar._troca_de_branch(pre) and not pre.get("branch_de_trabalho")
-        disponivel = mudancas is None or bool(mudancas) or troca
+        # Código em dia com o binário publicado depois dele: a atualização só troca o binário.
+        disponivel = mudancas is None or bool(mudancas) or troca or servidor_velho
         mudancas = mudancas or []
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
@@ -7039,6 +7059,7 @@ async def get_atualizacao(procurar: bool = False):
                                "remoto": diag.versao_legivel(f"origin/{atualizar.alvo()}")},
             "atras": len(mudancas),
             "atualizacao_disponivel": disponivel,
+            "servidor_desatualizado": servidor_velho,
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}
                        for s in atualizacoes.pendentes()],
@@ -7067,6 +7088,8 @@ async def post_atualizacao_iniciar():
         raise HTTPException(409, detail=erro(
             "erro_atualizacao_dependencia", f"falta o que a atualizacao precisa: {', '.join(faltando)}",
             faltando=faltando))
+    # A resposta guardada é de antes desta atualização.
+    _PUBLICADO.clear()
     r = await asyncio.to_thread(atualizar.iniciar, settings.port)
     if not r.get("ok"):
         raise HTTPException(409, detail=erro("erro_atualizacao_ja_rodando",

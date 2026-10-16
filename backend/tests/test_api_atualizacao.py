@@ -1,9 +1,32 @@
 """Endpoints do botão Atualizar."""
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _sem_rede_do_binario(monkeypatch):
+    """A tela lê o manifesto do Rust pela rede; aqui o binário publicado é o do topo e está instalado."""
+    from app import api
+    api._PUBLICADO.clear()
+    monkeypatch.setattr(api.atualizar, "pinned_target", lambda destino: (f"origin/{destino}", None))
+    yield
+    api._PUBLICADO.clear()
+
+
+def test_codigo_em_dia_com_binario_publicado_diferente_oferece_atualizar(monkeypatch):
+    """O binário do Rust sai depois do código: sem commit novo, a troca dele ainda é atualização."""
+    from app import api
+    monkeypatch.setattr(api.atualizar.rust_release, "stale", lambda release: True)
+    c = _client()
+    with patch("app.api.atualizar.checar", return_value={"pode": True}), \
+         patch("app.api._mudancas_pendentes", return_value=[]):
+        d = c.get("/api/atualizacao", headers=_AUTH).json()
+    assert d["atras"] == 0
+    assert d["servidor_desatualizado"] is True and d["atualizacao_disponivel"] is True
 
 
 def _client():

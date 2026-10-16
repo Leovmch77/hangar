@@ -724,6 +724,13 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
         _log.warning("contrato do binario %s ilegivel (entrada %r, commit do topo %r)",
                      plat, entry, manifest.get("commit"))
         return None, release
+    # O código vai até o commit do binário publicado, nem um depois: o código seguinte rodaria com o binário de antes.
+    publicado = binary[0]
+    if publicado == _git_quiet("rev-parse", "--verify", "--quiet", topo).stdout.strip():
+        return topo, release
+    if _git_quiet("merge-base", "--is-ancestor", publicado, topo).returncode == 0:
+        return publicado, release
+    # Binário de commit fora desta branch: o último commit dela que fala o mesmo contrato.
     if _protocol_at(topo) == want:
         return topo, release
     # Só os commits que mexeram no número: o pai de cada um é o último com o valor anterior.

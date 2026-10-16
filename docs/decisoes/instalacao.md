@@ -39,9 +39,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   checkout da branch de teste: a volta é pelo botão.
 - **O Atualizar só avança até o commit cujo binário do Rust foi publicado para este sistema.**
   O binário é o de `platforms.<sistema>` no `server-latest.json` da release da branch (sem a
-  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai ao commit mais novo de
-  `origin/<branch>` (primeiro pai) com o mesmo número, nunca recua, e o download usa o manifesto
-  lido na escolha. Atrás do topo, a tela avisa que a versão mais nova ainda não tem binário e é
+  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai
+  exatamente ao commit desse binário, nunca recua, e o download usa o manifesto lido na escolha;
+  só binário de commit fora de `origin/<branch>` cai no commit mais novo (primeiro pai) com o mesmo
+  número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
+  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que a versão mais nova ainda não tem binário e é
   compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
   avisa. Sem Rust (`CP_RUST_SERVER=0`), sem release própria da branch (404) ou sem build deste
   sistema no manifesto: topo, como antes, calado. Sem como conferir (rede, git, commit ilegível):
@@ -606,6 +608,14 @@ Build de UM sistema que falha: no manifesto antigo ele sai da lista e o asset ve
 commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por sistema
 (`platforms.<sistema>` com `commit` e `protocol`) resolve: a escolha usa a entrada do próprio
 sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
+
+**Commit exato, não o mesmo contrato (16/10/2026).** No notebook do Jefferson o Atualizar das 17:41
+levou o checkout a `2970723f` enquanto o build do `server.yml` de `cb6daadbb`, que trazia a correção
+da fila, ainda rodava (~30 min). Com o contrato igual, o código foi ao topo e o `hangar-server`
+ficou o das 16:36: a correção do Rust não chegou, e depois, com o binário publicado às 17:49, a
+tela respondia "Não há versão nova" porque contava só commits. Agora o checkout para no commit do
+binário publicado, e a tela compara o sha256 dos binários instalados com o manifesto (resposta
+guardada 5 min; "Procurar" relê), oferecendo a troca do binário mesmo com o código em dia.
 
 ## Verificação local antes do push (06/10/2026)
 
