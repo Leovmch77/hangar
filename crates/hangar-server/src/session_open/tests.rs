@@ -442,6 +442,29 @@ fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
     assert_eq!(total, (43, 43, 29));
 }
 
+/// CRI-030: criadora com terminal que ainda não falou (sem modo no transcript) passa o modo com que
+/// nasceu, o do registro gravado na abertura dela, e não o padrão da conta.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminal_creator_without_transcript_passes_its_launch_mode() {
+    let runtime = test_runtime();
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_terminal_creator").unwrap();
+    let files = fixture["scenario"]["state"]["files"].as_object_mut().unwrap();
+    files.retain(|path, _| !path.ends_with(".jsonl"));
+    files.insert("<ROOT>/home/.hangar/session-specs/0123456789abcdef0123456789abcdef.json".into(),
+        json!({"conversation": "22222222-2222-4222-8222-222222222222", "permission_mode": "auto"}));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    materialize(&fixture, &root);
+    let body = String::from_utf8(request_body(&fixture)).unwrap().replace("<ROOT>", &root.to_string_lossy());
+    let env = [("HOME", root.join("home")), ("PATH", root.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
+    let facts = facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
+        .with_terminal(crate::list::mux::Mux::with_program(root.join("bin/tmux"), std::time::Duration::from_secs(2)),
+            std::sync::Arc::new(crate::list::procs::ProcFs::with_root(root.join("proc"))));
+    let resolved = resolve::resolve_open(&SessionOpenRequest::parse(body.as_bytes()).unwrap(), &OWNER, &facts).unwrap();
+    assert_eq!(resolved.spec.permission_mode, Some(PermissionMode::Auto));
+}
+
 /// O caminho da raiz de teste volta a ser `<ROOT>`, como nas fixtures.
 fn unroot(result: Result<resolve::Resolved, OpenError>, root: &std::path::Path) -> Result<resolve::Resolved, OpenError> {
     let root = root.to_string_lossy();

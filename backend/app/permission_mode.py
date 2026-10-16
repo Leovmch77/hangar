@@ -114,19 +114,17 @@ def ultimo_nao_plan(name: str, padrao: str = "manual") -> str:
         return _ultimos_nao_plan.get(name, padrao)
 
 
-# Modo da abertura de cada sessão de terminal: o transcript só o grava na primeira fala.
-_launch_modes: OrderedDict[str, str] = OrderedDict()
-
-
-def remember_launch_mode(session_id: str, mode: str) -> None:
-    # `plan` não diz a classe: o Claude Code conta plan vindo de bypass como bypass.
-    if mode == "plan":
-        return
-    with _mem_lock:
-        _launch_modes[session_id] = mode
-        _launch_modes.move_to_end(session_id)
-        if len(_launch_modes) > 200:
-            _launch_modes.popitem(last=False)
+def _launch_mode(session_id: str) -> str | None:
+    """Modo da abertura da conversa, do registro que o Rust grava (o transcript só o grava na primeira
+    fala). `plan` não diz a classe: o Claude Code conta plan vindo de bypass como bypass."""
+    for path in (Path.home() / ".hangar" / "session-specs").glob("*.json"):
+        try:
+            spec = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            continue
+        if spec.get("conversation") == session_id and spec.get("permission_mode") not in (None, "plan"):
+            return spec["permission_mode"]
+    return None
 
 
 def known_non_plan(name: str) -> str | None:
@@ -181,9 +179,7 @@ def session_non_plan_mode(jsonl: str | None) -> str | None:
         return None
     sid = Path(jsonl).stem
     # A abertura é o último recurso: o que foi visto ou gravado depois dela vale mais.
-    with _mem_lock:
-        launched = _launch_modes.get(sid)
-    return known_non_plan(sid) or transcript_non_plan_mode(jsonl) or launched
+    return known_non_plan(sid) or transcript_non_plan_mode(jsonl) or _launch_mode(sid)
 
 
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:

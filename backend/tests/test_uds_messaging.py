@@ -140,7 +140,12 @@ def test_aviso_do_painel_para_sessao_recem_criada_usa_o_modo_da_abertura(tmp_pat
     monkeypatch.setattr(api.permission_mode, "_ultimos_nao_plan", OrderedDict())
     monkeypatch.setattr(api.permission_mode, "modo_da_conta", lambda cfg: "auto")
     nova = str(tmp_path / "sid-nova.jsonl")
-    api.permission_mode.remember_launch_mode("sid-nova", "bypassPermissions")
+    # O modo da abertura é o do registro que o Rust grava ao abrir, achado pela conversa.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    specs = tmp_path / ".hangar" / "session-specs"
+    specs.mkdir(parents=True)
+    (specs / f"{'a' * 32}.json").write_text(json.dumps({"conversation": "outra", "permission_mode": "auto"}))
+    (specs / f"{'b' * 32}.json").write_text(json.dumps({"conversation": "sid-nova", "permission_mode": "bypassPermissions"}))
     assert api._classe_modo("grupo de trabalho", "nova", None, nova) == "bypass"
     # Com o transcript gravado, vale o que o CLI registrou depois da abertura.
     Path(nova).write_text(json.dumps({"type": "user", "permissionMode": "auto"}) + "\n")

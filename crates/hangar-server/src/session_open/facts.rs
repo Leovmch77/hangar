@@ -116,7 +116,9 @@ impl LocalFacts {
                 &mut Default::default(), name, &pane.cwd, pid).jsonl
         });
         let cache = Mutex::new(crate::list::capped::Capped::new(1));
-        let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten());
+        // Sem fala no transcript, o modo de abertura (CRI-030).
+        let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten()
+            .or_else(|| super::record::launch_mode(&self.env().home, Path::new(&jsonl).file_stem()?.to_str()?)));
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
     }
 }

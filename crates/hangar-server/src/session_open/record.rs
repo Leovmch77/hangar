@@ -39,6 +39,15 @@ pub fn remove(home: &Path, key: &str) -> io::Result<()> {
     }
 }
 
+/// O modo com que a conversa nasceu, fora de `plan` (que não diz a classe). O Python lê igual
+/// (`permission_mode._launch_mode`).
+pub fn launch_mode(home: &Path, conversation: &str) -> Option<String> {
+    std::fs::read_dir(dir(home)).ok()?.flatten().find_map(|entry| {
+        let spec: Value = serde_json::from_slice(&crate::runtime::queue::read_replaced(&entry.path()).ok()?).ok()?;
+        (spec["conversation"] == conversation).then(|| text(&spec, "permission_mode")).flatten().filter(|mode| mode != "plan")
+    })
+}
+
 /// `Ok(None)` só quando não existe; arquivo ilegível ou de outra versão é erro, nunca um spec inventado.
 pub fn read(home: &Path, key: &str) -> io::Result<Option<SessionSpec>> {
     let bytes = match crate::runtime::queue::read_replaced(&path(home, key)?) {
