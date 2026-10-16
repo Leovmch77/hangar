@@ -2717,3 +2717,44 @@ Python fica com Pi, omp, Kimi e o modo `python`.
   cache; Chromium ausente, fila cheia ou prazo é 503, fora do cache, e o cliente oferece "Tentar de
   novo".
 
+
+## Abertura de sessão única no Rust
+
+(16/10/2026, pedido do usuário: "independente de onde eu abrir, é uma sessão do Hangar".) Antes,
+~17 entradas e ~25 lançadores entre o Python e o Rust abriam a sessão cada um de um jeito: sem
+plugin, na conta errada, no modo errado. A conferência de 769 comportamentos do Python e 81
+defeitos achados nele (todos consertados no Rust, decisão do usuário) estão nos arquivos da fase
+(`.superpowers/sdd/2026-10-15-abertura-de-sessao/`, fora do git).
+
+- **Um pedido, uma resolução, um registro.** `SessionOpenRequest` → `resolve_open()` → `SessionSpec`
+  gravado por sessão em `~/.hangar/session-specs/<chave>.json`. A referência de "abrir certo" é a
+  matriz capacidades × origens, não o modal "+": os padrões que as telas preenchiam (modo, conta)
+  passaram ao `resolve_open()`, e tela que não tocou num campo não o manda. Herança da criadora
+  (conta, modo, com/sem terminal) vale para todo provider que tem o conceito; `inherit: false` pede
+  o padrão da conta. Conta a 95% ou mais na abertura cai na de mais folga, com aviso em toda tela,
+  na voz e no `hangar-send`.
+- **Reabrir é o mesmo lançador com uma mudança.** `reopen_session(spec ⊕ SessionChange)` cobre modo,
+  recarregar, conta, bypass, `/resume` ao vivo (só Claude) e retomar do Arquivo, com as guardas da
+  criação. Nada é encerrado antes de a vida nova estar montada; falha volta com código.
+- **Terminal sem servidor.** `claude`/`codex`/`pi`/`omp`/`kimi` digitados chamam `hangar-server open`
+  (subcomando, não binário próprio: o `hangar-server` já é instalado em toda máquina). Com o
+  servidor de pé, ele abre e registra; fora do ar, abre igual e o servidor adota depois. Recusa HTTP
+  não cai no CLI cru: só a falta de conexão e de lançador cai.
+- **Restore depois de reboot ou queda do tmux.** O Rust fotografa a cada 30 s as sessões com terminal
+  e a conversa delas (`~/.hangar/session-restore.json`). Quando o servidor do multiplexador não é o
+  da fotografia (`#{start_time}`; sem ele, nascimento do processo; sem os dois, o boot), reabre cada
+  uma pelo spec, no modo em que estava ao cair, com o comando no `new-session`. Sessão fica na
+  fotografia até ausente por 2 min com o servidor de pé; fechada pelo app sai na hora; o servidor que
+  some tendo uma sessão só conta como fim normal dela e não volta (limite aceito: `kill-server` com
+  uma sessão também não). Falha passageira tenta 3 vezes antes de o servidor novo virar o da
+  fotografia. A varredura de grupos espera o restore. Motivo de não digitar no shell: com zsh e
+  `CORRECT_ALL` o shell parava em "correct 'claude' to '.claude'?".
+- **Limite de uso troca de conta sozinho (Claude).** Sinal pelo transcript (com terminal) ou pelo
+  stream-json (sem terminal), nunca pelo pane. A fila fica segura até a troca terminar; o recado de
+  continuar vai à frente na fila durável; conta gasta fica marcada até o reset (`limit-spent.json`);
+  sem conta com folga, a sessão para e mostra `limit_switch_no_room`. Codex: só a detecção; o
+  `rateLimitExceeded` é throttle temporário e não conta como limite.
+- **O Python saiu.** `backend/app` desde `601bc62a0`: +605/−4524. Sem lançador Python e sem reserva:
+  no modo `python`, abrir e reabrir respondem 503 com código. Ficam no Python, registrados: texto que
+  nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo ao Rust, e a
+  transferência Claude→Codex (inativa no serviço).

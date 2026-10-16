@@ -432,11 +432,13 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   CodeRabbit do GitHub revisa sozinho (`.coderabbit.yaml`); PR aberto antes da instalação só com
   o comentário `@coderabbitai review`. Os comentários dele são achados a tratar, não ruído. A CLI
   local do CodeRabbit continua fora deste repositório.
-- **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
-  vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O
-  bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
-  ambiente do pane: Claude via `headersHelper`, Codex via `http_headers`. Tool mapeia 1:1 num
-  endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
+- **MCP `hangar` (`/mcp`) é do Rust (`crates/hangar-server/src/mcp/`); identidade do chamador vai no
+  cabeçalho e o servidor resolve.** Assinatura da voz vence chave, chave vence pane, pane vence
+  nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O bearer do dono é conferido
+  antes do servidor MCP e nunca entra no ambiente do pane: Claude via `headersHelper`, Codex via
+  `http_headers`. Tool mapeia 1:1 numa rota que já existe, chamada dentro do processo; o CLI continua
+  como fallback e resolve identidade sozinho. No modo `python`, `/mcp` responde 503
+  `mcp_needs_rust_server`, sem reserva Python.
 - **O git da sessão é o da worktree onde o agente trabalha (`git_cwd`), não o da pasta de
   abertura.** O Claude Code não grava a worktree irmã no `cwd` do transcript: o sinal são as
   chamadas recentes (`cd`, `git -C`, arquivo editado). Nada na principal tira a sessão da
@@ -458,8 +460,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Mermaid é desenhado pelo `hangar-server` (`POST /api/mermaid`), em PNG, num Chromium sem rede**,
   com a biblioteca embutida no binário; os clientes só exibem a imagem. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#mermaid-desenhado-no-servidor-15102026).
-- **Página da conversa mora no Rust e some com a sessão.** `html_render` publica só pela ponte
-  privada (`/__hangar_server/pages`); lê o dono, convidado não vê. Link e URL do rascunho nunca
+- **Página da conversa mora no Rust e some com a sessão.** `html_render` publica dentro do processo
+  do Rust (`pages::routes::publish_value`); lê o dono, convidado não vê. Link e URL do rascunho nunca
   levam token ao transcript; o documento da página nunca tem `allow-same-origin` nem token na URL
   (PWA `srcdoc` com fetch autenticado, casca `blob:`, nativo em contexto de navegador próprio).
   Limpeza só pela varredura contra a lista; conjunto incerto não apaga nada. A fonte exibida,
@@ -582,15 +584,28 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Codex com terminal não informa quem resolveu: a resposta escrita sai 409
   `erro_sem_confirmacao_resposta` e o cartão fecha no `serverRequest/resolved`, sem "permitido" ou
   "negado por você".
-- **Perguntas, permissões e ciclo de vida da sessão aberta são do Rust; o Python fica com a
-  abertura.** Rust: plugin do Claude (`/api/plugin/*`, `plugin::Store`), fatos e entrega, modos de
+- **Abrir, reabrir, retomar e restaurar sessão é do Rust, por um lançador só.** Toda origem (telas,
+  voz, `hangar-send`, MCP, `orq`, outro servidor, `claude`/`codex`/`pi`/`omp`/`kimi` digitados no
+  terminal) manda um `SessionOpenRequest`; `resolve_open()` decide conta, modo, modelo, plugin e
+  com/sem terminal (os padrões que as telas preenchiam moram aqui) e grava o `SessionSpec` da sessão
+  em `~/.hangar/session-specs/<chave>.json`. Reabrir é `reopen_session(spec ⊕ SessionChange)`;
+  retomar do Arquivo e `/resume` passam pelas mesmas guardas da criação. Com o servidor fora, o
+  comando de terminal `hangar-server open` abre igual e o servidor adota depois; `-p`, pipe,
+  `--resume` explícito, subcomando e flag desconhecida seguem com o CLI cru. Depois de reboot ou
+  queda do tmux o Rust restaura as sessões com terminal pelo spec (`~/.hangar/session-restore.json`,
+  comando no `new-session`, nunca digitado no shell); o tmux-resurrect pula as sessões do Hangar.
+  Sessão que bate o limite de uso troca de conta sozinha pela reabertura (só Claude). No modo
+  `python`, abrir e reabrir respondem 503 com código, sem lançador Python. Exceções que ainda passam
+  pelo Python: texto que nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo
+  ao Rust, e a transferência Claude→Codex. Decisões e medições em
+  [plataforma.md](docs/decisoes/plataforma.md#abertura-de-sessão-única-no-rust).
+- **Perguntas, permissões e ciclo de vida da sessão aberta são do Rust.** Rust: plugin do Claude (`/api/plugin/*`, `plugin::Store`), fatos e entrega, modos de
   permissão (sondagem, troca, memória), Codex e Claude com terminal adotados (o Claude pela
   `CP_SESSION_KEY` do pane, que o vínculo do Python também usa), pane morto, fechamento, `/clear`,
   troca de conversa e sidecar, e toda reabertura pelo spec (`claude_reopen.rs`, `codex_relaunch`):
   terminal↔sem terminal, `/recarregar`, `/conta` com a conta ChatGPT fixa, o modelo e o Fast dela, e
   o bypass; o modo vem do spec e do observado, nunca do rodapé lido na hora. A transferência
-  Claude→Codex (`/conta` com `credential_id`) segue no Python. Python: criar e abrir, lançador, preparo de conta,
-  autorização das portas dele com o repasse acima e, depois do `DELETE` de Codex com terminal
+  Claude→Codex (`/conta` com `credential_id`) segue no Python. Python: autorização das portas dele com o repasse acima e, depois do `DELETE` de Codex com terminal
   concluído no Rust, só a limpeza externa (`share_store`/`sync_tunnel`, `ThenLink`, atalhos,
   caches), sem chamar o Rust de volta. Responsabilidade migrada nunca volta ao Python em
   `rust`/`pending`: Rust indisponível é erro visível. Modo de permissão gravado desconhecido é
