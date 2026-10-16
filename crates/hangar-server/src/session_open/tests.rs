@@ -1434,6 +1434,31 @@ fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl Fn
     (raw, dir, root)
 }
 
+/// S-40 em Pi, omp e Kimi: o prompt inicial entra na fila durável da sessão (a do `PromptQueue`, que
+/// entrega quando o agente fica pronto), carimbado antes da conversa existir, como o bastão fazia.
+/// Pane que não nasce não deixa a entrada para trás.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_initial_prompt_of_pi_omp_and_kimi_waits_in_the_durable_queue() {
+    for name in ["create_pi_terminal", "create_omp_terminal", "create_kimi_terminal"] {
+        let (raw, _dir, root) = run_contract(name, |s| s["steps"][0]["json"]["initial_prompt"] = json!("-leia o plano"));
+        assert_eq!(raw["steps"][0]["status"], 200, "{name}: {}", raw["steps"][0]["body"]);
+        let session = raw["steps"][0]["body"]["name"].as_str().unwrap();
+        let text = std::fs::read_to_string(root.join(format!("home/.claude/.hangar-queue/{session}.jsonl"))).unwrap_or_default();
+        let rows: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(rows.len(), 1, "{name}: {text}");
+        assert_eq!((&rows[0]["text"], &rows[0]["delivered"], &rows[0]["pre_transcript"]), (&json!("-leia o plano"), &json!(false), &json!(true)), "{name}");
+        assert!(rows[0]["id"].as_str().is_some_and(|id| id.len() == 32) && rows[0]["ts"].as_f64().is_some(), "{name}: {}", rows[0]);
+        assert!(raw["steps"][0]["body"]["avisos"].as_array().unwrap().is_empty(), "{name}: entregue não avisa");
+    }
+    let (raw, _dir, root) = run_contract("create_pi_terminal", |s| {
+        s["steps"][0]["json"]["initial_prompt"] = json!("oi");
+        s["fakes"]["tmux_new_session"] = json!({"rc": 1, "stderr": "boom"});
+    });
+    assert_ne!(raw["steps"][0]["status"], 200);
+    assert!(!root.join("home/.claude/.hangar-queue/p1.jsonl").exists(), "pane que não nasceu deixou a fila");
+}
+
 /// Sem o registro a sessão não tem como ser reaberta nem reconhecida pela chave: falhar ao gravá-lo é
 /// falha da abertura, antes do pane, e a worktree que ela criou é desfeita.
 #[cfg(target_os = "linux")]

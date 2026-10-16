@@ -120,6 +120,17 @@ pub fn pane(spec: &SessionSpec, conversation: Conversation, ctx: &AgentContext) 
         config_dir: spec.account.config_dir().map(str::to_owned), command })
 }
 
+/// S-40: o prompt inicial de Pi, omp e Kimi vai à fila durável do nome (`PromptQueue`, que entrega
+/// quando o agente fica pronto), carimbado antes da conversa existir. Grava antes do pane: depois
+/// dele o Python já pode estar drenando o arquivo.
+pub fn queue_initial_prompt(claude_base: &Path, name: &str, text: &str, now: f64) -> std::io::Result<PathBuf> {
+    let path = crate::locate::queue_path(claude_base, name);
+    let row = json!({"id": crate::mods::state::random_hex(16), "text": text, "ts": now, "delivered": false, "pre_transcript": true});
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::runtime::queue::atomic_write(&path, format!("{row}\n").as_bytes())?;
+    Ok(path)
+}
+
 /// `KIMI_CODE_HOME` do servidor ou `~/.kimi-code`.
 pub fn kimi_home(home: &Path, env: &BTreeMap<String, String>) -> PathBuf {
     text(env, "KIMI_CODE_HOME").map_or_else(|| home.join(".kimi-code"), PathBuf::from)

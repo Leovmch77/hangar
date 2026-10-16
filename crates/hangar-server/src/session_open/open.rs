@@ -445,16 +445,12 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     host.leave_old_group(&spec.name).await?;
     diary.step("preparar_comando");
     let sid = host.new_session_id();
-    let mut warnings = Vec::new();
     let (pane, jsonl, route) = if claude {
         let (pane, jsonl, route) = claude_plan(host, spec, &sid, read_only, initial_prompt, runtime).await?;
         (pane, Some(jsonl), route)
     } else {
         let ctx = agents::AgentContext { home: host.home(), server_env: host.env(), runtime_config: runtime, read_only,
             windows: host.terminal().windows };
-        if initial_prompt.is_some_and(|p| !p.is_empty()) {
-            warnings.push(format!("O prompt inicial não vai no comando do {}: mande-o como a primeira mensagem.", spec.provider.name()));
-        }
         // O transcript nasce no 1º turno, num layout próprio: nada a semear.
         (agents::pane(spec, Conversation::New(&sid), &ctx)?, None, None)
     };
@@ -475,6 +471,22 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
     }
+    // S-40: o Claude leva o prompt no comando; os outros, na fila.
+    let queued = match initial_prompt.filter(|p| !claude && !p.is_empty()) {
+        None => None,
+        Some(text) => {
+            let base = host.server_projects().parent().map(Path::to_path_buf).unwrap_or_default();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+            match agents::queue_initial_prompt(&base, &spec.name, text, now) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    diary.refused("erro", "prompt_inicial_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
+                    let _ = super::record::remove(host.home(), &spec.key);
+                    return Err(OpenError::new(500, "erro_criacao_sessao", format!("o prompt inicial não entrou na fila: {error}")));
+                }
+            }
+        }
+    };
     if let Err(error) = terminal::spawn(host.mux(), host.terminal(), &pane).await {
         diary.refused("erro", error.code, Some("criar_terminal"), Some(&error.stderr));
         if error.code == terminal::UNCERTAIN {
@@ -483,6 +495,9 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         if let Err(error) = super::record::remove(host.home(), &spec.key) {
             tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu ficou para trás");
         }
+        if let Some(path) = &queued && let Err(error) = std::fs::remove_file(path) {
+            tracing::warn!(kind = ?error.kind(), "prompt inicial da abertura que não nasceu ficou na fila");
+        }
         return Err(creation(match error.code {
             "terminal_morreu_ao_nascer" => format!("o terminal fechou logo depois de abrir: {}", error.stderr),
             _ => "falha ao criar sessao no tmux".to_owned(),
@@ -490,7 +505,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     }
     diary.step("limpar_estado_anterior");
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider };
-    warnings.extend(host.born(&born).await);
+    let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));
     Ok((jsonl, warnings, route))
