@@ -2,7 +2,7 @@
 import { act, createElement, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
+import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, loadLiveVoiceSettings, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,6 +76,11 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   fetchSessionsForServer: vi.fn(async () => [{ name: 'sess', provider: 'claude', ...chatRow.extra }]),
   fetchDictationOrganization: vi.fn(async () => 'on'),
+  loadLiveVoiceSettings: vi.fn(async () => ({ enabled: false, codex: false, jev: false, voices: [],
+    settings: { voice: null, codex_account: 'default', organizer: {
+      direct: { model: null, effort: 'medium', tier: null }, plan: { model: null, effort: 'high', tier: null },
+    } }, call: { active: false, client: null },
+  })),
   interrupt: vi.fn(async () => {}),
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
@@ -132,7 +137,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
+    .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' cite_action cite_too_long_aria selection_copy selection_copy_markdown selection_copy_image_url selection_copy_image_urls')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
@@ -331,6 +336,7 @@ import { retainDraftAttachment } from './draftAttachments';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import { useServers } from '../stores/servers';
 import { useMods } from '../stores/mods';
+import { useLiveVoice } from '../features/voice/liveVoiceStore';
 import { readDictation, readDraft, setDictationInFlight, writeDictation, writeDraft } from '../stores/drafts';
 
 async function render(el: ReturnType<typeof createElement>) {
@@ -722,6 +728,44 @@ describe('Parar no Composer', () => {
 });
 
 describe('linha de botões do Composer', () => {
+  it('voz ao vivo fica após o microfone só no chat, sem entrar na Nova conversa', async () => {
+    composerChat.state = 'idle';
+    firstInput.attempt = null;
+    const { settingsByServer } = useLiveVoice.getState();
+    useLiveVoice.setState({ settingsByServer: {} });
+    vi.mocked(loadLiveVoiceSettings).mockResolvedValueOnce({
+      enabled: true, codex: true, jev: true, voices: ['sol'],
+      settings: { voice: 'sol', codex_account: 'default', organizer: {
+        direct: { model: null, effort: 'medium', tier: null }, plan: { model: null, effort: 'high', tier: null },
+      } }, call: { active: false, client: null },
+    });
+    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', queuePanel: noQueue }));
+    try {
+      await act(async () => useLiveVoice.getState().loadSettings(useServers.getState().servers.find(server => server.id === 's1')!));
+      const voice = container.querySelector('[aria-label^="live_voice_open"]');
+      expect(voice).not.toBeNull();
+      const mic = button(container, 'composer_gravar_audio');
+      const settings = button(container, 'composer_session_settings');
+      const send = button(container, 'composer_enviar_mensagem');
+      expect(button(container, 'composer_adicionar_ao_chat')).toBeDefined();
+      expect(mic).toBeDefined();
+      expect(settings).toBeDefined();
+      expect(send).toBeDefined();
+      expect(mic!.nextElementSibling).toBe(voice);
+      expect(voice!.nextElementSibling!.nextElementSibling).toBe(settings);
+      expect(settings!.nextElementSibling).toBe(send);
+
+      await act(async () => root.render(createElement(NewConversation, newConversationProps({ id: 's1' }))));
+      expect(container.querySelector('[aria-label="nova_conversa_placeholder"]')).not.toBeNull();
+      expect(button(container, 'composer_gravar_audio')).toBeDefined();
+      expect(button(container, 'nova_conversa_enviar')).toBeDefined();
+      expect(container.querySelector('[aria-label^="live_voice_open"]')).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      useLiveVoice.setState({ settingsByServer });
+    }
+  });
+
   it('campo em linha própria; +, microfone com a dica do estilo e um chip só de ajustes', async () => {
     composerChat.state = 'idle';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', queuePanel: noQueue }));

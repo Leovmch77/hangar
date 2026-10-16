@@ -27,11 +27,11 @@ export const ComposerInput = forwardRef<TextInput, ComponentProps<typeof Multili
 });
 
 type Action = { onPress: () => void; disabled: boolean; busy?: boolean; showBusy?: boolean };
-export function ComposerActions({ attach, mic, send, settings, beforeMic, afterSettings }: {
+export function ComposerActions({ attach, mic, send, settings, beforeMic, afterMic, afterSettings }: {
   attach: Action;
   mic: Action & { recording: boolean; styleLabel: string; onStyle: () => void };
   send: Action & { label: string; hint?: string; editing?: boolean; count?: number; visible?: boolean };
-  settings: ReactNode; beforeMic?: ReactNode; afterSettings?: ReactNode;
+  settings: ReactNode; beforeMic?: ReactNode; afterMic?: ReactNode; afterSettings?: ReactNode;
 }) {
   const { theme } = useUnistyles();
   const count = send.count ?? 0;
@@ -54,6 +54,7 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterS
       {mic.busy && mic.showBusy ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
         : <Icon name={mic.recording ? 'Square' : 'Mic'} size={mic.recording ? 16 : 20} color={mic.recording ? theme.tokens.status.error : theme.tokens.text.secondary} />}
     </Pressable>
+    {afterMic}
     <View style={styles.spacer} />
     {settings}
     {afterSettings}
