@@ -96,6 +96,13 @@ def being_born(name, after=0):
     return bool(born) and born >= after and time.time() - born < BIRTH_WINDOW_S and not outside_scope(name)
 
 
+def _record_jsonl(config_dir, native, pane_cwd):
+    """O projeto é a pasta do Claude: no psmux o pane informa a do Bash que o agente deixou vivo."""
+    from app.registry import sanitize_cwd
+    cwd = native.get('cwd') or pane_cwd
+    return str(Path(config_dir) / 'projects' / sanitize_cwd(cwd) / f"{native['sessionId']}.jsonl"), cwd
+
+
 def _collect(name):
     from app import api, claude_customizations, tmux, registry as registry_mod, procinfo
     import psutil
@@ -138,14 +145,14 @@ def _collect(name):
     sid = registry_mod._session_id_from_cmdline(cmd)
     agent_birth = psutil.Process(agent).create_time()
     record = Path(config_dir) / 'sessions' / f'{agent}.json'
+    cwd = pane['cwd']
     if record.exists():
         native = json.loads(record.read_bytes())
         if int(native.get('pid') or 0) != agent:
             raise RuntimeError('registro terminal de outro processo')
         current_sid = native.get('sessionId')
         if current_sid:
-            from app.registry import sanitize_cwd
-            jsonl = str(Path(config_dir) / 'projects' / sanitize_cwd(pane['cwd']) / f'{current_sid}.jsonl')
+            jsonl, cwd = _record_jsonl(config_dir, native, pane['cwd'])
             sid = current_sid
     if not sid:
         marker = registry_mod._marker_by_pids(Path(config_dir), [agent], set())
@@ -165,7 +172,7 @@ def _collect(name):
     return dict(name=name, pane=target, created=created, namespace=namespace,
         pane_birth=pane_birth, agent_pid=agent, agent_birth=agent_birth,
         session_proof=_session_hash(namespace, fields[5], created),
-        jsonl=jsonl, session_id=Path(jsonl).stem, config_dir=config_dir, cwd=pane['cwd'],
+        jsonl=jsonl, session_id=Path(jsonl).stem, config_dir=config_dir, cwd=cwd,
         mux_argv=['tmux'], windows=os.name == 'nt',
         claude_settings=claude_customizations.from_environment(
             procinfo._env_var_of(agent, claude_customizations.SESSION_SETTINGS_ENV)),

@@ -1525,3 +1525,14 @@ def test_clear_unproved_before_enter_keeps_the_queue(monkeypatch,tmp_path):
         assert (await owner.op('session',{'kind':'submit','text':'/clear'},'clear'))['disposition'] == 'unknown'
         assert [row['id'] for row in slot.store.state['rows']] == ['row']
     asyncio.run(flow())
+
+
+def test_terminal_transcript_follows_the_claude_cwd_not_the_live_bash_of_the_pane():
+    # No psmux o pane informa a pasta do Bash que o agente deixou vivo; o projeto é a pasta do Claude.
+    from app import runtime_terminal as terminal
+    native = {'pid': 1748, 'sessionId': '28d69f41-7dfb-4267-aec4-67a0f0b1c572', 'cwd': 'C:\\Work\\App'}
+    jsonl, cwd = terminal._record_jsonl('/conta', native, 'C:\\Work\\Other\\Web')
+    assert Path(jsonl) == Path('/conta/projects/C--Work-App/28d69f41-7dfb-4267-aec4-67a0f0b1c572.jsonl')
+    assert cwd == 'C:\\Work\\App'
+    jsonl, cwd = terminal._record_jsonl('/conta', {'pid': 1, 'sessionId': 'sid'}, '/w')
+    assert (Path(jsonl), cwd) == (Path('/conta/projects/-w/sid.jsonl'), '/w'), 'registro sem cwd fica com o do pane'
