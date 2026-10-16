@@ -251,6 +251,21 @@ impl Sources for NativeSources {
             state.side.hubs.plugin_rates().record(&identity.binding, tokens, seconds, crate::state::monitor::wall_now())
         })
     }
+    /// Só com terminal: sem terminal quem vê o limite é o próprio ator, pelo stream-json.
+    fn turn_error<'a>(&'a self, identity: &'a Identity) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            let state = self.state()?;
+            let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
+            if !registry.terminal_target(&identity.name).await.is_ok_and(|target| target.is_some()) { return Ok(()); }
+            let (live, transcript) = registry.context_transcript(&identity.name).await.map_err(|_| ServiceError("plugin_context_source_missing"))?;
+            if live != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
+            let now = crate::state::monitor::wall_now();
+            let found = tokio::task::spawn_blocking(move || crate::session_write::limit_switch::file_limit(&transcript, now)).await
+                .map_err(|_| ServiceError("plugin_context_source_missing"))?;
+            if let Some(limit) = found { registry.usage_limit(&identity.name, "claude", limit); }
+            Ok(())
+        })
+    }
 }
 
 /// Grava a medida no transcript da conversa vigente, com ou sem terminal. A vida é conferida antes e

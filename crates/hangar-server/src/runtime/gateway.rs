@@ -104,7 +104,13 @@ pub struct RuntimeRegistry {
     heal_attempts:std::sync::Mutex<BTreeMap<String,std::time::Instant>>,
     /// Caixa de entrada dos recibos dos recados nativos que o Rust escreve, com e sem terminal.
     native:super::native_message::Inbox,
+    /// Quem troca de conta quando a sessão para no limite de uso (`session_write::limit_switch`).
+    limits:std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<LimitHit>>,
 }
+
+/// Sessão que parou no limite de uso da conta.
+#[derive(Debug)]
+pub struct LimitHit { pub name:String, pub provider:String, pub limit:UsageLimit }
 /// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
 /// não vira laço de processos mortos.
 pub(super) const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
@@ -290,11 +296,16 @@ impl RuntimeRegistry {
         Self { diag:crate::diag::DiagClient::new(upstream,secret.clone()),reopening:Default::default(),terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
-            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default() }
+            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default(),limits:std::sync::OnceLock::new() }
     }
     /// Escrita para sessão doente, ou a conversa aberta: a sessão em erro é reaberta aqui, em segundo plano
     /// e uma por vez; a saudável só refaz a projeção da fila. Responde na hora; quem escreveu recebe o 503
     /// e tenta de novo. Falha vai ao diário.
+    /// Liga a troca de conta no limite; sem ela o aviso de limite só fica no estado da sessão.
+    pub fn set_limit_sink(&self,sink:tokio::sync::mpsc::UnboundedSender<LimitHit>) { let _ = self.limits.set(sink); }
+    pub fn usage_limit(&self,name:&str,provider:&str,limit:UsageLimit) {
+        if let Some(sink) = self.limits.get() { let _ = sink.send(LimitHit { name:name.to_owned(),provider:provider.to_owned(),limit }); }
+    }
     pub fn request_reopen(&self,name:&str) {
         let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
         if !self.reopening.lock().unwrap_or_else(|e|e.into_inner()).insert(name.to_owned()) { return; }
@@ -1208,7 +1219,7 @@ impl RuntimeRegistry {
                 let mut engine = RuntimeEngine::new("codex",metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
                     .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
                 if let Some(store) = &self.interactions { engine = engine.with_interactions(target.key.clone(),store.clone())?; }
-                engine = engine.with_live(self.live_sender(&target.name));
+                engine = engine.with_live(self.live_sender(&target.name)).with_lifecycle(self.self_ref.get().cloned());
                 let cell = AdoptionCell::new(&target.endpoint,target.app_pid).with_lifecycle(self.codex_wake.clone(),target.sidecar_life());
                 let adoption = Adoption { endpoint:target.endpoint.clone(),app_pid:target.app_pid,cell:cell.clone() };
                 let handle = RuntimeActor::spawn_adopted(runtime,queue,connection,engine,adoption);

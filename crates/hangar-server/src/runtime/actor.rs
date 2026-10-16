@@ -131,7 +131,7 @@ impl RuntimeEngine {
             store.forget(key).map_err(crate::interactions::runtime_error)?;
             next = next.with_interactions(key.clone(),store.clone())?;
         }
-        (next.launch,next.policy,next.publisher,next.revision,next.live) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone());
+        (next.launch,next.policy,next.publisher,next.revision,next.live,next.lifecycle) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone(),self.lifecycle.clone());
         Ok(next)
     }
     fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
@@ -1111,7 +1111,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
-                Effect::UsageLimit { .. } => {},
+                Effect::UsageLimit { limit } => {
+                    if let Some(registry) = engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { registry.usage_limit(&target.name,&target.provider,limit); }
+                },
                 Effect::ReserveAsyncAnswer { operation_id,reservation,command } => {
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     jobs.spawn(async move {

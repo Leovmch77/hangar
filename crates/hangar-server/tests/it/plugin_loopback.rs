@@ -253,6 +253,7 @@ mod held_routes {
         rows: Vec<Discovery>,
         rate: Mutex<Option<(u64, f64)>>,
         context: Mutex<Option<(u64, u64)>>,
+        turn_errors: Mutex<Vec<String>>,
     }
     impl Sources for Facts {
         fn enabled(&self) -> SourceFuture<'_, bool> { Box::pin(async { Ok(self.enabled.load(Ordering::Relaxed)) }) }
@@ -274,6 +275,9 @@ mod held_routes {
         fn rate<'a>(&'a self, _: &'a Identity, tokens: u64, seconds: f64) -> SourceFuture<'a, ()> {
             Box::pin(async move { *self.rate.lock().unwrap() = Some((tokens, seconds)); Ok(()) })
         }
+        fn turn_error<'a>(&'a self, identity: &'a Identity) -> SourceFuture<'a, ()> {
+            Box::pin(async move { self.turn_errors.lock().unwrap().push(identity.name.clone()); Ok(()) })
+        }
     }
     struct Running(tokio::task::JoinHandle<()>);
     impl Drop for Running { fn drop(&mut self) { self.0.abort(); } }
@@ -282,7 +286,7 @@ mod held_routes {
             binding: InteractionBinding { key: "runtime-key".into(), conversation: "sid".into(), generation: 2 } };
         let facts = Arc::new(Facts { enabled: AtomicBool::new(true), rows: vec![Discovery { identity: identity.clone(), pane: Some("%1".into()),
             socket: Some("/tmp/tmux-socket".into()), mux_session: Some("$2".into()), psmux_pid: None }], identity,
-            rate: Mutex::new(None), context: Mutex::new(None) });
+            rate: Mutex::new(None), context: Mutex::new(None), turn_errors: Mutex::new(Vec::new()) });
         let store = Arc::new(plugin::Store::new(Arc::new(InteractionStore::default())));
         store.interactions().bind(&facts.identity.binding).unwrap();
         store.bind(&facts.identity.binding).unwrap();
@@ -412,6 +416,16 @@ mod held_routes {
         for row in &mut rows { row.psmux_pid = None; row.socket = Some("/tmp/socket".into()); }
         body.tmux = Some("/tmp/socket,0,0".into());
         assert_eq!(plugin::routes::discover(&body,&rows).err().unwrap().0,"plugin_identity_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn plugin_loopback_only_a_turn_ending_in_error_is_checked_for_the_usage_limit() {
+        let (_store, facts, address, _server) = start().await;
+        for motivo in ["answer", "aborted", "error"] {
+            let mut body = envelope(); body["estado"] = json!("idle"); body["motivo"] = json!(motivo);
+            assert_eq!(post(address, "state", body).await.status().as_u16(), 200, "{motivo}");
+        }
+        assert_eq!(*facts.turn_errors.lock().unwrap(), vec!["renamed".to_owned()]);
     }
 
     #[tokio::test]
