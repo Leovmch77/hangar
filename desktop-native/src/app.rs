@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, tab::{Tab, TabBar}, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-    input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
+    input::{AnyInputState, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
@@ -89,6 +89,7 @@ mod search;
 mod topbar;
 mod voice_ui;
 mod quotes;
+mod questions;
 mod mermaid;
 pub(crate) mod setup;
 /// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
@@ -271,7 +272,6 @@ enum Payload {
     PluginPressed(Result<Value, Failure>),
     // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
     PluginShown(Result<Value, Failure>),
-    PluginClosed(Result<Value, Failure>),
     // Digitação num campo de mod: o lugar, a `key` e a identidade do campo que mandou; a volta libera o próximo pedido
     // da fila dele, e só a falha aparece.
     PluginInput(String, crate::plugin_ui::Control, EntityId, Result<Value, Failure>),
@@ -434,7 +434,7 @@ struct PluginFailure;
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
-struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
+struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<AnyInputState>, _changes: Vec<Subscription>, tab: usize, minimized: bool, body_scroll: ScrollHandle }
 
 impl AskForm {
     fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
@@ -593,6 +593,11 @@ pub struct Hangar {
     plugin_caps: Vec<String>,
     /// Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
     plugin_local_tab: Option<String>,
+    /// Escolhas locais por sessão, sem alterar o estado do mod no terminal.
+    plugin_presentations: HashMap<SessionKey, crate::plugin_ui::presentation::Presentation>,
+    plugin_body_scrolls: HashMap<SessionKey, HashMap<String, ScrollHandle>>,
+    plugin_question_focus: FocusHandle,
+    plugin_question_seen: Option<(Option<SessionKey>, String)>,
     /// Rolagem da fileira de abas dos mods e a aba ativa para a qual ela já rolou.
     plugin_tabs_scroll: ScrollHandle,
     plugin_tabs_seen: Option<String>,
@@ -962,9 +967,10 @@ impl Hangar {
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), quotes: Default::default(), mermaid: Default::default(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(), commands_latest: HashMap::new(), commands_seq: 0,
+            plugin_question_seen: None,
             suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1136,11 +1142,6 @@ impl Hangar {
     /// Aviso de falha de uma ação de mod; um novo substitui o anterior (`PluginFailure`).
     fn notify_plugin_failure(text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = text { window.push_notification(Notification::warning(text).id::<PluginFailure>(), cx); }
-    }
-
-    /// Painel de mod que não fechou: a frase genérica é a mesma do web.
-    fn close_failure(error: &Failure) -> String {
-        Self::plugin_failure(error, || tr_shared("plugin_fechar_falhou", &[]))
     }
 
     /// Digitação num campo de mod que não chegou: a frase genérica é a mesma do web.
@@ -1858,10 +1859,6 @@ impl Hangar {
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
-            Payload::PluginClosed(result) => {
-                Self::notify_plugin_failure(result.err().map(|error| Self::close_failure(&error)), window, cx);
-                return;
-            }
             Payload::PluginShown(result) => {
                 Self::notify_plugin_failure(result.err().and_then(|error| Self::show_failure(&error)), window, cx);
                 return;
@@ -2099,6 +2096,13 @@ impl Hangar {
                     self.plugin_local_tab.as_deref());
                 self.plugin_band = s.above;
                 self.plugin_panes = s.panes;
+                if let Some(key) = self.selected_key() {
+                    let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+                    let scrolls = self.plugin_body_scrolls.entry(key.clone()).or_default();
+                    scrolls.retain(|id, _| ids.contains(id));
+                    for id in ids.iter() { scrolls.entry(id.clone()).or_insert_with(ScrollHandle::new); }
+                    if ids.is_empty() { self.plugin_presentations.remove(&key); }
+                }
                 self.plugin_shown = s.shown_id;
                 self.plugin_columns = s.columns;
                 self.plugin_source = s.source;
@@ -2248,6 +2252,8 @@ impl Hangar {
                 if let Some(key) = self.selected_key() {
                     self.answered_tools.retain(|(owner, _)| owner != &key);
                     self.answering.remove(&key);
+                    self.plugin_presentations.remove(&key);
+                    self.plugin_body_scrolls.remove(&key);
                 }
                 self.revision += 1;
                 self.terminal_suggestion.clear();
@@ -3057,7 +3063,7 @@ impl Hangar {
     fn ask_picks(&self, cx: &Context<Self>) -> Vec<Pick> {
         self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
             if self.ask_form.typing.get(i) == Some(&true) {
-                Pick::Text(self.ask_form.inputs.get(i).map(|input| input.read(cx).value().to_string()).unwrap_or_default())
+                Pick::Text(self.ask_form.inputs.get(i).map(|input| input.value(cx).to_string()).unwrap_or_default())
             } else { pick.clone() }
         }).collect()
     }
@@ -3859,15 +3865,27 @@ impl Hangar {
         if let Some(ask) = &self.chat.ask {
             for item in &ask.payload.questions {
                 form.picks.push(Pick::Empty);
-                form.typing.push(ask.codex() && item.options.is_empty());
+                form.typing.push(item.options.is_empty());
                 let secret = item.is_secret;
-                let input = cx.new(|cx| InputState::new(window, cx).masked(secret).placeholder(tr("ask_placeholder")));
+                let input = questions::new_input(secret, window, cx);
+                let (index, fp) = (form.inputs.len(), form.fingerprint.clone());
                 // O botão Enviar depende do texto: cada edição redesenha o cartão.
-                form._changes.push(cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()));
+                let changed = match &input {
+                    AnyInputState::Input(input) => cx.subscribe(input, move |this, _, event: &InputEvent, cx| this.edit_ask_input(&fp, index, event, cx)),
+                    AnyInputState::Textarea(input) => cx.subscribe(input, move |this, _, event: &InputEvent, cx| this.edit_ask_input(&fp, index, event, cx)),
+                    _ => unreachable!("a resposta é um campo simples ou multilinha"),
+                };
+                form._changes.push(changed);
                 form.inputs.push(input);
             }
         }
         self.ask_form = form;
+    }
+
+    fn edit_ask_input(&mut self, fingerprint: &str, index: usize, event: &InputEvent, cx: &mut Context<Self>) {
+        if self.ask_form.fingerprint != fingerprint { return; }
+        if matches!(event, InputEvent::Change) && let Some(typing) = self.ask_form.typing.get_mut(index) { *typing = true; }
+        cx.notify();
     }
 
     fn set_pick(&mut self, fingerprint: &str, index: usize, pick: Option<Pick>, typing: bool, cx: &mut Context<Self>) {
@@ -3897,12 +3915,19 @@ impl Hangar {
                     if this.ask_form.fingerprint == fp { this.ask_form.tab = *index; cx.notify(); }
                 }))
         });
-        let mut body = div().flex().flex_col().gap_4();
+        let scroll_key = format!("{fingerprint}#{tab}");
+        if self.ask_scroll.0 != scroll_key {
+            self.ask_scroll = (scroll_key, ScrollHandle::new());
+            self.ask_form.body_scroll = ScrollHandle::new();
+        }
+        // A lista cede espaço para o campo e as ações quando a janela é baixa.
+        let options_max = (f32::from(window.viewport_size().height) - 680.).clamp(64., 190.);
+        let mut body = div().flex().flex_col().gap_3();
         for (qi, item) in ask.payload.questions.iter().enumerate().filter(|(qi, _)| *qi == tab) {
             let pick = self.ask_form.picks.get(qi).cloned().unwrap_or(Pick::Empty);
             let typing = self.ask_form.typing.get(qi) == Some(&true);
             let chosen = |i: usize| !typing && matches!(&pick, Pick::Options(list) if list.contains(&i));
-            let mut options = div().flex().flex_col().gap_2();
+            let mut options = div().flex().flex_col().gap_1();
             for (oi, option) in item.options.iter().enumerate() {
                 let (fp, current, entry) = (fingerprint.clone(), pick.clone(), item.clone());
                 let on_pick = cx.listener(move |this, _: &bool, _, cx| {
@@ -3917,28 +3942,23 @@ impl Hangar {
                 });
             }
             let mut escapes = div().flex().flex_wrap().gap_2();
-            if ask.allows_text(item) && !item.options.is_empty() {
-                let fp = fingerprint.clone();
-                escapes = escapes.child(Button::new(SharedString::from(format!("ask-type-{qi}"))).small().ghost().toggled(typing).disabled(busy)
-                    .label(tr("ask_type")).on_click(cx.listener(move |this, _, window, cx| {
-                        let next = !this.ask_form.typing.get(qi).copied().unwrap_or(false);
-                        this.set_pick(&fp, qi, None, next, cx);
-                        if next { if let Some(input) = this.ask_form.inputs.get(qi).cloned() { input.update(cx, |input, cx| input.focus(window, cx)); } }
-                    })));
-            }
             if ask.allows_chat() {
                 let fp = fingerprint.clone();
-                escapes = escapes.child(Button::new(SharedString::from(format!("ask-chat-{qi}"))).small().ghost().toggled(!typing && pick == Pick::Chat).disabled(busy)
+                escapes = escapes.child(Button::new(SharedString::from(format!("ask-chat-{qi}"))).xsmall().ghost().toggled(!typing && pick == Pick::Chat).disabled(busy)
                     .label(tr("ask_chat")).on_click(cx.listener(move |this, _, _, cx| this.set_pick(&fp, qi, Some(Pick::Chat), false, cx))));
             }
-            let input = typing.then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
+            let input = ask.allows_text(item).then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
             body = body.child(div().flex().flex_col().gap_2()
                 .when(total == 1 && !item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
                     .child(item.header.clone())))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
                 .when(item.multi_select, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_multi"))))
-                .child(options)
-                .when_some(input, |el, input| el.child(Input::new(&input).disabled(busy)))
+                .when(!item.options.is_empty(), |el| el.child(scrolled("ask-scroll", &self.ask_scroll.1, options_max, options)))
+                .when_some(input, |el, input| el.child(div().flex().flex_col().flex_shrink_0().gap_2().mt_1()
+                    .child(div().text_xs().text_color(if typing { theme::accent() } else { theme::muted() })
+                        .child(tr(if typing { "ask_written" } else { "ask_write" })))
+                    .child(questions::field(&input, busy))
+                    .child(div().text_xs().text_color(theme::muted()).child(tr("ask_draft_kept")))))
                 .when(item.is_secret, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_secret"))))
                 .child(escapes));
         }
@@ -3946,28 +3966,44 @@ impl Hangar {
         // Cancelar sempre existe: pergunta assíncrona do Codex só se dispensa (Skip); as demais interrompem o turno.
         let cancel = {
             let (action, fp) = if ask.payload.is_async { (Action::Skip, fingerprint.clone()) } else { (Action::Cancel, String::new()) };
-            Button::new("ask-cancel").ghost().label(tr("cancel")).disabled(busy)
+            Button::new("ask-cancel").small().ghost().label(tr("cancel")).disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), fp.clone(), cx)))
         };
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
-        let scroll_key = format!("{fingerprint}#{tab}");
-        if self.ask_scroll.0 != scroll_key { self.ask_scroll = (scroll_key, ScrollHandle::new()); }
         let body = div().flex().flex_col().gap_3().when_some(tabs, |el, tabs| el.child(tabs))
-            .child(scrolled("ask-scroll", &self.ask_scroll.1, 360., body)).into_any_element();
-        Some(self.interaction_card(tr("ask_title"), body,
-            div().flex().items_center().gap_2()
+            .child(body).into_any_element();
+        let completed = self.ask_picks(cx).iter().zip(&ask.payload.questions)
+            .filter(|(pick, item)| interaction::answer(&ask, item, pick).is_some()).count();
+        let progress = tr("ask_progress").replace("{done}", &completed.to_string()).replace("{total}", &total.to_string());
+        let minimized = self.ask_form.minimized;
+        Some(in_column(questions::card(minimized, progress, body,
+            div().flex().flex_wrap().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
+                .when(tab > 0, |el| {
+                    let fp = fingerprint.clone();
+                    el.child(Button::new("ask-previous").small().ghost().label(tr("ask_previous")).disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.ask_form.fingerprint == fp { this.ask_form.tab = tab - 1; cx.notify(); }
+                        })))
+                })
                 .child(cancel)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
-                    Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
+                    Button::new("ask-next").small().primary().label(tr("ask_next")).disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| if this.ask_form.fingerprint == fp { this.ask_form.tab = tab + 1; cx.notify(); }))
                 } else {
-                    Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
+                    Button::new("ask-send").small().primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
                         .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
                 })
-                .into_any_element()))
+                .into_any_element(),
+            &self.ask_form.body_scroll, questions::body_height(f32::from(window.viewport_size().height)),
+            cx.listener(|this, _, window, cx| {
+                this.ask_form.minimized = !this.ask_form.minimized;
+                // O campo sai da árvore ao recolher: o foco volta para um controle que continua visível.
+                this.composer.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }))).py_2().into_any_element())
     }
 
     fn render_options(&mut self, busy: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -5029,8 +5065,8 @@ fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(cont
         .when(selected, |el| el.bg(theme::accent_dim()))
         .when(!busy, |el| el.cursor_pointer())
         .when(!busy && !selected, |el| el.hover(|style| style.bg(theme::hover())))
-        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
-        .when(!option.description.is_empty(), |el| el.child(div().text_sm().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
+        .child(div().text_size(rems(0.8125)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
+        .when(!option.description.is_empty(), |el| el.child(div().text_xs().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
         .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().mt_1().p_2().rounded_md().bg(theme::raised())
             .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
 }
@@ -5792,6 +5828,7 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
+const PLUGIN_PANE_MAX_HEIGHT: f32 = 360.;
 
 /// O formulário da linha da lista, no mesmo formato do `ask_question` do stream.
 fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
@@ -5801,6 +5838,13 @@ fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
 }
 
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options, state.interaction_id]).to_string() }
+
+fn question_focus_snapshot(ask: Option<&Ask>, state: &SessionState) -> String {
+    match ask {
+        Some(ask) => format!("ask:{}", ask.payload.interaction_id.as_ref().unwrap_or(&ask.fingerprint)),
+        None => format!("select:{}", state.interaction_id.clone().unwrap_or_else(|| select_snapshot(state))),
+    }
+}
 
 fn select_body(snapshot: &str, option: Option<usize>) -> Option<Value> {
     let (_, _, interaction_id): (Option<String>, Option<Vec<String>>, Option<String>) = serde_json::from_str(snapshot).ok()?;
@@ -6203,13 +6247,12 @@ impl Hangar {
         }))
     }
 
-    /// Quem atende o `✕` de um painel de mod; sessão só leitura fica sem ele.
-    fn plugin_close(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Close> {
-        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
+    /// Minimizar só muda a apresentação local, inclusive em uma sessão de leitura.
+    fn plugin_minimize(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Minimize> {
         let view = cx.entity().downgrade();
-        Some(std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
+        Some(std::rc::Rc::new(move |site: &str, window: &mut Window, cx: &mut App| {
             let site = site.to_owned();
-            let _ = view.update(cx, |this, cx| this.close_plugin(site, cx));
+            let _ = view.update(cx, |this, cx| this.minimize_plugin(site, window, cx));
         }))
     }
 
@@ -6232,10 +6275,13 @@ impl Hangar {
         cx.notify();
     }
 
-    fn close_plugin(&mut self, site: String, cx: &mut Context<Self>) {
-        // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
+    fn minimize_plugin(&mut self, site: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Não fecha no terminal: assim o conteúdo e a aba continuam disponíveis para restaurar.
         self.keep_plugin_hovered_without(Some(&site));
-        self.spawn_plugin("close", json!({"site": site}), Payload::PluginClosed);
+        if let Some(key) = self.selected_key() { self.plugin_presentations.entry(key).or_default().minimize(); }
+        if self.selected.as_ref().is_some_and(|session| session.takes_messages()) {
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
+        } else { self.root_focus.focus(window, cx); }
         cx.notify();
     }
 
@@ -6243,7 +6289,7 @@ impl Hangar {
     /// painel da frente.
     fn keep_plugin_hovered(&mut self) { self.keep_plugin_hovered_without(None); }
 
-    /// Como `keep_plugin_hovered`, tirando o painel `gone` (fechado pelo `✕`) dos lugares à vista.
+    /// Como `keep_plugin_hovered`, tirando o painel oculto dos lugares à vista.
     fn keep_plugin_hovered_without(&mut self, gone: Option<&str>) {
         if self.plugin_hovered.is_empty() { return; }
         let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
@@ -6357,7 +6403,8 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), close: (!self.plugin_panes.is_empty()).then(|| self.plugin_close(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+            body_scrolls: self.selected_key().as_ref().and_then(|key| self.plugin_body_scrolls.get(key)),
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
 
@@ -6435,6 +6482,7 @@ impl Hangar {
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.new_chat_screen() { self.plugin_question_seen = None; }
         if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
         self.sync_plugin_fields(window, cx);
@@ -6477,15 +6525,17 @@ impl Hangar {
         // Menu de uma pergunta nativa aberta ou recém-respondida: o card é quem responde, sem aviso de terminal.
         let ask_pane = self.chat.ask_pane();
         let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login);
+        let interaction = card.or_else(|| pending.then(|| in_column(div().py_2().text_sm().text_color(theme::warning())
+            .child(tr("pending_question"))
+            .when_some(self.chat.state.question.clone(), |el, question| el.child(div().text_color(theme::text()).child(question))))
+            .into_any_element()));
+        let plugin_space = self.render_plugin_space(interaction, readable, window, cx);
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content
             .children(outgoing.into_iter().map(|text| in_column(div().w_full().flex().flex_col().items_end().gap_1().py_1()
                 .child(user_bubble(conversation_text(div().whitespace_normal().line_clamp(6).text_ellipsis(), true).child(text)).opacity(0.6))
                 .child(div().text_xs().text_color(theme::muted()).child(tr("sending"))))))
-            .when_some(card, |el, card| el.child(card))
             .when_some(plan_bar, |el, bar| el.child(in_column(bar)))
-            .when(pending, |el| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(tr("pending_question")))))
-            .when_some(self.chat.state.question.clone().filter(|_| pending), |el, question| el.child(in_column(div().text_sm().child(question))))
             .when_some(action_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(problem_banner(&self.chat.state), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
             .when_some(self.error.clone(), |el, error| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(error)
@@ -6494,16 +6544,7 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .children(readable.then(|| {
-                let view = self.plugin_view(cx);
-                // Painéis de mod ficam acima da faixa, como o terminal os abre, em qualquer largura: com mais de um, em abas,
-                // só o da frente desenhado. A altura tem teto para o painel comprido rolar por dentro.
-                let tallest = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
-                let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
-                let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
-                crate::plugin_ui::panes(&self.plugin_panes, active.as_deref(), &view, tallest).map(in_column).into_iter()
-                    .chain(crate::plugin_ui::band(&self.plugin_band, &view).map(in_column)).collect::<Vec<_>>()
-            }).into_iter().flatten())
+            .children(plugin_space)
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
                 None if read_only => el.child(in_column(div().py_2().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_so_leitura")))),
@@ -6511,6 +6552,54 @@ impl Hangar {
                     |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx))),
             });
         self.measured_bottom(content.into_any_element())
+    }
+
+    /// Uma área só: pergunta e mod nunca são empilhados, e a troca mantém a altura do painel aberto.
+    fn render_plugin_space(&mut self, question: Option<AnyElement>, readable: bool, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::plugin_ui::presentation::{Display, Presentation};
+        let ids = if readable { crate::plugin_ui::pane_ids(&self.plugin_panes) } else { Vec::new() };
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+        let key = self.selected_key();
+        let mut default = Presentation::default();
+        let presentation = key.map(|key| self.plugin_presentations.entry(key).or_default()).unwrap_or(&mut default);
+        let display = presentation.display(active.is_some(), question.is_some());
+        let reserve = presentation.reserves_panel(active.is_some());
+        let next_question = question.as_ref().map(|_| (self.selected_key(), question_focus_snapshot(self.chat.ask.as_ref(), &self.chat.state)));
+        let changed = self.plugin_question_seen != next_question;
+        self.plugin_question_seen = next_question;
+        if changed {
+            if question.is_some() { self.plugin_question_focus.focus(window, cx); }
+            else if self.plugin_question_focus.contains_focused(window, cx) {
+                if self.selected.as_ref().is_some_and(|session| session.takes_messages()) {
+                    self.composer.update(cx, |input, cx| input.focus(window, cx));
+                } else { self.root_focus.focus(window, cx); }
+            }
+        }
+        if display != Display::Panel { self.keep_plugin_hovered_without(active.as_deref()); }
+        let height = (f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE).min(PLUGIN_PANE_MAX_HEIGHT);
+        let space = match display {
+            Display::Question => question.map(|question|
+                div().id("plugin-interaction-space").track_focus(&self.plugin_question_focus)
+                    .relative().w_full().max_h(px(height)).when(reserve, |el| el.h(px(height))).flex_shrink_0().overflow_y_scroll()
+                    .child(question).into_any_element()),
+            Display::Panel => {
+                let view = self.plugin_view(cx);
+                crate::plugin_ui::panes(&self.plugin_panes, active.as_deref(), &view, height)
+                    .map(|pane| in_column(pane).id("plugin-interaction-space").into_any_element())
+            }
+            Display::Minimized => Some(in_column(div().id("plugin-minimized").flex().items_center().gap_2().py_2()
+                .child(div().flex_1().text_xs().text_color(theme::muted()).child(tr("plugin_minimized")))
+                .child(Button::new("plugin-restore").small().outline().label(tr("plugin_restore"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(key) = this.selected_key() { this.plugin_presentations.entry(key).or_default().restore(); }
+                        if this.selected.as_ref().is_some_and(|session| session.takes_messages()) {
+                            this.composer.update(cx, |input, cx| input.focus(window, cx));
+                        } else { this.root_focus.focus(window, cx); }
+                        cx.notify();
+                    })))).into_any_element()),
+            Display::None => None,
+        };
+        space.into_iter().chain(readable.then(|| crate::plugin_ui::band(&self.plugin_band, &self.plugin_view(cx)).map(|band| in_column(band).into_any_element())).flatten()).collect()
     }
 
     /// O painel direito abrindo ou fechando na mesma conversa: a largura dele e quanto está à vista (0 a 1), pedindo
@@ -6973,7 +7062,6 @@ mod tests {
         assert_eq!(Hangar::show_failure(&bare), Some(tr_shared("plugin_aba_falhou", &[])));
         assert_eq!(Hangar::input_failure(&bare), tr_shared("plugin_input_falhou", &[]));
         assert_eq!(Hangar::press_failure(&bare), tr_shared("plugin_clique_falhou", &[]));
-        assert_eq!(Hangar::close_failure(&bare), tr_shared("plugin_fechar_falhou", &[]));
         assert_ne!(tr_shared("plugin_fechar_falhou", &[]), "plugin_fechar_falhou");
         // Código que o app não conhece não vale como frase: 5xx com ele segue a genérica.
         let unknown = Failure { code: Some("internal_info".into()), ..bare };
@@ -7013,6 +7101,24 @@ mod tests {
                               worktree_path: Some("/r/hangar-x".into()), ..Default::default() };
         assert_eq!(super::worktree_label(&s).as_deref(), Some("hangar-x"));
         assert_eq!(super::worktree_label(&SessionInfo { name: "a".into(), ..Default::default() }), None);
+    }
+
+    #[test]
+    fn question_focus_keeps_checked_options_and_detects_the_next_interaction() {
+        use super::{question_focus_snapshot, Ask, SessionState};
+        let mut state = SessionState { question: Some("Quais?".into()), options: Some(vec!["[ ] A".into()]),
+            interaction_id: Some("interaction-a".into()), ..Default::default() };
+        let before = question_focus_snapshot(None, &state);
+        state.options = Some(vec!["[x] A".into()]);
+        assert_eq!(question_focus_snapshot(None, &state), before);
+        state.interaction_id = Some("interaction-b".into());
+        assert_ne!(question_focus_snapshot(None, &state), before);
+        let raw = serde_json::json!({"interaction_id":"interaction-b", "questions":[{"question":"Qual?"}]});
+        let ask = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        assert_ne!(question_focus_snapshot(Some(&ask), &state), question_focus_snapshot(None, &state));
+        let raw_next = serde_json::json!({"interaction_id":"interaction-c", "questions":[{"question":"Qual?"}]});
+        let next = Ask::new(serde_json::from_value(raw_next.clone()).unwrap(), &raw_next);
+        assert_ne!(question_focus_snapshot(Some(&ask), &state), question_focus_snapshot(Some(&next), &state));
     }
 
     #[test]

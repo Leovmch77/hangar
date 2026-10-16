@@ -256,8 +256,8 @@ impl Element for FloatingMark {
         // Cópia dos lugares: desenhar o filho não pode achar a lista emprestada.
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
-            // Os brilhos não entram com fade: o texto parado já está na linha.
-            let t = if self.reduce_motion || matches!(place.draw, Floating::Shimmer(_) | Floating::ThinkingFocus(_)) { 1. }
+            // Texto em cache nasce visível: sem foco, o relógio não redesenha depois do primeiro quadro.
+            let t = if self.reduce_motion || matches!(place.draw, Floating::Elapsed(..) | Floating::Shimmer(_) | Floating::ThinkingFocus(_)) { 1. }
                 else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
             // Só a marca entra com o fade: o selo já estava na linha antes de ela começar a trabalhar.
             let (inner, badge) = match place.draw {

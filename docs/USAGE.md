@@ -379,7 +379,10 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   turno em curso, sem esperar. Não tocar = espera, como sempre.
 - **Painel "Na fila" (Claude e Codex):** mensagem mandada com a sessão trabalhando espera no
   Hangar, num painel acima do campo de mensagem (app nativo, PWA no celular e app), na ordem de entrega; ela
-  sai sozinha quando o agente para, uma por vez, e só então vira bolha na conversa. Em cada linha:
+  sai sozinha quando o agente para. Em Claude e Codex, com ou sem terminal, as mensagens comuns
+  que já esperam são reunidas num único prompt, com uma quebra de linha entre elas. Mensagens
+  que chegarem depois da reserva esperam o próximo turno. Recados de sessões, comandos e respostas
+  a perguntas mantêm seus canais próprios. O lote vira uma única bolha na conversa. Em cada linha:
   **Apagar** tira a mensagem da fila (em todos os aparelhos abertos); **Editar** leva o texto ao campo
   de mensagem, onde o envio vira **Atualizar** (Esc ou Cancelar sai sem mudar; anexo e microfone ficam
   desligados enquanto edita); a alça (ou as setas) **reordena**; **Orientar** manda aquela mensagem

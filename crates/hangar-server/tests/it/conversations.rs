@@ -160,6 +160,30 @@ async fn transcript_read_twice_resets_every_device_and_follows_new_file() {
     }
 }
 
+#[tokio::test]
+async fn codex_clear_resets_history_before_the_new_rollout_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("codex-before.jsonl");
+    let new = dir.path().join("codex-after.jsonl");
+    let message = |text:&str|format!("{}\n",json!({"type":"response_item","payload":{"type":"message","role":"user",
+        "content":[{"type":"input_text","text":text}]}}));
+    std::fs::write(&old,message("mensagem anterior")).unwrap();
+    let (fake,up) = spawn_fake().await;
+    fake.set_info(info_json("codex",&old));
+    let srv = spawn_server(config(up,"127.0.0.1")).await;
+    let mut events = sse(open_events(srv,"s","",&[]).await);
+    assert!(messages(&mut events,1).await[0].data.contains("mensagem anterior"));
+    fake.set_info(info_json("codex",&new));
+    next_named(&mut events,"reset").await;
+    assert!(!new.exists(),"o Codex só cria o rollout depois do primeiro turno");
+    let history = client().get(format!("http://{srv}/api/sessions/s/history")).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(history.status().as_u16(),200);
+    assert_eq!(serde_json::from_str::<Value>(&history.text().await.unwrap()).unwrap(),json!([]));
+    std::fs::write(&new,message("mensagem nova")).unwrap();
+    let received = messages(&mut events,1).await;
+    assert!(received[0].data.contains("mensagem nova") && !received[0].data.contains("mensagem anterior"));
+}
+
 /// A descoberta apontou outro arquivo por uma leitura só: ninguém perde a conversa da tela.
 #[tokio::test]
 async fn transcript_read_once_keeps_the_conversation() {

@@ -261,7 +261,7 @@ impl Hangar {
     }
 
     /// Cartão do subagente, igual nos três visuais e nunca dentro de grupo: ladrilho do ícone, tipo, descrição, o
-    /// modelo apagado à direita e, no fim, a marca enquanto roda ou o aviso de falha. O cartão inteiro abre a conversa
+    /// modelo e a duração à direita e, no fim, a marca enquanto roda ou o aviso de falha. O cartão inteiro abre a conversa
     /// dele na aba Atividade. `None` quando a chamada não é Agent. A página publicada (`html_render`) passa por aqui
     /// pelo mesmo motivo: troca a linha nos três visuais.
     pub(super) fn render_agent_card(&mut self, tool: Tool, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -276,7 +276,22 @@ impl Hangar {
         let description = request.1.clone();
         let model = input("model");
         let failed = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
-        let running = !failed && tool.result.is_none() && self.running(tool.call);
+        let run = self.conversation.activity.agents.iter().find(|agent| agent.call == tool.call);
+        let running = !failed && run.is_some_and(|agent| agent.running);
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.;
+        let duration = run.filter(|agent| !failed || !agent.running).and_then(|agent| agent.elapsed(now));
+        let timer = duration.and_then(|elapsed| {
+            let clock = div().flex_shrink_0().h(px(16.)).flex().items_center().gap(px(4.)).text_size(px(11.)).text_color(theme::muted())
+                .child(chrome::small_icon(IconName::Clock, 12., theme::muted()));
+            if running {
+                let since = Instant::now().checked_sub(elapsed)?;
+                Some(clock.child(tr("agent_running_for"))
+                    .child(self.elapsed_slot(super::panes::Area::Conversation, format!("agent-elapsed-{key}"), since, None)).into_any_element())
+            } else {
+                let label = if failed { tr("agent_failed_after") } else { tr("agent_finished_in") };
+                Some(clock.child(label.replace("{time}", &chrome::format_elapsed(elapsed))).into_any_element())
+            }
+        });
         let tint = if failed { theme::warning() } else { theme::muted() };
         let label = format!("{}: {name} · {description}", super::activity::web("tool_abrir_agente"));
         let card = Button::new(SharedString::from(format!("agent-card-{key}")))
@@ -291,8 +306,9 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(description))
                 // O modelo fica no fim e não na descrição: é o que sobra para ler quando a descrição é cortada.
                 .when_some(model, |el, model| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(model)))
+                .when_some(timer, |el, timer| el.child(timer))
                 .when(running, |el| el.child(self.working_mark_slot(super::panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())))
-                .when(failed, |el| el.child(failed_ending()))
+                .when(failed, |el| el.child(if duration.is_some() { chrome::small_icon(IconName::CircleX, 13., theme::warning()).into_any_element() } else { failed_ending() }))
                 .child(chrome::small_icon(IconName::ExternalLink, 14., theme::faint())))
             .on_click(cx.listener(move |this, _, _, cx| this.open_agent(request.clone(), cx)));
         Some(card.into_any_element())

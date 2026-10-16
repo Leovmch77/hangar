@@ -1297,7 +1297,7 @@ mod tests {
 
     fn parent(id: &str, prompt: &str, agent_id: Option<&str>, running: bool) -> AgentRun {
         AgentRun { call: 0, id: id.into(), description: String::new(), subagent_type: None, model: None, prompt: Some(prompt.into()),
-            running, agent_id: agent_id.map(Into::into) }
+            running, agent_id: agent_id.map(Into::into), started_at: None, finished_at: None }
     }
 
     #[test]
