@@ -4,7 +4,7 @@
 #
 # Regras (as mesmas do pi.posix.sh):
 #  - uso não interativo -> cru: (a) o PRIMEIRO argumento é subcomando do pi (install/remove/
-#    uninstall/update/list/config; `pi "remove the dead code"` continua prompt); (b) flag que imprime
+#    uninstall/update/list/config/auth; `pi "remove the dead code"` continua prompt); (b) flag que imprime
 #    e sai em qualquer posição (-p/--print, --mode, --list-models, --export, --help/-h, --version/-v).
 #  - flag que gerencia a própria sessão (--session-id, --resume/-r, --continue/-c, --session,
 #    --fork, --no-session) -> cru.
@@ -18,7 +18,7 @@ function pi
     # subcomando: só vale como PRIMEIRO argumento (`pi remove x` é subcomando; `pi "remove x"` é prompt).
     if test (count $argv) -gt 0
         switch $argv[1]
-            case install remove uninstall update list config
+            case install remove uninstall update list config auth
                 command pi $argv
                 return
         end

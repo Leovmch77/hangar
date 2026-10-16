@@ -21,8 +21,18 @@ FLAGS = {
     "kimi": {"--model": "model"},
 }
 
+# Subcomando do claude (`claude --help`, seção Commands): só vale como PRIMEIRO argumento e roda cru;
+# virar sessão faria dele o prompt inicial. pi/omp/kimi já saem crus no próprio wrapper.
+SUBCOMMANDS = {
+    "claude": {"agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp",
+               "plugin", "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview",
+               "update", "upgrade"},
+}
+
 
 def request(provider: str, args: list[str]) -> dict | None:
+    if args and args[0] in SUBCOMMANDS.get(provider, ()):
+        return None
     body: dict = {"provider": provider, "cwd": os.environ.get("PWD") or os.getcwd(), "headless": False}
     env = {"claude": {"CLAUDE_CONFIG_DIR": "config_dir", "CP_ENGINE": "engine"},
            "omp": {"OMP_PROFILE": "omp_profile"}}.get(provider, {})

@@ -5,7 +5,7 @@
 #
 # Regras:
 #  - uso não interativo -> cru: (a) o PRIMEIRO argumento é subcomando do pi (install/remove/
-#    uninstall/update/list/config; `pi "remove the dead code"` continua prompt); (b) flag que imprime
+#    uninstall/update/list/config/auth; `pi "remove the dead code"` continua prompt); (b) flag que imprime
 #    e sai em qualquer posição (-p/--print, --mode, --list-models, --export, --help/-h, --version/-v).
 #  - flag que gerencia a própria sessão (--session-id, --resume/-r, --continue/-c, --session,
 #    --fork, --no-session) -> cru.
@@ -19,7 +19,7 @@ pi() {
     local a
     # subcomando: só vale como PRIMEIRO argumento (`pi remove x` é subcomando; `pi "remove x"` é prompt).
     case "${1:-}" in
-        install|remove|uninstall|update|list|config)
+        install|remove|uninstall|update|list|config|auth)
             command pi "$@"
             return
             ;;

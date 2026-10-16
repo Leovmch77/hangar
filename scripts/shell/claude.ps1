@@ -70,7 +70,13 @@ function claude {
         if ($env:CP_ENGINE) { $pedido.engine = $env:CP_ENGINE }
         $chaves = @{ '--model' = 'model'; '--effort' = 'effort'; '--permission-mode' = 'permission_mode' }
         $cobre = $true
-        for ($i = 0; $i -lt $args.Count; $i++) {
+        # Subcomando do claude (`claude --help`, secao Commands) so vale como PRIMEIRO argumento e
+        # roda cru: virar sessao faria dele o prompt inicial. Mesma lista do scripts/hangar-open.
+        $subcomandos = @('agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install',
+                         'logs', 'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop',
+                         'kill', 'ultrareview', 'update', 'upgrade')
+        if ($args.Count -gt 0 -and $subcomandos -ccontains [string]$args[0]) { $cobre = $false }
+        for ($i = 0; $cobre -and$i -lt $args.Count; $i++) {
             $a = [string]$args[$i]
             $flag, $valor = $a -split '=', 2
             if ($chaves.ContainsKey($flag)) {

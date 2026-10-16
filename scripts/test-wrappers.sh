@@ -694,6 +694,12 @@ for SH in bash zsh fish; do
     d=$(tty_case "$SH" claude ok --flag-que-o-pedido-nao-conhece)
     check_raw "$SH claude flag desconhecida vai crua" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ --flag-que-o-pedido-nao-conhece$'
 
+    d=$(tty_case "$SH" claude ok update)
+    check_raw "$SH claude subcomando vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ update$'
+
+    d=$(tty_case "$SH" pi ok auth)
+    check_raw "$SH pi subcomando auth vai cru" "$d" '^ARGV: auth$'
+
     d=$(tty_case "$SH" claude ok --resume abc)
     check_raw "$SH claude --resume vai cru" "$d" '^ARGV: --resume abc$'
 
