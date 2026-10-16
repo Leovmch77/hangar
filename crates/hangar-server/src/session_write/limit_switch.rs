@@ -16,8 +16,17 @@ use crate::session_open::{Account,AccountSource,AgentProvider,ChangeReason,Sessi
 pub enum Decision { Switch { path:String, label:String }, Stay(&'static str) }
 
 /// Contas que já bateram o limite, até a janela delas voltar: não são escolhidas de novo nesse prazo.
+/// Gravadas ao lado do cache de cotas: o cache velho depois de um reinício mostraria a conta esgotada com folga.
 #[derive(Default)]
-pub struct Spent(Mutex<BTreeMap<String,f64>>);
+pub struct Spent { spent:Mutex<BTreeMap<String,f64>>, file:Option<std::path::PathBuf> }
+
+impl Spent {
+    /// Ilegível ou ausente começa vazio: no pior caso a conta esgotada recusa de novo e é marcada outra vez.
+    pub fn at(file:std::path::PathBuf) -> Self {
+        let spent = std::fs::read(&file).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or_default();
+        Self { spent:Mutex::new(spent),file:Some(file) }
+    }
+}
 
 fn canonical(dir:&str) -> String {
     std::fs::canonicalize(dir).map_or_else(|_|dir.to_owned(),|path|path.to_string_lossy().into_owned())
@@ -25,10 +34,15 @@ fn canonical(dir:&str) -> String {
 
 impl Spent {
     pub fn mark(&self,dir:&str,until:f64) {
-        if let Ok(mut spent) = self.0.lock() { spent.insert(canonical(dir),until); }
+        let Ok(mut spent) = self.spent.lock() else { return };
+        spent.insert(canonical(dir),until);
+        let Some(file) = &self.file else { return };
+        let saved = file.parent().map_or(Ok(()),std::fs::create_dir_all)
+            .and_then(|()|crate::pages::store::write_atomic(file,&serde_json::to_vec(&*spent).unwrap_or_default()));
+        if let Err(error) = saved { tracing::warn!(code="limit_spent_write_failed",kind=?error.kind(),"conta gasta não gravada; vale até o reinício"); }
     }
     pub fn is_spent(&self,dir:&str,now:f64) -> bool {
-        self.0.lock().is_ok_and(|spent|spent.get(&canonical(dir)).is_some_and(|until|*until > now))
+        self.spent.lock().is_ok_and(|spent|spent.get(&canonical(dir)).is_some_and(|until|*until > now))
     }
 }
 
@@ -180,7 +194,7 @@ pub fn spawn(st:Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     let runtime = st.state.runtime.get()?.clone();
     let (sink,mut hits) = tokio::sync::mpsc::unbounded_channel();
     runtime.set_limit_sink(sink);
-    let switcher = Switcher::default();
+    let switcher = Switcher { spent:Spent::at(st.accounts.quota_path().with_file_name("limit-spent.json")),..Switcher::default() };
     let host = Native { st,runtime };
     Some(tokio::spawn(async move {
         while let Some(hit) = hits.recv().await { switcher.handle(&host,hit).await; }
@@ -286,6 +300,21 @@ mod tests {
         assert_eq!(decide(&spec(claude("/b")),"/b",&cat,&quotas,&spent,1000.0),Decision::Stay("limit_switch_no_room"));
         // Passado o reset, as contas voltam a valer, e a de mais folga é a primeira.
         assert_eq!(decide(&spec(claude("/b")),"/b",&cat,&quotas,&spent,2001.0),Decision::Switch { path:"/a".into(),label:"a".into() });
+    }
+
+    #[test]
+    fn a_spent_account_stays_spent_after_a_restart_until_its_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("limit-spent.json");
+        let before = Spent::at(file.clone());
+        before.mark("/a",2000.0);
+        before.mark("/b",500.0);
+        let after = Spent::at(file.clone());
+        assert!(after.is_spent("/a",1000.0),"o reinício não devolve a conta esgotada");
+        assert!(!after.is_spent("/a",2001.0));
+        assert!(!after.is_spent("/b",1000.0));
+        std::fs::write(&file,"não é json").unwrap();
+        assert!(!Spent::at(file).is_spent("/a",1000.0),"arquivo ilegível começa vazio");
     }
 
     #[test]
