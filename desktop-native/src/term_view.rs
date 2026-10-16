@@ -227,11 +227,38 @@ impl TermView {
 
     pub fn scroll_lines(&mut self, lines: i32) -> bool { self.scroll(Scroll::Delta(lines)) }
 
-    pub fn scroll_wheel(&mut self, event: &ScrollWheelEvent) -> bool {
+    /// `x`/`y` relativos à grade. Programa que pediu o mouse recebe a roda na célula; tela alternativa sem
+    /// mouse recebe setas (o alternateScroll do xterm), porque nela não há histórico local para rolar.
+    /// Sem `can_send` (vista só de leitura) a roda rola só o histórico local.
+    pub fn scroll_wheel(&mut self, event: &ScrollWheelEvent, x: f32, y: f32, can_send: bool) -> bool {
         self.wheel_remainder += f32::from(event.delta.pixel_delta(px(self.line_height)).y) / self.line_height;
         let lines = self.wheel_remainder.trunc() as i32;
         self.wheel_remainder -= lines as f32;
-        self.scroll_lines(lines)
+        if lines == 0 { return false; }
+        let mode = *self.term.mode();
+        let bytes = if !can_send || event.modifiers.shift {
+            None
+        } else if mode.intersects(TermMode::MOUSE_MODE) {
+            let col = (x / self.cell_width).floor().max(0.) as usize + 1;
+            let row = (y / self.line_height).floor().max(0.) as usize + 1;
+            let button = if lines > 0 { 64 } else { 65 };
+            if mode.contains(TermMode::SGR_MOUSE) {
+                Some(format!("[<{button};{col};{row}M").into_bytes())
+            } else if col <= 223 && row <= 223 {
+                Some(vec![0x1b, b'[', b'M', 32 + button as u8, 32 + col as u8, 32 + row as u8])
+            } else { None }
+        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            let app = mode.contains(TermMode::APP_CURSOR);
+            Some(match (lines > 0, app) { (true, false) => b"[A".to_vec(), (true, true) => b"OA".to_vec(),
+                (false, false) => b"[B".to_vec(), (false, true) => b"OB".to_vec() })
+        } else { None };
+        let Some(bytes) = bytes else { return self.scroll_lines(lines) };
+        let redraw = self.term.grid().display_offset() != 0;
+        self.term.scroll_display(Scroll::Bottom);
+        let mut echoed = false;
+        // Rajada da roda limitada: cada passo vira bytes na fila de envio, que é curta.
+        for _ in 0..lines.unsigned_abs().min(5) { echoed |= self.send_input(&bytes); }
+        redraw || echoed
     }
 
     fn scroll(&mut self, amount: Scroll) -> bool {
@@ -590,6 +617,37 @@ mod tests {
     }
 
     #[test]
+    fn wheel_goes_to_the_program_that_asked_for_the_mouse_or_the_alternate_screen() {
+        let up = ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 1.)), ..Default::default() };
+        let down = ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., -2.)), ..Default::default() };
+        // Programa com mouse (tmux com `mouse on`, Claude Code em tela cheia): a roda vira botão 64/65 na célula.
+        let mut view = TermView::new(20, 5);
+        view.feed(b"[?1049h[?1000h[?1006h");
+        let (x, y) = (view.cell_width * 3.5, view.line_height * 1.5);
+        assert!(!view.scroll_wheel(&up, x, y, true));
+        assert_eq!(view.take_output().concat(), b"[<64;4;2M".to_vec());
+        view.scroll_wheel(&down, x, y, true);
+        assert_eq!(view.take_output().concat(), b"[<65;4;2M[<65;4;2M".to_vec());
+        // Giro enorme num evento só não vira rajada: no máximo 5 passos por evento.
+        let big = ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 40.)), ..Default::default() };
+        view.scroll_wheel(&big, x, y, true);
+        assert_eq!(view.take_output().concat(), b"[<64;4;2M".repeat(5));
+        // Tela alternativa sem mouse: setas, como o alternateScroll do xterm.
+        let mut alt = TermView::new(20, 5);
+        alt.feed(b"[?1049h");
+        alt.scroll_wheel(&up, 0., 0., true);
+        assert_eq!(alt.take_output().concat(), b"[A".to_vec());
+        // Tela normal: rola o histórico local e nada vai ao programa.
+        let mut plain = TermView::new(10, 2);
+        plain.feed(b"a
+b
+c
+d");
+        assert!(plain.scroll_wheel(&up, 0., 0., true));
+        assert!(plain.take_output().is_empty());
+    }
+
+    #[test]
     fn terminal_selection_uses_resized_cell_metrics() {
         let mut view = TermView::new(20, 4);
         view.feed(b"first\r\nsecond\r\nthird");
@@ -610,9 +668,9 @@ mod tests {
         assert!(!view.scroll_lines(0));
         view.scroll_lines(-1);
         for _ in 0..3 {
-            assert!(!view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }));
+            assert!(!view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }, 0., 0., true));
         }
-        assert!(view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }));
+        assert!(view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }, 0., 0., true));
         assert!(view.key_down(&key("z", Some("z"), Modifiers::default())).redraw);
         assert_eq!(view.snapshot().offset, 0);
         assert!(view.resize_grid(12, 3));

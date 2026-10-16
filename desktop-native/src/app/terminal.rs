@@ -538,8 +538,14 @@ impl Hangar {
                         slot.status = Status::Connected;
                     }
                     Ok(ws::Event::Data(bytes)) => { slot.view.feed(&bytes); Self::flush_terminal(slot); }
-                    Ok(ws::Event::Closed) => { slot.socket = None; slot.status = Status::Failed(tr("term_disconnected")); }
-                    Err(error) => { slot.socket = None; slot.status = Status::Failed(socket_error(error)); }
+                    Ok(ws::Event::Closed) => {
+                        crate::log_line(&format!("terminal {}: o servidor fechou o socket", slot.name));
+                        slot.socket = None; slot.status = Status::Failed(tr("term_disconnected"));
+                    }
+                    Err(error) => {
+                        crate::log_line(&format!("terminal {}: socket caiu: {error:?}", slot.name));
+                        slot.socket = None; slot.status = Status::Failed(socket_error(error));
+                    }
                 }
             }
             Reply::CodeList(key, request_key, attempt, result) => {
@@ -594,12 +600,21 @@ impl Hangar {
         cx.notify();
     }
 
-    fn flush_terminal(slot: &mut Slot) {
-        if slot.socket.is_none() { return; }
-        for bytes in slot.view.take_output() {
-            if let Some(socket) = &slot.socket {
-                if let Err(error) = socket.send(&bytes) { slot.status = Status::Failed(socket_error(error)); }
+    fn flush_terminal(slot: &mut Slot) { Self::flush(slot, false); }
+
+    /// Um quadro só por envio: a fila do socket tem 8 lugares. `droppable` (a roda) perde o quadro com a
+    /// fila cheia em vez de dar o terminal como desconectado; tecla e colagem nunca se perdem calados.
+    fn flush(slot: &mut Slot, droppable: bool) {
+        let Some(socket) = &slot.socket else { return };
+        let bytes = slot.view.take_output().concat();
+        if bytes.is_empty() { return; }
+        match socket.send(&bytes) {
+            Err(crate::ws::Error::QueueFull) if droppable => crate::log_line(&format!("terminal {}: fila cheia, rolagem descartada ({} bytes)", slot.name, bytes.len())),
+            Err(error) => {
+                crate::log_line(&format!("terminal {}: envio falhou ({} bytes): {error:?}", slot.name, bytes.len()));
+                slot.status = Status::Failed(socket_error(error));
             }
+            Ok(_) => {}
         }
     }
 
@@ -633,7 +648,10 @@ impl Hangar {
         slot.bounds.set(bounds);
         if slot.view.resize_to_bounds(bounds, window) {
             let (cols, rows) = slot.view.dimensions();
-            if let Some(socket) = &slot.socket { if let Err(error) = socket.resize(cols, rows) { slot.status = Status::Failed(socket_error(error)); } }
+            if let Some(socket) = &slot.socket { if let Err(error) = socket.resize(cols, rows) {
+                crate::log_line(&format!("terminal {}: redimensionar falhou: {error:?}", slot.name));
+                slot.status = Status::Failed(socket_error(error));
+            } }
             cx.notify();
         }
     }
@@ -838,7 +856,10 @@ impl Hangar {
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if let Some(slot) = this.terminal.as_mut().and_then(|panel| panel.tabs.get_mut(panel.active)) {
-                    if slot.view.scroll_wheel(event) { cx.notify(); }
+                    let at = event.position - slot.bounds.get().origin;
+                    let can_send = slot.accepts_input();
+                    if slot.view.scroll_wheel(event, f32::from(at.x), f32::from(at.y), can_send) { cx.notify(); }
+                    Self::flush(slot, true);
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyTerminal, _, cx| {
