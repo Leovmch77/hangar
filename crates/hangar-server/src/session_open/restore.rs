@@ -1,7 +1,8 @@
 //! Restaurar as sessões com terminal depois do reboot: o Rust guarda, enquanto roda, quais sessões do
-//! Hangar estão abertas e em que conversa (`~/.hangar/session-restore.json`), e na subida de uma máquina
-//! que reiniciou reabre cada uma pelo spec gravado, retomando a conversa (S-68, S-69, S-70). O comando vai
-//! no `new-session`, nunca digitado num shell. Não depende do tmux-resurrect, e vale no Windows (psmux).
+//! Hangar estão abertas e em que conversa (`~/.hangar/session-restore.json`), e na subida, quando o servidor
+//! do multiplexador não é mais o da fotografia (reboot, queda ou `kill-server` do tmux), reabre cada uma pelo
+//! spec gravado, retomando a conversa (S-68, S-69, S-70). O comando vai no `new-session`, nunca digitado num
+//! shell. Não depende do tmux-resurrect, e vale no Windows (psmux).
 //!
 //! Uma sessão sai da fotografia só depois de ausente por `ABSENT` com o servidor de pé: o desligamento
 //! derruba as sessões e o servidor em segundos, e fechar uma sessão de propósito a tira da próxima subida.
@@ -19,13 +20,12 @@ pub const FILE: &str = "session-restore.json";
 /// Ausente por mais que isto com o servidor de pé: fechada de propósito.
 pub const ABSENT: f64 = 120.0;
 const EVERY: Duration = Duration::from_secs(30);
-/// O horário de subida da máquina varia um pouco entre leituras; outra subida é longe disso.
-const SAME_BOOT: u64 = 60;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// Quando a máquina subiu (segundos desde a época), na última vez que o servidor olhou.
-    pub boot: u64,
+    /// Quando o servidor do multiplexador subiu (segundos desde a época), na última vez que o Rust olhou.
+    #[serde(default)]
+    pub mux_started: Option<u64>,
     /// Pela chave do spec.
     pub sessions: BTreeMap<String, Entry>,
 }
@@ -69,7 +69,7 @@ pub fn conversation_of(provider: AgentProvider, jsonl: &str) -> Option<String> {
 
 /// A fotografia seguinte: as vivas com a conversa de agora (a de antes, se a lista não provou); as ausentes
 /// ficam até `ABSENT`.
-pub fn observe(prev: &Snapshot, alive: &BTreeMap<String, Entry>, now: f64, boot: u64) -> Snapshot {
+pub fn observe(prev: &Snapshot, alive: &BTreeMap<String, Entry>, now: f64, mux_started: Option<u64>) -> Snapshot {
     let mut sessions = BTreeMap::new();
     for (key, entry) in alive {
         let conversation = entry.conversation.clone().or_else(|| prev.sessions.get(key).and_then(|e| e.conversation.clone()));
@@ -80,13 +80,51 @@ pub fn observe(prev: &Snapshot, alive: &BTreeMap<String, Entry>, now: f64, boot:
         let since = entry.missing_since.unwrap_or(now);
         if now - since < ABSENT { sessions.insert(key.clone(), Entry { missing_since: Some(since), ..entry.clone() }); }
     }
-    Snapshot { boot, sessions }
+    Snapshot { mux_started, sessions }
 }
 
-/// O que reabrir na subida: só depois de outra subida da máquina, e só o que não tem sessão com o nome.
-pub fn to_restore(snap: &Snapshot, boot: u64, live: &HashSet<String>) -> Vec<(String, Entry)> {
-    if snap.boot.abs_diff(boot) <= SAME_BOOT { return Vec::new(); }
-    snap.sessions.iter().filter(|(_, e)| !live.contains(&e.name)).map(|(k, e)| (k.clone(), e.clone())).collect()
+/// O servidor do multiplexador agora: nenhum (as sessões morreram com ele), o horário em que subiu, ou
+/// desconhecido (não respondeu).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuxStart { NoServer, Started(u64), Unknown }
+
+/// O que reabrir na subida: só com outro servidor que o da fotografia, e só o que não tem sessão com o nome.
+/// `None`: o multiplexador não respondeu e não dá para decidir agora.
+pub fn to_restore(snap: &Snapshot, current: MuxStart, live: &HashSet<String>) -> Option<Vec<(String, Entry)>> {
+    match current {
+        MuxStart::Unknown => return None,
+        MuxStart::Started(at) if snap.mux_started == Some(at) => return Some(Vec::new()),
+        _ => {}
+    }
+    Some(snap.sessions.iter().filter(|(_, e)| !live.contains(&e.name)).map(|(k, e)| (k.clone(), e.clone())).collect())
+}
+
+/// Uma variável de formato do servidor (`display-message -p`); `Err` = sem servidor (`Ok(None)`) ou sem resposta.
+async fn mux_format(program: &std::ffi::OsStr, format: &str) -> Result<Option<String>, ()> {
+    let mut command = crate::terminal_input::child_command(program);
+    command.args(["display-message", "-p", format]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), command.output()).await.map_err(|_| ())?.map_err(|_| ())?;
+    if out.status.success() { return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())); }
+    if crate::list::mux::is_absence(&String::from_utf8_lossy(&out.stderr)) { Ok(None) } else { Err(()) }
+}
+
+/// Quando o servidor do multiplexador subiu: o `#{start_time}` do tmux; sem ele (o psmux pode não ter), o
+/// nascimento do processo do servidor (`#{pid}`); sem os dois, a subida da máquina.
+pub async fn mux_start(program: &std::ffi::OsStr) -> MuxStart {
+    let start = match mux_format(program, "#{start_time}").await {
+        Err(()) => return MuxStart::Unknown,
+        Ok(None) => return MuxStart::NoServer,
+        Ok(Some(text)) => text.parse::<u64>().ok(),
+    };
+    if let Some(at) = start.filter(|at| *at > 0) { return MuxStart::Started(at); }
+    let pid = mux_format(program, "#{pid}").await.ok().flatten().and_then(|p| p.parse::<u32>().ok());
+    let born = pid.and_then(|pid| {
+        let mut system = sysinfo::System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        system.process(pid).map(sysinfo::Process::start_time)
+    });
+    MuxStart::Started(born.unwrap_or_else(sysinfo::System::boot_time))
 }
 
 fn path(home: &Path) -> PathBuf { home.join(".hangar").join(FILE) }
@@ -174,42 +212,50 @@ async fn reopen(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> 
     super::open::open_session(&host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
 }
 
-/// Na subida: reabre o que a máquina perdeu ao reiniciar; depois fotografa a cada `EVERY`.
+/// Reabre uma sessão e grava o resultado no diário.
+async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
+    let result = reopen(st, key, entry).await;
+    let mut event = json!({"evento": "sessao.restaurada", "nivel": "ok", "sessao": entry.name, "provider": entry.provider.name()});
+    if let Err(code) = &result {
+        tracing::warn!(session = %entry.name, code = %code, "sessão com terminal não restaurada");
+        event["evento"] = json!("sessao.restauro_falhou");
+        event["nivel"] = json!("erro");
+        event["codigo"] = json!(code);
+    }
+    if let Some(dir) = crate::diag::diary_dir() && let Err(error) = crate::diag::write_diary(&dir, &[event], chrono::Local::now()) {
+        tracing::warn!(kind = ?error.kind(), "diário do restore não gravado");
+    }
+    result
+}
+
+/// A cada `EVERY`: com outro servidor do multiplexador que o da fotografia (a subida depois do reboot, ou o
+/// tmux que caiu com o Rust de pé), reabre o que ele perdeu; com o mesmo, fotografa.
 pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::ffi::OsString) {
-    let boot = sysinfo::System::boot_time();
     let mut snap = read(&home);
-    let live: Option<HashSet<String>> = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect());
-    match live {
-        // Sem a lista não se sabe o que existe: nada é reaberto por cima.
-        None => tracing::warn!(code = "session_restore_list_unavailable", "a lista não respondeu na subida; nada foi restaurado"),
-        Some(live) => {
-            let pending = to_restore(&snap, boot, &live);
-            if !pending.is_empty() { tracing::info!(count = pending.len(), "restaurando as sessões com terminal depois do reboot"); }
-            for (key, entry) in pending {
-                let result = reopen(&st, &key, &entry).await;
-                let mut event = json!({"evento": "sessao.restaurada", "nivel": "ok", "sessao": entry.name, "provider": entry.provider.name()});
-                if let Err(code) = &result {
-                    tracing::warn!(session = %entry.name, code = %code, "sessão não restaurada depois do reboot");
-                    event["evento"] = json!("sessao.restauro_falhou");
-                    event["nivel"] = json!("erro");
-                    event["codigo"] = json!(code);
-                }
-                if let Some(dir) = crate::diag::diary_dir() && let Err(error) = crate::diag::write_diary(&dir, &[event], chrono::Local::now()) {
-                    tracing::warn!(kind = ?error.kind(), "diário do restore não gravado");
+    loop {
+        let current = mux_start(&program).await;
+        let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
+        let same = matches!(current, MuxStart::Started(at) if snap.mux_started == Some(at));
+        match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
+            (true, _) => {
+                if let Some(alive) = alive(&st, &home, &program).await {
+                    let next = observe(&snap, &alive, now(), snap.mux_started);
+                    if next != snap {
+                        if let Err(error) = write(&home, &next) {
+                            tracing::warn!(code = "session_restore_unwritten", kind = ?error.kind(), "fotografia das sessões não gravada");
+                        }
+                        snap = next;
+                    }
                 }
             }
-        }
-    }
-    // A subida desta máquina passa a ser a da fotografia: um reinício só do servidor não reabre nada.
-    snap.boot = boot;
-    loop {
-        if let Some(alive) = alive(&st, &home, &program).await {
-            let next = observe(&snap, &alive, now(), boot);
-            if next != snap {
-                if let Err(error) = write(&home, &next) {
-                    tracing::warn!(code = "session_restore_unwritten", kind = ?error.kind(), "fotografia das sessões não gravada");
-                }
-                snap = next;
+            // Sem a lista ou sem o multiplexador não se sabe o que existe: nada é reaberto por cima.
+            (false, None) => tracing::warn!(code = "session_restore_undecided", "sem a lista ou o multiplexador; o restore espera"),
+            (false, Some(pending)) => {
+                if !pending.is_empty() { tracing::info!(count = pending.len(), "restaurando as sessões com terminal que o multiplexador perdeu"); }
+                for (key, entry) in &pending { let _ = restore_one(&st, key, entry).await; }
+                // O servidor de agora (o restore pode tê-lo subido) passa a ser o da fotografia: um reinício só do
+                // Rust não reabre nada.
+                if let MuxStart::Started(at) = mux_start(&program).await { snap.mux_started = Some(at); }
             }
         }
         tokio::time::sleep(EVERY).await;
@@ -264,25 +310,27 @@ mod tests {
     #[test]
     fn a_session_leaves_the_snapshot_only_after_being_absent_with_the_server_up() {
         let alive: BTreeMap<String, Entry> = [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", None))].into();
-        let first = observe(&Snapshot::default(), &alive, 1000.0, 7);
+        let first = observe(&Snapshot::default(), &alive, 1000.0, Some(7));
         assert_eq!(first.sessions.len(), 2);
         let only_a: BTreeMap<String, Entry> = [("k1".into(), entry("a", None))].into();
-        let second = observe(&first, &only_a, 1010.0, 7);
+        let second = observe(&first, &only_a, 1010.0, Some(7));
         assert_eq!(second.sessions["k1"].conversation.as_deref(), Some("c1"), "a conversa provada antes fica quando a lista não a prova");
         assert_eq!(second.sessions["k2"].missing_since, Some(1010.0), "ausente fica, marcada");
-        assert!(observe(&second, &only_a, 1010.0 + ABSENT - 1.0, 7).sessions.contains_key("k2"), "o desligamento derruba tudo em segundos");
-        assert!(!observe(&second, &only_a, 1010.0 + ABSENT, 7).sessions.contains_key("k2"), "fechada de propósito sai");
-        let back = observe(&second, &alive, 1020.0, 7);
+        assert!(observe(&second, &only_a, 1010.0 + ABSENT - 1.0, Some(7)).sessions.contains_key("k2"), "o desligamento derruba tudo em segundos");
+        assert!(!observe(&second, &only_a, 1010.0 + ABSENT, Some(7)).sessions.contains_key("k2"), "fechada de propósito sai");
+        let back = observe(&second, &alive, 1020.0, Some(7));
         assert_eq!(back.sessions["k2"].missing_since, None, "voltou");
     }
 
     #[test]
-    fn only_another_boot_restores_and_never_over_a_live_name() {
-        let snap = Snapshot { boot: 1000, sessions: [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", Some("c2")))].into() };
-        assert!(to_restore(&snap, 1030, &HashSet::new()).is_empty(), "a mesma subida: o servidor só reiniciou");
+    fn only_another_multiplexer_server_restores_and_never_over_a_live_name() {
+        let snap = Snapshot { mux_started: Some(1000), sessions: [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", Some("c2")))].into() };
+        let keys = |p: Option<Vec<(String, Entry)>>| p.map(|v| v.into_iter().map(|(k, _)| k).collect::<Vec<_>>());
+        assert_eq!(keys(to_restore(&snap, MuxStart::Started(1000), &HashSet::new())), Some(vec![]), "o mesmo servidor: só o Rust reiniciou");
         let live: HashSet<String> = ["a".to_owned()].into();
-        let pending = to_restore(&snap, 5000, &live);
-        assert_eq!(pending.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["k2"]);
+        assert_eq!(keys(to_restore(&snap, MuxStart::Started(5000), &live)), Some(vec!["k2".to_owned()]), "outro servidor (reboot, kill-server)");
+        assert_eq!(keys(to_restore(&snap, MuxStart::NoServer, &HashSet::new())), Some(vec!["k1".to_owned(), "k2".to_owned()]), "nenhum servidor");
+        assert_eq!(keys(to_restore(&snap, MuxStart::Unknown, &HashSet::new())), None, "multiplexador calado: decide depois");
     }
 
     #[test]
