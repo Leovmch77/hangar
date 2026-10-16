@@ -1070,6 +1070,25 @@ describe('rascunho guardado no Composer', () => {
     act(() => root.unmount());
   });
 
+  it('anexo colado durante o upload fica no rascunho e espera o próximo envio', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    let uploaded!: (v: { path: string }) => void;
+    realFirstInput.upload.mockReset().mockImplementationOnce(() => new Promise((resolve) => { uploaded = resolve; }));
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({ version: 1, text: '', revision: 1, transcript: null, submission: null,
+      attachments: [{ uri: 'file:///a.png', name: 'a.png', mime: 'image/png', kind: 'image' }] }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => { void button(container, 'composer_enviar_mensagem')!.click(); });
+    await act(async () => pasteInput.onPaste!([{ uri: 'file:///novo.txt', fileName: 'novo.txt', type: 'text/plain', fileSize: 1 }], null));
+    await act(async () => uploaded({ path: '/up/a.png' }));
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('📎 board_imagem: /up/a.png', expect.any(Number));
+    const uris = (JSON.parse(storage.memory.get('draft.v1:s1::sess')!) as { attachments: { uri: string }[] }).attachments.map((a) => a.uri);
+    expect(uris).toEqual(['file:///novo.txt']);
+    expect(container.querySelectorAll('[aria-label="board_remover_anexo"]')).toHaveLength(1);
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
   it('falha no segundo upload guarda o caminho do primeiro e o reenvio não o sobe de novo', async () => {
     composerChat.send.mockClear();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);

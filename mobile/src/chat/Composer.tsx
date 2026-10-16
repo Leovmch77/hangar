@@ -319,7 +319,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (isSubmitting(origin.serverId, origin.name) || !submission
       || (submission.status !== 'rejected' && submission.status !== 'unknown')) return;
     // Os anexos continuam no rascunho com o caminho enviado: devolver só o texto evita citá-los duas vezes.
-    const insert = allUploaded(pendingAttachments) ? attachLine(pendingAttachments) : null;
+    // Um anexo novo, ainda sem upload, não estava no envio recusado.
+    const uploaded = pendingAttachments.filter((a) => a.uploadedPath);
+    const insert = uploaded.length ? attachLine(uploaded) : null;
     const withoutAttachment = insert && submission.text.endsWith(insert)
       ? submission.text.slice(0, -insert.length).replace(/ — $/, '') : submission.text;
     // As citações não voltam ao campo: continuam na bandeja, que só esvazia quando o envio dá certo.
@@ -625,11 +627,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     };
     const body = composeWithContextRefs(sentRefs, trimmed);
     let finalText = body;
-    // Remover anexo fica desligado durante o envio: a lista é a mesma do começo ao fim.
+    // Remover anexo fica desligado durante o envio; colar no meio dele acrescenta um que espera a próxima vez.
     const sentAttachments = attachmentsRef.current;
     if (sentAttachments.length) {
       const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
-      let current = sentAttachments;
       const inserts: string[] = [];
       setUploading(true);
       try {
@@ -653,7 +654,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               return;
             }
             const uploaded = { ...attach, uploadedPath: path, uploadedFor: target };
-            current = current.map((a) => (a.uri === attach.uri ? uploaded : a));
+            const current = attachmentsRef.current.map((a) => (a.uri === attach.uri ? uploaded : a));
             if (!persistDraft({ attachments: current })) {
               stop();
               return;
