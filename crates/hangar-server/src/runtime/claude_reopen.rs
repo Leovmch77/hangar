@@ -733,6 +733,18 @@ impl RuntimeRegistry {
     /// Falhou depois de encerrar: a sessão volta pelo spec de antes; sem terminal, se nem o terminal de antes
     /// voltar. O erro diz onde ela ficou.
     async fn restore_claude(&self,name:&str,current:&Current,error:RuntimeError) -> ReopenFailure {
+        // Só leitura estacionada não roda sem terminal: volta a esperar o terminal protegido, com o arquivo dela.
+        if let (true,Life::Headless { meta,.. })=(current.spec.read_only,&current.life) {
+            let (dir,owned,meta)=(self.claude_sidecars(),name.to_owned(),meta.as_object().cloned().unwrap_or_default());
+            let parked=tokio::task::spawn_blocking(move||super::codex_sidecar::put(&dir,&owned,&meta)).await;
+            let message=format!("o terminal protegido não voltou ({}); a sessão read-only ficou parada até reabrir no terminal",error.message);
+            if !matches!(parked,Ok(Ok(_))) {
+                let message=format!("{message}; o arquivo da sessão não foi regravado");
+                super::actor::mark_live_error(&self.live_channel(name),&error.code,&message);
+                return ReopenFailure { error:RuntimeError::new("erro_troca_conta_parada",&message),stopped:true,landed:None };
+            }
+            return ReopenFailure { error:RuntimeError::new("erro_troca_conta_parada",&message),stopped:true,landed:Some(Surface::Headless) };
+        }
         let mut tries=vec![current.spec.clone()];
         if current.spec.surface==Surface::Terminal && !current.spec.read_only {
             let mut headless=current.spec.clone();headless.surface=Surface::Headless;tries.push(headless);

@@ -44,6 +44,9 @@ fn failure_body(failure:&ReopenFailure) -> (StatusCode,Value) {
     if let Some(message)=crate::runtime::claude_reopen::busy_message(&error.code) {
         return (StatusCode::CONFLICT,detail_body(&error.code,message,json!({})));
     }
+    if error.code=="erro_troca_conta_parada" {
+        return (StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({"erro":error.message})));
+    }
     let message=if failure.stopped {format!("a troca falhou; {}",error.message)} else {format!("não troquei: {}",error.message)};
     (StatusCode::CONFLICT,detail_body("erro_troca_conta",&message,json!({"erro":error.message,"code":error.code})))
 }

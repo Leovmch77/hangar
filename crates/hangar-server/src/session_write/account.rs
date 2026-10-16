@@ -158,6 +158,7 @@ fn refusal(failure:&ReopenFailure) -> (StatusCode,Value) {
     }
     match error.code.as_str() {
         "erro_conversa_ja_na_conta"=>(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({}))),
+        "erro_troca_conta_parada"=>(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({"erro":error.message}))),
         "erro_mover_conversa" if !failure.stopped=>(StatusCode::INTERNAL_SERVER_ERROR,detail_body(&error.code,&error.message,json!({"erro":error.message}))),
         _=>{
             let message=if failure.stopped {format!("a troca falhou: {}",error.message)} else {format!("não troquei de conta: {}",error.message)};

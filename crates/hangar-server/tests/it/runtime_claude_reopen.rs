@@ -33,6 +33,7 @@ read_state() {{ [ -f "$S" ] && read -r NAME PID BORN < "$S"; }}
 case "$1" in
   new-session)
     printf '%s\n' "$@" > "$S.args"
+    [ -f "$S.nospawn" ] && exit 1
     : > "$S.env"; prev=""; for a in "$@"; do [ "$prev" = "-e" ] && echo "$a" >> "$S.env"; prev="$a"; done
     # O processo leva o ambiente do `-e` e o que o `hangar-engine` poria; `$S.forge` sobrepõe (outra identidade).
     E=(); while IFS= read -r l; do E+=("$l"); done < "$S.env"
@@ -555,4 +556,23 @@ async fn an_old_claude_that_ignores_the_stop_is_killed_and_the_reopen_goes_on() 
     let (found,_) = registry.terminal_view("s1").await.unwrap();
     registry.close(&found,2).await.unwrap();
     fx.finish();
+}
+
+/// CRA-047: a sessão só leitura estacionada cuja troca de conta não traz o terminal protegido fica parada
+/// (o arquivo dela continua lá), com `erro_troca_conta_parada`; nunca sem nada nem sem terminal.
+#[tokio::test]
+async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_parked() {
+    let fx = fixture();
+    let b = account_b(&fx);
+    std::fs::write(fx.home.join(".claude/.credentials.json"),"{\"claudeAiOauth\":{\"accessToken\":\"a\"}}").unwrap();
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null,"read_only":true}));
+    std::fs::write(fx.state.with_extension("nospawn"),"").unwrap();
+    let registry = fx.registry().await;
+    let server = serve_with_accounts(&fx,registry).await;
+    let (status,body) = post(server,"conta",json!({"config_dir":b})).await;
+    assert_eq!((status,body["detail"]["code"].as_str()),(409,Some("erro_troca_conta_parada")),"{body}");
+    let meta:Value = serde_json::from_slice(&std::fs::read(fx.sidecar_path("s1")).expect("segue estacionada")).unwrap();
+    assert_eq!((meta["read_only"].as_bool(),meta["session_id"].as_str()),(Some(true),Some(SID)));
 }
