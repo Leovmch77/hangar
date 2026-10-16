@@ -227,23 +227,23 @@ async fn group_pair_unpair_call_the_routes_as_the_caller() {
 async fn new_session_opens_with_the_caller_as_creator_and_the_whole_request() {
     let s = scene().await;
     let mut mcp = Mcp::open(s.addr, &[("x-hangar-pane", "%7")]).await;
-    let result = mcp.call("new_session", json!({"nome": "nova", "cwd": "/tmp", "provider": "codex", "headless": true,
+    let result = mcp.call("new_session", json!({"nome": "nova", "cwd": "/tmp", "provider": "claude", "headless": true,
         "conta": "/home/x/.claude-outra", "initial_prompt": "comece", "inherit": false, "branch": ""})).await;
     assert!(!failed(&result), "{result}");
-    assert_eq!(s.python.hits_to("/api/sessions"), 1, "Codex ainda abre no Python, pelo repasse do POST");
-    assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap(), json!({"name": "nova", "cwd": "/tmp", "provider": "codex",
+    assert_eq!(s.python.hits_to("/api/sessions"), 1, "Claude sem terminal ainda abre no Python, pelo repasse do POST");
+    assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap(), json!({"name": "nova", "cwd": "/tmp", "provider": "claude",
         "headless": true, "config_dir": "/home/x/.claude-outra", "initial_prompt": "comece", "inherit": false, "creator": "beta"}));
     let keys: Vec<_> = result["structuredContent"].as_object().unwrap().keys().cloned().collect();
     assert_eq!(keys, ["name", "cwd", "provider", "headless", "config_dir", "account_source"]);
     // Omitido continua omitido: quem herda é a abertura, não a tool.
-    assert!(!failed(&mcp.call("new_session", json!({"nome": "n1", "cwd": "/tmp", "provider": "codex"})).await));
+    assert!(!failed(&mcp.call("new_session", json!({"nome": "n1", "cwd": "/tmp", "provider": "claude", "headless": true})).await));
     assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap(),
-        json!({"name": "n1", "cwd": "/tmp", "provider": "codex", "creator": "beta"}));
+        json!({"name": "n1", "cwd": "/tmp", "provider": "claude", "headless": true, "creator": "beta"}));
     let refused = mcp.call("new_session", json!({"nome": "n2", "cwd": "/tmp", "provider": "pi", "headless": true})).await;
     assert!(failed(&refused) && first_text(&refused).contains("headless só vale"));
     let voice = hangar_server::voice::machines::voice_signature(SECRET).unwrap();
     let mut voz = Mcp::open(s.addr, &[("x-hangar-voice", &voice)]).await;
-    assert!(!failed(&voz.call("new_session", json!({"nome": "n3", "cwd": "/tmp", "provider": "codex"})).await));
+    assert!(!failed(&voz.call("new_session", json!({"nome": "n3", "cwd": "/tmp", "provider": "claude", "headless": true})).await));
     assert!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap().get("creator").is_none(), "a voz não tem o que herdar");
 }
 

@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use crate::fake::*;
 
-/// Claude com terminal é do Rust (a recusa também); o resto segue ao Python com o corpo intacto, sem
-/// marca nenhuma (a do cliente não passa): o Python não volta ao Rust pelo que veio da 8765.
+/// Com terminal e o Codex são do Rust (a recusa também); o Claude sem terminal segue ao Python com o
+/// corpo intacto, sem marca nenhuma (a do cliente não passa): o Python não volta ao Rust pelo que veio da 8765.
 #[tokio::test]
 async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     let (fake, up) = spawn_fake().await;
@@ -17,10 +17,12 @@ async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     let resp = post(br#"{"name":"s1","cwd":"/nao/existe","provider":"claude","headless":false}"#).await.unwrap();
     assert_eq!(resp.status(), 400);
     assert_eq!(serde_json::from_str::<Value>(&resp.text().await.unwrap()).unwrap()["detail"]["code"], "erro_cwd_inexistente");
+    let codex = post(br#"{"name":"s1","cwd":"/nao/existe","provider":"codex","headless":true}"#).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&codex.text().await.unwrap()).unwrap()["detail"]["code"], "erro_cwd_inexistente");
     assert_eq!(fake.hits_to("/api/sessions"), 0, "o Rust respondeu sozinho");
-    let codex = br#"{"name":"s1","cwd":"/x","provider":"codex"}"#;
-    assert_eq!(post(codex).await.unwrap().text().await.unwrap(), "from-python");
-    assert_eq!(fake.last_body(), codex, "corpo repassado byte a byte");
+    let headless = br#"{"name":"s1","cwd":"/x","provider":"claude","headless":true}"#;
+    assert_eq!(post(headless).await.unwrap().text().await.unwrap(), "from-python");
+    assert_eq!(fake.last_body(), headless, "corpo repassado byte a byte");
     assert!(fake.last_hit().1.get("x-hangar-open").is_none(), "a marca do cliente não passa");
     for body in [&br#"{"name":"s1","cwd":"/x","bogus":1}"#[..], b"nem json"] {
         let resp = client().post(format!("http://{srv}/api/sessions")).bearer_auth(OWNER)
@@ -32,8 +34,8 @@ async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     assert_eq!(fake.hits_to("/api/sessions"), 3);
 }
 
-/// O que entrou direto no Python (Connect, MCP) chega pela ponte privada do Claude (`<nome>/open`), só
-/// com o segredo; o que não é Claude com terminal volta 421 e o Python segue com ele.
+/// O que entrou direto no Python (Connect) chega pela ponte privada (`<nome>/open`), só com o segredo; o
+/// Claude sem terminal volta 421 e o Python segue com ele; o Codex é do Rust.
 #[tokio::test]
 async fn the_private_claude_bridge_opens_what_entered_python_directly() {
     let (_python, upstream) = spawn_fake().await;
@@ -47,10 +49,13 @@ async fn the_private_claude_bridge_opens_what_entered_python_directly() {
         let request = if secret { request.header("x-hangar-internal", SECRET) } else { request };
         async move { request.body(body.to_string()).send().await.unwrap() }
     };
-    let codex = serde_json::json!({"request": {"name": "s1", "cwd": "/x", "provider": "codex"}, "guest_root": null});
-    assert_eq!(open(codex.clone(), false).await.status(), 404, "sem o segredo a ponte não existe");
-    assert_eq!(open(codex, true).await.status(), 421);
-    let claude = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "claude", "headless": false}, "guest_root": null});
+    let headless = serde_json::json!({"request": {"name": "s1", "cwd": "/x", "provider": "claude", "headless": true}, "guest": null});
+    assert_eq!(open(headless.clone(), false).await.status(), 404, "sem o segredo a ponte não existe");
+    assert_eq!(open(headless, true).await.status(), 421);
+    let codex = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "codex"}});
+    let refused: Value = serde_json::from_str(&open(codex, true).await.text().await.unwrap()).unwrap();
+    assert_eq!(refused["detail"]["code"], "erro_cwd_inexistente", "o Codex abre (e recusa) no Rust");
+    let claude = serde_json::json!({"request": {"name": "s1", "cwd": "/nao/existe", "provider": "claude", "headless": false}, "guest": null});
     let refused: Value = serde_json::from_str(&open(claude, true).await.text().await.unwrap()).unwrap();
     assert_eq!(refused["detail"]["code"], "erro_cwd_inexistente", "a recusa é a da abertura do Rust");
 }
