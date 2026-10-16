@@ -215,10 +215,8 @@ impl OpenHost for Host {
     fn diary(&self, events: Vec<Value>) { self.record.lock().unwrap().diary.extend(events); }
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
-    fn wake(&self, name: &str, initial_prompt: Option<String>) {
-        let mut request = json!({"op": "claude_headless.acordar", "name": name});
-        if let Some(prompt) = initial_prompt { request["initial_prompt"] = json!(prompt); }
-        self.record.lock().unwrap().runtime_requests.push(request);
+    fn wake(&self, name: &str) {
+        self.record.lock().unwrap().runtime_requests.push(json!({"op": "claude_headless.acordar", "name": name}));
     }
 }
 

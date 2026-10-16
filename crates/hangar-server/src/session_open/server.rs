@@ -296,26 +296,18 @@ impl OpenHost for ServerHost {
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
 
-    fn wake(&self, name: &str, initial_prompt: Option<String>) {
+    fn wake(&self, name: &str) {
         let Some(runtime) = self.st.state.runtime.get().cloned() else {
             tracing::warn!(session = %name, "sem o registro do runtime: a sessão sem terminal sobe no primeiro envio");
             return;
         };
         let name = name.to_owned();
+        // A falha fica no canal da sessão (`open_inner`); a fila espera a próxima subida.
         tokio::spawn(async move {
             match runtime.open_claude_headless(&name, true).await {
                 Some(Ok(())) => {}
-                Some(Err(error)) => {
-                    tracing::warn!(session = %name, code = %error.code, "a sessão sem terminal criada não subiu");
-                    return;
-                }
-                None => {
-                    tracing::warn!(session = %name, "a sessão sem terminal criada sumiu antes de subir");
-                    return;
-                }
-            }
-            if let Some(text) = initial_prompt && let Err(error) = runtime.submit(&name, &text).await {
-                tracing::warn!(session = %name, code = %error.code, "a primeira mensagem da sessão sem terminal não entrou na fila");
+                Some(Err(error)) => tracing::warn!(session = %name, code = %error.code, "a sessão sem terminal criada não subiu"),
+                None => tracing::warn!(session = %name, "a sessão sem terminal criada sumiu antes de subir"),
             }
         });
     }

@@ -47,8 +47,8 @@ pub trait OpenHost: Send + Sync {
     fn new_session_id(&self) -> String;
     fn new_bridge_key(&self) -> String;
     /// A sessão sem terminal recém-criada sobe em segundo plano (os hooks de SessionStart rodam enquanto
-    /// a pessoa digita), com a primeira mensagem, se veio (S-40). Não espera.
-    fn wake(&self, name: &str, initial_prompt: Option<String>);
+    /// a pessoa digita) e entrega o que está na fila. Não espera.
+    fn wake(&self, name: &str);
 }
 
 /// UUID v4 de 16 bytes aleatórios em hexadecimal.
@@ -338,7 +338,7 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime).await {
         Ok((jsonl, warnings, route)) => {
-            if spec.surface == Surface::Headless { host.wake(&spec.name, initial_prompt.filter(|p| !p.is_empty())); }
+            if spec.surface == Surface::Headless { host.wake(&spec.name); }
             Ok(Opened { body: created_body(&spec, jsonl.as_deref(), warnings, route.as_ref()), undo, key: spec.key.clone() })
         }
         // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
@@ -389,7 +389,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
     let result = match spec.surface {
         Surface::Terminal => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await,
-        Surface::Headless => headless_life(host, spec, previous_non_plan, &mut diary, remember_provider).await,
+        Surface::Headless => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider).await,
     };
     let events = diary.end(result.as_ref().err());
     host.diary(events);
@@ -470,10 +470,24 @@ fn headless_sidecar(spec: &SessionSpec, sid: &str, previous_non_plan: Option<Per
     meta
 }
 
-/// Do `validar` ao `sessao.criada` do Claude sem terminal: grava registro e sidecar. O processo sobe
-/// depois (`OpenHost::wake`), pelo spec.
-async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_plan: Option<PermissionMode>, diary: &mut Diary,
-                       remember_provider: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+/// A linha da primeira mensagem na fila da sessão nova (`runtime/<key>.json`), carimbada antes da
+/// conversa existir (`pre_transcript`, como o kick-off do bastão). Bloqueante.
+fn enqueue_first(queue_dir: &Path, key: &str, name: &str, text: &str) -> std::io::Result<()> {
+    use crate::runtime::queue::{Action, State, Store, acquire_lease_within};
+    let runtime = queue_dir.join("runtime");
+    let _lease = acquire_lease_within(&runtime.join(format!("{key}.lock")), Duration::from_secs(3))?;
+    let mut store = Store::open(&runtime.join(format!("{key}.json")), queue_dir, State::new(key, 1, name, Vec::new()))?;
+    let epoch_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    let id = crate::mods::state::random_hex(16);
+    store.exec(1, &format!("append:{id}"), crate::runtime::protocol::ClockSample { monotonic_s: 0.0, epoch_s },
+        Action::Append { text: text.into(), delivered: false, ts: Some(epoch_s), pre_transcript: true, entry_id: Some(id) })?;
+    Ok(())
+}
+
+/// Do `validar` ao `sessao.criada` do Claude sem terminal: grava a primeira mensagem, o registro e o
+/// sidecar. O processo sobe depois (`OpenHost::wake`), pelo spec.
+async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_plan: Option<PermissionMode>, initial_prompt: Option<&str>,
+                       diary: &mut Diary, remember_provider: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let sidecars = host.home().join(".hangar");
     let taken = |kind: &str| crate::runtime::codex_sidecar::path(&sidecars.join(kind), &spec.name).exists();
@@ -499,6 +513,18 @@ async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_pla
     claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd, host.terminal().windows);
     // Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
     host.release_name(&spec.name).await?;
+    // S-40: a primeira mensagem já está na fila durável quando a criação responde; quem sobe a sessão
+    // (o acordar, a subida do servidor, a próxima escrita) a entrega, e falhar a subida não a perde.
+    if let Some(text) = initial_prompt.filter(|p| !p.is_empty()) {
+        let queue_dir = crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()).claude_base.join(".hangar-queue");
+        let (key, name, text) = (spec.key.clone(), spec.name.clone(), text.to_owned());
+        let queued = tokio::task::spawn_blocking(move || enqueue_first(&queue_dir, &key, &name, &text)).await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+        if let Err(error) = queued {
+            diary.refused("erro", "fila_nao_gravada", Some("sidecar_gravado"), Some(&error.kind().to_string()));
+            return Err(OpenError::new(500, "erro_criacao_sessao", format!("a primeira mensagem não entrou na fila: {error}")));
+        }
+    }
     if let Err(error) = super::record::write(host.home(), spec) {
         diary.refused("erro", "registro_nao_gravado", Some("sidecar_gravado"), Some(&error.kind().to_string()));
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));

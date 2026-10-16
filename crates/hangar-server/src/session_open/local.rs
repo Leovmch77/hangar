@@ -74,5 +74,5 @@ impl OpenHost for LocalHost {
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
     // O comando local só abre sessão com terminal.
-    fn wake(&self, _name: &str, _initial_prompt: Option<String>) {}
+    fn wake(&self, _name: &str) {}
 }

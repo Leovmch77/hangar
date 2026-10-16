@@ -651,16 +651,18 @@ def _headless_request(scenario: dict) -> dict | None:
 
 
 def _rule_s40_headless(expected: dict, raw: dict, scenario: dict) -> bool | None:
-    """S-40 sem terminal: o Python recusava o prompt inicial; o Rust cria a sessão e a acorda com ele
-    como primeira mensagem. A recusa da fixture não tem o que comparar: a regra só confere a criação."""
+    """S-40 sem terminal: o Python recusava o prompt inicial; o Rust cria a sessão com ele já na fila
+    durável (antes de responder) e a acorda. A recusa da fixture não tem o que comparar: a regra só
+    confere a criação, a fila e o acordar."""
     body = _headless_request(scenario)
     if not body or not body.get("initial_prompt") or body.get("read_only"):
         return None
     status = (raw.get("steps") or [{}])[0].get("status")
-    woke = any(r.get("op") == "claude_headless.acordar" and r.get("initial_prompt") == body["initial_prompt"]
-               for r in raw.get("runtime_requests", []))
+    woke = any(r.get("op") == "claude_headless.acordar" for r in raw.get("runtime_requests", []))
+    queued = any("/.hangar-queue/runtime/" in path and body["initial_prompt"] in json.dumps(change, ensure_ascii=False)
+                 for path, change in (raw.get("files") or {}).items())
     raw["_replaced"] = True
-    return status == 200 and woke
+    return status == 200 and woke and queued
 
 
 def _rule_d001_inherit(expected: dict, raw: dict, scenario: dict) -> bool | None:
