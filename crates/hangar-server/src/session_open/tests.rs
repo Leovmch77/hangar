@@ -1676,6 +1676,19 @@ fn the_initial_prompt_of_pi_omp_and_kimi_waits_in_the_durable_queue() {
     assert!(!root.join("home/.claude/.hangar-queue/p1.jsonl").exists(), "pane que não nasceu deixou a fila");
 }
 
+/// RET-078: a ponte de skills roda antes de abrir Pi e Kimi, como no Python; o omp não a usa.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_skill_bridge_runs_for_pi_and_kimi_only() {
+    for (name, runs) in [("create_pi_terminal", true), ("create_kimi_terminal", true), ("create_omp_terminal", false)] {
+        let (raw, _dir, _root) = run_contract(name, |_| {});
+        assert_eq!(raw["steps"][0]["status"], 200, "{name}: {}", raw["steps"][0]["body"]);
+        let bridged = raw["subprocesses"].as_array().unwrap().iter()
+            .any(|p| p["argv"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|x| x.ends_with("skill_bridge.py")))));
+        assert_eq!(bridged, runs, "{name}");
+    }
+}
+
 /// Sem o registro a sessão não tem como ser reaberta nem reconhecida pela chave: falhar ao gravá-lo é
 /// falha da abertura, antes do pane, e a worktree que ela criou é desfeita.
 #[cfg(target_os = "linux")]

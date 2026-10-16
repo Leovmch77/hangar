@@ -492,8 +492,8 @@ async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_on
     Ok((pane, jsonl, route))
 }
 
-/// A ponte de skills (`skill_bridge.py`): a skill instalada no Claude vale já nesta sessão de Pi, omp
-/// ou Kimi. Nunca impede a abertura.
+/// A ponte de skills (`skill_bridge.py`): a skill instalada no Claude vale já nesta sessão de Pi ou
+/// Kimi. Nunca impede a abertura.
 async fn sync_skills(host: &dyn OpenHost) {
     let Some(argv) = host.backend_dir().and_then(|dir| agents::skill_bridge_argv(&dir, host.terminal().windows)) else {
         tracing::warn!(backend = ?host.backend_dir(), "ponte de skills sem a venv do backend; não refeita antes de abrir a sessão");
@@ -650,7 +650,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
                        -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let claude = spec.provider == AgentProvider::Claude;
-    if matches!(spec.provider, AgentProvider::Pi | AgentProvider::Omp | AgentProvider::Kimi) { sync_skills(host).await; }
+    if matches!(spec.provider, AgentProvider::Pi | AgentProvider::Kimi) { sync_skills(host).await; }
     // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
     name_still_free(host, spec, diary).await?;
     if !restore { host.leave_old_group(&spec.name).await?; }
