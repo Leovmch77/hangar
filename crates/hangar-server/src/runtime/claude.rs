@@ -1211,7 +1211,8 @@ impl ClaudeEngine {
     /// Segundos parada desde o último evento da CLI ou comando nosso, se nada está em aberto; `None` = não estaciona.
     pub fn park_idle(&self,now:f64) -> Option<f64> {
         let open = !self.alive || self.initializing || self.in_progress || !self.pending.is_empty() || self.question.is_some()
-            || self.effort_intent.is_some() || !self.background.is_empty();
+            || self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared" || intent["status"] == "dispatching")
+            || !self.background.is_empty();
         (!open).then(||now - self.active_at)
     }
 

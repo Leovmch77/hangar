@@ -217,6 +217,10 @@ fn park_idle_counts_from_the_last_activity_and_only_with_nothing_open() {
 
     let effort = engine(json!({"name":"session","session_id":"sid","initialized":true,"effort_intent":{"operation_id":"e","value":"high","status":"prepared"}}));
     assert_eq!(effort.park_idle(10.0 + PARK * 2.0),None,"esforço pendente");
+    for status in ["rejected","unknown"] {
+        let settled = engine(json!({"name":"session","session_id":"sid","initialized":true,"effort_intent":{"operation_id":"e","value":"high","status":status}}));
+        assert_eq!(settled.park_idle(10.0 + PARK),Some(PARK),"esforço {status} não está pendente");
+    }
 
     let mut background = ready();
     line(&mut background,json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"t1","task_type":"local_bash","description":"build"}]}),10.0);
