@@ -146,17 +146,6 @@ def test_transcript_path_le_a_raiz_do_provider_pedido(monkeypatch, tmp_path):
     assert pi_sessions.transcript_path("/w", "01a067f7-6120-700b-b71d-6a6092e0c720", "pi") == ""
 
 
-def test_transcript_alvo_fica_no_layout_normal(monkeypatch, tmp_path):
-    import re
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "omp"))
-    alvo = Path(pi_sessions.transcript_alvo("/w", "abc-uuid", "omp"))
-    assert alvo.parent == tmp_path / "omp" / "sessions" / pi_sessions.cwd_slug("/w")
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_abc-uuid\.jsonl", alvo.name)
-    alvo.parent.mkdir(parents=True)
-    alvo.write_text("")
-    assert pi_sessions.transcript_path("/w", "abc-uuid", "omp") == str(alvo)
-
-
 def test_subagente_do_omp_mora_direto_sob_o_stem():
     stem = "2026-09-03T16-17-19-304Z_01a0680f-77c8-7397-805f-c8651e6051f1"
     assert pi_sessions.is_subagent_transcript(f"/r/--w--/{stem}/ContarLinhas.jsonl")

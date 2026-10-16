@@ -121,7 +121,7 @@ check_pi_injected() {
 }
 
 # $1=descrição  $2=arquivo de saída — o omp NÃO tem --session-id: quem escolhe a sessão é o CAMINHO
-# passado em --session, e ele precisa ser o mesmo que o backend montaria (transcript_alvo), senão o
+# passado em --session, e ele precisa ser o mesmo que o servidor montaria (session_open/agents.rs), senão o
 # glob `*_<uuid>.jsonl` do registry procura numa pasta e o transcript nasce noutra.
 check_omp_injected() {
     local desc="$1" out="$2" sid caminho esperado_dir arquivo

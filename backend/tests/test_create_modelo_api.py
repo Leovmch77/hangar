@@ -34,22 +34,6 @@ def test_model_invalido_devolve_400():
     assert r.status_code == 400
 
 
-def test_pi_com_til_no_id_chega_intacto_ao_create():
-    """B1 da revisão final: o catálogo real do Pi traz `openrouter/~anthropic/claude-opus-latest`
-    (11 ids com `~` entre 390). A tela oferece a linha; o backend tem que aceitar o id inteiro — a
-    regex é a barreira do shell, e `~` citado por shlex.join não sofre expansão — e repassá-lo
-    intacto ao create, sem corromper nada."""
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="pi-til", cwd="/tmp", provider="pi")) as cr:
-        r = TestClient(app).post("/api/sessions", headers=AUTH, json={
-            "name": "pi-til", "cwd": "/tmp", "provider": "pi",
-            "model": "openrouter/~anthropic/claude-opus-latest", "effort": "high"})
-    assert r.status_code == 200
-    cr.assert_called_once_with("pi-til", "/tmp", None, provider="pi", engine=None,
-                               model="openrouter/~anthropic/claude-opus-latest",
-                               effort="high", context_window=None)
-
-
 def test_effort_fora_da_lista_devolve_400():
     r = TestClient(app).post("/api/sessions", headers=AUTH, json={
         "name": "x", "cwd": "/tmp", "provider": "claude", "effort": "turbo", "headless": True})
@@ -68,20 +52,7 @@ def test_codex_sem_modelo_nao_e_barrado_pela_validacao():
     cr.assert_called_once()
 
 
-def test_kimi_sem_modelo_nao_e_barrado_pela_validacao():
-    """Irmão do Codex: o Kimi também é provider fora de escopo, e o caminho dele é o
-    registry.create (não o create_codex) — sem a guarda de mock, o teste subiria um pane tmux
-    de verdade (o mesmo defeito que o teste do Codex tinha)."""
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="km", cwd="/tmp", provider="kimi")) as cr:
-        r = TestClient(app).post("/api/sessions", headers=AUTH, json={
-            "name": "km", "cwd": "/tmp", "provider": "kimi"})
-    assert r.status_code == 200
-    cr.assert_called_once_with("km", "/tmp", None, provider="kimi", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-@pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
+@pytest.mark.parametrize("provider", ["claude"])
 def test_codex_account_so_vale_para_codex(provider):
     with patch("app.api.registry.create") as cr:
         # Claude sem terminal: com terminal a abertura é do Rust.
@@ -410,5 +381,3 @@ def test_padrao_do_jev_ligado_chega_ao_create_pela_rota(monkeypatch):
                                  json={"name": "j", "cwd": "/tmp", "provider": "claude", "headless": True})
     assert r.status_code == 200
     assert cr.call_args.kwargs["jev"] is True
-
-

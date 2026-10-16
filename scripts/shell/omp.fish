@@ -2,7 +2,7 @@
 #
 # Mesmo papel do pi.fish, com UMA diferença que muda a forma: o omp NÃO tem `--session-id`.
 # Quem escolhe a sessão é o CAMINHO do transcript (`--session <arquivo>`), então o wrapper monta o
-# caminho igual ao backend (`backend/app/adapters/omp/adapter.py` -> `pi/sessions.transcript_alvo`)
+# caminho igual ao servidor (`crates/hangar-server/src/session_open/agents.rs`, o pane novo do omp)
 # e exporta CP_PI_SESSION com o MESMO uuid do nome do arquivo — é por ele que o backend acha a
 # sessão em /proc/<pid>/environ quando o bilhete da extensão ainda não existe (registry:_pi_sid_of).
 #
@@ -26,7 +26,7 @@
 #
 # Escape hatch: `command omp ...` roda o binário cru, sem este wrapper.
 
-# Mesmo caminho que backend/app/adapters/pi/sessions.py:transcript_alvo monta pro `--session`:
+# Mesmo caminho que o session_open/agents.rs do servidor monta pro `--session`:
 # <raiz>/<slug do cwd>/<ts>_<id>.jsonl. O slug troca só o separador por '-' (acento e espaço passam).
 # Perfil pedido na linha (`--profile x` / `--profile=x`) ou já no ambiente (OMP_PROFILE). Vazio = sem perfil.
 function hangar_omp_perfil

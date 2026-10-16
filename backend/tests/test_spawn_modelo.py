@@ -63,8 +63,3 @@ def test_claude_spawn_sem_permissao_identico_ao_de_hoje():
 def test_pi_spawn_ignora_permissao():
     base = get_adapter("pi").spawn_command("/tmp", "sid", None, None)
     assert get_adapter("pi").spawn_command("/tmp", "sid", None, None, permission_mode="plan") == base
-
-
-def test_kimi_spawn_ignora_permissao():
-    base = get_adapter("kimi").spawn_command("/tmp", "sid", None, None)
-    assert get_adapter("kimi").spawn_command("/tmp", "sid", None, None, permission_mode="plan") == base

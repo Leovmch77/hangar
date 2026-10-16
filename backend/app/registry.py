@@ -2157,7 +2157,6 @@ class SessionRegistry:
                effort: str | None = None, context_window: int | None = None,
                permission_mode: str | None = None,
                initial_prompt: str | None = None,
-               omp_profile: str | None = None,
                codex_account: str | None = None,
                read_only: bool = False,
                headless: bool = False,
@@ -2168,8 +2167,8 @@ class SessionRegistry:
                engine_account: str | None = None, engine_models: list[dict] | None = None,
                service_tier: str | None = None,
                claude_customizations: dict | None = None) -> SessionInfo:
-        # Claude com terminal (sessão nova) abre no Rust; a retomada do Arquivo ainda passa aqui.
-        if provider == "claude" and not headless and resume_session_id is None:
+        # Sessão nova com terminal de Claude, Pi, omp e Kimi abre no Rust; a retomada do Arquivo ainda passa aqui.
+        if provider in ("claude", "pi", "omp", "kimi") and not headless and resume_session_id is None:
             raise SessionOpenNeedsRust()
         if claude_customizations is not None and provider != "claude":
             raise ValueError("plugins e skills por sessão só valem para Claude")
@@ -2258,15 +2257,6 @@ class SessionRegistry:
         if read_only:
             from app.orq_readonly import prepare
             protected_prefix = prepare(cwd, runtime_dirs=(config_dir or "", codex_home or ""))
-        if omp_profile:
-            if provider != "omp":
-                raise ValueError("perfil so vale para provider omp")
-            # A MESMA regra de nome do omp (resolve_omp_directories): o valor vai pro ambiente do pane.
-            from app.omp_plugin_sync import InventoryError, resolve_omp_directories
-            try:
-                resolve_omp_directories(Path.home(), {"OMP_PROFILE": omp_profile}, Path.home())
-            except InventoryError as e:
-                raise ValueError(str(e)) from None
         # Motor de modelo: valida ANTES de criar o pane. Motor inexistente com env vazio faria a
         # sessão subir na conta Anthropic ACHANDO que é o motor pedido — falha silenciosa.
         if engine:
@@ -2359,7 +2349,7 @@ class SessionRegistry:
                     raise ValueError("session_id invalido")
                 sid = resume_session_id
                 from app.adapters import get_adapter
-                cmd = tmux.join_cmd(get_adapter("omp").resume_command(cwd, sid, model, effort, omp_profile))
+                cmd = tmux.join_cmd(get_adapter("omp").resume_command(cwd, sid, model, effort))
             elif provider == "pi":
                 # `pi --session-id <id>` RETOMA quando o id ja existe ("creating it if missing", no
                 # --help do 0.82.1) -> o comando do resume e o mesmo do spawn, so com o id antigo.
@@ -2399,8 +2389,6 @@ class SessionRegistry:
                 extra["codex_account"] = account.id
                 if service_tier is not None:
                     extra["service_tier"] = service_tier
-            if provider == "omp" and omp_profile:
-                extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
                 cwd, sid, model, effort, permission_mode, **extra))
         if engine:

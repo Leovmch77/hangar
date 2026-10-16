@@ -393,25 +393,6 @@ def _create_pi(tmp_path, monkeypatch, **kw):
     return info, ns, pt
 
 
-def test_create_pi_does_not_seed_a_claude_transcript_path(tmp_path, monkeypatch):
-    # O jsonl do Pi e <ts>_<uuid>.jsonl em ~/.pi/agent/sessions/<slug>/ e so nasce no 1o turno.
-    # Um path do layout do Claude aqui e um arquivo que NUNCA existe — e como o _jsonl_cache e de
-    # CLASSE (api.registry + sse._registry), ele ficaria grudado nesse fantasma.
-    registry.SessionRegistry._jsonl_cache.pop("s-pi", None)
-    info, ns, _ = _create_pi(tmp_path, monkeypatch)
-    assert info.provider == "pi"
-    assert info.jsonl is None
-    assert "s-pi" not in registry.SessionRegistry._jsonl_cache
-    # spawn_command do PiAdapter, agora alcancavel: `pi --session-id <uuid>` (o `exec` vem do tmux.py)
-    assert ns.call_args[0][2].startswith("pi --session-id ")
-
-
-def test_create_pi_skips_the_claude_trust_list(tmp_path, monkeypatch):
-    # _pretrust_cwd escreve hasTrustDialogAccepted no .claude.json, que o pi nem le.
-    _, _, pt = _create_pi(tmp_path, monkeypatch)
-    pt.assert_not_called()
-
-
 def _create_omp(tmp_path, monkeypatch, **kw):
     from unittest.mock import patch
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "omp"))
@@ -421,15 +402,6 @@ def _create_omp(tmp_path, monkeypatch, **kw):
          patch.object(registry, "_pretrust_cwd") as pt:
         info = reg.create("s-omp", "/home/u/p", provider="omp", **kw)
     return info, ns, pt
-
-
-def test_create_omp_lanca_session_por_caminho_sem_cache_de_jsonl(tmp_path, monkeypatch):
-    info, ns, pt = _create_omp(tmp_path, monkeypatch)
-    cmd = ns.call_args[0][2]
-    assert info.provider == "omp" and info.jsonl is None
-    assert "omp --session " in cmd and "--session-id" not in cmd and "CP_PI_SESSION=" in cmd
-    assert "s-omp" not in registry.SessionRegistry._jsonl_cache
-    pt.assert_not_called()
 
 
 def test_resume_omp_usa_r_com_caminho(tmp_path, monkeypatch):
@@ -457,7 +429,7 @@ def test_create_pi_resume_sobe_pi_e_nao_claude(tmp_path, monkeypatch):
     assert "claude" not in cmd
 
 
-def test_create_pi_refuses_an_engine(tmp_path, monkeypatch):
+def test_resume_pi_refuses_an_engine(tmp_path, monkeypatch):
     # `hangar-engine --exec` so exporta ANTHROPIC_*/CLAUDE_CODE_*, que o pi ignora -> a sessao subiria
     # na conta do proprio pi PARECENDO estar no motor pedido.
     from unittest.mock import patch
@@ -466,8 +438,19 @@ def test_create_pi_refuses_an_engine(tmp_path, monkeypatch):
          patch.object(registry.tmux, "new_session", return_value=True) as ns, \
          patch("app.engines.listar", return_value={"kimi": {}}):
         with pytest.raises(ValueError) as exc:
-            reg.create("s-pi", "/home/u/p", provider="pi", engine="kimi")
+            reg.create("s-pi", "/home/u/p", provider="pi", engine="kimi",
+                       resume_session_id="11111111-1111-4111-8111-111111111111")
     assert "motor" in str(exc.value)
+    ns.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["pi", "omp", "kimi"])
+def test_new_terminal_session_of_pi_omp_and_kimi_needs_rust(tmp_path, provider):
+    from unittest.mock import patch
+    reg = registry.SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "new_session", return_value=True) as ns:
+        with pytest.raises(registry.SessionOpenNeedsRust):
+            reg.create("s1", "/home/u/p", provider=provider)
     ns.assert_not_called()
 
 

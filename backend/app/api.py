@@ -2341,8 +2341,8 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
     body, account_source, avisos_extra = await _inherit_from_creator(body)
     headless = body.headless if body.headless is not None else (
         not body.read_only and body.provider in ("claude", "codex") and bool(runtime_config.get("headless_default")))
-    if body.provider == "claude" and not headless:
-        # Claude com terminal abre no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
+    if body.provider in ("claude", "pi", "omp", "kimi") and not headless:
+        # Com terminal, Claude, Pi, omp e Kimi abrem no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
         raise registry_mod.SessionOpenNeedsRust()
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
@@ -2451,8 +2451,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     # sessoes; vai pro threadpool via asyncio.to_thread, igual aos outros handlers async deste
     # arquivo que chamam registry.list()/save_upload (menor risco de regressao: comportamento e
     # exceções do create() Claude ficam IDENTICOS, so a chamada muda de sync p/ thread).
-    # Pi entra pelo MESMO registry.create do Claude (pane tmux + spawn_command do PiAdapter); o que
-    # muda la dentro e so o transcript, que nao e pre-semeado (layout proprio, arquivo so no 1o turno).
     # Validar provider, config_dir e engine ANTES de qualquer efeito no disco: um pedido que vai
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
@@ -2644,7 +2642,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
                     else Path(tmux.config_dir_de(body.config_dir)))
             try:
                 guard = (acquire(AccountKey.new("codex" if body.provider == "codex" else "claude", home))
-                         if body.provider in ("claude", "codex", "pi", "omp") else nullcontext())
+                         if body.provider in ("claude", "codex") else nullcontext())
             except AccountLockError as exc:
                 # Exclusão ou login segura a conta: o app mostra "tente de novo", não um 500.
                 raise HTTPException(409, detail=erro(exc.code, "a conta está ocupada por outra operação")) from None
@@ -2699,8 +2697,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             kw["jev"] = True
         if body.initial_prompt is not None:
             kw["initial_prompt"] = body.initial_prompt
-        if body.omp_profile:
-            kw["omp_profile"] = body.omp_profile
         if body.codex_account is not None:
             kw["codex_account"] = body.codex_account
         if body.service_tier is not None:
@@ -2712,9 +2708,9 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
         return kw
 
     # Reconciliar e criar a sessão sob a MESMA guarda (ciclo_conta), só no caminho que consome o
-    # config dir (Claude/Pi — o Codex tem conta propria e nao le config dir do Claude). A guarda
+    # config dir (Claude — o Codex tem conta propria e nao le config dir do Claude). A guarda
     # compartilhada faz a exclusão da conta, que é do Rust, esperar a sessão que está subindo.
-    if body.config_dir is not None and body.provider in ("claude", "pi", "omp"):
+    if body.config_dir is not None and body.provider == "claude":
         alvo = Path(body.config_dir)
         if contas.e_conta(alvo):
             nome_conta = alvo.name.removeprefix(".claude-")

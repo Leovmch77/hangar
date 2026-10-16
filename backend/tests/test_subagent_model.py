@@ -1,5 +1,5 @@
 """Modelo dos subagentes escolhido na abertura: vira CLAUDE_CODE_SUBAGENT_MODEL do processo."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,7 +36,7 @@ def test_create_sem_escolha_nao_exporta_nada(tmp_path, monkeypatch):
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in visto["env"]
 
 
-@pytest.mark.parametrize("kw", [{"provider": "pi"}, {"engine": "kimi", "headless": True}])
+@pytest.mark.parametrize("kw", [{"provider": "pi", "resume_session_id": _ARCHIVE_SID}, {"engine": "kimi", "headless": True}])
 def test_create_recusa_fora_do_claude_sem_motor(tmp_path, monkeypatch, kw):
     with pytest.raises(ValueError, match="subagentes"):
         _reg(tmp_path, monkeypatch, {}).create("s", str(tmp_path), subagent_model="opus", **kw)
@@ -67,15 +67,3 @@ def test_new_session_passa_o_env_como_e(monkeypatch):
     tmux.new_session("s", "/tmp", "claude", env={"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
     args = rodou["args"]
     assert args[args.index("CLAUDE_CODE_SUBAGENT_MODEL=opus") - 1] == "-e"
-
-
-def test_api_recusa_fora_do_claude(monkeypatch):
-    from fastapi.testclient import TestClient
-    from app.api import app
-    from app.config import settings
-    monkeypatch.setattr(settings, "auth_token", "secret")
-    with patch("app.api.registry.create") as cr:
-        r = TestClient(app).post("/api/sessions", headers={"Authorization": "Bearer secret"}, json={
-            "name": "s", "cwd": "/tmp", "provider": "pi", "subagent_model": "opus"})
-    assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_subagente_so_claude"
-    cr.assert_not_called()

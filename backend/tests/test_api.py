@@ -1061,7 +1061,7 @@ def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
     monkeypatch.setattr(api_mod, "list_config_dirs",
                         lambda: [ConfigDirInfo(path="/h/.claude-work", label="work", active=True)])
     r = api_client.post("/api/sessions", headers=_h(),
-                        json={"name": "x", "cwd": "/tmp", "provider": "pi", "config_dir": "/h/.evil"})
+                        json={"name": "x", "cwd": "/tmp", "provider": "claude", "headless": True, "config_dir": "/h/.evil"})
     assert r.status_code == 400
 
 
@@ -1144,7 +1144,7 @@ def test_create_rejects_invalid_service_tier(api_client, tier):
     create.assert_not_called()
 
 
-@pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
+@pytest.mark.parametrize("provider", ["claude"])
 def test_create_service_tier_only_accepts_codex(api_client, provider):
     # Claude sem terminal: com terminal a abertura é do Rust.
     with patch("app.api.registry.create") as create:
@@ -1209,51 +1209,6 @@ def test_create_priority_without_announced_service_is_rejected(api_client, monke
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "erro_codex_escolha_invalida"
     create.assert_not_called()
-
-
-def test_create_pi_provider_routes_to_claude_create_with_provider(api_client):
-    # Pi usa o MESMO registry.create (pane tmux); o provider TEM que chegar la, senao o create
-    # spawnaria claude e pre-semearia um transcript do layout errado.
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="p", cwd="/tmp", provider="pi", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "p", "cwd": "/tmp", "provider": "pi"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "pi"
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("p", "/tmp", None, provider="pi", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_pi_with_engine_is_refused(api_client):
-    # Motor so faz sentido no Claude: o env do hangar-engine e Anthropic-only.
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "p", "cwd": "/tmp", "provider": "pi", "engine": "kimi"})
-    assert r.status_code == 400
-    cr.assert_not_called()
-
-
-def test_create_omp_provider_routes_to_claude_create_with_provider(api_client):
-    # omp e o fork do Pi: MESMO registry.create, so o provider muda o comando do pane.
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="o", cwd="/tmp", provider="omp", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "o", "cwd": "/tmp", "provider": "omp"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "omp"
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("o", "/tmp", None, provider="omp", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_omp_with_engine_is_refused(api_client):
-    # Motor so faz sentido no Claude: o env do hangar-engine e Anthropic-only.
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "o", "cwd": "/tmp", "provider": "omp", "engine": "x"})
-    assert r.status_code == 400
-    cr.assert_not_called()
 
 
 def test_create_rejects_unknown_provider(api_client):

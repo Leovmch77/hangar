@@ -10,7 +10,6 @@ exige glob pelo sufixo.
 """
 import os
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Copia de getDefaultSessionDirPath (pi-coding-agent 0.82.1, dist/core/session-manager.js:245):
@@ -106,11 +105,3 @@ def localizar_na_raiz(padrao: str, provider: str, perfil: str | None = None) -> 
     if not cands:
         return ""
     return str(max(cands, key=lambda p: p.stat().st_mtime))
-
-
-def transcript_alvo(cwd: str, session_id: str, provider: str, perfil: str | None = None) -> str:
-    """Onde o transcript de uma sessao NOVA deve nascer (o omp aceita o caminho por `--session`).
-    Mesmo layout que o agente usaria sozinho, pra sessao continuar no picker dele."""
-    agora = datetime.now(timezone.utc)
-    ts = agora.strftime("%Y-%m-%dT%H-%M-%S-") + f"{agora.microsecond // 1000:03d}Z"
-    return str(sessions_root(provider, perfil) / cwd_slug(cwd) / f"{ts}_{session_id}.jsonl")

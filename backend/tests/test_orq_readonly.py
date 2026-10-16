@@ -326,13 +326,6 @@ def test_api_checks_protection_before_creation_and_passes_flag(monkeypatch, tmp_
     assert error.value.status_code == 400
     create.assert_not_called()
 
-    prepare.side_effect = None
-    create = Mock(return_value=api.SessionInfo(name="readonly", cwd=str(tmp_path), provider="kimi"))
-    monkeypatch.setattr(api.registry, "create", create)
-    asyncio.run(api.create_session(api.CreateBody(
-        name="readonly", cwd=str(tmp_path), provider="kimi", read_only=True)))
-    assert create.call_args.kwargs["read_only"] is True
-
 
 @pytest.mark.skipif(sys.platform != "linux" or not shutil.which("bash"),
                     reason="stub de curl usa executável POSIX")
