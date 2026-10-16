@@ -476,6 +476,7 @@ impl RuntimeRegistry {
         let barrier=self.barrier(key).await;
         if barrier.operation.lock().map_err(|_|failure("lifecycle_operation"))?.is_some() {return Ok(None);}
         let Ok(_guard)=barrier.try_lock() else {return Ok(None)};
+        let Ok(_parking)=barrier.park.try_write() else {return Ok(None)};
         let found=self.entries.lock().await.get(key).filter(|entry|entry.generation==generation && !entry.respawn_inflight)
             .and_then(|entry|Some((entry.runtime_target.clone()?,entry.cano_birth?)));
         let Some((target,born))=found else {return Ok(None)};
@@ -485,6 +486,7 @@ impl RuntimeRegistry {
         let procs=self.processes.clone();
         if !cano_is_ours(procs.as_ref(),&target,born,key)? {return Err(failure("lifecycle_process_changed"));}
         self.close_locked_as(key,generation,true,true).await?;
+        *barrier.parked.lock().map_err(|_|failure("lifecycle_parked"))?=Some(name.to_owned());
         Ok(Some(idle))
     }
     /// `_vigiar_ociosas`: uma rodada por minuto enquanto o registro existir.
@@ -1094,6 +1096,7 @@ impl RuntimeRegistry {
                 mods.attach_process(&target.name,&process,life,Arc::new(handle.clone()));
             }
         });
+        if let Ok(mut parked)=self.barrier(&target.key).await.parked.lock() {*parked=None;}
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
             lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()),relaunch:claude_recipe,settings_owner:None,
             mode_source:crate::terminal_facts::ModeSource {binding:crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:target.metadata[if target.provider=="claude" {"session_id"} else {"thread_id"}].as_str().unwrap_or("").into()},transcript:target.transcript.clone(),confirmed:target.metadata["permission_mode"].as_str().filter(|mode|*mode!="plan").map(str::to_owned)},
@@ -1276,7 +1279,11 @@ impl RuntimeRegistry {
     /// `park`: mata como o encerrar, mas a fila e o arquivo da sessão ficam para a próxima vida.
     async fn close_locked_as(&self,key:&str,generation:u64,kill:bool,park:bool) -> Result<Value,RuntimeError> {
         let (handle,lease_path,name,life,runtime_target,cano_birth,recipe,_settings_owner) = match self.entries.lock().await.get(key) {
-            None=>return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) }),
+            None=>{
+                // Fechar a estacionada é fechar: o próximo envio não a reabre.
+                if let Ok(mut parked)=self.barrier(key).await.parked.lock() {*parked=None;}
+                return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) });
+            },
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life,entry.runtime_target.clone(),entry.cano_birth,entry.relaunch.clone(),entry.settings_owner.clone()),
             _=>return Err(failure("runtime_generation")),
         };
@@ -2244,7 +2251,21 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         let kill = match &command["kill"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("close_kill"))? };
         return if kill { registry.close_with_kill(&envelope.key,envelope.generation).await } else { registry.close(&envelope.key,envelope.generation).await };
     }
-    let handle = registry.entry(&envelope.key,envelope.generation).await?;
+    // Envio, fila e controle seguram a leitura da trava de estacionar: o processo não morre no meio deles, e a
+    // sessão estacionada é reaberta pelo arquivo dela antes de atender.
+    let resumable = matches!(kind,"submit"|"queue"|"control");
+    let barrier = registry.barrier(&envelope.key).await;
+    let _parking = if resumable { Some(barrier.park.read().await) } else { None };
+    let handle = match registry.entry(&envelope.key,envelope.generation).await {
+        Err(missing) if resumable => {
+            let parked = barrier.parked.lock().map_err(|_|failure("lifecycle_parked"))?.clone();
+            match parked { Some(name) => match registry.open_claude_headless(&name,true).await {
+                Some(opened) => { opened?; registry.entry(&envelope.key,envelope.generation).await? },
+                None => return Err(missing),
+            }, None => return Err(missing) }
+        },
+        found => found?,
+    };
     match kind {
         "submit"=> {
             // Só envios: as consultas que o Python repete (confirm, snapshot) inflariam a conta.
@@ -3181,6 +3202,58 @@ mod tests {
         let deadline=std::time::Instant::now()+Duration::from_secs(10);
         while delivered()==0 {
             assert!(std::time::Instant::now()<deadline,"a mensagem chegou ao processo novo");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(delivered(),1,"entregue uma vez");
+        send.abort();
+        registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Texto que nasce no Python (orq, recibo, recado) chega pela porta privada com chave e geração: na sessão
+    /// estacionada ele reabre pelo arquivo e é entregue uma vez; um envio em curso impede estacionar.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn a_private_submit_reopens_a_parked_claude_and_one_in_flight_blocks_parking() {
+        let home=tempfile::tempdir().unwrap();
+        let key="cd".repeat(16);
+        let (first,escuta,_,server)=park_cano(home.path(),&key).await;
+        let sidecar=json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
+            "cano":{"pid":first.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
+        let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cl.json"),sidecar.to_string()).unwrap();
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into()});
+        let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes.clone()).with_codex_environment(env));
+        registry.bind_lifecycle();
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        registry.open_claude_headless("cl",false).await.unwrap().unwrap();
+
+        {
+            let barrier=registry.barrier(&key).await;
+            let _in_flight=barrier.park.read().await;
+            registry.park_idle_claude(Duration::ZERO).await;
+            assert!(registry.has_entry(Some(&key),"cl").await,"envio em curso pela porta privada impede estacionar");
+        }
+        registry.park_idle_claude(Duration::ZERO).await;
+        assert!(!registry.has_entry(None,"cl").await,"estacionada");
+        server.abort();
+
+        let (second,escuta,lines,server)=park_cano(home.path(),&key).await;
+        let mut relaunched=sidecar.clone();
+        relaunched["cano"]=json!({"pid":second.0.id(),"escuta":escuta,"token":"fixture","versao":2});
+        std::fs::write(dir.join("cl.json"),relaunched.to_string()).unwrap();
+        processes.canos.lock().unwrap().push(i64::from(second.0.id()));
+        let envelope=Envelope {protocol:0,instance:"instance".into(),key:key.clone(),generation:1,operation_id:"orq".into(),
+            clock:ClockSample {monotonic_s:0.0,epoch_s:0.0},command:json!({"kind":"submit","text":"orq-depois-de-estacionar","pre_transcript":false})};
+        // O cano falso não confirma a escrita: o envio fica esperando, e o que conta é a linha que chegou.
+        let send={let registry=registry.clone();tokio::spawn(async move {dispatch(&registry,&envelope).await})};
+        let delivered=||lines.lock().unwrap().iter().filter(|line|line.contains("orq-depois-de-estacionar")).count();
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        while delivered()==0 {
+            assert!(!send.is_finished(),"o envio do Python falhou: {:?}",send.is_finished());
+            assert!(std::time::Instant::now()<deadline,"o texto do Python chegou ao processo novo");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;

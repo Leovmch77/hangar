@@ -15,6 +15,10 @@ pub(super) struct Barrier {
     serial:tokio::sync::Mutex<()>,
     pub operation:std::sync::Mutex<Option<(String,std::sync::Arc<std::sync::atomic::AtomicBool>)>>,
     pub closed:std::sync::Mutex<Option<ClosedLife>>,
+    /// Envios pela porta privada leem; estacionar só escreve com nenhum em curso.
+    pub park:tokio::sync::RwLock<()>,
+    /// Nome da sessão estacionada desta chave: o próximo envio a reabre pelo arquivo dela.
+    pub parked:std::sync::Mutex<Option<String>>,
 }
 #[derive(Clone)]
 pub(super) struct ClosedLife {
