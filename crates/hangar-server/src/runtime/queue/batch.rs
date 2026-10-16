@@ -52,7 +52,7 @@ pub(super) fn claim(state: &mut State, min_ts: f64, clock: ClockSample, call_id:
 pub(super) fn confirm_members(state: &mut State, id: &str) {
     let Some(row)=state.rows.iter_mut().find(|row|row_id(row)==id) else {return;};
     if let Some(fields)=row.as_object_mut() {fields.remove("batch_prompt");}
-    let Some(entries)=row["batch_entries"].as_array_mut() else {return;};
+    let Some(entries)=row.get_mut("batch_entries").and_then(Value::as_array_mut) else {return;};
     let mut members = BTreeSet::new();
     for entry in entries {
         members.insert(row_id(entry).to_owned());

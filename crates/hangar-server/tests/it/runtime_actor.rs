@@ -2249,11 +2249,10 @@ mod terminal_async {
         assert!(starts.lock().unwrap().is_empty(),"nenhum turn/start durante o seletor");
         assert!(!accepted(dir.path(),"ordinary"));
         drop(hold);
-        until("a entrada da fila sai quando o seletor termina",||accepted(dir.path(),"ordinary")).await;
+        until("o lote sai quando o seletor termina",||starts.lock().unwrap().first().is_some_and(|text|text=="segue\ndireta")).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let sent = starts.lock().unwrap().clone();
-        assert_eq!(sent.first().map(String::as_str),Some("segue"),"a da fila sai primeiro: {sent:?}");
-        assert_eq!(sent.iter().filter(|text|*text == "segue").count(),1,"exatamente uma vez: {sent:?}");
+        assert_eq!(sent,vec!["segue\ndireta".to_owned()],"o lote conserva a ordem e sai exatamente uma vez");
         handle.stop().await.unwrap();
         drop(push);
         server.abort();

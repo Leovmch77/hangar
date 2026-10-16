@@ -172,6 +172,13 @@ impl Fixture {
     fn state(&self)->Value {
         serde_json::from_slice(&queue::read_replaced(&self.target.state_path).unwrap_or_else(|error|panic!("estado ilegível: {error}"))).unwrap()
     }
+    fn sent_prompts(&self)->Vec<String> {
+        self.io.calls.lock().unwrap().iter().filter_map(|call| {
+            if call.args[0]=="load-buffer" {Some(String::from_utf8(call.stdin.clone()).unwrap())}
+            else if call.args[0]=="send-keys" && call.args.contains(&"-l".into()) && call.args.last().is_some_and(|text|text!="\r") {call.args.last().cloned()}
+            else {None}
+        }).collect()
+    }
     /// Espera com prazo; no estouro mostra onde a operação parou (multiplexador e diário).
     /// O teto cobre o runner Windows, onde cada leitura de fatos grava o diário durável em ~0,1–0,3 s.
     async fn wait_for(&self,what:&str,mut done:impl FnMut()->bool) {
@@ -544,11 +551,7 @@ async fn queued_batch_terminal_sends_one_prompt_and_confirms_all_members() {
     assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
     f.idle.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("o driver escreveu",||f.io.calls.lock().unwrap().iter().any(|call|call.args[0]=="send-keys" && call.args.last().is_some_and(|key|key=="\r"))).await;
-    let sent:Vec<String>=f.io.calls.lock().unwrap().iter().filter_map(|call| {
-        if call.args[0]=="load-buffer" {Some(String::from_utf8(call.stdin.clone()).unwrap())}
-        else if call.args[0]=="send-keys" && call.args.contains(&"-l".into()) && call.args.last().is_some_and(|text|text!="\r") {call.args.last().cloned()}
-        else {None}
-    }).collect();
+    let sent=f.sent_prompts();
     assert_eq!(sent,vec!["primeira\nsegunda\nterceira"],"o driver recebe um único prompt inteiro");
     let state=f.state();assert_eq!(state["rows"].as_array().unwrap().len(),1);
     assert_eq!(state["rows"][0]["batch_entries"].as_array().unwrap().len(),3);
@@ -1243,13 +1246,16 @@ async fn terminal_runtime_claim_crash_before_intent_restores_safe_pending_row() 
     f.ready.store(true,std::sync::atomic::Ordering::Release); h.drain().await.unwrap(); assert_eq!(f.state()["rows"][0]["delivered"],true); assert_eq!(f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()=="Olá").count(),1); h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_claim_only_one_entry_while_driver_is_in_flight() {
+async fn terminal_runtime_claims_one_batch_while_driver_is_in_flight() {
     let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("first-claim","Um")).await.unwrap(); h.command(f.command("second-claim","Dois")).await.unwrap();
     f.io.blocked.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
     let hc=h.clone(); let draining=tokio::spawn(async move {hc.drain().await});
     f.wait_for("espera 5",||f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys")).await;
-    let rows=f.state()["rows"].clone(); assert_eq!(rows[0]["delivered"],true); assert_eq!(rows[1]["delivered"],false);
+    let rows=f.state()["rows"].clone();assert_eq!(rows.as_array().unwrap().len(),1);
+    assert_eq!(rows[0]["delivered"],true);assert_eq!(rows[0]["text"],"Um\nDois");
+    let members:Vec<_>=rows[0]["batch_entries"].as_array().unwrap().iter().map(|row|row["id"].as_str().unwrap()).collect();
+    assert_eq!(members,["first-claim","second-claim"]);
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); draining.await.unwrap().unwrap(); h.stop().await.unwrap();
 }
 
@@ -1528,13 +1534,11 @@ async fn mods_hold_parks_writes_until_release() {
     assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)),"o clique segue lendo o pane");
     assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
     direct.await.unwrap().unwrap();
-    let typed=|text:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.iter().any(|a|a.contains(text))).count();
-    // A linha vira `delivered` no `Claim`, antes de digitar: a espera é pelas duas digitadas, e a parada,
-    // serial com a entrega em curso, garante que nada mais sai depois da contagem.
+    // A linha vira entregue antes de digitar: a prova observa o texto que chegou ao driver.
     f.wait_for("entregas depois do clique",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)
-        && typed("Na fila")>0 && typed("Durante o clique")>0).await;
+        && f.sent_prompts()==["Na fila\nDurante o clique"]).await;
     h.stop().await.unwrap();
-    assert_eq!((typed("Na fila"),typed("Durante o clique")),(1,1),"cada entrada sai uma vez");
+    assert_eq!(f.sent_prompts(),["Na fila\nDurante o clique"],"o lote sai uma vez e conserva a ordem");
 }
 
 /// Sem `Release` (a tarefa do clique sumiu), a reserva vence sozinha no prazo dela.
@@ -1980,11 +1984,8 @@ async fn new_message_waits_behind_older_deferred_row() {
     assert_eq!(second.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(second.payload["code"],"queue_ahead"); assert_eq!(second.payload["queued"],true);
     f.ready.store(true,std::sync::atomic::Ordering::Release);
-    let typed=||->Vec<String> {f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.contains(&"-l".into())).map(|r|r.args.last().unwrap().clone()).collect()};
-    f.wait_for("as duas digitadas",||typed().iter().any(|t|t=="Segunda")).await;
-    let typed=typed();
-    let (a,b)=(typed.iter().position(|t|t=="Primeira").unwrap(),typed.iter().position(|t|t=="Segunda").unwrap());
-    assert!(a<b,"ordem {typed:?}");
+    f.wait_for("as duas partes no mesmo prompt",||f.sent_prompts()==["Primeira\nSegunda"]).await;
+    assert_eq!(f.sent_prompts(),["Primeira\nSegunda"]);
     h.stop().await.unwrap();
 }
 

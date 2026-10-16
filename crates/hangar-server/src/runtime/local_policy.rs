@@ -258,9 +258,12 @@ fn prompt_blocks(text: &str) -> (Vec<Value>, Vec<String>) {
         let opened = (|| {
             let mut options=std::fs::OpenOptions::new();options.read(true);
             #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NONBLOCK);}
-            if !std::fs::metadata(path)?.is_file() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
+            let metadata=std::fs::metadata(path)?;
+            if !metadata.is_file() && !metadata.is_dir() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
             let mut file=options.open(path)?;
-            if !file.metadata()?.is_file() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
+            // Abrir diretório não bloqueia; a leitura conserva a causa original da plataforma.
+            let metadata=file.metadata()?;
+            if !metadata.is_file() && !metadata.is_dir() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
             file.by_ref().take(IMAGE_CAP + 1).read_to_end(&mut data)?;
             file.metadata().map(|meta| meta.len())
         })();

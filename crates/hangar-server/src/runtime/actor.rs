@@ -752,6 +752,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut error:Option<RuntimeError> = None;
     let mut io_open = true;
     let mut drain_requested = true;
+    let mut drain_claim:Option<String> = None;
     let mut drain_active = false;
     let mut drain_waiters = Vec::new();
     let mut mods_waiters:ModsWaiters = BTreeMap::new();
@@ -1189,6 +1190,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             && !roots.values().any(|root|(root.preparing || root.defer_for_batch && root.result.is_none() && root.error.is_none()) && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
             drain_requested = false; drain_active = true;
             let validate=reserved.is_none().then(||engine.batch_validator());
+            let claim_id=format!("claim:{}",unique());drain_claim=Some(format!("call::{claim_id}"));
             let queue = queue.clone(); let target = target.clone(); let sample = clock(start);
             jobs.spawn(async move {
                 let result = async {
@@ -1196,7 +1198,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         Some(entry_id)=>Action::Claim {min_ts:target.created,limit:Some(1),entry_id:Some(entry_id)},
                         None=>Action::ClaimBatch {min_ts:target.created},
                     };
-                    let claimed = queue.exec_validated(target.generation,&format!("claim:{}",unique()),sample,action,false,validate).await.map_err(io_failure)?;
+                    let claimed = queue.exec_validated(target.generation,&claim_id,sample,action,false,validate).await.map_err(io_failure)?;
                     let state = queue.snapshot().await.map_err(io_failure)?;
                     let mut claimed = claimed.as_array().ok_or_else(||failure("queue_shape"))?.clone();
                     // Reivindicada numa vida que parou antes de despachar: operação preparada e sem tentativa
@@ -1267,7 +1269,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         }
                         arrival += 1;
                         let ticket = arrival;
-                        let defer_for_batch=drain_active && !from_queue && command.kind==OperationKind::Input && !rowless(&target.provider,&command);
+                        let claimed=drain_active && drain_claim.as_ref().and_then(|id|authoritative.operations.get(id))
+                            .and_then(|op|op.result.as_array()).is_some_and(|rows|!rows.is_empty());
+                        let waiting=super::queue::waiting_ids(&authoritative,target.created).iter().any(|id|id!=&command.operation_id);
+                        let defer_for_batch=(claimed || waiting) && !from_queue && command.kind==OperationKind::Input && !rowless(&target.provider,&command);
                         roots.insert(id.clone(),Pending { from_queue,defer_for_batch,original:serde_json::to_value(&command).unwrap(),command:command.clone(),responses:vec![response],
                             result:None,preparing:true,cancelled:false,error:None,deadline:clock(start).monotonic_s+30.0,timed_out:false,ready_to_run:false,arrival });
                         let queue = queue.clone(); let target = target.clone(); let sample = clock(start);
