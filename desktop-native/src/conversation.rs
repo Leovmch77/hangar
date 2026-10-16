@@ -211,6 +211,17 @@ pub struct AgentRun {
     pub subagent_type: Option<String>, pub model: Option<String>, pub prompt: Option<String>, pub running: bool,
     /// O `agentId` que o resultado do Agent traz: o nome do arquivo do subagente no disco.
     pub agent_id: Option<String>,
+    pub started_at: Option<f64>,
+    pub finished_at: Option<f64>,
+}
+
+impl AgentRun {
+    pub fn elapsed(&self, now: f64) -> Option<std::time::Duration> {
+        let start = self.started_at.filter(|at| at.is_finite() && *at > 0.)?;
+        let end = if self.running { now } else { self.finished_at? };
+        if !end.is_finite() { return None; }
+        std::time::Duration::try_from_secs_f64((end - start).max(0.)).ok()
+    }
 }
 
 /// Bash com `run_in_background: true`: o comando cru e o rótulo sem o encanamento.
@@ -277,11 +288,11 @@ fn wakes(input: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
 /// Agentes e shells de fundo, dobrados dos eventos como o `createActivityFolder` do web. Refeito a cada troca do
 /// conjunto de eventos, então `/clear` e histórico novo não carregam nada do anterior.
 pub fn fold_activity(events: &[ChatEvent]) -> Activity {
-    let mut resulted: HashSet<&str> = HashSet::new();
+    let mut resulted: HashMap<&str, Option<f64>> = HashMap::new();
     // Id do trabalho em segundo plano (agentId, id do shell) -> tool_use_id do lançamento.
     let mut background: HashMap<String, &str> = HashMap::new();
     // Fim que chegou antes do lançamento: o par fecha quando ele aparecer.
-    let mut finished_early: HashSet<String> = HashSet::new();
+    let mut finished_early: HashMap<String, Option<f64>> = HashMap::new();
     // Bash de fundo esperando a resposta de lançamento; outro resultado com a mesma frase não conta.
     let mut shell_pending: HashSet<&str> = HashSet::new();
     // Colega de equipe -> hora do último SendMessage para ele; aviso de ocioso anterior chegou atrasado.
@@ -295,8 +306,8 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
     // Tarefas pelo número sequencial do TaskCreate; o `bool` marca a apagada. A lista do último TodoWrite vence.
     let mut created: Vec<(ActivityTask, bool)> = Vec::new();
     let mut whole: Option<Vec<(ActivityTask, bool)>> = None;
-    fn finish<'a>(id: String, background: &HashMap<String, &'a str>, resulted: &mut HashSet<&'a str>, early: &mut HashSet<String>) {
-        match background.get(&id) { Some(&call) => { resulted.insert(call); } None => { early.insert(id); } }
+    fn finish<'a>(id: String, at: Option<f64>, background: &HashMap<String, &'a str>, resulted: &mut HashMap<&'a str, Option<f64>>, early: &mut HashMap<String, Option<f64>>) {
+        match background.get(&id) { Some(&call) => { resulted.entry(call).or_insert(at); } None => { early.entry(id).or_insert(at); } }
     }
     for (i, event) in events.iter().enumerate() {
         match event.kind.as_str() {
@@ -313,7 +324,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                 }
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { continue; }
-                    finish(task.to_owned(), &background, &mut resulted, &mut finished_early);
+                    finish(task.to_owned(), event.ts, &background, &mut resulted, &mut finished_early);
                     continue;
                 }
                 let text = event.result.as_deref().unwrap_or("");
@@ -325,7 +336,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                     if let Some(agent) = shown_agent_id(launched, text) { agent_ids.insert(id, agent); }
                     if text_launch || launched.is_some() {
                         if let Some(agent) = launched {
-                            if finished_early.remove(agent) { resulted.insert(id); }
+                            if let Some(at) = finished_early.remove(agent) { resulted.entry(id).or_insert(at); }
                             background.insert(agent.to_owned(), id);
                         }
                         continue;
@@ -333,19 +344,19 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                 }
                 if shell_pending.remove(id) {
                     if let Some(shell) = word_after(text, "Command running in background with ID:") {
-                        if finished_early.remove(shell) { resulted.insert(id); }
+                        if let Some(at) = finished_early.remove(shell) { resulted.entry(id).or_insert(at); }
                         background.insert(shell.to_owned(), id);
                         continue;
                     }
                     // Pediu fundo e não foi: este resultado já é o final.
                 }
-                resulted.insert(id);
+                resulted.entry(id).or_insert(event.ts);
             }
             "user_msg" => {
                 let text = event.text.as_deref().unwrap_or("");
                 if !text.contains("<task-notification>") { continue; }
                 let Some(task) = text.split_once("<task-id>").and_then(|(_, rest)| rest.split_once("</task-id>")).map(|(id, _)| id.trim()) else { continue };
-                finish(task.to_owned(), &background, &mut resulted, &mut finished_early);
+                finish(task.to_owned(), event.ts, &background, &mut resulted, &mut finished_early);
             }
             "tool_use" => {
                 let input = event.tool_input.as_ref();
@@ -398,7 +409,8 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                         } else { desc };
                         agent_calls.insert(id);
                         agents.push(AgentRun { call: i, id: id.to_owned(), description, subagent_type: text("subagent_type"),
-                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None });
+                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None,
+                            started_at: event.ts, finished_at: None });
                     }
                     Some("Bash") if input.and_then(|v| v.get("run_in_background")).and_then(Value::as_bool) == Some(true) => {
                         shell_pending.insert(id);
@@ -413,10 +425,11 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
         }
     }
     for agent in &mut agents {
-        agent.running = !resulted.contains(agent.id.as_str());
+        agent.running = !resulted.contains_key(agent.id.as_str());
+        agent.finished_at = resulted.get(agent.id.as_str()).copied().flatten();
         agent.agent_id = agent_ids.get(agent.id.as_str()).map(|a| (*a).to_owned());
     }
-    for shell in &mut shells { shell.running = !resulted.contains(shell.id.as_str()); }
+    for shell in &mut shells { shell.running = !resulted.contains_key(shell.id.as_str()); }
     agents.sort_by_key(|a| !a.running);
     shells.sort_by_key(|s| !s.running);
     let tasks = whole.unwrap_or(created).into_iter().filter(|(_, deleted)| !deleted).map(|(task, _)| task).collect();

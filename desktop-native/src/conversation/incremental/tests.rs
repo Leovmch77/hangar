@@ -6,6 +6,32 @@ use std::collections::HashSet;
 fn event(value: Value) -> ChatEvent { serde_json::from_value(value).unwrap() }
 
 #[test]
+fn agent_duration_tracks_execution_and_freezes_at_the_real_finish() {
+    let start = event(json!({"id":"agent","kind":"tool_use","tool_use_id":"a","tool_name":"Agent","ts":1000.0}));
+    let launch = event(json!({"id":"launch","kind":"tool_result","tool_use_id":"a","bg_agent_id":"worker","ts":1002.0}));
+    let finish = event(json!({"id":"finish","kind":"tool_result","tool_use_id":"task:worker","ts":1192.0}));
+    let foreground = event(json!({"id":"foreground","kind":"tool_result","tool_use_id":"a","ts":1075.0}));
+    let notification = event(json!({"id":"note","kind":"user_msg","text":"<task-notification><task-id>worker</task-id></task-notification>","ts":1192.0}));
+    for (events, running, seconds) in [
+        (vec![start.clone()], true, 300),
+        (vec![start.clone(), launch.clone()], true, 300),
+        (vec![start.clone(), foreground], false, 75),
+        (vec![start.clone(), launch.clone(), finish.clone()], false, 192),
+        (vec![start.clone(), finish, launch.clone()], false, 192),
+        (vec![start, launch, notification], false, 192),
+    ] {
+        let mut fold = Incremental::default();
+        for n in 1..=events.len() { fold.update(&events[..n], n - 1, View::default()); }
+        for activity in [&fold.activity, &conversation::fold_activity(&events)] {
+            let run = &activity.agents[0];
+            assert_eq!(run.running, running);
+            assert_eq!(run.elapsed(1300.0).map(|d| d.as_secs()), Some(seconds));
+            if !running { assert_eq!(run.elapsed(1600.0).map(|d| d.as_secs()), Some(seconds)); }
+        }
+    }
+}
+
+#[test]
 fn ordinary_results_do_not_rebuild_historical_activity() {
     let mut fold = super::ActivityFold::default();
     for i in 0..200 {

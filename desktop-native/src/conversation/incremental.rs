@@ -165,9 +165,9 @@ impl Incremental {
 /// Estado de redução da atividade; as listas visuais não guardam vínculos pendentes.
 #[derive(Default)]
 struct ActivityFold {
-    resulted: HashSet<String>,
+    resulted: HashMap<String, Option<f64>>,
     background: HashMap<String, String>,
-    finished_early: HashSet<String>,
+    finished_early: HashMap<String, Option<f64>>,
     // Colega de equipe -> hora do último SendMessage para ele; aviso de ocioso anterior chegou atrasado.
     woken: HashMap<String, f64>,
     shell_pending: HashSet<String>,
@@ -181,9 +181,12 @@ struct ActivityFold {
 }
 
 impl ActivityFold {
-    fn finish(&mut self, id: &str) -> bool {
-        if let Some(call) = self.background.get(id) { self.resulted.insert(call.clone()) }
-        else { self.finished_early.insert(id.to_owned()); false }
+    fn finish(&mut self, id: &str, at: Option<f64>) -> bool {
+        if let Some(call) = self.background.get(id) {
+            let changed = !self.resulted.contains_key(call);
+            self.resulted.entry(call.clone()).or_insert(at);
+            changed
+        } else { self.finished_early.entry(id.to_owned()).or_insert(at); false }
     }
 
     fn push(&mut self, i: usize, event: &ChatEvent) -> bool {
@@ -192,7 +195,7 @@ impl ActivityFold {
                 let Some(id) = tool_key(event) else { return false };
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((self.woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { return false; }
-                    return self.finish(task);
+                    return self.finish(task, event.ts);
                 }
                 let text = event.result.as_deref().unwrap_or("");
                 let mut changed = false;
@@ -206,7 +209,10 @@ impl ActivityFold {
                     }
                     if text_launch || launched.is_some() {
                         if let Some(agent) = launched {
-                            if self.finished_early.remove(agent) { changed |= self.resulted.insert(id.to_owned()); }
+                            if let Some(at) = self.finished_early.remove(agent) {
+                                changed |= !self.resulted.contains_key(id);
+                                self.resulted.entry(id.to_owned()).or_insert(at);
+                            }
                             self.background.insert(agent.to_owned(), id.to_owned());
                         }
                         return changed;
@@ -214,20 +220,24 @@ impl ActivityFold {
                 }
                 if self.shell_pending.remove(id) {
                     if let Some(shell) = word_after(text, "Command running in background with ID:") {
-                        if self.finished_early.remove(shell) { changed |= self.resulted.insert(id.to_owned()); }
+                        if let Some(at) = self.finished_early.remove(shell) {
+                            changed |= !self.resulted.contains_key(id);
+                            self.resulted.entry(id.to_owned()).or_insert(at);
+                        }
                         self.background.insert(shell.to_owned(), id.to_owned());
                         return changed;
                     }
                 }
                 // Mesmo um órfão pode concluir uma chamada futura com o mesmo ID.
-                let inserted = self.resulted.insert(id.to_owned());
+                let inserted = !self.resulted.contains_key(id);
+                self.resulted.entry(id.to_owned()).or_insert(event.ts);
                 changed || inserted && (self.agent_calls.contains(id) || self.shell_calls.contains(id))
             }
             "user_msg" => {
                 let text = event.text.as_deref().unwrap_or("");
                 if !text.contains("<task-notification>") { return false; }
                 let Some(task) = text.split_once("<task-id>").and_then(|(_, rest)| rest.split_once("</task-id>")).map(|(id, _)| id.trim()) else { return false };
-                self.finish(task)
+                self.finish(task, event.ts)
             }
             "tool_use" => {
                 let input = event.tool_input.as_ref();
@@ -240,7 +250,7 @@ impl ActivityFold {
                         let mut changed = false;
                         for (key, call) in &self.background {
                             if !super::wakes(input, key) { continue; }
-                            changed |= self.resulted.remove(call);
+                            changed |= self.resulted.remove(call).is_some();
                             if let Some(at) = event.ts { self.woken.insert(key.clone(), at); }
                         }
                         return changed;
@@ -276,7 +286,8 @@ impl ActivityFold {
                         } else { desc };
                         self.agent_calls.insert(id.to_owned());
                         self.agents.push(AgentRun { call: i, id: id.to_owned(), description, subagent_type: text("subagent_type"),
-                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None });
+                            model: text("model"), prompt: text("prompt"), running: false, agent_id: None,
+                            started_at: event.ts, finished_at: None });
                         true
                     }
                     Some("Bash") if input.and_then(|v| v.get("run_in_background")).and_then(Value::as_bool) == Some(true) => {
@@ -298,10 +309,11 @@ impl ActivityFold {
         let mut agents = self.agents.clone();
         let mut shells = self.shells.clone();
         for agent in &mut agents {
-            agent.running = !self.resulted.contains(&agent.id);
+            agent.running = !self.resulted.contains_key(&agent.id);
+            agent.finished_at = self.resulted.get(&agent.id).copied().flatten();
             agent.agent_id = self.agent_ids.get(&agent.id).cloned();
         }
-        for shell in &mut shells { shell.running = !self.resulted.contains(&shell.id); }
+        for shell in &mut shells { shell.running = !self.resulted.contains_key(&shell.id); }
         agents.sort_by_key(|agent| !agent.running);
         shells.sort_by_key(|shell| !shell.running);
         let tasks = self.whole.as_ref().unwrap_or(&self.created).iter().filter(|(_, deleted)| !deleted).map(|(task, _)| task.clone()).collect();
