@@ -451,9 +451,11 @@ impl Resolver {
             //    uma contaminaria a outra; sozinha, segue o mais novo para pegar o pós-/clear.
             if let Some((p, sid)) = tree.repl().find_map(|(p, c)| session_id(c).map(|s| (p, s))) {
                 let own = claude_cwd(procs, p, projects_dir);
+                let moved = own.as_deref().is_some_and(|own| own != cwd);
                 let projdir = projects_of(procs, p, projects_dir).join(sanitize_cwd(own.as_deref().unwrap_or(cwd)));
                 let sid_jsonl = projdir.join(format!("{sid}.jsonl")).to_string_lossy().into_owned();
-                let j = if has_siblings { sid_jsonl } else { self.newest_after_clear(&projdir, sid_jsonl, &aux_open) };
+                // Com o pane noutra pasta as irmãs da pasta do Claude não foram contadas: o mais novo seria de outra.
+                let j = if has_siblings || moved { sid_jsonl } else { self.newest_after_clear(&projdir, sid_jsonl, &aux_open) };
                 self.jsonl.insert(name.into(), j.clone());
                 return tracked(j);
             }
@@ -866,6 +868,30 @@ mod tests {
         age(&newest, 30);
         assert_eq!(run(&BashMoved { config, sid: None }), Transcript { jsonl: Some(newest.to_string_lossy().into()), tracked: false },
             "o mais novo também é o da pasta do Claude");
+    }
+
+    #[test]
+    fn moved_bash_never_takes_the_newer_transcript_of_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("conta");
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::write(config.join("sessions").join("11.json"),
+            r#"{"pid":11,"sessionId":"28d69f41-7dfb-4267-aec4-67a0f0b1c572","cwd":"/real"}"#).unwrap();
+        let project = config.join("projects").join("-real");
+        std::fs::create_dir_all(&project).unwrap();
+        let own = project.join("28d69f41-7dfb-4267-aec4-67a0f0b1c572.jsonl");
+        std::fs::write(&own, "{}\n").unwrap();
+        age(&own, 60);
+        // A irmã na mesma pasta não conta como irmã: o pane desta informa outra pasta.
+        let sibling = project.join("00000000-0000-4000-8000-000000000002.jsonl");
+        std::fs::write(&sibling, "{}\n").unwrap();
+        age(&sibling, 30);
+        let children: ChildrenMap = [(10, vec![11])].into_iter().collect();
+        let mut pane = pane("s", "/bash");
+        pane.pid = Some(10);
+        let found = resolve_one(std::slice::from_ref(&pane), &BashMoved { config, sid: Some("28d69f41-7dfb-4267-aec4-67a0f0b1c572") },
+            &children, &dir.path().join("projects"), &mut Resolver::default(), "s", "/bash", Some(10));
+        assert_eq!(found, Transcript { jsonl: Some(own.to_string_lossy().into()), tracked: true });
     }
 
     #[test]
