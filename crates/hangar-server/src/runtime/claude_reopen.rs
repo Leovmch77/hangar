@@ -36,6 +36,12 @@ const EXIT_WAIT:Duration = Duration::from_secs(15);
 /// `--resume` de conversa longa demora a mostrar o prompt.
 const TERMINAL_WAIT:Duration = Duration::from_secs(60);
 const HEADLESS_WAIT:Duration = Duration::from_secs(10);
+/// A vida nova que falhou e não saiu: nada volta por cima dela.
+const NEW_ALIVE:&str = "reopen_new_alive";
+
+/// Onde o encerramento da vida antiga parou: antes do processo sair (nada mudou), com ele vivo depois
+/// de pedido o fim (não se reabre por cima), ou depois de ele sair (a sessão volta pelo spec antigo).
+enum Stop { Before(RuntimeError), Alive(RuntimeError), After(RuntimeError) }
 
 /// A vida que roda agora.
 enum Life {
@@ -195,15 +201,25 @@ impl RuntimeRegistry {
 
     async fn reopen_by_spec(&self,name:&str,change:SessionChange,between:Option<&dyn Between>) -> Result<Reopened,ReopenFailure> {
         let _ingress=super::lifecycle::ClosedIngress::acquire(self.ingress(),name).await.map_err(ReopenFailure::refused)?;
+        // Conferido de novo sob a porta: outra troca pode ter terminado enquanto esta esperava.
+        let now=match self.claude_sidecar(name).await.map_err(ReopenFailure::refused)? {Some(_)=>Surface::Headless,None=>Surface::Terminal};
+        if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
+            return Ok(Reopened { spec:None,changed:false });
+        }
         let current=self.claude_current(name,true).await.map_err(ReopenFailure::refused)?;
         let mut next=current.spec.with(&change);
         if let Some(between)=between {between.adjust(&mut next);}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
         let start=self.prepare_start(name,&next,&current).await.map_err(ReopenFailure::refused)?;
-        if let Err(error)=self.stop_claude(name,&current,next.surface).await {
+        match self.stop_claude(name,&current,next.surface).await {
+            Ok(())=>{},
+            Err(Stop::Before(error))=>return Err(ReopenFailure::refused(error)),
             // O processo antigo que não saiu não é reaberto por cima: seriam dois Claude na mesma conversa.
-            let stopped=error.code=="reopen_process_alive";
-            return Err(ReopenFailure { error,stopped,landed:None });
+            Err(Stop::Alive(error))=>{
+                super::actor::mark_live_error(&self.live_channel(name),&error.code,&error.message);
+                return Err(ReopenFailure { error,stopped:true,landed:None });
+            },
+            Err(Stop::After(error))=>return Err(self.restore_claude(name,&current,error).await),
         }
         if let Some(between)=between && let Err(error)=between.apply(&current.spec,&next,&current.sid).await {
             return Err(self.restore_claude(name,&current,error).await);
@@ -215,6 +231,11 @@ impl RuntimeRegistry {
                     tracing::warn!(session=%name,kind=?error.kind(),"spec da reabertura não gravado");
                 }
                 Ok(Reopened { spec:Some(next),changed:true })
+            },
+            // A vida nova que não saiu não divide a conversa com a de antes restaurada.
+            Err(error) if error.code==NEW_ALIVE=>{
+                super::actor::mark_live_error(&self.live_channel(name),&error.code,&error.message);
+                Err(ReopenFailure { error,stopped:true,landed:None })
             },
             Err(error)=>{
                 // A conversa que não voltou para a conta de antes não é reaberta lá: seria outra conversa.
@@ -354,36 +375,42 @@ impl RuntimeRegistry {
     }
 
     /// Encerra a vida que roda e confirma a saída da árvore inteira; depois avança a geração da fila.
-    async fn stop_claude(&self,name:&str,current:&Current,to:Surface) -> Result<(),RuntimeError> {
+    async fn stop_claude(&self,name:&str,current:&Current,to:Surface) -> Result<(),Stop> {
         let key=current.spec.key.clone();
+        let before=Stop::Before;
         match &current.life {
             Life::Terminal { target }=>{
                 let io=crate::terminal_input::ProcessIo::default();
-                let pane=super::lifecycle::pane(&io,&target.binding).await?;
-                if pane.copy {return Err(refused("lifecycle_panel","o terminal está com um painel aberto"));}
-                let lives=tree(pane.pid)?;
-                self.close_claude_entry(&key,current.generation).await?;
-                let (program,prefix)=target.binding.mux_argv.split_first().ok_or_else(||refused("lifecycle_mux","sem o multiplexador"))?;
+                let pane=super::lifecycle::pane(&io,&target.binding).await.map_err(before)?;
+                if pane.copy {return Err(Stop::Before(refused("lifecycle_panel","o terminal está com um painel aberto")));}
+                let lives=tree(pane.pid).map_err(before)?;
+                let (program,prefix)=target.binding.mux_argv.split_first().ok_or_else(||Stop::Before(refused("lifecycle_mux","sem o multiplexador")))?;
+                self.close_claude_entry(&key,current.generation).await.map_err(before)?;
                 let session=if target.binding.windows {name.to_owned()} else {format!("={name}")};
                 let mut command=crate::terminal_input::child_command(program);
                 command.args(prefix).args(["kill-session","-t",&session]).stdin(std::process::Stdio::null()).kill_on_drop(true);
                 let killed=tokio::time::timeout(Duration::from_secs(5),command.output()).await.ok().and_then(Result::ok).is_some_and(|o|o.status.success());
-                if !killed {return Err(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu"));}
-                wait_gone(lives,EXIT_WAIT).await?;
+                if !killed {return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));}
+                wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
             },
             Life::Headless { meta,open }=>{
-                if *open {self.close_claude_entry(&key,current.generation).await?;}
-                if let Some(cano)=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok()) {
-                    let lives=tree(i64::from(cano.pid))?;
-                    super::process::kill(&cano,&key,&self.claude_sidecars()).await.map_err(|e|RuntimeError::new(e.code(),"o processo antigo não foi encerrado"))?;
-                    wait_gone(lives,EXIT_WAIT).await?;
+                let cano=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok());
+                let lives=match &cano {Some(cano)=>tree(i64::from(cano.pid)).map_err(before)?,None=>Vec::new()};
+                if *open {self.close_claude_entry(&key,current.generation).await.map_err(before)?;}
+                if let Some(cano)=cano {
+                    // `kill` que falha pode ter sinalizado o grupo: a árvore que sobrou decide.
+                    if let Err(error)=super::process::kill(&cano,&key,&self.claude_sidecars()).await {
+                        wait_gone(lives,EXIT_WAIT).await.map_err(|_|Stop::Alive(RuntimeError::new(error.code(),"o processo antigo não foi encerrado")))?;
+                    } else {
+                        wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
+                    }
                 }
                 // O sidecar sai: nada sobe o processo sem terminal enquanto o pane nasce. Sem terminal de
                 // novo, a vida nova grava o dela.
-                if to==Surface::Terminal {self.remove_claude_sidecar(name).await?;}
+                if to==Surface::Terminal {self.remove_claude_sidecar(name).await.map_err(Stop::After)?;}
             },
         }
-        self.advance_generation(name,&key,current.generation).await
+        self.advance_generation(name,&key,current.generation).await.map_err(Stop::After)
     }
 
     /// Dá a partida na vida nova e confirma: o Claude na conversa e no modo pedidos.
@@ -394,8 +421,10 @@ impl RuntimeRegistry {
             Start::Terminal(pane,terminal)=>{
                 crate::session_open::claude::pretrust(&crate::session_open::claude::claude_json(&terminal,&env.home,next.account.config_dir()),&next.cwd,terminal.windows);
                 let watcher=self.watcher_ref().ok_or_else(||refused("runtime_binding","sem a vigia do terminal"))?;
-                crate::session_open::terminal::spawn(&watcher.spawn_mux(),&terminal,&pane).await
-                    .map_err(|e|refused("reopen_terminal_spawn",&format!("o terminal não abriu: {}",e.stderr)))?;
+                if let Err(error)=crate::session_open::terminal::spawn(&watcher.spawn_mux(),&terminal,&pane).await {
+                    self.drop_failed_terminal(name).await?;
+                    return Err(refused("reopen_terminal_spawn",&format!("o terminal não abriu: {}",error.stderr)));
+                }
                 let deadline=tokio::time::Instant::now()+TERMINAL_WAIT;
                 let io=crate::terminal_input::ProcessIo::default();
                 loop {
@@ -404,7 +433,7 @@ impl RuntimeRegistry {
                         && target.binding.conversation==current.sid
                         && super::lifecycle::permission_mode(&io,&target.binding).await.is_ok_and(|shown|shown==mode) {return Ok(());}
                     if tokio::time::Instant::now()>=deadline {
-                        self.drop_failed_terminal(name).await;
+                        self.drop_failed_terminal(name).await?;
                         return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos"));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -416,7 +445,11 @@ impl RuntimeRegistry {
                     tokio::task::spawn_blocking(move||super::codex_sidecar::put(&dir,&owned,&meta)).await
                         .map_err(|_|refused("lifecycle_sidecar_io","o arquivo da sessão não foi gravado"))?
                         .map_err(|_|refused("lifecycle_sidecar_io","o arquivo da sessão não foi gravado"))?;}
-                self.open_claude_headless(name,true).await.ok_or_else(||refused("runtime_binding","a sessão sem terminal sumiu"))??;
+                let opened=self.open_claude_headless(name,true).await.unwrap_or_else(||Err(refused("runtime_binding","a sessão sem terminal sumiu")));
+                if let Err(error)=opened {
+                    self.drop_failed_headless(name,&next.key).await?;
+                    return Err(error);
+                }
                 let deadline=tokio::time::Instant::now()+HEADLESS_WAIT;
                 loop {
                     if let Some((_,view))=self.claude_headless_view(name).await {
@@ -429,7 +462,7 @@ impl RuntimeRegistry {
                     if tokio::time::Instant::now()>=deadline {break;}
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                self.drop_failed_headless(name,&next.key).await;
+                self.drop_failed_headless(name,&next.key).await?;
                 Err(refused("relaunch_initialize","o Claude sem terminal não subiu na conversa e no modo pedidos"))
             },
         }
@@ -473,22 +506,28 @@ impl RuntimeRegistry {
             .map_err(|_|refused("lifecycle_sidecar_io","o arquivo da sessão não pôde ser apagado"))
     }
 
-    async fn drop_failed_terminal(&self,name:&str) {
+    /// Fecha o terminal da tentativa que falhou e espera a árvore dele sair; ficou vivo = `NEW_ALIVE`.
+    async fn drop_failed_terminal(&self,name:&str) -> Result<(),RuntimeError> {
         if let Some((target,_))=self.claude_terminal_entry(name).await {let _=self.close_claude_entry(&target.key,target.generation).await;}
-        let Some(watcher)=self.watcher_ref() else {return};
-        let mut command=crate::terminal_input::child_command(watcher.mux_program());
+        let watcher=self.watcher_ref().ok_or_else(||refused(NEW_ALIVE,"sem a vigia do terminal para fechar a tentativa"))?;
         let session=if cfg!(windows) {name.to_owned()} else {format!("={name}")};
-        command.args(["kill-session","-t",&session]).stdin(std::process::Stdio::null()).kill_on_drop(true);
-        let _=tokio::time::timeout(Duration::from_secs(5),command.output()).await;
+        let lives=match watcher.mux_text(&["display-message","-p","-t",&session,"#{pane_pid}"]).await.and_then(|pid|pid.trim().parse::<i64>().ok()) {
+            Some(pid)=>tree(pid)?,
+            None=>Vec::new(),
+        };
+        let _=watcher.mux_text(&["kill-session","-t",&session]).await;
+        wait_gone(lives,EXIT_WAIT).await.map_err(|_|refused(NEW_ALIVE,"o Claude novo não saiu; a sessão não volta por cima dele para não haver dois na mesma conversa"))
     }
 
-    async fn drop_failed_headless(&self,name:&str,key:&str) {
+    async fn drop_failed_headless(&self,name:&str,key:&str) -> Result<(),RuntimeError> {
         if let Some((generation,_))=self.claude_headless_view(name).await {let _=self.close_claude_entry(key,generation).await;}
-        if let Ok(Some(meta))=self.claude_sidecar(name).await
-            && let Some(cano)=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok())
-            && let Err(error)=super::process::kill(&cano,key,&self.claude_sidecars()).await {
+        let Ok(Some(meta))=self.claude_sidecar(name).await else {return Ok(())};
+        let Some(cano)=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok()) else {return Ok(())};
+        let lives=tree(i64::from(cano.pid))?;
+        if let Err(error)=super::process::kill(&cano,key,&self.claude_sidecars()).await {
             tracing::warn!(session=%name,code=error.code(),"cano da reabertura que falhou não foi encerrado");
         }
+        wait_gone(lives,EXIT_WAIT).await.map_err(|_|refused(NEW_ALIVE,"o Claude novo não saiu; a sessão não volta por cima dele para não haver dois na mesma conversa"))
     }
 
     /// A geração seguinte na fila: a vida nova não casa com recibos e interações da antiga.

@@ -57,6 +57,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         }
     } else {None};
     // A tarefa carrega o passe só pelo comando; o freeze nunca espera o próprio pedido.
+    let life_st=st.clone();
     let job=tokio::spawn(async move {
         let reply=match &target.handle {
             EntryHandle::Terminal {handle,..}=>handle.control(id.clone(),if set {"set_permission_mode"} else {"permission_modes"}.into(),if let Some(mode)=&mode {json!({"mode":mode})} else {json!({"probe":probe})}).await?,
@@ -78,7 +79,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         let terminal_reopen=target.terminal && reply.payload["requires_reopen"]==true && reply.payload["cycle_closed"]==true;
         let headless_reopen=!target.terminal && reply.disposition==Disposition::Rejected && reply.payload["permission_boot_rejected"]==true;
         if set && mode.as_deref()==Some("bypassPermissions") && terminal_reopen && reply.payload["uncertain"]!=true {
-            return Ok(bypass_reopen(&runtime,&name).await);
+            return Ok(crate::session_write::relaunch::during_life_change(&life_st,&name,bypass_reopen(&runtime,&name)).await);
         }
         if set && mode.as_deref()==Some("bypassPermissions") && headless_reopen && reply.payload["uncertain"]!=true {
             return runtime.reopen_claude(name,target.key,target.generation,id).await.map(|value|(StatusCode::OK,value));

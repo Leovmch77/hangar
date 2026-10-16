@@ -146,3 +146,22 @@ async fn at_startup_only_the_claude_terminals_that_had_a_queue_are_adopted() {
     registry.close(&key,3).await.unwrap();
     finish(&mut agent);
 }
+
+#[tokio::test]
+async fn nothing_is_adopted_while_a_reopen_holds_the_gate() {
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let registry = fx.registry().await;
+    registry.ingress().close("s1",Duration::from_secs(1)).await.unwrap();
+    let refused = registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code));
+    assert_eq!(refused,Some(Err("session_transfer_busy".into())),"a vida antiga não sobe por cima da troca");
+    assert!(registry.terminal_view("s1").await.is_none());
+    registry.ingress().open("s1");
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    let (key,_) = registry.terminal_view("s1").await.unwrap();
+    registry.close(&key,1).await.unwrap();
+    finish(&mut agent);
+}

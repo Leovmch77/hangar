@@ -98,6 +98,25 @@ pub fn claim_guest(claude_base: &Path, session: &str, guest: &str, life: Option<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
 }
 
+/// `guest_users.set_life`: a vida nova da sessão que o convidado criou, sob a mesma `guests.lock`.
+/// Sem dono gravado não há o que mudar; ilegível não é sobrescrito.
+pub fn guest_set_life(claude_base: &Path, session: &str, life: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let lock = std::fs::OpenOptions::new().read(true).append(true).create(true).open(claude_base.join("guests.lock"))?;
+    lock.lock()?;
+    let path = claude_base.join("guests.json");
+    let mut state = match crate::runtime::queue::read_replaced(&path) {
+        Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().filter(Value::is_object)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "guests.json ilegível"))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some(owner) = state["sessions"].get_mut(session).filter(|o| o.is_object()) else { return Ok(()) };
+    if owner["life"] == life { return Ok(()); }
+    owner["life"] = json!(life);
+    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
+}
+
 /// O convidado do envelope da ponte: `guest` ausente ou nulo é o dono; o id, o convidado dele.
 pub fn bridge_guest(envelope: &Value, claude_base: &Path) -> Result<Option<LoginGuest>, OpenError> {
     let malformed = || OpenError::new(400, "erro_corpo_invalido", "guest é o id do convidado ou null");

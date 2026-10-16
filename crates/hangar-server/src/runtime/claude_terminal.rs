@@ -29,6 +29,9 @@ fn login(argv: &[String]) -> bool {
     rest.first().is_some_and(|a| matches!(a.as_str(), "auth" | "login" | "setup-token"))
 }
 
+/// O alvo da sessão no multiplexador: `=nome` casa exato; o psmux não aceita o `=` nesses comandos.
+fn session_target(name: &str) -> String { if cfg!(windows) { name.to_owned() } else { format!("={name}") } }
+
 /// A chave lida do ambiente da sessão (`show-environment`); ausente = `None`.
 fn session_key(output: &str) -> Option<String> {
     let value = output.lines().find_map(|line| line.trim().strip_prefix("CP_SESSION_KEY="))?;
@@ -155,7 +158,7 @@ impl Watcher {
         }
         for (name, pane) in names {
             if registry.has_entry(None, &name).await { continue; }
-            let shown = self.mux_text(&["show-environment", "-t", &format!("={name}"), "CP_SESSION_KEY"]).await.unwrap_or_default();
+            let shown = self.mux_text(&["show-environment", "-t", &session_target(&name), "CP_SESSION_KEY"]).await.unwrap_or_default();
             let target = pane.target().unwrap_or_else(|| format!("={name}:"));
             let (queue, owned, created) = (self.cfg.queue_dir.clone(), name.clone(), pane.session_created.unwrap_or(0));
             let durable = match session_key(&shown) {
@@ -174,7 +177,7 @@ impl Watcher {
         let created = pane.session_created.ok_or_else(|| refused("claude_terminal_pane", "o multiplexador não informou quando a sessão nasceu"))?;
         let target_pane = pane.target().unwrap_or_else(|| format!("={name}:"));
         let program = self.cfg.mux_program.to_string_lossy().into_owned();
-        let shown = self.mux_text(&["show-environment", "-t", &format!("={name}"), "CP_SESSION_KEY"]).await.unwrap_or_default();
+        let shown = self.mux_text(&["show-environment", "-t", &session_target(&name), "CP_SESSION_KEY"]).await.unwrap_or_default();
         let key = match session_key(&shown) {
             Some(key) => key,
             None => {
@@ -182,7 +185,7 @@ impl Watcher {
                 let legacy = tokio::task::spawn_blocking(move || legacy_key(&queue, &owned, &pane_id, created)).await.ok().flatten();
                 let key = legacy.unwrap_or_else(|| crate::mods::state::random_hex(16));
                 // Gravada na sessão: a próxima adoção (outro processo do Rust) acha a mesma fila.
-                if self.mux_text(&["set-environment", "-t", &format!("={name}"), "CP_SESSION_KEY", &key]).await.is_none() {
+                if self.mux_text(&["set-environment", "-t", &session_target(&name), "CP_SESSION_KEY", &key]).await.is_none() {
                     return Err(refused("claude_terminal_key", "a chave da sessão não foi gravada no terminal"));
                 }
                 key
@@ -200,7 +203,7 @@ impl Watcher {
     }
 
     /// Saída de um comando do multiplexador que deu certo.
-    async fn mux_text(&self, args: &[&str]) -> Option<String> {
+    pub(super) async fn mux_text(&self, args: &[&str]) -> Option<String> {
         let mut command = crate::terminal_input::child_command(&self.cfg.mux_program);
         command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
         let out = tokio::time::timeout(Duration::from_secs(5), command.output()).await.ok()?.ok()?;

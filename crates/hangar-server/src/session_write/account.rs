@@ -236,8 +236,8 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     let change=SessionChange { reason:ChangeReason::AccountSwitch,surface,account:Some(Account::Claude { config_dir:destination.clone() }),
         permission_mode:None,model:None,effort:None,service_tier:None };
     let mover=MoveConversation { env,windows:cfg!(windows),leave_engine };
-    let job={let runtime=runtime.clone();let name=name.clone();
-        tokio::spawn(async move {runtime.reopen_claude_session(&name,change,Some(&mover)).await})};
+    let job={let runtime=runtime.clone();let name=name.clone();let st=st.clone();
+        tokio::spawn(async move {crate::session_write::relaunch::during_life_change(&st,&name,runtime.reopen_claude_session(&name,change,Some(&mover))).await})};
     let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
     st.list.invalidate();
     let (status,body)=match outcome {

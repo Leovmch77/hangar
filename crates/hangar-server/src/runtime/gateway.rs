@@ -308,6 +308,8 @@ impl RuntimeRegistry {
     /// `true` quando reabriu. Uma tentativa por pedido; a de outra operação no meio (fechar, trocar de
     /// modo) vence, pela barreira da chave.
     async fn reopen_if_failed(&self,name:&str) -> Result<bool,RuntimeError> {
+        // Uma troca em curso (porta fechada) é quem decide a vida da sessão: nada a reabrir por cima dela.
+        let Ok(_pass) = self.ingress.enter(name,Duration::ZERO).await else { return Ok(false) };
         let found = self.entries.lock().await.iter().find(|(_,entry)|entry.name == name)
             .map(|(key,entry)|(key.clone(),entry.generation,entry.handle.clone(),entry.provider.clone()));
         let Some((key,generation,handle,provider)) = found else {
@@ -342,6 +344,12 @@ impl RuntimeRegistry {
     /// `ensure_running` do Python antes de toda operação) e, com a vigia ligada, o Codex é adotado agora.
     /// `None` = não é sessão sem ator do Rust.
     pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        // Pela porta, como as escritas: no meio de uma troca (porta fechada) abrir ou adotar subiria a vida
+        // antiga por cima da que está nascendo.
+        let _pass = match self.ingress.enter(name,Duration::ZERO).await {
+            Ok(pass)=>pass,
+            Err(_)=>return Some(Err(RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"))),
+        };
         if let Some(opened) = self.open_claude_headless(name,true).await { return Some(opened); }
         let watcher = self.watcher.get()?.clone();
         if let Some(adopted) = watcher.adopt_now(self,name).await { return Some(adopted); }

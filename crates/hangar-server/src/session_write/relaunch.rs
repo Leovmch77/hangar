@@ -76,6 +76,7 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     };
     let panels = Some(st.term.clone());
     let home = st.list.env().dirs.as_ref().map(|dirs| dirs.home.clone());
+    let st2 = st.clone();
     let outcome = detached_relaunch(async move {
         if let Some(codex) = runtime.relaunch_codex(&name, terminal, panels).await { return Some(Relaunched::Codex(codex)); }
         if home.as_deref().is_some_and(|home| crate::runtime::codex_relaunch::transfer_open(home, &name, None, None)) {
@@ -84,7 +85,7 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         let surface = if terminal { Surface::Terminal } else { Surface::Headless };
         let change = SessionChange { reason: ChangeReason::ModeSwitch, surface: Some(surface), account: None, permission_mode: None,
             model: None, effort: None, service_tier: None };
-        runtime.reopen_claude_session(&name, change, None).await.map(|r| Relaunched::Claude(r, !terminal))
+        during_life_change(&st2, &name, runtime.reopen_claude_session(&name, change, None)).await.map(|r| Relaunched::Claude(r, !terminal))
     }).await;
     let (status, body) = match outcome {
         None => return forward_whole(&st, parts, bytes, &fwd).await,
@@ -106,6 +107,7 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path()))
         else { return pass(&st, req, &fwd).await };
     let home = st.list.env().dirs.as_ref().map(|dirs| dirs.home.clone());
+    let st2 = st.clone();
     let outcome = detached_relaunch(async move {
         if let Some(codex) = runtime.restart_codex(&name).await { return Some(Relaunched::Codex(codex)); }
         // A transferência que falhou ao restaurar é recuperada pelo Recarregar, no Python que a conduz.
@@ -113,7 +115,7 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         let from_terminal = runtime.claude_headless(&name).await.is_none_or(|headless| !headless);
         let change = SessionChange { reason: ChangeReason::Reload, surface: None, account: None, permission_mode: None,
             model: None, effort: None, service_tier: None };
-        runtime.reopen_claude_session(&name, change, None).await.map(|r| Relaunched::Claude(r, from_terminal))
+        during_life_change(&st2, &name, runtime.reopen_claude_session(&name, change, None)).await.map(|r| Relaunched::Claude(r, from_terminal))
     }).await;
     let (status, body) = match outcome {
         None => return pass(&st, req, &fwd).await,
@@ -139,6 +141,23 @@ async fn detached_relaunch(work: impl Future<Output = Option<Relaunched>> + Send
         tracing::error!(code = PANICKED, error = %error, "troca de modo ou recarga interrompida no meio");
         Some(Relaunched::Codex(Err(RuntimeError::new(PANICKED, "A troca parou no meio; confira o estado da sessão antes de tentar de novo."))))
     })
+}
+
+/// A reabertura troca a vida da sessão (pane ⇄ sidecar, nascimento novo): durante ela a varredura dos
+/// convites não a revoga, e no fim (também na falha, que pode ter mudado a vida) convite e dono-convidado
+/// passam à vida nova. Falha ao gravar o dono vai ao log e não troca o resultado.
+pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Future<Output = T>) -> T {
+    let Some(share)=st.share.clone() else { return work.await };
+    share.lives.facts().begin_mode_change(name);
+    let result=work.await;
+    if let Some(life)=share.lives.life(name,true).await {
+        if let Err(error)=share.store.set_life(name,Some(life.clone())) { tracing::warn!(session=%name,kind=?error.kind(),"convite não acompanhou a vida nova"); }
+        let (base,owned)=(st.accounts.env.claude_base.clone(),name.to_owned());
+        let saved=tokio::task::spawn_blocking(move||crate::session_open::server::guest_set_life(&base,&owned,&life)).await;
+        if !matches!(saved,Ok(Ok(()))) { tracing::warn!(session=%name,"dono-convidado não acompanhou a vida nova"); }
+    }
+    share.lives.facts().end_mode_change(name);
+    result
 }
 
 /// O `HTTPException` do `_trocar_modo`/`_reload_terminal` do Claude: ocupada é o motivo com a frase do app;
