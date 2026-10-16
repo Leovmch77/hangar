@@ -1083,17 +1083,6 @@ def test_create_rejects_invalid_service_tier(api_client, tier):
     create.assert_not_called()
 
 
-def test_create_rejects_unknown_provider(api_client):
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "provider": "gemini"})
-    assert r.status_code == 400
-    # B3 do parecer task 11: provider fora da lista nao pode reusar o codigo do /api/model-options
-    # (que orienta so claude/pi) — a criacao aceita codex/kimi e o texto tem que ser generico.
-    assert r.json()["detail"]["code"] == "erro_provider_sessao_invalido"
-    cr.assert_not_called()
-
-
 def test_rename_falha_usa_a_mesma_chave_da_sidebar(api_client):
     # B2 do parecer task 11: a rota de rename nao pode ter chave propria duplicando a traducao
     # que a Sidebar ja usa no fallback dela — o code e o contrato, os dois apontam pra mesma frase.

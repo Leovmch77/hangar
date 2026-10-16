@@ -420,7 +420,7 @@ async def test_ingress_and_controls_are_temporarily_unavailable(scenario, monkey
         assert response.json()["detail"]["code"] == "session_transfer_busy"
 
 
-@pytest.mark.parametrize("headless", [False, True])
+@pytest.mark.parametrize("headless", [False])
 async def test_archived_thread_reapplies_budget_and_keeps_explicit_choices(scenario, monkeypatch, headless):
     result = await scenario.run()
     record = store.load_transfer(result["transfer_id"])
@@ -970,7 +970,7 @@ async def test_archive_current_path_cannot_change_transfer_account(scenario, mon
     with pytest.raises(HistoryError, match="não pertence"):
         scenario.reg.create("archive", scenario.info.cwd, provider="codex", codex_account=scenario.account.id,
             resume_session_id=scenario.thread_id, transfer_id=record.id, tool_output_token_limit=5000,
-            transfer_rollout_path=str(path), headless=True)
+            transfer_rollout_path=str(path))
     assert not cs.exists("archive")
     with pytest.raises(ValidationError):
         api.ResumeArchivedBody(provider="codex", transfer_rollout_path=str(path))

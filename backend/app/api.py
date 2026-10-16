@@ -97,7 +97,7 @@ from app import contas, default_model, engine_probe, engines, procinfo
 from app.costs import report as costs_report, usd_brl as _usd_brl, PERIODOS as _COST_PERIODOS
 from app import costs_sources, pricing
 from app.git_ops import (
-    list_branches, switch_branch, create_worktree, remove_worktree, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
+    list_branches, switch_branch, create_worktree, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
     folder_status, folder_fetch, folder_pull, folder_switch, folder_create_branch,
 )
 from app import loop as loop_mod
@@ -1855,15 +1855,6 @@ class CreateBody(_StrictBody):
     creator: str | None = Field(default=None, min_length=1)
 
 
-def _jev_efetivo(pedido: bool | None) -> bool:
-    """Jev desta sessão: o que o chamador pediu, ou o padrão do servidor quando ele não disse nada.
-
-    Um lugar só porque os três caminhos de criação (folha, `hangar-send --new`, MCP `new_session`)
-    desembocam todos no `create_session` — resolver em cada um faria o padrão valer em dois e
-    faltar no terceiro sem ninguém perceber."""
-    return bool(runtime_config.get("jev_padrao")) if pedido is None else pedido
-
-
 class TtsBody(_StrictBody):
     # max_length: sem teto, um corpo de 100 MB era parseado INTEIRO antes do 413 do preparo/teto
     # de caracteres poder recusar. 200_000 e bem acima do teto real (_TTS_TETO) — so evita o corpo
@@ -2146,15 +2137,6 @@ def uso_endpoint(period: str = "all", conta: list[str] = Query([]), projeto: lis
         return _aquecendo(e)
 
 
-async def _kill_unclaimed(name: str) -> None:
-    try:
-        await asyncio.to_thread(registry.kill, name)
-    except Exception:
-        _log.exception("[guests] sessao %s sem dono nao encerrou", name)
-    finally:
-        await asyncio.to_thread(_invalidate_lists)
-
-
 def _codex_as_claude_mode(name: str) -> str | None:
     """Modo do Claude equivalente ao da sessão Codex `name` (None se não for Codex)."""
     from app.adapters.codex import sessions as codex_sessions
@@ -2166,63 +2148,6 @@ def _codex_as_claude_mode(name: str) -> str | None:
     if approval == "never":
         return "bypassPermissions"
     return "acceptEdits" if sandbox == "workspace-write" else "manual"
-
-
-def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
-    """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
-    meta = headless_sessions.load(name)
-    modo = None
-    if meta:
-        modo = meta.get("permission_mode")
-        if modo == "plan":
-            modo = meta.get("previous_non_plan")
-    modo = modo or permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(name))
-    modo = "manual" if modo == "default" else modo
-    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE and modo != "plan" else None
-
-
-async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | None, list[str]]:
-    """Preenche o que veio omitido com o da sessão criadora; devolve também `"inherited"` quando a
-    conta veio dela e os avisos do que não deu para herdar. O modo conta porque o primeiro recado
-    de uma criadora em bypass para uma irmã em Manual fica retido no receptor (`mode-mismatch`)."""
-    # Convidado não herda a conta nem o modo de uma sessão do dono.
-    if not body.creator or guest_users.current.get() is not None:
-        return body, None, []
-    info = await _cached_info(body.creator)
-    if info is None:
-        return body, None, [f"sessão criadora '{body.creator}' não encontrada; nada foi herdado"]
-    update: dict = {}
-    avisos: list[str] = []
-    account_source = None
-    # Perfil do omp já define a conta.
-    # Codex não tem conta Claude: a nova fica na padrão, como quando a criadora não é identificada.
-    if (body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile
-            and info.provider != "codex"):
-        cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
-        if not confiavel:
-            # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
-            raise HTTPException(409, detail=erro(
-                "erro_conta_criadora", f"não consegui confirmar a conta da sessão '{info.name}' — "
-                "escolha a conta (`conta` no MCP, `--conta` no hangar-send)"))
-        account_source = "inherited"
-        if cfg:
-            update["config_dir"] = str(cfg)
-    if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
-        update["headless"] = bool(info.headless)
-    if body.permission_mode is None and body.provider == "claude" and info.provider in ("claude", "codex"):
-        modo = await (asyncio.to_thread(_codex_as_claude_mode, info.name) if info.provider == "codex"
-                      else asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl))
-        if modo:
-            update["permission_mode"] = modo
-        else:
-            avisos.append(f"não consegui ler o modo de permissão de '{info.name}'; vale o padrão da conta")
-    return (body.model_copy(update=update) if update else body), account_source, avisos
-
-
-def _create_error_code(e: ValueError) -> str:
-    if isinstance(e, registry_mod.GroupCleanupFailed):
-        return e.code
-    return "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
 
 
 async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSessionInfo | None:
@@ -2253,65 +2178,8 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
     opened = await _open_in_rust(body, request)
     if opened is not None:
         return opened
-    if "provider" not in body.model_fields_set:
-        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
-                                                   body.omp_profile, body.subagent_model)
-        body = body.model_copy(update={"provider": provider})
-    body, account_source, avisos_extra = await _inherit_from_creator(body)
-    if body.provider in ("claude", "codex", "pi", "omp", "kimi"):
-        # Toda sessão nova abre no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
-        raise registry_mod.SessionOpenNeedsRust()
-    worktree: dict = {}
-    try:
-        info = await _criar_sessao(body, worktree)
-        if body.branch is not None:
-            # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
-            cwd = worktree.get("cwd", body.cwd)
-            is_wt = Path(cwd, ".git").is_file()
-            info = info.model_copy(update={"cwd": cwd, "branch": body.branch, "worktree": is_wt,
-                                           "worktree_path": cwd if is_wt else None})
-        guest = guest_users.current.get()
-        if guest is not None:
-            try:
-                await asyncio.to_thread(guest_users.claim, info.name, guest.id)
-            except Exception:
-                # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
-                _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
-                await _kill_unclaimed(info.name)
-                raise
-            info = info.model_copy(update={"owner": guest.name})
-        if avisos_extra:
-            info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
-        info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
-                                  account_source=account_source)
-        if (guest is None and body.remember_provider
-                and runtime_config.get("last_session_provider") != info.provider):
-            try:
-                await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
-            except Exception as exc:  # noqa: BLE001 — a sessão já existe; falhar aqui faria o cliente recriá-la
-                _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
-                info = info.model_copy(update={"avisos": [*info.avisos,
-                    f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
-        return info
-    except BaseException:
-        if worktree.get("path") and not worktree.get("session_created"):
-            try:
-                await asyncio.shield(asyncio.to_thread(_undo_worktree, worktree))
-            except GitError as exc:
-                raise HTTPException(500, detail=erro("erro_criacao_sessao",
-                                                      f"falha ao desfazer a worktree: {exc.detail}")) from exc
-        raise
-
-
-def _undo_worktree(worktree: dict) -> None:
-    """Desfaz a worktree que o próprio pedido criou. Força: os arquivos de config copiados podem
-    não estar ignorados na base. A branch nova vai junto, senão a nova tentativa daria 409."""
-    remove_worktree(worktree["source"], worktree["path"], force=True)
-    branch = worktree.get("new_branch")
-    if branch:
-        deleted = git_ops._run(worktree["source"], "branch", "-D", branch)
-        if deleted.returncode != 0:
-            raise GitError(500, git_ops._scrub(deleted.stderr.strip()) or "não consegui apagar a branch")
+    # Toda abertura é do Rust (`_open_in_rust` para o que entrou aqui pelo Connect): sem ele, recusa.
+    raise registry_mod.SessionOpenNeedsRust()
 
 
 def _allowed_scan_root(path: str) -> Path:
@@ -2321,156 +2189,6 @@ def _allowed_scan_root(path: str) -> Path:
         raise FsError(403, "root not allowed")
     scan_dir(str(root), str(target))
     return root
-
-
-async def _criar_sessao(body: CreateBody, worktree: dict):
-    from app.account_lifecycle import complete_on_cancel
-    return await complete_on_cancel(_create_session_owned(body, worktree))
-
-
-async def _create_session_owned(body: CreateBody, worktree: dict):
-    if body.headless is None:
-        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
-                                      and bool(runtime_config.get("headless_default"))})
-    # Handler async por causa da trava de conta mais abaixo. Todo provider passa pelo MESMO
-    # registry.create — o Codex tambem, desde que o lancador unico virou o comando do pane dele.
-    # registry.create e SINCRONO e spawna um
-    # subprocess tmux (bloqueante) -> rodar direto aqui travaria o event loop / o SSE de outras
-    # sessoes; vai pro threadpool via asyncio.to_thread, igual aos outros handlers async deste
-    # arquivo que chamam registry.list()/save_upload (menor risco de regressao: comportamento e
-    # exceções do create() Claude ficam IDENTICOS, so a chamada muda de sync p/ thread).
-    # Validar provider, config_dir e engine ANTES de qualquer efeito no disco: um pedido que vai
-    # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
-    if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
-        raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
-    # Só o Codex cria aqui (o resto abre no Rust): o que é só do Claude é recusado.
-    if body.claude_customizations is not None:
-        raise HTTPException(400, detail=erro("claude_customizations_invalid",
-                                             "plugins e skills por sessão só valem para Claude"))
-    # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
-    guest = guest_users.current.get()
-    if guest is not None and not guest_users.inside_root(guest, body.cwd):
-        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
-                                             "o convidado só abre sessão dentro da pasta dele"))
-    # Sem isto a sessão sem terminal nasce e só quebra ao subir o processo, com um ENOENT que não
-    # diz qual arquivo faltou.
-    if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
-        raise HTTPException(400, detail=erro("erro_cwd_inexistente", f"a pasta {body.cwd} não existe",
-                                             cwd=body.cwd))
-    if body.engine_account is not None:
-        raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
-    if body.read_only:
-        from app.orq_readonly import prepare
-        try:
-            await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(body.config_dir or "",))
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
-    if body.codex_account is not None and body.provider != "codex":
-        raise HTTPException(400, detail=erro("codex_account_so_codex",
-                                             "codex_account só vale para provider codex"))
-    if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
-    # pedido incoerente — 400, nao "ignora e segue".
-    if body.engine is not None:
-        raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
-    if body.permission_mode is not None and body.provider != "claude":
-        raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
-    if body.omp_profile and body.provider != "omp":
-        raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
-    if body.subagent_model is not None:
-        raise HTTPException(400, detail=erro("erro_subagente_so_claude",
-                                             "modelo dos subagentes so vale para claude sem motor"))
-    # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
-    # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
-    # entraria num comando de shell montado por concatenacao.
-    try:
-        model_args.validar(body.provider, body.model, body.effort, body.permission_mode)
-    except ValueError as e:
-        # permission_mode fora da lista deve ser 409 com código específico, não 400 genérico
-        msg = str(e)
-        if "permission_mode" in msg:
-            raise HTTPException(409, detail=erro("erro_permissao_invalida", msg)) from None
-        raise HTTPException(400, str(e)) from None
-
-    if body.new_branch and body.branch is None:
-        raise HTTPException(400, detail=erro("erro_criacao_sessao", "branch nova sem nome"))
-    if body.branch is not None:
-        try:
-            root = await asyncio.to_thread(_allowed_scan_root, body.cwd)
-            source = body.cwd
-            # Recusa antes de criar a worktree, em vez de criar e desfazer no registry.create.
-            if not sanitize_session_name(body.name):
-                raise GitError(400, "nome de sessão inválido")
-            worker = asyncio.create_task(asyncio.to_thread(
-                git_ops.create_branch_worktree, source, body.branch, root,
-                new_branch=body.new_branch, base=body.base))
-            try:
-                path, created = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                path, created = await asyncio.shield(worker)
-                if created:
-                    worktree.update(source=source, path=path,
-                                    new_branch=body.branch if body.new_branch else None)
-                raise
-        except (FsError, GitError) as exc:
-            raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
-        if created:
-            worktree.update(source=source, path=path,
-                            new_branch=body.branch if body.new_branch else None)
-        body.cwd = worktree["cwd"] = path
-
-
-    async def _create_registry(kwargs: dict):
-        """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
-        def create():
-            from app.account_lifecycle import AccountKey, AccountLockError, acquire
-            from contextlib import nullcontext
-            home = Path(tmux.config_dir_de(body.config_dir))
-            try:
-                guard = acquire(AccountKey.new("claude", home)) if body.provider == "claude" else nullcontext()
-            except AccountLockError as exc:
-                # Exclusão ou login segura a conta: o app mostra "tente de novo", não um 500.
-                raise HTTPException(409, detail=erro(exc.code, "a conta está ocupada por outra operação")) from None
-            with guard:
-                try:
-                    info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
-                except claude_customizations.CustomizationsError as exc:
-                    raise HTTPException(exc.status, detail=erro(exc.code, exc.detail)) from None
-            worktree["session_created"] = True
-            # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
-            _invalidate_lists()
-            return info
-
-        worker = asyncio.create_task(asyncio.to_thread(create))
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            await asyncio.shield(worker)
-            raise
-
-    # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
-    def _registry_kwargs() -> dict:
-        kw: dict = dict(provider=body.provider, model=body.model, effort=body.effort)
-        if body.permission_mode is not None:
-            kw["permission_mode"] = body.permission_mode
-        if _jev_efetivo(body.jev):
-            kw["jev"] = True
-        if body.initial_prompt is not None:
-            kw["initial_prompt"] = body.initial_prompt
-        if body.service_tier is not None:
-            kw["service_tier"] = body.service_tier
-        if body.read_only:
-            kw["read_only"] = True
-        if body.headless:
-            kw["headless"] = True
-        return kw
-
-    try:
-        return await _create_registry(_registry_kwargs())
-    except ValueError as e:
-        code = _create_error_code(e)
-        raise HTTPException(409, detail=erro(code, str(e)))
 
 
 def _jsonl_of_session(name: str) -> str | None:
@@ -3979,32 +3697,13 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
         headless=bool(body.headless))
-    if creation.provider in ("claude", "codex", "pi", "omp", "kimi"):
-        # A sucessora nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust já olhou o
-        # pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
-        creation = creation.model_copy(update={"initial_prompt": kick})
-        if request.headers.get("x-hangar-open") == "rust":
-            return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
-                                 "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
+    # A sucessora nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust já olhou o
+    # pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+    creation = creation.model_copy(update={"initial_prompt": kick})
+    if request.headers.get("x-hangar-open") == "rust":
+        return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
+                             "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
     novo = await create_session(creation, request)
-    if creation.initial_prompt is None:
-        try:
-            await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
-                kick, delivered=False, pre_transcript=True))
-        except OSError as e:
-            # A sessão JÁ existe: o erro tem de dizer isso, senão o 500 nomeia a coisa errada e quem
-            # lê acha que nada aconteceu — e vai criar outra. Aqui o conserto é humano (mandar o
-            # kick-off na mão), então o caminho do dossiê vai junto.
-            _log.error("bastao: sessão %s criada, mas o kick-off não entrou na fila: %s", novo.name, e)
-            raise HTTPException(500, detail=erro(
-                "erro_bastao_fila", f"a sessão {novo.name} nasceu, mas o kick-off não entrou na fila "
-                f"dela ({e}) — mande você mesmo o pedido apontando pra {alvo}",
-                nome=novo.name, dossie=str(alvo))) from None
-        # Drena numa thread: `send_prompt` espera a TUI ficar interativa (`_wait_input_ready`), o que
-        # pode levar segundos numa sessão recém-criada — segurar o request nisso não ajuda ninguém.
-        # Pi/Kimi nascem com `jsonl=None` e a thread sai calada; não há perda, a fila é durável e o
-        # drain do próximo idle/SSE entrega.
-        threading.Thread(target=_drain_session, args=(novo.name,), daemon=True).start()
     # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
     # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
     return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,

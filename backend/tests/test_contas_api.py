@@ -65,61 +65,6 @@ def test_marcador_por_symlink_nao_entra_na_lista(casa):
     assert str(conta) not in {c.path for c in list_config_dirs()}
 
 
-def test_falha_na_reconciliacao_devolve_erro_e_nao_cria_sessao(casa, monkeypatch):
-    """ContaError do reconciliar (ex: Windows sem Modo Desenvolvedor) e OSError de filesystem
-    viram HTTPException com o motivo, e a sessão NÃO é criada — abertura abortada, não 500 com
-    traceback."""
-    contas.criar("conta2")
-
-    def boom_conta(self, projeto=None):
-        raise contas.ContaError(500, "não consegui criar o atalho")
-
-    def boom_os(self, projeto=None):
-        raise OSError("permissão negada")
-
-    criados = []
-    monkeypatch.setattr(api_mod.registry, "create",
-                        lambda *a, **k: criados.append(a) or object())
-    cli = TestClient(app)
-    # ContaError: o detail passa como STRING (e.detail) — o texto do motivo chega direto.
-    # Sem terminal: com terminal a abertura (e a reconciliação) é do Rust.
-    monkeypatch.setattr(contas._Ciclo, "reconciliar", boom_conta)
-    r = cli.post("/api/sessions", json={
-        "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
-        "provider": "claude", "headless": True}, headers=AUTH)
-    assert r.status_code == 500
-    assert "não consegui criar o atalho" in r.json()["detail"]
-    # OSError: vira o envelope erro_conta_reconciliacao_falhou — o contrato code/params tem que
-    # ser afirmado (B4 do parecer task 11): um envelope com o MESMO msg mas code errado reprova.
-    monkeypatch.setattr(contas._Ciclo, "reconciliar", boom_os)
-    r = cli.post("/api/sessions", json={
-        "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
-        "provider": "claude", "headless": True}, headers=AUTH)
-    assert r.status_code == 500
-    d = r.json()["detail"]
-    assert d["code"] == "erro_conta_reconciliacao_falhou"
-    assert d["params"]["nome_conta"] == "conta2"
-    assert d["params"]["erro"] == "permissão negada"
-    assert "permissão negada" in d["msg"]
-    assert criados == []
-
-
-def test_conta_nomeada_repassa_as_mesmas_escolhas_da_padrao(casa, monkeypatch):
-    contas.criar("conta2")
-    monkeypatch.setattr(contas._Ciclo, "reconciliar", lambda self, projeto=None: [])
-    monkeypatch.setattr(api_mod.cliproxy, "supports_fast", lambda engine, model=None: True)
-    kwargs = []
-    monkeypatch.setattr(api_mod.registry, "create",
-                        lambda *a, **k: kwargs.append(k) or SessionInfo(name="s1", provider="claude"))
-    r = TestClient(app).post("/api/sessions", json={
-        "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
-        "provider": "claude", "service_tier": "priority", "initial_prompt": "oi",
-        "headless": True}, headers=AUTH)
-    assert r.status_code == 200, r.text
-    assert kwargs[0]["service_tier"] == "priority"
-    assert kwargs[0]["initial_prompt"] == "oi"
-
-
 def test_codex_com_config_dir_nao_reconcilia(casa, monkeypatch):
     """Provider codex não consome config dir (ele tem conta própria, do CLI do Codex): a
     reconciliação — efeito no disco — não pode rodar num pedido que vai criar uma sessão codex."""
@@ -132,21 +77,6 @@ def test_codex_com_config_dir_nao_reconcilia(casa, monkeypatch):
     r = TestClient(app).post("/api/sessions", json={
         "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
         "provider": "codex"}, headers=AUTH)
-    assert reconciliou == []
-
-
-def test_engine_invalido_rejeita_antes_de_reconciliar(casa, monkeypatch):
-    """Validação de engine vem ANTES do toque no disco: pedido que vai ser rejeitado não pode
-    ter movido deriva nem criado memória na conta."""
-    contas.criar("conta2")
-    reconciliou = []
-    monkeypatch.setattr(contas._Ciclo, "reconciliar",
-                        lambda self, projeto=None: reconciliou.append(1) or [])
-    monkeypatch.setattr(api_mod.engines, "listar", lambda: {})
-    r = TestClient(app).post("/api/sessions", json={
-        "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
-        "provider": "claude", "engine": "naoexiste", "headless": True}, headers=AUTH)
-    assert r.status_code == 400
     assert reconciliou == []
 
 

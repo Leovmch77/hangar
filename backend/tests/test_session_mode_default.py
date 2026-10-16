@@ -1,41 +1,5 @@
 """O modo omitido herda; escolha explícita nunca altera a preferência."""
-from unittest.mock import AsyncMock, Mock
 import pytest
-from app import api, runtime_config
-from app.registry import SessionInfo
-
-
-def _sem_pino_do_conftest(monkeypatch):
-    # O conftest força headless_default=False para os outros testes; aqui o padrão é o assunto.
-    original = runtime_config.get
-
-    def get(campo):
-        if campo != "headless_default":
-            return original(campo)
-        return runtime_config._carregar().get(campo, getattr(runtime_config.settings, campo, None))
-    monkeypatch.setattr(runtime_config, "get", get)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "pi"])
-@pytest.mark.parametrize("default", [False, True])
-@pytest.mark.parametrize("requested", [None, False, True])
-async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, default, requested):
-    monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
-    monkeypatch.setattr(api.settings, "headless_default", default)
-    _sem_pino_do_conftest(monkeypatch)
-    create = Mock(return_value=SessionInfo(name="test-mode", cwd=str(tmp_path), provider=provider))
-    monkeypatch.setattr(api.registry, "create", create)
-    monkeypatch.setattr(api, "get_adapter", Mock())
-    body = api.CreateBody(name="test-mode", cwd=str(tmp_path), provider=provider, headless=requested)
-    await api._criar_sessao(body, {})
-    effective = requested if requested is not None else default and provider in ("claude", "codex")
-    assert create.call_args.kwargs.get("headless", False) is effective
-    assert runtime_config.get("headless_default") is default
-    assert not (tmp_path / "runtime-config.json").exists()
-    assert body.headless is requested
-
-
 
 
 @pytest.mark.parametrize("flags, expected", [((), None), (("--headless",), True), (("--terminal",), False)])
@@ -88,23 +52,3 @@ def test_cli_preserves_omission_and_explicit_mode(tmp_path, flags, expected):
         server.server_close()
         worker.join()
 
-
-@pytest.mark.asyncio
-async def test_busy_account_is_a_coded_conflict(tmp_path, monkeypatch):
-    from app import account_lifecycle
-
-    monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
-    create = Mock(return_value=SessionInfo(name="busy-account", cwd=str(tmp_path), provider="claude"))
-    monkeypatch.setattr(api.registry, "create", create)
-    monkeypatch.setattr(api, "get_adapter", Mock())
-
-    def busy(*args, **kwargs):
-        raise account_lifecycle.AccountLockError("account_busy")
-
-    monkeypatch.setattr(account_lifecycle, "acquire", busy)
-    body = api.CreateBody(name="busy-account", cwd=str(tmp_path), provider="claude")
-    with pytest.raises(api.HTTPException) as refused:
-        await api._criar_sessao(body, {})
-    assert refused.value.status_code == 409
-    assert refused.value.detail["code"] == "account_busy"
-    create.assert_not_called()

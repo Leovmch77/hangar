@@ -33,44 +33,6 @@ def test_guest_scans_inside_his_folder(ana):
     assert fs.scan_dir(g.root) is not None
 
 
-def test_create_outside_folder_is_403(ana, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api
-    from app.api import app
-    from app.config import settings
-    from app.models import SessionInfo
-    g, tmp = ana
-    monkeypatch.setattr(settings, "auth_token", "secret")
-    _, tok = guest_users.create("bia", g.root, False, True)
-    (tmp / "fora").mkdir()
-    # Sem efeito real se a recusa regredir.
-    monkeypatch.setattr(api.registry, "create",
-                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="pi"))
-    # Pi: Claude com terminal do convidado nasce no Rust.
-    r = TestClient(app).post("/api/sessions", headers={"Authorization": f"Bearer {tok}"},
-                             json={"name": "x", "cwd": str(tmp / "fora"), "provider": "pi"})
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "erro_fora_da_pasta"
-
-
-def test_create_inside_folder_claims_session(ana, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api
-    from app.models import SessionInfo
-    g, _ = ana
-    monkeypatch.setattr(api.settings, "auth_token", "secret")
-    _, tok = guest_users.create("bia", g.root, False, True)
-    claimed = []
-    monkeypatch.setattr(guest_users, "claim", lambda session, gid: claimed.append((session, gid)))
-    monkeypatch.setattr(api.registry, "create",
-                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="pi"))
-    r = TestClient(api.app).post("/api/sessions", headers={"Authorization": f"Bearer {tok}"},
-                                 json={"name": "x", "cwd": g.root + "/sub", "provider": "pi"})
-    assert r.status_code == 200
-    assert r.json()["owner"] == "bia"
-    assert [c[0] for c in claimed] == ["x"]
-
-
 def test_rename_moves_guest_ownership(ana, monkeypatch):
     from app import api
     g, _ = ana
@@ -122,28 +84,6 @@ def test_guest_user_shortcut_folder_must_be_inside_his_root(guest_shortcut):
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "erro_fora_da_pasta"
     assert started == []
-
-
-def test_failed_claim_kills_the_new_session_and_surfaces(ana, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api
-    from app.models import SessionInfo
-    g, _ = ana
-    monkeypatch.setattr(api.settings, "auth_token", "secret")
-    _, tok = guest_users.create("bia", g.root, False, True)
-
-    def claim_fails(session, gid):
-        raise OSError("disco cheio")
-    killed = []
-    monkeypatch.setattr(guest_users, "claim", claim_fails)
-    monkeypatch.setattr(api.registry, "create",
-                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="pi"))
-    monkeypatch.setattr(api.registry, "kill", killed.append)
-    r = TestClient(api.app, raise_server_exceptions=False).post(
-        "/api/sessions", headers={"Authorization": f"Bearer {tok}"},
-        json={"name": "x", "cwd": g.root + "/sub", "provider": "pi"})
-    assert r.status_code == 500
-    assert killed == ["x"]
 
 
 def test_rename_survives_guest_claim_failure(ana, monkeypatch):

@@ -303,19 +303,6 @@ def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch
     apply.assert_not_called()
 
 
-def test_create_codex_refuses_fixed_account(cli, tmp_path, monkeypatch):
-    from app import api
-    _fixed_engine(tmp_path, monkeypatch)
-    create = MagicMock()
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "invalid", "cwd": str(tmp_path), "provider": "codex", "engine": "proxy",
-        "engine_account": "default", "headless": False})
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"]["code"] == "erro_cliproxy_conta"
-    create.assert_not_called()
-
-
 @pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.5[1m]"])
 def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, monkeypatch, model):
     from app import api

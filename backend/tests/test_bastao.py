@@ -522,11 +522,9 @@ def test_post_grava_o_dossie_cria_a_sessao_e_enfileira_o_kickoff(bastao_post, tm
     assert p.name == "cc2.md" and p.read_text(encoding="utf-8") == d["texto"]
     # cwd e provider herdados da origem quando o corpo não manda outros.
     assert criadas[0].cwd == str(tmp_path) and criadas[0].model == "opus"
-    entradas = PromptQueue("cc2").load()
-    assert [e["text"] for e in entradas] == [d["kickoff"]]
-    # delivered=False + pre_transcript: entrega pelo DRAIN (o /input digitaria numa TUI que ainda
-    # está subindo), e imune ao corte por idade da fila — ela nasceu antes do transcript existir.
-    assert entradas[0]["delivered"] is False and entradas[0]["pre_transcript"] is True
+    # O kick-off vai na abertura, como primeira mensagem; a fila do Hangar não o carrega.
+    assert criadas[0].initial_prompt == d["kickoff"]
+    assert PromptQueue("cc2").load() == []
 
 
 def test_claude_com_terminal_recebe_o_kickoff_como_primeira_mensagem(bastao_post):
@@ -599,18 +597,6 @@ def test_post_400_com_nome_que_sanitiza_pra_vazio(bastao_post, tmp_path):
     assert criadas == []
     # E nada foi gravado antes da recusa (o dossiê é caro: roda git e parseia transcript).
     assert not (tmp_path / ".hangar-bastao").exists()
-
-
-def test_post_diz_que_a_sessao_nasceu_quando_a_fila_falha(bastao_post, monkeypatch):
-    from app import pqueue
-    def sem_disco(self, *a, **kw):
-        raise OSError("disco cheio")
-    monkeypatch.setattr(pqueue.PromptQueue, "append", sem_disco)
-    post, criadas = bastao_post
-    r = post(name="cc2", headless=True)
-    assert r.status_code == 500
-    assert criadas and criadas[0].name == "cc2"
-    assert "cc2" in r.text and "nasceu" in r.text      # nomeia o que de fato aconteceu
 
 
 def test_post_recusa_nome_ja_em_uso_sem_tocar_no_dossie_dela(bastao_post, monkeypatch):
