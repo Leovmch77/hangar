@@ -30,6 +30,10 @@ SUBCOMMANDS = {
 }
 
 
+def uncovered(provider: str, arg: str) -> None:
+    print(f"hangar: o argumento '{arg}' não cabe no pedido do Hangar; abrindo o {provider} sem o Hangar", file=sys.stderr)
+
+
 def request(provider: str, args: list[str]) -> dict | None:
     if args and args[0] in SUBCOMMANDS.get(provider, ()):
         return None
@@ -45,12 +49,12 @@ def request(provider: str, args: list[str]) -> dict | None:
             if not eq:
                 value = next(rest, None)
                 if value is None:
-                    return None
+                    return uncovered(provider, arg)
             body[flags[flag]] = value
         elif provider == "claude" and arg == "--dangerously-skip-permissions":
             body["permission_mode"] = "bypassPermissions"
         elif arg.startswith("-") or "initial_prompt" in body:
-            return None
+            return uncovered(provider, arg)
         else:
             body["initial_prompt"] = arg
     return body

@@ -76,23 +76,28 @@ function claude {
                          'logs', 'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop',
                          'kill', 'ultrareview', 'update', 'upgrade')
         if ($args.Count -gt 0 -and $subcomandos -ccontains [string]$args[0]) { $cobre = $false }
-        for ($i = 0; $cobre -and$i -lt $args.Count; $i++) {
+        $barrou = $null
+        for ($i = 0; $cobre -and $i -lt $args.Count; $i++) {
             $a = [string]$args[$i]
             $flag, $valor = $a -split '=', 2
             if ($chaves.ContainsKey($flag)) {
                 if ($null -eq $valor) {
                     $i++
-                    if ($i -ge $args.Count) { $cobre = $false; break }
+                    if ($i -ge $args.Count) { $barrou = $a; break }
                     $valor = [string]$args[$i]
                 }
                 $pedido[$chaves[$flag]] = $valor
             } elseif ($a -eq '--dangerously-skip-permissions') {
                 $pedido.permission_mode = 'bypassPermissions'
             } elseif ($a.StartsWith('-') -or $pedido.Contains('initial_prompt')) {
-                $cobre = $false; break
+                $barrou = $a; break
             } else {
                 $pedido.initial_prompt = $a
             }
+        }
+        if ($null -ne $barrou) {
+            $cobre = $false
+            [Console]::Error.WriteLine("hangar: o argumento '$barrou' nao cabe no pedido do Hangar; abrindo o claude sem o Hangar")
         }
         if ($cobre) {
             $servidor = $null

@@ -696,6 +696,8 @@ for SH in bash zsh fish; do
 
     d=$(tty_case "$SH" claude ok --flag-que-o-pedido-nao-conhece)
     check_raw "$SH claude flag desconhecida vai crua" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ --flag-que-o-pedido-nao-conhece$'
+    grep -qF "argumento '--flag-que-o-pedido-nao-conhece'" "$d/tty" \
+        || { echo "FAIL: $SH claude flag desconhecida — não disse qual argumento impediu"; fail=1; }
 
     d=$(tty_case "$SH" claude ok update)
     check_raw "$SH claude subcomando vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ update$'
