@@ -176,6 +176,7 @@ struct ActivityFold {
     shell_calls: HashSet<String>,
     agent_calls: HashSet<String>,
     agent_ids: HashMap<String, String>,
+    agent_descs: HashMap<String, String>,
     agents: Vec<AgentRun>,
     shells: Vec<ShellRun>,
     created: Vec<(ActivityTask, bool)>,
@@ -193,6 +194,16 @@ impl ActivityFold {
         match event.kind.as_str() {
             "tool_result" => {
                 let Some(id) = tool_key(event) else { return false };
+                // Parada pelo usuário: o aviso do Claude Code traz só a descrição do agente, sem task-id.
+                if let Some(stopped) = id.strip_prefix("task:stopped:") {
+                    let mut changed = false;
+                    for (call, desc) in &self.agent_descs {
+                        if desc == stopped && self.background.values().any(|c| c == call) {
+                            changed |= super::record_completion(&mut self.resulted, call.clone(), event.ts);
+                        }
+                    }
+                    return changed;
+                }
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((self.woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { return false; }
                     return self.finish(task, event.ts);
@@ -282,6 +293,7 @@ impl ActivityFold {
                             crate::i18n::tr_web("atividade_swarm_itens", &params).unwrap_or(desc)
                         } else { desc };
                         self.agent_calls.insert(id.to_owned());
+                        if let Some(raw) = text("description") { self.agent_descs.insert(id.to_owned(), raw); }
                         self.agents.push(AgentRun { call: i, id: id.to_owned(), description, subagent_type: text("subagent_type"),
                             model: text("model"), prompt: text("prompt"), running: false, agent_id: None,
                             started_at: event.ts, finished_at: None });

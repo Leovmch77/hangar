@@ -556,6 +556,20 @@ def test_queued_removed_ids_diferem_no_mesmo_timestamp():
     assert a.id != b.id and a.text != b.text
 
 
+def test_parada_de_agentes_pelo_usuario_fecha_cada_um_pela_descricao():
+    # O Claude Code avisa a parada só com as descrições, sem task-id; texto da versão 2.1.301.
+    varios = parse_line(json.dumps({"type": "attachment", "uuid": "u-stop", "timestamp": "2026-10-16T10:31:21.479Z",
+        "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                       "prompt": '2 background agents were stopped by the user: "Revisar a Task 4", "Validar a tela".'}}))
+    assert [(e.kind, e.tool_use_id, e.result) for e in varios] == [
+        ("tool_result", "task:stopped:Revisar a Task 4", "task-notification"),
+        ("tool_result", "task:stopped:Validar a tela", "task-notification")]
+    assert len({e.id for e in varios}) == 2 and all(e.ts for e in varios)
+    [um] = parse_line(json.dumps({"type": "queue-operation", "operation": "enqueue",
+        "content": 'Background agent "Validar a tela" was stopped by the user.'}))
+    assert um.tool_use_id == "task:stopped:Validar a tela"
+
+
 def test_entrega_sem_terminal_anexo_e_remove_viram_uma_bolha():
     # Sem terminal, a mesma entrega grava `attachment/queued_command` e `queue-operation remove`.
     att = parse_line(json.dumps({"type": "attachment", "uuid": "u-att", "timestamp": "2026-10-09T23:06:03.448Z",

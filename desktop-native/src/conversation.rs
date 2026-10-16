@@ -323,6 +323,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
     let mut resume_pending: HashMap<&str, Vec<(String, Option<f64>)>> = HashMap::new();
     let mut agent_calls: HashSet<&str> = HashSet::new();
     let mut agent_ids: HashMap<&str, &str> = HashMap::new();
+    let mut agent_descs: HashMap<&str, String> = HashMap::new();
     let mut agents = Vec::new();
     let mut shells = Vec::new();
     // Tarefas pelo número sequencial do TaskCreate; o `bool` marca a apagada. A lista do último TodoWrite vence.
@@ -341,6 +342,13 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                             if let Some(&call) = background.get(&key) { resulted.remove(call); }
                             if let Some(at) = at { woken.insert(key, at); }
                         }
+                    }
+                    continue;
+                }
+                // Parada pelo usuário: o aviso do Claude Code traz só a descrição do agente, sem task-id.
+                if let Some(stopped) = id.strip_prefix("task:stopped:") {
+                    for (&call, desc) in &agent_descs {
+                        if desc == stopped && background.values().any(|&c| c == call) { record_completion(&mut resulted, call, event.ts); }
                     }
                     continue;
                 }
@@ -430,6 +438,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                             crate::i18n::tr_web("atividade_swarm_itens", &params).unwrap_or(desc)
                         } else { desc };
                         agent_calls.insert(id);
+                        if let Some(raw) = text("description") { agent_descs.insert(id, raw); }
                         agents.push(AgentRun { call: i, id: id.to_owned(), description, subagent_type: text("subagent_type"),
                             model: text("model"), prompt: text("prompt"), running: false, agent_id: None,
                             started_at: event.ts, finished_at: None });
@@ -874,6 +883,17 @@ mod tests {
         ChatEvent { text: Some(format!("<task-notification>\n<task-id> {task} </task-id>\n<status>completed</status></task-notification>")), ..ev("user_msg", id) }
     }
     fn running(events: &[ChatEvent]) -> Vec<String> { fold_activity(events).running_agents().map(|a| a.id.clone()).collect() }
+
+    #[test]
+    fn stop_by_the_user_ends_the_background_agent_by_its_description() {
+        let launch = answered("r", "t1", "Async agent launched successfully.\nagentId: ag-1 (use it)");
+        let mut events = vec![agent("a", "t1", json!({"description": "Validar a tela"})), launch,
+            agent("b", "t2", json!({"description": "Outra"})), answered("q", "t2", "Async agent launched successfully.\nagentId: ag-2 (use it)")];
+        events.push(ChatEvent { tool_use_id: Some("task:stopped:Validar a tela".into()), result: Some("task-notification".into()),
+            ts: Some(9.0), ..ev("tool_result", "s") });
+        assert_eq!(running(&events), vec!["t2".to_string()], "só o agente com a descrição parada sai");
+        assert_eq!(fold_activity(&events).agents.iter().find(|a| a.id == "t1").unwrap().finished_at, Some(9.0));
+    }
 
     #[test]
     fn foreground_agent_runs_until_its_result() {

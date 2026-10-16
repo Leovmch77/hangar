@@ -93,6 +93,19 @@ fn structured_launch_id_keeps_the_agent_running_without_the_launch_text() {
 }
 
 #[test]
+fn background_agent_stopped_by_the_user_ends_by_its_description() {
+    let events = [
+        event(json!({"id":"agent","kind":"tool_use","tool_use_id":"a","tool_name":"Agent","tool_input":{"prompt":"Ler","description":"Validar a tela","run_in_background":true}})),
+        event(json!({"id":"launch","kind":"tool_result","tool_use_id":"a","result":"Async agent launched successfully.\nagentId: ab12 (use it)"})),
+        event(json!({"id":"stop","kind":"tool_result","tool_use_id":"task:stopped:Validar a tela","result":"task-notification","ts":9.0})),
+    ];
+    let mut fold = super::ActivityFold::default();
+    for (i, ev) in events.iter().enumerate() { fold.push(i, ev); }
+    assert!(!fold.snapshot().agents[0].running);
+    assert_eq!(fold.snapshot(), conversation::fold_activity(&events));
+}
+
+#[test]
 fn teammate_runs_until_idle_and_keeps_its_real_agent_id() {
     let events = [
         event(json!({"id":"agent","kind":"tool_use","tool_use_id":"a","tool_name":"Agent","tool_input":{"prompt":"Ler","name":"x"}})),
