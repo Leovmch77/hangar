@@ -478,6 +478,17 @@ def test_task_notification_enfileirada_vira_tool_result_sintetico():
     assert evs[0].tool_use_id == "task:a4e4f68c8a3c46749"   # e o que o fold do painel casa
 
 
+def test_cada_fim_enfileirado_do_subagente_retomado_tem_id_proprio():
+    # Retomado por SendMessage, o mesmo subagente avisa o fim de novo; com o id repetido o cliente
+    # descartava o segundo aviso e o card ficava "Pensando" para sempre.
+    retomado = json.loads(_QUEUED)
+    retomado["content"] = retomado["content"].replace("completed", "killed")
+    primeiro, de_novo, segundo = parse_line(_QUEUED), parse_line(_QUEUED), parse_line(json.dumps(retomado))
+    assert primeiro[0].id == de_novo[0].id
+    assert segundo[0].tool_use_id == "task:a4e4f68c8a3c46749"
+    assert primeiro[0].id != segundo[0].id
+
+
 _HAND_BACK = ('<agent-message from="abd7854a2736546e7">\n[Subagent hand-back] The text below is the final '
               'report.\n  relatorio\n</agent-message>')
 

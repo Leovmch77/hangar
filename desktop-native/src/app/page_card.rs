@@ -114,7 +114,7 @@ impl Budget {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum HostMsg { Height(f32), Link(String) }
+pub enum HostMsg { Height(f32), Link(String, bool) }
 
 /// Mensagem da página (`window.hangarHost`). Entrada não confiável: os iframes http(s) permitidos também chamam a
 /// ponte. Só os dois métodos, altura finita e positiva, link só http(s).
@@ -125,7 +125,8 @@ pub fn parse_host(raw: &str) -> Option<HostMsg> {
         "ui/notifications/size-changed" => params["height"].as_f64().filter(|h| h.is_finite() && *h > 0.).map(|h| HostMsg::Height(h as f32)),
         "ui/open-link" => {
             let url = url::Url::parse(params["url"].as_str()?).ok()?;
-            matches!(url.scheme(), "http" | "https").then(|| HostMsg::Link(url.into()))
+            let external = params["ctrlKey"] == true || params["metaKey"] == true;
+            matches!(url.scheme(), "http" | "https").then(|| HostMsg::Link(url.into(), external))
         }
         _ => None,
     }
@@ -559,7 +560,9 @@ impl Hangar {
                     self.redraw(panes::Area::Conversation, cx);
                 }
                 // Só logo depois de um clique ou tecla na página: sozinha ela não abre o navegador.
-                Some(HostMsg::Link(url)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => cx.open_url(&url),
+                Some(HostMsg::Link(url, external)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => {
+                    super::links::open_link_later(self.pages.window, url, external, false, cx);
+                }
                 _ => {}
             },
             // Endereço atual do site, para a faixa do cartão.
@@ -642,7 +645,8 @@ impl Hangar {
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    /// Os modificadores vão junto: Ctrl/Cmd+clique num link da página vai ao navegador do sistema, como no chat.
+    fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         match kind {
             Pointer::Down => view.pressed = true,
@@ -651,7 +655,7 @@ impl Hangar {
             _ => {}
         }
         let origin = view.origin.get();
-        if let Some(engine) = self.page_engine(id) { engine.pointer(kind, at - origin, clicks); }
+        if let Some(engine) = self.page_engine(id) { engine.pointer(kind, at - origin, clicks, modifiers); }
     }
 
     pub(super) fn render_page_card(&mut self, tool: Tool, page: PageRef, cx: &mut Context<Self>) -> AnyElement {
@@ -775,11 +779,11 @@ impl Hangar {
                     let Some(view) = this.pages.views.get_mut(&down) else { return };
                     view.gesture = Some(Instant::now());
                     if view.parked { view.parked = false; cx.notify(); }
-                    this.page_pointer(&down, Pointer::Down, event.position, event.click_count);
+                    this.page_pointer(&down, Pointer::Down, event.position, event.click_count, &event.modifiers);
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up, Pointer::Up, event.position, 0)))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up_out, Pointer::Up, event.position, 0)))
-                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, _| this.page_pointer(&moved, Pointer::Move, event.position, 0)))
+                .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up, Pointer::Up, event.position, 0, &event.modifiers)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up_out, Pointer::Up, event.position, 0, &event.modifiers)))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, _| this.page_pointer(&moved, Pointer::Move, event.position, 0, &event.modifiers)))
                 // A tecla é da página; Esc devolve o foco à conversa.
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     cx.stop_propagation();
@@ -948,7 +952,11 @@ mod tests {
         assert_eq!(parse_host(&size("-1")), None);
         assert_eq!(parse_host(&size("\"x\"")), None);
         let link = |u: &str| format!(r#"{{"method":"ui/open-link","params":{{"url":"{u}"}}}}"#);
-        assert_eq!(parse_host(&link("https://a.dev/x")), Some(HostMsg::Link("https://a.dev/x".into())));
+        assert_eq!(parse_host(&link("https://a.dev/x")), Some(HostMsg::Link("https://a.dev/x".into(), false)));
+        // Ctrl ou Cmd no clique: o link vai ao navegador do sistema, como no chat.
+        let with = |m: &str| format!(r#"{{"method":"ui/open-link","params":{{"url":"https://a.dev/x","{m}":true}}}}"#);
+        assert_eq!(parse_host(&with("ctrlKey")), Some(HostMsg::Link("https://a.dev/x".into(), true)));
+        assert_eq!(parse_host(&with("metaKey")), Some(HostMsg::Link("https://a.dev/x".into(), true)));
         assert_eq!(parse_host(&link("javascript:alert(1)")), None);
         assert_eq!(parse_host(&link("file:///etc/passwd")), None);
         assert_eq!(parse_host(r#"{"method":"ui/other"}"#), None);

@@ -462,7 +462,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   privada (`/__hangar_server/pages`); lê o dono, convidado não vê. Link e URL do rascunho nunca
   levam token ao transcript; o documento da página nunca tem `allow-same-origin` nem token na URL
   (PWA `srcdoc` com fetch autenticado, casca `blob:`, nativo em contexto de navegador próprio).
-  Limpeza só pela varredura contra a lista; conjunto incerto não apaga nada. Evidência em
+  Limpeza só pela varredura contra a lista; conjunto incerto não apaga nada. A fonte exibida,
+  copiada ou salva vem do servidor, sem o que ele injetou; link da página e do chat passam pela
+  mesma `links::open_link`. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#página-da-conversa-mora-no-rust-e-some-com-a-sessão).
 - **Configuração compartilhada leva o conteúdo, e o destino resolve caminho e programa.** Caminho
   vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;

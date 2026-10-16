@@ -5,6 +5,7 @@ import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
 import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import { UserBubble } from './UserBubble';
+import { QueuedBubble } from './QueuedBubble';
 import { AssistantBubble } from './AssistantBubble';
 import { PreviewBubble } from './PreviewBubble';
 import { ToolGroup } from './tools/ToolGroup';
@@ -18,7 +19,7 @@ import { locateInMarkdown, type QuoteRef } from '@hangar/core';
 import { useCiteDialog } from '../stores/citeDialog';
 import { contextRefsKey } from '../stores/contextRefs';
 import { flashQuoteSource } from '../stores/quoteFlash';
-import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, waitsInQueue, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
+import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -219,14 +220,9 @@ export function MessageList({
       case 'event': {
         const ev = item.ev;
         if (ev.kind === 'user_msg') {
-          // fila durável (queued-*): translúcida só enquanto espera a vez, como na PWA; sem terminal,
-          // a já entregue ao processo não está na fila.
-          if (ev.id.startsWith('queued-')) {
-            return (
-              <View style={working && waitsInQueue(ev, session?.provider, session?.headless) ? styles.pending : undefined}>
-                <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} onQuoteClick={goToQuote} />
-              </View>
-            );
+          if (ev.id.startsWith('queued-') || ev.id.startsWith('held:') || ev.desistiu || ev.hook_error != null) {
+            return <QueuedBubble event={ev} working={working} problem={stateEvent?.problema}
+              provider={session?.provider} headless={session?.headless} sessionName={sessionName} serverId={serverId} onQuoteClick={goToQuote} />;
           }
           return <UserBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} onQuoteClick={goToQuote} />;
         }
@@ -252,7 +248,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless, goToQuote, canQuote]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.

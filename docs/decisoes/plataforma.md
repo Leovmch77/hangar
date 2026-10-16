@@ -900,6 +900,25 @@ a página por sessão em `~/.hangar/paginas` e a conversa mostra o cartão: PWA 
   painel. A prova da WebView2 escondida e minimizada está em
   [frontend.md](frontend.md#página-da-conversa-no-windows-webview2-fora-da-tela-14102026). O macOS
   segue no cartão estático.
+- **Fonte, copiar, salvar, links e atalhos (15/10/2026, pedido do usuário).** A tela cheia troca
+  entre Página e Fonte, copia a fonte e a salva em `.html` (nativo e PWA; no app, Compartilhar).
+  A fonte vem do servidor (`?raw=1&source=1`), sem o bloco de tema e a ponte: o cliente copiaria CSS
+  e script que não são da página. O `<id>.html` guarda a página como o agente escreveu e o bloco
+  entra na leitura (`theme::served`), porque desfazer a injeção por regex deixava o `<head>` que ela
+  criou e podia levar um bloco de mesmo id escrito pelo agente. Página gravada antes disso (sem
+  `original` no meta) continua com o bloco no arquivo e só ela passa pela regex.
+  O nome do arquivo sai do título. Salvar no nativo usa o diálogo do sistema na pasta Downloads.
+  Link clicado na página segue a regra do chat, numa função só (`links::open_link`): PR do GitHub
+  ou MR do GitLab abre no painel de navegador da sessão, Ctrl/Cmd+clique vai ao navegador do
+  sistema, o resto também vai ao sistema. Para isso a ponte da página manda `ctrlKey`/`metaKey`,
+  ignora clique sintético (`isTrusted`, senão a página abriria link sozinha) e o nativo passa os
+  modificadores do clique ao motor (`Engine::pointer`). Com a tela cheia aberta, atalho do app
+  (Ctrl/Cmd que casa com binding completo no contexto do foco) fecha o diálogo e roda na raiz; o
+  que a página ou o editor da Fonte tratam (Ctrl+C, Ctrl+A) fica com eles. A busca usa
+  `Keymap::bindings_for_input`: `possible_bindings_for_input` só devolve atalho de várias teclas
+  ainda pendente e nunca achava o atalho completo. A tela cheia também é `BrowserPage`, como o
+  cartão, para Ctrl+W e F2 ficarem com a página. Na PWA e no app não há atalho: a web desktop está
+  congelada e o celular não tem teclado de atalho.
 
 ## Rascunho da página devolve o print, e o tema da página tem a paleta completa (15/10/2026)
 

@@ -8,8 +8,9 @@ import {
 } from 'expo-audio';
 import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio';
 import type { SharedObject } from 'expo';
-import { novoEstadoVad, passoVad } from '@hangar/core';
+import { novoEstadoVad, passoVad, registrarDiag } from '@hangar/core';
 import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
+import * as m from '../../paraglide/messages';
 import { dictationStyleStore } from './ditadoEstiloStore';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
@@ -165,7 +166,11 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
       recording.recorder = recorder;
       recording.subscription = recorder.addListener('recordingStatusUpdate', (status) => {
         if (status.hasError || status.mediaServicesDidReset) {
-          recording.error ??= new Error(status.error || 'ditado_parada_falhou');
+          if (!recording.error) {
+            registrarDiag({ evento: 'dictation.recording_failed', nivel: 'erro',
+              codigo: status.mediaServicesDidReset ? 'media_services_reset' : 'recording_error', detalhe: status.error ?? undefined });
+            recording.error = new Error(m.composer_falha_gravacao());
+          }
           recording.interrupted = true;
         }
         if (status.isFinished || recording.error) {
