@@ -263,7 +263,8 @@ def test_lancador_antigo_ou_sem_token_sai_3_para_o_codex_cru(w, monkeypatch, tmp
 def test_acha_o_mesmo_hangar_server_que_o_supervisor(w, monkeypatch, tmp_path):
     # Mesma regra do `hangar-open` (`rust_bins.find_bin`): o mais novo entre a cópia e o baixado.
     import shutil
-    raiz = tmp_path / "copia"
+    # Resolvida como o `rust_bins` a vê: no Windows o `resolve()` traz a caixa de letra do disco.
+    raiz = tmp_path.resolve() / "copia"
     (raiz / "scripts").mkdir(parents=True)
     (raiz / "backend" / "app").mkdir(parents=True)
     shutil.copy(_CAMINHO.parent / "hangar-open", raiz / "scripts" / "hangar-open")

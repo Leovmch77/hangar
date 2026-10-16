@@ -14,7 +14,8 @@ _SERVER = "hangar-server" + (".exe" if os.name == "nt" else "")
 @pytest.fixture
 def copia(tmp_path, monkeypatch):
     """Uma cópia do Hangar com o `hangar-open` e o `rust_bins.py`, e uma casa vazia."""
-    raiz = tmp_path / "copia"
+    # Resolvida como o `rust_bins` a vê: no Windows o `resolve()` traz a caixa de letra do disco.
+    raiz = tmp_path.resolve() / "copia"
     (raiz / "scripts").mkdir(parents=True)
     (raiz / "backend" / "app").mkdir(parents=True)
     shutil.copy(_REPO / "scripts" / "hangar-open", raiz / "scripts" / "hangar-open")
