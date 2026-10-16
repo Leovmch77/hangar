@@ -487,3 +487,24 @@ async fn a_failed_open_is_written_to_the_sidecar() {
     assert_eq!(meta["problema"][0],"headless_nao_subiu","{meta}");
     assert!(meta["problema"][1].as_str().unwrap_or("").contains("cano_connect"),"{meta}");
 }
+
+/// CSH-066: a religação sem terminal toma a guarda da conta como a abertura: com a conta presa por quem
+/// a troca ou desloga (guarda exclusiva), recusa antes de encerrar o processo.
+#[tokio::test]
+async fn the_headless_relaunch_takes_the_account_guard_like_the_open() {
+    use hangar_server::accounts::{AccountKey,AccountLocks,GuardMode,Provider};
+    let dir = tempfile::tempdir().unwrap();
+    let account = dir.path().join("conta");
+    std::fs::create_dir_all(&account).unwrap();
+    let (escuta,_,server) = cano(None,None).await;
+    let mut target = target(dir.path(),escuta,true);
+    target.metadata["config_dir"] = json!(account);
+    let registry = registry().await;
+    registry.open(target).await.unwrap();
+    let held = AccountLocks::system().unwrap().try_acquire(&AccountKey::new(Provider::Claude,&account).unwrap(),GuardMode::Exclusive).unwrap();
+    let refused = registry.clone().reopen_claude("session".into(),"key".into(),1,"op".into()).await.unwrap_err();
+    assert_eq!(refused.code,"account_busy");
+    drop(held);
+    registry.close("key",1).await.unwrap();
+    server.abort();
+}

@@ -1841,6 +1841,8 @@ impl RuntimeRegistry {
                 _=>return Err(failure("runtime_binding")),
             }
         };
+        // Como a abertura: quem troca de conta ou desloga não vê o processo subir no meio.
+        let _account=runtime_account_guard("claude",&target.metadata).await?;
         if target.generation!=generation {
             if generation.checked_add(1)!=Some(target.generation) {return Err(failure("runtime_generation"));}
             let reply=handle.as_ref().ok_or_else(||failure("runtime_binding"))?.command(RuntimeCommand {operation_id:id.into(),kind:OperationKind::SetPermissionMode,payload:json!({"mode":"bypassPermissions"})}).await?;
