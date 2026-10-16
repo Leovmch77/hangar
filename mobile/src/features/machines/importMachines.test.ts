@@ -38,10 +38,132 @@ function network(extra: (url: string, init: RequestInit) => Response | Promise<R
     if (url.endsWith('/api/peers')) return json([]);
     if (url.endsWith('/api/peers/app-list')) return json({ rev: 'r1', servers: [] });
     if (url.endsWith('/api/sessions')) return json([]);
-    if (url.endsWith('/api/peers/identificador')) return json({ identificador: 'real-machine', lan_url: '' });
+    if (url.endsWith('/api/peers/identificador')) return json({ identificador: url.startsWith(owner.baseUrl) ? 'owner-machine' : url.startsWith(other.baseUrl) ? 'other-machine' : 'real-machine', lan_url: '' });
     return json({}, 404);
   });
 }
+
+describe('identidades confirmadas das máquinas', () => {
+  test.each([
+    { host: 'owner-empty.test', identifier: '' },
+    { host: 'owner-blank.test', identifier: '   ' },
+  ])('identificador salvo vazio preserva lan e impede alias duplicado: $host', async ({ host, identifier }) => {
+    const learned = { ...owner, baseUrl: `https://${host}`, label: 'fixture-custom-owner',
+      lan: { id: 'owner-machine', url: 'http://192.168.0.5:8765' } };
+    useServers.setState({ servers: [learned, other], activeId: other.id });
+    network((url) => {
+      if (url === `${learned.baseUrl}/api/peers/app-list`) return json({ rev: 'r1', servers: [
+        { id: 'owner-alias', label: 'fixture-alias', address: 'https://owner-alias.test', token: 'alias-token', disabled: false, invite: false },
+      ] });
+      if (url === `${learned.baseUrl}/api/peers/identificador`) return json({ identificador: identifier, lan_url: '' });
+      if (url === 'https://owner-alias.test/api/peers/identificador') return json({ identificador: 'owner-machine', lan_url: '' });
+      return undefined;
+    });
+    const result = await discoverSavedMachines([learned]);
+    await useServers.getState().load();
+    expect(result.added).toEqual([]);
+    expect(result.issues).toEqual([{ stage: 'saved_identity', machine: host }]);
+    expect(useServers.getState().servers[0]).toEqual(learned);
+    expect(stored().servers[0].lan).toEqual({ id: 'owner-machine', url: 'http://192.168.0.5:8765' });
+    expect(useServers.getState().servers).toHaveLength(2);
+    expect(useServers.getState().activeId).toBe(other.id);
+    expect(JSON.stringify(mocks.warning.mock.calls)).toContain(host);
+    expect(JSON.stringify(mocks.warning.mock.calls)).not.toContain(owner.token);
+  });
+  test('origem retornando por alias é identificada antes da candidata e sobrevive a nova hidratação sem duplicar', async () => {
+    const original = { ...owner, label: 'fixture-custom-owner', disabled: true };
+    useServers.setState({ servers: [original, other], activeId: other.id });
+    network((url) => url === `${owner.baseUrl}/api/peers/identificador` || url === 'https://owner-alias.test/api/peers/identificador'
+      ? json({ identificador: 'owner-machine', lan_url: 'http://192.168.0.5:8765' }) : undefined);
+    const alias = { ...remote, baseUrl: 'https://owner-alias.test', label: 'fixture-alias' };
+    const first = await importMachines([alias]);
+    expect(first.added).toEqual([]);
+    expect(first.issues).toEqual([]);
+    expect(useServers.getState().servers).toHaveLength(2);
+    expect(useServers.getState().servers[0]).toEqual({ ...original, lan: { id: 'owner-machine', url: 'http://192.168.0.5:8765' } });
+    expect(useServers.getState().activeId).toBe(other.id);
+    expect(paths()).toContain(`${owner.baseUrl}/api/peers/identificador`);
+    expect(paths()).not.toContain(`${owner.baseUrl}/api/sessions`);
+    useServers.setState({ servers: [], activeId: null, vaultReadable: false });
+    await useServers.getState().load();
+    expect(useServers.getState().servers[0].lan?.id).toBe('owner-machine');
+    expect((await importMachines([alias])).added).toEqual([]);
+    expect(useServers.getState().servers).toHaveLength(2);
+    expect(stored().servers).toHaveLength(2);
+  });
+
+  test('duas candidatas alias na mesma rodada só salvam uma identidade, com lan confirmado e não alegado', async () => {
+    network(() => undefined);
+    const result = await importMachines([remote, { ...remote, id: 'alias', baseUrl: 'https://remote-alias.test',
+      lan: { id: 'claimed-owner', url: 'https://claimed.test' } }]);
+    expect(result.added).toHaveLength(1);
+    expect(result.added[0]).toEqual({ ...remote, label: 'real-machine', lan: { id: 'real-machine', url: '' } });
+    expect(useServers.getState().servers).toHaveLength(3);
+  });
+
+  test('duas importações concorrentes de aliases revalidam a identidade depois da rede', async () => {
+    const pending = deferred<Response>();
+    network((url) => url.startsWith('https://remote') && url.endsWith('/identificador') ? pending.promise : undefined);
+    const first = importMachines([remote]);
+    const second = importMachines([{ ...remote, id: 'alias', baseUrl: 'https://remote-alias.test' }]);
+    await settle();
+    pending.resolve(json({ identificador: 'real-machine', lan_url: '' }));
+    const results = await Promise.all([first, second]);
+    expect(results.flatMap((result) => result.added)).toHaveLength(1);
+    expect(useServers.getState().servers.filter((s) => s.lan?.id === 'real-machine')).toHaveLength(1);
+    expect(useServers.getState().activeId).toBe(other.id);
+  });
+
+  test('identidade vazia não junta candidatas de endereços diferentes', async () => {
+    network((url) => url.startsWith('https://remote') && url.endsWith('/identificador') ? json({ identificador: '', lan_url: '' }) : undefined);
+    const result = await importMachines([remote, { ...remote, id: 'second', baseUrl: 'https://remote-other.test' }]);
+    expect(result.added).toHaveLength(2);
+    expect(result.added.map((s) => s.lan)).toEqual([{ id: '', url: '' }, { id: '', url: '' }]);
+  });
+
+  test('fonte offline conserva identidade aprendida, avisa e ainda importa outra candidata', async () => {
+    const learned = { ...owner, label: 'fixture-custom-owner', lan: { id: 'owner-machine', url: 'http://192.168.0.5:8765' } };
+    useServers.setState({ servers: [learned, other], activeId: other.id });
+    network((url) => {
+      if (url === `${owner.baseUrl}/api/peers/identificador`) return json({ detail: 'never-show-secret' }, 503);
+      if (url === 'https://owner-alias.test/api/peers/identificador') return json({ identificador: 'owner-machine', lan_url: '' });
+      return undefined;
+    });
+    const result = await importMachines([{ ...remote, id: 'owner-alias', baseUrl: 'https://owner-alias.test' }, remote]);
+    expect(result.added.map((s) => s.baseUrl)).toEqual([remote.baseUrl]);
+    expect(result.issues).toContainEqual({ stage: 'saved_identity', status: 503, machine: 'owner.test' });
+    expect(useServers.getState().servers[0]).toEqual(learned);
+    expect(useServers.getState().activeId).toBe(other.id);
+  });
+
+  test.each(['baseUrl', 'token'] as const)('resposta antiga da identidade não atualiza cadastro cujo %s mudou', async (field) => {
+    const pending = deferred<Response>();
+    network((url) => url === `${owner.baseUrl}/api/peers/identificador` ? pending.promise : undefined);
+    const importing = importMachines([remote]); await settle();
+    if (field === 'baseUrl') useServers.getState().update(owner.id, { baseUrl: 'https://owner-changed.test' });
+    else useServers.getState().add({ ...owner, token: 'fixture-new-token' });
+    const changed = useServers.getState().servers.find((s) => s.id === owner.id)!;
+    pending.resolve(json({ identificador: 'stale-owner', lan_url: 'http://192.168.0.9:8765' }));
+    await importing;
+    expect(useServers.getState().servers.find((s) => s.id === owner.id)).toEqual(changed);
+    expect(useServers.getState().servers.find((s) => s.id === owner.id)?.lan).toBeUndefined();
+  });
+
+  test('avisos automáticos iguais aparecem uma vez sem retirar issues, e outra máquina ou status avisa', async () => {
+    let status = 502;
+    network((url) => url.endsWith('/api/peers') ? json({ detail: 'never-show-secret' }, status) : undefined);
+    const first = await discoverSavedMachines([owner]);
+    const second = await discoverSavedMachines([owner]);
+    expect(first.issues).toEqual([{ stage: 'source_peers', status: 502, machine: 'owner.test' }]);
+    expect(second.issues).toEqual(first.issues);
+    expect(mocks.warning).toHaveBeenCalledTimes(1);
+    await discoverSavedMachines([other]);
+    expect(mocks.warning).toHaveBeenCalledTimes(2);
+    status = 504;
+    await discoverSavedMachines([owner]);
+    expect(mocks.warning).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe('descoberta autenticada só acrescenta', () => {
   test.each(['source', 'peer', 'candidate'] as const)('identifica duas falhas 403 distintas no aviso de %s sem corpo, caminho ou token', async (kind) => {
@@ -82,7 +204,7 @@ describe('descoberta autenticada só acrescenta', () => {
       return undefined;
     });
     const result = await discoverSavedMachines([owner]);
-    expect(result.added).toEqual([{ ...remote, label: 'real-machine' }]);
+    expect(result.added).toEqual([{ ...remote, label: 'real-machine', lan: { id: 'real-machine', url: '' } }]);
     expect(useServers.getState().servers.filter((s) => s.baseUrl === remote.baseUrl)).toHaveLength(1);
     expect(result.issues).toContainEqual({ stage: 'candidate', status: 401, machine: 'remote.test' });
     expect(mocks.warning).toHaveBeenCalled();
@@ -132,9 +254,9 @@ describe('descoberta autenticada só acrescenta', () => {
     expect(useServers.getState().servers.some((s) => s.baseUrl === remote.baseUrl)).toBe(false);
     pending.resolve(json({ identificador: 'returned-name', lan_url: '' }));
     const result = await importing; await settle();
-    expect(result.added).toEqual([{ ...remote, label: 'returned-name' }]);
+    expect(result.added).toEqual([{ ...remote, label: 'returned-name', lan: { id: 'returned-name', url: '' } }]);
     expect(result.issues).toEqual([]);
-    expect(stored().servers).toContainEqual({ ...remote, label: 'returned-name' });
+    expect(stored().servers).toContainEqual({ ...remote, label: 'returned-name', lan: { id: 'returned-name', url: '' } });
     expect(useServers.getState().activeId).toBe(other.id);
     expect(paths()).toContain(`${other.baseUrl}/api/peers`);
     expect(paths()).toContain(`${other.baseUrl}/api/peers/app-list`);
@@ -153,7 +275,7 @@ describe('descoberta autenticada só acrescenta', () => {
         lan: { url: 'http://192.168.0.8:8765', id: remote.id } },
     ] }) : undefined);
     const result = await discoverSavedMachines([owner]);
-    expect(result.added).toEqual([{ ...remote, label: 'real-machine', disabled: true }]);
+    expect(result.added).toEqual([{ ...remote, label: 'real-machine', disabled: true, lan: { id: 'real-machine', url: '' } }]);
     expect(result.issues).toContainEqual({ stage: 'invalid_item', machine: 'owner.test' });
     expect(paths().some((url) => url.includes('/token') || url.startsWith('https://guest.test') || url.startsWith('http://[::1]'))).toBe(false);
     expect(mocks.warning).toHaveBeenCalled();
@@ -175,7 +297,7 @@ describe('descoberta autenticada só acrescenta', () => {
       return undefined;
     });
     const result = await discoverSavedMachines();
-    expect(result.added).toEqual([{ ...remote, label: 'real-machine' }]);
+    expect(result.added).toEqual([{ ...remote, label: 'real-machine', lan: { id: 'real-machine', url: '' } }]);
     expect(result.issues).toEqual(expect.arrayContaining([
       { stage: 'source_peers', status: 503, machine: 'owner.test' },
       { stage: 'peer_token', status: 403, machine: 'missing.test', source: 'other.test' },
@@ -219,7 +341,9 @@ describe('confirmação reutilizada pelo link', () => {
     mocks.fetch.mockClear();
     await importMachines([{ ...remote, id: 'next', baseUrl: 'https://next.test', token: 'next-token' }]);
     expect(imported.added[0].id).not.toBe('candidato');
-    expect(paths()).toEqual(['https://next.test/api/sessions', 'https://next.test/api/peers/identificador']);
+    expect(paths().filter((url) => url.startsWith('https://next.test'))).toEqual(['https://next.test/api/sessions', 'https://next.test/api/peers/identificador']);
+    expect(mocks.fetch.mock.calls.filter(([, init]) => new Headers(init.headers).get('Authorization') === 'Bearer next-token')
+      .every(([url]) => String(url).startsWith('https://next.test/'))).toBe(true);
   });
   test('sem ativa escolhe a primeira nova da lista, mesmo quando outra confirma antes', async () => {
     useServers.setState({ servers: [], activeId: null });
@@ -242,19 +366,22 @@ describe('confirmação reutilizada pelo link', () => {
     pending.resolve(json({ identificador: 'remote-name', lan_url: '' }));
     const results = await Promise.all([first, second]);
     expect(results.flatMap((r) => r.added)).toEqual([]);
-    expect(useServers.getState().servers).toEqual([owner, other, concurrent]);
+    expect(useServers.getState().servers).toEqual([
+      { ...owner, lan: { id: 'owner-machine', url: '' } },
+      { ...other, lan: { id: 'other-machine', url: '' } }, concurrent,
+    ]);
     expect(useServers.getState().activeId).toBe(other.id);
   });
 
-  test('já salva não é sondada nem recebe novo token, e válida entra apesar de falha de outra candidata', async () => {
+  test('já salva só consulta identidade sem receber novo token, e válida entra apesar de falha de outra candidata', async () => {
     network((url) => url === 'https://bad.test/api/sessions' ? json({}, 401) : undefined);
     const result = await importMachines([{ ...owner, token: 'overwrite', label: 'overwrite', disabled: true }, remote,
       { ...remote, id: 'bad', baseUrl: 'https://bad.test' },
     ]);
-    expect(result.added).toEqual([{ ...remote, label: 'real-machine' }]);
+    expect(result.added).toEqual([{ ...remote, label: 'real-machine', lan: { id: 'real-machine', url: '' } }]);
     expect(result.issues).toEqual([{ stage: 'candidate', status: 401, machine: 'bad.test' }]);
-    expect(useServers.getState().servers[0]).toEqual(owner);
-    expect(paths().some((url) => url.startsWith(owner.baseUrl))).toBe(false);
+    expect(useServers.getState().servers[0]).toEqual({ ...owner, lan: { id: 'owner-machine', url: '' } });
+    expect(paths().filter((url) => url.startsWith(owner.baseUrl))).toEqual([`${owner.baseUrl}/api/peers/identificador`]);
   });
 
   test('aguarda hidratação antes de decidir se a máquina já existe', async () => {

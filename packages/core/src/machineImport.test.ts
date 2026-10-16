@@ -73,6 +73,40 @@ describe('endereços de importação', () => {
 });
 
 describe('merge só acrescenta', () => {
+  test('mesma identidade confirmada em outro endereço não duplica nem usa o apelido como identidade', () => {
+    const saved = { ...machine, label: 'fixture-custom-nickname', disabled: true, lan: { id: 'confirmed-home', url: '' } };
+    const alias = { ...machine, id: 'alias', baseUrl: 'https://home-alias.test', label: 'confirmed-home', token: 'alias-token', lan: { id: 'confirmed-home', url: 'http://192.168.0.2' } };
+    const result = mergeImportedMachines({ servers: [saved], activeId: saved.id }, [alias]);
+    expect(result.added).toEqual([]);
+    expect(result.servers).toEqual([saved]);
+    expect(result.servers[0]).toBe(saved);
+    expect(result.activeId).toBe(saved.id);
+  });
+
+  test('URLs distintas da mesma identidade na rodada só acrescentam a primeira e não removem duplicatas existentes', () => {
+    const first = { ...machine, lan: { id: 'confirmed-home', url: '' } };
+    const alias = { ...first, id: 'alias', baseUrl: 'https://home-alias.test' };
+    const result = mergeImportedMachines({ servers: [], activeId: null }, [first, alias]);
+    expect(result.servers).toEqual([first]);
+    expect(result.activeId).toBe(first.id);
+    const before = [first, alias];
+    const repeated = mergeImportedMachines({ servers: before, activeId: alias.id }, [alias]);
+    expect(repeated.servers).toBe(before);
+    expect(repeated.activeId).toBe(alias.id);
+  });
+
+  test('identidades vazias, apelidos iguais e identidade de convidado não escondem máquinas próprias diferentes', () => {
+    const first = { ...machine, lan: { id: '', url: '' } };
+    const second = { ...first, id: 'second', baseUrl: 'https://second.test' };
+    expect(mergeImportedMachines({ servers: [], activeId: null }, [first, second]).added).toHaveLength(2);
+    const guest = { ...first, id: 'guest', invite: true, lan: { id: 'shared-id', url: '' } };
+    const own = { ...second, lan: { id: 'shared-id', url: '' } };
+    expect(mergeImportedMachines({ servers: [guest], activeId: guest.id }, [own]).added).toEqual([own]);
+  });
+
+  test('metadado lan alegado pelo payload não vira identidade confirmada', () => {
+    expect(parseMachineImportPayload(JSON.stringify([{ ...machine, lan: { id: 'claimed-id', url: 'https://claimed.test' } }]))).toEqual([machine]);
+  });
   test('preserva lista, token, apelido, flags e ativa; não colide IDs locais', () => {
     const saved = { ...machine, disabled: true, lan: { url: '', id: 'home' } };
     const next = { ...machine, id: 'home', baseUrl: 'https://work.test', label: 'fixture-work', token: 'work' };

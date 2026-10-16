@@ -52,7 +52,7 @@ describe('verifyLoginMachine', () => {
       ] });
       if (url.endsWith('/api/peers')) return json([]);
       if (url.endsWith('/api/sessions')) return json([]);
-      return json({ identificador: 'found-name', lan_url: '' });
+      return json({ identificador: url.startsWith(baseUrl) ? 'machine-home' : 'found-name', lan_url: '' });
     });
     await verifyLoginMachine(machine, resolveName);
     await new Promise<void>((r) => setImmediate(r));

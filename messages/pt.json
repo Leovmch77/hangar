@@ -7554,6 +7554,7 @@
   "machine_import_source_app_list": "Não foi possível ler a lista de máquinas do app.",
   "machine_import_peer_token": "Não foi possível obter o token de uma máquina nova.",
   "machine_import_candidate": "Uma tentativa de conexão ou de leitura do nome da máquina falhou.",
+  "machine_import_saved_identity": "Não foi possível confirmar a identidade da máquina já salva. As informações já salvas foram mantidas.",
   "machine_import_invalid_item": "Uma entrada inválida foi ignorada.",
   "mobile_machines_invalid_response": "O servidor devolveu uma resposta inválida.",
   "mobile_machines_invalid_url": "Informe uma URL http ou https válida, sem token, usuário ou senha no endereço.",

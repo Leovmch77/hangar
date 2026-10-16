@@ -7554,6 +7554,7 @@
   "machine_import_source_app_list": "Could not read the app’s machine list.",
   "machine_import_peer_token": "Could not obtain the token for a new machine.",
   "machine_import_candidate": "An attempt to connect or read the machine’s name failed.",
+  "machine_import_saved_identity": "Could not confirm the saved machine’s identity. Any previously learned identity was kept.",
   "machine_import_invalid_item": "An invalid entry was skipped.",
   "mobile_machines_invalid_response": "The server returned an invalid response.",
   "mobile_machines_invalid_url": "Enter a valid http or https URL, without a token, username or password in the address.",

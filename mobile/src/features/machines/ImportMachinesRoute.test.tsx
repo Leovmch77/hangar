@@ -36,11 +36,52 @@ beforeEach(async () => {
   mocks.params = { '#': JSON.stringify([next, { ...saved, token: 'do-not-overwrite' }]) };
   configureApi({ getBaseUrl: () => 'https://wrong.test', getToken: () => 'wrong', origin: null,
     onUnauthorized: () => { throw new Error('unexpected_active_reset'); }, createEventSource: vi.fn() });
-  mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions') ? json([]) : json({ identificador: 'real-new-name', lan_url: '' }));
+  mocks.fetch.mockImplementation(async (url: string) => {
+    if (url.endsWith('/api/sessions') || url.endsWith('/api/peers')) return json([]);
+    if (url.endsWith('/app-list')) return json({ rev: 'r1', servers: [] });
+    return json({ identificador: url.startsWith(saved.baseUrl) ? 'saved-machine' : 'real-new-name', lan_url: '' });
+  });
   vi.stubGlobal('fetch', mocks.fetch);
   el = document.createElement('div'); document.body.appendChild(el); root = createRoot(el);
 });
 afterEach(async () => { await act(async () => root.unmount()); el.remove(); await useServers.getState().load(); vi.unstubAllGlobals(); });
+
+test('alias já salvo conclui sem adição, informa nenhuma nova e vai às conversas', async () => {
+  mocks.params = { '#': JSON.stringify([next]) };
+  mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions') ? json([])
+    : url.endsWith('/api/peers') ? json([]) : url.endsWith('/app-list') ? json({ rev: 'r1', servers: [] })
+      : json({ identificador: 'same-machine', lan_url: '' }));
+  await render(); await act(async () => button(m.machine_import_action()).click()); await settle();
+  expect(useServers.getState().servers).toHaveLength(1);
+  expect(useServers.getState().servers[0]).toEqual({ ...saved, lan: { id: 'same-machine', url: '' } });
+  expect(mocks.replace).toHaveBeenCalledWith('/');
+  expect(mocks.success).toHaveBeenCalledWith(m.machine_import_empty());
+  expect(mocks.success).not.toHaveBeenCalledWith(m.machine_import_success({ count: 1 }));
+  expect(mocks.fetch.mock.calls.some(([url]) => url === `${saved.baseUrl}/api/sessions`)).toBe(false);
+});
+
+test.each([false, true])('B dispara descoberta após inserir origem sem novo login nem recursão, rota saiu: %s', async (leave) => {
+  mocks.params = { '#': JSON.stringify([next]) };
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { release = resolve; });
+  mocks.fetch.mockImplementation(async (url: string) => {
+    if (url === `${next.baseUrl}/api/sessions`) return pending;
+    if (url.endsWith('/api/sessions')) return json([]);
+    if (url === `${next.baseUrl}/api/peers/app-list`) return json({ rev: 'r1', servers: [
+      { id: 'found', label: 'fixture-found', address: 'https://found.test', token: 'found-token', disabled: false, invite: false },
+    ] });
+    if (url.endsWith('/app-list')) return json({ rev: 'r1', servers: [] });
+    if (url.endsWith('/api/peers')) return json([]);
+    return json({ identificador: url.startsWith(saved.baseUrl) ? 'saved-machine' : url.startsWith(next.baseUrl) ? 'new-machine' : 'found-machine', lan_url: '' });
+  });
+  await render(); await act(async () => button(m.machine_import_action()).click());
+  if (leave) await act(async () => root.render(null));
+  await act(async () => { release(json([])); }); await settle();
+  expect(useServers.getState().servers.find((s) => s.baseUrl === 'https://found.test'))
+    .toMatchObject({ label: 'found-machine', token: 'found-token', lan: { id: 'found-machine', url: '' } });
+  expect(useServers.getState().activeId).toBe(saved.id);
+  expect(mocks.fetch.mock.calls.some(([url]) => url === 'https://found.test/api/peers')).toBe(false);
+});
 
 test('mostra novas e já salvas sem fazer rede; importa só após gesto e preserva o token com percentual literal', async () => {
   await render();
@@ -50,14 +91,15 @@ test('mostra novas e já salvas sem fazer rede; importa só após gesto e preser
   expect(el.textContent).not.toContain('literal%25');
   expect(mocks.fetch).not.toHaveBeenCalled();
   await act(async () => button(m.machine_import_action()).click()); await settle();
-  expect(useServers.getState().servers[0]).toEqual(saved);
-  expect(useServers.getState().servers[1]).toMatchObject({ baseUrl: next.baseUrl, label: 'real-new-name', token: 'literal%25/#?+' });
+  expect(useServers.getState().servers[0]).toEqual({ ...saved, lan: { id: 'saved-machine', url: '' } });
+  expect(useServers.getState().servers[1]).toMatchObject({ baseUrl: next.baseUrl, label: 'real-new-name', token: 'literal%25/#?+', lan: { id: 'real-new-name', url: '' } });
   expect(useServers.getState().servers[1].id).not.toBe(saved.id);
   expect(useServers.getState().activeId).toBe(saved.id);
   for (const [url, init] of mocks.fetch.mock.calls) {
-    expect(url).toMatch(/^https:\/\/new\.test\//);
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer literal%25/#?+');
+    expect(url).toMatch(/^https:\/\/(?:new|saved)\.test\//);
+    expect(new Headers(init.headers).get('Authorization')).toBe(String(url).startsWith(next.baseUrl) ? 'Bearer literal%25/#?+' : 'Bearer saved-token');
   }
+  expect(mocks.fetch.mock.calls.some(([url]) => url === `${saved.baseUrl}/api/sessions`)).toBe(false);
   expect(mocks.replace).toHaveBeenCalledWith('/');
   expect(mocks.success).toHaveBeenCalledWith(m.machine_import_success({ count: 1 }));
 });
@@ -68,11 +110,16 @@ test('espera hidratação e bloqueia importação duplicada durante verificaçã
   expect(mocks.fetch).not.toHaveBeenCalled();
   await act(async () => { useServers.setState({ ready: true }); });
   let resolve!: (r: Response) => void;
-  mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions')
-    ? new Promise<Response>((r) => { resolve = r; }) : json({ identificador: 'real-new-name', lan_url: '' }));
+  mocks.fetch.mockImplementation(async (url: string) => {
+    if (url === `${next.baseUrl}/api/sessions`) return new Promise<Response>((r) => { resolve = r; });
+    if (url.endsWith('/api/peers')) return json([]);
+    if (url.endsWith('/app-list')) return json({ rev: 'r1', servers: [] });
+    return json({ identificador: url.startsWith(saved.baseUrl) ? 'saved-machine' : 'real-new-name', lan_url: '' });
+  });
   await act(async () => { button(m.machine_import_action()).click(); button(m.machine_import_action()).click(); });
   expect(el.textContent).toContain(m.machine_import_verifying());
-  expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  expect(mocks.fetch.mock.calls.filter(([url]) => url === `${next.baseUrl}/api/sessions`)).toHaveLength(1);
+  expect(mocks.fetch.mock.calls.some(([url]) => url === `${saved.baseUrl}/api/sessions`)).toBe(false);
   await act(async () => { resolve(json([])); }); await settle();
   expect(useServers.getState().servers).toHaveLength(2);
 });
@@ -82,7 +129,8 @@ test('duas recusas 403 mostram a máquina de cada ocorrência sem caminho ou seg
     { ...next, id: 'one', baseUrl: 'https://one.test/private-path', token: 'one-secret' },
     { ...next, id: 'two', baseUrl: 'https://two.test/private-path', token: 'two-secret' },
   ]) };
-  mocks.fetch.mockImplementation(async () => json({ detail: 'leaked:one-secret:two-secret' }, 403));
+  mocks.fetch.mockImplementation(async (url: string) => url === `${saved.baseUrl}/api/peers/identificador`
+    ? json({ identificador: 'saved-machine', lan_url: '' }) : json({ detail: 'leaked:one-secret:two-secret' }, 403));
   await render(); await act(async () => button(m.machine_import_action()).click()); await settle();
   const alerts = [...el.querySelectorAll('[role="alert"]')].map((node) => node.textContent);
   expect(alerts).toHaveLength(2);
@@ -94,8 +142,12 @@ test('duas recusas 403 mostram a máquina de cada ocorrência sem caminho ou seg
 
 test('falha parcial fica visível sem segredo, mantém o que respondeu e oferece conversas', async () => {
   mocks.params = { '#': JSON.stringify([next, { ...next, id: 'bad', baseUrl: 'https://bad.test', token: 'bad-secret' }]) };
-  mocks.fetch.mockImplementation(async (url: string) => url.startsWith('https://bad.test')
-    ? json({ detail: 'never-show-bad-secret' }, 401) : url.endsWith('/api/sessions') ? json([]) : json({ identificador: 'good-name', lan_url: '' }));
+  mocks.fetch.mockImplementation(async (url: string) => {
+    if (url.startsWith('https://bad.test')) return json({ detail: 'never-show-bad-secret' }, 401);
+    if (url.endsWith('/api/sessions') || url.endsWith('/api/peers')) return json([]);
+    if (url.endsWith('/app-list')) return json({ rev: 'r1', servers: [] });
+    return json({ identificador: url.startsWith(saved.baseUrl) ? 'saved-machine' : 'good-name', lan_url: '' });
+  });
   await render(); await act(async () => button(m.machine_import_action()).click()); await settle();
   expect(el.textContent).toContain(m.machine_import_candidate());
   expect(el.textContent).toContain('HTTP 401');

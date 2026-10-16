@@ -1,6 +1,6 @@
 import { getSessions, probeServerResponse } from './api';
 import { SERVIDOR_CANDIDATO } from './esfriamento';
-import type { Server } from './servers';
+import type { LanInfo, Server } from './servers';
 
 const MAX_MACHINES = 100;
 const MAX_PAYLOAD = 262_144;
@@ -63,7 +63,7 @@ export function createMachineImportLink(servers: Server[]): string {
 }
 
 export type MachineImportIssue = {
-  stage: 'source_peers' | 'source_app_list' | 'peer_token' | 'candidate' | 'invalid_item';
+  stage: 'source_peers' | 'source_app_list' | 'peer_token' | 'saved_identity' | 'candidate' | 'invalid_item';
   status?: number; machine?: string; source?: string;
 };
 export type MachineImportResult = { added: Server[]; issues: MachineImportIssue[] };
@@ -89,14 +89,20 @@ async function readImportJson(server: Server, path: string): Promise<unknown> {
   return response.json();
 }
 
+export async function readMachineIdentity(server: Server): Promise<LanInfo> {
+  const identity = await readImportJson(server, '/api/peers/identificador');
+  if (!object(identity) || typeof identity.identificador !== 'string' || identity.identificador.length > 256
+    || /[\u0000-\u001f\u007f]/.test(identity.identificador)
+    || (identity.lan_url !== undefined && typeof identity.lan_url !== 'string')) throw invalid();
+  return { id: identity.identificador.trim(), url: identity.lan_url ? normalizeMachineUrl(identity.lan_url as string) : '' };
+}
+
 export async function confirmImportedMachine(server: Server): Promise<Server> {
   const target = { ...server, id: SERVIDOR_CANDIDATO };
   const sessions: unknown = await getSessions(target);
   if (!Array.isArray(sessions)) throw invalid();
-  const identity = await readImportJson(target, '/api/peers/identificador');
-  if (!object(identity) || typeof identity.identificador !== 'string' || identity.identificador.length > 256
-    || /[\u0000-\u001f\u007f]/.test(identity.identificador)) throw invalid();
-  return { ...server, label: identity.identificador.trim() || server.label };
+  const lan = await readMachineIdentity(target);
+  return { ...server, label: lan.id || server.label, lan };
 }
 
 export async function discoverMachineCandidates(sources: Server[], current: () => Server[]): Promise<{ candidates: Server[]; issues: MachineImportIssue[] }> {
@@ -157,15 +163,18 @@ export async function discoverMachineCandidates(sources: Server[], current: () =
 export function mergeImportedMachines(state: { servers: Server[]; activeId: string | null }, incoming: Server[]) {
   const key = (raw: string) => { try { return normalizeMachineUrl(raw); } catch { return raw.replace(/\/+$/, ''); } };
   const seen = new Set(state.servers.map((s) => key(s.baseUrl)));
+  const identities = new Set(state.servers.filter(isOwnMachine).map((s) => s.lan?.id.trim()).filter((id): id is string => !!id));
   const ids = new Set([SERVIDOR_CANDIDATO, ...state.servers.map((s) => s.id)]);
   const added: Server[] = [];
   for (const server of incoming.filter(isOwnMachine)) {
     const baseUrl = key(server.baseUrl);
-    if (seen.has(baseUrl)) continue;
+    const identity = server.lan?.id.trim();
+    if (seen.has(baseUrl) || identity && identities.has(identity)) continue;
     let id = server.id;
     for (let suffix = 2; ids.has(id); suffix++) id = `${server.id}_${suffix}`;
     added.push({ ...server, id, baseUrl });
     seen.add(baseUrl);
+    if (identity) identities.add(identity);
     ids.add(id);
   }
   return {

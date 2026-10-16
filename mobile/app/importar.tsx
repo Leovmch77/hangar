@@ -4,7 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
 import { mergeImportedMachines, parseMachineImportPayload, type MachineImportResult } from '@hangar/core';
 import { useServers } from '../src/stores/servers';
-import { importMachines, machineImportIssueMessage } from '../src/features/machines/importMachines';
+import { discoverSavedMachines, importMachines, machineImportIssueMessage } from '../src/features/machines/importMachines';
 import { PageHeader, Pill } from '../src/features/config/PageHeader';
 import { SectionCard } from '../src/features/config/SectionCard';
 import { InfoNotice } from '../src/features/config/InfoNotice';
@@ -44,10 +44,11 @@ function ImportMachines({ payload }: { payload: string }) {
     locked.current = true; setBusy(true); setError(''); setResult(null);
     try {
       const imported = await importMachines(fresh);
+      if (imported.added.length) void discoverSavedMachines();
       if (!mounted.current) return;
       setResult(imported);
-      if (imported.added.length && !imported.issues.length) {
-        toast.ok(m.machine_import_success({ count: imported.added.length }));
+      if (!imported.issues.length) {
+        toast.ok(imported.added.length ? m.machine_import_success({ count: imported.added.length }) : m.machine_import_empty());
         router.replace('/');
       }
     } catch (cause) {
