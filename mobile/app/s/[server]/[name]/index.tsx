@@ -20,6 +20,7 @@ import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
 import { MoreSheet } from '../../../../src/chat/MoreSheet';
+import { PluginUi } from '../../../../src/chat/PluginUi';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { PendingPlan } from '../../../../src/chat/PendingPlan';
 import { SessionProblem } from '../../../../src/chat/SessionProblem';
@@ -559,6 +560,8 @@ export default function ChatScreen() {
           ) : null}
           {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
           {!servidorSumiu && recarregavel && semTerminal ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
+          {!servidorSumiu && !codexPreThread && !dead && fetchedSession !== null
+            ? <PluginUi key={rota} serverId={serverId} name={name} readOnly={soLeitura} /> : null}
           {!servidorSumiu && !codexPreThread && fetchedSession !== null
             ? dead
               ? (
