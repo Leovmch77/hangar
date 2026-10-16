@@ -308,6 +308,28 @@ mod tests {
         assert!(!launch.program.contains(&"--allow-dangerously-skip-permissions".to_owned()), "em bypass a flag de volta não entra");
     }
 
+    /// S-11: a vida nova nunca sai de uma ficha montada às pressas; do spec gravado vêm a janela do
+    /// motor, a base fora do plano e o só leitura (que segue recusado sem terminal).
+    #[test]
+    fn relaunch_from_the_spec_keeps_engine_window_base_mode_and_read_only() {
+        let case = case("create_claude_headless_engine_then_launch");
+        let mut meta = case.meta();
+        meta["context_window"] = json!(262144);
+        meta["previous_non_plan"] = json!("bypassPermissions");
+        let meta = relaunch_meta(meta, &case.sid, "plan", &json!(null), &json!(null));
+        let env = AccountEnvironment::from_map(case.server_env());
+        let ctx = Context { env: &env, runtime_config: &json!({}), plugin_roots: &[], bridge: None, engine_route: None, fast: false };
+        let spec = crate::session_open::record::claude_live(&case.root.join("home"), &meta, "s1").unwrap();
+        let program = plan(&spec, &meta, &ctx).unwrap().program;
+        let engine: Vec<&str> = program.iter().take_while(|a| *a != "--").map(String::as_str).collect();
+        assert_eq!(engine, ["hangar-engine", "--exec", "kimi", "--model", "k3-256k", "--context", "262144"]);
+        assert!(program.contains(&"--allow-dangerously-skip-permissions".to_owned()), "base bypass no plano volta ao bypass");
+        let mut read_only = meta.clone();
+        read_only["read_only"] = json!(true);
+        let spec = crate::session_open::record::claude_live(&case.root.join("home"), &read_only, "s1").unwrap();
+        assert_eq!(plan(&spec, &read_only, &ctx).unwrap_err().code, "headless_read_only");
+    }
+
     #[test]
     fn permanent_launch_failures_are_told_apart_from_passing_ones() {
         let case = case("create_claude_headless_then_launch");

@@ -2831,6 +2831,10 @@ mod tests {
             "session_id":"0c657c79-1745-406b-a97f-bbbf5402ff19","permission_mode":"manual"}),..claude };
         let failed = launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("a subida sem cano precisa falhar");
         assert!(!failed.code.starts_with("policy_") && failed.code != "relaunch_recipe_missing","{}",failed.code);
+        // S-72: pid gravado vivo mas de outro programa (reaproveitado depois do boot) não é o cano da
+        // sessão: sobe outro em vez de dar a sessão por de pé.
+        claude.binding.pid = std::process::id();
+        assert!(launch_if_needed(&policy,&mut claude,dir.path()).await.is_err(),"pid alheio não vale como cano vivo");
         // Sem terminal não há bwrap: só leitura nunca sobe aqui.
         claude.metadata["read_only"] = json!(true);
         assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().unwrap().code,"headless_read_only");
