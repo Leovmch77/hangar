@@ -478,13 +478,11 @@ async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_pla
     let sidecars = host.home().join(".hangar");
     let taken = |kind: &str| crate::runtime::codex_sidecar::path(&sidecars.join(kind), &spec.name).exists();
     // A resolução conferiu o nome antes de conta e worktree: outra sessão pode ter nascido desde então.
-    match terminal::presence(host.mux(), host.terminal(), &spec.name).await {
-        (terminal::Presence::Absent, _) if !taken("claude-headless") && !taken("codex-sessions") => {}
-        (terminal::Presence::Unknown, stderr) => return Err(mux_unavailable(&stderr)),
-        _ => {
-            diary.refused("aviso", "nome_ja_em_uso", None, None);
-            return Err(name_in_use());
-        }
+    // Sem pane, o multiplexador que não responde (ou não existe) não impede, como no `_create_headless`.
+    let pane = terminal::presence(host.mux(), host.terminal(), &spec.name).await.0 == terminal::Presence::Present;
+    if pane || taken("claude-headless") || taken("codex-sessions") {
+        diary.refused("aviso", "nome_ja_em_uso", None, None);
+        return Err(name_in_use());
     }
     host.leave_old_group(&spec.name).await?;
     let sid = host.new_session_id();
