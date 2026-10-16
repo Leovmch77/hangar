@@ -73,46 +73,6 @@ def _fixed_proxy(monkeypatch):
     eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
 
 
-def test_fixed_account_is_in_headless_sidecar(tmp_path, monkeypatch):
-    from app.adapters.claude_headless import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
-    _fixed_proxy(monkeypatch)
-    seen = {}
-    registry = _reg(tmp_path, monkeypatch, seen)
-    info = registry.create("headless-fixed", str(tmp_path), engine="proxy", engine_account="default",
-                           model="gpt-5.5", headless=True)
-    meta = sessions.load(info.name)
-    assert meta["engine_account"] == "default" and meta["model"] == "fixed/gpt-5.5"
-    assert meta["engine_credential_id"] == "codex:/tmp/codex"
-    assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5" in registry._comando_terminal(meta, resume=True)
-
-
-@pytest.mark.parametrize("tier", ["default", "priority"])
-def test_create_claude_service_tier_transport(tmp_path, monkeypatch, tier):
-    from app import cliproxy
-    from app.adapters.claude_headless import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
-    _fixed_proxy(monkeypatch)
-    monkeypatch.setattr(cliproxy, "supports_fast", lambda engine, model=None: engine == "proxy")
-    seen = {}
-    registry = _reg(tmp_path, monkeypatch, seen)
-    info = registry.create("fast", str(tmp_path), engine="proxy", model="gpt-5.5",
-                           service_tier=tier, headless=True)
-    meta = sessions.load(info.name)
-    assert meta["service_tier"] == tier
-    assert f"--service-tier {tier} -- claude" in registry._comando_terminal(meta, resume=True)
-
-
-@pytest.mark.parametrize("tier", ["default", "priority"])
-def test_create_incompatible_service_tier_has_no_effects(tmp_path, monkeypatch, tier):
-    from app import cliproxy
-    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
-    monkeypatch.setattr(reg, "_pretrust_cwd", lambda *a: pytest.fail("não pode preparar conta"))
-    monkeypatch.setattr(reg.tmux, "new_session", lambda *a, **k: pytest.fail("não pode abrir pane"))
-    with pytest.raises(ValueError, match="service_tier"):
-        reg.SessionRegistry(tmp_path).create("fast", str(tmp_path), service_tier=tier, headless=True)
-
-
 @pytest.mark.parametrize("tier", ["default", "priority"])
 def test_rebuild_incompatible_service_tier(tmp_path, monkeypatch, tier):
     from app import cliproxy
@@ -166,22 +126,6 @@ def test_terminal_proof_requires_ready_claude_identity(tmp_path, monkeypatch):
         "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": "codex:/tmp/codex",
         "CP_ENGINE_SERVICE_TIER": "priority"}.get(name))
     registry.wait_for_claude("fixed", meta)
-
-
-def test_automatic_headless_resume_rejects_subagent_missing_from_catalog(tmp_path, monkeypatch):
-    from unittest.mock import MagicMock
-    from app.adapters.claude_headless import adapter as A, sessions
-    _fixed_proxy(monkeypatch)
-    eng.salvar("proxy", {**eng.listar()["proxy"], "subagent_model": "gpt-image-2"})
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
-    meta = sessions.save("fixed", str(tmp_path), "11111111-1111-1111-1111-111111111111",
-                         engine="proxy", engine_account="default", model="fixed/gpt-5.5",
-                         engine_credential_id="codex:/tmp/codex", engine_account_base_url="http://127.0.0.1:8317")
-    spawn = MagicMock()
-    monkeypatch.setattr(A, "subir_cano_processo", spawn)
-    with pytest.raises(ValueError, match="subagentes"):
-        asyncio.run(A.ClaudeHeadlessAdapter()._subir_cano(A._Sessao("fixed", meta)))
-    spawn.assert_not_called()
 
 
 def test_proxy_init_response_does_not_replace_fixed_route(tmp_path, monkeypatch):

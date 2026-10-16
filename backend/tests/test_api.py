@@ -1060,35 +1060,22 @@ def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
     from app.config import ConfigDirInfo
     monkeypatch.setattr(api_mod, "list_config_dirs",
                         lambda: [ConfigDirInfo(path="/h/.claude-work", label="work", active=True)])
-    r = api_client.post("/api/sessions", headers=_h(),
-                        json={"name": "x", "cwd": "/tmp", "provider": "claude", "headless": True, "config_dir": "/h/.evil"})
-    assert r.status_code == 400
-
-
-# ---------------------------------------------------------------------------
-# Task 6: POST /api/sessions ramifica por `provider` (default "claude" preserva o caminho de
-# hoje). Codex e async (create_codex, mocado -- nao spawna o app-server real); Claude continua
-# indo pro registry.create sincrono (agora via asyncio.to_thread, ver docstring do endpoint).
-# ---------------------------------------------------------------------------
-def test_create_default_provider_routes_to_claude_create(api_client, monkeypatch):
-    monkeypatch.setattr(api_mod, "_session_provider_catalog", AsyncMock(return_value={
-        "claude": {"disponivel": True, "default": True}, "codex": {"disponivel": True, "default": False}}))
-    # Sem terminal: Claude com terminal nasce no Rust.
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "headless": True})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "claude"
-    cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine=None,
-                               model=None, effort=None, context_window=None, headless=True)
-
-
-def test_create_claude_with_terminal_needs_rust(api_client):
-    # Sem o Rust a abertura recusa antes de qualquer efeito, com código para o cliente.
     with patch("app.api.registry.create") as cr:
         r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "provider": "claude"})
+                            json={"name": "x", "cwd": "/tmp", "provider": "codex", "config_dir": "/h/.evil"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "erro_config_dir_invalido"
+    cr.assert_not_called()
+
+
+@pytest.mark.parametrize("headless", [None, True])
+def test_create_claude_needs_rust(api_client, headless):
+    # Claude, com e sem terminal, abre no Rust: sem ele a abertura recusa antes de qualquer efeito.
+    body = {"name": "x", "cwd": "/tmp", "provider": "claude"}
+    if headless is not None:
+        body["headless"] = headless
+    with patch("app.api.registry.create") as cr:
+        r = api_client.post("/api/sessions", headers=_h(), json=body)
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "session_open_needs_rust_server"
     cr.assert_not_called()
@@ -1105,8 +1092,7 @@ def test_create_codex_provider_routes_to_create_normal(api_client):
     assert r.json()["provider"] == "codex"
     # jsonl vazio como no Pi/Kimi: o rollout so existe depois que a TUI abre a thread.
     assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("cx", "/tmp", None, provider="codex", engine=None,
-                               model=None, effort=None, context_window=None)
+    cr.assert_called_once_with("cx", "/tmp", None, provider="codex", model=None, effort=None)
 
 
 def test_create_codex_descarta_snapshot_da_sessao_anterior(api_client, monkeypatch):
@@ -1141,18 +1127,6 @@ def test_create_rejects_invalid_service_tier(api_client, tier):
         response = api_client.post("/api/sessions", headers=_h(), json={
             "name": "cx", "cwd": "/tmp", "provider": "codex", "service_tier": tier})
     assert response.status_code == 422
-    create.assert_not_called()
-
-
-@pytest.mark.parametrize("provider", ["claude"])
-def test_create_service_tier_only_accepts_codex(api_client, provider):
-    # Claude sem terminal: com terminal a abertura é do Rust.
-    with patch("app.api.registry.create") as create:
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": provider, "service_tier": "default",
-            "headless": provider == "claude"})
-    assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "erro_criacao_sessao"
     create.assert_not_called()
 
 
@@ -1243,18 +1217,6 @@ def test_rename_codex_sem_terminal_nao_exige_tmux(api_client):
     occupied.assert_called_once_with("cx")
     rename.assert_called_once_with("cc", "cx")
     has_tmux.assert_not_called()
-
-
-def test_create_sem_terminal_sobe_o_processo_na_criacao(api_client):
-    from app.models import SessionInfo
-    info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
-    adapter = MagicMock()
-    with patch("app.api.registry.create", return_value=info), \
-         patch("app.api.get_adapter", return_value=adapter):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "hl", "cwd": "/tmp", "provider": "claude", "headless": True})
-    assert r.status_code == 200
-    adapter.acordar.assert_called_once_with("hl")
 
 
 def test_create_codex_conflict_maps_to_409(api_client):

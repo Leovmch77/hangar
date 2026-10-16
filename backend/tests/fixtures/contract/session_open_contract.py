@@ -1349,17 +1349,11 @@ def child_main(scenario_path: str, out_path: str, backend: str) -> None:
 
 
 def _child_call(step: dict, rec: dict) -> dict:
-    """Chamada direta ao Python (o que o coordenador pede hoje): só `launch_headless`."""
-    import asyncio
-    from app.adapters import get_adapter, CLAUDE_HEADLESS
+    """Chamada direta ao Python: só `launch_headless`, que hoje é do Rust (`runtime/claude_launch.rs`,
+    conferido contra estas fixtures nos testes dele); o Python não lança mais."""
     if step["call"] != "launch_headless":
         raise SystemExit(f"chamada desconhecida {step['call']}")
-    try:
-        cano, launched = asyncio.run(get_adapter(CLAUDE_HEADLESS).launch_process(step["name"]))
-        return {"call": step["call"], "name": step["name"], "launched": launched,
-                "cano": {k: v for k, v in cano.items() if k in ("escuta", "versao")}}
-    except Exception as exc:   # noqa: BLE001
-        return {"call": step["call"], "name": step["name"], "exception": f"{type(exc).__name__}: {exc}"}
+    return {"call": step["call"], "name": step["name"], "exception": "o lançamento do Claude sem terminal é do Rust"}
 
 
 def _pane_argv(command: str) -> list[str]:

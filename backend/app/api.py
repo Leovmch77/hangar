@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import ClientDisconnect
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
@@ -1884,7 +1884,6 @@ class ClaudeCustomizationBody(_StrictBody):
 
 
 class CreateBody(_StrictBody):
-    _engine_catalog: list[dict] | None = PrivateAttr(default=None)
     name: str = Field(min_length=1)
     cwd: str = Field(min_length=1)
     branch: str | None = Field(default=None, min_length=1)
@@ -2337,12 +2336,10 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
                                                    body.omp_profile, body.subagent_model)
         body = body.model_copy(update={"provider": provider})
-    explicit_account = body.config_dir is not None
     body, account_source, avisos_extra = await _inherit_from_creator(body)
-    headless = body.headless if body.headless is not None else (
-        not body.read_only and body.provider in ("claude", "codex") and bool(runtime_config.get("headless_default")))
-    if body.provider in ("claude", "pi", "omp", "kimi") and not headless:
-        # Com terminal, Claude, Pi, omp e Kimi abrem no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
+    if body.provider in ("claude", "pi", "omp", "kimi"):
+        # Claude (com e sem terminal), Pi, omp e Kimi abrem no Rust (`_open_in_rust`): aqui só chega com ele
+        # fora, antes de efeito.
         raise registry_mod.SessionOpenNeedsRust()
     # Convidado fica na conta Codex padrão: as outras contas são do dono.
     if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
@@ -2350,29 +2347,6 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
         if connected and not any(account.is_default for account in connected):
             body = body.model_copy(update={"codex_account": connected[0].id})
             avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
-    if not explicit_account and body.provider == "claude" and not body.engine:
-        # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
-        # mais folga, e a resposta diz que trocou.
-        from app import cotas
-        # cotas_claude() consulta a ponte do Rust por HTTP síncrono: fica fora do event loop.
-        config_dir, aviso = await asyncio.to_thread(
-            lambda: cotas.conta_com_cota(body.config_dir, cotas.cotas_claude()))
-        if aviso:
-            _log.warning("create_session %s: %s", body.name, aviso)
-            body = body.model_copy(update={"config_dir": config_dir})
-            avisos_extra.append(aviso)
-            account_source = "quota"
-    if body.provider == "claude" and not body.engine and (
-            body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
-        cfg = Path(body.config_dir) if body.config_dir else None
-        removidos, falhas = await asyncio.to_thread(default_model.drop_foreign, cfg)
-        for valor in removidos:
-            _log.warning("create_session %s: modelo padrão %r não é da Anthropic; removido do settings.json",
-                         body.name, valor)
-            avisos_extra.append(f"O modelo padrão '{valor}' do settings.json não é da Anthropic "
-                                "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
-        avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
-                         for f in falhas]
     worktree: dict = {}
     try:
         info = await _criar_sessao(body, worktree)
@@ -2455,16 +2429,10 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    # Só o Codex cria aqui (o resto abre no Rust): o que é só do Claude é recusado.
     if body.claude_customizations is not None:
-        if body.provider != "claude":
-            raise HTTPException(400, detail=erro("claude_customizations_invalid",
-                                                 "plugins e skills por sessão só valem para Claude"))
-        if guest_users.current.get() is not None:
-            raise HTTPException(403, detail=erro("claude_customizations_owner_only",
-                                                 "a seleção de plugins pertence ao dono"))
-    if body.service_tier is not None and body.provider != "codex":
-        if body.provider != "claude" or not await asyncio.to_thread(cliproxy.supports_fast, body.engine, body.model):
-            raise HTTPException(400, detail=erro("erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
+        raise HTTPException(400, detail=erro("claude_customizations_invalid",
+                                             "plugins e skills por sessão só valem para Claude"))
     # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
     guest = guest_users.current.get()
     if guest is not None and not guest_users.inside_root(guest, body.cwd):
@@ -2475,20 +2443,8 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
         raise HTTPException(400, detail=erro("erro_cwd_inexistente", f"a pasta {body.cwd} não existe",
                                              cwd=body.cwd))
-    account_models = None
     if body.engine_account is not None:
-        if body.provider != "claude" or not body.engine:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
-        account = await asyncio.to_thread(_fixed_engine_account, body.engine, body.engine_account)
-        cfg = engines.listar()[body.engine]
-        from app.cliproxy_accounts import base_model
-        account_models = body._engine_catalog if body._engine_catalog is not None else await _engine_models(body.engine, fresco=True)
-        try:
-            base = base_model(body.model or cfg["model"], account["prefix"])
-            catalog = cliproxy.validate_models(cfg, base, account, account_models)
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-        body = body.model_copy(update={"model": base})
+        raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
     if body.read_only:
         from app.orq_readonly import prepare
         try:
@@ -2514,10 +2470,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
     # pedido incoerente — 400, nao "ignora e segue".
     if body.engine is not None:
-        if body.provider != "claude":
-            raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
-        if body.engine not in await asyncio.to_thread(engines.listar):
-            raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
+        raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
     # permission_mode só vale para claude — e para o Codex sem terminal (vira sandbox/approval).
     if body.permission_mode is not None and body.provider != "claude" \
             and not (body.provider == "codex" and body.headless):
@@ -2525,13 +2478,8 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     if body.omp_profile and body.provider != "omp":
         raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
     if body.subagent_model is not None:
-        if body.provider != "claude" or body.engine:
-            raise HTTPException(400, detail=erro("erro_subagente_so_claude",
-                                                 "modelo dos subagentes so vale para claude sem motor"))
-        try:
-            model_args.validar("claude", body.subagent_model, None)
-        except ValueError as e:
-            raise HTTPException(400, str(e).replace("model:", "subagent_model:", 1)) from None
+        raise HTTPException(400, detail=erro("erro_subagente_so_claude",
+                                             "modelo dos subagentes so vale para claude sem motor"))
     # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
@@ -2597,27 +2545,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
                             new_branch=body.branch if body.new_branch else None)
         body.cwd = worktree["cwd"] = path
 
-    # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
-    # catálogo do provedor (_engine_models); vir do navegador seria deixar um terceiro escolher uma
-    # variável de ambiente — e ainda ficaria None justamente nos provedores que não reportam
-    # context_length. Com motor mas sem modelo (ou vice-versa), nada a resolver: o env segue o motor.
-    janela = None
-    if body.engine and body.model:
-        catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
-        try:
-            for m in await (_fixed_engine_models(body.engine, body.engine_account)
-                            if body.engine_account else _engine_models(body.engine)):
-                if m["id"] == catalog_id:
-                    janela = 1_000_000 if catalog_id != body.model else m.get("context_length")
-                    break
-        except HTTPException:
-            # _engine_models devolve 502 quando o cache expirou e o /v1/models não responde, e 409
-            # quando o motor sumiu do arquivo entre a validação e aqui. A janela é enfeite: deixar
-            # essa chamada derrubar a criação faria o provedor fora do ar IMPEDIR de abrir sessão —
-            # coisa que hoje não acontece, e que contradiz o Step 5 da Task 5 ("provedor parado: a
-            # sessão ainda cria"). A sessão sobe sem a var e o CLI usa o default dele.
-            janela = None
-
     codex_lease = None
     if body.provider == "codex" and (body.codex_account is not None or codex_service is not None):
         if codex_service is None:
@@ -2633,9 +2560,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
         """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
         nonlocal codex_lease
         def create():
-            if body.engine_account is not None:
-                kwargs["engine_account"] = body.engine_account
-                kwargs["engine_models"] = account_models
             from app.account_lifecycle import AccountKey, AccountLockError, acquire
             from contextlib import nullcontext
             home = (codex_account_obj.home if body.provider == "codex"
@@ -2685,14 +2609,9 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
 
     # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
     def _registry_kwargs() -> dict:
-        kw = dict(provider=body.provider, engine=body.engine, model=body.model,
-                  effort=body.effort, context_window=janela)
+        kw: dict = dict(provider=body.provider, model=body.model, effort=body.effort)
         if body.permission_mode is not None:
             kw["permission_mode"] = body.permission_mode
-        if body.subagent_model is not None:
-            kw["subagent_model"] = body.subagent_model
-        if body.claude_customizations is not None:
-            kw["claude_customizations"] = body.claude_customizations.model_dump()
         if _jev_efetivo(body.jev):
             kw["jev"] = True
         if body.initial_prompt is not None:
@@ -2707,59 +2626,11 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             kw["headless"] = True
         return kw
 
-    # Reconciliar e criar a sessão sob a MESMA guarda (ciclo_conta), só no caminho que consome o
-    # config dir (Claude — o Codex tem conta propria e nao le config dir do Claude). A guarda
-    # compartilhada faz a exclusão da conta, que é do Rust, esperar a sessão que está subindo.
-    if body.config_dir is not None and body.provider == "claude":
-        alvo = Path(body.config_dir)
-        if contas.e_conta(alvo):
-            nome_conta = alvo.name.removeprefix(".claude-")
-            try:
-                # `ciclo_conta` numa thread: o `flock` do __enter__ bloqueia, e no event loop isso
-                # congelava o app inteiro quando duas operações de conta se cruzavam. flock pertence
-                # ao descritor aberto, não à thread — tomar e soltar de threads diferentes é válido.
-                cm = contas.ciclo_conta(nome_conta)
-                ciclo = await asyncio.to_thread(cm.__enter__)
-                try:
-                    try:
-                        avisos = await asyncio.to_thread(ciclo.reconciliar,
-                                                         sanitize_cwd(body.cwd))
-                    except contas.ContaError as e:
-                        # ContaError já carrega status HTTP (o hangar-conta imprime o detail). Deixar
-                        # escapar viraria 500 com traceback — o usuário não saberia por que a
-                        # abertura falhou (ex: Windows sem Modo Desenvolvedor recusando symlink).
-                        raise HTTPException(e.status, e.detail) from None
-                    except OSError as e:
-                        raise HTTPException(500, detail=erro("erro_conta_reconciliacao_falhou",
-                                             f"não consegui reconciliar a conta "
-                                             f"{nome_conta}: {e}", nome_conta=nome_conta,
-                                             erro=str(e))) from None
-                    for aviso in avisos:
-                        _log.warning("conta %s: %s", alvo.name, aviso)
-                    try:
-                        info = await _create_registry(_registry_kwargs())
-                        if body.headless:
-                            # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
-                            wake = {"engine_models": account_models} if body.engine_account else {}
-                            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
-                        return info.model_copy(update={"avisos": list(avisos)})
-                    except ValueError as e:
-                        code = _create_error_code(e)
-                        raise HTTPException(409, detail=erro(code, str(e)))
-                finally:
-                    # Solta a trava sempre — inclusive quando o corpo levanta HTTPException.
-                    await asyncio.to_thread(cm.__exit__, None, None, None)
-            except contas.ContaError as e:
-                # Conta sumiu entre a validação e a trava (ex: DELETE concorrente).
-                raise HTTPException(e.status, e.detail) from None
     try:
         info = await _create_registry(_registry_kwargs())
-        if body.headless and body.provider == "codex":
+        if body.headless:
             # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
             _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
-        elif body.headless:
-            wake = {"engine_models": account_models} if body.engine_account else {}
-            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
         return info
     except ValueError as e:
         code = _create_error_code(e)
@@ -3419,9 +3290,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
             if headless and not read_only:
                 if engine_account is not None or info.engine:
                     try:
-                        hl.reset_start_attempts(name)
-                        if await hl.ensure_running(name, require_initialize=True,
-                                                   engine_models=account_models if engine_account is not None else None) is None:
+                        if await hl.ensure_running(name, require_initialize=True) is None:
                             raise RuntimeError("a sessão não reabriu")
                     except Exception as exc:
                         return str(exc)
@@ -4273,7 +4142,6 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         raise HTTPException(400, detail=erro("erro_bastao_cwd_inexistente",
                                              f"a pasta {cwd} não existe mais; se ela foi renomeada "
                                              f"ou movida, escolha a pasta nova", cwd=cwd))
-    account_models = None
     if body.engine_account is not None:
         if body.provider != "claude" or not body.engine:
             raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
@@ -4308,14 +4176,13 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
         headless=bool(body.headless))
-    if creation.provider == "claude" and not creation.headless:
-        # Claude com terminal nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust
-        # já olhou o pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+    if creation.provider == "claude":
+        # Claude nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust já olhou o
+        # pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
         creation = creation.model_copy(update={"initial_prompt": kick})
         if request.headers.get("x-hangar-open") == "rust":
             return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
                                  "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
-    creation._engine_catalog = account_models
     novo = await create_session(creation)
     if creation.initial_prompt is None:
         try:
@@ -10048,7 +9915,6 @@ async def _reabrir_em_bypass(name: str, info):
                                         previous_non_plan="bypassPermissions") is None:
                 hl.acordar(name)
                 raise HTTPException(409, detail=erro("erro_permissao_reabrir", "não gravei o modo novo no arquivo de estado da sessão"))
-            hl.reset_start_attempts(name)
             try:
                 await hl.ensure_running(name, require_initialize=True)
             except Exception as e:

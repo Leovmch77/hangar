@@ -83,21 +83,6 @@ def test_unassociated_proxy_accounts_have_visible_empty_error(cli, tmp_path, mon
     assert engine["cliproxy_error"]
 
 
-def test_incompatible_subagent_is_refused_before_creation(cli, tmp_path, monkeypatch):
-    from app import api
-    _fixed_engine(tmp_path, monkeypatch)
-    cfg = eng.listar()["proxy"]
-    eng.salvar("proxy", {**cfg, "subagent_model": "gpt-image-2"})
-    create = MagicMock()
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "engine": "proxy", "engine_account": "default",
-        "model": "gpt-5.5", "headless": True})
-    assert response.status_code == 400, response.text
-    assert "subagentes" in response.text
-    create.assert_not_called()
-
-
 def test_fixed_session_model_effort_cannot_apply_bare_or_global_model(cli, monkeypatch):
     from app import api
     from app.models import SessionInfo
@@ -302,20 +287,6 @@ def test_session_model_catalog_exposes_confirmed_proxy_fast(cli, tmp_path, monke
     assert response.json()["current"] == {"model": "gpt-5.5", "service_tier": tier}
 
 
-@pytest.mark.parametrize("tier", ["default", "priority"])
-def test_create_claude_proxy_forwards_fast(cli, tmp_path, monkeypatch, tier):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    create = MagicMock(return_value=SessionInfo(name="fixed", provider="claude", engine="proxy"))
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": "gpt-5.5", "service_tier": tier, "headless": True})
-    assert response.status_code == 200, response.text
-    assert create.call_args.kwargs["service_tier"] == tier
-
-
 def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch):
     from app import api
     from app.models import SessionInfo
@@ -332,32 +303,17 @@ def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch
     apply.assert_not_called()
 
 
-@pytest.mark.parametrize("model,window", [("gpt-5.5", 400000), ("gpt-5.5[1m]", 1000000)])
-def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, monkeypatch, model, window):
+def test_create_codex_refuses_fixed_account(cli, tmp_path, monkeypatch):
     from app import api
-    from app.models import SessionInfo
     _fixed_engine(tmp_path, monkeypatch)
-    seen = []
-
-    def create(name, cwd, config_dir, **kwargs):
-        seen.append((config_dir, kwargs))
-        return SessionInfo(name=name, cwd=cwd, engine="proxy", engine_account="default",
-                           conta=f"codex:{(tmp_path / 'codex').resolve()}")
-
+    create = MagicMock()
     monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": model, "headless": True})
-    assert response.status_code == 200, response.text
-    assert seen[0][0] is None
-    assert seen[0][1]["engine_account"] == "default"
-    assert seen[0][1]["model"] == model and seen[0][1]["context_window"] == window
-    assert response.json()["engine_account"] == "default" and response.json()["conta"].startswith("codex:")
-    seen.clear()
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "invalid", "cwd": str(tmp_path), "provider": "codex", "engine": "proxy",
         "engine_account": "default", "headless": False})
-    assert response.status_code == 400 and not seen
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "erro_cliproxy_conta"
+    create.assert_not_called()
 
 
 @pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.5[1m]"])

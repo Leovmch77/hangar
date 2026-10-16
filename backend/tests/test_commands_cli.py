@@ -10,28 +10,15 @@ def _by_name(cmds):
     return {c.name: c for c in cmds}
 
 
-def test_headless_guarda_a_lista_do_initialize_e_os_so_de_tui_do_init(adapter, monkeypatch):  # noqa: F811
+def test_headless_guarda_os_so_de_tui_do_init(adapter):  # noqa: F811
     sess = adapter._sessions["s1"]
-
-    async def ctrl(s, subtype, **kw):
-        return {"commands": [{"name": "usage", "description": "Show usage", "argumentHint": ""},
-                             {"name": "doctor", "description": "x"}, "lixo"]}
-    monkeypatch.setattr(adapter, "_ctrl", ctrl)
-    monkeypatch.setattr(adapter, "_agendar_cota", lambda s: None)
-
-    async def drenar(s):
-        pass
-    monkeypatch.setattr(adapter, "_drenar_fim_de_turno", drenar)
 
     async def fluxo():
         assert adapter.comandos("s1") == (None, frozenset())
-        await adapter._esperar_initialize(sess)
         await adapter._on_event(sess, {"type": "system", "subtype": "init", "session_id": sess.sid,
                                        "terminal_slash_commands": ["doctor", "color"]})
     asyncio.run(fluxo())
-    cli, so_tui = adapter.comandos("s1")
-    assert [c["name"] for c in cli] == ["usage", "doctor"]
-    assert so_tui == {"doctor", "color"}
+    assert adapter.comandos("s1")[1] == {"doctor", "color"}
 
 
 def test_lista_da_cli_manda_nos_nomes_e_descricao_local_vem_primeiro(tmp_path):

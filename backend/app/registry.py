@@ -2165,8 +2165,9 @@ class SessionRegistry:
                engine_account: str | None = None, engine_models: list[dict] | None = None,
                service_tier: str | None = None,
                claude_customizations: dict | None = None) -> SessionInfo:
-        # Sessão nova com terminal de Claude, Pi, omp e Kimi abre no Rust; a retomada do Arquivo ainda passa aqui.
-        if provider in ("claude", "pi", "omp", "kimi") and not headless and resume_session_id is None:
+        # Sessão nova de Claude (com e sem terminal), Pi, omp e Kimi abre no Rust; a retomada do Arquivo
+        # com terminal ainda passa aqui.
+        if provider in ("claude", "pi", "omp", "kimi") and (resume_session_id is None or headless and provider == "claude"):
             raise SessionOpenNeedsRust()
         if claude_customizations is not None and provider != "claude":
             raise ValueError("plugins e skills por sessão só valem para Claude")
@@ -2224,23 +2225,15 @@ class SessionRegistry:
             permission_mode = permission_mode if permission_mode is not None else target.get("permission_mode")
         self._leave_old_group(name)
         if headless:
-            if provider not in ("claude", "codex"):
-                raise ValueError("sessao sem terminal so vale para provider claude ou codex")
+            # Só o Codex chega aqui sem terminal: o resto abre no Rust.
             if read_only or initial_prompt:
                 raise ValueError("sessao sem terminal nao aceita read_only nem prompt inicial")
-            if provider == "codex":
-                if engine:
-                    raise ValueError("motor so vale para provider claude")
-                return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
-                                                   permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit, transfer_rollout_path,
-                                                   service_tier=service_tier)
-            return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
-                                         effort, context_window, permission_mode, subagent_model,
-                                         jev, engine_account,
-                                         fixed_account["credential_id"] if fixed_account else None,
-                                         fixed_account["base_url"] if fixed_account else None,
-                                         service_tier=service_tier, claude_customizations=claude_customizations)
+            if engine:
+                raise ValueError("motor so vale para provider claude")
+            return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
+                                               permission_mode, codex_account, jev,
+                                               transfer_id, tool_output_token_limit, transfer_rollout_path,
+                                               service_tier=service_tier)
         claude_settings = None
         codex_home = None
         if provider == "codex":
@@ -2489,68 +2482,6 @@ class SessionRegistry:
                            provider=provider, engine=engine, engine_account=engine_account,
                            conta=fixed_account["credential_id"] if fixed_account else None,
                            codex_home=codex_home)
-
-    def _create_headless(self, name: str, cwd: str, config_dir: str | None,
-                         resume_session_id: str | None, engine: str | None, model: str | None,
-                         effort: str | None, context_window: int | None,
-                         permission_mode: str | None, subagent_model: str | None = None,
-                         jev: bool = False, engine_account: str | None = None,
-                         engine_credential_id: str | None = None,
-                         engine_account_base_url: str | None = None,
-                         service_tier: str | None = None,
-                         claude_customizations: dict | None = None) -> SessionInfo:
-        """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
-        primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
-        sessão não custa um processo, e nada aqui depende de tmux."""
-        from app.adapters import get_adapter, CLAUDE_HEADLESS
-        if engine:
-            from app import engines
-            if engine not in engines.listar():
-                raise ValueError(f"motor '{engine}' nao existe")
-            _exigir_cp_engine()
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider="claude",
-                           detalhe="nome_ja_em_uso")
-            raise ValueError("ja existe uma sessao com esse nome")
-        if resume_session_id is not None:
-            try:
-                uuid.UUID(resume_session_id)
-            except (ValueError, AttributeError, TypeError):
-                raise ValueError("session_id invalido")
-            sid = resume_session_id
-        else:
-            sid = str(uuid.uuid4())
-        model_args.validar("claude", model, effort, permission_mode)
-        claude_settings = session_customizations.prepare(
-            sid, cwd, tmux.config_dir_de(config_dir), claude_customizations,
-            resume=resume_session_id is not None)
-        diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
-        _pretrust_cwd(cwd, config_dir)
-        self._forget(name, required=True)
-        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
-        _retire_waiting_runtime(name)
-        PromptQueue(name).clear()
-        # Nascer JÁ no plano deixaria a sessão sem modo de base: é ele que diz pra onde
-        # "Implementar o plano" volta e se o plano precisa perguntar por ferramenta.
-        anterior = modo_permissao.modo_da_conta(config_dir) if permission_mode == "plan" else None
-        meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
-                                      model=model, effort=effort, context_window=context_window,
-                                      permission_mode=permission_mode, previous_non_plan=anterior,
-                                      subagent_model=subagent_model, jev=jev,
-                                      engine_account=engine_account,
-                                      engine_credential_id=engine_credential_id,
-                                      engine_account_base_url=engine_account_base_url,
-                                      service_tier=service_tier, claude_settings=claude_settings)
-        ThenLink(name).clear()
-        # Nome reusado não herda o par externo da sessão antiga.
-        _encerrar_pares_externos(name)
-        _log_leave_warnings(name, self._clear_pair(name))
-        jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
-        self._seed(name, jsonl)
-        diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
-        return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
-                           headless=True, engine=engine, engine_account=engine_account,
-                           conta=engine_credential_id if engine_account else None)
 
     def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
                                model: str | None, effort: str | None, permission_mode: str | None,
@@ -2986,7 +2917,6 @@ class SessionRegistry:
             if not current or stale_process:
                 headless_sessions.restaurar(restored)
             hl = get_adapter(CLAUDE_HEADLESS)
-            hl._subidas.pop(record.name, None)
             from app import runtime_coordinator
             coordinator = runtime_coordinator.current()
             if (coordinator is not None and getattr(coordinator, "transport", None) is not None

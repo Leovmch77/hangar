@@ -38,9 +38,10 @@ async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, defaul
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("requested", [None, False, True])
-async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_path, monkeypatch, provider, requested):
+async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_path, monkeypatch, requested):
+    # Claude abre no Rust: só o Codex passa por aqui.
+    provider = "codex"
     from app import orq_readonly
 
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
@@ -49,14 +50,13 @@ async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_
     prepare = Mock()
     monkeypatch.setattr(orq_readonly, "prepare", prepare)
     # Uma regressão na recusa nunca pode abrir processo real durante este teste.
-    for method in ("_create_headless", "_create_codex_headless"):
-        monkeypatch.setattr(api.registry, method, Mock(side_effect=AssertionError("unexpected session creation")))
+    monkeypatch.setattr(api.registry, "_create_codex_headless",
+                        Mock(side_effect=AssertionError("unexpected session creation")))
     create = Mock(wraps=api.registry.create) if requested is True else Mock(
         return_value=SessionInfo(name="read-only-mode", cwd=str(tmp_path), provider=provider))
     monkeypatch.setattr(api.registry, "create", create)
     body = api.CreateBody(name="read-only-mode", cwd=str(tmp_path), provider=provider,
-                          read_only=True, headless=requested,
-                          permission_mode="bypassPermissions" if provider == "claude" else None)
+                          read_only=True, headless=requested)
     if requested is True:
         with pytest.raises(api.HTTPException) as rejected:
             await api._criar_sessao(body, {})

@@ -260,37 +260,6 @@ async def worktrees_context() -> dict:
     }
 
 
-@router.post("/sessions/{name}/reopen")
-async def session_reopen(name: str) -> dict:
-    """Abrir a conversa reabre a sessão em erro. Quem escolhe a conversa é o Rust; o coordenador
-    que reabre ainda é daqui. Responde antes de reabrir; uma por sessão em voo."""
-    from app import runtime_coordinator
-    coordinator = runtime_coordinator.current()
-    if coordinator is not None and coordinator.managed_queue(name) and name not in _projection_tasks:
-        task = asyncio.create_task(_ensure_projection(coordinator, name))
-        _projection_tasks[name] = task
-        task.add_done_callback(lambda _t, n=name: _projection_tasks.pop(n, None))
-    return {"ok": True}
-
-
-_projection_tasks: dict[str, asyncio.Task] = {}
-
-
-async def _ensure_projection(coordinator, name: str) -> None:
-    from app import runtime_coordinator
-    import uuid
-    try:
-        # Sem prazo próprio: cancelar no meio interromperia a reabertura da sessão (até minutos) e deixaria
-        # o processo lançado sem dono; quem limita a espera é o próprio coordenador.
-        await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
-    except runtime_coordinator.TransferInProgress:
-        # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
-        # deixa rastro de uma passagem que não termina.
-        diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
-    except Exception as exc:
-        from app.runtime_coordinator import failure_reason
-        diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
-
 
 @router.get("/sessions/{name}/plugin")
 async def plugin_pending(name: str) -> dict:
