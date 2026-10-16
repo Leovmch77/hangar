@@ -501,8 +501,10 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             m = _TASK_NOTIF_RE.search(queued)
             if m:
                 tid = m.group(1).strip()
-                # id proprio: a entrada nao tem uuid, e o front deduplica por id.
-                return [ChatEvent(kind="tool_result", id=f"queued-task:{tid}",
+                # id próprio: a entrada não tem uuid, e o front deduplica por id. O hash separa os
+                # fins de um subagente retomado; as linhas do mesmo aviso continuam iguais.
+                h = hashlib.md5(queued.encode("utf-8", "replace")).hexdigest()[:8]
+                return [ChatEvent(kind="tool_result", id=f"queued-task:{tid}:{h}",
                                   tool_use_id=f"task:{tid}", result="task-notification")]
             return []
         # Msg de usuario digitada ENQUANTO o agente trabalha: o harness enfileira (`enqueue`) e, ao

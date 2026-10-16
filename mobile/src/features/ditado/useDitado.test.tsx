@@ -5,6 +5,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { RecordingStatus } from 'expo-audio';
+import { configureDiag, type EventoDiag } from '@hangar/core';
+import * as m from '../../paraglide/messages';
+
+const recordDiagnostic = vi.fn<(event: EventoDiag, destination?: string) => void>();
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -94,6 +98,8 @@ function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; 
 
 beforeEach(() => {
   vi.useFakeTimers();
+  recordDiagnostic.mockClear();
+  configureDiag({ registrar: recordDiagnostic, novoReq: () => '' });
   document.body.innerHTML = '';
   appState.currentState = 'active';
   appState.listener = null;
@@ -118,6 +124,7 @@ beforeEach(() => {
 afterEach(async () => {
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
+  configureDiag({ registrar: () => {}, novoReq: () => '' });
   vi.clearAllTimers();
   vi.useRealTimers();
 });
@@ -446,7 +453,9 @@ describe('useDitado — interrupção e origem da gravação', () => {
     });
     expect(onFim).not.toHaveBeenCalled();
     expect(onErroParada).toHaveBeenCalledTimes(1);
-    expect(onErroParada.mock.calls[0][0].message).toBe('stop nativo falhou');
+    expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
+    expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
+      codigo: 'recording_error', detalhe: 'stop nativo falhou' }, undefined);
     expect(fetch).not.toHaveBeenCalled();
     expect(removeStatusListener).toHaveBeenCalledTimes(1);
     expect(fakeRec.release).toHaveBeenCalledTimes(1);
@@ -462,7 +471,9 @@ describe('useDitado — interrupção e origem da gravação', () => {
     await act(async () => { emitRecordingStatus({ hasError: true, error: 'microfone interrompido', url: null }); });
     expect(h.getHook().gravando).toBe(false);
     expect(onErroParada).toHaveBeenCalledTimes(1);
-    expect(onErroParada.mock.calls[0][0].message).toBe('microfone interrompido');
+    expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
+    expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
+      codigo: 'recording_error', detalhe: 'microfone interrompido' }, undefined);
     expect(onFim).not.toHaveBeenCalled();
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     expect(removeStatusListener).toHaveBeenCalledTimes(1);
@@ -505,7 +516,9 @@ describe('useDitado — interrupção e origem da gravação', () => {
     await h.mount({ onFim, onErroParada });
     await act(async () => { await expect(h.getHook().iniciar()).resolves.toBeUndefined(); });
     expect(onErroParada).toHaveBeenCalledTimes(1);
-    expect(onErroParada.mock.calls[0][0].message).toBe('erro nativo de preparação');
+    expect(onErroParada.mock.calls[0][0].message).toBe(m.composer_falha_gravacao());
+    expect(recordDiagnostic).toHaveBeenCalledExactlyOnceWith({ evento: 'dictation.recording_failed', nivel: 'erro',
+      codigo: 'recording_error', detalhe: 'erro nativo de preparação' }, undefined);
     expect(onFim).not.toHaveBeenCalled();
     expect(fakeRec.record).not.toHaveBeenCalled();
     expect(fakeRec.release).toHaveBeenCalledTimes(1);

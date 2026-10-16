@@ -6,6 +6,7 @@ import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { QueuePanel as Panel } from '@hangar/core';
+import { contextRefsPlainText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { Glass } from '../ui/Glass';
@@ -81,7 +82,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
               const destructive = enabled.findIndex((a) => a.destructive);
               ActionSheetIOS.showActionSheetWithOptions(
                 {
-                  title: entry.text.slice(0, 80),
+                  title: contextRefsPlainText(entry.text).slice(0, 80),
                   options: [...enabled.map((a) => a.title), m.comum_cancelar()],
                   cancelButtonIndex: enabled.length,
                   destructiveButtonIndex: destructive >= 0 ? destructive : undefined,
@@ -95,7 +96,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
                 // No Android o toque longo é do MenuView; o no-op impede que soltar o dedo vire toque.
                 onLongPress={!panel.actions ? undefined : Platform.OS === 'ios' ? openIOS : () => {}}
                 delayLongPress={350}
-                accessibilityLabel={entry.text}
+                accessibilityLabel={contextRefsPlainText(entry.text)}
                 accessibilityHint={panel.actions ? m.queue_panel_actions() : undefined}
                 // O menu mora no toque longo, que o leitor de tela não alcança: as ações viram ações da linha.
                 accessibilityActions={panel.actions ? enabled.map((a) => ({ name: a.id, label: a.title })) : undefined}
@@ -104,7 +105,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
                 }}
                 style={[styles.row, editing && { backgroundColor: theme.tokens.accent.dim }]}
               >
-                <Text style={styles.text} numberOfLines={full === entry.id ? undefined : 1}>{entry.text}</Text>
+                <Text style={styles.text} numberOfLines={full === entry.id ? undefined : 1}>{contextRefsPlainText(entry.text)}</Text>
                 {editing ? (
                   <Pressable accessibilityRole="button" onPress={onCancelEdit} disabled={busy} hitSlop={8} style={styles.cancelBtn}>
                     <Text style={[styles.cancel, busy && styles.disabled]}>{m.comum_cancelar()}</Text>
@@ -114,7 +115,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
                   <>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={m.codex_orientar()}
+                      accessibilityLabel={m.queue_panel_steer_message({ text: entry.text.replace(/\s+/g, ' ').trim().slice(0, 80) })}
                       accessibilityHint={m.codex_orientar_ajuda()}
                       accessibilityState={{ disabled: busy }}
                       disabled={busy}

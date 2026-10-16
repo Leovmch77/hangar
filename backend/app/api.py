@@ -636,7 +636,7 @@ async def _grupos_indisponiveis(request: Request, exc: Exception):
     return JSONResponse(status_code=503, content={"detail": _group_unavailable(code).detail})
 
 
-async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str):
+async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str, **repasse):
     """Pedido de uma rota que só o Rust atende, chegado por uma porta do Python (Connect,
     convidado): autenticado aqui, ele segue pela ponte privada e a resposta volta como veio. Sem o
     Rust não há reserva Python: a rota responde indisponível, com o código de `sem_rust`."""
@@ -647,7 +647,7 @@ async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str):
         return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
     if account_bridge.owner_mode() == "python":
         return JSONResponse({"detail": sem_rust}, status_code=503)
-    return await account_bridge.forward_public(request, destino)
+    return await account_bridge.forward_public(request, destino, **repasse)
 
 
 @app.middleware("http")
@@ -692,6 +692,20 @@ async def _planos_pelo_rust(request: Request, call_next):
         return await call_next(request)
     return await _repasse_ao_rust(request, erro("erro_planos_precisa_rust", "os planos precisam do servidor Rust, que não está rodando"),
                                   "/__hangar_server/forwarded")
+
+
+# Cabeçalhos do PNG do diagrama que voltam do Rust; o tipo já volta sempre.
+_MERMAID_HEADERS = ("x-hangar-css-width", "x-hangar-css-height", "cache-control", "x-content-type-options")
+
+
+@app.post("/api/mermaid")
+async def mermaid_pelo_rust(request: Request):
+    """O desenho é do Rust (`mermaid::serve`). Aqui chegam o dono pelo Connect, que segue pela ponte,
+    e quem o Rust não reconheceu como dono. O convidado fica sem a rota, como antes."""
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _repasse_ao_rust(request, erro("mermaid_indisponivel", "o desenho de diagramas precisa do servidor Rust"),
+                                  "/__hangar_server/forwarded", keep=_MERMAID_HEADERS, limit=64 * 1024 * 1024)
 
 
 @app.middleware("http")
@@ -757,7 +771,7 @@ app.add_middleware(
     # aqui. Sem o ETag exposto, o PWA servido pela VPS falando com o backend de casa (cross-origin)
     # recebe o validador e nao consegue le-lo: o cache do chat nunca teria o que mandar no
     # If-None-Match e cairia calado no download inteiro, em toda entrada.
-    expose_headers=["ETag"],
+    expose_headers=["ETag", "x-hangar-css-width", "x-hangar-css-height"],
 )
 # JSON e assets grandes cruzam LAN/VPN; o Starlette exclui `text/event-stream`, sem segurar o SSE.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)

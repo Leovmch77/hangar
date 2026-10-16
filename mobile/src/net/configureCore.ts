@@ -1,7 +1,8 @@
-import { baseOf, configureApi, configureLocale } from '@hangar/core';
+import { baseOf, configureApi, configureLocale, definirArmazem } from '@hangar/core';
 import { getLocales } from 'expo-localization';
 import { overwriteGetLocale } from '../paraglide/runtime';
 import { useServers } from '../stores/servers';
+import { prefs } from '../stores/prefs';
 import { setPairNotice } from '../stores/sessions';
 import { useAparencia } from '../stores/aparencia';
 import { createEventSource } from './sse';
@@ -9,6 +10,11 @@ import { iniciarDiag } from './diag';
 import { toast } from '../ui/Toast';
 
 export function configureCore() {
+  definirArmazem({
+    getItem: (key) => prefs.getString(key) ?? null,
+    setItem: (key, value) => prefs.set(key, value),
+    removeItem: (key) => { prefs.remove(key); },
+  });
   // uma fonte só: o mesmo getLocale alimenta o runtime do core e o do paraglide mobile.
   // Escolha manual em Configurações vence o idioma do aparelho; `system` volta a segui-lo.
   const locale = (): 'pt' | 'en' => {

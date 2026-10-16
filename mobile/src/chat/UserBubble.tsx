@@ -2,7 +2,8 @@ import { memo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ImageThumb, type MediaItem } from './ImageThumb';
-import { parseImageMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader } from '@hangar/core';
+import { hasContextRefs, parseImageMessage, parsePeerMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader, type QuoteRef } from '@hangar/core';
+import { ContextRefView } from './ContextRefView';
 import * as m from '../paraglide/messages';
 import { BubbleActions } from './BubbleActions';
 import { superficie } from '../theme/superficie';
@@ -11,7 +12,7 @@ import { useServers } from '../stores/servers';
 // Bolha do usuário: pequena, à direita, no fundo superficie(0.8) — o mesmo degrau da bolha do nativo,
 // e por isso acompanha Transparência e Solidez. Se parseImageMessage(text) não nulo → legenda +
 // miniaturas. As ações (copiar, compartilhar) não ficam à mostra: o toque longo abre a linha embaixo.
-export const UserBubble = memo(function UserBubble({ text, sessionName, serverId, ts, eventId, imageCount = 0 }: {
+export const UserBubble = memo(function UserBubble({ text, sessionName, serverId, ts, eventId, imageCount = 0, onQuoteClick }: {
   text: string;
   sessionName?: string;
   serverId?: string;
@@ -19,6 +20,8 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
   eventId?: string;
   /** Imagens coladas no TERMINAL: vêm do transcript por /transcript-image, não do texto. */
   imageCount?: number;
+  /** Toque numa citação: rola até a resposta de origem. */
+  onQuoteClick?: (ref: QuoteRef) => void;
 }) {
   const { theme } = useUnistyles();
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
@@ -26,9 +29,21 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
   const [showOriginal, setShowOriginal] = useState(false);
   const [acoes, setAcoes] = useState(false);
   const parsed = parseImageMessage(text);
+  const peer = parsePeerMessage(parsed?.caption ?? text);
+  const peerColor = peer?.scope === 'external' ? theme.tokens.status.error
+    : peer?.scope === 'group' ? theme.tokens.status.warning
+      : peer?.scope === 'panel' ? theme.tokens.text.muted : theme.tokens.accent.base;
+  const peerLabel = peer ? (peer.scope === 'group' ? m.board_peer_grupo({ n: peer.from })
+    : peer.scope === 'panel' ? m.board_peer_painel({ n: peer.from })
+      : peer.scope === 'external' ? m.board_peer_fora({ n: peer.from }) : m.board_peer_de({ n: peer.from })) : null;
+  const peerAccessibilityLabel = peer ? (peer.scope === 'group' ? m.peer_message_group_sender({ name: peer.from })
+    : peer.scope === 'panel' ? m.peer_message_panel_sender({ name: peer.from })
+      : peer.scope === 'external' ? m.peer_message_external_sender({ name: peer.from }) : m.peer_message_sender({ name: peer.from })) : undefined;
+  const emptyPeer = !!peer && !peer.text.trim();
+  const body = peer ? (emptyPeer ? m.peer_message_empty() : peer.text) : text;
   const doTerminal = imageCount > 0 && !!sessionName && !!eventId;
   const hasImages = (!!parsed && !!sessionName) || doTerminal;
-  const caption = parsed ? parsed.caption : doTerminal ? text : '';
+  const caption = peer ? body : (parsed ? parsed.caption : doTerminal ? text : '');
   // Como no web: com o caminho escrito pra TODAS as fotos, as últimas `imageCount` já vêm do
   // transcript, e mostrar as duas fontes duplicava cada imagem.
   const filenames = !parsed || !sessionName ? []
@@ -42,6 +57,10 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     })) : []),
   ] : [];
   const alternar = () => setAcoes((v) => !v);
+  // Legenda com citação ou elemento (bloco <hangar-ref>): segmentos no lugar do texto cru.
+  const renderCaption = (t: string) => (hasContextRefs(t)
+    ? <ContextRefView text={t} onQuoteClick={onQuoteClick} />
+    : <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{t}</Text>);
 
   // O texto não é `selectable`: no Android a seleção come o toque longo que abre as ações, e copiar
   // já está lá.
@@ -50,13 +69,16 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
       <Pressable
         onLongPress={alternar}
         delayLongPress={350}
-        style={[styles.bubble, voz && styles.voice]}
+        style={[styles.bubble, voz && styles.voice, peer && { borderWidth: 1, borderColor: peerColor }]}
         accessibilityActions={[{ name: 'longpress', label: m.navbar_mais_acoes() }]}
         onAccessibilityAction={(e) => { if (e.nativeEvent.actionName === 'longpress') alternar(); }}
       >
+        {peerLabel ? <View accessible accessibilityLabel={peerAccessibilityLabel} style={[styles.peerChip, { borderColor: peerColor }]}>
+          <Text accessible={false} style={[styles.voiceLabel, { color: peerColor }]}>{peerLabel}</Text>
+        </View> : null}
         {conteudo}
       </Pressable>
-      {acoes ? <BubbleActions text={textoAcoes} ts={ts} ouvir={false} defaultOpen align={voz ? 'start' : 'end'} /> : null}
+      {acoes ? <BubbleActions text={emptyPeer ? text : textoAcoes} ts={ts} ouvir={false} defaultOpen align={voz ? 'start' : 'end'} /> : null}
     </View>
   );
 
@@ -81,24 +103,24 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     if (!server) return bolha(<>
       {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
       <Text style={[styles.txt, { color: theme.tokens.status.error }]} accessibilityRole="alert">{m.chat_servidor_removido()}</Text>
-    </>, caption || text);
+    </>, caption || body);
     // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
     if (galeria.length === 0) {
-      const display = caption || text;
-      return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{display}</Text>, display);
+      const display = caption || body;
+      return bolha(renderCaption(display), display);
     }
     return bolha(
       <>
-        {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
+        {caption ? renderCaption(caption) : null}
         <View style={styles.thumbs}>
           {galeria.map((g, i) => <ImageThumb key={g.uri} items={galeria} index={i} style={styles.thumb} />)}
         </View>
       </>,
-      caption || text,
+      caption || body,
     );
   }
 
-  return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{text}</Text>, text);
+  return bolha(renderCaption(body), body);
 });
 
 const styles = StyleSheet.create((theme) => ({
@@ -122,6 +144,7 @@ const styles = StyleSheet.create((theme) => ({
   // Delegação por voz: borda fina em vez de cor, que fica para estado e aviso.
   voice: { borderWidth: 1, borderColor: theme.tokens.border.default },
   voiceLabel: { fontWeight: '600', fontSize: theme.base.text.sm },
+  peerChip: { alignSelf: 'flex-start', borderWidth: 1, borderRadius: theme.base.radius.full, paddingHorizontal: 8, paddingVertical: 2 },
   detailsButton: { minHeight: 44, justifyContent: 'center' },
   thumbs: {
     flexDirection: 'row',

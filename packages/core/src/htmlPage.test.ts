@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   frameHeight, htmlPageFromResult, isHtmlRenderTool, pageExpandable, pageFetchState, pageZoomKey, pageZoomLabel,
-  parseHostMessage, reservedHeight, stepPageZoom, themedPageDocument, wheelZoom, PAGE_ZOOM_MAX, PAGE_ZOOM_MIN,
+  pageFileName, pageUrls, parseHostMessage, reservedHeight, stepPageZoom, themedPageDocument, wheelZoom, PAGE_ZOOM_MAX,
+  PAGE_ZOOM_MIN,
 } from './htmlPage';
 
 const ref = { id: 'a1', title: 'T', height: null, heights: { '360': 500, '728': 380, '1000': 360 }, ownTheme: false };
@@ -12,6 +13,30 @@ describe('htmlPage', () => {
     const out = themedPageDocument(doc, 'light', { '--foreground': '#111' });
     expect(out).toContain(':root{color-scheme:light;--foreground:#111}:root{--radius:10px}');
     expect(out).not.toContain('velho');
+  });
+
+  it('nomeia o arquivo salvo pelo título, sem o que os sistemas de arquivo recusam', () => {
+    expect(pageFileName('Prova de redimensionamento')).toBe('Prova de redimensionamento.html');
+    expect(pageFileName(' a/b: c*d?  "e" <f>|g\\h \t')).toBe('a b c d e f g h.html');
+    expect(pageFileName('///')).toBe('pagina.html');
+    expect(pageFileName('x'.repeat(300))).toHaveLength(120 + '.html'.length);
+  });
+
+  it('pede a fonte da página sem o que o servidor injeta', () => {
+    expect(pageUrls('http://h', 's 1', 'a').source).toBe('http://h/api/sessions/s%201/pages/a?raw=1&source=1');
+  });
+
+  it('parte dos padrões do esquema guardados na página e aplica as cores do app por cima', () => {
+    const doc = '<style id="hangar-theme" data-base=":root{--radius:10px}" data-dark="--info:#5b9cf5;--foreground:#ddd;" '
+      + 'data-light="--info:#2f6fd6;--foreground:#222;">velho</style>';
+    const out = themedPageDocument(doc, 'light', { '--foreground': '#111' });
+    // A do cliente vem depois e vence; a que o cliente não manda fica com o padrão do esquema, não some.
+    expect(out).toContain(':root{color-scheme:light;--info:#2f6fd6;--foreground:#222;--foreground:#111}:root{--radius:10px}');
+    expect(out).toContain('data-dark="--info:#5b9cf5;--foreground:#ddd;"');
+    expect(themedPageDocument(doc, 'dark', {})).toContain(':root{color-scheme:dark;--info:#5b9cf5;--foreground:#ddd;}');
+    // Fonte padrão vem antes e a do cliente vence.
+    const fonts = '<style id="hangar-theme" data-base="body{}" data-dark="--font-sans:Padrão;">x</style>';
+    expect(themedPageDocument(fonts, 'dark', { '--font-sans': 'Geist' })).toContain(':root{color-scheme:dark;--font-sans:Padrão;--font-sans:Geist}body{}');
   });
 
   it('reconhece a tool do hangar e só ela', () => {

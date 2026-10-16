@@ -1,14 +1,17 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import { abrirVisor } from '../lib/visor';
+  import { hasContextRefs, type QuoteRef } from '@hangar/core';
+  import ContextRefSegments from './ContextRefSegments.svelte';
 
   interface Props {
     caption: string;
     srcs: string[];
     // Versão reduzida para desenhar; o visor abre sempre o `srcs` original.
     thumbs?: string[];
+    onQuoteClick?: ((ref: QuoteRef) => void) | null;
   }
-  let { caption, srcs, thumbs }: Props = $props();
+  let { caption, srcs, thumbs, onQuoteClick = null }: Props = $props();
   let thumbFailed = $state(new Set<number>());
 
   // Abre no visor compartilhado (lib/visor.ts) com TODAS as imagens desta bolha: quem manda 4 fotos
@@ -41,7 +44,9 @@
       </button>
     {/each}
   </div>
-  {#if caption}<p class="image-caption">{caption}</p>{/if}
+  {#if caption && hasContextRefs(caption)}
+    <div class="image-caption"><ContextRefSegments text={caption} {onQuoteClick} /></div>
+  {:else if caption}<p class="image-caption">{caption}</p>{/if}
 </div>
 
 <style>

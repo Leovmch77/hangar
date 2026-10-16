@@ -114,7 +114,7 @@ impl Budget {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum HostMsg { Height(f32), Link(String) }
+pub enum HostMsg { Height(f32), Link(String, bool) }
 
 /// Mensagem da página (`window.hangarHost`). Entrada não confiável: os iframes http(s) permitidos também chamam a
 /// ponte. Só os dois métodos, altura finita e positiva, link só http(s).
@@ -125,7 +125,8 @@ pub fn parse_host(raw: &str) -> Option<HostMsg> {
         "ui/notifications/size-changed" => params["height"].as_f64().filter(|h| h.is_finite() && *h > 0.).map(|h| HostMsg::Height(h as f32)),
         "ui/open-link" => {
             let url = url::Url::parse(params["url"].as_str()?).ok()?;
-            matches!(url.scheme(), "http" | "https").then(|| HostMsg::Link(url.into()))
+            let external = params["ctrlKey"] == true || params["metaKey"] == true;
+            matches!(url.scheme(), "http" | "https").then(|| HostMsg::Link(url.into(), external))
         }
         _ => None,
     }
@@ -260,14 +261,14 @@ impl Pages {
         }
     }
 
-    /// Conversa com página: o Chromium sobe já, em paralelo ao resto, e não no primeiro desenho do cartão (que pode nem
-    /// estar à vista). Sem página, ele é solto e nada sobe.
+    /// Conversa com página: o Chromium das páginas sobe já, em paralelo ao resto, e não no primeiro desenho do cartão
+    /// (que pode nem estar à vista). Sem página, ele é solto e nada sobe.
     pub fn warm(&mut self, wanted: bool, window: &Window, cx: &App) {
         #[cfg(target_os = "linux")]
         {
             if !wanted || !self.live { self.warm = None; return; }
             if self.warm.is_some() { return; }
-            match Engine::warm(window, cx) {
+            match Engine::warm_pages(window, cx) {
                 Ok(warm) => self.warm = Some(warm),
                 Err(error) => eprintln!("[pagina] Chromium não subiu antes da página: {error}"),
             }
@@ -327,24 +328,31 @@ pub(super) static APP_FONTS: std::sync::LazyLock<String> = std::sync::LazyLock::
         serde_json::to_string(&css).unwrap_or_default())
 });
 
+/// Cores do app que a página recebe, uma tabela só para a chave e o script. O que o app não tem (`--info`, gráficos)
+/// fica com o padrão do esquema que o servidor guardou na página.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn palette() -> [(&'static str, Hsla); 10] {
+    [("--foreground", theme::text()), ("--muted-foreground", theme::muted()), ("--surface", theme::surface()),
+        ("--border", theme::border()), ("--accent", theme::accent()), ("--accent-foreground", theme::on_accent()),
+        ("--danger", theme::danger()), ("--warning", theme::warning()), ("--success", theme::success()),
+        ("--code-background", theme::inset())]
+}
+
 /// O que o script do tema lê do app: chave igual, script igual, sem montá-lo a cada quadro.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Copy, PartialEq)]
-pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 5] }
+pub(super) struct ThemeKey { dark: bool, colors: [Hsla; 10] }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn theme_key() -> ThemeKey {
-    ThemeKey { dark: theme::is_dark(), colors: [theme::text(), theme::muted(), theme::surface(), theme::border(), theme::accent()] }
-}
+fn theme_key() -> ThemeKey { ThemeKey { dark: theme::is_dark(), colors: palette().map(|(_, c)| c) } }
 
 /// Script que entrega o tema do app à página, nos nomes de variável da spec.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn theme_script() -> String {
-    let vars = json!({
-        "--background": "transparent", "--foreground": hex(theme::text()), "--muted-foreground": hex(theme::muted()),
-        "--surface": hex(theme::surface()), "--border": hex(theme::border()), "--accent": hex(theme::accent()),
-        "--font-sans": format!("\"{}\", system-ui, sans-serif", theme::SANS), "--font-mono": format!("\"{}\", ui-monospace, monospace", theme::MONO),
-    });
+    let mut vars: serde_json::Map<String, Value> = palette().into_iter().map(|(name, c)| (name.to_owned(), hex(c).into())).collect();
+    vars.insert("--background".into(), "transparent".into());
+    vars.insert("--font-sans".into(), format!("\"{}\", system-ui, sans-serif", theme::SANS).into());
+    vars.insert("--font-mono".into(), format!("\"{}\", ui-monospace, monospace", theme::MONO).into());
     let params = json!({"theme": if theme::is_dark() { "dark" } else { "light" }, "styles": {"variables": vars}});
     format!("window.__hangarApply&&window.__hangarApply({params})")
 }
@@ -552,11 +560,13 @@ impl Hangar {
                     self.redraw(panes::Area::Conversation, cx);
                 }
                 // Só logo depois de um clique ou tecla na página: sozinha ela não abre o navegador.
-                Some(HostMsg::Link(url)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => cx.open_url(&url),
+                Some(HostMsg::Link(url, external)) if view.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) => {
+                    super::links::open_link_later(self.pages.window, url, external, false, cx);
+                }
                 _ => {}
             },
             // Endereço atual do site, para a faixa do cartão.
-            crate::browser::Event::UserInput => {}
+            crate::browser::Event::UserInput | crate::browser::Event::Escape => {}
             crate::browser::Event::State(state) => if let Some(running) = &mut view.running && running.at != state.url {
                 running.at = state.url;
                 self.redraw(panes::Area::Conversation, cx);
@@ -635,7 +645,8 @@ impl Hangar {
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    /// Os modificadores vão junto: Ctrl/Cmd+clique num link da página vai ao navegador do sistema, como no chat.
+    fn page_pointer(&mut self, id: &str, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         let Some(view) = self.pages.views.get_mut(id) else { return };
         match kind {
             Pointer::Down => view.pressed = true,
@@ -644,7 +655,7 @@ impl Hangar {
             _ => {}
         }
         let origin = view.origin.get();
-        if let Some(engine) = self.page_engine(id) { engine.pointer(kind, at - origin, clicks); }
+        if let Some(engine) = self.page_engine(id) { engine.pointer(kind, at - origin, clicks, modifiers); }
     }
 
     pub(super) fn render_page_card(&mut self, tool: Tool, page: PageRef, cx: &mut Context<Self>) -> AnyElement {
@@ -751,7 +762,8 @@ impl Hangar {
                 }
             }).absolute().inset_0();
             let cover = (!framed).then(|| match view.last_frame.clone() {
-                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+                // Tirado no tamanho em que saiu da tela: o cartão pode ter mudado desde então, e esticado ele deformava.
+                Some(frame) => img(frame).size_full().object_fit(ObjectFit::Contain).into_any_element(),
                 None => loading().into_any_element(),
             });
             let focused = view.focus.clone();
@@ -767,11 +779,11 @@ impl Hangar {
                     let Some(view) = this.pages.views.get_mut(&down) else { return };
                     view.gesture = Some(Instant::now());
                     if view.parked { view.parked = false; cx.notify(); }
-                    this.page_pointer(&down, Pointer::Down, event.position, event.click_count);
+                    this.page_pointer(&down, Pointer::Down, event.position, event.click_count, &event.modifiers);
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up, Pointer::Up, event.position, 0)))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up_out, Pointer::Up, event.position, 0)))
-                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, _| this.page_pointer(&moved, Pointer::Move, event.position, 0)))
+                .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up, Pointer::Up, event.position, 0, &event.modifiers)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, event: &MouseUpEvent, _, _| this.page_pointer(&up_out, Pointer::Up, event.position, 0, &event.modifiers)))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, _| this.page_pointer(&moved, Pointer::Move, event.position, 0, &event.modifiers)))
                 // A tecla é da página; Esc devolve o foco à conversa.
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     cx.stop_propagation();
@@ -940,7 +952,11 @@ mod tests {
         assert_eq!(parse_host(&size("-1")), None);
         assert_eq!(parse_host(&size("\"x\"")), None);
         let link = |u: &str| format!(r#"{{"method":"ui/open-link","params":{{"url":"{u}"}}}}"#);
-        assert_eq!(parse_host(&link("https://a.dev/x")), Some(HostMsg::Link("https://a.dev/x".into())));
+        assert_eq!(parse_host(&link("https://a.dev/x")), Some(HostMsg::Link("https://a.dev/x".into(), false)));
+        // Ctrl ou Cmd no clique: o link vai ao navegador do sistema, como no chat.
+        let with = |m: &str| format!(r#"{{"method":"ui/open-link","params":{{"url":"https://a.dev/x","{m}":true}}}}"#);
+        assert_eq!(parse_host(&with("ctrlKey")), Some(HostMsg::Link("https://a.dev/x".into(), true)));
+        assert_eq!(parse_host(&with("metaKey")), Some(HostMsg::Link("https://a.dev/x".into(), true)));
         assert_eq!(parse_host(&link("javascript:alert(1)")), None);
         assert_eq!(parse_host(&link("file:///etc/passwd")), None);
         assert_eq!(parse_host(r#"{"method":"ui/other"}"#), None);

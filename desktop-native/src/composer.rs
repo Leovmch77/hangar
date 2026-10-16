@@ -80,7 +80,8 @@ pub fn compose_prompt(caption: &str, uploads: &[(bool, Uploaded)], speech: impl 
 
 /// Legenda canônica (porta de `_cap` do core): o transcript pode gravar só ela.
 pub fn caption(text: &str) -> &str {
-    let at = text.find("📎").filter(|&i| text[i..].trim_start_matches("📎").trim_start().starts_with("imagem:")
+    let floor = crate::context_refs::refs_end(text);
+    let at = text[floor..].find("📎").map(|i| i + floor).filter(|&i| text[i..].trim_start_matches("📎").trim_start().starts_with("imagem:")
         || text[i..].trim_start_matches("📎").trim_start().starts_with("arquivo:"));
     let Some(at) = at else { return text.trim(); };
     let head = text[..at].trim_end();
@@ -91,9 +92,11 @@ pub fn caption(text: &str) -> &str {
 pub struct Marked { pub caption: String, pub files: Vec<(bool, String)>, pub image_marks: usize }
 
 pub fn parse_marked(text: &str) -> Option<Marked> {
+    // Um `📎` dentro de um trecho citado é texto: só valem os marcadores depois do último bloco de referência.
+    let floor = crate::context_refs::refs_end(text);
     let mut found = Vec::new();
     for (mark, image) in [("imagem:", true), ("arquivo:", false)] {
-        let mut from = 0;
+        let mut from = floor;
         while let Some(i) = text[from..].find("📎").map(|i| i + from) {
             let rest = text[i + "📎".len()..].trim_start();
             if rest.starts_with(mark) { found.push((i, image, text.len() - rest.len() + mark.len())); }
@@ -295,20 +298,38 @@ fn inline_reference(value: &str, link: bool) -> Option<CodeReference> {
 /// Isola as citações para o plugin inline do kit sem transformar código cercado ou URLs.
 pub fn citation_markdown(source: &str) -> String { citation_markdown_with(source, &|_| false) }
 
+/// Caminho e linha (maior que zero) de um link de citação `hangar-file:`; `None` em qualquer outro endereço.
+pub fn citation_target(url: &str) -> Option<(String, Option<u32>)> {
+    let url = url::Url::parse(url).ok().filter(|url| url.scheme() == "hangar-file")?;
+    let path = url.query_pairs().find(|(key, _)| key == "path")?.1.into_owned();
+    let line = url.query_pairs().find(|(key, _)| key == "line").and_then(|(_, value)| value.parse::<u32>().ok()).filter(|n| *n > 0);
+    Some((path, line))
+}
+
+/// O texto que o chip de citação mostra: `caminho:linha`.
+pub fn citation_text(path: &str, line: Option<u32>) -> String { format!("{path}{}", line.map(|n| format!(":{n}")).unwrap_or_default()) }
+
 /// Os caminhos que viraram chip num texto já passado por `citation_markdown`.
 pub fn citation_paths(markdown: &str) -> Vec<String> {
     markdown.match_indices("](hangar-file:?").filter_map(|(at, _)| {
         let rest = &markdown[at + 2..];
-        let url = url::Url::parse(&rest[..rest.find(')')?]).ok()?;
-        url.query_pairs().find(|(key, _)| key == "path").map(|(_, value)| value.into_owned())
+        citation_target(&rest[..rest.find(')')?]).map(|(path, _)| path)
     }).collect()
 }
 
 /// Como `citation_markdown`, mas o caminho que `dead` diz que não abre fica como texto: chip que não abre não se clica.
 pub fn citation_markdown_with(source: &str, dead: &dyn Fn(&str) -> bool) -> String {
+    citation_markdown_mapped(source, dead, &mut crate::source_map::Edits::default())
+}
+
+/// Como `citation_markdown_with`, anotando em `edits` cada trecho trocado por um chip.
+pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, edits: &mut crate::source_map::Edits) -> String {
     let mut output = String::with_capacity(source.len());
     let mut fence = None;
+    let mut line_start = 0;
     for line in source.split_inclusive('\n') {
+        let line_at = line_start;
+        line_start += line.len();
         let trimmed = line.trim_start();
         let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
         if let Some(marker) = marker {
@@ -351,8 +372,10 @@ pub fn citation_markdown_with(source: &str, dead: &dyn Fn(&str) -> bool) -> Stri
                     .filter(|_| at == 0 || !line[..at].ends_with('!'))
                     .filter(|r| !dead(&r.path)) {
                     let suffix = reference.line.map(|n| format!(":{n}")).unwrap_or_default();
+                    let out_from = output.len();
                     output.push_str(&format!("[{}{}](hangar-file:?path={}&line={})", basename(&reference.path).replace('[', "\\[").replace(']', "\\]"), suffix,
                         encode_component(&reference.path).replace('(', "%28").replace(')', "%29"), reference.line.unwrap_or(0)));
+                    edits.push(line_at + at..line_at + at + used, out_from..output.len());
                 } else { output.push_str(&rest[..used]); }
                 at += used;
             } else if rest.starts_with("http://") || rest.starts_with("https://") {
@@ -547,6 +570,25 @@ mod tests {
         assert_eq!(marked.caption, "veja");
         assert_eq!(marked.files, vec![(true, "1.png".into()), (false, "2.zip".into())]);
         assert!(parse_marked("texto").is_none());
+    }
+
+    #[test]
+    fn markers_inside_a_reference_block_are_text() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!("../../packages/core/src/contextRefs.fixtures.json")).unwrap();
+        let case = fixtures["parse"].as_array().unwrap().iter().find(|c| c["name"] == "marcador de anexo dentro do bloco").unwrap();
+        let message = case["message"].as_str().unwrap();
+        let block_end = message.find("\n</hangar-ref>").unwrap() + "\n</hangar-ref>".len();
+        let marked = parse_marked(message).unwrap();
+        assert_eq!(marked.files, vec![(true, "a.png".to_owned())]);
+        assert_eq!(marked.caption, format!("{}\n\noi", &message[..block_end]));
+        // Anexo de verdade depois do bloco: só ele conta.
+        let with_file = format!("{} 📎 arquivo: /srv/up/b.zip", message);
+        let marked = parse_marked(&with_file).unwrap();
+        assert_eq!(marked.files, vec![(true, "a.png".to_owned()), (false, "b.zip".to_owned())]);
+        assert_eq!(marked.image_marks, 1);
+        assert_eq!(caption(&with_file), format!("{}\n\noi", &message[..block_end]));
+        // Só o bloco, sem anexo depois: nenhum marcador.
+        assert!(parse_marked(&message[..block_end]).is_none());
     }
 
     #[test]

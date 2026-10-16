@@ -20,6 +20,10 @@ pub struct PageMeta {
     // Site de verdade (modo URL): sem `<id>.html`, o app abre o endereço.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    // `<id>.html` é a página como o agente escreveu, e o tema e a ponte entram na leitura (`theme::served`). Página
+    // gravada antes do campo já traz os dois no arquivo.
+    #[serde(default)]
+    pub original: bool,
 }
 
 pub struct NewPage { pub html: String, pub title: String, pub height: Option<u32>, pub heights: BTreeMap<u32, u32>, pub draft: bool, pub own_theme: bool, pub url: Option<String> }
@@ -53,7 +57,7 @@ impl Store {
         std::fs::write(dir.join("jsonl"), jsonl)?;
         let id = new_id();
         let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let meta = PageMeta { title: page.title.clone(), height: page.height, heights: page.heights.clone(), created, draft: page.draft, own_theme: page.own_theme, url: page.url.clone() };
+        let meta = PageMeta { title: page.title.clone(), height: page.height, heights: page.heights.clone(), created, draft: page.draft, own_theme: page.own_theme, url: page.url.clone(), original: true };
         if page.url.is_none() { write_atomic(&dir.join(format!("{id}.html")), page.html.as_bytes())?; }
         write_atomic(&dir.join(format!("{id}.json")), &serde_json::to_vec(&meta)?)?;
         Ok(id)
@@ -80,6 +84,9 @@ impl Store {
     pub fn shot_path(&self, key: &str, id: &str, theme: Theme, width: u32) -> PathBuf {
         self.root.join(key).join(format!("{id}.{}.{width}.png", theme.as_str()))
     }
+
+    /// Print do rascunho, um por id, fora do cache que os clientes leem.
+    pub fn draft_shot_path(&self, key: &str, id: &str) -> PathBuf { self.root.join(key).join(format!("{id}.draft.png")) }
 
     /// Apaga a pasta cujo transcript não está vivo há `GONE_AFTER`, e rascunhos com mais de `DRAFT_TTL`.
     /// Os dois lados são comparados canonicalizados: `~/.claude-<conta>` é link do `~/.claude`.

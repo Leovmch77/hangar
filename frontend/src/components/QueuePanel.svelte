@@ -2,7 +2,7 @@
   // Painel "Na fila" acima do composer (estilo do T3): o que espera a vez no Hangar, com reordenar, editar,
   // orientar e apagar por linha. Sem ações (Pi, omp, Kimi, modo python), só a lista.
   import * as m from '../paraglide/messages';
-  import { dropTarget, moveTarget, type QueuePanel } from '@hangar/core';
+  import { contextRefsPlainText, dropTarget, moveTarget, type QueuePanel } from '@hangar/core';
   import IconListOrdered from './icons/IconListOrdered.svelte';
   import IconGripVertical from './icons/IconGripVertical.svelte';
   import IconPencil from './icons/IconPencil.svelte';
@@ -116,8 +116,9 @@
             </button>
           {/if}
           <!-- Botão com cara de texto: toque, clique e teclado mostram a mensagem inteira; o `title` serve ao ponteiro. -->
-          <button type="button" class="qp-text" title={entry.text} aria-expanded={fullId === entry.id}
-                  onclick={() => (fullId = fullId === entry.id ? null : entry.id)}>{#if editing}<span class="sr-only">{m.queue_panel_editing()}: </span>{/if}{entry.text}</button>
+          <!-- Citação vira rótulo curto: o bloco <hangar-ref> inteiro não cabe numa linha de fila. -->
+          <button type="button" class="qp-text" title={contextRefsPlainText(entry.text)} aria-expanded={fullId === entry.id}
+                  onclick={() => (fullId = fullId === entry.id ? null : entry.id)}>{#if editing}<span class="sr-only">{m.queue_panel_editing()}: </span>{/if}{contextRefsPlainText(entry.text)}</button>
           {#if panel.actions}
             {#if editing}
               <button type="button" class="qp-cancel" disabled={busy} onclick={onCancelEdit}>{m.comum_cancelar()}</button>

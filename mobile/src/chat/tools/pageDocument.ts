@@ -3,16 +3,17 @@ import { Linking } from 'react-native';
 import type { WebView } from 'react-native-webview';
 import { useUnistyles } from 'react-native-unistyles';
 import {
-  baseOf, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
+  baseOf, fetchPageSource, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
 
 export type ThemeParams = { theme: 'dark' | 'light'; styles: { variables: Record<string, string> } };
 
-// Nome da variável da página → token do app (o mesmo mapa da PWA). Fonte fica com a padrão da
-// página: as do app não são nomes de CSS.
-const tokenVars = (t: ThemeTokens): Record<string, string> => ({
+// Nome da variável da página → token do app (o mesmo mapa da PWA). As fontes são as que o app usa: a do sistema e,
+// no código, a mono do tema do app.
+const tokenVars = (t: ThemeTokens, fontMono: string): Record<string, string> => ({
+  '--font-sans': 'system-ui, -apple-system, sans-serif', '--font-mono': `${fontMono}, ui-monospace, monospace`,
   '--foreground': t.text.primary, '--muted-foreground': t.text.muted, '--surface': t.bg.surface,
   '--border': t.border.default, '--accent': t.accent.base, '--accent-foreground': t.text.inverse,
   '--danger': t.status.error, '--warning': t.status.warning, '--success': t.status.success,
@@ -83,9 +84,9 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
 
   const scheme = rt.themeName === 'light' ? 'light' : 'dark';
   const params = useMemo<ThemeParams>(() => {
-    const vars = tokenVars(theme.tokens);
+    const vars = tokenVars(theme.tokens, theme.base.fontMono);
     return { theme: scheme, styles: { variables: themeVariables((n) => vars[n] ?? '') } };
-  }, [scheme, theme.tokens]);
+  }, [scheme, theme.tokens, theme.base.fontMono]);
   const paramsRef = useRef(params);
   useEffect(() => { paramsRef.current = params; }, [params]);
 
@@ -121,5 +122,10 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
 
   // Tema próprio: a página fica como foi desenhada, sem as cores do app.
   const doc = useMemo(() => (raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
-  return { key, state, doc, reported, setReported, load, params };
+  // Fonte: a página como o agente escreveu (o servidor tira o tema e a ponte). Erro sobe para a tela mostrar.
+  const loadSource = useCallback(async () => {
+    if (!base) throw new Error('no-server');
+    return fetchPageSource(pageUrls(base, sessionName, page.id).source, { Authorization: auth });
+  }, [base, auth, sessionName, page.id]);
+  return { key, state, doc, reported, setReported, load, params, loadSource };
 }

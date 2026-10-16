@@ -1,4 +1,5 @@
 import type { ArchiveEntry } from './api';
+import { contextRefsPlainText } from './contextRefs';
 
 export interface LiveInput {
   serverId: string;
@@ -34,7 +35,7 @@ export function mergeConversations(live: LiveInput[], closedByServer: Map<string
       // A viva já está na lista pela sessão; a entrada do arquivo seria a mesma conversa duas vezes.
       // `entry.live` sozinho falha logo após retomar: o arquivo ainda não sabe da sessão nova.
       if (entry.live || liveStems.get(serverId)?.has(entry.session_id)) continue;
-      rows.push({ kind: 'closed', serverId, entry, title: entry.preview || entry.ultima || entry.session_id.slice(0, 8), at: entry.mtime });
+      rows.push({ kind: 'closed', serverId, entry, title: contextRefsPlainText(entry.preview || entry.ultima || '') || entry.session_id.slice(0, 8), at: entry.mtime });
     }
   }
   return rows.sort((a, b) => b.at - a.at);

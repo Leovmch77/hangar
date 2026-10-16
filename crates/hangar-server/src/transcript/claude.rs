@@ -356,7 +356,8 @@ fn queue_operation(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatE
         return match TASK_NOTIF.captures(q) {
             Some(m) => {
                 let tid = strip(&m[1]);
-                vec![task_result(format!("queued-task:{tid}"), tid)]
+                // O hash separa os fins de um subagente retomado; as linhas do mesmo aviso continuam iguais.
+                vec![task_result(format!("queued-task:{tid}:{h}"), tid)]
             }
             None => Vec::new(),
         };
@@ -714,6 +715,18 @@ mod tests {
             .into_iter().map(|e| e.id).collect::<Vec<_>>();
         assert_eq!(ids(att), vec!["delivery:d-1".to_string()]);
         assert_eq!(ids(rem), vec!["delivery:d-1".to_string()]);
+    }
+
+    #[test]
+    fn each_queued_end_of_a_resumed_subagent_keeps_its_own_id() {
+        let notice = |status: &str| json!({"type": "queue-operation", "operation": "enqueue",
+            "content": format!("<task-notification>\n<task-id>a45</task-id>\n<status>{status}</status>\n</task-notification>")});
+        let ids = |line: Value| LineParser::new(Provider::Claude).feed(line.to_string().as_bytes(), 0)
+            .into_iter().map(|e| (e.id, e.tool_use_id)).collect::<Vec<_>>();
+        let (first, again, resumed) = (ids(notice("completed")), ids(notice("completed")), ids(notice("killed")));
+        assert_eq!(first, again);
+        assert_eq!(resumed[0].1.as_deref(), Some("task:a45"));
+        assert_ne!(first[0].0, resumed[0].0);
     }
 
     #[test]

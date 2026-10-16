@@ -152,6 +152,7 @@ mod list_bridge;
 mod list_facts;
 mod list_routes;
 mod list_wake;
+mod mermaid_routes;
 mod mods_actor;
 mod mods_bridge;
 mod mods_bridge_terminal;

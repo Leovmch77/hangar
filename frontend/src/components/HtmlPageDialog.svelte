@@ -2,12 +2,63 @@
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
-  import { PAGE_ZOOM_MAX, PAGE_ZOOM_MIN, pageZoomKey, pageZoomLabel, parseHostMessage, stepPageZoom, wheelZoom,
+  import { PAGE_ZOOM_MAX, PAGE_ZOOM_MIN, pageFileName, pageZoomKey, pageZoomLabel, parseHostMessage, stepPageZoom, wheelZoom,
     themedPageDocument, type PageZoomAction } from '@hangar/core';
   import { openPageLink, pageVariables, postTheme, readFullscreenMessage, withZoomBridge, type Scheme } from '../lib/pageHost';
+  import ReadView from './ReadView.svelte';
+  import { copyText } from '../lib/clipboard';
+  import { saveFile } from '../lib/saveFile';
 
-  let { title, doc, ownTheme, scheme, onClose }:
-    { title: string; doc: string; ownTheme: boolean; scheme: Scheme; onClose: () => void } = $props();
+  let { title, doc, ownTheme, scheme, onClose, loadSource }:
+    { title: string; doc: string; ownTheme: boolean; scheme: Scheme; onClose: () => void; loadSource: () => Promise<string> } = $props();
+
+  // Fonte: a página como o agente escreveu (o servidor tira o tema e a ponte), com realce, para ler, copiar e salvar.
+  let showingSource = $state(false);
+  let source = $state<string | null>(null);
+  let sourceFailed = $state(false);
+  let copied = $state<'ok' | 'failed' | null>(null);
+  let saving = $state<'busy' | 'again' | 'failed' | null>(null);
+  let fileUrl: string | null = null;
+
+  // Um pedido por vez: alternar Página e Fonte com o pedido no ar reaproveita o mesmo, e uma resposta velha não
+  // sobrescreve a nova.
+  let fetching: Promise<void> | null = null;
+  function fetchSource(): Promise<void> {
+    if (source != null) return Promise.resolve();
+    fetching ??= (async () => {
+      sourceFailed = false;
+      try {
+        source = await loadSource();
+      } catch {
+        sourceFailed = true;
+      } finally {
+        fetching = null;
+      }
+    })();
+    return fetching;
+  }
+
+  async function copySource() {
+    if (source == null) return;
+    copied = (await copyText(source)) ? 'ok' : 'failed';
+    setTimeout(() => (copied = null), 1500);
+  }
+
+  // Mesmo endereço a cada toque: no iOS o segundo toque abre a folha de compartilhar com o arquivo já pronto.
+  // `text/plain`, não `text/html`: o blob é da origem do app, e um navegador que abrisse em vez de baixar rodaria a
+  // página com o acesso dele. O nome mantém o `.html`.
+  async function saveSource() {
+    if (source == null) return;
+    fileUrl ??= URL.createObjectURL(new Blob([source], { type: 'text/plain;charset=utf-8' }));
+    saving = 'busy';
+    try {
+      saving = (await saveFile(fileUrl, pageFileName(title))) === 'tap-again' ? 'again' : null;
+    } catch {
+      saving = 'failed';
+    }
+  }
+
+  onMount(() => () => { if (fileUrl) URL.revokeObjectURL(fileUrl); });
 
   let zoom = $state(1);
   let pending = 0;
@@ -74,7 +125,18 @@
   <div class="page-full">
     <div class="bar">
       <span class="title">{title}</span>
-      <div class="zoom">
+      <button type="button" class="btn" aria-pressed={showingSource}
+        onclick={() => { showingSource = !showingSource; if (showingSource) void fetchSource(); }}>
+        {showingSource ? m.page_view_page() : m.page_view_source()}</button>
+      {#if source != null}
+        <button type="button" class="btn" aria-label={m.page_copy_source()} title={m.page_copy_source()} onclick={copySource}>
+          {copied === 'ok' ? m.toast_copiado() : copied === 'failed' ? m.toast_copiar_falhou() : m.page_copy_source()}</button>
+        <button type="button" class="btn" aria-label={m.page_save_file()} title={m.page_save_file()} disabled={saving === 'busy'}
+          onclick={saveSource}>
+          {saving === 'busy' ? m.save_file_downloading() : saving === 'again' ? m.save_file_tap_again()
+            : saving === 'failed' ? m.save_file_failed() : m.page_save_file()}</button>
+      {/if}
+      <div class="zoom" hidden={showingSource}>
         <button type="button" class="btn" aria-label={m.page_zoom_out()} title={m.page_zoom_out()}
           disabled={zoom <= PAGE_ZOOM_MIN} onclick={() => apply('out')}>−</button>
         <button type="button" class="btn pct" aria-label={m.page_zoom_reset()} title={m.page_zoom_reset()}
@@ -85,7 +147,20 @@
       <button type="button" class="btn" bind:this={closeButton} aria-label={m.page_close()} title={m.page_close()}
         onclick={onClose}>✕</button>
     </div>
-    <div class="stage" bind:this={stage}>
+    {#if showingSource}
+      <div class="stage source">
+        {#if sourceFailed}
+          <p class="note" role="alert">{m.page_source_error()}
+            <button type="button" class="btn" onclick={fetchSource}>{m.page_retry()}</button></p>
+        {:else if source == null}
+          <p class="note" role="status">{m.page_loading({ title })}</p>
+        {:else}
+          <div class="code"><ReadView path="page.html" text={source} /></div>
+        {/if}
+      </div>
+    {/if}
+    <!-- A página continua montada atrás da Fonte: voltar a ela não recarrega. -->
+    <div class="stage" bind:this={stage} hidden={showingSource}>
       <div class="zoomed" style:zoom={zoom}>
         <!-- Mesmo isolamento do cartão: sem allow-same-origin e sem allow-popups. -->
         <iframe bind:this={frame} {title} srcdoc={src} sandbox="allow-scripts" referrerpolicy="no-referrer"
@@ -121,5 +196,9 @@
     container-type: size; background: var(--surface-inset);
   }
   .zoomed { width: 100cqw; height: 100cqh; }
+  .stage[hidden], .zoom[hidden] { display: none; }
+  .source { container-type: normal; }
+  .code { padding: var(--space-3); }
+  .note { margin: 0; padding: var(--space-4); color: var(--text-muted); font-size: var(--text-sm); }
   iframe { display: block; width: 100%; height: 100%; border: 0; background: transparent; }
 </style>

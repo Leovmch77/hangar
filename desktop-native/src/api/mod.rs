@@ -50,6 +50,46 @@ impl Eq for Shared {}
 impl std::hash::Hash for Shared { fn hash<H: std::hash::Hasher>(&self, state: &mut H) { std::sync::Arc::as_ptr(&self.0).hash(state) } }
 impl std::fmt::Debug for Shared { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{} bytes", self.0.len()) } }
 
+/// Resposta da rota do Mermaid: a imagem com o tamanho de exibição (px CSS), o erro do diagrama ou a falha tentável.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MermaidReply {
+    Image { png: Vec<u8>, width: f32, height: f32 },
+    /// 422: a mensagem do parser.
+    Invalid(String),
+    /// Vale tentar de novo: 503 (com o motivo do servidor), rede ou prazo.
+    Unavailable(MermaidRetry),
+    /// Outra tentativa daria o mesmo resultado.
+    Refused(MermaidRefusal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MermaidRetry { Busy(String), Offline, Timeout }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MermaidRefusal {
+    BadRequest,
+    Unauthorized,
+    Gone,
+    /// 404 (servidor sem a rota ou convidado) e 403: a rota não é para este acesso; a tela mostra só o código.
+    Hidden,
+    /// Resposta fora do contrato (outro status, PNG sem tamanho).
+    Other,
+}
+
+/// O status de uma resposta de erro do Mermaid; `message` é o motivo que o 503 traz.
+pub fn mermaid_failure(status: u16, message: String) -> MermaidReply {
+    match status {
+        422 => MermaidReply::Invalid(message),
+        // 502 e 504 vêm do proxy no caminho e passam: indisponível, como o 503.
+        502..=504 => MermaidReply::Unavailable(MermaidRetry::Busy(message)),
+        400 => MermaidReply::Refused(MermaidRefusal::BadRequest),
+        401 => MermaidReply::Refused(MermaidRefusal::Unauthorized),
+        410 => MermaidReply::Refused(MermaidRefusal::Gone),
+        403 | 404 => MermaidReply::Refused(MermaidRefusal::Hidden),
+        _ => MermaidReply::Refused(MermaidRefusal::Other),
+    }
+}
+
 // `plain` busca mídia de terceiros: nunca leva o token do servidor.
 #[derive(Clone)]
 pub struct Api { client: Client, plain: Client, base: Url, token: String }
@@ -414,6 +454,30 @@ impl Api {
         if !query.is_empty() { url.query_pairs_mut().extend_pairs(query); }
         let r = self.client.get(url).timeout(Duration::from_secs(30)).send().await.map_err(|_| Failure::transport(false))?;
         Ok(Self::checked(r, false).await?.bytes().await.map_err(|_| Failure::transport(false))?.to_vec())
+    }
+
+    /// Diagrama desenhado pelo servidor (`POST /api/mermaid`). Só 503, rede e prazo podem passar numa nova tentativa.
+    pub async fn mermaid(&self, source: &str, dark: bool, width: u32) -> MermaidReply {
+        let url = self.server_url(&["mermaid"], &[]);
+        let body = json!({"source": source, "theme": if dark { "dark" } else { "light" }, "width": width});
+        let lost = |e: reqwest::Error| MermaidReply::Unavailable(if e.is_timeout() { MermaidRetry::Timeout } else { MermaidRetry::Offline });
+        let r = match self.client.post(url).json(&body).timeout(Duration::from_secs(30)).send().await { Ok(r) => r, Err(e) => return lost(e) };
+        let status = r.status();
+        if status.is_success() {
+            let size = |name: &str| r.headers().get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v > 0.);
+            let (Some(width), Some(height)) = (size("x-hangar-css-width"), size("x-hangar-css-height")) else {
+                return MermaidReply::Refused(MermaidRefusal::Other);
+            };
+            return match r.bytes().await {
+                Ok(png) if !png.is_empty() => MermaidReply::Image { png: png.to_vec(), width, height },
+                Ok(_) => MermaidReply::Refused(MermaidRefusal::Other),
+                Err(e) => lost(e),
+            };
+        }
+        let message = r.json::<Value>().await.ok().and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default().chars().take(500).collect::<String>();
+        mermaid_failure(status.as_u16(), message)
     }
 
     pub async fn interrupt(&self, name: &str, clear: bool) -> Result<(), Failure> {

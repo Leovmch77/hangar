@@ -21,7 +21,7 @@ impl Render for QueueDragChip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().max_w(px(320.)).px(px(10.)).py(px(4.)).rounded(px(8.)).bg(theme::raised()).border_1().border_color(theme::border_strong())
             .shadow(theme::popover_shadow()).text_size(px(12.5)).text_color(theme::text()).truncate()
-            .child(conversation::one_line(&self.text, 80))
+            .child(conversation::one_line(&super::quotes::summary(&self.text), 80))
     }
 }
 
@@ -55,7 +55,7 @@ impl Hangar {
     /// Rascunho da conversa que sai da tela: em edição de mensagem da fila, o de antes dela (a edição acaba aqui).
     pub(super) fn composer_draft(&mut self, cx: &App) -> String {
         match self.queue.edit.take() {
-            Some((_, edit)) => edit.saved_draft,
+            Some((key, edit)) => { self.end_edit_refs(&key, false); edit.saved_draft }
             None => self.composer.read(cx).value().to_string(),
         }
     }
@@ -67,8 +67,10 @@ impl Hangar {
         let draft = self.composer.read(cx).value().to_string();
         let current = self.queue.edit.as_ref().filter(|(k, _)| *k == key).map(|(_, e)| e);
         let edit = model::begin_edit(entry, &draft, current);
-        let text = entry.text.clone();
+        // As citações e os elementos da mensagem vão para a bandeja; o campo recebe só o digitado.
+        let (refs, text) = super::quotes::split_refs(&entry.text);
         drop(panel);
+        self.begin_edit_refs(&key, refs);
         self.queue.edit = Some((key, edit));
         self.queue.collapsed = false;
         self.set_composer_at_end(text, window, cx);
@@ -86,7 +88,8 @@ impl Hangar {
 
     /// Sai da edição (Cancelar, Esc ou atualização feita): o rascunho de antes volta ao composer.
     pub(super) fn finish_queue_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, edit)) = self.queue.edit.take() else { return };
+        let Some((key, edit)) = self.queue.edit.take() else { return };
+        self.end_edit_refs(&key, false);
         self.set_composer_at_end(edit.saved_draft, window, cx);
         cx.notify();
     }
@@ -94,8 +97,8 @@ impl Hangar {
     /// "Atualizar" e o Enter em edição. Texto igual ao da fila (sem as bordas em branco, como o `queueEditPayload` do
     /// core) só sai da edição, sem pedido.
     pub(super) fn submit_queue_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, edit)) = self.queue.edit.clone() else { return };
-        let text = self.composer.read(cx).value().to_string();
+        let Some((key, edit)) = self.queue.edit.clone() else { return };
+        let text = self.compose_with_refs(&key, &self.composer.read(cx).value().to_string());
         if !model::can_update(&text) { return; }
         if text.trim() == edit.original.trim() { self.finish_queue_edit(window, cx); return; }
         self.act(Action::QueueEdit(edit.entry_id.clone(), text), edit.entry_id, cx);
@@ -113,6 +116,8 @@ impl Hangar {
         let composer = self.composer.read(cx).value().to_string();
         let Some(text) = model::edit_left(&edit, &self.chat.queue_panel(), &composer) else { return };
         self.queue.edit = None;
+        // Volta o texto editado só sem rascunho guardado (`edit_left`); as referências seguem o mesmo destino.
+        self.end_edit_refs(&key, edit.saved_draft.trim().is_empty());
         self.set_composer_at_end(text, window, cx);
         self.action_feedback.insert(key, (tr_shared("queue_entry_gone", &[]), true));
         cx.notify();
@@ -223,9 +228,9 @@ impl Hangar {
                 }))
                 .when(dragging && self.queue.dragged.as_deref() == Some(id.as_str()), |el| el.opacity(0.5));
         }
-        let full = text.clone();
+        let full = super::quotes::summary(&text);
         row = row.child(div().id(SharedString::from(format!("queue-text-{i}"))).flex_1().min_w_0().px(px(4.)).truncate()
-            .text_size(px(12.5)).text_color(theme::text()).child(conversation::one_line(&text, 400))
+            .text_size(px(12.5)).text_color(theme::text()).child(conversation::one_line(&full, 400))
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)));
         if !actions { return row.into_any_element(); }
         if editing {

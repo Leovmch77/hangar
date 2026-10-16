@@ -36,7 +36,8 @@ pub struct Engine {
 
 /// Clique e tecla de verdade na página vão ao painel, que pausa o agente se ele estiver agindo. Script de
 /// inicialização vale desde o primeiro documento; o binding do CDP chegava tarde para ele.
-const USER_INPUT: &str = "(()=>{const f=e=>{if(e.isTrusted&&window.ipc)window.ipc.postMessage('hangar-user')};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
+/// O Esc também vai à parte: a escolha de elemento do painel se cancela com ele.
+const USER_INPUT: &str = "(()=>{const f=e=>{if(!e.isTrusted||!window.ipc)return;window.ipc.postMessage('hangar-user');if(e.type==='keydown'&&e.key==='Escape')window.ipc.postMessage('hangar-escape')};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
 
 /// Link com `target=_blank` e `window.open` abrem nesta página: o painel é um navegador de uma aba só.
 const SAME_TAB: &str = "(()=>{addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[target]');if(a&&a.target!=='_self'&&a.target!=='_top'&&a.target!=='_parent')a.target='_self'},true);const o=window.open;window.open=function(u){if(u){location.href=u;return window}return o.apply(this,arguments)}})()";
@@ -96,7 +97,11 @@ impl Starter {
         let (on_load, on_title, on_ipc) = ((state.clone(), events.clone()), (state.clone(), events.clone()), events.clone());
         let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false).with_initialization_script(SAME_TAB)
             .with_initialization_script(USER_INPUT)
-            .with_ipc_handler(move |req| if req.body() == "hangar-user" { let _ = on_ipc.try_send(Event::UserInput); });
+            .with_ipc_handler(move |req| match req.body().as_str() {
+                "hangar-user" => { let _ = on_ipc.try_send(Event::UserInput); }
+                "hangar-escape" => { let _ = on_ipc.try_send(Event::Escape); }
+                _ => {}
+            });
         // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
         // O agente dirige a página com o app em segundo plano ou com ela estacionada: sem estes, o WebView2 a dá por
         // encoberta e congela os timers (eval e url estouravam o prazo até um clique no app).
@@ -361,7 +366,7 @@ impl Engine {
 
     // O painel é janela filha e recebe a entrada direto; só a página da conversa, pintada pelo app, passa por aqui.
     #[cfg(target_os = "windows")]
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) { self.mouse(kind, MouseButton::Left, at, clicks, modifiers) }
     #[cfg(target_os = "windows")]
     pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
     #[cfg(target_os = "windows")]
@@ -399,7 +404,7 @@ impl Engine {
     #[cfg(target_os = "windows")]
     pub fn texture_replaced(&self) -> bool { self.page.as_ref().is_some_and(|page| page.frames.commit()) }
     #[cfg(not(target_os = "windows"))]
-    pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}
+    pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize, _modifiers: &Modifiers) {}
     #[cfg(not(target_os = "windows"))]
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
     #[cfg(not(target_os = "windows"))]

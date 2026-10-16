@@ -106,7 +106,8 @@ checa "psmux sem formato não fornece identidade" "cli" "$(me 2>/dev/null)"
 # 5) Sessão SEM terminal: a chave do sidecar vence tudo — inclusive um pane herdado do
 #    operador que subiu o backend de dentro de um tmux, e um carimbo obsoleto pós-rename.
 mkdir -p "$TMP/headless"
-printf '{"name": "renomeada", "provider": "claude", "key": "abc123", "session_id": "x"}\n' > "$TMP/headless/renomeada.json"
+# Formato compacto, o que o hangar-server grava.
+printf '{"name":"renomeada","provider":"claude","headless":true,"key":"abc123","cano":{"name":"aninhado"}}\n' > "$TMP/headless/renomeada.json"
 export HANGAR_HEADLESS_DIR="$TMP/headless" CP_SESSION_KEY="abc123" CP_SESSION_NAME="nome-do-nascimento"
 export TMUX=1 TMUX_PANE="%1" PANES_FAKE=$'%1 outra' SESSAO_ATUAL="outra"
 checa "sem terminal (chave do sidecar)" "renomeada" "$(me 2>/dev/null)"
@@ -128,12 +129,20 @@ unset CP_SESSION_KEY HANGAR_CANO_KEY HANGAR_HEADLESS_DIR
 mkdir -p "$TMP/scripts" "$TMP/backend" "$TMP/claude-headless"
 cp "$REPO/scripts/hangar-send" "$TMP/scripts/hangar-send"
 echo "CP_AUTH_TOKEN=x" > "$TMP/backend/.env"
-printf '{"name": "w-t4", "provider": "claude", "key": "k1"}\n' > "$TMP/claude-headless/t.json"
+printf '{"name":"w-t4","provider":"claude","key":"k1"}\n' > "$TMP/claude-headless/t.json"
 printf '#!/usr/bin/env bash\necho chamou-api >> "%s/api.log"\nexit 1\n' "$TMP" > "$TMP/bin/curl"
 chmod +x "$TMP/bin/curl"
 quem=$(CP_SESSION_KEY=k1 HANGAR_HEADLESS_DIR="$TMP/claude-headless" "$TMP/scripts/hangar-send" --whoami 2>/dev/null)
 checa "--whoami imprime a identidade" "w-t4" "$quem"
 checa "--whoami sem chamada à API" "nao" "$([[ -e "$TMP/api.log" ]] && echo sim || echo nao)"
+
+# 9) Script de verdade com `pipefail`: a pasta do Claude sem a chave não encerra a busca antes da do Codex.
+mkdir -p "$TMP/home9/.hangar/claude-headless" "$TMP/home9/.hangar/codex-sessions"
+printf '{"name":"outra","key":"k-outra"}\n' > "$TMP/home9/.hangar/claude-headless/outra.json"
+printf '{"name":"cx-t9","provider":"codex","key":"k9"}\n' > "$TMP/home9/.hangar/codex-sessions/cx-t9.json"
+quem=$(env -u TMUX -u TMUX_PANE -u CP_SESSION_NAME HOME="$TMP/home9" HANGAR_CANO_KEY=k9 \
+    "$TMP/scripts/hangar-send" --whoami 2>/dev/null)
+checa "--whoami acha a chave na segunda pasta" "cx-t9" "$quem"
 
 echo
 if (( falhas )); then echo "$falhas falha(s)"; exit 1; fi

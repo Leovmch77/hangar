@@ -125,6 +125,7 @@ export interface SessionInfo {
   plan_hidden?: boolean | null;
   // Motor de modelo desta sessão (nome no engines.json). null/undefined = conta Anthropic.
   engine?: string | null;
+  codex_service_tier?: string | null;
   // Conta da sessão como ID do /api/cotas ("claude:<dir>", "chave:<motor>") — a pílula de cota do
   // topo mostra o uso da conta da sessão ATIVA. null = não dá pra saber (kimi/pi sem motor).
   conta?: string | null;
@@ -228,6 +229,7 @@ export interface ChatEvent {
 
 export interface StateEvent {
   interaction_id?: string | null;
+  codex_service_tier?: string | null;
   codex_buffering?: boolean;
   codex_mode?: 'default' | 'plan' | null;
   claude_permission_mode?: string | null;
@@ -646,12 +648,14 @@ export interface CodexModel {
   description: string | null;
   efforts: CodexModelEffort[];
   defaultEffort: string | null;
+  serviceTiers?: { id: string; hidden?: boolean }[];
 }
 
 export interface CodexModelChoice {
   model: string | null;
   effort: string | null;
   mode?: 'default' | 'plan' | null;
+  service_tier?: string | null;
 }
 
 export interface CodexModelsResponse {

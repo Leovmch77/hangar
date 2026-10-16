@@ -26,8 +26,25 @@ return Math.ceil(d.scrollHeight>d.clientHeight?d.scrollHeight:Math.max(d.getBoun
 const LOADED: &str = "Promise.race([new Promise(r=>document.readyState===\"complete\"?r():addEventListener(\"load\",()=>r(),{once:true})),\
 new Promise(r=>setTimeout(r,3000))])";
 
-pub struct Job { pub width: u32, pub theme: Theme, pub shot: Option<PathBuf> }
+/// Uma largura a medir e, com `shot`, a fotografar.
+pub struct Job { pub width: u32, pub theme: Theme, pub shot: Option<Shot> }
+
+/// O print dos clientes sai no dobro e transparente, sobre a conversa deles. O do rascunho é o que o modelo lê, sem a
+/// conversa atrás: em densidade 1, sobre o fundo da conversa no tema do trabalho, e não conta como medição da coluna.
+pub struct Shot { pub path: PathBuf, pub draft: bool }
+
+impl Shot {
+    pub fn cache(path: PathBuf) -> Self { Shot { path, draft: false } }
+    pub fn draft(path: PathBuf) -> Self { Shot { path, draft: true } }
+}
 pub struct Rendered { pub heights: BTreeMap<u32, u32>, pub console: Vec<ConsoleLine> }
+/// Desenho sem rede: o print recortado, ou o `error` que o próprio script devolveu; `blocked` conta as
+/// requisições recusadas.
+pub struct Offline { pub drawn: Result<Drawn, String>, pub blocked: u32 }
+/// PNG em escala 2 do recorte; `width`/`height` em px CSS.
+pub struct Drawn { pub png: Vec<u8>, pub width: u32, pub height: u32 }
+/// Lado máximo do recorte em px CSS: em escala 2 fica abaixo dos 16384 px por lado do Skia.
+pub const CLIP_MAX: u32 = 8192;
 #[derive(Serialize, Clone, Debug)]
 pub struct ConsoleLine { pub level: String, pub text: String }
 #[derive(Debug)]
@@ -84,17 +101,25 @@ pub async fn render(html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
 }
 
 pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
+    run(bin, |url| async move { drive(&url, html, jobs, own_theme).await }).await
+}
+
+/// Página sem rede nenhuma (`Fetch` recusa tudo): carrega o `html`, avalia `expression` (promessa que
+/// devolve `{clip:{x,y,width,height}}` ou `{error}`) e tira o PNG do recorte, com fundo transparente.
+pub async fn render_offline(bin: Option<PathBuf>, html: &str, width: u32, theme: Theme, expression: &str) -> Result<Offline, ChromeError> {
+    run(bin, |url| async move { offline(&url, html, width, theme, expression).await }).await
+}
+
+/// Vaga, lançamento, prazo e encerramento comuns aos dois caminhos; `work` recebe a URL do CDP.
+async fn run<T, F, Fut>(bin: Option<PathBuf>, work: F) -> Result<T, ChromeError>
+where F: FnOnce(String) -> Fut, Fut: std::future::Future<Output = Result<T, ChromeError>> {
     let bin = bin.ok_or(ChromeError::Absent)?;
     // A vaga só volta quando o Chrome anterior morre: sem prazo aqui, a fila presa segura quem chega.
     let slot = tokio::time::timeout(DEADLINE, SLOTS.acquire()).await
         .map_err(|_| ChromeError::Failed("fila do navegador do servidor cheia"))?
         .map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
-    run(&bin, html, jobs, own_theme, slot).await
-}
-
-async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool, slot: SemaphorePermit<'static>) -> Result<Rendered, ChromeError> {
     let profile = tempfile::tempdir().map_err(|_| ChromeError::Failed("perfil temporário"))?;
-    let child = tokio::process::Command::new(bin)
+    let child = tokio::process::Command::new(&bin)
         .args(["--headless", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
                "--disable-gpu", "--mute-audio", "--font-render-hinting=none"])
         .arg(format!("--user-data-dir={}", profile.path().display()))
@@ -107,7 +132,7 @@ async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool, slot: Semaph
     // O prazo cobre só o desenho: no Windows o Chrome leva segundos para morrer depois de desenhar.
     tokio::time::timeout(DEADLINE, async {
         let url = ws_url(profile.path(), child).await?;
-        drive(&url, html, jobs, own_theme).await
+        work(url).await
     }).await.unwrap_or(Err(ChromeError::Failed("navegador do servidor passou do prazo")))
 }
 
@@ -178,7 +203,7 @@ async fn ws_url(profile: &Path, child: &mut tokio::process::Child) -> Result<Str
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct Cdp { ws: Ws, next_id: u64, console: Vec<ConsoleLine> }
+struct Cdp { ws: Ws, next_id: u64, console: Vec<ConsoleLine>, blocked: u32 }
 
 impl Cdp {
     async fn send(&mut self, session: Option<&str>, method: &str, params: Value) -> Result<u64, ChromeError> {
@@ -189,7 +214,7 @@ impl Cdp {
         Ok(self.next_id)
     }
 
-    /// Lê até a resposta do mesmo `id`; no caminho, bloqueia `file:` e guarda o console.
+    /// Lê até a resposta do mesmo `id`; no caminho, recusa o que o `Fetch` pausou e guarda o console.
     async fn call(&mut self, session: Option<&str>, method: &str, params: Value) -> Result<Value, ChromeError> {
         let id = self.send(session, method, params).await?;
         loop {
@@ -208,6 +233,7 @@ impl Cdp {
     async fn event(&mut self, v: &Value) -> Result<(), ChromeError> {
         match v["method"].as_str() {
             Some("Fetch.requestPaused") => {
+                self.blocked += 1;
                 let params = json!({"requestId": v["params"]["requestId"], "errorReason": "BlockedByClient"});
                 self.send(v["sessionId"].as_str(), "Fetch.failRequest", params).await?;
             }
@@ -248,43 +274,90 @@ fn measured(eval: &Value) -> Result<u32, ChromeError> {
     }
 }
 
-async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
+/// Abre a aba, recusa o que casar com `blocked` e espera o `html` carregar; devolve o CDP e a sessão da aba.
+async fn load(url: &str, html: &str, blocked: &str, transparent: bool) -> Result<(Cdp, String), ChromeError> {
     // Print de página alta em escala 2 passa do limite de quadro padrão do tungstenite.
     let config = WebSocketConfig::default().max_frame_size(None).max_message_size(None);
     let (ws, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), true).await
         .map_err(|_| ChromeError::Failed("CDP do servidor recusou a conexão"))?;
-    let mut cdp = Cdp { ws, next_id: 0, console: Vec::new() };
+    let mut cdp = Cdp { ws, next_id: 0, console: Vec::new(), blocked: 0 };
     let target = cdp.call(None, "Target.createTarget", json!({"url": "about:blank"})).await?["targetId"].as_str().unwrap_or_default().to_owned();
     let session = cdp.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})).await?["sessionId"].as_str().unwrap_or_default().to_owned();
     let s = Some(session.as_str());
     cdp.call(s, "Page.enable", json!({})).await?;
     cdp.call(s, "Runtime.enable", json!({})).await?;
-    cdp.call(s, "Fetch.enable", json!({"patterns": [{"urlPattern": "file:*"}]})).await?;
-    // Tema próprio fica com o branco padrão do Chromium: o print mostra a página como foi desenhada.
-    if !own_theme {
+    cdp.call(s, "Fetch.enable", json!({"patterns": [{"urlPattern": blocked}]})).await?;
+    if transparent {
         cdp.call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}})).await?;
     }
     let frame = cdp.call(s, "Page.getFrameTree", json!({})).await?["frameTree"]["frame"]["id"].as_str().unwrap_or_default().to_owned();
     cdp.call(s, "Page.setDocumentContent", json!({"frameId": frame, "html": html})).await?;
     cdp.call(s, "Runtime.evaluate", json!({"expression": LOADED, "awaitPromise": true})).await?;
+    Ok((cdp, session))
+}
+
+async fn png(cdp: &mut Cdp, s: Option<&str>, clip: Value) -> Result<Vec<u8>, ChromeError> {
+    let shot = cdp.call(s, "Page.captureScreenshot", json!({"format": "png", "captureBeyondViewport": true, "clip": clip})).await?;
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(shot["data"].as_str().unwrap_or("")).map_err(|_| ChromeError::Failed("print inválido"))
+}
+
+async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
+    // Tema próprio fica com o branco padrão do Chromium: o print mostra a página como foi desenhada.
+    let (mut cdp, session) = load(url, html, "file:*", !own_theme).await?;
+    let s = Some(session.as_str());
     let mut heights = BTreeMap::new();
     for job in jobs {
         cdp.call(s, "Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": job.theme.as_str()}]})).await?;
         // Viewport baixa: com ela alta, `scrollHeight` nunca fica abaixo dela e a página curta mediria alta.
-        cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": job.width, "height": super::HEIGHT_MIN, "deviceScaleFactor": 2, "mobile": false})).await?;
+        let draft = job.shot.as_ref().is_some_and(|s| s.draft);
+        let density = if draft { 1 } else { 2 };
+        cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": job.width, "height": super::HEIGHT_MIN, "deviceScaleFactor": density, "mobile": false})).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
         let h = cdp.call(s, "Runtime.evaluate", json!({"expression": MEASURE, "returnByValue": true})).await?;
         let height = measured(&h)?;
-        heights.insert(job.width, height);
-        if let Some(path) = &job.shot {
-            let shot = cdp.call(s, "Page.captureScreenshot", json!({"format": "png", "captureBeyondViewport": true,
-                "clip": {"x": 0, "y": 0, "width": job.width, "height": height, "scale": 1}})).await?;
-            use base64::Engine as _;
-            let bytes = base64::engine::general_purpose::STANDARD.decode(shot["data"].as_str().unwrap_or("")).map_err(|_| ChromeError::Failed("print inválido"))?;
+        if !draft { heights.insert(job.width, height); }
+        if let Some(Shot { path, .. }) = &job.shot {
+            if !own_theme {
+                let (r, g, b, a) = if draft { let (r, g, b) = job.theme.backdrop(); (r, g, b, 1) } else { (0, 0, 0, 0) };
+                cdp.call(s, "Emulation.setDefaultBackgroundColorOverride", json!({"color": {"r": r, "g": g, "b": b, "a": a}})).await?;
+            }
+            let bytes = png(&mut cdp, s, json!({"x": 0, "y": 0, "width": job.width, "height": height, "scale": 1})).await?;
             super::store::write_atomic(path, &bytes).map_err(|_| ChromeError::Failed("print não gravado"))?;
         }
     }
     Ok(Rendered { heights, console: cdp.console })
+}
+
+async fn offline(url: &str, html: &str, width: u32, theme: Theme, expression: &str) -> Result<Offline, ChromeError> {
+    let (mut cdp, session) = load(url, html, "*", true).await?;
+    let s = Some(session.as_str());
+    // Rede desligada antes do script de quem pede, também para o que o `Fetch` não intercepta (WebSocket).
+    // É camada extra sobre a política da página: Chrome que recusar o comando desenha do mesmo jeito.
+    let offline = json!({"offline": true, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1});
+    if cdp.call(s, "Network.enable", json!({})).await.is_err() || cdp.call(s, "Network.emulateNetworkConditions", offline).await.is_err() {
+        tracing::debug!(code = "page_chrome_offline_refused", "emulação de rede desligada recusada pelo navegador do servidor");
+    }
+    cdp.call(s, "Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": theme.as_str()}]})).await?;
+    cdp.call(s, "Emulation.setDeviceMetricsOverride", json!({"width": width, "height": super::HEIGHT_MIN, "deviceScaleFactor": 2, "mobile": false})).await?;
+    let eval = cdp.call(s, "Runtime.evaluate", json!({"expression": expression, "awaitPromise": true, "returnByValue": true})).await?;
+    if eval.get("exceptionDetails").is_some() { return Err(ChromeError::Failed("script do desenho falhou")); }
+    let value = &eval["result"]["value"];
+    if let Some(error) = value["error"].as_str() { return Ok(Offline { drawn: Err(error.to_owned()), blocked: cdp.blocked }); }
+    let (x, y, w, h) = pixel_clip(&value["clip"]).ok_or(ChromeError::Failed("recorte inválido"))?;
+    let png = png(&mut cdp, s, json!({"x": x, "y": y, "width": w, "height": h, "scale": 1})).await?;
+    Ok(Offline { drawn: Ok(Drawn { png, width: w, height: h }), blocked: cdp.blocked })
+}
+
+/// Recorte em px CSS inteiros que cobre o retângulo pedido: em escala 2 o PNG mede o dobro, exato.
+fn pixel_clip(clip: &Value) -> Option<(f64, f64, u32, u32)> {
+    let [x, y, w, h] = ["x", "y", "width", "height"].map(|k| clip[k].as_f64());
+    let (x, y, w, h) = (x?, y?, w?, h?);
+    if w <= 0.0 || h <= 0.0 { return None; }
+    let (left, top) = (x.floor().max(0.0), y.floor().max(0.0));
+    let (w, h) = ((x + w).ceil() - left, (y + h).ceil() - top);
+    let max = f64::from(CLIP_MAX);
+    (w >= 1.0 && h >= 1.0 && w <= max && h <= max).then_some((left, top, w as u32, h as u32))
 }
 
 #[cfg(test)]
@@ -362,6 +435,16 @@ mod tests {
         assert_eq!(find_with(None, None, None, &[]), None);
     }
 
+    #[test]
+    fn clip_covers_the_rectangle_in_whole_css_pixels() {
+        assert_eq!(pixel_clip(&json!({"x": 0.4, "y": 0, "width": 100.2, "height": 50.5})), Some((0.0, 0.0, 101, 51)));
+        assert_eq!(pixel_clip(&json!({"x": -3, "y": 2.5, "width": 10, "height": 10})), Some((0.0, 2.0, 7, 11)));
+        for bad in [json!({"x": 0, "y": 0, "width": 0, "height": 10}), json!({"x": 0, "y": 0, "width": "10", "height": 10}),
+            json!({"x": 0, "y": 0, "width": 10}), json!({"x": 0, "y": 0, "width": 10, "height": CLIP_MAX + 1}), json!(null)] {
+            assert_eq!(pixel_clip(&bad), None, "{bad}");
+        }
+    }
+
     #[tokio::test]
     async fn no_binary_is_absent() {
         let r = render_with(None, "<p>x</p>", &[Job { width: 360, theme: Theme::Dark, shot: None }], false).await;
@@ -412,7 +495,7 @@ mod tests {
         for _ in 0..3 {
             let started = std::time::Instant::now();
             let jobs: Vec<Job> = super::super::WIDTHS.iter()
-                .map(|w| Job { width: *w, theme: Theme::Dark, shot: (*w == 728).then(|| dir.path().join("s.png")) }).collect();
+                .map(|w| Job { width: *w, theme: Theme::Dark, shot: (*w == 728).then(|| Shot::cache(dir.path().join("s.png"))) }).collect();
             let r = render(&html, &jobs).await.unwrap();
             eprintln!("render {:?}", started.elapsed());
             assert_eq!(r.heights.len(), super::super::WIDTHS.len());
@@ -426,7 +509,7 @@ mod tests {
         let shot = dir.path().join("s.png");
         let html = super::super::theme::inject("<!doctype html><div style=\"height:333px\"></div><script>console.error('oi')</script>", true);
         dbg!(find());
-        let r = render(&html, &[Job { width: 728, theme: Theme::Dark, shot: Some(shot.clone()) }]).await.unwrap();
+        let r = render(&html, &[Job { width: 728, theme: Theme::Dark, shot: Some(Shot::cache(shot.clone())) }]).await.unwrap();
         dbg!(&r.heights, &r.console, &shot);
         assert_eq!(r.heights[&728], 333);
         assert!(r.console.iter().any(|c| c.level == "error" && c.text.contains("oi")));

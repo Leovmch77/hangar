@@ -3,6 +3,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use super::*;
+use gpui_kit::component::input::{Editor, EditorState};
+
 use super::page_card::{Miss, PageRef, miss, shot_width};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use super::page_card::{GESTURE, HostMsg, Running, forward_key, parse_host};
@@ -34,6 +36,23 @@ pub fn step_zoom(zoom: f32, action: ZoomAction) -> f32 {
     };
     // Arredonda ao degrau: somas seguidas não acumulam erro.
     ((next / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+/// Nome do arquivo salvo: o título sem o que os sistemas de arquivo recusam, até 120 caracteres.
+pub fn file_name(title: &str) -> String {
+    let clean: String = title.chars().map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { ' ' } else { c }).collect();
+    let name: String = clean.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+    format!("{}.html", if name.trim().is_empty() { "pagina" } else { name.trim() })
+}
+
+/// Ação do atalho do app (Ctrl, Cmd ou Alt) que a tecla completa sozinha no contexto do foco; tecla de página (Ctrl+C,
+/// Ctrl+A…) não tem. Tecla sem esses modificadores é da página, mesmo que o app a use em outro lugar.
+fn app_shortcut(window: &Window, k: &Keystroke, cx: &App) -> Option<Box<dyn gpui_kit::Action>> {
+    if !(k.modifiers.control || k.modifiers.platform || k.modifiers.alt) { return None; }
+    // `possible_bindings_for_input` só devolve atalho de várias teclas que ainda espera a próxima; o completo vem daqui,
+    // já sem os `NoAction`.
+    let (bindings, _) = cx.key_bindings().borrow().bindings_for_input(std::slice::from_ref(k), &window.context_stack());
+    bindings.into_iter().next().map(|binding| binding.action().boxed_clone())
 }
 
 pub fn zoom_label(zoom: f32) -> String { format!("{}%", (zoom * 100.).round() as i32) }
@@ -117,9 +136,62 @@ pub(super) struct PageFullscreen {
     /// Pedido à vista: resposta de um anterior (nova tentativa, tema trocado) não entra.
     seq: u64,
     _load: Task<()>,
+    /// Mostrando a Fonte no lugar da página.
+    showing_source: bool,
+    /// O HTML como o agente escreveu (sem o tema e a ponte), para a Fonte, copiar e salvar; `None` no site.
+    source_text: Option<Result<SharedString, ()>>,
+    source_view: Option<Entity<EditorState>>,
+    /// Resultado de Salvar: o caminho gravado ou a falha.
+    saved: Option<(String, bool)>,
+    _source: Task<()>,
 }
 
 impl PageFullscreen {
+    /// O código da página, ao abrir o diálogo (Copiar e Salvar ficam prontos) e de novo só se falhou. Site não tem.
+    fn fetch_source(&mut self, cx: &mut Context<Self>) {
+        if self.source.page.url.is_some() { return; }
+        self.source_text = None;
+        let (api, name, id) = (self.host.api.clone(), self.host.name.clone(), self.source.page.id.clone());
+        let task = self.host.runtime.spawn(async move { api.page(&name, &id, &[], &[("raw", "1"), ("source", "1")]).await });
+        self._source = cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|_| Err(Failure::local("network_error")));
+            let _ = this.update(cx, |this, cx| {
+                this.source_text = Some(result.map(|bytes| String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()).into())
+                    .map_err(|error| eprintln!("[pagina] fonte da página não veio: {}", error.detail)));
+                cx.notify();
+            });
+        });
+    }
+
+    fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.showing_source = !self.showing_source;
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if self.showing_source && let Some(running) = &self.running { running.engine.hide(); }
+        if !self.showing_source { window.focus(&self.focus, cx); } else if matches!(self.source_text, Some(Err(()))) { self.fetch_source(cx); }
+        cx.notify();
+    }
+
+    /// Salvar pergunta o destino, na pasta de downloads, como o anexo.
+    fn save_source(&mut self, cx: &mut Context<Self>) {
+        let Some(Ok(text)) = self.source_text.clone() else { return };
+        let prompt = cx.prompt_for_new_path(&super::downloads_folder(), Some(&file_name(&self.source.page.title)));
+        self._source = cx.spawn(async move |this, cx| {
+            let saved = match prompt.await {
+                Ok(Ok(Some(path))) => {
+                    let written = cx.background_executor().spawn(async move { std::fs::write(&path, text.as_bytes()).map(|()| path) }).await;
+                    Some(match written {
+                        Ok(path) => (tr("saved").replace("{path}", &path.display().to_string()), false),
+                        Err(_) => (tr("save_failed"), true),
+                    })
+                }
+                Ok(Ok(None)) => None,
+                // O diálogo do sistema falhou: dizer, não parecer que Salvar não fez nada.
+                _ => Some((tr("save_failed"), true)),
+            };
+            let _ = this.update(cx, |this, cx| { this.saved = saved; cx.notify(); });
+        });
+    }
+
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.body = Body::Loading;
         self.seq += 1;
@@ -182,10 +254,12 @@ impl PageFullscreen {
                 cx.notify();
             }
             // Link só logo depois de um clique ou tecla na página: sozinha ela não abre o navegador.
-            crate::browser::Event::Host(raw) => if let Some(HostMsg::Link(url)) = parse_host(&raw)
-                && self.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) { cx.open_url(&url) },
+            crate::browser::Event::Host(raw) => if let Some(HostMsg::Link(url, external)) = parse_host(&raw)
+                && self.gesture.take().is_some_and(|at| at.elapsed() < GESTURE) {
+                super::links::open_link_later(self.host.window, url, external, true, cx);
+            },
             crate::browser::Event::State(state) => running.at = state.url,
-            crate::browser::Event::UserInput => {}
+            crate::browser::Event::UserInput | crate::browser::Event::Escape => {}
         }
     }
 
@@ -236,23 +310,33 @@ impl PageFullscreen {
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn pointer(&mut self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    fn pointer(&mut self, kind: Pointer, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         match kind {
             Pointer::Down => self.pressed = true,
             // Soltura de um arrasto que não começou na página não é dela.
             Pointer::Up if !std::mem::take(&mut self.pressed) => return,
             _ => {}
         }
-        if let Some(running) = &self.running { running.engine.pointer(kind, at - self.origin.get(), clicks); }
+        if let Some(running) = &self.running { running.engine.pointer(kind, at - self.origin.get(), clicks, modifiers); }
     }
 
-    /// Ctrl+=/-/0 amplia em qualquer modo; o resto vai à página viva. O Esc nem chega aqui: o diálogo do kit o trata
-    /// antes (ação `Cancel`) e fecha.
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Ctrl+=/-/0 amplia em qualquer modo; atalho do app roda nele; o resto vai à página viva. O Esc nem chega aqui: o
+    /// diálogo do kit o trata antes (ação `Cancel`) e fecha.
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         if let Some(action) = zoom_key(&k.key, &k.modifiers) { cx.stop_propagation(); self.zoom_to(action, cx); return; }
+        // O atalho casa aqui também, mas quem o trata é a raiz do app, fora do diálogo: a tela cheia sai da frente e ele
+        // roda como fora dela, como com a página do cartão em foco.
+        if let Some(action) = app_shortcut(window, k, cx) && let Some(hangar) = self.host.hangar.upgrade() {
+            cx.stop_propagation();
+            let root = hangar.read(cx).root_focus.clone();
+            window.close_dialog(cx);
+            window.focus(&root, cx);
+            window.dispatch_action(action, cx);
+            return;
+        }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(running) = &self.running {
+        if let Some(running) = self.running.as_ref().filter(|_| !self.showing_source) {
             cx.stop_propagation();
             self.gesture = Some(Instant::now());
             forward_key(&running.engine, k, cx);
@@ -261,7 +345,7 @@ impl PageFullscreen {
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(running) = &self.running { cx.stop_propagation(); running.engine.key(false, &event.keystroke); }
+        if let Some(running) = self.running.as_ref().filter(|_| !self.showing_source) { cx.stop_propagation(); running.engine.key(false, &event.keystroke); }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let _ = (event, cx);
     }
@@ -287,9 +371,28 @@ impl Render for PageFullscreen {
             running.push_theme();
         }
         let zoom = self.zoom;
+        let has_source = self.source.page.url.is_none();
+        let source_ready = matches!(self.source_text, Some(Ok(_)));
+        let source_actions = div().flex().items_center().gap_1()
+            .child(Button::new("page-full-view").ghost().small()
+                .icon(if self.showing_source { IconName::Eye } else { IconName::Code })
+                .label(tr_shared(if self.showing_source { "page_view_page" } else { "page_view_source" }, &[]))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_source(window, cx))))
+            .children(match &self.source_text {
+                Some(Ok(text)) => Some(gpui_kit::component::clipboard::Clipboard::new("page-full-copy").value(text.clone())
+                    .tooltip(tr_shared("page_copy_source", &[])).into_any_element()),
+                _ => None,
+            })
+            .child(Button::new("page-full-save").ghost().small().icon(IconName::Download).tooltip(tr_shared("page_save_file", &[]))
+                .accessibility_label(tr_shared("page_save_file", &[])).disabled(!source_ready)
+                .on_click(cx.listener(|this, _, _, cx| this.save_source(cx))));
+        let saved = self.saved.clone().map(|(text, failed)| div().max_w(px(320.)).truncate().text_xs()
+            .text_color(if failed { theme::warning() } else { theme::muted() }).child(text));
         let header = div().flex().items_center().gap_2().pr(px(36.)).h(px(28.))
             .child(div().flex_1().min_w_0().truncate().text_sm().text_color(theme::text()).child(title.clone()))
-            .child(div().flex().items_center().gap_1()
+            .children(saved)
+            .when(has_source, |el| el.child(source_actions))
+            .when(!self.showing_source, |el| el.child(div().flex().items_center().gap_1()
                 .child(Button::new("page-full-zoom-out").ghost().small().icon(IconName::Minus)
                     .tooltip(tr_shared("page_zoom_out", &[])).accessibility_label(tr_shared("page_zoom_out", &[])).disabled(zoom <= ZOOM_MIN)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to(ZoomAction::Out, cx))))
@@ -299,7 +402,7 @@ impl Render for PageFullscreen {
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to(ZoomAction::Reset, cx))))
                 .child(Button::new("page-full-zoom-in").ghost().small().icon(IconName::Plus)
                     .tooltip(tr_shared("page_zoom_in", &[])).accessibility_label(tr_shared("page_zoom_in", &[])).disabled(zoom >= ZOOM_MAX)
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom_to(ZoomAction::In, cx)))))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_to(ZoomAction::In, cx))))))
             .when(!self.source.live, |el| {
                 let (hangar, id) = (self.host.hangar.clone(), self.source.page.id.clone());
                 el.child(Button::new("page-full-open").ghost().small().icon(IconName::ExternalLink).label(tr_shared("page_open_browser", &[]))
@@ -369,8 +472,27 @@ impl Render for PageFullscreen {
             }
         };
 
+        if self.showing_source && self.source_view.is_none() && let Some(Ok(text)) = &self.source_text {
+            let text = text.clone();
+            let view = cx.new(|cx| EditorState::new(window, cx).language("html").default_value(text).soft_wrap(true));
+            view.update(cx, |state, cx| state.set_readonly(true, cx));
+            self.source_view = Some(view);
+        }
         let stage = div().id("page-full-stage").relative().w(px(size.stage_w)).h(px(size.stage_h)).overflow_hidden().rounded_md()
-            .bg(theme::inset()).track_focus(&self.focus).key_context("PageFullscreen").aria_label(title)
+            .bg(theme::inset());
+        if self.showing_source {
+            let source = match (&self.source_text, &self.source_view) {
+                (Some(Err(())), _) => Self::note(tr_shared("page_source_error", &[]), Role::Alert, "page-full-source-error").into_any_element(),
+                (_, Some(view)) => div().id("page-full-source").size_full()
+                    .child(Editor::new(view).readonly(true).bordered(false).h_full().font_family(theme::MONO).text_sm())
+                    .into_any_element(),
+                _ => Self::note(tr_shared("page_loading", &[("title", &title_for)]), Role::Status, "page-full-source-loading").into_any_element(),
+            };
+            // Atalho do app vale também com o foco no código.
+            return div().id("page-full").flex().flex_col().gap_3().child(header)
+                .child(stage.on_key_down(cx.listener(Self::on_key)).child(source));
+        }
+        let stage = stage.track_focus(&self.focus).key_context("PageFullscreen BrowserPage").aria_label(title)
             .on_key_down(cx.listener(Self::on_key)).on_key_up(cx.listener(Self::on_key_up))
             .child(surface)
             .child(body);
@@ -379,11 +501,11 @@ impl Render for PageFullscreen {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus, cx);
                 this.gesture = Some(Instant::now());
-                this.pointer(Pointer::Down, event.position, event.click_count);
+                this.pointer(Pointer::Down, event.position, event.click_count, &event.modifiers);
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0)))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.pointer(Pointer::Move, event.position, 0)));
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0, &event.modifiers)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0, &event.modifiers)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.pointer(Pointer::Move, event.position, 0, &event.modifiers)));
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let stage = stage.on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| window.focus(&this.focus, cx)));
 
@@ -408,9 +530,10 @@ pub(super) fn open(host: Host, source: Source, window: &mut Window, cx: &mut App
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             running: None,
             shot: None, asked_dark: theme::is_dark(), seq: 0, _load: Task::ready(()),
+            showing_source: false, source_text: None, source_view: None, saved: None, _source: Task::ready(()),
         }
     });
-    full.update(cx, |full, cx| full.start(window, cx));
+    full.update(cx, |full, cx| { full.start(window, cx); full.fetch_source(cx); });
     let shown = full.clone();
     window.open_dialog(cx, move |dialog, window, _| {
         let size = full_size(viewport(window));
@@ -424,7 +547,7 @@ pub(super) fn open(host: Host, source: Source, window: &mut Window, cx: &mut App
 #[cfg(test)]
 mod tests {
     // Sem `super::*`: o glob da gpui_kit traz um `test` próprio que sombreia o `#[test]` da std.
-    use super::{FullSize, ZoomAction, full_size, step_zoom, wheel_zoom, zoom_key, zoom_label};
+    use super::{FullSize, ZoomAction, file_name, full_size, step_zoom, wheel_zoom, zoom_key, zoom_label};
     use gpui_kit::Modifiers;
 
     #[test]
@@ -458,6 +581,14 @@ mod tests {
         assert_eq!(wheel_zoom(0., 10.), (None, 10.));
         assert_eq!(wheel_zoom(45., 10.), (Some(ZoomAction::In), 0.));
         assert_eq!(wheel_zoom(0., -120.), (Some(ZoomAction::Out), 0.));
+    }
+
+    #[test]
+    fn file_name_comes_from_the_title() {
+        assert_eq!(file_name("Prova de redimensionamento"), "Prova de redimensionamento.html");
+        assert_eq!(file_name(" a/b: c*d?  \"e\" <f>|g\\h \t"), "a b c d e f g h.html");
+        assert_eq!(file_name("///"), "pagina.html", "título só de símbolos proibidos");
+        assert_eq!(file_name(&"x".repeat(300)).chars().count(), 120 + ".html".len());
     }
 
     #[test]

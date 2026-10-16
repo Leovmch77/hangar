@@ -40,7 +40,7 @@ export default function CodexLimitsSheet() {
   function label(w: RateLimitWindow): string {
     const pct = w.usedPercent != null ? `${Math.round(w.usedPercent)}%` : '—';
     const inTxt = resetsIn(w.resetsAt);
-    const reset = inTxt ? ` · reseta ${inTxt}` : '';
+    const reset = inTxt ? ` · ${m.rate_reseta({ quando: inTxt })}` : '';
     return m.codex_limite_uso({ pct, reset });
   }
 

@@ -74,13 +74,17 @@ export function pageUrls(base: string, session: string, id: string) {
   const root = `${base}/api/sessions/${encodeURIComponent(session)}/pages/${encodeURIComponent(id)}`;
   return {
     raw: `${root}?raw=1`,
+    source: `${root}?raw=1&source=1`,
     isolated: root,
     shot: (theme: 'dark' | 'light', width: number) => `${root}/shot?theme=${theme}&width=${Math.round(width)}`,
   };
 }
 
+// As cores-base que o cliente tira do próprio tema; as derivadas (`--card`, `--primary`, `--ring`…) a página calcula
+// delas, e a que o cliente não tem (`--info`, `--chart-5/6`) fica com o padrão do esquema guardado na página.
 const VARS = ['--foreground', '--muted-foreground', '--surface', '--border', '--accent', '--accent-foreground',
-  '--danger', '--warning', '--success', '--code-background', '--chart-1', '--chart-2', '--chart-3', '--chart-4', '--font-sans', '--font-mono'];
+  '--danger', '--warning', '--success', '--code-background', '--chart-1', '--chart-2', '--chart-3', '--chart-4',
+  '--font-sans', '--font-mono'];
 
 // Lê do app (por nome da variável da página) o valor real do tema; vazio fica com o padrão injetado.
 export function themeVariables(get: (name: string) => string): Record<string, string> {
@@ -89,14 +93,31 @@ export function themeVariables(get: (name: string) => string): Record<string, st
   return out;
 }
 
-const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)">)[\s\S]*?(<\/style>)/;
+const THEME_BLOCK = /(<style id="hangar-theme" data-base="([^"]*)"([^>]*)>)[\s\S]*?(<\/style>)/;
+const unquote = (v: string) => v.replaceAll('&quot;', '"');
 
-// Troca só o conteúdo do bloco de tema que o servidor injeta; o data-base fica para as trocas seguintes. Uma regra
-// para a PWA e o app.
+// Troca só o conteúdo do bloco de tema que o servidor injeta; os atributos ficam para as trocas seguintes. Parte das
+// cores do esquema guardadas pelo servidor (`data-dark`/`data-light`, ausentes em página antiga) e aplica as do app
+// por cima, como a troca ao vivo da página. Uma regra para a PWA e o app.
 export function themedPageDocument(html: string, scheme: 'dark' | 'light', vars: Record<string, string>): string {
-  const css = `:root{color-scheme:${scheme};${Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';')}}`;
-  return html.replace(THEME_BLOCK,
-    (_all, open: string, base: string, close: string) => `${open}${css}${base.replaceAll('&quot;', '"')}${close}`);
+  const own = Object.entries(vars).map(([k, v]) => `${k}:${v}`).join(';');
+  return html.replace(THEME_BLOCK, (_all, open: string, base: string, attrs: string, close: string) => {
+    const defaults = new RegExp(` data-${scheme}="([^"]*)"`).exec(attrs)?.[1] ?? '';
+    return `${open}:root{color-scheme:${scheme};${unquote(defaults)}${own}}${unquote(base)}${close}`;
+  });
+}
+
+// Fonte da página: o servidor já tira o tema e a ponte. Erro HTTP sobe para a tela mostrar.
+export async function fetchPageSource(url: string, headers: Record<string, string>): Promise<string> {
+  const r = await fetch(url, { headers });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+
+// Nome do arquivo salvo: o título sem o que os sistemas de arquivo recusam, até 120 caracteres. Mesma regra no nativo.
+export function pageFileName(title: string): string {
+  const name = [...title.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, ' ').split(/\s+/).filter(Boolean).join(' ')].slice(0, 120).join('').trim();
+  return `${name || 'pagina'}.html`;
 }
 
 // Tela cheia da página (como o HtmlRenderDialog do T3): zoom de 50% a 200% em degraus de 25%.

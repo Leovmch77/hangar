@@ -11,6 +11,7 @@ import {
   especificidade,
   donoDaLinha,
   sendInputForServer,
+  steerSession,
   queuedMessages,
   registrarDiag,
   parsePluginToast,
@@ -24,9 +25,13 @@ import {
   moveTarget,
   editQueuedMessage,
   cancelQueuedMessage,
+  descartarDaFila,
   steerQueuedMessage,
   reorderQueuedMessage,
   formataErro,
+  composeWithContextRefs,
+  splitContextRefs,
+  type ContextRef,
 } from '@hangar/core';
 import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server, QueuePanel, QueueEdit } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -51,6 +56,10 @@ const SSE_RETRY_MIN_MS = 3_000;
 // Prazo para o `queue` do retrato chegar depois de a conexão abrir.
 const QUEUE_SNAPSHOT_MS = 3_000;
 const SSE_RETRY_MAX_MS = 30_000;
+
+// Edição da fila com as citações da mensagem: o campo mostra só o texto digitado e elas voltam na
+// frente ao gravar (com elas o Atualizar vale mesmo com o campo vazio).
+export type ChatQueueEdit = QueueEdit & { refs: readonly ContextRef[] };
 
 export interface ChatState {
   draftUpdate: number;
@@ -88,7 +97,7 @@ export interface ChatState {
   // Fila do Hangar pelo evento `queue` (Claude e Codex); null = sem ele, o painel sai das bolhas.
   queuePanel: QueuePanel | null;
   // Mensagem da fila aberta no composer; o rascunho de antes dela fica em `savedDraft`.
-  queueEdit: QueueEdit | null;
+  queueEdit: ChatQueueEdit | null;
   // Texto que o composer recebe quando a edição fechou por a entrada ter saído da fila (null = o rascunho guardado).
   queueEditExit: string | null;
   // Uma ação da fila por vez: os botões do painel ficam desativados enquanto ela está em voo.
@@ -109,7 +118,7 @@ export interface ChatApi {
   retain: () => void;
   release: () => void;
   loadOlder: () => void;
-  send: (text: string, draftRevision?: number) => Promise<void>;
+  send: (text: string, draftRevision?: number, mode?: 'steer') => Promise<void>;
   // Recarrega o histórico depois de falha da primeira carga (o SSE segue vivo por conta
   // própria — onerror reconecta —, então retry é só a parte REST).
   retry: () => void;
@@ -127,6 +136,7 @@ export interface ChatApi {
   dropQueueEdit: (text?: string) => void;
   submitQueueEdit: (text: string) => Promise<void>;
   removeQueued: (id: string) => Promise<void>;
+  discardQueued: (id: string) => Promise<string | null>;
   steerQueued: (id: string) => Promise<void>;
   moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
@@ -667,23 +677,32 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   }
 
   // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
-  async function queueAction(run: (target: Server) => Promise<unknown>): Promise<boolean> {
+  async function queueAction(run: (target: Server) => Promise<unknown>, onError?: (message: string) => void): Promise<boolean> {
+    if (useChatStore.getState().queueBusy) return false;
     const target = destino();
-    if (!target || useChatStore.getState().queueBusy) return false;
+    if (!target) {
+      const message = m.chat_servidor_removido();
+      onError?.(message);
+      showQueueError(message);
+      return false;
+    }
     clearTimeout(queueErrorTimer);
     useChatStore.setState({ queueBusy: true, queueError: null });
     try {
       await run(target);
       return true;
     } catch (err) {
-      showQueueError(formataErro(err) ?? (err instanceof Error ? err.message : String(err)));
+      const message = formataErro(err) ?? (err instanceof Error ? err.message : String(err));
+      onError?.(message);
+      showQueueError(message);
       return false;
     } finally {
       useChatStore.setState({ queueBusy: false });
     }
   }
 
-  // Toda saída da edição: o Composer põe `text` no campo, ou o rascunho guardado sem ele.
+  // Toda saída da edição: o Composer põe `text` no campo, ou o rascunho guardado sem ele. As
+  // citações moram dentro do `queueEdit`, então saem junto.
   function dropQueueEdit(text?: string) {
     useChatStore.setState({ queueEdit: null, queueEditExit: text ?? null });
   }
@@ -708,8 +727,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const entry = queueEntries().find((e) => e.id === id);
       if (!entry) return draft;
       const next = beginQueueEdit(entry, draft, useChatStore.getState().queueEdit);
-      useChatStore.setState({ queueEdit: next.edit, queueEditExit: null });
-      return next.composerText;
+      const split = splitContextRefs(entry.text);
+      useChatStore.setState({ queueEdit: { ...next.edit, refs: split?.refs ?? [] }, queueEditExit: null });
+      return split ? split.typed : next.composerText;
     },
     cancelQueueEdit() {
       dropQueueEdit();
@@ -717,9 +737,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     dropQueueEdit,
     async submitQueueEdit(text: string): Promise<void> {
       const edit = useChatStore.getState().queueEdit;
-      if (!edit || !canUpdateQueueEdit(text)) return;
+      if (!edit || !canUpdateQueueEdit(text, edit.refs)) return;
       // Texto igual ao da fila: só sai da edição, sem pedido.
-      const next = queueEditPayload(text, queueEntries().find((e) => e.id === edit.entryId)?.text);
+      const next = queueEditPayload(composeWithContextRefs(edit.refs, text), queueEntries().find((e) => e.id === edit.entryId)?.text);
       if (next !== null && !(await queueAction(async (t) => {
         try {
           await editQueuedMessage(name, edit.entryId, next, t);
@@ -738,6 +758,12 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (!ok) return;
       // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
       useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+    },
+    async discardQueued(id: string) {
+      let error: string | null = null;
+      const ok = await queueAction((t) => descartarDaFila(name, id, t), (message) => { error = message; });
+      if (ok) useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+      return error;
     },
     // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
     async steerQueued(id: string) {
@@ -822,9 +848,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       rebuildIndex(events);
       useChatStore.setState({ events });
     },
-    async send(text: string, draftRevision?: number) {
-      const trimmed = text.trim();
-      if (!trimmed) return;
+    async send(text: string, draftRevision?: number, mode?: 'steer') {
+      const trimmed = mode === 'steer' ? text : text.trim();
+      if (!trimmed.trim()) return;
       // Destino desta conversa, nunca o servidor ativo: trocar de servidor no meio não desvia o envio.
       const target = useServers.getState().servers.find((s) => s.id === serverId);
       if (!target) throw new Error(m.chat_servidor_removido());
@@ -836,8 +862,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         const solid = useChatStore.getState().stateEvent?.state === 'idle';
         useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed, solid }] }));
         try {
-          await sendInputForServer(target, name, trimmed);
+          if (mode === 'steer') await steerSession(name, trimmed, target);
+          else await sendInputForServer(target, name, trimmed);
         } catch (err) {
+          // O /steer também usa 409 quando escreveu sem confirmar: não presumir recusa.
+          if (mode === 'steer' && (err as { status?: number } | null)?.status === 409) {
+            throw new Error(m.queue_steer_uncertain(), { cause: err });
+          }
           if (isInputRejected(err)) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));
           throw err;
         }

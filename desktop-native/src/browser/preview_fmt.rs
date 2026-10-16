@@ -56,6 +56,32 @@ fn property<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
     node["properties"].as_array()?.iter().find(|p| p["name"] == name).map(|p| &p["value"]["value"])
 }
 
+/// Papel com que o nó sai no snapshot. Editor rico (`contenteditable` sem papel, como o Tiptap) é um campo para o
+/// agente: vira `textbox` com ref.
+fn line_role(node: &Value) -> &str {
+    let role = node["role"]["value"].as_str().unwrap_or("");
+    let editor = !ACTIONABLE.contains(&role) && property(node, "editable").is_some()
+        && property(node, "focusable") == Some(&Value::Bool(true));
+    if editor { "textbox" } else { role }
+}
+
+/// O nó vira linha própria no snapshot, fora o texto repetido do pai, que depende de quem o contém.
+fn own_line(node: &Value, role: &str, trimmed: &str) -> bool {
+    !node["ignored"].as_bool().unwrap_or(false) && !role.is_empty() && !MUTE.contains(&role)
+        // Tabela de layout é desenho; o nome dela repete o texto dos filhos.
+        && !role.starts_with("Layout")
+        && !(trimmed.is_empty() && STRUCTURE.contains(&role))
+}
+
+/// Papel e nome com que o snapshot mostra o nó do elemento `backend`, para o agente reencontrá-lo pela mesma linha.
+/// Vazios quando o elemento não vira linha (um `div` sem papel, por exemplo).
+pub fn snapshot_identity(nodes: &[Value], backend: i64) -> (String, String) {
+    let Some(node) = nodes.iter().find(|n| n["backendDOMNodeId"].as_i64() == Some(backend)) else { return Default::default() };
+    let (role, name) = (line_role(node), node["name"]["value"].as_str().unwrap_or(""));
+    if !own_line(node, role, name.trim()) || role == "StaticText" { return Default::default(); }
+    (role.to_owned(), name.to_owned())
+}
+
 /// `refs_only`: só as linhas acionáveis, sem a estrutura em volta.
 pub fn compact_ax(nodes: &[Value], refs_only: bool) -> Compact {
     let by_id: HashMap<&str, &Value> = nodes.iter().filter_map(|n| Some((n["nodeId"].as_str()?, n))).collect();
@@ -66,17 +92,10 @@ pub fn compact_ax(nodes: &[Value], refs_only: bool) -> Compact {
     let mut stack: Vec<(&str, usize, &str)> = nodes.first().and_then(|n| n["nodeId"].as_str()).map(|id| vec![(id, 0, "")]).unwrap_or_default();
     while let Some((id, level, parent)) = stack.pop() {
         let Some(node) = by_id.get(id) else { continue };
-        let role = node["role"]["value"].as_str().unwrap_or("");
-        // Editor rico (`contenteditable` sem papel, como o Tiptap) é um campo para o agente: vira `textbox` com ref.
-        let editor = !ACTIONABLE.contains(&role) && property(node, "editable").is_some()
-            && property(node, "focusable") == Some(&Value::Bool(true));
-        let role = if editor { "textbox" } else { role };
+        let role = line_role(node);
         let name = node["name"]["value"].as_str().unwrap_or("");
         let trimmed = name.trim();
-        let shown = !node["ignored"].as_bool().unwrap_or(false) && !role.is_empty() && !MUTE.contains(&role)
-            // Tabela de layout é desenho; o nome dela repete o texto dos filhos.
-            && !role.starts_with("Layout")
-            && !(trimmed.is_empty() && STRUCTURE.contains(&role))
+        let shown = own_line(node, role, trimmed)
             // Texto que já está no nome de quem o contém (botão cujo nome junta os textos dele), ou só pontuação
             // (" | "), não diz nada novo.
             && !(role == "StaticText" && (parent.contains(trimmed) || !trimmed.chars().any(char::is_alphanumeric)));
@@ -234,6 +253,22 @@ mod tests {
         assert_eq!(compact_ax(&nodes, true).lines[0], "- button \"Entrar agora\" [ref=@e1]");
         let lines: Vec<String> = (0..10).map(|i| format!("linha {i}")).collect();
         assert!(capped(&lines, 30).starts_with("linha 0\nlinha 1\nlinha 2\n… cortado: mostrei 3 de 10 linhas"));
+    }
+
+    #[test]
+    fn picked_element_gets_the_snapshot_role_and_name() {
+        let mut editor = node("4", "generic", "", Some(40), &[]);
+        editor["properties"] = json!([{"name": "editable", "value": {"value": "richtext"}}, {"name": "focusable", "value": {"value": true}}]);
+        let nodes = vec![node("1", "button", "Salvar", Some(10), &[]), node("2", "generic", "", Some(11), &[]),
+            json!({"nodeId": "3", "ignored": true, "role": {"value": "link"}, "name": {"value": "x"}, "backendDOMNodeId": 12}), editor,
+            node("5", "row", "", Some(13), &[]), node("6", "heading", "Prova de escolher elemento", Some(14), &[])];
+        let id = |backend| snapshot_identity(&nodes, backend);
+        assert_eq!(id(10), ("button".into(), "Salvar".into()));
+        assert_eq!(id(14), ("heading".into(), "Prova de escolher elemento".into()));
+        assert_eq!(id(40), ("textbox".into(), String::new()), "editor rico é textbox, como no snapshot");
+        for mute in [11, 12, 13, 99] { assert_eq!(id(mute), Default::default(), "{mute} não vira linha no snapshot"); }
+        // A linha do snapshot do mesmo nó traz o mesmo papel e nome.
+        assert_eq!(compact_ax(&nodes[..1], false).lines[0], "- button \"Salvar\" [ref=@e1]");
     }
 
     #[test]
