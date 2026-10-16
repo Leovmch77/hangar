@@ -40,9 +40,15 @@
   // Altura só anima na troca de modo; crescer o campo ao digitar acompanha na hora.
   let animating = $state(false);
   let lastMode = untrack(() => mode);
-  $effect(() => {
+  // `pre`: antes de o dock ficar `inert`, quando o clique no microfone ainda vale.
+  $effect.pre(() => {
     if (mode === lastMode) return;
     lastMode = mode;
+    if (mode === 'sessions') {
+      // Gravando, a lista não esconde o microfone ligado: parar transcreve para o campo.
+      untrack(() => dockEl)?.querySelector<HTMLButtonElement>('.mic[aria-pressed="true"]')?.click();
+      if (untrack(() => dockEl)?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    }
     animating = true;
     const t = setTimeout(() => (animating = false), 340);
     return () => clearTimeout(t);
@@ -67,9 +73,6 @@
     else dockEl?.querySelector<HTMLButtonElement>('.mic:not([aria-pressed="true"])')?.click();
   }
   function showSessions() {
-    // Gravando, a lista não esconde o microfone ligado: parar transcreve para o campo.
-    dockEl?.querySelector<HTMLButtonElement>('.mic[aria-pressed="true"]')?.click();
-    (document.activeElement as HTMLElement | null)?.blur?.();
     if (history.state?.[COMPOSE]) history.back();
     else mode = 'sessions';
   }
@@ -163,17 +166,17 @@
     </div>
   {:else}
     <div class="middle">
-      <div class="layer list-layer" inert={!collapsed} aria-hidden={!collapsed}>
+      <div class="layer list-layer" inert={!collapsed}>
         <HomeSessions {onOpenChat} />
       </div>
-      <div class="layer greeting" inert={collapsed} aria-hidden={collapsed}>
+      <div class="layer greeting" inert={collapsed}>
         {#if draft.serverObj}<HomeUsage server={draft.serverObj} />{/if}
         <h1>{m.native_new_chat_title()}</h1>
       </div>
     </div>
 
     <div class="bottom" class:animating style:height={dockHeight ? `${collapsed ? launcherHeight : dockHeight}px` : undefined}>
-    <div class="launcher" inert={!collapsed} aria-hidden={!collapsed} bind:clientHeight={launcherHeight}>
+    <div class="launcher" inert={!collapsed} bind:clientHeight={launcherHeight}>
       <button type="button" class="launcher-text" onclick={() => openCompose('field')}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
           stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
@@ -187,7 +190,7 @@
       </button>
     </div>
 
-    <div class="dock" bind:this={dockEl} bind:clientHeight={dockHeight} inert={collapsed} aria-hidden={collapsed}>
+    <div class="dock" bind:this={dockEl} bind:clientHeight={dockHeight} inert={collapsed}>
       <div class="top-pills">
         {#if draft.servers.length > 1}
           <QuietPill label={machineLabel} ariaLabel={m.native_new_chat_machine()} disabled={draft.sending}

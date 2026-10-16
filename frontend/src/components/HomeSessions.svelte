@@ -62,8 +62,8 @@
         {#each g.sessions as session (session.serverId + '::' + session.name)}
           <SessionCard {session}
             serverBadge={manyServers ? { label: session.serverLabel, color: session.serverColor } : null}
-            onClick={() => model.open(session)}
-            onDelete={() => model.requestDelete(session.name, session.serverId, session.state)} />
+            onClick={() => { deleteError = ''; model.open(session); }}
+            onDelete={() => { deleteError = ''; model.requestDelete(session.name, session.serverId, session.state); }} />
         {/each}
         {#if g.state === 'idle' && g.total > 1}
           <button type="button" class="more" aria-expanded={readyExpanded} onclick={() => (readyExpanded = !readyExpanded)}>
