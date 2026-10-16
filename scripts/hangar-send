@@ -408,7 +408,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless] [--jev|--sem-jev]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider]}"
     shift
     # servidor::nome cria a sessão NOUTRA máquina, pela API dela (peers.json), igual ao recado.
     remoto=""
@@ -424,7 +424,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless] [--jev|--sem-jev]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -447,9 +447,23 @@ if [[ "$1" == "--new" ]]; then
     # --subagente: modelo dos subagentes (CLAUDE_CODE_SUBAGENT_MODEL); só Claude sem motor.
     # --conta com --provider codex: conta Codex (~/.codex-<nome>); `openai-codex` é a padrão.
     cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""; subagente=""; codex_conta=""; service_tier=""
-    remember_provider="false"
+    remember_provider="false"; no_inherit=""; engine_account=""; branch=""; new_branch=""; base=""; customizations=""; prompt=""
+    # Uma flag que só aceita valor uma vez: `once <variável> <flag> <valor>`.
+    once() {
+        [[ -n "${!1}" ]] && { echo "erro: $2 informado duas vezes" >&2; exit 2; }
+        printf -v "$1" '%s' "$3"
+    }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            # --no-inherit: o omitido cai no padrão da conta em vez de herdar desta sessão (D-001).
+            --no-inherit) once no_inherit "$1" true; shift ;;
+            --engine-account) once engine_account "$1" "${2:?uso: --engine-account <id>}"; shift 2 ;;
+            --branch) once branch "$1" "${2:?uso: --branch <nome>}"; shift 2 ;;
+            --new-branch) once new_branch "$1" true; shift ;;
+            --base) once base "$1" "${2:?uso: --base <ref>}"; shift 2 ;;
+            # --customizations: o delta de plugins/skills da tela de criação, em JSON.
+            --customizations) once customizations "$1" "${2:?uso: --customizations <json>}"; shift 2 ;;
+            --prompt) once prompt "$1" "${2:?uso: --prompt <texto>}"; shift 2 ;;
             --service-tier)
                 [[ -n "$service_tier" ]] && { echo "erro: --service-tier informado duas vezes" >&2; exit 2; }
                 service_tier="${2:?uso: --service-tier <default|priority>}"; shift 2 ;;
@@ -553,6 +567,15 @@ print(home + "\t" + achada)' "$configs" "$conta")
         fi
     fi
     cwd="${cwd:-$HOME}"
+    # Mesma regra do servidor, antes do POST: --base só com --new-branch, que pede o nome da branch.
+    if [[ -n "$new_branch" && -z "$branch" ]] || [[ -n "$base" && -z "$new_branch" ]]; then
+        echo "erro: --new-branch pede --branch <nome>; --base só vale com --new-branch" >&2
+        exit 2
+    fi
+    if [[ -n "$customizations" ]] && ! python3 -c 'import json,sys; sys.exit(0 if isinstance(json.loads(sys.argv[1]), dict) else 1)' "$customizations" 2>/dev/null; then
+        echo "erro: --customizations precisa ser um objeto JSON" >&2
+        exit 2
+    fi
     # Os demais providers dependem de pane; parar antes do POST evita criação incoerente.
     if [[ -n "$headless" && -n "$provider" && "$provider" != "claude" && "$provider" != "codex" ]]; then
         echo "erro: --headless só vale com provider claude ou codex (veio: $provider)" >&2
@@ -631,9 +654,28 @@ if sys.argv[16]:
     d["creator"] = sys.argv[16]
 if sys.argv[17]:
     d["service_tier"] = sys.argv[17]
+if sys.argv[18]:
+    d["inherit"] = False
+if sys.argv[19]:
+    d["engine_account"] = sys.argv[19]
+if sys.argv[20]:
+    d["branch"] = sys.argv[20]
+if sys.argv[21]:
+    d["new_branch"] = True
+if sys.argv[22]:
+    d["base"] = sys.argv[22]
+if sys.argv[23]:
+    d["claude_customizations"] = json.loads(sys.argv[23])
+if sys.argv[24]:
+    d["initial_prompt"] = sys.argv[24]
 print(json.dumps(d))' \
-           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$subagente" "$codex_conta" "$remember_provider" "$criadora" "$service_tier")
-    creation_result=$(api POST /api/sessions "$body") || exit 1
+           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$subagente" "$codex_conta" "$remember_provider" "$criadora" "$service_tier" \
+           "$no_inherit" "$engine_account" "$branch" "$new_branch" "$base" "$customizations" "$prompt")
+    # O prazo das telas: preparar conta e worktree passa dos 30 s, e desistir antes dizia "inacessível"
+    # com a sessão ainda nascendo.
+    creation_result=$(API_TIMEOUT=120 api POST /api/sessions "$body") || exit 1
+    # O nome que vale é o que o servidor deu (ele limpa acento e espaço).
+    name=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("name") or sys.argv[1])' "$name" <<<"$creation_result" || printf '%s' "$name")
     if ! herdado=$(python3 -c 'import json,sys
 result = json.load(sys.stdin)
 for warning in result.get("avisos", []):
