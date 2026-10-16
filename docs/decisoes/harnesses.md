@@ -595,7 +595,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   "Voz no app nativo".
 - **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
   saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
-  microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
+  microfone: o `finish_plan` confirmado entra na própria fila de silêncio (`plan_gate`, a mesma regra do
+  `send_to_session`) e cai se ele voltar a falar noutro turno. A resposta da ferramenta só sai com a entrega
+  real ("Plano entregue à sessão") ou com o motivo da falha, nunca antes. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
 - **Voz: o organizador tem o acesso de uma sessão.** `danger-full-access` com cwd em
   `~/.hangar/voz/arquivos` (fixa, nunca apagada), que só guarda rascunhos; ele lê e edita qualquer
   arquivo pelo caminho completo. Destrutivo pede o sim falado pela regra do prompt e depois roda,

@@ -92,7 +92,7 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
 
-enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Listen(String, bool), Heard(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
+enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Listen(String, bool), Heard(String, String), PlanFailed(String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
     Sessions(Vec<String>), Jev { turn: String, speech: Option<String>, note: Option<String> },
     /// Número da oferta, SDP e a nota da sessão na tela do aparelho que ofereceu.
     Offer(u64, String, String), Live, Level(f32), Detached }
@@ -131,6 +131,8 @@ impl Voice {
     pub fn session_answer(&self, text: String) { let _ = self.commands.send(Command::Answer(text)); }
     /// A sessão aceitou o plano enviado: o organizador o esquece.
     pub fn plan_delivered(&self) { let _ = self.commands.send(Command::PlanDelivered); }
+    /// O plano não chegou à sessão; `why` vai ao organizador.
+    pub fn plan_failed(&self, why: String) { let _ = self.commands.send(Command::PlanFailed(why)); }
     /// Nomes das sessões que a busca enxerga: o `set_mode` recusa quando a fala cita uma delas.
     pub fn set_sessions(&self, names: Vec<String>) { let _ = self.commands.send(Command::Sessions(names)); }
     /// A tela já agiu pelo Jev (trocou, abriu): `speech` a voz fala na hora e `note` diz ao organizador que não repita nem fale.
@@ -360,6 +362,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut new_prefs: Vec<String> = Vec::new();
     // Cada pedido leva o destino falado (vazio = a sessão da tela) e o turno da fala que o pediu.
     let mut gate: SendGate<(Value, Option<String>, String)> = SendGate::default();
+    // O plano confirmado espera o silêncio como o envio direto; a resposta do finish_plan só sai com a entrega real.
+    let mut plan_gate: SendGate<(Value, String)> = SendGate::default();
+    let mut plan_call: Option<(Value, Option<String>)> = None;
     let mut organizer_busy = false;
     let mut spoken = SpokenTurns::default();
     let mut activity = Activity::Idle;
@@ -455,6 +460,14 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         if let Some(text) = ack.due(Instant::now(), last_user_voice) {
             if out.away { log("wait ack skipped: away"); } else { speak(&rpc, &thread, &mut out, text.to_owned(), "wait ack").await; }
         }
+        if let Some(((id, session), text)) = plan_gate.due(Instant::now()) {
+            log(format!("plan sent bytes={}", text.len()));
+            let _ = events.send(VoiceEvent::SendPlan { session, text }).await;
+            planner.sent();
+            let warn = apply_models(&rpc, &thread, &mut applied, &models, Mode::Direct, &defaults, &mut effective, events).await;
+            plan_call = Some((id, warn.map(str::to_owned)));
+            let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
+        }
         // Comando parado não manda evento nenhum: sem este despertar, o prazo dele nunca seria conferido.
         let command_due = running_commands.values().map(|(_, at)| *at).min();
         let ack_due = ack.next_check(last_user_voice);
@@ -481,7 +494,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         for text in std::mem::take(&mut out.parked) { speak(&rpc, &thread, &mut out, text, "parked").await; }
                     }
                 }
-                Some(Command::Level(input)) => if input >= MIC_VOICE_LEVEL { gate.heard_voice(Instant::now()); out.hold.heard_voice(Instant::now()); },
+                Some(Command::Level(input)) => if input >= MIC_VOICE_LEVEL {
+                    gate.heard_voice(Instant::now()); plan_gate.heard_voice(Instant::now()); out.hold.heard_voice(Instant::now());
+                },
                 Some(Command::Detached) => { log("device detached"); detached = true; out.away = true; }
                 Some(Command::Offer(seq, sdp, context)) if answering.is_some() => {
                     // A mais nova substitui a que esperava: a resposta desta é a única que o dono atual aplica.
@@ -528,7 +543,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     // A falha já aparece no cartão; o modo não mudou, não há o que dizer ao organizador.
                     let _ = apply_models(&rpc, &thread, &mut applied, &models, planner.mode, &defaults, &mut effective, events).await;
                 }
-                Some(Command::PlanDelivered) => planner.delivered(),
+                Some(Command::PlanDelivered) => {
+                    planner.delivered();
+                    if let Some((id, warn)) = plan_call.take() {
+                        let reply = format!("Plano entregue à sessão; o resultado chega depois. {}", warn.unwrap_or_default());
+                        let _ = rpc.respond(id, tool_reply(reply.trim_end(), true)).await;
+                    }
+                }
+                Some(Command::PlanFailed(why)) => match plan_call.take() {
+                    Some((id, _)) => {
+                        let reply = format!("O plano não chegou à sessão: {why} Ele continua guardado; para reenviar, chame finish_plan de novo.");
+                        let _ = rpc.respond(id, tool_reply(reply, false)).await;
+                    }
+                    None => if let Some(input) = results.push(String::new(), format!("O plano não chegou à sessão: {why}")) {
+                        start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await;
+                    },
+                },
                 Some(Command::Jev { turn, speech, note }) => {
                     log(format!("jev acted note={} speech={}", note.is_some(), speech.is_some()));
                     if let Some(text) = speech { speak(&rpc, &thread, &mut out, text, "jev").await; }
@@ -682,14 +712,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 // máquina: nos dois casos o conteúdo vai junto.
                                 let away = target_cwd.is_none() || organizer::squash(&destination) != organizer::squash(&target);
                                 let text = finish_request(&path, action, away.then_some(content.as_str()));
-                                log(format!("plan sent bytes={} named={}", text.len(), session.is_some()));
-                                let _ = events.send(VoiceEvent::SendPlan { session: destination, text }).await;
-                                planner.sent();
-                                let warn = apply_models(&rpc, &thread, &mut applied, &models, Mode::Direct, &defaults, &mut effective, events).await;
-                                let reply = format!("Plano enviado à sessão; o resultado chega depois. {}", warn.unwrap_or_default());
-                                let _ = rpc.respond(id, tool_reply(reply.trim_end(), true)).await;
-                                let _ = events.send(VoiceEvent::Mode(Mode::Direct)).await;
-                                "plan-sent"
+                                match plan_gate.offer((id.clone(), destination.clone()), &destination, text, Instant::now()) {
+                                    Ok(_) => "plan-held",
+                                    Err(((id, _), why)) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-plan" }
+                                }
                             }
                         }
                         // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
@@ -989,6 +1015,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 log("gate cancelled: user kept talking");
                                 let _ = rpc.respond(id, tool_reply("O usuário continuou falando; nada foi enviado. Monte o pedido com a fala completa.", false)).await;
                             }
+                            for ((id, _), _) in plan_gate.user_spoke() {
+                                log("plan held cancelled: user kept talking");
+                                let _ = rpc.respond(id, tool_reply("O usuário continuou falando; o plano não foi enviado e continua guardado. Ouça; \
+                                    se ele confirmar de novo, chame finish_plan de novo.", false)).await;
+                            }
                         }
                     } else if let Some(text) = text
                         && method == "item/completed" && organizer::from_hangar(&text) && !text.trim_start().starts_with("[NOTA DO HANGAR]") {
@@ -1035,6 +1066,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             last_user_voice = Some(Instant::now());
                             last_user_delta = last_user_voice;
                             out.hold.heard_voice(Instant::now());
+                            plan_gate.heard_voice(Instant::now());
                             if speaking.is_none() && let Some((turn, at)) = &delegated && at.elapsed() >= organizer::CONTINUATION_AFTER {
                                 log("user still speaking after the delegation");
                                 speaking = Some((turn.clone(), Instant::now()));
@@ -1096,6 +1128,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                                 for ((id, ..), _) in gate.user_spoke() {
                                     log("gate cancelled: turn interrupted");
                                     let _ = rpc.respond(id, tool_reply("O turno foi interrompido; nada foi enviado.", false)).await;
+                                }
+                                for ((id, _), _) in plan_gate.user_spoke() {
+                                    log("plan held cancelled: turn interrupted");
+                                    let _ = rpc.respond(id, tool_reply("O turno foi interrompido; o plano não foi enviado e continua guardado.", false)).await;
                                 }
                             }
                             if params["turn"]["status"] == "failed" {
