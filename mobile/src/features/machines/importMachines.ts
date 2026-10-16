@@ -67,6 +67,13 @@ export async function importMachines(candidates: Server[]): Promise<MachineImpor
   return { added: confirmed.length ? useServers.getState().appendImported(confirmed) : [], issues };
 }
 
+function shortHost(host: string | undefined): string {
+  if (!host) return '';
+  let name = host;
+  try { name = new URL(host.includes('://') ? host : `http://${host}`).hostname; } catch { /* fica o texto recebido */ }
+  return name.replace(/\.tail[0-9a-z]+\.ts\.net$/i, '');
+}
+
 export async function discoverSavedMachines(sources?: Server[]): Promise<MachineImportResult> {
   let result: MachineImportResult;
   try {
@@ -88,7 +95,7 @@ export async function discoverSavedMachines(sources?: Server[]): Promise<Machine
   if (freshIssues.length) {
     // A busca roda a cada abertura: o aviso diz só onde falhou; o motivo de cada uma fica na importação explícita.
     const hosts = [...new Set(freshIssues.flatMap((issue) => [issue.machine, issue.source])
-      .map((host) => (host ?? '').replace(/\.ts\.net(:\d+)?$/, '').split('.tail')[0]).filter(Boolean))];
+      .map(shortHost).filter(Boolean))];
     toast.aviso(hosts.length ? m.machine_import_warning_short({ hosts: hosts.join(', ') }) : m.machine_import_warning({ count: freshIssues.length }));
   }
   return result;

@@ -1403,7 +1403,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const pasted = await Clipboard.getStringAsync();
       if (!pasted) { setError(m.composer_colar_vazio()); return; }
       const current = textRef.current;
-      const at = caret ?? { start: current.length, end: current.length };
+      const start = Math.min(caret?.start ?? current.length, current.length);
+      const at = { start, end: Math.min(Math.max(caret?.end ?? current.length, start), current.length) };
       const next = current.slice(0, at.start) + pasted + current.slice(at.end);
       handleChangeText(next);
       const end = at.start + pasted.length;
