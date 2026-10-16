@@ -19,18 +19,16 @@ pub(super) fn field(input: &AnyInputState, busy: bool) -> AnyElement {
     div().id("ask-answer").debug_selector(|| "ask-answer".into()).flex_shrink_0().child(field).into_any_element()
 }
 
-pub(super) fn body_height(window_height: f32) -> f32 {
-    // Cabeçalho, ações e compositor conservam espaço mesmo com uma pergunta longa.
-    (window_height - 360.).max(0.)
-}
-
+/// O cartão cabe em `max_height`: cabeçalho, abas e ações ficam parados e só o corpo encolhe e rola.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn card(
     minimized: bool,
     progress: String,
+    tabs: Option<AnyElement>,
     body: AnyElement,
     footer: AnyElement,
     scroll: &ScrollHandle,
-    max_body_height: f32,
+    max_height: f32,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let toggle_id = if minimized { "ask-reopen" } else { "ask-minimize" };
@@ -41,19 +39,23 @@ pub(super) fn card(
         .child(Button::new(toggle_id).debug_selector(move || toggle_id.into()).small().ghost()
             .icon(if minimized { IconName::ChevronDown } else { IconName::Minus })
             .label(tr(if minimized { "ask_reopen" } else { "ask_minimize" })).on_click(on_toggle));
-    div().id("ask-card").rounded(px(12.)).border_1().border_color(theme::ask_highlight().opacity(0.55))
+    let body = div().relative().flex_shrink_1().min_h_0().flex().flex_col().border_t_1().border_color(theme::border())
+        .child(div().id("ask-body-scroll").flex_shrink_1().min_h_0().overflow_y_scroll().track_scroll(scroll).p_3().pr_6().child(body))
+        .child(div().absolute().inset_0().child(Scrollbar::vertical(scroll).mode(ScrollbarMode::Always)));
+    div().id("ask-card").debug_selector(|| "ask-card".into()).max_h(px(max_height)).rounded(px(12.)).border_1()
+        .border_color(theme::ask_highlight().opacity(0.55))
         .bg(theme::boxed()).shadow(theme::card_shadow()).flex().flex_col().text_sm()
-        .child(header)
+        .child(header.flex_shrink_0())
         .when(!minimized, |el| el
-            .child(div().border_t_1().border_color(theme::border()).p_3()
-                .child(scrolled("ask-body-scroll", scroll, max_body_height, body)))
-            .child(div().border_t_1().border_color(theme::border()).px_3().py_2().child(footer)))
+            .when_some(tabs, |el, tabs| el.child(div().flex_shrink_0().px_3().child(tabs)))
+            .child(body)
+            .child(div().flex_shrink_0().border_t_1().border_color(theme::border()).px_3().py_2().child(footer)))
         .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{body_height, card, field, new_input};
+    use super::{card, field, new_input};
     use gpui::{Context, Entity, IntoElement, Modifiers, Render, ScrollHandle, TestAppContext, VisualTestContext, Window, div, point, px, size, prelude::*};
     use gpui_kit::component::input::{AnyInputState, Textarea, TextareaState};
 
@@ -62,17 +64,22 @@ mod tests {
         input: Entity<TextareaState>,
         scroll: ScrollHandle,
         long_question: bool,
+        // A área do app que recebe o cartão: altura máxima e rolagem própria, como `plugin-interaction-space`.
+        space: Option<f32>,
     }
 
     impl Render for QuestionSurface {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            card(self.minimized, "1 de 2 respondidas".into(),
+            let max = self.space.unwrap_or(f32::from(window.viewport_size().height));
+            let card = card(self.minimized, "1 de 2 respondidas".into(),
+                Some(div().debug_selector(|| "question-tabs".into()).child("Item 1  Item 2").into_any_element()),
                 div().debug_selector(|| "question-body".into())
                     .when(self.long_question, |el| el.child(div().h(px(1500.)).child("Pergunta longa")))
                     .child(Textarea::new(&self.input)).into_any_element(),
                 div().debug_selector(|| "question-footer".into()).child("Enviar").into_any_element(),
-                &self.scroll, body_height(f32::from(window.viewport_size().height)),
-                cx.listener(|this, _, _, cx| { this.minimized = !this.minimized; cx.notify(); }))
+                &self.scroll, max,
+                cx.listener(|this, _, _, cx| { this.minimized = !this.minimized; cx.notify(); }));
+            div().id("space").debug_selector(|| "space".into()).w_full().max_h(px(max)).overflow_y_scroll().child(card)
         }
     }
 
@@ -86,7 +93,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let (view, cx) = cx.add_window_view(|window, cx| {
             window.retain_a11y_tree(true);
-            QuestionSurface { minimized: false, scroll: ScrollHandle::new(), long_question: false,
+            QuestionSurface { minimized: false, scroll: ScrollHandle::new(), long_question: false, space: None,
                 input: cx.new(|cx| TextareaState::new(window, cx).default_value("Primeira linha\nSegunda linha")) }
         });
         cx.simulate_resize(size(px(680.), px(800.)));
@@ -113,7 +120,7 @@ mod tests {
     fn long_question_scrolls_without_pushing_actions_out_of_a_short_window(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (view, cx) = cx.add_window_view(|window, cx| QuestionSurface {
-            minimized: false, scroll: ScrollHandle::new(), long_question: true,
+            minimized: false, scroll: ScrollHandle::new(), long_question: true, space: None,
             input: cx.new(|cx| TextareaState::new(window, cx)),
         });
         cx.simulate_resize(size(px(680.), px(480.)));
@@ -128,6 +135,31 @@ mod tests {
         draw(cx);
         assert!(view.read_with(cx, |view, _| view.scroll.offset().y) < px(0.), "o corpo comprido precisa rolar");
         assert_eq!(cx.debug_bounds("question-footer").unwrap(), footer, "rolar a pergunta não desloca as ações");
+    }
+
+    #[gpui::test]
+    fn card_fits_the_question_space_and_keeps_header_and_tabs_while_scrolling(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| QuestionSurface {
+            minimized: false, scroll: ScrollHandle::new(), long_question: true, space: Some(360.),
+            input: cx.new(|cx| TextareaState::new(window, cx)),
+        });
+        cx.simulate_resize(size(px(680.), px(900.)));
+        draw(cx);
+        let space = cx.debug_bounds("space").unwrap();
+        let card = cx.debug_bounds("ask-card").unwrap();
+        assert!(card.size.height <= px(360.), "o cartão cabe na área: {card:?}");
+        let (header, tabs, footer) = (cx.debug_bounds("ask-minimize").unwrap(), cx.debug_bounds("question-tabs").unwrap(),
+            cx.debug_bounds("question-footer").unwrap());
+        assert!(header.top() >= space.top() && footer.bottom() <= space.bottom(), "cabeçalho e ações dentro da área");
+        let body = cx.debug_bounds("question-body").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent { position: point(body.left() + px(20.), footer.top() - px(20.)),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1500.))), modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved });
+        draw(cx);
+        assert!(view.read_with(cx, |view, _| view.scroll.offset().y) < px(0.), "o corpo comprido precisa rolar");
+        assert_eq!(cx.debug_bounds("ask-minimize").unwrap(), header, "rolar não esconde o cabeçalho");
+        assert_eq!(cx.debug_bounds("question-tabs").unwrap(), tabs, "rolar não esconde as abas");
+        assert_eq!(cx.debug_bounds("question-footer").unwrap(), footer, "rolar não desloca as ações");
     }
 
     struct FieldSurface(AnyInputState);

@@ -4018,13 +4018,13 @@ impl Hangar {
         };
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
-        let body = div().flex().flex_col().gap_3().when_some(tabs, |el, tabs| el.child(tabs))
-            .child(body).into_any_element();
+        let tabs = tabs.map(IntoElement::into_any_element);
+        let body = body.into_any_element();
         let completed = self.ask_picks(cx).iter().zip(&ask.payload.questions)
             .filter(|(pick, item)| interaction::answer(&ask, item, pick).is_some()).count();
         let progress = tr("ask_progress").replace("{done}", &completed.to_string()).replace("{total}", &total.to_string());
         let minimized = self.ask_form.minimized;
-        Some(in_column(questions::card(minimized, progress, body,
+        Some(in_column(questions::card(minimized, progress, tabs, body,
             div().flex().flex_wrap().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
                 .when(tab > 0, |el| {
@@ -4044,7 +4044,8 @@ impl Hangar {
                         .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
                 })
                 .into_any_element(),
-            &self.ask_form.body_scroll, questions::body_height(f32::from(window.viewport_size().height)),
+            // O `py_2` do `in_column` abaixo fica fora do cartão, dentro da área.
+            &self.ask_form.body_scroll, self.question_space_height(true, window) - 16.,
             cx.listener(|this, _, window, cx| {
                 this.ask_form.minimized = !this.ask_form.minimized;
                 // O campo sai da árvore ao recolher: o foco volta para um controle que continua visível.
@@ -5877,6 +5878,22 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 const PLUGIN_PANE_MAX_HEIGHT: f32 = 360.;
 
+/// Altura da área entre a conversa e o compositor, onde mod e pergunta se revezam.
+fn plugin_space_height(window: &Window) -> f32 { (f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE).min(PLUGIN_PANE_MAX_HEIGHT) }
+
+impl Hangar {
+    /// Com um mod aberto a pergunta herda a altura dele, para a troca não pular; sem mod, cresce com a janela sem o teto do mod.
+    fn question_space_height(&self, readable: bool, window: &Window) -> f32 {
+        let ids = if readable { crate::plugin_ui::pane_ids(&self.plugin_panes) } else { Vec::new() };
+        let open = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref()).is_some();
+        let reserve = match self.selected_key().and_then(|key| self.plugin_presentations.get(&key)) {
+            Some(presentation) => presentation.reserves_panel(open),
+            None => crate::plugin_ui::presentation::Presentation::default().reserves_panel(open),
+        };
+        if reserve { plugin_space_height(window) } else { f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE }
+    }
+}
+
 /// O formulário da linha da lista, no mesmo formato do `ask_question` do stream.
 fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
     let raw = session.ask_form.clone()?;
@@ -6623,12 +6640,14 @@ impl Hangar {
             }
         }
         if display != Display::Panel { self.keep_plugin_hovered_without(active.as_deref()); }
-        let height = (f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE).min(PLUGIN_PANE_MAX_HEIGHT);
+        let height = plugin_space_height(window);
         let space = match display {
-            Display::Question => question.map(|question|
+            Display::Question => question.map(|question| {
+                let height = self.question_space_height(readable, window);
                 div().id("plugin-interaction-space").track_focus(&self.plugin_question_focus)
                     .relative().w_full().max_h(px(height)).when(reserve, |el| el.h(px(height))).flex_shrink_0().overflow_y_scroll()
-                    .child(question).into_any_element()),
+                    .child(question).into_any_element()
+            }),
             Display::Panel => {
                 let view = self.plugin_view(cx);
                 crate::plugin_ui::panes(&self.plugin_panes, active.as_deref(), &view, height)
