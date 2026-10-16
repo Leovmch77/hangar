@@ -471,3 +471,19 @@ async fn open_waits_for_launched_cano_to_listen() {
     registry.close("key",1).await.unwrap();
     server.abort();
 }
+
+/// CSH-073: a sessão sem terminal que não sobe grava `headless_nao_subiu` no arquivo dela, como o
+/// `_registrar_problema` do Python: a próxima vida (e o restart do backend) ainda mostram o motivo.
+#[tokio::test]
+async fn a_failed_open_is_written_to_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecars = dir.path().join("claude-headless");
+    std::fs::create_dir_all(&sidecars).unwrap();
+    std::fs::write(sidecars.join("session.json"),json!({"name":"session","key":"key","session_id":"sid-1","headless":true}).to_string()).unwrap();
+    let target = target(dir.path(),format!("tcp:{}",crate::refused_address()),true);
+    let registry = registry().await;
+    assert_eq!(registry.open_managed(target,sidecars.clone()).await.unwrap_err().code,"cano_connect");
+    let meta:Value = serde_json::from_slice(&std::fs::read(sidecars.join("session.json")).unwrap()).unwrap();
+    assert_eq!(meta["problema"][0],"headless_nao_subiu","{meta}");
+    assert!(meta["problema"][1].as_str().unwrap_or("").contains("cano_connect"),"{meta}");
+}

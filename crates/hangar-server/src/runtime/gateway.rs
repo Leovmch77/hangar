@@ -1090,10 +1090,18 @@ impl RuntimeRegistry {
     /// erro): sem isso o chat mostraria a sessão parada. Geração ou provedor errado é pedido torto,
     /// não a sessão falhando.
     async fn open_inner(&self,target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
-        let name = target.name.clone();
+        let (name,key,claude) = (target.name.clone(),target.key.clone(),target.provider == "claude");
+        let sidecars = managed.clone();
         let result = self.open_attempt(target,managed,spawn).await;
         if let Err(error) = &result && !["runtime_generation","runtime_provider"].contains(&error.code.as_str()) {
             super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+            // A queda vai ao arquivo da sessão (a próxima vida a mostra); trava ou conta ocupada é passageira.
+            if let (true,Some(dir)) = (claude,sidecars) && !["runtime_lease","account_busy"].contains(&error.code.as_str()) {
+                let detail:String = format!("{}: {}",error.code,error.message).chars().take(300).collect();
+                let patch = [("problema".to_owned(),json!(["headless_nao_subiu",detail]))].into_iter().collect();
+                let written = tokio::task::spawn_blocking({let name=name.clone();move||super::codex_sidecar::update_if(&dir,&name,&[("key",Value::from(key))],&patch)}).await;
+                if !matches!(written,Ok(Ok(_))) { tracing::warn!(session=%name,code=%error.code,"a falha de subida não foi gravada no arquivo da sessão"); }
+            }
         }
         result
     }
