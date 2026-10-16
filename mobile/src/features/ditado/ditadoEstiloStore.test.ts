@@ -27,10 +27,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function campos(valor: string) {
+function campos(valor: string, maxMinutes = 5) {
   return {
     campos: {
       ditado_estilo: { valor, definido: true, origem: 'app' as const },
+      dictation_max_minutes: { valor: maxMinutes, definido: true, origem: 'app' as const },
     },
     somente_leitura: {},
   };
@@ -48,6 +49,37 @@ beforeEach(() => {
 });
 
 describe('ditadoEstiloStore', () => {
+  it('leitura confirma o padrão do estilo e o teto configurado juntos', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValue({ campos: {
+      dictation_max_minutes: { valor: 12, definido: true, origem: 'app' },
+    }, somente_leitura: {} });
+    await dictationStyleStore(a).getState().carregar();
+    expect(dictationStyleStore(a).getState()).toMatchObject({ valor: 'prosa', pronto: true, falhou: false, ceilingMs: 720_000 });
+  });
+
+  it('leitura atrasada atualiza o teto sem desfazer o estilo confirmado por escrita', async () => {
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as core.RespostaPatchConfig);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    await store.getState().trocar('briefing');
+    read.resolve(campos('limpar', 7) as core.ConfigServidor);
+    await loading;
+    expect(store.getState()).toMatchObject({ valor: 'briefing', pronto: true, falhou: false, ceilingMs: 420_000 });
+  });
+
+  it('relê só o teto da máquina da conversa sem trocar o estilo nem o estado pronto', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValueOnce(campos('limpar', 7) as core.ConfigServidor)
+      .mockResolvedValueOnce(campos('briefing', 9) as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    await store.getState().refreshCeiling();
+    expect(core.getConfigForServer).toHaveBeenLastCalledWith(a);
+    expect(core.getConfig).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({ valor: 'limpar', pronto: true, falhou: false, ceilingMs: 540_000 });
+  });
+
   it('A e B guardam valores separados e usam GET/PATCH explícitos com B ativo', async () => {
     vi.mocked(core.getConfigForServer).mockImplementation(async (server) => campos(server.id === a.id ? 'limpar' : 'briefing') as never);
     vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);
@@ -111,7 +143,7 @@ describe('ditadoEstiloStore', () => {
     const storeA = dictationStyleStore(a);
     const storeB = dictationStyleStore(b);
     await Promise.all([storeA.getState().carregar(), storeB.getState().carregar()]);
-    expect(storeA.getState()).toMatchObject({ pronto: true, falhou: true, valor: 'prosa' });
+    expect(storeA.getState()).toMatchObject({ pronto: false, falhou: true, valor: 'prosa' });
     expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
     const writeA = deferred<core.RespostaPatchConfig>();
     vi.mocked(core.patchConfigForServer).mockImplementation((server) => server.id === a.id
@@ -122,6 +154,71 @@ describe('ditadoEstiloStore', () => {
     await failed;
     expect(storeA.getState().valor).toBe('prosa');
     expect(storeB.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+  });
+
+  it('falha não confirma estilo local e permite nova leitura do servidor', async () => {
+    vi.mocked(core.getConfigForServer).mockRejectedValueOnce(new Error('502'))
+      .mockResolvedValueOnce(campos('briefing') as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    expect(store.getState()).toMatchObject({ pronto: false, falhou: true });
+    await store.getState().revalidar();
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
+    expect(core.getConfigForServer).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{}, campos('desconhecido'), { campos: { ditado_estilo: { valor: null } } }])('leitura sem estilo conhecido confirma o padrão Prosa: %j', async (response) => {
+    vi.mocked(core.getConfigForServer).mockResolvedValue(response as core.ConfigServidor);
+    await dictationStyleStore(a).getState().carregar();
+    expect(dictationStyleStore(a).getState()).toMatchObject({ pronto: true, falhou: false, valor: 'prosa' });
+  });
+
+  it.each(['read-first', 'write-first'])('leitura e troca sem valor confirmado terminam em falha visível: %s', async (order) => {
+    const read = deferred<core.ConfigServidor>();
+    const write = deferred<core.RespostaPatchConfig>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockReturnValue(write.promise);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    const failed = expect(store.getState().trocar('briefing')).rejects.toThrow('502');
+    if (order === 'read-first') {
+      read.resolve(campos('limpar') as core.ConfigServidor);
+      await loading;
+    }
+    write.reject(new Error('502'));
+    await failed;
+    if (order === 'write-first') {
+      read.resolve(campos('limpar') as core.ConfigServidor);
+      await loading;
+    }
+    expect(store.getState()).toMatchObject({ pronto: false, falhou: true, valor: 'prosa' });
+  });
+
+  it('revalidar conserva o estilo confirmado durante a leitura e a troca recusada', async () => {
+    vi.mocked(core.getConfigForServer).mockResolvedValueOnce(campos('limpar') as core.ConfigServidor);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockRejectedValue(new Error('502'));
+    const loading = store.getState().revalidar();
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+    await expect(store.getState().trocar('briefing')).rejects.toThrow('502');
+    read.resolve(campos('prosa') as core.ConfigServidor);
+    await loading;
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'limpar' });
+  });
+
+  it('GET que falha depois da escolha confirmada não invalida o estilo salvo', async () => {
+    const read = deferred<core.ConfigServidor>();
+    vi.mocked(core.getConfigForServer).mockReturnValue(read.promise);
+    vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as core.RespostaPatchConfig);
+    const store = dictationStyleStore(a);
+    const loading = store.getState().carregar();
+    await store.getState().trocar('briefing');
+    read.reject(new Error('502'));
+    await loading;
+    expect(store.getState()).toMatchObject({ pronto: true, falhou: false, valor: 'briefing' });
   });
 
   it('mesmo ID atualiza token e LAN sem apagar estado nem mudar pedido em voo', async () => {

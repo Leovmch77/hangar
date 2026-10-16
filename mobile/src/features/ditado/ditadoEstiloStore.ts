@@ -31,23 +31,23 @@ function createDictationStyleStore(server?: Server | null) {
     ceilingMs: dictationCeilingMs(undefined),
 
     carregar: async () => {
+      if (!get().pronto) return get().revalidar();
+    },
+
+    revalidar: async () => {
       if (target === null) return;
-      if (get().pronto) return;
       if (carregando) return carregando;
       const server = target ? { ...target } : undefined;
       const escritasNoInicio = escritas;
+      set({ falhou: false });
       carregando = (server ? getConfigForServer(server) : getConfig())
         .then((cfg) => {
           const v = cfg.campos?.ditado_estilo?.valor;
-          if (ehEstilo(v) && escritas === escritasNoInicio) {
-            set({ valor: v });
-          }
-          set({ pronto: true, falhou: false, ceilingMs: dictationCeilingMs(cfg.campos) });
+          set({ ceilingMs: dictationCeilingMs(cfg.campos) });
+          if (escritas === escritasNoInicio) set({ valor: ehEstilo(v) ? v : PADRAO, pronto: true, falhou: false });
         })
         .catch(() => {
-          // `pronto` mesmo assim: sem ele a tela fica esperando para sempre. O que muda é que
-          // `falhou` diz que o valor exibido é o padrão, não o do servidor.
-          set({ pronto: true, falhou: true });
+          if (escritas === escritasNoInicio) set({ pronto: false, falhou: true });
         })
         .finally(() => {
           carregando = null;
@@ -67,15 +67,11 @@ function createDictationStyleStore(server?: Server | null) {
       }
     },
 
-    revalidar: async () => {
-      set({ pronto: false });
-      return get().carregar();
-    },
-
     trocar: async (novo: EstiloDitado) => {
       if (target === null) throw new Error(m.chat_servidor_removido());
       const server = target ? { ...target } : undefined;
       const antes = get().valor;
+      const wasReady = get().pronto;
       const minha = ++escritas;
       set({ valor: novo });
       try {
@@ -83,7 +79,7 @@ function createDictationStyleStore(server?: Server | null) {
         set({ pronto: true, falhou: false });
       } catch (e) {
         if (escritas === minha) {
-          set({ valor: antes });
+          set({ valor: antes, pronto: wasReady, falhou: !wasReady });
         }
         throw e;
       }

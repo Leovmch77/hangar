@@ -15,6 +15,7 @@ import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { useSettingsColors } from '../../src/features/config/colors';
 import { ProviderGlyph } from '../../src/ui/ProviderGlyph';
 import { useServers } from '../../src/stores/servers';
+import { prefs } from '../../src/stores/prefs';
 import { getLocale } from '../../src/paraglide/runtime';
 import * as m from '../../src/paraglide/messages';
 
@@ -119,8 +120,8 @@ export default function Harnesses() {
   const [integrationToggling, setIntegrationToggling] = useState<string[]>([]);
   const [accounts, setAccounts] = useState<CodexAccount[] | null>(null);
   const [accountsError, setAccountsError] = useState('');
-  // ponytail: a conta escolhida vive só nesta tela (o desktop guarda por servidor em disco); reabrir volta à padrão.
   const [account, setAccount] = useState('default');
+  const [accountPreferenceError, setAccountPreferenceError] = useState('');
   const [accountSync, setAccountSync] = useState<AccountSync | null>(null);
   const [accountError, setAccountError] = useState('');
   const [accountReconciling, setAccountReconciling] = useState(false);
@@ -300,6 +301,12 @@ export default function Harnesses() {
     setAccount(id);
     setAccountSync(accounts.find((a) => a.id === id)?.sync ?? null);
     setAccountError('');
+    try {
+      prefs.set(`harness.codex.account.v1:${server.id}`, id);
+      setAccountPreferenceError('');
+    } catch {
+      setAccountPreferenceError(m.native_harness_codex_preference_error());
+    }
     readAccount(server, id, false);
   };
   const reconcile = () => {
@@ -399,7 +406,13 @@ export default function Harnesses() {
     controller.current = new AbortController();
     setList(null); setError(''); setRepair(null); setWhy([]); setInstall(null); installRef.current = null;
     setInstallError(null); setOptions(null); setIntegration(null); setAccounts(null); setAccountsError('');
-    accountRef.current = 'default'; setAccount('default'); setAccountSync(null); setAccountError('');
+    let selected = 'default';
+    setAccountPreferenceError('');
+    if (server) {
+      try { selected = prefs.getString(`harness.codex.account.v1:${server.id}`) ?? 'default'; }
+      catch { setAccountPreferenceError(m.native_harness_codex_preference_error()); }
+    }
+    accountRef.current = selected; setAccount(selected); setAccountSync(null); setAccountError('');
     setCodexOptions(null); codexOptionsRef.current = null; setReconciling(false); setAccountReconciling(false);
     if (server) reloadAll(server);
     return () => {
@@ -552,6 +565,7 @@ export default function Harnesses() {
           })}
         </View>
         {accountsError ? line(m.harness_codex_conta_erro({ erro: accountsError }), danger, true) : null}
+        {accountPreferenceError ? line(accountPreferenceError, danger, true) : null}
       </View>
     );
   };

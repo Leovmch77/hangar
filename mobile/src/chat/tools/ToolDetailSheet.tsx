@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { extractEdits, extractFilePath, getBashOutput, summarizeToolInput, summarizeToolResult, toolPhase, type ChatEvent } from '@hangar/core';
+import { extractEdits, extractEditPaths, getBashOutput, summarizeToolInput, summarizeToolResult, toolPhase, type ChatEvent } from '@hangar/core';
 import { Sheet, type SheetRef } from '../../ui/Sheet';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
@@ -47,6 +47,7 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
     }), []);
     const result = use ? resultOf(use) : null;
     const edits = use ? extractEdits(use.tool_name, use.tool_input) : null;
+    const paths = use ? extractEditPaths(use.tool_name, use.tool_input) : null;
     const fase = toolPhase(result);
     const corFase = fase === 'error' ? theme.tokens.status.error : fase === 'pending' ? theme.tokens.accent.base : theme.tokens.text.muted;
     // Resultado vazio ainda precisa dizer o desfecho: um erro sem texto é indistinguível de sucesso,
@@ -89,7 +90,7 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
             <ScrollView style={styles.scroll}>
               {edits ? edits.map((e, i) => (
                 <View key={i}>
-                  <Text style={[styles.arquivo, { color: theme.tokens.text.secondary }]}>{extractFilePath(use.tool_input)}</Text>
+                  <Text style={[styles.arquivo, { color: theme.tokens.text.secondary }]}>{paths?.[i]}</Text>
                   <EditDiff oldText={e.oldText} newText={e.newText} />
                 </View>
               )) : null}
