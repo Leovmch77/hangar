@@ -185,6 +185,45 @@ fn interrupt_denies_all_pending_first() {
     assert_eq!(frames[2]["request"]["subtype"],"interrupt");
 }
 
+/// `_pode_estacionar` do Python: o tempo parado conta do último evento da CLI ou comando nosso, e qualquer
+/// coisa em aberto (turno, permissão, pergunta, subida, esforço pendente, trabalho de fundo, processo morto) impede.
+#[test]
+fn park_idle_counts_from_the_last_activity_and_only_with_nothing_open() {
+    const PARK:f64 = 65.0 * 60.0;
+    let ready = || engine(json!({"name":"session","session_id":"sid","initialized":true,"permission_mode":"manual"}));
+    let mut session = ready();
+    assert_eq!(session.park_idle(10.0 + PARK),Some(PARK),"parada desde a abertura");
+    session.command(command(OperationKind::Input,json!({"text":"oi"})),clock(100.0)).unwrap();
+    assert_eq!(session.park_idle(100.0 + PARK),None,"turno em curso");
+    line(&mut session,json!({"type":"result","subtype":"success","result":"ok"}),300.0);
+    assert_eq!(session.park_idle(300.0 + PARK - 1.0),Some(PARK - 1.0),"o fim do turno é atividade");
+    line(&mut session,json!({"type":"rate_limit_event","rate_limit_info":{}}),400.0);
+    assert_eq!(session.park_idle(400.0 + PARK),Some(PARK),"qualquer evento da CLI é atividade");
+
+    let mut permission = ready();
+    line(&mut permission,json!({"type":"control_request","request_id":"p","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}),10.0);
+    assert_eq!(permission.view()["pending"].as_array().unwrap().len(),1,"a permissão ficou em aberto");
+    assert_eq!(permission.park_idle(10.0 + PARK * 2.0),None,"permissão em aberto");
+
+    let mut question = ready();
+    line(&mut question,json!({"type":"control_request","request_id":"q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]}}}),10.0);
+    assert_eq!(question.park_idle(10.0 + PARK * 2.0),None,"pergunta em aberto");
+
+    let starting = engine(json!({"name":"session","session_id":"sid"}));
+    assert_eq!(starting.park_idle(10.0 + PARK * 2.0),None,"subida sem initialize");
+
+    let effort = engine(json!({"name":"session","session_id":"sid","initialized":true,"effort_intent":{"operation_id":"e","value":"high","status":"prepared"}}));
+    assert_eq!(effort.park_idle(10.0 + PARK * 2.0),None,"esforço pendente");
+
+    let mut background = ready();
+    line(&mut background,json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"t1","task_type":"local_bash","description":"build"}]}),10.0);
+    assert_eq!(background.park_idle(10.0 + PARK * 2.0),None,"trabalho de fundo vivo");
+
+    let mut dead = ready();
+    line(&mut dead,json!({"type":"cano_saiu","code":0}),10.0);
+    assert_eq!(dead.park_idle(10.0 + PARK * 2.0),None,"processo já morto não tem o que estacionar");
+}
+
 #[test]
 fn subagent_does_not_close_parent() {
     let mut engine = engine(json!({"name":"session","initialized":true}));

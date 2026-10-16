@@ -87,6 +87,8 @@ pub struct ClaudeEngine {
     echoes: std::collections::VecDeque<(String,String)>,
     /// `task_id` do último `background_tasks_changed`: o trabalho de fundo segue vivo depois do `result`.
     background: BTreeSet<String>,
+    /// Último evento da CLI ou comando nosso, no relógio do motor: daqui conta o tempo parado.
+    active_at: f64,
 }
 
 const ECHO_LIMIT: usize = 64;
@@ -130,7 +132,7 @@ impl ClaudeEngine {
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),active_at:clock.monotonic_s,metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -471,6 +473,7 @@ impl ClaudeEngine {
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
+        self.active_at = clock.monotonic_s;
         if !self.alive {
             // A queda levou os pedidos em aberto: responder a um deles é responder a algo que já não existe (409).
             if matches!(command.kind,OperationKind::Select | OperationKind::AnswerQuestions | OperationKind::SkipQuestion) {
@@ -608,7 +611,7 @@ impl ClaudeEngine {
         self.clock = clock;
         let mut effects = Vec::new();
         match input {
-            EngineInput::Line(event) => self.on_line(event,&mut effects)?,
+            EngineInput::Line(event) => { self.active_at = clock.monotonic_s; self.on_line(event,&mut effects)? },
             EngineInput::WriteAck { operation_id,outcome } => self.on_ack(operation_id,outcome,&mut effects),
             EngineInput::Tick => self.on_tick(&mut effects),
             EngineInput::PolicyResult { request_id,payload } => {
@@ -1199,6 +1202,13 @@ impl ClaudeEngine {
         // Prazos da superfície: janela dos desenhos, nova ligação e pedidos vencidos.
         let out = self.surface.as_mut().map(|surface|surface.tick(now)).unwrap_or_default();
         Self::surface_out(effects,out);
+    }
+
+    /// Segundos parada desde o último evento da CLI ou comando nosso, se nada está em aberto; `None` = não estaciona.
+    pub fn park_idle(&self,now:f64) -> Option<f64> {
+        let open = !self.alive || self.initializing || self.in_progress || !self.pending.is_empty() || self.question.is_some()
+            || self.effort_intent.is_some() || !self.background.is_empty();
+        (!open).then(||now - self.active_at)
     }
 
     pub fn next_deadline(&self) -> Option<f64> {
