@@ -12,7 +12,7 @@ import type { Server } from '@hangar/core';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import { Icon } from '../../ui/Icon';
 import { AttachmentPreview } from '../../ui/AttachmentPreview';
-import type { PickedAttachment } from '../../ui/attachmentPicker';
+import { readClipboard, type PickedAttachment } from '../../ui/attachmentPicker';
 import { AttachSheet } from '../../ui/AttachSheet';
 import { usePressScale } from '../../ui/pressScale';
 import { HomeUsageCard } from '../usage/HomeUsageCard';
@@ -411,6 +411,15 @@ export function NewConversation({
         onClose={() => setAttachMenuOpen(false)}
         onPick={pick}
         onError={setAttachError}
+        onPaste={() => {
+          readClipboard()
+            .then((pasted) => {
+              if (pasted && typeof pasted !== 'string') pick(pasted);
+              else if (pasted) setText((current) => current + pasted);
+              else setAttachError(m.composer_colar_vazio());
+            })
+            .catch((e: unknown) => setAttachError(e instanceof Error && e.message ? e.message : m.composer_colar_falhou()));
+        }}
         dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
       />
     </View>

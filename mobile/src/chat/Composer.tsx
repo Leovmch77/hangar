@@ -26,8 +26,9 @@ import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
 import { QueuePanel } from './QueuePanel';
-import type { PickedAttachment } from '../ui/attachmentPicker';
+import { readClipboard, type PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
+
 import { AttachmentPreview } from '../ui/AttachmentPreview';
 import { ContextRefTray } from '../ui/ContextRefTray';
 import { CiteReplyModal } from './CiteReplyModal';
@@ -1389,18 +1390,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // O menu de segurar do campo no iOS não oferece Colar: o "+" cola pela área de transferência.
   const handleClipboardPaste = useCallback(async () => {
     try {
-      const Clipboard = await import('expo-clipboard');
-      if (await Clipboard.hasImageAsync()) {
-        const image = await Clipboard.getImageAsync({ format: 'png' });
-        if (image?.data) {
-          const FileSystem = await import('expo-file-system/legacy');
-          const uri = `${FileSystem.cacheDirectory}colado-${Date.now()}.png`;
-          await FileSystem.writeAsStringAsync(uri, image.data.replace(/^data:[^,]*,/, ''), { encoding: FileSystem.EncodingType.Base64 });
-          handlePicked({ uri, name: 'colado.png', mime: 'image/png', kind: 'image' });
-          return;
-        }
-      }
-      const pasted = await Clipboard.getStringAsync();
+      const pasted = await readClipboard();
+      if (pasted && typeof pasted !== 'string') { handlePicked(pasted); return; }
       if (!pasted) { setError(m.composer_colar_vazio()); return; }
       const current = textRef.current;
       const start = Math.min(caret?.start ?? current.length, current.length);

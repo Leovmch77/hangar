@@ -67,3 +67,18 @@ export async function pickFile(): Promise<PickedAttachment | null> {
     size: asset.size,
   };
 }
+
+/** Imagem copiada vira anexo; senão devolve o texto. Vazia = null. */
+export async function readClipboard(): Promise<PickedAttachment | string | null> {
+  const Clipboard = await import('expo-clipboard');
+  if (await Clipboard.hasImageAsync()) {
+    const image = await Clipboard.getImageAsync({ format: 'png' });
+    if (image?.data) {
+      const FileSystem = await import('expo-file-system/legacy');
+      const uri = `${FileSystem.cacheDirectory}colado-${Date.now()}.png`;
+      await FileSystem.writeAsStringAsync(uri, image.data.replace(/^data:[^,]*,/, ''), { encoding: FileSystem.EncodingType.Base64 });
+      return { uri, name: 'colado.png', mime: 'image/png', kind: 'image' };
+    }
+  }
+  return (await Clipboard.getStringAsync()) || null;
+}
