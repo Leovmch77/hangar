@@ -323,6 +323,7 @@ class RuntimeCoordinator:
         self._hooks_ran = set()
         self._settling = False      # entrando num modo: as sessões ainda abrindo ou voltando
         self._mode_event = None
+        self.python_left = None     # ligado quando o Python solta as sessões ao Rust que volta
         # Sessões cuja recusa de fundo por cache inválido já foi ao diário nesta sequência.
         self._cache_invalid_logged: set[str] = set()
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
@@ -378,6 +379,7 @@ class RuntimeCoordinator:
         """O Rust desistiu: o Python é o dono até o backend reiniciar. Cada sessão do Rust é
         retomada uma vez; depois roda o que o lifespan faria sem o Rust."""
         self._set_mode("python", settling=True)
+        self.python_left = asyncio.Event()
         token = _mode_bypass.set(True)
         try:
             for slot in tuple(self.slots.values()):
@@ -395,22 +397,33 @@ class RuntimeCoordinator:
             self._set_mode("python")
 
     async def leave_python(self):
-        """Religar o Rust: o Python solta clientes, travas e filas; as sessões ficam como numa queda."""
+        """Religar o Rust: cada sessão sai do Python pela passagem normal (operação em curso termina,
+        `quiesce`, trava solta) e fica como numa queda. Exceção = quem chama devolve tudo ao Python."""
+        adapters = self.legacy.adapters if self.legacy is not None else {}
+        codex = adapters.get("codex")
+        if any(sess["client"].tem_processo_proprio for sess in getattr(codex, "_sessions", {}).values()):
+            raise RuntimeError("Codex com processo do Python: soltar o cliente mataria o processo")
         self._set_mode("pending")
         self._hooks_ran.discard("python")       # nova desistência religa os clientes de novo
-        if (claude := self.legacy.adapters.get("claude")) is not None:
-            claude.desligar_todas()
-            claude._sessions.clear()
-        for name in list(getattr(codex := self.legacy.adapters.get("codex"), "_sessions", ())):
-            await codex.release_client(name)
+        if self.python_left is not None:
+            self.python_left.set()              # os SSE com estado do Python fecham e reconectam no Rust
         for slot in tuple(self.slots.values()):
-            if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Python:
-                async with self._barrier(slot):
-                    await self._wait_active(slot)
+            if self.names.get(slot.binding.name) != slot.binding.key or slot.phase != Phase.Python:
+                continue
+            async with self._barrier(slot):
+                await asyncio.wait_for(self._wait_active(slot), _ACTIVE_WAIT_S)
+                await self.legacy.quiesce(slot.binding.descriptor())
+                with slot.guard:
                     if slot.lease is not None:
                         slot.lease.close()
                     slot.lease, slot.store, slot.phase, slot.cache_valid = None, None, Phase.Rust, False
-                self._signal(slot)
+            self._signal(slot)
+        # Cliente sem registro (cano religado só para ver o estado): basta fechar a ligação.
+        if (claude := adapters.get("claude")) is not None:
+            claude.desligar_todas()
+            claude._sessions.clear()
+        for name in list(getattr(codex, "_sessions", ())):
+            await codex.release_client(name)
 
     async def _close_ingress_of_incomplete_transfers(self):
         """O Rust novo nasce com as portas abertas: troca interrompida precisa delas fechadas até terminar."""
