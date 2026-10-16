@@ -369,7 +369,10 @@ export function papelNaPastaAtual(salvo: string | null, pasta?: string | null): 
   // ponytail: require síncrono só no app; no teste de node o módulo nativo não carrega e o caminho fica como está.
   if (atual === undefined) {
     try { atual = (require('expo-file-system/legacy') as { documentDirectory: string | null }).documentDirectory; }
-    catch { atual = null; }
+    catch (err) {
+      if (typeof __DEV__ !== 'undefined') console.warn('wallpaper-folder-unavailable', err);
+      atual = null;
+    }
   }
   return atual ? `${atual}${nome}` : salvo;
 }
