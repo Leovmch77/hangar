@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Cria uma sessao Codex gerenciada pelo hangar e anexa o terminal ao tmux.
 
-Funciona com o backend DESLIGADO, como `claude`, `pi` e `kimi` ja funcionavam. A fonte de verdade
-da conversa e o SIDECAR em disco, que o lancador grava. Cada chamada cria uma sessao nova;
-a API local acrescenta as limpezas de nome reusado quando esta disponivel.
+Abre pelo `hangar-open`, o lançador do Hangar: com o servidor de pé ele pede ao servidor; fora do
+ar abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois. Cada
+chamada cria uma sessao nova.
 """
 from __future__ import annotations
 
 import json
 import os
-import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,43 +35,27 @@ def _repo() -> Path:
 
 
 def _do_backend():
-    """Os dois modulos do backend que este wrapper usa, ou (None, None).
+    """O `sessions.py` do backend (limpeza do sidecar sem API), ou None.
 
-    Carregados por CAMINHO, e nao por `from app.adapters.codex import ...`: o import normal executa
-    `app/adapters/__init__.py`, que instancia os quatro adapters e puxa `app.config` -> pydantic. Os
-    dois modulos daqui sao stdlib puro de proposito (ver o cabecalho de lancador.py), mas isso nao
-    adianta nada se o caminho ate eles nao for. Este wrapper roda no `python3` do sistema, sem o
-    venv: numa maquina sem pydantic instalado no sistema, o import normal falharia e o wrapper
-    voltaria a depender da API — que e exatamente o que ele nao pode fazer.
-
-    Falhando mesmo assim, tudo aqui cai no plano B da API.
+    Carregado por CAMINHO, e nao por `from app.adapters.codex import sessions`: o import normal
+    executa `app/adapters/__init__.py`, que instancia os adapters e puxa `app.config` -> pydantic, e
+    este wrapper roda no `python3` do sistema, sem o venv.
     """
     import importlib.machinery
     import importlib.util
 
     base = _repo() / "backend"
     sys.path.insert(0, str(base))   # `sessions.py` importa `app.atomico`/`app.names` (stdlib)
-
-    def carregar(nome: str, caminho: Path):
-        loader = importlib.machinery.SourceFileLoader(nome, str(caminho))
-        spec = importlib.util.spec_from_loader(nome, loader)
+    caminho = base / "app" / "adapters" / "codex" / "sessions.py"
+    try:
+        loader = importlib.machinery.SourceFileLoader("hangar_codex_sessions", str(caminho))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         return mod
-
-    codex = base / "app" / "adapters" / "codex"
-    try:
-        return (carregar("hangar_codex_sessions", codex / "sessions.py"),
-                carregar("hangar_codex_lancador", codex / "lancador.py"))
     except (ImportError, OSError) as exc:
         print(f"hangar-codex: sem os modulos do backend ({exc}); usando a API", file=sys.stderr)
-        return None, None
-
-
-def _tmux_vivas() -> set[str]:
-    r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
-                       capture_output=True, text=True)
-    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+        return None
 
 
 def _env() -> dict[str, str]:
@@ -133,79 +117,65 @@ def _nomes_livres(cwd: str, ocupados: set[str]):
             yield name
 
 
-def _local_codex_account() -> str:
+def _hangar_open() -> str:
+    """O lançador do Hangar: no PATH, no `~/.hangar/bin` ou no build desta cópia."""
+    achado = shutil.which("hangar-open")
+    if achado:
+        return achado
+    for candidato in (Path.home() / ".hangar" / "bin" / "hangar-open",
+                      _repo() / "crates" / "target" / "release" / "hangar-open"):
+        if candidato.is_file() and os.access(candidato, os.X_OK):
+            return str(candidato)
+    raise RuntimeError("hangar-open não encontrado (PATH, ~/.hangar/bin ou crates/target/release); "
+                       "instale o Hangar de novo para ter o lançador")
+
+
+def _open(body: dict) -> dict:
+    """`hangar-open open`: a sessão nasce como as do app, com o servidor de pé ou fora."""
+    r = subprocess.run([_hangar_open(), "open", json.dumps(body)], capture_output=True, text=True)
+    if r.returncode == 0:
+        return json.loads(r.stdout)
+    texto = (r.stderr or r.stdout).strip()
+    try:
+        detail = json.loads(texto.splitlines()[-1])["detail"]
+    except (ValueError, IndexError, KeyError, TypeError):
+        detail = texto or f"hangar-open saiu com {r.returncode}"
+    raise BackendHttpError(r.returncode, detail)
+
+
+def _conta_do_codex_home() -> str | None:
+    """`CODEX_HOME` herdado precisa ser uma conta gerenciada; a padrão não manda o campo."""
     home = os.environ.get("CODEX_HOME")
     if not home or Path(home).expanduser().resolve(strict=False) == (Path.home() / ".codex").resolve(strict=False):
-        return "default"
-    return "custom"
+        return None
+    alvo = Path(home).expanduser().resolve(strict=False)
+    try:
+        contas = _api("GET", "/api/codex-contas")
+    except BackendTransportError as exc:
+        raise RuntimeError(f"CODEX_HOME personalizado: com o servidor fora não dá para achar a conta ({exc})") from None
+    for conta in contas:
+        try:
+            if Path(conta["home"]).expanduser().resolve(strict=False) == alvo:
+                return conta["id"]
+        except (KeyError, TypeError, ValueError):
+            continue
+    raise RuntimeError("CODEX_HOME personalizado não é uma conta Codex gerenciada neste servidor")
 
 
 def _create(cwd: str, prompt: str | None) -> str:
-    existing = {item["name"] for item in _api("GET", "/api/sessions")}
-    codex_account = None
-    inherited_home = os.environ.get("CODEX_HOME")
-    if inherited_home and _local_codex_account() == "custom":
-        home = Path(inherited_home).expanduser().resolve(strict=False)
-        contas = _api("GET", "/api/codex-contas")
-        for conta in contas:
-            try:
-                if Path(conta["home"]).expanduser().resolve(strict=False) == home:
-                    codex_account = conta["id"]
-                    break
-            except (KeyError, TypeError, ValueError):
-                continue
-        if codex_account is None:
-            raise RuntimeError(
-                "CODEX_HOME personalizado não é uma conta Codex gerenciada neste servidor"
-            )
-    for name in _nomes_livres(cwd, existing):
+    codex_account = _conta_do_codex_home()
+    for name in _nomes_livres(cwd, set()):
+        body = {"name": name, "cwd": cwd, "provider": "codex", "headless": False, "initial_prompt": prompt}
+        if codex_account is not None:
+            body["codex_account"] = codex_account
         try:
-            body = {
-                "name": name,
-                "cwd": cwd,
-                "provider": "codex",
-                "headless": False,
-                "initial_prompt": prompt,
-            }
-            if codex_account is not None:
-                body["codex_account"] = codex_account
-            result = _api("POST", "/api/sessions", body)
-            return result["name"]
+            return _open(body)["name"]
         except BackendHttpError as exc:
-            detail = exc.detail if isinstance(exc.detail, dict) else {}
-            code = detail.get("code")
-            if exc.status == 409 and code == "erro_nome_em_uso":
+            if isinstance(exc.detail, dict) and exc.detail.get("code") == "erro_nome_em_uso":
                 continue
-            raise
+            msg = exc.detail.get("msg") if isinstance(exc.detail, dict) else exc.detail
+            raise RuntimeError(msg or str(exc)) from None
     raise RuntimeError("nao foi possivel escolher um nome de sessao livre")
-
-
-def _create_local(cwd: str, prompt: str | None, lancador) -> str:
-    """Cria a sessao direto no tmux, sem backend. O comando do pane e o MESMO que o backend usa.
-
-    O que se perde sem a API sao as limpezas de nome reusado (fila duravel, vinculo 'then',
-    pareamento) e o escopo transiente do systemd. Nenhuma delas impede a sessao de funcionar, e
-    todas voltam a valer na proxima criacao com o backend no ar — enquanto nao abrir nada e o
-    defeito que este ticket existe pra corrigir.
-
-    NAO pre-confia o cwd (o `codex_sessions.pretrust_cwd` que o backend chama na criacao pelo app),
-    e isso e deliberado: aqui tem uma pessoa na frente do terminal, e a pergunta "voce confia nesta
-    pasta?" e dela. Pelo app ninguem tem como responder, e por isso la a resposta e dada; aqui,
-    responder por ela seria decidir confianca no lugar de quem digitou o comando — o `claude` e o
-    `pi` do shell tambem nao pre-confiam nada.
-    """
-    ocupados = _tmux_vivas()
-    name = next(_nomes_livres(cwd, ocupados))
-    codex_home = os.environ.get("CODEX_HOME") or str((Path.home() / ".codex").resolve(strict=False))
-    cmd = shlex.join(lancador.comando_do_lancador(
-        cwd, prompt, codex_home=codex_home,
-        codex_account=_local_codex_account()))
-    r = subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd,
-                        "-e", f"CP_SESSION_NAME={name}", cmd],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"tmux recusou criar a sessao {name}: {r.stderr.strip()}")
-    return name
 
 
 def _limpar_local(name: str, codex_sessions) -> None:
@@ -235,16 +205,9 @@ def main() -> int:
         return 2
     prompt = sys.argv[1] if len(sys.argv) == 2 else None
     cwd = os.getcwd()
-    codex_sessions, lancador = _do_backend()
+    codex_sessions = _do_backend()
     try:
-        try:
-            name = _create(cwd, prompt)
-        except BackendTransportError as exc:
-            if lancador is None:
-                raise
-            print(f"hangar-codex: backend fora ({exc}); criando direto no tmux",
-                  file=sys.stderr)
-            name = _create_local(cwd, prompt, lancador)
+        name = _create(cwd, prompt)
     except RuntimeError as exc:
         print(f"hangar-codex: {exc}", file=sys.stderr)
         return 1
