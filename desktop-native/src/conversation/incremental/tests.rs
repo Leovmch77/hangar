@@ -11,11 +11,17 @@ fn agent_duration_tracks_execution_and_freezes_at_the_real_finish() {
     let launch = event(json!({"id":"launch","kind":"tool_result","tool_use_id":"a","bg_agent_id":"worker","ts":1002.0}));
     let finish = event(json!({"id":"finish","kind":"tool_result","tool_use_id":"task:worker","ts":1192.0}));
     let foreground = event(json!({"id":"foreground","kind":"tool_result","tool_use_id":"a","ts":1075.0}));
+    let untimed = event(json!({"id":"untimed","kind":"tool_result","tool_use_id":"task:worker"}));
+    let untimed_foreground = event(json!({"id":"untimed-fg","kind":"tool_result","tool_use_id":"a"}));
+    let duplicate = event(json!({"id":"duplicate","kind":"tool_result","tool_use_id":"task:worker","ts":1250.0}));
     let notification = event(json!({"id":"note","kind":"user_msg","text":"<task-notification><task-id>worker</task-id></task-notification>","ts":1192.0}));
     for (events, running, seconds) in [
         (vec![start.clone()], true, 300),
         (vec![start.clone(), launch.clone()], true, 300),
-        (vec![start.clone(), foreground], false, 75),
+        (vec![start.clone(), foreground.clone()], false, 75),
+        (vec![start.clone(), untimed_foreground, foreground], false, 75),
+        (vec![start.clone(), launch.clone(), untimed.clone(), finish.clone(), duplicate], false, 192),
+        (vec![start.clone(), untimed, finish.clone(), launch.clone()], false, 192),
         (vec![start.clone(), launch.clone(), finish.clone()], false, 192),
         (vec![start.clone(), finish, launch.clone()], false, 192),
         (vec![start, launch, notification], false, 192),

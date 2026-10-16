@@ -183,10 +183,8 @@ struct ActivityFold {
 impl ActivityFold {
     fn finish(&mut self, id: &str, at: Option<f64>) -> bool {
         if let Some(call) = self.background.get(id) {
-            let changed = !self.resulted.contains_key(call);
-            self.resulted.entry(call.clone()).or_insert(at);
-            changed
-        } else { self.finished_early.entry(id.to_owned()).or_insert(at); false }
+            super::record_completion(&mut self.resulted, call.clone(), at)
+        } else { super::record_completion(&mut self.finished_early, id.to_owned(), at); false }
     }
 
     fn push(&mut self, i: usize, event: &ChatEvent) -> bool {
@@ -210,8 +208,7 @@ impl ActivityFold {
                     if text_launch || launched.is_some() {
                         if let Some(agent) = launched {
                             if let Some(at) = self.finished_early.remove(agent) {
-                                changed |= !self.resulted.contains_key(id);
-                                self.resulted.entry(id.to_owned()).or_insert(at);
+                                changed |= super::record_completion(&mut self.resulted, id.to_owned(), at);
                             }
                             self.background.insert(agent.to_owned(), id.to_owned());
                         }
@@ -221,16 +218,14 @@ impl ActivityFold {
                 if self.shell_pending.remove(id) {
                     if let Some(shell) = word_after(text, "Command running in background with ID:") {
                         if let Some(at) = self.finished_early.remove(shell) {
-                            changed |= !self.resulted.contains_key(id);
-                            self.resulted.entry(id.to_owned()).or_insert(at);
+                            changed |= super::record_completion(&mut self.resulted, id.to_owned(), at);
                         }
                         self.background.insert(shell.to_owned(), id.to_owned());
                         return changed;
                     }
                 }
                 // Mesmo um órfão pode concluir uma chamada futura com o mesmo ID.
-                let inserted = !self.resulted.contains_key(id);
-                self.resulted.entry(id.to_owned()).or_insert(event.ts);
+                let inserted = super::record_completion(&mut self.resulted, id.to_owned(), event.ts);
                 changed || inserted && (self.agent_calls.contains(id) || self.shell_calls.contains(id))
             }
             "user_msg" => {

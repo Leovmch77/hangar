@@ -285,6 +285,15 @@ fn wakes(input: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
     !shutdown && (to == key || key.strip_prefix("teammate:").is_some_and(|name| to == "*" || name == to))
 }
 
+fn record_completion<K: Eq + std::hash::Hash>(map: &mut HashMap<K, Option<f64>>, key: K, at: Option<f64>) -> bool {
+    use std::collections::hash_map::Entry;
+    match map.entry(key) {
+        Entry::Vacant(entry) => { entry.insert(at); true }
+        Entry::Occupied(mut entry) if entry.get().is_none() && at.is_some() => { entry.insert(at); true }
+        Entry::Occupied(_) => false,
+    }
+}
+
 /// Agentes e shells de fundo, dobrados dos eventos como o `createActivityFolder` do web. Refeito a cada troca do
 /// conjunto de eventos, então `/clear` e histórico novo não carregam nada do anterior.
 pub fn fold_activity(events: &[ChatEvent]) -> Activity {
@@ -307,7 +316,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
     let mut created: Vec<(ActivityTask, bool)> = Vec::new();
     let mut whole: Option<Vec<(ActivityTask, bool)>> = None;
     fn finish<'a>(id: String, at: Option<f64>, background: &HashMap<String, &'a str>, resulted: &mut HashMap<&'a str, Option<f64>>, early: &mut HashMap<String, Option<f64>>) {
-        match background.get(&id) { Some(&call) => { resulted.entry(call).or_insert(at); } None => { early.entry(id).or_insert(at); } }
+        match background.get(&id) { Some(&call) => { record_completion(resulted, call, at); } None => { record_completion(early, id, at); } }
     }
     for (i, event) in events.iter().enumerate() {
         match event.kind.as_str() {
@@ -336,7 +345,7 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                     if let Some(agent) = shown_agent_id(launched, text) { agent_ids.insert(id, agent); }
                     if text_launch || launched.is_some() {
                         if let Some(agent) = launched {
-                            if let Some(at) = finished_early.remove(agent) { resulted.entry(id).or_insert(at); }
+                            if let Some(at) = finished_early.remove(agent) { record_completion(&mut resulted, id, at); }
                             background.insert(agent.to_owned(), id);
                         }
                         continue;
@@ -344,13 +353,13 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                 }
                 if shell_pending.remove(id) {
                     if let Some(shell) = word_after(text, "Command running in background with ID:") {
-                        if let Some(at) = finished_early.remove(shell) { resulted.entry(id).or_insert(at); }
+                        if let Some(at) = finished_early.remove(shell) { record_completion(&mut resulted, id, at); }
                         background.insert(shell.to_owned(), id);
                         continue;
                     }
                     // Pediu fundo e não foi: este resultado já é o final.
                 }
-                resulted.entry(id).or_insert(event.ts);
+                record_completion(&mut resulted, id, event.ts);
             }
             "user_msg" => {
                 let text = event.text.as_deref().unwrap_or("");
