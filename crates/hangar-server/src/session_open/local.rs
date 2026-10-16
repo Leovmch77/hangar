@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use super::OpenError;
 use super::claude::PluginBridge;
-use super::open::{Born, OpenHost, ProgramOutput};
-use super::terminal::{Mux, ProcessMux, TerminalEnv};
+use super::open::{Born, OpenHost};
+use super::terminal::{Mux, MuxOutput, ProcessMux, TerminalEnv};
 
 /// `CHAVE=valor` por linha do `backend/.env`; a última vale, como o `install-native` lê.
 pub fn dotenv(text: &str) -> BTreeMap<String, String> {
@@ -48,7 +48,7 @@ impl OpenHost for LocalHost {
     }
     /// A `backend/` da cópia do Hangar (`cli::backend_dir`).
     fn backend_dir(&self) -> Option<PathBuf> { super::cli::backend_dir() }
-    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
+    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, MuxOutput> {
         Box::pin(super::server::run_program(&self.env, argv, timeout))
     }
     fn customizations(&self, _args: Value) -> BoxFuture<'_, Result<Value, OpenError>> {

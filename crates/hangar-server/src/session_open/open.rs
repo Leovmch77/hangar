@@ -11,12 +11,9 @@ use serde_json::{Value, json};
 
 use super::agents::{self, Conversation};
 use super::claude::{self, PluginBridge};
-use super::terminal::{self, Mux, PaneSpec, TerminalEnv};
+use super::terminal::{self, Mux, MuxOutput, PaneSpec, TerminalEnv};
 use super::{Account, AgentProvider, OpenCaller, OpenError, PermissionMode, Resolved, SessionSpec, Surface};
 
-/// Saída de um programa que a abertura roda (`hangar-conta`, a sonda do `bwrap`).
-#[derive(Clone, Debug, Default)]
-pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr: String }
 
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
@@ -37,7 +34,7 @@ pub trait OpenHost: Send + Sync {
     fn server_projects(&self) -> PathBuf;
     /// A pasta `backend/` do Hangar (a venv e o `skill_bridge.py`).
     fn backend_dir(&self) -> Option<PathBuf>;
-    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput>;
+    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, MuxOutput>;
     /// A operação `prepare` das escolhas de plugins e skills; devolve o `{"settings": …}`.
     fn customizations(&self, args: Value) -> BoxFuture<'_, Result<Value, OpenError>>;
     /// O grupo da sessão antiga de mesmo nome sai antes de qualquer efeito.
@@ -237,7 +234,7 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
 /// O envelope do só leitura com o ambiente, a casa e quem roda programas: a abertura e o relançamento do
 /// Codex (que o reaplica, S-28) usam o mesmo.
 pub(crate) async fn read_only_envelope<'a>(env: &BTreeMap<String, String>, home: &Path, cwd: &str, config_dir: Option<&str>,
-    run: &'a (dyn Fn(Vec<String>, Duration) -> BoxFuture<'a, ProgramOutput> + Sync)) -> Result<Vec<String>, OpenError> {
+    run: &'a (dyn Fn(Vec<String>, Duration) -> BoxFuture<'a, MuxOutput> + Sync)) -> Result<Vec<String>, OpenError> {
     let refuse = |msg: String| OpenError::new(400, "erro_criacao_sessao", msg);
     if !cfg!(target_os = "linux") { return Err(refuse("read-only exige Linux com bubblewrap (bwrap)".into())); }
     let path: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -588,25 +585,45 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
             return Err(OpenError::new(500, "erro_criacao_sessao", format!("a primeira mensagem não entrou na fila: {error}")));
         }
     }
-    if let Err(error) = super::record::write(host.home(), spec) {
-        diary.refused("erro", "registro_nao_gravado", Some("sidecar_gravado"), Some(&error.kind().to_string()));
-        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
-    }
     let meta = headless_sidecar(spec, &sid, previous_non_plan, settings.as_ref(), route.as_ref()).as_object().cloned().unwrap_or_default();
-    if let Err(error) = crate::runtime::codex_sidecar::put(&sidecars.join("claude-headless"), &spec.name, &meta) {
-        diary.refused("erro", "sidecar_nao_gravado", Some("sidecar_gravado"), Some(&error.kind().to_string()));
-        if let Err(error) = super::record::remove(host.home(), &spec.key) {
-            tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu ficou para trás");
-        }
-        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
-    }
+    persist(host, spec, diary, "sidecar_gravado", &sidecars.join("claude-headless"), &meta)?;
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None, restored: false };
     let mut warnings = left;
-    warnings.extend(host.born(&born).await);
-    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
-        "etapa": "sidecar_gravado", "operacao": diary.op}));
+    warnings.extend(announce(host, spec, diary, &born, "sidecar_gravado").await);
     Ok((Some(jsonl), warnings, route))
+}
+
+/// O registro antes do que faz a sessão existir: sem ele ela não é reaberta nem reconhecida pela chave.
+fn write_record(host: &dyn OpenHost, spec: &SessionSpec, diary: &mut Diary, stage: &'static str) -> Result<(), OpenError> {
+    super::record::write(host.home(), spec).map_err(|error| {
+        diary.refused("erro", "registro_nao_gravado", Some(stage), Some(&error.kind().to_string()));
+        OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}"))
+    })
+}
+
+fn forget_record(host: &dyn OpenHost, key: &str) {
+    if let Err(error) = super::record::remove(host.home(), key) {
+        tracing::warn!(kind = ?error.kind(), "registro da abertura que não nasceu ficou para trás");
+    }
+}
+
+/// Registro e sidecar da sessão sem terminal; o sidecar que não grava leva o registro junto.
+fn persist(host: &dyn OpenHost, spec: &SessionSpec, diary: &mut Diary, stage: &'static str, dir: &Path,
+           meta: &crate::runtime::codex_sidecar::Meta) -> Result<(), OpenError> {
+    write_record(host, spec, diary, stage)?;
+    crate::runtime::codex_sidecar::put(dir, &spec.name, meta).map_err(|error| {
+        diary.refused("erro", "sidecar_nao_gravado", Some(stage), Some(&error.kind().to_string()));
+        forget_record(host, &spec.key);
+        OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}"))
+    })
+}
+
+async fn announce(host: &dyn OpenHost, spec: &SessionSpec, diary: &mut Diary, born: &Born, stage: &str) -> Vec<String> {
+    let warnings = host.born(born).await;
+    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
+        "etapa": stage, "operacao": diary.op}));
+    warnings
 }
 
 /// O nome que a resolução conferiu pode ter ganhado um pane desde então.
@@ -632,23 +649,12 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
     diary.step("confiar_pasta");
     super::codex::pretrust(Path::new(codex_home), &spec.cwd);
     host.release_name(&spec.name).await?;
-    if let Err(error) = super::record::write(host.home(), spec) {
-        diary.refused("erro", "registro_nao_gravado", Some("confiar_pasta"), Some(&error.kind().to_string()));
-        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
-    }
-    let dir = crate::runtime::codex_sidecar::dir(host.home());
     let mut meta = super::codex::headless_sidecar(spec, codex_home);
     // A thread que já existe: a subida a retoma (`thread/resume`) em vez de abrir outra.
     if let Some(thread) = resume { meta.insert("thread_id".into(), json!(thread)); }
-    if let Err(error) = crate::runtime::codex_sidecar::put(&dir, &spec.name, &meta) {
-        diary.refused("erro", "sidecar_nao_gravado", Some("confiar_pasta"), Some(&error.kind().to_string()));
-        let _ = super::record::remove(host.home(), &spec.key);
-        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
-    }
+    persist(host, spec, diary, "confiar_pasta", &crate::runtime::codex_sidecar::dir(host.home()), &meta)?;
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None, restored: false };
-    warnings.extend(host.born(&born).await);
-    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
-        "etapa": "sidecar_gravado", "operacao": diary.op}));
+    warnings.extend(announce(host, spec, diary, &born, "sidecar_gravado").await);
     if initial_prompt.is_some_and(|p| !p.is_empty()) { progress_step(&spec.name, "recado", json!({})); }
     warnings.extend(host.warm_codex(&spec.name, initial_prompt).await);
     Ok(warnings)
@@ -707,11 +713,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     if !restore { host.release_name(&spec.name).await?; }
     // A sessão que volta já tem registro (plugins, worktree, criadora): a falha do pane o devolve como estava.
     let previous = restore.then(|| super::record::read(host.home(), &spec.key).ok().flatten()).flatten();
-    // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
-    if let Err(error) = super::record::write(host.home(), spec) {
-        diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
-        return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
-    }
+    write_record(host, spec, diary, "criar_terminal")?;
     // S-40: o Claude e o Codex levam o prompt no comando; os outros, na fila.
     let queued = match initial_prompt.filter(|p| !claude && codex_home.is_none() && !p.is_empty()) {
         None => None,
@@ -723,7 +725,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
                 Ok(path) => Some(path),
                 Err(error) => {
                     diary.refused("erro", "prompt_inicial_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
-                    let _ = super::record::remove(host.home(), &spec.key);
+                    forget_record(host, &spec.key);
                     return Err(OpenError::new(500, "erro_criacao_sessao", format!("o prompt inicial não entrou na fila: {error}")));
                 }
             }
@@ -751,8 +753,6 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     }
     diary.step("limpar_estado_anterior");
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned), restored: restore };
-    warnings.extend(host.born(&born).await);
-    diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
-        "etapa": "terminal_criado", "operacao": diary.op}));
+    warnings.extend(announce(host, spec, diary, &born, "terminal_criado").await);
     Ok((jsonl, warnings, route))
 }

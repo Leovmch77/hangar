@@ -15,8 +15,8 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 
 use super::claude::PluginBridge;
-use super::open::{Born, OpenHost, ProgramOutput};
-use super::terminal::{Mux, ProcessMux, TerminalEnv};
+use super::open::{Born, OpenHost};
+use super::terminal::{Mux, MuxOutput, ProcessMux, TerminalEnv};
 use super::{OpenCaller, OpenError, SessionOpenRequest};
 use crate::accounts::environment::AccountEnvironment;
 use crate::routes::AppState;
@@ -218,8 +218,8 @@ impl ServerHost {
 }
 
 /// Programa da abertura, pelo PATH do servidor e sem os segredos dele no ambiente.
-pub async fn run_program(env: &BTreeMap<String, String>, argv: Vec<String>, timeout: Duration) -> ProgramOutput {
-    let failed = |stderr: String| ProgramOutput { code: None, stdout: String::new(), stderr };
+pub async fn run_program(env: &BTreeMap<String, String>, argv: Vec<String>, timeout: Duration) -> MuxOutput {
+    let failed = |stderr: String| MuxOutput { code: None, stdout: String::new(), stderr };
     let Some((program, args)) = argv.split_first() else { return failed("comando vazio".into()) };
     let path: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let Some(exe) = crate::runtime::process::resolve_program(program, &path) else { return failed(format!("{program} não está no PATH")) };
@@ -227,7 +227,7 @@ pub async fn run_program(env: &BTreeMap<String, String>, argv: Vec<String>, time
     command.args(args).env_clear().stdin(std::process::Stdio::null()).kill_on_drop(true)
         .envs(env.iter().filter(|(k, _)| !matches!(k.as_str(), "CP_AUTH_TOKEN" | "HANGAR_INTERNAL_SECRET" | "HANGAR_RUNTIME_INSTANCE")));
     match tokio::time::timeout(timeout, command.output()).await {
-        Ok(Ok(out)) => ProgramOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(Ok(out)) => MuxOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned() },
         Ok(Err(e)) => failed(e.to_string()),
         Err(_) => failed(format!("{program} não respondeu no prazo")),
@@ -244,7 +244,7 @@ impl OpenHost for ServerHost {
     /// O servidor roda na `backend/` (é de lá que ele lê o `.env`).
     fn backend_dir(&self) -> Option<PathBuf> { std::env::current_dir().ok() }
 
-    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
+    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, MuxOutput> {
         Box::pin(run_program(&self.env.base, argv, timeout))
     }
 

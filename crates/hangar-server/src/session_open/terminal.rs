@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 
 use super::AgentProvider;
 
-/// Saída de um comando do multiplexador; `code: None` = não terminou no prazo ou não rodou.
+/// Saída de um comando do multiplexador ou de um programa da abertura; `code: None` = não terminou no prazo ou não rodou.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MuxOutput { pub code: Option<i32>, pub stdout: String, pub stderr: String }
 

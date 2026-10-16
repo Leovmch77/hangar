@@ -704,7 +704,7 @@ impl RuntimeRegistry {
             },
             Surface::Terminal=>{
                 let read_only=if next.read_only {
-                    let run=|argv:Vec<String>,timeout:Duration|->futures_util::future::BoxFuture<'_,crate::session_open::open::ProgramOutput> {
+                    let run=|argv:Vec<String>,timeout:Duration|->futures_util::future::BoxFuture<'_,crate::session_open::terminal::MuxOutput> {
                         let base=env.base.clone();Box::pin(async move {crate::session_open::server::run_program(&base,argv,timeout).await})
                     };
                     Some(crate::session_open::open::read_only_envelope(&env.base,&env.home,&next.cwd,next.account.config_dir(),&run).await

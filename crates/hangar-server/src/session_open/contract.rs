@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use serde_json::{Map, Value, json};
 
 use super::claude::PluginBridge;
-use super::open::{Born, OpenHost, ProgramOutput};
+use super::open::{Born, OpenHost};
 use super::resolve::{CodexCatalogError, CodexLogin, CreatorFacts, OpenFacts, ProviderCatalog, ServerDefaults};
 use super::terminal::{Mux, MuxOutput, TerminalEnv};
 use super::{OpenCaller, OpenError, ServiceTier, SessionOpenRequest};
@@ -202,7 +202,7 @@ impl OpenHost for Host {
     fn server_projects(&self) -> PathBuf { self.home.join(".claude/projects") }
     fn backend_dir(&self) -> Option<PathBuf> { Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend")) }
 
-    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
+    fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, MuxOutput> {
         Box::pin(async move {
             let prog = Path::new(&argv[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // `git` e o `hangar-conta` rodam de verdade, dentro da raiz, como no lado Python (lá o
@@ -214,7 +214,7 @@ impl OpenHost for Host {
             let entry = json!({"prog": prog, "argv": args, "rc": code});
             let mut record = self.record.lock().unwrap();
             if found.is_some() { record.probes.push(entry) } else { record.subprocesses.push(entry) }
-            ProgramOutput { code: Some(code), stdout: found.and_then(|r| r["stdout"].as_str()).unwrap_or("").into(),
+            MuxOutput { code: Some(code), stdout: found.and_then(|r| r["stdout"].as_str()).unwrap_or("").into(),
                 stderr: found.and_then(|r| r["stderr"].as_str()).unwrap_or("").into() }
         })
     }
