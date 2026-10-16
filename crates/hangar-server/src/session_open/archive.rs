@@ -307,6 +307,11 @@ pub fn plan(w: &Where, facts: &dyn OpenFacts, project: &str, sid: &str, body: Ar
 /// `move_conversation`: a conversa vai inteira para a conta `to` (o `<id>.jsonl` e a pasta irmã), sem
 /// cópia na origem. Já estava lá: `false`.
 pub fn move_conversation(server_projects: &Path, project: &str, sid: &str, from: Option<&str>, to: Option<&str>) -> Result<bool, OpenError> {
+    move_with(&|a, b| std::fs::rename(a, b), server_projects, project, sid, from, to)
+}
+
+fn move_with(rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>, server_projects: &Path, project: &str, sid: &str, from: Option<&str>, to: Option<&str>)
+    -> Result<bool, OpenError> {
     let projects = |dir: Option<&str>| dir.map_or_else(|| server_projects.to_owned(), |d| Path::new(d).join("projects"));
     let (src, dst) = (projects(from).join(project), projects(to).join(project));
     // A conta padrão pode vir pelo nome da pasta e pela ausência: a mesma pasta não é mudança.
@@ -319,10 +324,21 @@ pub fn move_conversation(server_projects: &Path, project: &str, sid: &str, from:
     let failed = |e: std::io::Error| OpenError::new(500, "erro_mover_conversa", format!("nao consegui mover a conversa de conta: {e}"))
         .with_params(json!({"erro": e.to_string()}));
     std::fs::create_dir_all(&dst).map_err(failed)?;
-    std::fs::rename(src.join(&file), dst.join(&file)).map_err(failed)?;
-    if src.join(sid).is_dir() && let Err(error) = std::fs::rename(src.join(sid), dst.join(sid)) {
+    rename(&src.join(&file), &dst.join(&file)).map_err(failed)?;
+    if src.join(sid).is_dir() && let Err(error) = rename(&src.join(sid), &dst.join(sid)) {
         // Sem a pasta irmã a conversa perde tool-results e subagentes: melhor inteira na origem.
-        let _ = std::fs::rename(dst.join(&file), src.join(&file));
+        if let Err(back) = rename(&dst.join(&file), &src.join(&file)) {
+            let message = format!("nao consegui mover a conversa de conta: {error}; a conversa ficou partida entre as contas: {} e {}",
+                dst.join(&file).display(), src.join(sid).display());
+            tracing::error!(back = %back, "{message}");
+            if let Some(dir) = crate::diag::diary_dir() {
+                let line = json!({"evento": "sessao.conversa_partida", "nivel": "erro", "codigo": "erro_mover_conversa", "detalhe": message});
+                if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
+                    tracing::warn!(kind = ?error.kind(), "conversa partida não gravada no diário");
+                }
+            }
+            return Err(OpenError::new(500, "erro_mover_conversa", message).with_params(json!({"erro": error.to_string()})));
+        }
         return Err(failed(error));
     }
     Ok(true)
@@ -351,5 +367,26 @@ pub async fn open(host: &dyn super::open::OpenHost, plan: Plan, mut resolved: su
             }
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// SF8: a pasta irmã que não muda e o arquivo que não volta deixam a conversa partida entre as
+    /// contas, e o erro diz isso.
+    #[test]
+    fn a_move_that_cannot_be_undone_says_the_conversation_is_split() {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = (root.path().join("a"), root.path().join("b"));
+        std::fs::create_dir_all(a.join("projects/p/s1")).unwrap();
+        std::fs::write(a.join("projects/p/s1.jsonl"), "{}").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let rename = |_: &std::path::Path, _: &std::path::Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { Ok(()) } else { Err(std::io::Error::other("ocupado")) }
+        };
+        let error = super::move_with(&rename, root.path(), "p", "s1", a.to_str(), b.to_str()).unwrap_err();
+        assert_eq!(calls.get(), 3, "a volta foi tentada");
+        assert!(error.msg.contains("partida"), "{}", error.msg);
     }
 }
