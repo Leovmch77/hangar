@@ -232,9 +232,10 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     let state = Arc::new(state);
     let v6_state = state.clone();
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
-    let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
-    // As sessões com terminal que a máquina perdeu ao reiniciar voltam pelo spec; depois, a fotografia delas.
+    // As sessões com terminal que o multiplexador perdeu voltam pelo spec; antes da varredura de grupos, que
+    // conta como vivos os nomes à espera dele.
     let _session_restore = crate::session_open::restore::spawn(state.clone()).map(crate::AbortOnDrop);
+    let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
     // Sem a fotografia do Python a varredura não revoga nada (ver `life::sweep`); o túnel religa já.
     let _share_sweep = state.share.clone().map(|share| crate::AbortOnDrop(tokio::spawn(
         crate::share::owner_routes::sweep_loop(share, crate::share::owner_routes::SWEEP_EVERY))));

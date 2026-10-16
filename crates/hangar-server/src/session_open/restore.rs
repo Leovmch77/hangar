@@ -172,6 +172,19 @@ fn drop_closed(snap: &mut Snapshot, closed: &mut Vec<String>) {
     closed.clear();
 }
 
+/// Os nomes que o restore ainda pode reabrir: a varredura de grupos os conta como vivos, senão tiraria os
+/// membros do grupo antes de a sessão voltar.
+static HELD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Segura os nomes da fotografia enquanto o servidor dela não é o de agora; solta quando é.
+fn hold(snap: &Snapshot, settled: bool) {
+    let mut held = HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *held = if settled { Vec::new() } else { snap.sessions.values().map(|e| e.name.clone()).collect() };
+}
+
+/// Os nomes à espera do restore.
+pub fn held() -> Vec<String> { HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() }
+
 fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
 
 /// A chave do spec gravada no ambiente da sessão (`CP_SESSION_KEY`).
@@ -282,6 +295,7 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
         let current = mux_start(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
         let same = matches!(current, MuxStart::Started(at) if snap.mux_started == Some(at));
+        hold(&snap, same);
         match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
             (true, _) => {
                 if let Some(alive) = alive(&st, &home, &program).await {
@@ -321,6 +335,8 @@ pub fn spawn(st: Arc<crate::routes::AppState>) -> Option<tokio::task::JoinHandle
     let dirs = st.list.env().dirs.clone()?;
     st.state.runtime.get()?;
     let program = st.list.env().capture_program.clone();
+    // Antes da primeira rodada da varredura de grupos: até o restore decidir, a fotografia segura os nomes.
+    hold(&read(&dirs.home), false);
     Some(tokio::spawn(run(st, dirs.home, program)))
 }
 
@@ -410,6 +426,15 @@ mod tests {
         drop_closed(&mut memory, &mut closed);
         assert!(!memory.sessions.contains_key("k1") && memory.sessions.contains_key("k2"), "a do laço também, antes de gravar");
         assert!(closed.is_empty());
+    }
+
+    #[test]
+    fn the_names_waiting_for_the_restore_count_as_alive_until_it_settles() {
+        let snap = Snapshot { mux_started: Some(1), sessions: [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", None))].into() };
+        hold(&snap, false);
+        assert_eq!(held(), ["a", "b"]);
+        hold(&snap, true);
+        assert!(held().is_empty());
     }
 
     #[test]
