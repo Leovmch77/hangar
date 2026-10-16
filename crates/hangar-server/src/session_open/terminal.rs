@@ -266,7 +266,7 @@ async fn wait_exit(pid: i32, deadline: tokio::time::Instant) -> Option<bool> {
 async fn wait_exit(_pid: i32, _deadline: tokio::time::Instant) -> Option<bool> { None }
 
 /// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
-fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
+pub(crate) fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
 
 /// A sessão `pane.name` existe e carrega a chave deste pedido. `Absent` também quando a de mesmo nome é outra.
 async fn is_this_one(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Presence {

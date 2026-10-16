@@ -122,7 +122,8 @@ impl ServerHost {
             return Ok(opened);
         };
         tracing::warn!(cause, "o dono da sessão do convidado não foi registrado; a sessão sai");
-        self.mux.run(vec![self.terminal.program.clone(), "kill-session".into(), "-t".into(), format!("={name}")]).await;
+        // No psmux o `=` não vale no `kill-session` e o nome cru já é exato.
+        self.mux.run(vec![self.terminal.program.clone(), "kill-session".into(), "-t".into(), super::terminal::target(&self.terminal, &name)]).await;
         if let Err(error) = super::record::remove(&self.env.home, &opened.key) {
             tracing::warn!(kind = ?error.kind(), "registro da sessão do convidado ficou para trás");
         }
