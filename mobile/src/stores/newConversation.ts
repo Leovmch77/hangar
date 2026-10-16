@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
   basename, createSessionForServer, fetchSessionsForServer, getCreationProgress, getHistory,
-  sanitizeSessionName, sendInputForServer, transitionFirstConversation, uploadFileForServer,
+  sanitizeSessionName, sendInputForServer, transitionFirstConversation, uniqueSessionName, uploadFileForServer,
 } from '@hangar/core';
 import type {
   ChatEvent, CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
@@ -125,11 +125,6 @@ function newId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function stableName(cwd: string, id: string): string {
-  const clean = basename(cwd).replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '') || 'sessao';
-  return `${clean}-${id.slice(-4)}`;
-}
-
 // Processo reaberto: creating/sending não voltam a disparar POST, viram incertos.
 export function restoreAttempt(serverId: string): FirstConversationAttempt | null {
   const raw = prefs.getString(KEY(serverId));
@@ -169,14 +164,13 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
 
   // Nome escolhido pela pessoa não ganha sufixo: conflito volta como 409 e ela decide.
   const explicit = input.body.name?.trim();
-  let id = newId();
+  const id = newId();
+  // O nome automático é o das outras telas; o backend ainda arbitra o conflito, a lista só evita um nome já visível.
+  let taken = new Set<string>();
   if (!explicit) {
-    // O backend ainda arbitra o conflito; a lista só evita um nome já visível.
-    let taken = new Set<string>();
     try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
-    while (taken.has(stableName(input.body.cwd, id))) id = newId();
   }
-  const finalName = explicit || stableName(input.body.cwd, id);
+  const finalName = explicit || uniqueSessionName(basename(input.body.cwd), taken);
   // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
   // backend faz no nome: o digitado pode ter espaço e acento.
   const draft: FirstConversationAttempt = Object.assign({
