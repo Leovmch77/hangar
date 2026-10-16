@@ -79,8 +79,8 @@ pub trait OpenFacts {
         -> Result<(), CodexCatalogError>;
     /// `permissions.defaultMode` cru da conta; `Err` = settings ilegível.
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String>;
-    /// Terminal, sidecar Codex ou sidecar sem terminal com este nome.
-    fn name_in_use(&self, name: &str) -> bool;
+    /// Terminal, sidecar Codex ou sidecar sem terminal com este nome; `Err` = o multiplexador não respondeu.
+    fn name_in_use(&self, name: &str) -> Result<bool, OpenError>;
     /// Troca de agente em curso no nome (`conversation_transfer.transfer_active`).
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError>;
     /// `os.path.realpath(os.path.expanduser(path))`.
@@ -482,7 +482,7 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
             return Err(conflict("Nome de perfil OMP inválido"));
         }
     }
-    if facts.name_in_use(&name) {
+    if facts.name_in_use(&name)? {
         return Err(OpenError::new(409, "erro_nome_em_uso", "ja existe uma sessao com esse nome"));
     }
     if provider == AgentProvider::Codex && headless && let Some(mode) = request_permission(request)

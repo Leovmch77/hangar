@@ -482,8 +482,11 @@ impl OpenFacts for LocalFacts {
         Ok(read_json(&dir.join("settings.json"))?.and_then(|settings| text(&settings["permissions"]["defaultMode"])))
     }
 
-    fn name_in_use(&self, name: &str) -> bool {
-        self.headless_sidecar(name).exists() || self.codex_sidecar(name).exists() || self.panes().iter().any(|p| p.session == name)
+    fn name_in_use(&self, name: &str) -> Result<bool, OpenError> {
+        if self.headless_sidecar(name).exists() || self.codex_sidecar(name).exists() { return Ok(true); }
+        // Sem resposta do multiplexador o nome não está livre: só a ausência conhecida é "nenhum pane".
+        let panes = self.runtime.block_on(self.mux.list_panes()).map_err(|e| super::open::mux_unavailable(e.code))?;
+        Ok(panes.iter().any(|p| p.session == name))
     }
 
     /// `transfer_active`: registro do índice da sessão com o mesmo nome e fase não terminal.

@@ -263,8 +263,8 @@ impl resolve::OpenFacts for FixtureFacts {
         Ok(settings.and_then(|s| s["permissions"]["defaultMode"].as_str()).map(str::to_owned))
     }
 
-    fn name_in_use(&self, name: &str) -> bool {
-        self.tmux.iter().any(|s| s["name"] == name) || self.sidecar("claude-headless", name).is_some() || self.sidecar("codex-sessions", name).is_some()
+    fn name_in_use(&self, name: &str) -> Result<bool, OpenError> {
+        Ok(self.tmux.iter().any(|s| s["name"] == name) || self.sidecar("claude-headless", name).is_some() || self.sidecar("codex-sessions", name).is_some())
     }
 
     fn transfer_busy(&self, _name: &str) -> Result<bool, OpenError> { Ok(self.busy) }
@@ -1074,6 +1074,47 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
+/// Duas aberturas do mesmo nome não correm juntas: a segunda é "nome em uso" até a primeira acabar.
+#[test]
+fn a_name_being_opened_is_in_use_until_the_open_ends() {
+    let home = std::path::Path::new("/casa/de/teste/reserva");
+    let first = open::NameClaim::take(home, "s1").unwrap();
+    let error = open::NameClaim::take(home, "s1").err().expect("o mesmo nome em curso");
+    assert_eq!((error.status, error.code), (409, Some("erro_nome_em_uso")));
+    let _other_home = open::NameClaim::take(std::path::Path::new("/outra/casa"), "s1").expect("outra casa é outro nome");
+    drop(first);
+    open::NameClaim::take(home, "s1").expect("livre de novo depois");
+}
+
+/// Multiplexador que não responde não é "nome livre": a resolução recusa com o código do tmux fora.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_silent_multiplexer_does_not_free_the_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("bin")).unwrap();
+    std::fs::write(home.path().join("bin/tmux"), "#!/bin/sh\necho 'lost server' >&2\nexit 2\n").unwrap();
+    std::fs::set_permissions(home.path().join("bin/tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = local_facts(home.path(), &runtime).name_in_use("s1").unwrap_err();
+    assert_eq!((error.status, error.code), (503, Some("erro_mux_indisponivel")));
+}
+
+/// O nome é conferido de novo no tmux logo antes de sair do grupo antigo: a sessão que nasceu
+/// depois da resolução recusa sem efeito, e o tmux calado é 503, nunca "livre".
+#[cfg(target_os = "linux")]
+#[test]
+fn the_name_is_checked_again_in_tmux_before_any_effect() {
+    let (raw, _dir, _root) = run_contract("create_claude_terminal_default", |s| s["fakes"]["tmux_late_sessions"] = json!(["s1"]));
+    assert_eq!(raw["steps"][0]["body"]["detail"]["code"], "erro_nome_em_uso", "{}", raw["steps"][0]["body"]);
+    assert_eq!(raw["steps"][0]["status"], 409);
+    let (raw, _dir, _root) = run_contract("create_claude_terminal_default", |s| s["fakes"]["tmux_new_session"] = json!({"silent": "all"}));
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(503), json!("erro_mux_indisponivel")), "{}", raw["steps"][0]["body"]);
+    let spawned = raw["subprocesses"].as_array().unwrap().iter().any(|p| p["argv"][0] == "new-session");
+    assert!(!spawned, "nenhum new-session sem a conferência");
+}
+
 /// O `backend/.env` que o pydantic do Python lê (sem exportar) vale para a abertura do Rust: a
 /// variável do processo vence a do arquivo, e só as `CP_*` entram.
 #[test]
@@ -1223,9 +1264,17 @@ fn unreadable_sidecars_are_errors_not_absent() {
     }
 }
 
-/// Os fatos de verdade numa casa de teste, sem tmux de quem roda o teste (o programa não existe, então
-/// nenhum pane e nenhum `/proc` é lido).
+/// Os fatos de verdade numa casa de teste, sem tmux de quem roda o teste: o da casa responde "sem
+/// servidor" (nenhum pane e nenhum `/proc` é lido), a não ser que o teste já tenha posto outro. Casa
+/// que não existe fica sem existir.
 fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> facts::LocalFacts {
+    #[cfg(unix)]
+    if home.is_dir() && !home.join("bin/tmux").exists() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin/tmux"), "#!/bin/sh\necho 'no server running on /tmp/tmux-teste/default' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(home.join("bin/tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let env = [("HOME", home), ("PATH", &home.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
     facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
         .with_terminal(crate::list::mux::Mux::with_program(home.join("bin/tmux"), std::time::Duration::from_secs(2)),

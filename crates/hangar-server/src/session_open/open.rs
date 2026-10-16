@@ -134,8 +134,36 @@ fn allowed_root(host: &dyn OpenHost, caller: &OpenCaller, cwd: &str, runtime: &V
 
 fn creation(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_criacao_sessao", msg) }
 
+fn name_in_use() -> OpenError { OpenError::new(409, "erro_nome_em_uso", "ja existe uma sessao com esse nome") }
+
+/// O tmux que não respondeu: não dá para saber se o nome está livre.
+pub(crate) fn mux_unavailable(detail: &str) -> OpenError {
+    OpenError::new(503, "erro_mux_indisponivel", "o tmux não respondeu — a lista de sessões está indisponível")
+        .with_params(json!({"detalhe": detail}))
+}
+
 /// O pane pode ter nascido sem o multiplexador confirmar: nada em volta dele é desfeito.
 const UNCERTAIN: &str = "session_open_uncertain";
+
+/// Nomes com abertura em curso neste processo, por casa (`home`).
+static OPENING: std::sync::Mutex<std::collections::BTreeSet<(PathBuf, String)>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A reserva do nome enquanto a abertura corre: a segunda abertura do mesmo nome é recusada.
+pub(crate) struct NameClaim((PathBuf, String));
+
+impl NameClaim {
+    pub(crate) fn take(home: &Path, name: &str) -> Result<Self, OpenError> {
+        let key = (home.to_owned(), name.to_owned());
+        if !OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+            return Err(name_in_use());
+        }
+        Ok(Self(key))
+    }
+}
+
+impl Drop for NameClaim {
+    fn drop(&mut self) { OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.0); }
+}
 
 /// `orq_readonly.prepare`: o envelope `bwrap` que deixa o código só leitura, provado com `/bin/true`.
 async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&str>) -> Result<Vec<String>, OpenError> {
@@ -235,7 +263,8 @@ pub struct Opened { pub body: Value, pub undo: Option<WorktreeUndo> }
 /// Abre a sessão Claude com terminal do spec resolvido.
 pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
     let Resolved { mut spec, mut warnings, initial_prompt, remember_provider } = resolved;
-    let runtime = crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
+    let _claim = NameClaim::take(host.home(), &spec.name)?;
+    let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let engine = matches!(spec.account, Account::Engine { .. });
     // CRI-025: modelo de motor deixado no `settings.json` faria a sessão Anthropic nascer nele.
     if !engine { warnings.extend(claude::drop_foreign_model(host.home(), spec.account.config_dir())); }
@@ -300,6 +329,15 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
 async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
                        remember_provider: bool, runtime: &Value) -> Result<(String, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
+    // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
+    match terminal::presence(host.mux(), host.terminal(), &spec.name).await {
+        (terminal::Presence::Absent, _) => {}
+        (terminal::Presence::Present, _) => {
+            diary.refused("aviso", "nome_ja_em_uso", None, None);
+            return Err(name_in_use());
+        }
+        (terminal::Presence::Unknown, stderr) => return Err(mux_unavailable(&stderr)),
+    }
     host.leave_old_group(&spec.name).await?;
     diary.step("preparar_comando");
     let sid = host.new_session_id();

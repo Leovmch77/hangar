@@ -65,7 +65,8 @@ struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<V
 
 /// O tmux em memória do harness: o estado inicial do cenário, os `new-session` gravados e as consultas
 /// respondidas pelo estado.
-struct FakeTmux { sessions: Mutex<BTreeMap<String, Value>>, force: Value, record: std::sync::Arc<Mutex<Record>> }
+struct FakeTmux { sessions: Mutex<BTreeMap<String, Value>>, force: Value, record: std::sync::Arc<Mutex<Record>>,
+    silenced: std::sync::atomic::AtomicBool }
 
 impl Mux for FakeTmux {
     fn scope(&self) -> BoxFuture<'_, Vec<String>> { Box::pin(async { SCOPE.map(str::to_owned).into() }) }
@@ -76,8 +77,11 @@ impl Mux for FakeTmux {
         let args = &inner[1..];
         let opt = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
         let target = opt("-t").map(|t| t.trim_start_matches('=').split(':').next().unwrap_or_default().to_owned());
-        // Um tmux que não responde no prazo a nada (só os testes do Rust o pedem).
-        if self.force["silent"] == true {
+        // Um tmux que deixa de responder no prazo (só os testes do Rust o pedem): `"all"` desde o começo,
+        // `true` a partir do `new-session`.
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.force["silent"] == true && args.first().is_some_and(|a| a == "new-session") { self.silenced.store(true, SeqCst); }
+        if self.force["silent"] == "all" || self.silenced.load(SeqCst) {
             return Box::pin(async { MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() } });
         }
         let mut sessions = self.sessions.lock().unwrap();
@@ -140,7 +144,7 @@ impl OpenFacts for Facts {
     fn codex_choice(&self, home: Option<&str>, model: Option<&str>, effort: Option<&str>, tier: Option<ServiceTier>)
         -> Result<(), CodexCatalogError> { self.local.codex_choice(home, model, effort, tier) }
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> { self.local.account_mode(config_dir) }
-    fn name_in_use(&self, name: &str) -> bool { self.local.name_in_use(name) }
+    fn name_in_use(&self, name: &str) -> Result<bool, OpenError> { self.local.name_in_use(name) }
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> { self.local.transfer_busy(name) }
     fn real_path(&self, path: &str) -> PathBuf { self.local.real_path(path) }
     fn new_key(&self) -> String { self.local.new_key() }
@@ -215,13 +219,15 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     let record = std::sync::Arc::new(Mutex::new(Record::default()));
     let substituted: Value = serde_json::from_str(&place(&scenario.to_string(), root)).unwrap_or(Value::Null);
     let state = &substituted["state"];
-    let sessions: BTreeMap<String, Value> = state["tmux_sessions"].as_array().into_iter().flatten()
+    let fakes = substituted["fakes"].clone();
+    // `tmux_late_sessions`: nascidas depois da resolução (o tmux as tem, a lista que a resolução leu não).
+    let late = fakes["tmux_late_sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|name| json!({"name": name, "env": {}}));
+    let sessions: BTreeMap<String, Value> = state["tmux_sessions"].as_array().cloned().unwrap_or_default().into_iter().chain(late)
         .map(|s| (s["name"].as_str().unwrap_or_default().to_owned(), json!({"cwd": s["cwd"], "env": s["env"], "command": s["command"]}))).collect();
     let home = root.join("home");
     let terminal = TerminalEnv { birth: Duration::from_millis(100), ..TerminalEnv::local(&home, &env) };
-    let fakes = substituted["fakes"].clone();
     let host = Host { home: home.clone(), env: env.clone(), terminal,
-        mux: FakeTmux { sessions: Mutex::new(sessions), force: fakes["tmux_new_session"].clone(), record: record.clone() },
+        mux: FakeTmux { sessions: Mutex::new(sessions), force: fakes["tmux_new_session"].clone(), record: record.clone(), silenced: Default::default() },
         fakes: fakes.clone(), record: record.clone() };
     let mut steps = Vec::new();
     for step in substituted["steps"].as_array().into_iter().flatten() {
