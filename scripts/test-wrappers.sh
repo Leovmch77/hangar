@@ -765,6 +765,14 @@ for w in claude.posix.sh claude.fish claude.ps1 pi.posix.sh pi.fish omp.posix.sh
     fi
 done
 
+echo "== claude.ps1: pasta de share e alvo do psmux =="
+# Sem PowerShell aqui: confere o texto. `.Path` num share vem com o prefixo do provider
+# (Microsoft.PowerShell.Core\FileSystem::\\...); o psmux não honra `=` em todo comando, e o nome
+# cru já é exato lá (o lançador Rust anexa assim no Windows).
+ps1="$REPO/scripts/shell/claude.ps1"
+grep -q '(Get-Location)\.ProviderPath' "$ps1" || { echo "FAIL: claude.ps1 não usa (Get-Location).ProviderPath"; fail=1; }
+if grep -qE 'attach-session -t "?=' "$ps1"; then echo "FAIL: claude.ps1 anexa com '=' no alvo do psmux"; fail=1; fi
+
 echo "== bloco gerenciado no rc (marcador novo entra, antigo sai) =="
 # O marcador virou `# >>> hangar >>>`. Um rc que ainda tenha o bloco do nome ANTIGO precisa
 # perdê-lo: os dois fazem `source` dos mesmos wrappers, e um rc com os dois carrega tudo

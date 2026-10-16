@@ -65,7 +65,7 @@ function claude {
     # claude.posix.sh / scripts/hangar-open: argumento que o pedido nao cobre, ou sem
     # hangar-server -> claude cru abaixo; recusa -> erro, sem segunda abertura.
     if (-not $env:TMUX -and -not $modoPrint -and -not [Console]::IsInputRedirected) {
-        $pedido = [ordered]@{ provider = 'claude'; cwd = (Get-Location).Path; headless = $false }
+        $pedido = [ordered]@{ provider = 'claude'; cwd = (Get-Location).ProviderPath; headless = $false }
         if ($env:CLAUDE_CONFIG_DIR) { $pedido.config_dir = $env:CLAUDE_CONFIG_DIR }
         if ($env:CP_ENGINE) { $pedido.engine = $env:CP_ENGINE }
         $chaves = @{ '--model' = 'model'; '--effort' = 'effort'; '--permission-mode' = 'permission_mode' }
@@ -119,7 +119,8 @@ function claude {
                 if ($codigo -eq 0) {
                     $nome = (($saida -join "`n") | ConvertFrom-Json).name
                     if (-not $nome) { Write-Error "hangar: resposta do hangar-server sem o nome da sessao: $saida"; return }
-                    tmux attach-session -t "=$nome"
+                    # Nome cru: o psmux nao honra `=` em todo comando e o nome ja e exato la.
+                    tmux attach-session -t $nome
                     return
                 }
                 # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado: segue cru.
