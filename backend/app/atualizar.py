@@ -685,6 +685,42 @@ def _behind_top() -> bool:
             and _git_quiet("merge-base", "--is-ancestor", head, topo).returncode == 0)
 
 
+_SERVER_WORKFLOW = ".github/workflows/server.yml"
+
+
+def _caminhos_do_build(rev: str) -> list[str] | None:
+    """Os `paths` do push no workflow que publica o hangar-server: mudar um deles pede binário novo."""
+    p = _git_quiet("show", f"{rev}:{_SERVER_WORKFLOW}")
+    if p.returncode != 0:
+        return None
+    caminhos, dentro = [], False
+    for linha in p.stdout.splitlines():
+        texto = linha.strip()
+        if texto == "paths:":
+            dentro = True
+        elif dentro and texto.startswith("- "):
+            caminhos.append(texto[2:].strip().strip("\"'"))
+        elif dentro and texto and not texto.startswith("#"):
+            break
+    return caminhos or None
+
+
+def _ultimo_com_o_binario(publicado: str, topo: str) -> str:
+    """O commit mais novo que ainda roda com o binário publicado: o pai do primeiro, depois dele, que muda o
+    que o build do Rust lê. Sem ler a lista, para no próprio commit do binário."""
+    caminhos = _caminhos_do_build(topo)
+    if caminhos is None:
+        return publicado
+    p = _git_quiet("log", "--first-parent", "--reverse", "--format=%H", f"{publicado}..{topo}", "--",
+                   *(f":(glob){c}" for c in caminhos))
+    if p.returncode != 0:
+        return publicado
+    primeiro = p.stdout.split()[:1]
+    if not primeiro:
+        return topo
+    return _git_quiet("rev-parse", "--verify", "--quiet", f"{primeiro[0]}^1").stdout.strip() or publicado
+
+
 def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
     """Até onde o checkout pode ir, e a release lida para escolher.
 
