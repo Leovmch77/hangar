@@ -2,10 +2,8 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 
 const vault = vi.hoisted(() => new Map<string, string>());
 const diag = vi.hoisted(() => vi.fn());
-vi.mock('@hangar/core', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@hangar/core')>(),
-  registrarDiag: diag,
-}));
+const realCore = await vi.importActual<typeof import('@hangar/core')>('@hangar/core');
+vi.mock('@hangar/core', () => ({ ...realCore, registrarDiag: diag }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(),
   setItemAsync: vi.fn(),
