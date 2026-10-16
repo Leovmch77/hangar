@@ -34,11 +34,20 @@ case "$1" in
   new-session)
     printf '%s\n' "$@" > "$S.args"
     : > "$S.env"; prev=""; for a in "$@"; do [ "$prev" = "-e" ] && echo "$a" >> "$S.env"; prev="$a"; done
-    env -u CLAUDE_CONFIG_DIR bash -c 'exec -a claude sleep 120' </dev/null >/dev/null 2>&1 &
+    # O processo leva o ambiente do `-e` e o que o `hangar-engine` poria; `$S.forge` sobrepõe (outra identidade).
+    E=(); while IFS= read -r l; do E+=("$l"); done < "$S.env"
+    last="${{@: -1}}"
+    x=$(grep -oE -- 'hangar-engine --exec [^ ]+' <<<"$last" | cut -d' ' -f3); [ -n "$x" ] && E+=("CP_ENGINE=$x")
+    x=$(grep -oE -- '--account [^ ]+' <<<"$last" | cut -d' ' -f2); [ -n "$x" ] && E+=("CP_ENGINE_ACCOUNT=$x")
+    x=$(grep -oE -- '--service-tier [^ ]+' <<<"$last" | cut -d' ' -f2); [ -n "$x" ] && E+=("CP_ENGINE_SERVICE_TIER=$x")
+    [ -f "$S.forge" ] && while IFS= read -r l; do E+=("$l"); done < "$S.forge"
+    env -u CLAUDE_CONFIG_DIR "${{E[@]}}" bash -c 'exec -a claude sleep 120' </dev/null >/dev/null 2>&1 &
     pid=$!; for i in $(seq 100); do tr '\0' ' ' < /proc/$pid/cmdline | grep -q '^claude ' && break; sleep 0.01; done
     echo "$4 $pid 1700000100" > "$S"
     sid=$(printf '%s\n' "$@" | grep -oE -- '--(resume|session-id) [0-9a-f-]{{36}}' | head -1 | cut -d' ' -f2); [ -n "$sid" ] || sid='{SID}'
-    echo "{{\"pid\":$pid,\"sessionId\":\"$sid\"}}" > '{sessions}'/$pid.json;;
+    # O registro nativo vai à pasta da conta em que o processo roda.
+    dir='{sessions}'; for l in "${{E[@]}}"; do case "$l" in CLAUDE_CONFIG_DIR=*) dir="${{l#CLAUDE_CONFIG_DIR=}}/sessions";; esac; done
+    mkdir -p "$dir"; echo "{{\"pid\":$pid,\"sessionId\":\"$sid\"}}" > "$dir/$pid.json";;
   has-session) read_state && [ "$3" = "=$NAME" ];;
   kill-session) read_state && kill "$PID" 2>/dev/null; rm -f "$S";;
   list-panes) read_state && printf '%s\t1\t%s\t%s\t%%7\t\tclaude\t%s\t0\t0\n' "$NAME" "$PID" '{c}' "$BORN";;
@@ -424,4 +433,15 @@ async fn an_invalid_engine_body_refuses_the_fast_reopen_before_anything_stops() 
     let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4","service_tier":"priority"})).await;
     assert_eq!(outcome,Ok(()));
     assert!(command(&args).contains("--service-tier priority"),"{}",command(&args));
+}
+
+/// CRA-035: a vida nova que sobe noutra conta (o `wait_for_claude` do Python conferia `CLAUDE_CONFIG_DIR`,
+/// motor, conta fixa e Fast) não é dada como reaberta, mesmo na conversa e no modo pedidos.
+#[tokio::test]
+async fn a_new_life_with_another_identity_is_not_a_reopen() {
+    let fx = fixture();
+    std::fs::write(fx.state.with_extension("forge"),format!("CLAUDE_CONFIG_DIR={}\n",fx.home.join(".claude-outra").display())).unwrap();
+    let (outcome,_) = to_terminal(&fx,json!({})).await;
+    assert_eq!(outcome.map_err(|(code,_)|code),Err("reopen_identity".into()));
+    fx.finish();
 }

@@ -129,6 +129,17 @@ fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&V
     Ok(())
 }
 
+/// A identidade que a CLI lê do ambiente: a pasta da conta, o motor, a conta fixa e o Fast.
+fn identity(env:&crate::accounts::environment::AccountEnvironment,spec:&SessionSpec)
+    -> (PathBuf,Option<String>,Option<String>,Option<crate::session_open::ServiceTier>) {
+    let config=spec.account.config_dir().map_or_else(||env.claude_base.clone(),PathBuf::from);
+    let config=std::fs::canonicalize(&config).unwrap_or(config);
+    match &spec.account {
+        Account::Engine { name,account,.. }=>(config,Some(name.clone()),account.clone(),spec.service_tier),
+        _=>(config,None,None,None),
+    }
+}
+
 /// `default_model.anthropic`: alias, id da Anthropic (Bedrock e Vertex incluídos) ou ARN do Bedrock.
 static ANTHROPIC:std::sync::LazyLock<regex::Regex>=std::sync::LazyLock::new(||regex::Regex::new(
     r"(?i)\A(?:(?:[a-z]{2,}\.)?(?:anthropic\.)?claude-[\w.:@-]+|arn:aws[\w-]*:bedrock:\S+|default|best|opus|opusplan|sonnet|haiku|fable)(?:\[1m\])?\z").unwrap());
@@ -607,7 +618,15 @@ impl RuntimeRegistry {
                     if let Some(Ok(()))=watcher.adopt_claude(self,name).await
                         && let Some((target,_))=self.claude_terminal_entry(name).await
                         && target.binding.conversation==sid
-                        && super::lifecycle::permission_mode(&io,&target.binding).await.is_ok_and(|shown|shown==mode) {return Ok(());}
+                        && super::lifecycle::permission_mode(&io,&target.binding).await.is_ok_and(|shown|shown==mode) {
+                        let pid=i64::from(target.metadata.agent_pid);
+                        let running=process_spec(pid,&next.key,name,next.cwd.clone(),0.0).map(|(spec,_)|identity(&env,&spec));
+                        if running.as_ref().is_ok_and(|running|*running==identity(&env,next)) {return Ok(());}
+                        if running.is_ok() {
+                            self.drop_failed_terminal(name).await?;
+                            return Err(refused("reopen_identity","o Claude reabriu com uma identidade diferente da escolhida (conta, motor ou Fast)"));
+                        }
+                    }
                     if tokio::time::Instant::now()>=deadline {
                         self.drop_failed_terminal(name).await?;
                         return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos"));
