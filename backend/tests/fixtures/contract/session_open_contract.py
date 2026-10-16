@@ -288,13 +288,17 @@ def _rust_binary() -> Path:
     return binary
 
 
+_ARCHIVE_RESUME = re.compile(r"^/api/archive/[^/]+/[^/]+/resume$")
+
+
 def run_rust_side(scenario: dict) -> dict:
     """A abertura do Rust sobre o mesmo cenário montado: o exemplo `session_open_contract` prepara o que
     o Rust lê do disco (antes do instantâneo), roda os passos e devolve o mesmo dicionário cru. O que
     ele ainda não atende (outros provedores, sem terminal, reaberturas) falha dizendo a rota."""
     name = scenario["name"]
     route = " ".join(f"{s['method']} {s['path']}" for s in scenario["steps"] if "method" in s)
-    if any(s.get("path") != "/api/sessions" or s.get("method") != "POST" for s in scenario["steps"]):
+    if any(s.get("method") != "POST" or not (s.get("path") == "/api/sessions" or _ARCHIVE_RESUME.match(s.get("path", "")))
+           for s in scenario["steps"]):
         raise RustSideNotImplemented(f"Rust side not implemented for {route} (scenario {name})")
     binary = _rust_binary()
     root = root_for(name)
@@ -775,7 +779,48 @@ def _rule_pi_session_env(expected: dict, raw: dict, scenario: dict) -> bool | No
     return found if created else None
 
 
+def _archive_step(scenario: dict) -> dict | None:
+    return next((st for st in scenario["steps"] if _ARCHIVE_RESUME.match(st.get("path", ""))), None)
+
+
+def _rule_archive_headless(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """Matriz, itens 21 e 24 (S-08): o retomar do Arquivo passa pela resolução da criação e segue o padrão
+    sem terminal do servidor; o Python abria sempre com terminal. A sessão nasce sem terminal na conversa
+    retomada (o sidecar com o id dela) e é acordada; o pane da fixture não tem o que comparar."""
+    step = _archive_step(scenario)
+    got = (raw.get("steps") or [{}])[0]
+    if step is None or (expected.get("steps") or [{}])[0].get("status") != 200 or got.get("body", {}).get("headless") is not True:
+        return None
+    sid = step["path"].rsplit("/", 2)[-2]
+    name = got["body"]["name"]
+    sidecar = next((change for path, change in (raw.get("files") or {}).items()
+                    if path.endswith(f"/home/.hangar/claude-headless/{name}.json")), None)
+    raw["_replaced"] = True
+    woke = any(r.get("op") == "claude_headless.acordar" for r in raw.get("runtime_requests", []))
+    return got.get("status") == 200 and woke and sid in json.dumps(sidecar or {})
+
+
+_RESUME_MODE = re.compile(r" --permission-mode \S+")
+
+
+def _rule_resume_mode(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """Matriz, item 17: o modo de permissão vai explícito também no `claude --resume` (o Python o deixava
+    de fora e a sessão voltava no padrão da conta)."""
+    created = [p for p in _new_sessions(raw) if "CP_PROVIDER=claude" in p["argv"] and " --resume " in p["argv"][-1]]
+    if not created:
+        return None
+    found = all(_RESUME_MODE.search(p["argv"][-1]) for p in created)
+    for p in created:
+        p["argv"][-1] = _RESUME_MODE.sub("", p["argv"][-1], count=1)
+    for s in raw.get("tmux_sessions", {}).values():
+        if " --resume " in s.get("command", ""):
+            s["command"] = _RESUME_MODE.sub("", s["command"], count=1)
+    return found
+
+
 RUST_DIFFERENCES = (
+    ("matriz itens 21 e 24 (Arquivo segue o padrão sem terminal)", _rule_archive_headless),
+    ("matriz item 17 (modo explícito no --resume)", _rule_resume_mode),
     ("S-40", _rule_s40),
     ("matriz item 17 (política explícita do Codex)", _rule_codex_policy),
     ("trava da conta Codex lida pelo Rust", _rule_codex_login_lock),

@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.archive_providers")
 PROVIDERS = ("pi", "omp", "kimi", "codex")
 
 # Publico: e o id que identifica uma conversa nestes providers, e quem retoma uma do Arquivo tem
-# que validar pelo MESMO criterio (api.resume_archived, registry.create). Duas definicoes de "id
+# que validar pelo MESMO criterio (o retomar do Arquivo, no Rust). Duas definicoes de "id
 # valido" faziam um id de 36 caracteres fora do formato passar numa e cair na outra, trocando a
 # mensagem que explica o problema por um "caminho invalido" generico.
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")

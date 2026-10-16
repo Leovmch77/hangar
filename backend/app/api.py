@@ -2884,7 +2884,7 @@ async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
         return info
     if not (project and session_id):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    # Mesma guarda de archive_history/resume_archived: sem ela, qualquer pasta da máquina vira
+    # Mesma guarda de archive_history e do retomar do Arquivo: sem ela, qualquer pasta da máquina vira
     # "conta" e o GET lê <pasta>/projects/<proj>/<uuid>.jsonl.
     if config_dir is not None and config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
