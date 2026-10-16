@@ -162,15 +162,16 @@ pub async fn serve_until_with_guest(
                     home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
                     mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
                 registry.bind_watcher(watcher.clone());
+                // Presas ao desligamento: uma adoção tardia abriria sessão depois do `registry.shutdown()`.
                 // Os Claude com terminal que já tinham fila aqui: o Rust os adota, sem esperar o Python.
-                { let (watcher,registry)=(watcher.clone(),registry.clone());
-                  tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; }); }
+                let claude_terminals = { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  AbortOnDrop(tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; })) };
                 // E os Codex sem terminal com cano vivo ou mensagem esperando.
-                { let (watcher,registry)=(watcher.clone(),registry.clone());
-                  tokio::spawn(async move { watcher.register_codex_headless(&registry).await; }); }
-                Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
+                let codex_headless = { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  AbortOnDrop(tokio::spawn(async move { watcher.register_codex_headless(&registry).await; })) };
+                vec![claude_terminals,codex_headless,AbortOnDrop(tokio::spawn(watcher.run(registry.clone())))]
             }
-            _ => None,
+            _ => Vec::new(),
         };
         // As sessões Claude sem terminal que já existem: o Rust as reconhece sozinho, sem esperar o Python.
         let _claude_boot = AbortOnDrop(tokio::spawn(registry.clone().register_claude_headless()));
