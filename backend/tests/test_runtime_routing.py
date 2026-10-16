@@ -451,6 +451,18 @@ def test_mode_switch_to_terminal_closes_rust_first(birth, monkeypatch):
     assert birth.kills == [pid]
 
 
+def test_failed_headless_claude_is_reopened_by_the_rust_not_by_the_python(birth):
+    transport = Transport()
+    owner = birth.build(transport)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        slot = await owner.ensure_open("s1")
+        slot.view = {**slot.view, "error":"cano_exited"}
+        await owner.op("s1", {"kind":"submit", "text":"oi", "steer":False, "pre_transcript":False}, "op-1")
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open", "submit"]
+
+
 def test_reload_reopens_in_rust(birth):
     owner, transport, pid = _opened(birth)
     async def scenario():

@@ -1400,9 +1400,12 @@ class RuntimeCoordinator:
 
     async def _reopen_if_failed(self, name):
         """Rust com a sessão em erro (ator morto, cano caído, entrega incerta): uma reabertura no
-        Rust antes da operação. Nunca passa a sessão ao Python."""
+        Rust antes da operação. Nunca passa a sessão ao Python. O Claude sem terminal o próprio Rust
+        reabre (`request_reopen`, religação do cano): reabrir daqui seria um segundo dono."""
         slot = self.slots.get(self.names.get(name, ""))
         if slot is None or slot.phase != Phase.Rust or self.in_lifecycle(slot):
+            return
+        if slot.binding.headless and slot.binding.provider == "claude":
             return
         if not slot.cache_valid or self._rust_failed(slot):
             try:
