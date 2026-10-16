@@ -61,7 +61,25 @@ impl Hangar {
         self.tab_groups().into_iter().flat_map(|group| group.members).collect()
     }
 
-    pub(super) fn scroll_target_tab(&self, target: &Target) {
+    pub(super) fn scroll_target_tab(&mut self, target: &Target) {
+        self.pending_tab_reveal = Some(target.clone());
+        self.reveal_target_tab(target);
+    }
+
+    pub(super) fn schedule_tab_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_tab_reveal.is_none() || self.tab_reveal_scheduled { return; }
+        self.tab_reveal_scheduled = true;
+        // Agendado no render: o quadro atual atualiza os bounds antes desta única repetição.
+        cx.on_next_frame(window, |this, _, cx| {
+            this.tab_reveal_scheduled = false;
+            if let Some(target) = this.pending_tab_reveal.take() {
+                this.reveal_target_tab(&target);
+                cx.notify();
+            }
+        });
+    }
+
+    fn reveal_target_tab(&self, target: &Target) {
         for (index, group) in self.tab_groups().iter().enumerate() {
             let Some(member) = group.members.iter().position(|t| t == target) else { continue; };
             let viewport = self.tabs_scroll.bounds();

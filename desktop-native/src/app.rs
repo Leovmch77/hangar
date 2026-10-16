@@ -637,6 +637,8 @@ pub struct Hangar {
     // que traz a aba ativa para a vista quando a seleção muda.
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
+    pending_tab_reveal: Option<sidebar::Target>,
+    tab_reveal_scheduled: bool,
     appearance_note: Option<String>,
     // Por que o tema Desktop não está pintando com o papel de parede; `None` quando pinta ou não foi escolhido.
     desktop_note: Option<String>,
@@ -983,7 +985,7 @@ impl Hangar {
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
-            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
+            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_reveal_scheduled: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
@@ -5384,6 +5386,7 @@ impl Hangar {
     /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.schedule_tab_reveal(window, cx);
         let floating = theme::is_floating();
         let host = self.server_label(cx);
         let tabs = self.render_tab_groups(window, cx);
