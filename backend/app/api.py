@@ -4225,15 +4225,15 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
 
 
 @app.post("/api/sessions/{name}/bastao", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def bastao_passar(name: str, body: BastaoBody):
+async def bastao_passar(name: str, body: BastaoBody, request: Request):
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
         body = body.model_copy(update={"provider": provider})
     with _acompanhar_criacao(body.name):
-        return await _passar_bastao(name, body)
+        return await _passar_bastao(name, body, request)
 
 
-async def _passar_bastao(name: str, body: BastaoBody):
+async def _passar_bastao(name: str, body: BastaoBody, request: Request):
     """Passa o bastão de `{name}` pra uma sessão nova: dossiê no disco + sessão criada + kick-off
     na fila durável dela.
 
@@ -4346,26 +4346,34 @@ async def _passar_bastao(name: str, body: BastaoBody):
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
         headless=bool(body.headless))
+    if creation.provider == "claude" and not creation.headless:
+        # Claude com terminal nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust
+        # já olhou o pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+        creation = creation.model_copy(update={"initial_prompt": kick})
+        if request.headers.get("x-hangar-open") == "rust":
+            return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
+                                 "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
     creation._engine_catalog = account_models
     novo = await create_session(creation)
-    _passo(destino, "recado")
-    try:
-        await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
-            kick, delivered=False, pre_transcript=True))
-    except OSError as e:
-        # A sessão JÁ existe: o erro tem de dizer isso, senão o 500 nomeia a coisa errada e quem
-        # lê acha que nada aconteceu — e vai criar outra. Aqui o conserto é humano (mandar o
-        # kick-off na mão), então o caminho do dossiê vai junto.
-        _log.error("bastao: sessão %s criada, mas o kick-off não entrou na fila: %s", novo.name, e)
-        raise HTTPException(500, detail=erro(
-            "erro_bastao_fila", f"a sessão {novo.name} nasceu, mas o kick-off não entrou na fila "
-            f"dela ({e}) — mande você mesmo o pedido apontando pra {alvo}",
-            nome=novo.name, dossie=str(alvo))) from None
-    # Drena numa thread: `send_prompt` espera a TUI ficar interativa (`_wait_input_ready`), o que
-    # pode levar segundos numa sessão recém-criada — segurar o request nisso não ajuda ninguém.
-    # Vale só pro Claude na prática (Pi/Kimi nascem com `jsonl=None` e a thread sai calada); não há
-    # perda, a fila é durável e o drain do próximo idle/SSE entrega.
-    threading.Thread(target=_drain_session, args=(novo.name,), daemon=True).start()
+    if creation.initial_prompt is None:
+        _passo(destino, "recado")
+        try:
+            await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
+                kick, delivered=False, pre_transcript=True))
+        except OSError as e:
+            # A sessão JÁ existe: o erro tem de dizer isso, senão o 500 nomeia a coisa errada e quem
+            # lê acha que nada aconteceu — e vai criar outra. Aqui o conserto é humano (mandar o
+            # kick-off na mão), então o caminho do dossiê vai junto.
+            _log.error("bastao: sessão %s criada, mas o kick-off não entrou na fila: %s", novo.name, e)
+            raise HTTPException(500, detail=erro(
+                "erro_bastao_fila", f"a sessão {novo.name} nasceu, mas o kick-off não entrou na fila "
+                f"dela ({e}) — mande você mesmo o pedido apontando pra {alvo}",
+                nome=novo.name, dossie=str(alvo))) from None
+        # Drena numa thread: `send_prompt` espera a TUI ficar interativa (`_wait_input_ready`), o que
+        # pode levar segundos numa sessão recém-criada — segurar o request nisso não ajuda ninguém.
+        # Pi/Kimi nascem com `jsonl=None` e a thread sai calada; não há perda, a fila é durável e o
+        # drain do próximo idle/SSE entrega.
+        threading.Thread(target=_drain_session, args=(novo.name,), daemon=True).start()
     # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
     # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
     return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,

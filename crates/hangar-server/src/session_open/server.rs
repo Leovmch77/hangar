@@ -329,6 +329,38 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     }
 }
 
+/// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e, com a
+/// sucessora Claude com terminal, devolve o pedido de abertura em vez de abrir; o Rust abre com o
+/// kick-off como primeira mensagem. Sucessora de outro provedor o Python cria como sempre.
+pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, owner) = crate::routes::gate(&st, peer, &req);
+    let (mut parts, body) = req.into_parts();
+    parts.headers.remove(DECLINED);
+    let Ok(bytes) = to_bytes(body, crate::session_write::BODY_LIMIT).await else {
+        return crate::session_write::too_large(&parts.headers);
+    };
+    let headers = parts.headers.clone();
+    if owner { parts.headers.insert(DECLINED, axum::http::HeaderValue::from_static("rust")); }
+    let response = crate::routes::pass(&st, Request::from_parts(parts, Body::from(bytes)), &fwd).await;
+    if !owner || response.headers().get(DECLINED).is_none_or(|v| v != "rust") { return response; }
+    let prepared: Value = match to_bytes(response.into_body(), crate::session_write::BODY_LIMIT).await {
+        Ok(raw) => serde_json::from_slice(&raw).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    let mut response = match SessionOpenRequest::parse(prepared["open"].to_string().as_bytes()) {
+        Err(_) => reply(&OpenError::new(502, "erro_criacao_sessao", "o preparo do bastão não devolveu um pedido de abertura")),
+        Ok(request) => match decide_detached(&st, request, OpenCaller::Owner, None).await {
+            Decision::Opened(opened) => crate::session_write::json_response(StatusCode::OK, json!({"name": opened.body["name"],
+                "dossie": prepared["dossie"], "texto": prepared["texto"], "kickoff": prepared["kickoff"], "aviso": prepared["aviso"],
+                "avisos": opened.body["avisos"]})),
+            Decision::Refused(error) => reply(&error),
+            Decision::NotOurs => reply(&OpenError::new(500, "erro_criacao_sessao", "a sucessora do bastão não é Claude com terminal")),
+        },
+    };
+    crate::routes::cors(&headers, response.headers_mut());
+    response
+}
+
 /// `/__hangar_server/sessions/open`: o que entra pelo Python (convidado com a pasta dele, Connect,
 /// MCP, bastão) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o que não é do Rust
 /// volta 421 e o Python segue. A worktree criada volta junto: o registro do convidado a desfaz se falhar.

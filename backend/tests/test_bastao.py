@@ -501,10 +501,10 @@ def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     # Sem nome ocupado por padrão (e sem consultar o tmux da máquina que roda os testes).
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
 
-    def post(**corpo):
+    def post(headers=None, **corpo):
         with patch("app.api.registry.list", return_value=[origem]):
             return api_client_bastao.post("/api/sessions/cc/bastao",
-                                          headers={"Authorization": "Bearer secret"}, json=corpo)
+                                          headers={"Authorization": "Bearer secret", **(headers or {})}, json=corpo)
 
     return post, criadas
 
@@ -514,7 +514,7 @@ def test_post_grava_o_dossie_cria_a_sessao_e_enfileira_o_kickoff(bastao_post, tm
     from app.pqueue import PromptQueue
 
     post, criadas = bastao_post
-    r = post(name="cc2", model="opus")
+    r = post(name="cc2", model="opus", headless=True)
     assert r.status_code == 200, r.text
     d = r.json()
     assert d["name"] == "cc2"
@@ -527,6 +527,22 @@ def test_post_grava_o_dossie_cria_a_sessao_e_enfileira_o_kickoff(bastao_post, tm
     # delivered=False + pre_transcript: entrega pelo DRAIN (o /input digitaria numa TUI que ainda
     # está subindo), e imune ao corte por idade da fila — ela nasceu antes do transcript existir.
     assert entradas[0]["delivered"] is False and entradas[0]["pre_transcript"] is True
+
+
+def test_claude_com_terminal_recebe_o_kickoff_como_primeira_mensagem(bastao_post):
+    """A sucessora Claude com terminal nasce no Rust com o kick-off no `initial_prompt`, sem fila. Pela
+    8765 o Rust marca o pedido e abre ele mesmo com o que volta daqui: o Python não cria nada."""
+    from app.pqueue import PromptQueue
+
+    post, criadas = bastao_post
+    r = post(name="cc2", provider="claude", headless=False)
+    assert r.status_code == 200, r.text
+    assert criadas[0].initial_prompt == r.json()["kickoff"] and PromptQueue("cc2").load() == []
+    r = post(headers={"x-hangar-open": "rust"}, name="cc3", provider="claude", headless=False)
+    assert r.status_code == 200 and r.headers["x-hangar-open"] == "rust"
+    assert r.json()["open"]["initial_prompt"] == r.json()["kickoff"] and r.json()["open"]["name"] == "cc3"
+    assert "config_dir" not in r.json()["open"], "o que não foi escolhido fica de fora, como omitido"
+    assert len(criadas) == 1, "com a marca do Rust o Python não cria"
 
 
 def test_post_nao_cria_sessao_quando_a_gravacao_do_dossie_falha(bastao_post, monkeypatch):
@@ -578,7 +594,7 @@ def test_post_diz_que_a_sessao_nasceu_quando_a_fila_falha(bastao_post, monkeypat
         raise OSError("disco cheio")
     monkeypatch.setattr(pqueue.PromptQueue, "append", sem_disco)
     post, criadas = bastao_post
-    r = post(name="cc2")
+    r = post(name="cc2", headless=True)
     assert r.status_code == 500
     assert criadas and criadas[0].name == "cc2"
     assert "cc2" in r.text and "nasceu" in r.text      # nomeia o que de fato aconteceu
