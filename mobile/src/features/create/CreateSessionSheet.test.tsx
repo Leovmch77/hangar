@@ -996,11 +996,8 @@ describe('CreateSessionSheet Codex', () => {
   ])('%s', async (_case, remembered, pick, expected) => {
     calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
     if (remembered) localStorage.setItem(`create.choices.v1:${server.id}`, JSON.stringify({ configDir: remembered }));
-    const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'Claude')!.click());
-    await act(async () => Promise.resolve());
-    // O primeiro botão com o nome é a própria pílula; a ação do menu vem depois.
-    if (pick) await act(async () => [...container.querySelectorAll('button')].filter((b) => b.textContent === pick).at(-1)!.click());
+    const { container, root } = await renderSheet(false, false);
+    if (pick) await pickAccount(container, pick, false);
     await send(container);
     expect(calls.create.mock.calls.at(-1)?.[1]).toMatchObject({ provider: 'claude' });
     expect(calls.create.mock.calls.at(-1)?.[1]?.config_dir).toBe(expected);
