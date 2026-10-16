@@ -126,8 +126,8 @@ pub fn join(argv: &[String], windows: bool) -> String {
 
 /// S-63: o que só a sessão põe (ou a configuração do servidor, relida na abertura) e o que é
 /// segredo do servidor. Servidor tmux subido de dentro de outra sessão teria os dela; o pane sai sem
-/// os que esta não pôs por `-e`.
-pub const NOT_INHERITED: [&str; 28] = [
+/// os que esta não pôs por `-e`. As do motor são as que o `hangar-engine` exporta (`engines.env_de`).
+pub const NOT_INHERITED: [&str; 46] = [
     "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS", "HANGAR_PLUGIN_URL", "HANGAR_PLUGIN_TOKEN",
     "HANGAR_CLAUDE_SETTINGS", "HANGAR_JEV", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL",
     "JEV_TEXTO_BASE_URL", "JEV_TEXTO_API_KEY", "JEV_TEXTO_MODELO", "JEV_TEXTO_CMD",
@@ -135,6 +135,12 @@ pub const NOT_INHERITED: [&str; 28] = [
     "CP_ENGINE", "CP_ENGINE_ACCOUNT", "CP_ENGINE_CREDENTIAL_ID", "CP_ENGINE_ACCOUNT_BASE_URL", "CP_ENGINE_SERVICE_TIER",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HANGAR_ORQ_READ_ONLY", "HANGAR_CANO_KEY", "HANGAR_CANO_OWNER",
     "CP_PI_SESSION", "OMP_PROFILE",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
+    "ENABLE_TOOL_SEARCH", "DISABLE_PROMPT_CACHING",
 ];
 /// Do servidor: nunca para o pane, nem para o cliente que pode subir o servidor tmux.
 const SERVER_SECRETS: [&str; 3] = ["CP_AUTH_TOKEN", "HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE"];
@@ -464,6 +470,18 @@ pub(crate) mod tests {
         for var in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_SUBAGENT_MODEL", "HANGAR_PLUGIN_TOKEN", "TYPESAFE_API_KEY", "CP_AUTH_TOKEN"] {
             assert!(removed.iter().any(|r| r == var), "{var} fica no cliente: {removed:?}");
         }
+    }
+
+    /// S-63: o que o `hangar-engine` exporta (`engines.py`) é da sessão de motor que o pôs; o pane novo
+    /// não herda de um servidor tmux subido de dentro dela.
+    #[test]
+    fn the_pane_does_not_inherit_what_an_engine_exports() {
+        let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/app/engines.py")).unwrap();
+        let exported: std::collections::BTreeSet<&str> = regex::Regex::new(r#""((?:ANTHROPIC|CLAUDE_CODE|CP_ENGINE|ENABLE|DISABLE)_[A-Z0-9_]+|CP_ENGINE)""#)
+            .unwrap().captures_iter(&source).map(|c| c.get(1).unwrap().as_str()).collect();
+        assert!(exported.len() >= 20, "o padrão não achou as variáveis do motor: {exported:?}");
+        let missing: Vec<&&str> = exported.iter().filter(|var| !NOT_INHERITED.contains(var)).collect();
+        assert!(missing.is_empty(), "o pane herdaria do motor: {missing:?}");
     }
 
     #[tokio::test]
