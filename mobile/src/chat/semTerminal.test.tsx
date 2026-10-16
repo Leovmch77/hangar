@@ -200,9 +200,11 @@ vi.mock('./draftAttachments', () => ({
   removeDraftAttachment: vi.fn(),
 }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
-vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref }: {
+const pasteInput = vi.hoisted(() => ({ onPaste: null as null | ((files: import('@mattermost/react-native-paste-input').PastedFile[], error: string | null) => void) }));
+vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref, onPaste }: {
   value: string; onChangeText: (text: string) => void; accessibilityLabel?: string; ref?: import('react').Ref<HTMLTextAreaElement>;
-}) => createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
+  onPaste?: NonNullable<typeof pasteInput.onPaste>;
+}) => (pasteInput.onPaste = onPaste ?? null, createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) })),
 }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
@@ -1037,11 +1039,69 @@ describe('rascunho guardado no Composer', () => {
     expect(reopened.container.textContent).toContain('nota.txt');
     act(() => button(reopened.container, 'composer_draft_recover')!.click());
     expect(reopened.container.querySelector('textarea')!.value).toBe('nota');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!)).toMatchObject({ attachment, submission: null });
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!)).toMatchObject({ attachments: [attachment], submission: null });
     act(() => reopened.root.unmount());
   });
 
-  it('recuperação não troca anexo atual; depois de removê-lo adota o anterior sem reutilizar upload da sessão morta', async () => {
+  it('colar vários anexa todos; remover tira só aquele; Enviar sobe os que faltam e junta os caminhos numa linha', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    realFirstInput.upload.mockReset().mockResolvedValueOnce({ path: '/up/a.png' }).mockResolvedValueOnce({ path: '/up/c.txt' });
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => pasteInput.onPaste!([
+      { uri: 'file:///a.png', fileName: 'a.png', type: 'image/png', fileSize: 2048 },
+      { uri: 'file:///b.txt', fileName: 'b.txt', type: 'text/plain', fileSize: 10 },
+      { uri: 'file:///c.txt', fileName: 'c.txt', type: 'text/plain', fileSize: 10 },
+    ], null));
+    const removers = () => container.querySelectorAll<HTMLElement>('[aria-label="board_remover_anexo"]');
+    expect(removers()).toHaveLength(3);
+    expect(container.textContent).not.toContain('composer_colou_so_um');
+    act(() => removers()[1].click());
+    const uris = () => (JSON.parse(storage.memory.get('draft.v1:s1::sess')!) as { attachments: { uri: string }[] }).attachments.map((a) => a.uri);
+    expect(uris()).toEqual(['file:///a.png', 'file:///c.txt']);
+    type(container, 'legenda');
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(realFirstInput.upload).toHaveBeenCalledTimes(2);
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith(
+      'legenda — 📎 board_imagem: /up/a.png 📎 board_arquivo: /up/c.txt', expect.any(Number));
+    expect(removers()).toHaveLength(0);
+    expect(uris()).toEqual([]);
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it('falha no segundo upload guarda o caminho do primeiro e o reenvio não o sobe de novo', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    realFirstInput.upload.mockReset().mockResolvedValueOnce({ path: '/up/a.png' }).mockRejectedValueOnce(new Error('grande demais'))
+      .mockResolvedValueOnce({ path: '/up/b.txt' });
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({ version: 1, text: '', revision: 1, transcript: null, submission: null, attachments: [
+      { uri: 'file:///a.png', name: 'a.png', mime: 'image/png', kind: 'image' },
+      { uri: 'file:///b.txt', name: 'b.txt', mime: 'text/plain', kind: 'file' },
+    ] }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('grande demais');
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(realFirstInput.upload).toHaveBeenCalledTimes(3);
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('📎 board_imagem: /up/a.png 📎 board_arquivo: /up/b.txt', expect.any(Number));
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it.each([
+    ['vazio', { text: '', attachment: null }, false],
+    ['só espaços', { text: '  \n ', attachments: [] }, false],
+    ['só anexo', { text: '', attachments: [{ uri: 'file:///draft-attachments/1-1.txt', name: 'n.txt', mime: 'text/plain', kind: 'file' }] }, true],
+  ])('rascunho anterior %s só aparece com o que devolver', async (_case, content, shown) => {
+    storage.memory.set('draft.v1.recoverable:s1::sess', JSON.stringify({ version: 1, revision: 1, transcript: '/old', submission: null, ...content }));
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.textContent?.includes('composer_draft_previous')).toBe(shown);
+    act(() => root.unmount());
+  });
+
+  it('recuperação soma o anexo anterior ao atual sem reutilizar upload da sessão morta', async () => {
     const attachment = { uri: 'file:///draft-attachments/2-1.txt', name: 'atual.txt', mime: 'text/plain', kind: 'file' };
     const previous = { ...attachment, uri: 'file:///draft-attachments/1-1.txt', name: 'anterior.txt',
       uploadedPath: '/uploads/anterior.txt', uploadedFor: { serverId: 's1', name: 'sess', transcript: '/old' } };
@@ -1053,16 +1113,11 @@ describe('rascunho guardado no Composer', () => {
     }));
     const { container, root } = await render(createElement(Composer, props));
     act(() => button(container, 'composer_draft_recover')!.click());
-    expect(container.textContent).toContain('composer_draft_recover_attach_busy');
-    expect(container.querySelector('textarea')!.value).toBe('atual');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual(attachment);
-    expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(true);
-    act(() => container.querySelector<HTMLButtonElement>('[aria-label="board_remover_anexo"]')!.click());
-    act(() => button(container, 'composer_draft_recover')!.click());
     expect(container.querySelector('textarea')!.value).toBe('atual\nanterior');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual({
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachments).toEqual([attachment, {
       uri: previous.uri, name: previous.name, mime: previous.mime, kind: previous.kind,
-    });
+    }]);
+    expect(container.querySelectorAll('[aria-label="board_remover_anexo"]')).toHaveLength(2);
     expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(false);
     act(() => root.unmount());
   });
@@ -1327,7 +1382,7 @@ describe('Orientar texto do composer com os stores reais', () => {
     const panel = blocked === 'edição da fila'
       ? { entries: [{ id: 'q1', text: 'mensagem da fila', ts: null }], actions: true } : noQueue;
     writeDraft('s1', 'sess', { version: 1, text: 'rascunho', revision: 1, transcript: null, submission: null,
-      attachment: blocked === 'anexo' ? { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } : null });
+      attachments: blocked === 'anexo' ? [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] : [] });
     if (blocked === 'edição da fila') {
       const chat = chatStore('s1', 'sess');
       chat.use.setState({ queuePanel: panel });
@@ -1638,7 +1693,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
 
   it.each(['anexo', 'grupo', 'pares'])('mudar %s durante a espera cancela a intenção', async (change) => {
     if (change === 'anexo') writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', submission: null,
-      attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+      attachments: [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] });
     sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['par'] }];
     const request = pendingTranscription();
     const { container, root } = await start(change === 'anexo' ? '' : 'antes');
@@ -1679,7 +1734,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
       if (change === 'edição da fila') queuedText = chat.startQueueEdit('q1', 'antes');
       if (change === 'anexo') {
         writeDraft('s1', 'sess', { ...readDraft('s1', 'sess')!,
-          attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+          attachments: [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] });
         chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
       }
     });
@@ -1691,7 +1746,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
     const kept = change === 'edição da fila' ? 'antes' : `antes ${answer.text}`;
     expect(container.querySelector('textarea')!.value).toBe(change === 'edição da fila' ? 'na fila' : kept);
     expect(readDraft('s1', 'sess')?.text).toBe(kept);
-    if (change === 'anexo') expect(readDraft('s1', 'sess')?.attachment?.uri).toBe('file:///foto.png');
+    if (change === 'anexo') expect(readDraft('s1', 'sess')?.attachments[0]?.uri).toBe('file:///foto.png');
     if (change === 'edição da fila') expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: answer.text });
   });
 
@@ -1746,7 +1801,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
   });
 
   it('pending externo órfão solta o botão no teto sem apagar texto nem áudio', async () => {
-    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', attachment: null, submission: null });
+    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', attachments: [], submission: null });
     setDictationInFlight('s1', 'sess', 'orphan', true);
     try {
       writeDictation('s1', 'sess', { version: 1, id: 'orphan', transcript: '/t/voice.jsonl', draftRevision: 1, before: 'antes',
@@ -2055,7 +2110,7 @@ describe('ditado entregue à conversa de origem', () => {
     status: 'ready', text: 'ditado', raw: 'ditado cru', issue: '', ...patch,
   });
   const storeDraft = (patch: Record<string, unknown> = {}) => storage.memory.set('draft.v1:s1::sess', JSON.stringify({
-    version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null, ...patch,
+    version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachments: [], submission: null, ...patch,
   }));
   beforeEach(() => { sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }]; });
 

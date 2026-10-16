@@ -1059,7 +1059,7 @@ test('ACK antigo preserva edição nova, snapshot e eco sobrevivem ao release', 
 
 test('disco indisponível impede POST e mantém texto; recusa conserva snapshot sem pisar na edição', async () => {
   const chat = chatStore('srv1', 'sess');
-  writeDraft('srv1', 'sess', { version: 1, text: 'antiga', revision: 4, transcript: '/t', attachment: null, submission: null });
+  writeDraft('srv1', 'sess', { version: 1, text: 'antiga', revision: 4, transcript: '/t', attachments: [], submission: null });
   const requests = fetchManual();
   disk.fail = true;
   await expect(chat.send('antiga')).rejects.toThrow();
@@ -1078,7 +1078,7 @@ test('disco indisponível impede POST e mantém texto; recusa conserva snapshot 
 });
 
 test('reabertura só lê; reenvio explícito faz um POST e recusa toque concorrente', async () => {
-  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: '/t', attachment: null,
+  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: '/t', attachments: [],
     submission: { text: 'oi', draftRevision: 1, status: 'sending' } });
   historyResponses = [[ev({ id: 'old:1', text: 'oi' })]];
   const chat = chatStore('srv1', 'sess');
@@ -1101,7 +1101,7 @@ test('reabertura só lê; reenvio explícito faz um POST e recusa toque concorre
 });
 
 test('snapshot incerto com outra edição exige recuperação sem fazer POST', async () => {
-  writeDraft('srv1', 'sess', { version: 1, text: 'outro', revision: 2, transcript: '/t', attachment: null,
+  writeDraft('srv1', 'sess', { version: 1, text: 'outro', revision: 2, transcript: '/t', attachments: [],
     submission: { text: 'oi', draftRevision: 1, status: 'unknown' } });
   const requests = fetchManual();
   await expect(chatStore('srv1', 'sess').send('outro')).rejects.toThrow(m.composer_submission_recover_first());
@@ -1119,7 +1119,7 @@ test('falha parcial de broadcast conserva detalhe por destino e snapshot incerto
 });
 
 test('ACK compara revisão mesmo quando a nova edição tem texto idêntico; associação inicial conserva identidade', async () => {
-  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: null, attachment: null, submission: null });
+  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: null, attachments: [], submission: null });
   const requests = fetchManual();
   const sending = chatStore('srv1', 'sess').send('oi');
   const current = readDraft('srv1', 'sess')!;
@@ -1131,13 +1131,13 @@ test('ACK compara revisão mesmo quando a nova edição tem texto idêntico; ass
 
 test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {
   writeDraft('srv1', 'sess', { version: 1, text: 'legenda', revision: 7, transcript: '/first',
-    attachment: { uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }, submission: null });
+    attachments: [{ uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }], submission: null });
   const requests = fetchManual();
   const sending = chatStore('srv1', 'sess').send('legenda — 📎 imagem: /uploaded/image.jpg', 7);
   requests[0].responder(null);
   await sending;
   expect(readDraft('srv1', 'sess')).toMatchObject({ text: '', revision: 8, transcript: '/first', submission: null,
-    attachment: { uri: 'file:///own/image', name: 'image.jpg' } });
+    attachments: [{ uri: 'file:///own/image', name: 'image.jpg' }] });
 });
 
 test('history recuperado reconcilia eco preservado sem duplicar user_msg', async () => {

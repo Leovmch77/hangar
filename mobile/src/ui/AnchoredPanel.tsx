@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AccessibilityInfo, Modal, Platform, Pressable, View, useWindowDimensions } from 'react-native';
+import { AccessibilityInfo, Keyboard, Modal, Platform, Pressable, View, useWindowDimensions } from 'react-native';
 import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import { useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
@@ -52,8 +52,12 @@ export function AnchoredPanel({
   useEffect(() => {
     if (!open) return;
     if (!anchor) { setRect({ x: 0, y: 0, width: 0, height: 0 }); return; }
-    anchor.measureInWindow((x, y, width, height) => setRect({ x, y, width, height }));
-  }, [open, anchor]);
+    const measure = () => anchor.measureInWindow((x, y, width, height) => setRect({ x, y, width, height }));
+    measure();
+    // Tocar no gatilho com o teclado aberto o fecha: o gatilho desce e o painel tem de ir junto.
+    const subs = [Keyboard.addListener('keyboardDidHide', measure), Keyboard.addListener('keyboardDidShow', measure)];
+    return () => subs.forEach((s) => s.remove());
+  }, [open, anchor, windowHeight]);
 
   const ready = !!rect && !!frame;
   useEffect(() => {

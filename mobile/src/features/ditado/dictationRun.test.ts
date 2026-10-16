@@ -69,7 +69,7 @@ describe('dictateUpload', () => {
   beforeEach(() => { memory.clear(); core.transcribe.mockReset(); core.upload.mockReset(); vi.mocked(removeDraftAttachment).mockClear(); });
 
   it('galeria transcreve pelo nome guardado, sem subir cópia, e o texto entra no rascunho intacto', async () => {
-    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null });
+    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachments: [], submission: null });
     core.transcribe.mockResolvedValueOnce({ path: '/up/sess/ditado-9.m4a', text: ' depois ', raw: 'depois cru', aviso: null, estilo_aplicado: 'prosa' });
     await dictateUpload(server, 's1', 'sess', '/t/a.jsonl', 'ditado-9.m4a', 'prosa');
     expect(core.transcribe).toHaveBeenCalledExactlyOnceWith(server, 'sess', 'ditado-9.m4a', { limpar: true, estilo: 'prosa' });

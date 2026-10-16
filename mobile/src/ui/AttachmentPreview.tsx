@@ -1,4 +1,4 @@
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon } from './Icon';
@@ -7,14 +7,15 @@ import * as m from '../paraglide/messages';
 import type { PickedAttachment } from './attachmentPicker';
 
 // O anexo à espera do Enviar, acima do campo: miniatura (ou clipe), nome, tamanho e remover.
-export function AttachmentPreview({ attachment, onRemove, disabled }: {
+export function AttachmentPreview({ attachment, onRemove, disabled, style }: {
   attachment: PickedAttachment;
   onRemove: () => void;
   disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
 }) {
   const { theme } = useUnistyles();
   return (
-    <View style={[styles.preview, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
+    <View style={[styles.preview, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }, style]}>
       {attachment.kind === 'image' ? (
         <Image source={{ uri: attachment.uri }} style={styles.thumb} contentFit="cover" transition={150} />
       ) : (

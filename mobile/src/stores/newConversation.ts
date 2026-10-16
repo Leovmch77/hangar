@@ -45,7 +45,7 @@ export function attemptAttachment(attempt: FirstConversationAttempt): DraftAttac
 function uploadedPath(attempt: FirstConversationAttempt, attach: DraftAttachment): string | null {
   if (!attempt.sessionName) return null;
   let kept: DraftAttachment | null | undefined;
-  try { kept = readDraft(attempt.serverId, attempt.sessionName)?.attachment; } catch { return null; }
+  try { kept = readDraft(attempt.serverId, attempt.sessionName)?.attachments.find((a) => a.uri === attach.uri); } catch { return null; }
   const done = kept?.uploadedFor;
   return kept?.uri === attach.uri && kept.uploadedPath && done?.serverId === attempt.serverId
     && done.name === attempt.sessionName ? kept.uploadedPath : null;
@@ -93,7 +93,7 @@ function persist(attempt: FirstConversationAttempt): void {
   if (attempt.sessionName && !readDraft(attempt.serverId, attempt.sessionName)) {
     writeDraft(attempt.serverId, attempt.sessionName, {
       version: 1, text: attempt.phase === 'sent' ? '' : attempt.text, revision: 1,
-      transcript: null, attachment: attempt.phase === 'sent' ? null : attemptAttachment(attempt), submission: null,
+      transcript: null, attachments: attempt.phase === 'sent' ? [] : [attemptAttachment(attempt)].filter((a) => a !== null), submission: null,
     });
   }
   useNewConversation.setState((s) => ({ attempts: { ...s.attempts, [attempt.serverId]: attempt } }));
@@ -252,12 +252,11 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
       }
       try {
         const kept = readDraft(serverId, sessionName);
-        // Outro anexo escolhido na conversa não é trocado por este.
-        if (!kept?.attachment || kept.attachment.uri === attach.uri) {
-          writeDraft(serverId, sessionName, {
-            ...(kept ?? { version: 1, text: attempt.text, revision: 1, transcript: null, attachment: null, submission: null }),
-            attachment: { ...withoutUpload(attach), uploadedPath: path, uploadedFor: { serverId, name: sessionName, transcript: null } },
-          });
+        // Removido na conversa antes do upload: não volta à lista.
+        const base = kept ?? { version: 1 as const, text: attempt.text, revision: 1, transcript: null, attachments: [attach], submission: null };
+        const uploaded = { ...withoutUpload(attach), uploadedPath: path, uploadedFor: { serverId, name: sessionName, transcript: null } };
+        if (base.attachments.some((a) => a.uri === attach.uri)) {
+          writeDraft(serverId, sessionName, { ...base, attachments: base.attachments.map((a) => (a.uri === attach.uri ? uploaded : a)) });
         }
       } catch {
         setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
@@ -277,9 +276,10 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
       if (!attach) return;
       try {
         const current = readDraft(serverId, sessionName);
-        if (current?.attachment?.uri !== attach.uri) return;
-        if (!current.text && !current.submission) clearDraft(serverId, sessionName);
-        else writeDraft(serverId, sessionName, { ...current, attachment: null });
+        if (!current?.attachments.some((a) => a.uri === attach.uri)) return;
+        const attachments = current.attachments.filter((a) => a.uri !== attach.uri);
+        if (!current.text && !current.submission && !attachments.length) clearDraft(serverId, sessionName);
+        else writeDraft(serverId, sessionName, { ...current, attachments });
       } catch { /* o anexo já foi; sobra só a prévia no rascunho */ }
     };
     let sending: FirstConversationAttempt | null;

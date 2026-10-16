@@ -48,7 +48,7 @@ function handOffDraft(serverId: string, name: string, text: string, merge: boole
   try { prev = readDraft(serverId, name); } catch { /* ilegível: grava por cima */ }
   const value: ConversationDraft = merge && prev
     ? { ...prev, text: prev.text ? `${prev.text}\n\n${text}` : text, revision: prev.revision + 1 }
-    : { version: 1, text, revision: (prev?.revision ?? 0) + 1, transcript: null, attachment: null, submission: null };
+    : { version: 1, text, revision: (prev?.revision ?? 0) + 1, transcript: null, attachments: [], submission: null };
   try { writeDraft(serverId, name, value); } catch (e) {
     toast.erro(e instanceof Error ? e.message : m.draft_write_error());
   }

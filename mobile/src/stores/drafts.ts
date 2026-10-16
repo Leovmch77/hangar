@@ -15,19 +15,26 @@ const attachmentSchema = z.object({
   }).optional(),
 });
 
-const draftSchema = z.object({
+// Rascunho gravado antes da lista tinha `attachment` (um só ou null): vira a lista na leitura.
+const legacyAttachment = (raw: unknown) => {
+  if (raw === null || typeof raw !== 'object' || 'attachments' in raw || !('attachment' in raw)) return raw;
+  const { attachment, ...rest } = raw as { attachment: unknown };
+  return { ...rest, attachments: attachment ? [attachment] : [] };
+};
+
+const draftSchema = z.preprocess(legacyAttachment, z.object({
   version: z.literal(1),
   text: z.string(),
   revision: z.number().int().nonnegative(),
   transcript: z.string().min(1).nullable(),
   dictationId: z.string().min(1).optional(),
-  attachment: attachmentSchema.nullable(),
+  attachments: z.array(attachmentSchema),
   submission: z.object({
     text: z.string(),
     draftRevision: z.number().int().nonnegative(),
     status: z.enum(['sending', 'unknown', 'rejected']),
   }).nullable(),
-});
+}));
 
 // Separado do anexo escolhido: transcrição tardia não substitui foto nem snapshot de envio.
 const dictationSchema = z.object({
@@ -179,7 +186,7 @@ export function recoverDictation(serverId: string, name: string, id: string): Re
   const voice = readDictation(serverId, name);
   if (!voice || voice.id !== id || voice.status !== 'ready' || !voice.text) return { draft: null, dictation: voice };
   const latest = readDraft(serverId, name)
-    ?? { version: 1 as const, text: '', revision: 0, transcript: null, attachment: null, submission: null };
+    ?? { version: 1 as const, text: '', revision: 0, transcript: null, attachments: [], submission: null };
   return insertDictation(serverId, name, latest, voice);
 }
 
@@ -190,7 +197,7 @@ export function applyReadyDictation(serverId: string, name: string, transcript: 
   if (!voice || voice.status !== 'ready' || !voice.text) return null;
   if (voice.transcript !== null && voice.transcript !== transcript) return null;
   const latest = readDraft(serverId, name)
-    ?? { version: 1 as const, text: '', revision: 0, transcript, attachment: null, submission: null };
+    ?? { version: 1 as const, text: '', revision: 0, transcript, attachments: [], submission: null };
   if (latest.revision !== voice.draftRevision) return null;
   if (voice.transcript !== null && latest.transcript !== null && latest.transcript !== voice.transcript) return null;
   return { ...insertDictation(serverId, name, latest, voice), voice };
