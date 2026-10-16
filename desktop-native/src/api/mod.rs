@@ -288,6 +288,13 @@ impl Api {
         Ok(delivery)
     }
 
+    /// Orienta a primeira mensagem que espera no Hangar: no Claude com terminal o `/steer` ignora o texto.
+    pub async fn steer_waiting(&self, name: &str) -> Result<(), Failure> {
+        let r = self.client.post(self.endpoint(Some(name), Some("steer"))).timeout(Duration::from_secs(60))
+            .send().await.map_err(|_| Failure::transport(true))?;
+        Self::checked(r, true).await.map(|_| ())
+    }
+
     // Texto vai direto ao turno em voo (Codex, sem terminal); a resposta não traz `delivered`.
     pub async fn steer_text(&self, name: &str, text: &str) -> Result<Delivery, Failure> {
         let r = self.client.post(self.endpoint(Some(name), Some("steer")))

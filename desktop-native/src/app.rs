@@ -2611,10 +2611,20 @@ impl Hangar {
             return false;
         };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
+        // No Claude com terminal o `/steer` ignora o texto: a mensagem entra na fila e a primeira que espera é orientada.
+        let terminal_claude = steer && self.selected_key().as_ref() == Some(&key) && self.provider() == ("claude", false);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = match group {
                 Some(names) => api.broadcast(&names, &text).await.and_then(|results| group_sheet::group_delivery(&key.name, results)),
+                None if terminal_claude => match api.send(&key.name, &text).await {
+                    Ok(delivery) if !delivery.delivered => {
+                        // Orientar recusado deixa a mensagem à vista no painel "Na fila", como sem a opção.
+                        let _ = api.steer_waiting(&key.name).await;
+                        Ok(delivery)
+                    }
+                    other => other,
+                },
                 None if steer => api.steer_text(&key.name, &text).await,
                 None => api.send(&key.name, &text).await,
             };
