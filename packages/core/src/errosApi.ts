@@ -296,6 +296,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_agente_inexistente: () => m.erro_agente_inexistente(),
   erro_subagente_inexistente: () => m.erro_subagente_inexistente(),
   erro_transcript_ausente: () => m.erro_transcript_ausente(),
+  erro_resume_so_claude: (p) => m.erro_resume_so_claude({ provider: String(p.provider) }),
+  erro_session_id_invalido: () => m.erro_session_id_invalido(),
 
   // Conflito: nome em uso, sessao viva, pane ocupado
   erro_nome_em_uso: () => m.erro_nome_em_uso(),
@@ -568,6 +570,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
   session_transfer_busy: () => m.session_transfer_busy(),
   session_transfer_gate_unavailable: () => m.session_transfer_gate_unavailable(),
+  session_transfer_resume_unsupported: () => m.session_transfer_resume_unsupported(),
   // Falhas da ponte e do runtime que a tela mostra sem que se saiba se a ação aconteceu.
   codex_bridge_uncertain: () => m.codex_bridge_uncertain(),
   claude_bridge_uncertain: () => m.claude_bridge_uncertain(),

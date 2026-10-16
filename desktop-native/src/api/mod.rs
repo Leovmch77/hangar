@@ -162,7 +162,8 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
             // Par externo, botões dos mods e abertura de sessão: a frase do web pelo código; o `detalhe`
             // de uma recusa e o rótulo do botão vêm nos parâmetros.
             if let Some(code) = fields.get("code").and_then(Value::as_str)
-                .filter(|code| code.starts_with("erro_par_") || code.starts_with("erro_mod_") || code.starts_with("session_open_")) {
+                .filter(|code| code.starts_with("erro_par_") || code.starts_with("erro_mod_") || code.starts_with("session_open_")
+                    || matches!(*code, "erro_resume_so_claude" | "erro_session_id_invalido")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
@@ -1048,6 +1049,7 @@ mod tests {
             ("session_transfer_queue_pending", "mensagens na fila", "Messages are queued"),
             ("session_transfer_source_busy", "permissão pendente", "pending question or approval"),
             ("session_transfer_busy", "trocando de agente", "switching agents"),
+            ("session_transfer_resume_unsupported", "transferência", "transfer"),
         ] {
             let text = failure_detail(Some(json!({"detail": {"code": code,
                 "msg": "private-payload", "params": {"model": "chosen", "estimated": 123, "limit": 100}}})), 409);
@@ -1058,6 +1060,14 @@ mod tests {
                 assert!(catalog[code].as_str().unwrap().contains(expected));
             }
         }
+    }
+
+    #[test]
+    fn resume_refusals_use_the_web_sentence() {
+        let text = failure_detail(Some(json!({"detail": {"code": "erro_resume_so_claude", "params": {"provider": "pi"}, "msg": "x"}})), 409);
+        assert!(text != "x" && text.contains("pi") && text.contains("Claude"), "{text}");
+        let text = failure_detail(Some(json!({"detail": {"code": "erro_session_id_invalido", "params": {}, "msg": "session_id invalido"}})), 422);
+        assert!(text != "session_id invalido" && !text.contains("erro_session_id_invalido"), "{text}");
     }
 
     #[test]
