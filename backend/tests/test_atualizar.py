@@ -1424,8 +1424,8 @@ def test_topo_sem_binario_para_no_ultimo_commit_do_contrato_publicado(repo, rust
     final = atualizar.executar()
     assert final["ok"] is True
     assert _rev(repo, "HEAD") == rust["ultimo_35"] != rust["topo"]
-    assert final["avisos"] == ["versão mais nova ainda sem binário do Rust para este sistema (compilando, ou o "
-                               f"build falhou); atualizado até {rust['ultimo_35'][:8]}"]
+    assert final["avisos"] == ["aguardando o build do servidor Rust para este sistema (compilando, ou o build "
+                               f"falhou): a versão mais nova muda o contrato com ele; atualizado até {rust['ultimo_35'][:8]}"]
     assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-latest"]
     # O download usa o manifesto da escolha, e a tela (também no Reiniciar) é compilada aqui.
     assert rust["preparo"]["release"][2] is rust["manifesto"]
@@ -1463,14 +1463,13 @@ def _http(code):
     return _falha
 
 
-@pytest.mark.parametrize("caso", ["outro_sistema", "sem_rust", "sem_release"])
+@pytest.mark.parametrize("caso", ["sem_rust", "branch_sem_release"])
 def test_sem_binario_deste_sistema_vai_ao_topo_como_antes(repo, rust, monkeypatch, caso):
-    if caso == "outro_sistema":
-        rust["manifesto"]["files"] = {k.replace("linux-x86_64", "windows-x86_64"): v
-                                      for k, v in rust["manifesto"]["files"].items()}
-    elif caso == "sem_rust":
+    if caso == "sem_rust":
         monkeypatch.setattr(atualizar.config.settings, "rust_server", False)
     else:
+        _git(rust["obra"], "push", "-q", "origin", "main:teste")
+        monkeypatch.setattr(atualizar.config.settings, "update_branch", "teste")
         monkeypatch.setattr(atualizar.rust_release, "read_manifest", _http(404))
     final = atualizar.executar()
     assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"] and final["avisos"] == []
@@ -1491,6 +1490,38 @@ def test_sem_como_conferir_vai_ao_topo_e_diz(repo, rust, monkeypatch, caso):
     assert final["ok"] is True and _rev(repo, "HEAD") == rust["topo"]
     assert final["avisos"][0].startswith("não consegui conferir o binário do Rust")
     assert atualizar.pinned_target("main")[0] is None
+
+
+@pytest.mark.parametrize("caso", ["manifesto_da_main_regravando", "sem_build_deste_sistema", "rede", "commit_ausente"])
+def test_sem_binario_conferido_nao_troca_o_contrato_do_checkout(repo, rust, monkeypatch, caso):
+    """Checkout no 35 com o binário 35 instalado, topo no 36 ainda sem build conferido: o código
+    só avança no 35, e o auto-update espera."""
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "merge", "-q", "--ff-only", rust["binario_35"])
+    if caso == "manifesto_da_main_regravando":   # o `--clobber` do server.yml apaga e sobe o arquivo
+        monkeypatch.setattr(atualizar.rust_release, "read_manifest", _http(404))
+    elif caso == "sem_build_deste_sistema":
+        rust["manifesto"]["files"] = {k.replace("linux-x86_64", "windows-x86_64"): v
+                                      for k, v in rust["manifesto"]["files"].items()}
+    elif caso == "rede":
+        monkeypatch.setattr(atualizar.rust_release, "read_manifest",
+                            lambda url: (_ for _ in ()).throw(OSError("rede fora")))
+    else:
+        rust["manifesto"]["commit"] = "f" * 40
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+    assert final["avisos"] == ["não consegui conferir o binário do Rust publicado para este sistema; o código "
+                               "não troca de contrato com ele até conferir"]
+    assert atualizar.pinned_target("main")[0] is None
+
+
+def test_sem_binario_conferido_e_nada_no_contrato_do_checkout_fica_onde_esta(repo, rust, monkeypatch):
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "merge", "-q", "--ff-only", rust["ultimo_35"])
+    monkeypatch.setattr(atualizar.rust_release, "read_manifest", _http(500))
+    monkeypatch.setattr(atualizar, "_newest_with_protocol", lambda topo, want: None)
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
 
 
 def test_ja_no_topo_com_binario_de_outro_contrato_nao_recua_e_avisa(repo, rust):
