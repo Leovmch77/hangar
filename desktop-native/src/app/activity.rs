@@ -151,7 +151,8 @@ fn agent_model(subs: &[SubRun], agent_id: Option<&str>, prompt: Option<&str>, as
         Some(id) => subs.iter().find(|s| s.agent_id == id),
         None => match_sub(subs, prompt),
     };
-    sub.and_then(|s| s.model.clone()).or(asked)
+    // Na lista sem modelo (só erro de API, ilegível): o apelido seria afirmar o que não rodou.
+    match sub { Some(s) => s.model.clone(), None => asked }
 }
 
 fn match_sub<'a>(subs: &'a [SubRun], prompt: Option<&str>) -> Option<&'a SubRun> {
@@ -1415,7 +1416,8 @@ mod tests {
         let subs = vec![answered, sub("b", "faz Y")];
         assert_eq!(agent_model(&subs, None, Some("faz X"), Some("opus".into())).as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(agent_model(&subs, Some("a"), Some("outro prompt"), Some("opus".into())).as_deref(), Some("gpt-6.1-sol"));
-        assert_eq!(agent_model(&subs, None, Some("faz Y"), Some("opus".into())).as_deref(), Some("opus"));
+        assert_eq!(agent_model(&subs, None, Some("faz Y"), Some("opus".into())), None);
+        assert_eq!(agent_model(&subs, None, Some("ainda não listado"), Some("opus".into())).as_deref(), Some("opus"));
         assert_eq!(agent_model(&[], None, Some("faz X"), None), None);
     }
 
