@@ -241,21 +241,21 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Agentes e voz**
+- [x] **Step 1: Agentes e voz** (997c49531..bd730a345, correções 4f600748e..55c7ae113)
   `hangar-send --new` (e o `orquestrar`, que o usa) imprime o nome devolvido (S-44), usa o prazo das
   telas (S-29) e aceita o conjunto inteiro de parâmetros; a voz segue pelo `POST` local, que agora
   é do Rust.
-- [ ] **Step 2: Comandos digitados no terminal (D-013)**
+- [x] **Step 2: Comandos digitados no terminal (D-013)** (lógica comum em `scripts/hangar-open`, que chama `hangar-server open`; subcomandos do CLI, `-p`, pipe, `--resume` e flag desconhecida rodam crus com aviso)
   `claude`/`pi`/`omp`/`kimi` (`.posix.sh`, `.fish`; `claude.ps1`) chamam o comando de terminal da
   Task 3. `-p`, pipe, `--resume` explícito e flag desconhecida seguem rodando o CLI cru
   (`claude.posix.sh:59-100`).
 - [x] **Step 3: Convidado e Connect** (a08765f72..85fdea970: o Rust grava o dono no `guests.json` sob a trava comum; o Connect vai pela ponte do Claude com `guest: <id>`)
   Criar como convidado e pela porta 8768 sem Rust → Python → Rust e sem dois escritores do
   `guests.json` (`guest_user_gate.py:182-195`, `guest_users.py:170-199`).
-- [ ] **Step 4: Chamadores que faltavam**
+- [x] **Step 4: Chamadores que faltavam** (`creation-progress` é do Rust desde a correção da Task 4; `remember_provider` gravado pelo Rust desde a retirada das pontes)
   `GET /api/sessions/creation-progress` (`api.py:2229`); `remember_provider` gravando o
   `runtime-config.json`.
-- [ ] **Step 5: Telas**
+- [x] **Step 5: Telas** (D-010 e D-003 em nativo, PWA e Expo: modo e conta só vão quando a pessoa mexeu; 28 frases de erro novas; nome automático decidido pelo Rust)
   Sem padrão escondido na tela ("+" sem modo = padrão da conta, D-010); erros novos com frase no
   `errosApi.ts` e no nativo (S-38); aviso de conta trocada em toda tela (D-003); nome automático
   igual (S-52).
