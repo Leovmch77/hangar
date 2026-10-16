@@ -14,6 +14,7 @@ pub mod local;
 pub mod open;
 pub mod record;
 pub mod resolve;
+pub mod restore;
 pub mod server;
 pub mod terminal;
 #[cfg(test)]

@@ -109,6 +109,9 @@ pub struct Resolved {
     /// A conversa que já existe e esta abertura retoma (Arquivo, `/resume`, restore); `None` = nova.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// A mesma sessão voltando depois do reboot: o grupo, a fila, o `then` e o par do nome são dela e ficam.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub restore: bool,
 }
 
 /// `model_args.ID_OK`, com o `\Z` do Python: quebra de linha no fim é recusada.
@@ -272,7 +275,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         .then(|| account_mode(spec.account.config_dir(), facts).unwrap_or(PermissionMode::BypassPermissions));
     // Só a abertura do dono muda o provedor lembrado.
     Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest,
-        previous_non_plan, resume: None })
+        previous_non_plan, resume: None, restore: false })
 }
 
 /// `session_defaults.choose_provider`.

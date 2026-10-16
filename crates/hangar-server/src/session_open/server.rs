@@ -286,7 +286,7 @@ impl OpenHost for ServerHost {
 
     fn born<'a>(&'a self, born: &'a Born) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
-            if let Some(share) = &self.st.share {
+            if let Some(share) = self.st.share.as_ref().filter(|_| !born.restored) {
                 crate::share::pair_routes::session_died(self.st.clone(), share.clone(), Arc::new(crate::share::pair_routes::Direct), &born.name).await;
             }
             if let Some(jsonl) = &born.jsonl { self.st.list.seed(&born.name, jsonl); }

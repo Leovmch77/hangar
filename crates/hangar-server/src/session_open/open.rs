@@ -21,7 +21,9 @@ pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
 /// `codex_terminal`: a pasta da conta do terminal Codex que nasceu (o nascimento conta como uso dela).
-pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool, pub codex_terminal: Option<String> }
+/// `restored`: a mesma sessão voltando depois do reboot; o par e o grupo do nome são dela.
+pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool, pub codex_terminal: Option<String>,
+    pub restored: bool }
 
 pub trait OpenHost: Send + Sync {
     /// A pasta pessoal do dono (registros, `~/.claude.json`, `~/.hangar`).
@@ -337,7 +339,7 @@ pub fn opens_here(spec: &SessionSpec) -> bool {
 
 /// Abre a sessão do spec resolvido: com terminal de todo provedor, ou o Claude e o Codex sem terminal.
 pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
-    let Resolved { mut spec, mut warnings, initial_prompt, remember_provider, previous_non_plan, resume } = resolved;
+    let Resolved { mut spec, mut warnings, initial_prompt, remember_provider, previous_non_plan, resume, restore } = resolved;
     let _claim = NameClaim::take(host.home(), &spec.name)?;
     let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let codex_home = match &spec.account {
@@ -364,7 +366,7 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref(),
-                 resume.as_deref()).await {
+                 resume.as_deref(), restore).await {
         Ok((jsonl, warnings, route)) => {
             // O Codex sem terminal já subiu dentro da abertura (`warm_codex`).
             if spec.surface == Surface::Headless && spec.provider == AgentProvider::Claude { host.wake(&spec.name); }
@@ -381,7 +383,7 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
 #[allow(clippy::too_many_arguments)]
 async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
                 remember_provider: bool, previous_non_plan: Option<PermissionMode>, runtime: &Value, codex_home: Option<&str>,
-                resume: Option<&str>) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+                resume: Option<&str>, restore: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref().or(codex_home)).await?) } else { None };
     // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
@@ -419,7 +421,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     progress_step(&spec.name, "criando", json!({}));
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
     let result = match (spec.surface, codex_home) {
-        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home, resume).await,
+        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home, resume, restore).await,
         (Surface::Headless, Some(home)) =>
             codex_headless_life(host, spec, home, initial_prompt, &mut diary, remember_provider, resume).await.map(|w| (None, w, None)),
         (Surface::Headless, None) => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider, resume).await,
@@ -574,7 +576,7 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None, restored: false };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
@@ -617,7 +619,7 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
         let _ = super::record::remove(host.home(), &spec.key);
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None, restored: false };
     let mut warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
@@ -628,14 +630,14 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
 /// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
 #[allow(clippy::too_many_arguments)]
 async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
-                       remember_provider: bool, runtime: &Value, codex_home: Option<&str>, resume: Option<&str>)
+                       remember_provider: bool, runtime: &Value, codex_home: Option<&str>, resume: Option<&str>, restore: bool)
                        -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let claude = spec.provider == AgentProvider::Claude;
     if matches!(spec.provider, AgentProvider::Pi | AgentProvider::Omp | AgentProvider::Kimi) { sync_skills(host).await; }
     // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
     name_still_free(host, spec, diary).await?;
-    host.leave_old_group(&spec.name).await?;
+    if !restore { host.leave_old_group(&spec.name).await?; }
     diary.step("preparar_comando");
     let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
     let (pane, jsonl, route) = if claude {
@@ -675,7 +677,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         _ => {}
     }
     diary.step("criar_terminal");
-    host.release_name(&spec.name).await?;
+    if !restore { host.release_name(&spec.name).await?; }
     // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
     if let Err(error) = super::record::write(host.home(), spec) {
         diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
@@ -714,7 +716,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         }));
     }
     diary.step("limpar_estado_anterior");
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned) };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned), restored: restore };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));
