@@ -158,7 +158,8 @@ impl ServerHost {
             let terminal = TerminalEnv::local(&env.home, &env.base);
             (env, terminal)
         }).await.unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
-        Self { st, env, terminal, mux: ProcessMux::default() }
+        let mux = ProcessMux { diary: crate::diag::diary_dir_in(&env), ..ProcessMux::default() };
+        Self { st, env, terminal, mux }
     }
 
     /// O dono da sessão que o convidado com login abriu vai ao `guests.json`. Falhou: a sessão sai
