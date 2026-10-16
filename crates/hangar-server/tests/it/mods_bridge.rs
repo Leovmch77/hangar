@@ -163,6 +163,9 @@ async fn two_processes_born_with_the_same_name_each_reach_only_their_session() {
     assert_eq!(start["fromApp"], false, "o processo antigo cai na própria sessão, sem clique em aberto");
     let opened = post(format!("{base}/opened"), json!({"sessao": "mods-s", "token": old, "attempt": attempt, "url": "https://x"}), false).await;
     assert_eq!(opened.status().as_u16(), 409, "a URL do antigo não vai ao aparelho da sessão nova");
+    // A janela do clique é de 1,5 s em relógio real: o processo novo recebe um clique aberto agora, e não
+    // o que as chamadas do antigo já consumiram sob carga.
+    let attempt = mods.begin_click("mods-s", "a", "vitrine", "b");
     let new = mint_keyed(OWNER, "mods-s", "processo-novo");
     let start = json_of(post(format!("{base}/press-start"), json!({"sessao": "mods-s", "token": new, "requestId": "a", "element": "b"}), false).await).await;
     assert_eq!((start["fromApp"].as_bool(), start["attempt"].as_str()), (Some(true), Some(attempt.as_str())));

@@ -3276,13 +3276,16 @@ mod tests {
         registry.park_idle_claude(Duration::from_secs(65*60)).await;
         assert!(registry.has_entry(Some(&key),"cl").await && process::probe_alive(first.0.id()),"parada há menos que o prazo fica aberta");
 
-        let kept=std::fs::read(&state_path).unwrap();
-        let mut waiting:Value=serde_json::from_slice(&kept).unwrap();
-        waiting["rows"].as_array_mut().unwrap().push(json!({"id":"x","text":"t","delivered":false}));
-        std::fs::write(&state_path,waiting.to_string()).unwrap();
+        // A fila é do ator, que a regrava da memória: a mensagem entra e sai por ele. O aviso de limite a
+        // segura sem entregar, e o estacionamento não olha esse aviso, só a fila.
+        let (sink,_hits)=tokio::sync::mpsc::unbounded_channel();
+        registry.set_limit_sink(sink);
+        registry.usage_limit(LimitHit {name:"cl".into(),provider:"claude".into(),account:None,limit:UsageLimit {window:"five_hour".into(),resets_at:None}});
+        registry.queue_action("cl","x".into(),Action::Append {text:"t".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("x".into())}).await.unwrap();
         registry.park_idle_claude(Duration::ZERO).await;
         assert!(registry.has_entry(Some(&key),"cl").await && process::probe_alive(first.0.id()),"mensagem por entregar na fila segura a sessão");
-        std::fs::write(&state_path,&kept).unwrap();
+        assert_eq!(registry.queue_action("cl","x-cancel".into(),Action::Cancel {entry_id:"x".into()}).await.unwrap(),json!("cancelled"));
+        registry.release_limit("cl");
 
         let before=std::fs::read(dir.join("cl.json")).unwrap();
         registry.park_idle_claude(Duration::ZERO).await;

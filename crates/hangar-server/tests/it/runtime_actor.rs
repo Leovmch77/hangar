@@ -1745,6 +1745,8 @@ for line in sys.stdin:
         let reply = handle.command(control("restart-1",OperationKind::Restart,json!({}))).await.unwrap();
         assert!(reply.disposition == Disposition::Accepted,"reiniciar responde aceito");
         assert!(matches!(process::liveness(old.pid,&key),process::Liveness::Dead),"o processo antigo morreu");
+        // Quem anota a subida é o `codex` falso, filho do cano novo: sob carga ele escreve depois do aceito.
+        until("o codex do cano novo anotou a subida",||recorded(dir.path()).len() >= 2).await;
         let canos = recorded(dir.path());
         assert_eq!(canos.len(),2);
         assert!(matches!(process::liveness(canos[1].pid,&key),process::Liveness::Ours));
