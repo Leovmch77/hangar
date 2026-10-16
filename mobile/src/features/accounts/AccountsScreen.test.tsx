@@ -218,6 +218,31 @@ describe('contas com motores e cota integrados', () => {
     expect(view.container.textContent).not.toContain('Nenhum motor configurado');
   });
 
+  it('mantém motor sem credencial após falha inicial da lista', async () => {
+    calls.credentials.mockRejectedValueOnce(new Error('credential read failed'));
+    const view = await show();
+    expect(view.container.textContent).toContain('credential read failed');
+    expect([...view.container.querySelectorAll('span')].filter(node => node.textContent === 'Provedor')).toHaveLength(1);
+    expect(buttons(view.container, 'Editar motor')).toHaveLength(1);
+  });
+
+  it('mantém motor sem credencial durante recarga e deduplica quando a credencial chega', async () => {
+    calls.credentials.mockRejectedValueOnce(new Error('credential read failed'));
+    const view = await show();
+    expect([...view.container.querySelectorAll('span')].filter(node => node.textContent === 'Provedor')).toHaveLength(1);
+    let credentialsDone!: (value: Credencial[]) => void;
+    let enginesDone!: (value: EnginesResponse) => void;
+    calls.credentials.mockImplementationOnce(() => new Promise(resolve => { credentialsDone = resolve; }));
+    calls.engines.mockImplementationOnce(() => new Promise(resolve => { enginesDone = resolve; }));
+    await click(view.container, 'Atualizar lista e cotas');
+    await act(async () => enginesDone({ motores: { custom: engine }, arquivo_corrompido: false, arquivo_caminho: '/home/test/engines.json' }));
+    expect([...view.container.querySelectorAll('span')].filter(node => node.textContent === 'Provedor')).toHaveLength(1);
+    expect(buttons(view.container, 'Editar motor')).toHaveLength(1);
+    await act(async () => credentialsDone([provider]));
+    expect([...view.container.querySelectorAll('span')].filter(node => node.textContent === 'Provedor')).toHaveLength(1);
+    expect(buttons(view.container, 'Editar motor')).toHaveLength(1);
+  });
+
   it('uma falha de leitura mostra o motivo e a atualização permite recuperar vazio', async () => {
     calls.engines.mockRejectedValueOnce(new Error('engine read refused'));
     const view = await show();
@@ -242,6 +267,50 @@ describe('contas com motores e cota integrados', () => {
     await act(async () => done({ ok: true }));
     expect(calls.engines).toHaveBeenCalledTimes(reads);
     expect(view.container.textContent).toContain('Máquina B');
+  });
+
+  it.each(['success', 'failure'])('DELETE tardio com %s não altera motor de mesmo nome na máquina B', async outcome => {
+    vi.spyOn(Alert, 'alert');
+    let done!: (value: { ok: boolean }) => void;
+    let fail!: (cause: Error) => void;
+    calls.deleteEngine.mockImplementationOnce(() => new Promise((resolve, reject) => { done = resolve; fail = reject; }));
+    calls.credentials.mockImplementation((target: Server) => Promise.resolve([{ ...provider, nome: target.id === a.id ? 'motor-a' : 'motor-b' }]));
+    const view = await show();
+    await click(view.container, 'Apagar motor');
+    const confirm = lastConfirmation().find(x => x.style === 'destructive')!.onPress!;
+    await act(async () => confirm());
+    expect(calls.deleteEngine).toHaveBeenCalledWith(a, 'custom');
+    expect(buttons(view.container, 'Apagar motor')[0].disabled).toBe(true);
+    await switchTo(b);
+    expect(view.container.textContent).toContain('motor-b');
+    const before = view.container.textContent;
+    const engineReads = calls.engines.mock.calls.length;
+    const credentialReads = calls.credentials.mock.calls.length;
+    await act(async () => { if (outcome === 'success') done({ ok: true }); else fail(new Error('delete A failed')); });
+    expect(view.container.textContent).toBe(before);
+    expect(calls.engines).toHaveBeenCalledTimes(engineReads);
+    expect(calls.credentials).toHaveBeenCalledTimes(credentialReads);
+    expect(buttons(view.container, 'Apagar motor')[0].disabled).toBe(false);
+    await click(view.container, 'Apagar motor');
+    const confirmB = lastConfirmation().find(x => x.style === 'destructive')!.onPress!;
+    await act(async () => confirmB());
+    expect(calls.deleteEngine).toHaveBeenLastCalledWith(b, 'custom');
+  });
+
+  it('diálogo antigo de motor não envia DELETE após a troca de máquina', async () => {
+    vi.spyOn(Alert, 'alert');
+    const view = await show(); await click(view.container, 'Apagar motor');
+    const confirm = lastConfirmation().find(x => x.style === 'destructive')!.onPress!;
+    await switchTo(b);
+    const before = view.container.textContent;
+    const engineReads = calls.engines.mock.calls.length;
+    const credentialReads = calls.credentials.mock.calls.length;
+    await act(async () => confirm());
+    expect(calls.deleteEngine).not.toHaveBeenCalled();
+    expect(view.container.textContent).toBe(before);
+    expect(calls.engines).toHaveBeenCalledTimes(engineReads);
+    expect(calls.credentials).toHaveBeenCalledTimes(credentialReads);
+    expect(buttons(view.container, 'Apagar motor')[0].disabled).toBe(false);
   });
 
   it('descarta motores recebidos de uma máquina antiga', async () => {

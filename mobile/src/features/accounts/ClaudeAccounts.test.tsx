@@ -214,6 +214,104 @@ describe('ClaudeAccountActions', () => {
 });
 
 describe('ClaudeAccountCreate', () => {
+  describe('releitura da criação', () => {
+    it('atualiza antes de concluir login e cancelar não perde a conta criada', async () => {
+      calls.create.mockResolvedValue({ path: '/home/user/.claude-work', label: 'Returned', active: false });
+      const refresh = deferred<void>(), changed = vi.fn(() => refresh.promise), close = vi.fn();
+      const { root, container } = mount();
+      try {
+        await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: changed, onClose: close })));
+        await input(container, 'work'); await click(container, m.comum_criar());
+        expect(changed).toHaveBeenCalledTimes(1);
+        expect(calls.start).toHaveBeenCalledWith(server, 'Returned'); expect(container.textContent).toContain(waiting.url);
+        expect(calls.code).not.toHaveBeenCalled();
+        await click(container, m.comum_cancelar());
+        expect(close).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1);
+        expect(calls.cancel).toHaveBeenCalledWith(server, 'Returned'); expect(calls.create).toHaveBeenCalledTimes(1);
+      } finally { await act(async () => refresh.resolve()); }
+    });
+
+    it('resposta perdida solicita lista sem repetir criação nem iniciar login', async () => {
+      calls.create.mockRejectedValue(new Error('creation response lost'));
+      const { root, container } = mount(); const changed = vi.fn();
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: changed, onClose: vi.fn() })));
+      await input(container, 'work'); await click(container, m.comum_criar());
+      expect(changed).toHaveBeenCalledTimes(1); expect(container.textContent).toContain('creation response lost');
+      await ticks(6000); await click(container, m.comum_criar());
+      expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, 'work'); expect(calls.start).not.toHaveBeenCalled();
+      expect(changed).toHaveBeenCalledTimes(1);
+    });
+
+    it('usa callback capturado na ação mesmo se a prop mudar antes da resposta', async () => {
+      const pending = deferred<{ path: string; label: string; active: boolean }>(); calls.create.mockReturnValueOnce(pending.promise);
+      const { root, container } = mount(); const original = vi.fn(), replacement = vi.fn();
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: original, onClose: vi.fn() })));
+      await input(container, 'work'); await click(container, m.comum_criar());
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: replacement, onClose: vi.fn() })));
+      await act(async () => pending.resolve({ path: '/home/user/.claude-work', label: 'Returned', active: false }));
+      expect(original).toHaveBeenCalledTimes(1); expect(replacement).not.toHaveBeenCalled();
+      expect(calls.start).toHaveBeenCalledWith(server, 'Returned');
+    });
+
+    it.each(['throw', 'reject'])('falha de atualização %s avisa sem desfazer criação nem impedir login', async failure => {
+      calls.create.mockResolvedValue({ path: '/home/user/.claude-work', label: 'Returned', active: false });
+      const changed = vi.fn(() => {
+        if (failure === 'throw') throw new Error('refresh unavailable');
+        return Promise.reject(new Error('refresh unavailable'));
+      });
+      const { root, container } = mount();
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: changed, onClose: vi.fn() })));
+      await input(container, 'work'); await click(container, m.comum_criar());
+      expect(calls.alert).toHaveBeenCalledWith(`${m.criar_conta_lista_erro()}\nrefresh unavailable`);
+      expect(calls.start).toHaveBeenCalledWith(server, 'Returned'); expect(container.textContent).toContain(waiting.url);
+      expect(container.textContent).not.toContain('refresh unavailable');
+      expect(calls.create).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['throw', 'reject'])('falha de atualização %s após resposta perdida não afirma conta criada', async failure => {
+      calls.create.mockRejectedValue(new Error('creation response lost'));
+      const changed = vi.fn(() => {
+        if (failure === 'throw') throw new Error('refresh unavailable');
+        return Promise.reject(new Error('refresh unavailable'));
+      });
+      const { root, container } = mount();
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: changed, onClose: vi.fn() })));
+      await input(container, 'work'); await click(container, m.comum_criar());
+      expect(calls.alert).toHaveBeenCalledWith(`${m.criar_conta_lista_falhou()}\nrefresh unavailable`);
+      expect(container.textContent).toContain('creation response lost'); expect(container.textContent).not.toContain('refresh unavailable');
+      await click(container, m.comum_criar());
+      expect(calls.create).toHaveBeenCalledTimes(1); expect(calls.start).not.toHaveBeenCalled();
+    });
+
+    it.each(['servidor', 'unmount'])('resposta de criação após %s não chama callback antigo nem novo', async change => {
+      const pending = deferred<{ path: string; label: string; active: boolean }>(); calls.create.mockReturnValueOnce(pending.promise);
+      const { root, container } = mount(); const original = vi.fn(), next = vi.fn();
+      await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: original, onClose: vi.fn() })));
+      await input(container, 'work'); await click(container, m.comum_criar());
+      if (change === 'servidor') await act(async () => root.render(createElement(ClaudeAccountCreate, { server: other, credentials: [], onChanged: next, onClose: vi.fn() })));
+      else await unmount(root);
+      await act(async () => pending.resolve({ path: '/home/user/.claude-work', label: 'Returned', active: false }));
+      expect(original).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled(); expect(calls.alert).not.toHaveBeenCalled();
+      expect(calls.start).not.toHaveBeenCalled();
+    });
+
+    it.each(['servidor', 'unmount'])('falha tardia da atualização após %s não mostra alerta nem chama callback novo', async change => {
+      calls.create.mockResolvedValue({ path: '/home/user/.claude-work', label: 'Returned', active: false });
+      const refresh = deferred<void>(), original = vi.fn(() => refresh.promise), next = vi.fn();
+      const { root, container } = mount();
+      try {
+        await act(async () => root.render(createElement(ClaudeAccountCreate, { server, credentials: [], onChanged: original, onClose: vi.fn() })));
+        await input(container, 'work'); await click(container, m.comum_criar());
+        expect(original).toHaveBeenCalledTimes(1);
+        if (change === 'servidor') await act(async () => root.render(createElement(ClaudeAccountCreate, { server: other, credentials: [], onChanged: next, onClose: vi.fn() })));
+        else await unmount(root);
+        await act(async () => refresh.reject(new Error('late refresh failure')));
+        expect(calls.alert).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+        expect(calls.start).not.toHaveBeenCalledWith(other, 'Returned');
+      } finally { await act(async () => refresh.resolve()); }
+    });
+  });
+
   it('cria uma vez e repete o login na conta retornada sem criar outra pasta', async () => {
     calls.create.mockResolvedValue({ path: '/home/user/.claude-work', label: 'Returned', active: false });
     calls.start.mockRejectedValueOnce(new Error('login start failed'));

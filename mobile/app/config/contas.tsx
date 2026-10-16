@@ -188,7 +188,7 @@ function ServerAccounts({ server }: { server: Server | null }) {
         account,
         credential: null,
       })),
-    ...(!loading && engines.ready ? Object.entries(engines.data!.motores)
+    ...(engines.ready ? Object.entries(engines.data!.motores)
       .filter(([name]) => !credentials.some(c => c.id === `chave:${name}`))
       .map(([name, engine]): IdentityRow => ({ key: `engine:${name}`, group: 'claude_engine', title: engine.label || name,
         description: `${engine.model} · ${engine.base_url}`, account: null, credential: null, engineName: name })) : []),
