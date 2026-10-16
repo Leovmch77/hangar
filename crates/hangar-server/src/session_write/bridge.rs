@@ -125,6 +125,10 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     req.headers_mut().remove(CLOSED_TRANSCRIPT);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
+    // Fechada de propósito não volta no próximo reboot, de qualquer agente.
+    if let (true, Some(name), Some(dirs)) = (owner, name.as_deref(), st.list.env().dirs.as_ref()) {
+        crate::session_open::restore::forget(&dirs.home, name);
+    }
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
     match runtime.kill_codex_terminal(&name).await {

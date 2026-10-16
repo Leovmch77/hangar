@@ -150,6 +150,28 @@ fn write(home: &Path, snap: &Snapshot) -> std::io::Result<()> {
     crate::runtime::queue::atomic_write(&path(home), &serde_json::to_vec_pretty(snap)?)
 }
 
+/// Os nomes fechados de propósito desde a última fotografia: o laço os tira da que ele tem na memória antes
+/// de gravar, sob esta mesma trava, para não regravar a entrada que `forget` acabou de tirar.
+static CLOSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A sessão fechada de propósito (o `DELETE`) sai da fotografia na hora: não volta no próximo reboot.
+pub fn forget(home: &Path, name: &str) {
+    let mut closed = CLOSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    closed.push(name.to_owned());
+    let mut snap = read(home);
+    let before = snap.sessions.len();
+    snap.sessions.retain(|_, entry| entry.name != name);
+    if snap.sessions.len() != before && let Err(error) = write(home, &snap) {
+        tracing::warn!(code = "session_restore_unwritten", kind = ?error.kind(), "a sessão fechada ficou na fotografia até o próximo tique");
+    }
+}
+
+/// Tira da fotografia os nomes fechados desde a última; chamar com `CLOSED` travada.
+fn drop_closed(snap: &mut Snapshot, closed: &mut Vec<String>) {
+    snap.sessions.retain(|_, entry| !closed.contains(&entry.name));
+    closed.clear();
+}
+
 fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
 
 /// A chave do spec gravada no ambiente da sessão (`CP_SESSION_KEY`).
@@ -263,7 +285,9 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
         match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
             (true, _) => {
                 if let Some(alive) = alive(&st, &home, &program).await {
-                    let next = observe(&snap, &alive, now(), snap.mux_started);
+                    let mut next = observe(&snap, &alive, now(), snap.mux_started);
+                    let mut closed = CLOSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop_closed(&mut next, &mut closed);
                     if next != snap {
                         if let Err(error) = write(&home, &next) {
                             tracing::warn!(code = "session_restore_unwritten", kind = ?error.kind(), "fotografia das sessões não gravada");
@@ -372,6 +396,20 @@ mod tests {
         assert!(!settle(&[("busy".to_owned(), Err("erro_mux_indisponivel".to_owned()))], &mut attempts, &mut done));
         assert!(settle(&[("busy".to_owned(), Err("account_busy".to_owned()))], &mut attempts, &mut done), "esgotou: o servidor novo é adotado");
         assert!(done.contains("busy"));
+    }
+
+    #[test]
+    fn a_session_closed_on_purpose_leaves_the_snapshot_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot { mux_started: Some(1), sessions: [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", Some("c2")))].into() };
+        write(dir.path(), &snap).unwrap();
+        forget(dir.path(), "a");
+        assert_eq!(read(dir.path()).sessions.keys().collect::<Vec<_>>(), ["k2"], "o arquivo, já");
+        let mut memory = snap.clone();
+        let mut closed = CLOSED.lock().unwrap();
+        drop_closed(&mut memory, &mut closed);
+        assert!(!memory.sessions.contains_key("k1") && memory.sessions.contains_key("k2"), "a do laço também, antes de gravar");
+        assert!(closed.is_empty());
     }
 
     #[test]
