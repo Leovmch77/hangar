@@ -1044,8 +1044,22 @@ fn the_pi_omp_and_kimi_panes_are_the_ones_python_launched() {
         env.extend(moved.iter().filter_map(|w| w.split_once('=')).map(|(k, v)| (k.to_owned(), v.to_owned())));
         if agent == "pi" { env.push(("CP_PI_SESSION".into(), "<uuid:1>".into())); }
         let (our_env, _) = launched_pane(&ours);
+        // A pasta do omp pelo mesmo cálculo do código: `Path::join` e o slug do `abspath` (no Windows
+        // ganha a unidade). A parte da raiz no slug vira o marcador da fixture.
+        let slug = crate::list::discover_other::pi_cwd_slug;
+        let root = slug("/r");
+        let tail = slug(&spec.cwd).strip_prefix(&format!("{}-", &root[..root.len() - 2])).map(str::to_owned);
+        let profile = match &spec.account { Account::Omp { profile, .. } => Some(profile.as_str()), _ => None };
+        let home = std::path::Path::new("/r/home");
+        let sessions = agents::omp_agent_dir(home, &Default::default(), profile).join("sessions");
+        let omp_dir = format!("{}{}", sessions.join(slug(&spec.cwd)).display(), std::path::MAIN_SEPARATOR);
+        let relative: Vec<String> = sessions.strip_prefix(home).unwrap().iter().map(|c| c.to_string_lossy().into_owned()).collect();
         let our_words: Vec<String> = shell_words(&terminal::tests::undo_not_inherited(ours.last().unwrap())).into_iter()
-            .map(|w| stamp.replace(&w.replace("/--r-", "/-<ROOT_SANITIZED>-").replace("/r/", "<ROOT>/"), "<iso-file>_").into_owned()).collect();
+            .map(|w| match &tail {
+                Some(tail) => w.replace(&omp_dir, &format!("<ROOT>/home/{}/-<ROOT_SANITIZED>-{tail}/", relative.join("/"))),
+                None => w,
+            })
+            .map(|w| stamp.replace(&w.replace("/r/", "<ROOT>/"), "<iso-file>_").into_owned()).collect();
         assert_eq!(our_env, env, "{name}: -e");
         assert_eq!(our_words, words, "{name}: comando");
         compared += 1;
@@ -1072,7 +1086,9 @@ fn pi_omp_and_kimi_resume_with_their_own_verb() {
 
     let omp = SessionSpec { provider: AgentProvider::Omp, cwd: "/w".into(), model: None, effort: None,
         account: Account::Omp { profile: "trabalho".into(), config_dir: None }, ..base.clone() };
-    let dir = home.path().join(".omp/profiles/trabalho/agent/sessions/--w--");
+    // Pelo mesmo cálculo do código (`omp_agent_dir` + slug do `abspath`): no Windows o `/w` ganha a unidade.
+    let dir = agents::omp_agent_dir(home.path(), &Default::default(), Some("trabalho")).join("sessions")
+        .join(crate::list::discover_other::pi_cwd_slug("/w"));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("2026-09-06T15-51-00-640Z_{ID}.jsonl"));
     std::fs::write(&file, "").unwrap();
@@ -1082,7 +1098,7 @@ fn pi_omp_and_kimi_resume_with_their_own_verb() {
     let bare = SessionSpec { account: Account::Default, ..omp.clone() };
     assert_eq!(command(&bare, agents::Conversation::Resume(ID)).unwrap_err().msg, "transcript do omp nao encontrado para retomar");
     // O omp grava o principal em `sessions/-/`: o mesmo nome em outra pasta da raiz também vale.
-    let elsewhere = home.path().join(".omp/agent/sessions/-");
+    let elsewhere = agents::omp_agent_dir(home.path(), &Default::default(), None).join("sessions").join("-");
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join(format!("2026-09-07T10-00-00-000Z_{ID}.jsonl")), "").unwrap();
     assert_eq!(command(&bare, agents::Conversation::Resume(ID)).unwrap().0[2], elsewhere.join(format!("2026-09-07T10-00-00-000Z_{ID}.jsonl")).to_string_lossy());
@@ -1108,7 +1124,8 @@ fn the_skill_bridge_runs_with_the_backend_python() {
         std::fs::write(b.join(python), "").unwrap();
         std::fs::create_dir_all(b.join("app")).unwrap();
         std::fs::write(b.join("app/skill_bridge.py"), "").unwrap();
-        assert_eq!(agents::skill_bridge_argv(b, windows), Some(vec![b.join(python).to_string_lossy().into_owned(),
+        let python = python.split('/').fold(b.to_path_buf(), |path, part| path.join(part));
+        assert_eq!(agents::skill_bridge_argv(b, windows), Some(vec![python.to_string_lossy().into_owned(),
             b.join("app").join("skill_bridge.py").to_string_lossy().into_owned(), "--quiet".into()]), "windows={windows}");
     }
 }
