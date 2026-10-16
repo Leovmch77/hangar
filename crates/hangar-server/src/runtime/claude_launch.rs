@@ -61,6 +61,24 @@ pub fn transcript(env: &AccountEnvironment, spec: &SessionSpec, sid: &str) -> Pa
     moved.unwrap_or(expected)
 }
 
+/// `permissions.defaultMode` do `settings.json` da conta (a do servidor sem pasta própria), como a
+/// abertura decide: ausente ou fora da lista é bypass, `default` é manual; ilegível recusa (T-002).
+fn account_mode(env: &AccountEnvironment, config_dir: Option<&str>) -> Result<PermissionMode, RuntimeError> {
+    let dir = config_dir.map_or_else(|| env.claude_base.clone(), PathBuf::from);
+    let mode = match std::fs::read(dir.join("settings.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(refused("launch_permission_mode", "o settings.json da conta não pôde ser lido; o modo da sessão não foi decidido")),
+        Ok(raw) => serde_json::from_slice::<Value>(&raw)
+            .map_err(|_| refused("launch_permission_mode", "o settings.json da conta é ilegível; o modo da sessão não foi decidido"))?
+            ["permissions"]["defaultMode"].as_str().map(str::to_owned),
+    };
+    Ok(match mode.as_deref() {
+        Some("default") => PermissionMode::Manual,
+        Some(mode) => PermissionMode::claude(mode).unwrap_or(PermissionMode::BypassPermissions),
+        None => PermissionMode::BypassPermissions,
+    })
+}
+
 /// `pensamento.ler()`: `showThinkingSummaries` do `settings.json` compartilhado (o `~/.claude` real).
 fn thinking_summaries(home: &Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(home.join(".claude").join("settings.json")) else { return false };
@@ -80,9 +98,13 @@ pub fn plan(spec: &SessionSpec, meta: &Value, ctx: &Context) -> Result<Launch, R
     // Sem terminal não há bwrap: o Claude subiria com o código gravável.
     if spec.read_only || meta["read_only"] == true { return Err(refused("headless_read_only", READ_ONLY_MSG)); }
     let sid = text(meta, "session_id").ok_or_else(|| refused("launch_meta", "sidecar sem `session_id`"))?;
-    // Ilegível ou desconhecido não vira um modo inventado (matriz, item 17).
-    let mode = spec.permission_mode.filter(|m| PermissionMode::CLAUDE.contains(m))
-        .ok_or_else(|| refused("launch_permission_mode", "modo de permissão da sessão desconhecido; a sessão não foi aberta"))?;
+    // Matriz, item 17: modo ausente é o `defaultMode` da conta; gravado e desconhecido não vira um
+    // modo inventado.
+    let mode = match spec.permission_mode.filter(|m| PermissionMode::CLAUDE.contains(m)) {
+        Some(mode) => mode,
+        None if meta["permission_mode"].is_null() => account_mode(ctx.env, spec.account.config_dir())?,
+        None => return Err(refused("launch_permission_mode", "modo de permissão da sessão desconhecido; a sessão não foi aberta")),
+    };
     let engine = match &spec.account { Account::Engine { name, context_window, .. } => Some((name, context_window)), _ => None };
     let tier = match spec.service_tier {
         Some(crate::session_open::ServiceTier::Priority) if !ctx.fast =>
@@ -339,6 +361,28 @@ mod tests {
         spec.permission_mode = None;
         assert!(permanent(&plan(&spec, &case.meta(), &ctx).unwrap_err().code));
         for passing in ["cano_nao_escutou", "cano_nao_subiu", "relaunch_initialize", "lifecycle_busy"] { assert!(!permanent(passing), "{passing}"); }
+    }
+
+    /// Matriz, item 17: sidecar sem modo (o do Python antigo) sobe no `defaultMode` da conta, explícito;
+    /// modo gravado que o Hangar não conhece é recusado.
+    #[test]
+    fn absent_mode_uses_the_account_default_and_unknown_is_refused() {
+        let case = case("create_claude_headless_then_launch");
+        let env = AccountEnvironment::from_map(case.server_env());
+        let ctx = Context { env: &env, runtime_config: &json!({}), plugin_roots: &[], bridge: None, engine_route: None, fast: false };
+        let mut meta = case.meta();
+        meta.as_object_mut().unwrap().remove("permission_mode");
+        let mode_of = |meta: &Value| {
+            let spec = crate::session_open::record::claude_live(&case.root.join("home"), meta, "s1").unwrap();
+            plan(&spec, meta, &ctx).map(|l| l.program.windows(2).find(|w| w[0] == "--permission-mode").map(|w| w[1].clone()))
+        };
+        assert_eq!(mode_of(&meta).unwrap().as_deref(), Some("bypassPermissions"), "conta sem defaultMode");
+        let settings = case.root.join("home/.claude-b/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, r#"{"permissions":{"defaultMode":"acceptEdits"}}"#).unwrap();
+        assert_eq!(mode_of(&meta).unwrap().as_deref(), Some("acceptEdits"));
+        meta["permission_mode"] = json!("Tudo");
+        assert_eq!(mode_of(&meta).unwrap_err().code, "launch_permission_mode");
     }
 
     #[test]
