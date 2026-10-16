@@ -133,9 +133,13 @@ pub fn forget_queue(claude_base: &Path, name: &str) -> std::io::Result<()> {
 }
 
 impl ServerHost {
-    pub fn new(st: Arc<AppState>) -> Self {
-        let env = AccountEnvironment::from_map(server_env(std::env::vars().collect(), Path::new(".env")));
-        let terminal = TerminalEnv::local(&env.home, &env.base);
+    pub async fn new(st: Arc<AppState>) -> Self {
+        // `TerminalEnv::local` pode esperar o `systemctl --user` (até 3 s): fora das threads do runtime.
+        let (env, terminal) = tokio::task::spawn_blocking(|| {
+            let env = AccountEnvironment::from_map(server_env(std::env::vars().collect(), Path::new(".env")));
+            let terminal = TerminalEnv::local(&env.home, &env.base);
+            (env, terminal)
+        }).await.unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
         Self { st, env, terminal, mux: ProcessMux::default() }
     }
 
@@ -306,7 +310,7 @@ async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller
     let st = st.clone();
     tokio::spawn(async move {
         match (decide(&st, request, caller).await, claim) {
-            (Decision::Opened(opened), Some(guest)) => match ServerHost::new(st.clone()).claim(opened, &guest).await {
+            (Decision::Opened(opened), Some(guest)) => match ServerHost::new(st.clone()).await.claim(opened, &guest).await {
                 Ok(opened) => Decision::Opened(opened),
                 Err(error) => Decision::Refused(error),
             },
@@ -319,7 +323,7 @@ async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller
 /// do Python. Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
 pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
     if explicitly_other(&request) { return Decision::NotOurs; }
-    let host = ServerHost::new(st.clone());
+    let host = ServerHost::new(st.clone()).await;
     let facts_env = host.env.clone();
     let runtime = tokio::runtime::Handle::current();
     let (request_for_facts, caller_for_facts) = (request.clone(), caller.clone());
