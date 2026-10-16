@@ -39,7 +39,7 @@ pub fn transcript_limit(tail:&str,now:f64) -> Option<UsageLimit> {
     if last["type"] != "assistant" || last["isApiErrorMessage"] != true { return None; }
     let params = &last["apiErrorParams"]["rate_limit_info"];
     let info = if last["apiError"] == "usage_limit_reached" && params.is_object() { params }
-        else if last["error"] == "rate_limit" && last["quotaLimits"]["status"] == "rejected" { &last["quotaLimits"] }
+        else if last["apiError"].is_null() && last["error"] == "rate_limit" && last["quotaLimits"]["status"] == "rejected" { &last["quotaLimits"] }
         else { return None };
     let limit = UsageLimit::from_info(info);
     limit.resets_at.is_none_or(|reset|reset > now).then_some(limit)
@@ -196,6 +196,9 @@ mod tests {
         let throttle = json!({"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"error":"rate_limit",
             "message":{"content":[{"type":"text","text":"API Error: rate limited"}]}}).to_string();
         assert_eq!(transcript_limit(&throttle,1791570000.0),None,"aperto temporário não é a cota");
+        let mut other:Value = serde_json::from_str(FIVE_HOUR.trim()).unwrap();
+        other["apiError"] = json!("overloaded");
+        assert_eq!(transcript_limit(&other.to_string(),1791570000.0),None,"a reserva da cota recusada é só do CLI sem apiError");
         assert_eq!(transcript_limit("{\"type\":\"assistant\",\"isSidechain\":false,tor",1791570000.0),None);
     }
 

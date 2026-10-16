@@ -1252,7 +1252,7 @@ fn turn_activity(kind:&str,event:&Value) -> bool {
 fn usage_limit(event:&Value,last:&Value,now:f64) -> Option<UsageLimit> {
     let params = &event["api_error_params"]["rate_limit_info"];
     let info = if event["api_error"] == "usage_limit_reached" { if params.is_object() { params } else { last } }
-        else if event["error"] == "rate_limit" && last["status"] == "rejected" && last["resetsAt"].as_f64().is_some_and(|reset|reset > now) { last }
+        else if event["api_error"].is_null() && event["error"] == "rate_limit" && last["status"] == "rejected" && last["resetsAt"].as_f64().is_some_and(|reset|reset > now) { last }
         else { return None };
     Some(UsageLimit::from_info(info))
 }

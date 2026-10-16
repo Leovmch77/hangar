@@ -802,4 +802,11 @@ fn old_cli_rate_limit_counts_only_with_a_current_rejected_quota() {
         assert_eq!(found.len() == 1,expected,"reset={reset}: {found:?}");
         if expected { assert_eq!(found[0],UsageLimit { window:"seven_day".into(),resets_at:Some(reset) }); }
     }
+    // CLI de hoje com outro `api_error`: a cota recusada que sobrou não transforma o erro em limite.
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let lines = format!("{}\n{}\n{}",
+        json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":reset,"rateLimitType":"seven_day"}}),
+        json!({"type":"assistant","error":"rate_limit","api_error":"overloaded","message":{"model":"<synthetic>","content":[]}}),
+        json!({"type":"result","subtype":"success","is_error":true,"api_error":"overloaded","result":"overloaded"}));
+    assert!(usage_limits(&feed(&mut engine,&lines,11.0)).is_empty());
 }
