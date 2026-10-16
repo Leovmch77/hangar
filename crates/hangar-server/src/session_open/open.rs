@@ -41,7 +41,8 @@ pub trait OpenHost: Send + Sync {
     /// A operação `prepare` das escolhas de plugins e skills; devolve o `{"settings": …}`.
     fn customizations(&self, args: Value) -> BoxFuture<'_, Result<Value, OpenError>>;
     /// O grupo da sessão antiga de mesmo nome sai antes de qualquer efeito.
-    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>>;
+    /// Os avisos de saída que não chegaram ao grupo antigo vão aos `avisos` da criação.
+    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, OpenError>>;
     /// O nome reusado não herda nada da morta (fila, `then`, caches); antes do pane, porque depois
     /// dele o runtime já adota a sessão.
     fn release_name<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>>;
@@ -557,7 +558,7 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
         diary.refused("aviso", "nome_ja_em_uso", None, None);
         return Err(name_in_use());
     }
-    host.leave_old_group(&spec.name).await?;
+    let left = host.leave_old_group(&spec.name).await?;
     // Retomada: o processo sobe com `--resume`, porque o transcript dessa conversa já existe.
     let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
     let settings = conversation_settings(host, spec, &sid, resume.is_some()).await?;
@@ -594,7 +595,8 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
     }
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None, restored: false };
-    let warnings = host.born(&born).await;
+    let mut warnings = left;
+    warnings.extend(host.born(&born).await);
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
     Ok((Some(jsonl), warnings, route))
@@ -619,7 +621,7 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
     spec.conversation = resume.map(str::to_owned);
     diary.step("validar");
     name_still_free(host, spec, diary).await?;
-    host.leave_old_group(&spec.name).await?;
+    let mut warnings = host.leave_old_group(&spec.name).await?;
     diary.step("confiar_pasta");
     super::codex::pretrust(Path::new(codex_home), &spec.cwd);
     host.release_name(&spec.name).await?;
@@ -637,7 +639,7 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None, restored: false };
-    let mut warnings = host.born(&born).await;
+    warnings.extend(host.born(&born).await);
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
     if initial_prompt.is_some_and(|p| !p.is_empty()) { progress_step(&spec.name, "recado", json!({})); }
@@ -655,7 +657,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     if matches!(spec.provider, AgentProvider::Pi | AgentProvider::Kimi) { sync_skills(host).await; }
     // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
     name_still_free(host, spec, diary).await?;
-    if !restore { host.leave_old_group(&spec.name).await?; }
+    let mut warnings = if restore { Vec::new() } else { host.leave_old_group(&spec.name).await? };
     diary.step("preparar_comando");
     let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
     let (pane, jsonl, route) = if claude {
@@ -736,7 +738,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     }
     diary.step("limpar_estado_anterior");
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned), restored: restore };
-    let warnings = host.born(&born).await;
+    warnings.extend(host.born(&born).await);
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));
     Ok((jsonl, warnings, route))

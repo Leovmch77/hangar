@@ -56,7 +56,7 @@ impl OpenHost for LocalHost {
     }
     /// Sem o servidor não há quem limpe grupo, `then` e fila do nome reusado: com algum deles no disco
     /// a sessão nova nasceria no grupo da antiga, com a fila e o encadeamento dela. Recusa.
-    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
+    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, OpenError>> {
         Box::pin(async move {
             let claude = crate::accounts::environment::AccountEnvironment::from_map(self.env.clone()).claude_base;
             let stem = crate::groups::store::file_stem(name);
@@ -66,7 +66,7 @@ impl OpenHost for LocalHost {
                 Some(path) => Err(OpenError::new(409, "session_open_name_needs_server", format!(
                     "o nome '{name}' ainda tem estado da sessão antiga ({}); com o servidor fora ninguém o limpa — suba o servidor ou use outro nome",
                     path.display())).with_params(serde_json::json!({"nome": name}))),
-                None => Ok(()),
+                None => Ok(Vec::new()),
             }
         })
     }

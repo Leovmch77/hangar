@@ -255,18 +255,15 @@ impl OpenHost for ServerHost {
         })
     }
 
-    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
+    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, OpenError>> {
         Box::pin(async move {
-            let Some(groups) = &self.st.groups else { return Ok(()) };
+            let Some(groups) = &self.st.groups else { return Ok(Vec::new()) };
             match crate::groups::exit::leave_and_notify(&self.st, groups, name).await {
-                Ok((_, warnings)) if !warnings.is_empty() =>
-                    tracing::warn!(count = warnings.len(), "criação: a saída do grupo antigo deixou avisos"),
-                Ok(_) => {}
-                Err(_) if groups.has_sidecar(name) => return Err(OpenError::new(409, "erro_grupo_limpeza_falhou",
+                Ok((_, failures)) => Ok(exit_warnings(&failures)),
+                Err(_) if groups.has_sidecar(name) => Err(OpenError::new(409, "erro_grupo_limpeza_falhou",
                     format!("o grupo da sessão antiga '{name}' não foi desfeito; tente de novo"))),
-                Err(_) => tracing::warn!("criação: grupos falharam sem grupo a desfazer"),
+                Err(_) => { tracing::warn!("criação: grupos falharam sem grupo a desfazer"); Ok(Vec::new()) }
             }
-            Ok(())
         })
     }
 
@@ -437,6 +434,12 @@ fn access_diary(route: &str, response: &Response, started: Instant, req: &str) {
             tracing::warn!(kind = ?error.kind(), "linha de acesso do diário não gravada");
         }
     });
+}
+
+/// Os avisos de saída que não chegaram ao grupo antigo, na frase que a criação devolve em `avisos`.
+pub(crate) fn exit_warnings(errs: &[Value]) -> Vec<String> {
+    if errs.is_empty() { return Vec::new(); }
+    vec![format!("A sessão antiga saiu do grupo, mas o aviso de saída falhou: {}", crate::groups::routes::failures_text(errs))]
 }
 
 fn reply(error: &OpenError) -> Response {
@@ -612,4 +615,17 @@ pub async fn archive_resume(State(st): State<Arc<AppState>>, ConnectInfo(peer): 
     crate::routes::cors(&headers, response.headers_mut());
     access_diary("POST /api/archive/{project}/{session_id}/resume", &response, started, &diag);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    /// SF7: o aviso de saída que não chegou ao grupo antigo vira aviso da criação, com quem e por quê.
+    #[test]
+    fn a_group_exit_that_did_not_reach_everyone_is_a_creation_warning() {
+        assert!(super::exit_warnings(&[]).is_empty());
+        let errs = [serde_json::json!({"sessao": "par", "erro": {"code": "erro_peer_nao_avisado", "msg": "fora do ar"}})];
+        let warnings = super::exit_warnings(&errs);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("par"), "{warnings:?}");
+    }
 }

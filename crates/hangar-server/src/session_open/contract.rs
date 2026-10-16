@@ -231,8 +231,8 @@ impl OpenHost for Host {
         })
     }
 
-    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
-        Box::pin(async move { self.record.lock().unwrap().cleaned.push(format!("grupo:{name}")); Ok(()) })
+    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, OpenError>> {
+        Box::pin(async move { self.record.lock().unwrap().cleaned.push(format!("grupo:{name}")); Ok(Vec::new()) })
     }
     fn release_name<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
         Box::pin(async move { self.record.lock().unwrap().cleaned.push(format!("nome:{name}")); Ok(()) })
