@@ -162,19 +162,19 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Criar Claude sem terminal no Rust**
+- [x] **Step 1: Criar Claude sem terminal no Rust** (03734f0d4..f71272ff0, mesclado em a7f319aed; o registro do Claude COM terminal foi para a Task 8)
   Grava o registro e lança pelo plano de lançamento do spec, não pela receita do processo vivo.
   Itens CSH. Inclui o registro das sessões e as travas de troca do coordenador Python (veio da Task 5,
   Step 3): `_reopen_registered`, `register_claude_sessions`, `_register_durable_terminals`,
   `_has_pending`, o primeiro open repassado ao Python (`session_write/mod.rs:134`), e a metade
   "registro em espera" da rota `/internal/sessions/{name}/release`.
-- [ ] **Step 2: Relançar e reabrir pelo spec**
+- [x] **Step 2: Relançar e reabrir pelo spec**
   `schedule_claude_respawn`/`reopen_headless_locked` usam o spec; ordem da `SessionChange` da spec
   (prepara parada, encerra e confirma, dá a partida e confirma); o modo observado da CLI vai ao
   spec (S-02).
-- [ ] **Step 3: Consertos desta parte**
+- [x] **Step 3: Consertos desta parte**
   S-02, S-11, S-30, S-64, S-72.
-- [ ] **Step 4: Apagar o Python substituído**
+- [x] **Step 4: Apagar o Python substituído** (fica a 1ª abertura pedida por texto que nasce no Python, T-007)
   `_create_headless`, `launch_process` e companhia, abrir/reabrir do `runtime_coordinator`,
   `internal_api.session_reopen` e a chamada em `locate.rs:118`.
 
@@ -182,15 +182,15 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Criar Codex com e sem terminal pelo spec**
+- [x] **Step 1: Criar Codex com e sem terminal pelo spec** (4fba5d710..935550fae, correções 91acae885..71c808842)
   O pane chama o `hangar-codex-tui` com `CP_SESSION_KEY` e o ambiente do spec. Itens CDX.
-- [ ] **Step 2: Troca de modo, restart, adoção e transferência numa implementação**
+- [x] **Step 2: Troca de modo, restart, adoção e transferência numa implementação** (a transferência Claude→Codex fica no Python e sai numa Task própria, T-008)
   `codex_relaunch` usando o spec.
-- [ ] **Step 3: `hangar-codex` sem `_create_local`**
+- [x] **Step 3: `hangar-codex` sem `_create_local`** (o comando de terminal é `hangar-server open`, T-006)
   Usa o comando de terminal da Task 3 (abre igual com o backend fora).
-- [ ] **Step 4: Consertos desta parte**
+- [x] **Step 4: Consertos desta parte**
   S-05, S-24, S-25, S-26, S-28, S-74; lacunas S-56, S-57, S-77.
-- [ ] **Step 5: Apagar o Python substituído**
+- [x] **Step 5: Apagar o Python substituído**
   `CodexAdapter.open_*`, `restart`, `ensure_tmux_tui`, `_create_codex_headless`,
   `sem_terminal.subir`, `_create_local`.
 
@@ -259,7 +259,7 @@ Status: ready-for-agent
   Sem padrão escondido na tela ("+" sem modo = padrão da conta, D-010); erros novos com frase no
   `errosApi.ts` e no nativo (S-38); aviso de conta trocada em toda tela (D-003); nome automático
   igual (S-52).
-- [ ] **Step 6: Apagar o despacho provisório da Task 3 e o `create_session` Python**
+- [x] **Step 6: Apagar o despacho provisório da Task 3 e o `create_session` Python** (71c808842: a rota Python só repassa a 8768 ou recusa com `session_open_needs_rust_server`)
 - [ ] **Step 7: Verificação manual no app nativo, PWA e Expo**
   Abrir pelo "+", pela Nova conversa, pela voz, por `hangar-send`, pelo MCP e pelo terminal, e
   conferir que nascem iguais.
