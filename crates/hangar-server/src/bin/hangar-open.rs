@@ -2,9 +2,9 @@
 //! do servidor, lendo os mesmos arquivos, para o terminal decidir igual com o servidor fora do ar.
 //!
 //!   hangar-open resolve [PEDIDO]  resolve nesta máquina e imprime o spec, sem efeito nenhum
-//!   hangar-open open [PEDIDO]     pede ao servidor; fora do ar, abre aqui o Claude com terminal
-//!                                 (o servidor adota a sessão quando voltar); o resto só resolve,
-//!                                 imprime e sai 3
+//!   hangar-open open [PEDIDO]     pede ao servidor; fora do ar, abre aqui a sessão com terminal (e o
+//!                                 Codex sem terminal; o servidor adota a sessão quando voltar); o
+//!                                 Claude sem terminal só resolve, imprime e sai 3
 //!
 //! Token, porta e as opções `CP_*` do servidor vêm do `backend/.env` da cópia do Hangar onde o
 //! comando mora, como no `hangar-send`. PEDIDO é o JSON do `POST /api/sessions`; omitido, vem da
