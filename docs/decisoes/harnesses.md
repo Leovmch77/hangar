@@ -337,11 +337,17 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Claude sem terminal estaciona depois de `_OCIOSA_S` (65 min) parado** e sem nada em aberto: o
   processo sai, o sidecar fica, o próximo prompt sobe com `--resume`. Quem encerra por dentro tira
   a sessão da memória (`_encerrar`) — saída nossa não marca `returncode`.
-- **Claude sem terminal só relê MCP/hooks/settings quando o processo nasce**: não há `/mcp
-  reconnect` em `-p`. Recarregar = `_encerrar` + `acordar` (sobe com `--resume`), só ociosa. O
+- **A recarga completa de configuração do Claude sem terminal relança o processo.**
+  Recarregar = `_encerrar` + `acordar` (sobe com `--resume`), só ociosa. O
   motivo vai no `state` (`recarregar_motivo`: a marca do `mcpServers` + `settings.json` gravada
   na subida mudou — nunca mtime do `.claude.json`, que o Claude Code reescreve a toda hora) e a
   tela só oferece o botão com motivo; no menu ele fica sempre.
+- **O catálogo de comandos do Claude é do Rust, com e sem terminal.** Composição, scans,
+  filtros e a sonda compartilhada ficam em `commands/`; convidado e Connect só passam pela
+  autorização das suas portas. `/reload-plugins` entra na reserva e permanece sem terminal,
+  mesmo quando o CLI o anuncia como exclusivo da TUI. A recarga desse comando não aplica
+  alterações de servidores MCP dos plugins em sessões sem terminal. Ver
+  [catálogo de comandos e reload-plugins](#catálogo-de-comandos-e-reload-plugins).
 - **Claude sem terminal que não sobe para em `_TETO_SUBIDAS`**, com espera sob a trava de spawn
   (todo gatilho de drain passa por ela). A mensagem fica `desistiu` e o problema na faixa; só ação
   do usuário (`acordar`) abre outra rodada. Sessão com processo morto não é entregável.
@@ -3612,7 +3618,7 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
   ticket (`~/.claude/.hangar-kimi/<pane>.json`) — the CLI has no caller-chosen session-id.
 - `sse.py` — merges the above into the SSE stream. `api.py` — FastAPI routes. `auth.py` — bearer token / `cp_token` cookie.
 - Also: `pqueue.py` (durable input queue), `preview.py` (live in-flight block), `askquestion.py`
-  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `commands.py`, `workflows.py`,
+  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `workflows.py`,
   `model_picker.py`, `config.py`, `fs.py`, `hook_installer.py`.
 
 Frontend (`frontend/src/`): `screens/` (Chat, Board, …), `components/` (MessageList, NavBar, Composer,
@@ -4461,6 +4467,50 @@ O corte do painel de agentes do #137 continua valendo.
 - O `/steer` sem corpo, que o chip "mandar agora" de um app antigo ainda manda, vira o Orientar da
   primeira entrada esperando (`steer_first` no ator): só promover a fila interna do Claude Code
   deixaria a mensagem do Hangar para trás. Sem entrada esperando, o comportamento é o de antes.
+
+## Catálogo de comandos e reload-plugins
+
+(16/10/2026, Claude Code 2.1.301.) `GET /api/sessions/{name}/commands` do Claude passou a ser
+composto no Rust (`commands/`). O Python perdeu o compositor, os scans, a sonda e sua ponte de
+filtro. Nas portas que atende, conserva autenticação e repasse por `forwarded`; sem Rust,
+responde 503 `commands_need_rust_server`. O contrato interno é 73 nos dois lados. O catálogo
+do Codex conserva o handler que já tinha.
+
+O desaparecimento de `/reload-plugins` tinha duas causas: a reserva Python não o incluía e a
+sessão sem terminal o excluía. O CLI medido inclui o nome tanto em `initialize.commands` quanto
+em `system/init.terminal_slash_commands`, mas aceita sua execução por frame de usuário no
+stream-json. A prova real devolveu código 0 e o resumo dos componentes recarregados. Por isso o
+novo catálogo corrige essa exceção, preservando a exclusão dos demais comandos só de terminal.
+A [referência oficial de comandos](https://code.claude.com/docs/en/commands) documenta a execução
+sem terminal e o limite das alterações de MCP de plugins.
+
+As fixtures de `backend/tests/fixtures/contract/commands/` foram geradas executando o Python do
+commit de origem, com HOME temporário. A comparação conserva campos, nulos, ordem, nomes do
+frontmatter e a prioridade da primeira ocorrência. Os casos incluem YAML 1.1, chaves repetidas,
+tags, BOM/CRLF e metadados inválidos; o scanner do catálogo de configurações tem outras regras
+e não foi substituto para essa composição.
+
+A leitura dos eventos YAML preserva os construtores do SafeLoader antes de projetar texto e
+truthiness. Isso inclui zeros sexagesimais, tags explícitas, datas inválidas, binários, conjuntos,
+pares ordenados, aliases e merges. Erro de construção em campo não consumido também descarta o
+cabeçalho inteiro. Inteiros têm precisão arbitrária, pois componentes sexagesimais podem se
+anular. A limpeza textual conserva os separadores U+001C a U+001F tratados por `str.split()`.
+
+A sonda não envia prompt: usa `control_request initialize`, em pasta temporária, com as
+configurações da conta. Há uma execução por conta/assinatura, teto de 120 s, espera de 600 s
+após falha e o mesmo formato do cache persistente. O processo e os hooks filhos ficam contidos
+no grupo Unix ou no Job do Windows até terminar. O exemplo `commands-probe` mede a composição;
+`--native` confere o initialize do CLI instalado sem consumir um turno de conversa.
+
+No Windows, a caracterização também conserva a extensão sem distinção de caixa e a ordem do
+`WindowsPath`, que decide os metadados de nomes repetidos. A prova do prazo expôs outro detalhe:
+`Child::wait` do Tokio fecha `child.stdin`; a solicitação retira e conserva esse cano durante
+o initialize, para a espera do líder não encerrar a sonda antes da resposta.
+
+O scan reaproveita os metadados da entrada do diretório no Windows, onde essa leitura evita uma
+consulta extra por arquivo. Links simbólicos continuam sendo seguidos explicitamente. No cache
+da sonda, leitura do resultado e registro da execução compartilham a trava da publicação: uma
+resposta publicada nesse intervalo não pode disparar uma segunda sonda da mesma assinatura.
 
 ## Agrupamento durável da fila (15/10/2026)
 

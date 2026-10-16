@@ -10,8 +10,6 @@ SESSION_SETTINGS_ENV = "HANGAR_CLAUDE_SETTINGS"
 _config: tuple[str, str] | None = None
 _MAX_RESPONSE = 4 * 1024 * 1024
 _TIMEOUT = 25.0
-# A lista do `/` não espera um Rust travado: sem resposta logo, sai sem filtro.
-_HIDDEN_TIMEOUT = 3.0
 
 
 class CustomizationsError(RuntimeError):
@@ -118,17 +116,6 @@ def resume_settings(session_id: str, current_session_id: str | None, process_set
     if session_id == current_session_id and process_settings is not None:
         return _validated_settings(process_settings)
     return stored_settings(session_id)
-
-
-def hidden_commands(cwd: str | None, config_dir: str, settings: dict | None, commands: list[str],
-                    plugins: list[str]) -> set[str]:
-    """Nomes que a conta, o `.claude/settings*.json` do projeto e a escolha da sessão desligaram."""
-    result = _request("hidden", {"cwd": cwd, "config_dir": config_dir, "settings": settings, "commands": commands,
-                                 "plugins": plugins}, timeout=_HIDDEN_TIMEOUT)
-    hidden = result.get("hidden")
-    if not isinstance(hidden, list) or any(not isinstance(name, str) for name in hidden):
-        raise CustomizationsError(503, "claude_customizations_unavailable", "Resposta de customização inválida.")
-    return set(hidden)
 
 
 def remember(session_id: str, settings: dict | None) -> None:

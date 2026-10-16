@@ -576,8 +576,6 @@ impl ClaudeEngine {
                 if !self.deliverable() { return Err(error("aguarde a sessão ficar ociosa")); }
                 self.local_command(operation_id,"/compact",&mut effects);
             }
-            OperationKind::Commands => effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,
-                payload:json!({"commands":self.commands,"terminal_commands":self.terminal_commands}) }),
             OperationKind::Cwd => effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:self.metadata["cwd"].clone() }),
             OperationKind::Detach => effects.push(Effect::Stop { reason:"detach".into() }),
             _ => return Err(error("operação exige a barreira de lifecycle ou não é suportada pelo Claude")),

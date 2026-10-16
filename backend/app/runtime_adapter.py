@@ -369,12 +369,9 @@ class LegacyBridge:
             sess = adapter._sessions[name]
             if provider == "claude":
                 for source, target in {"model":"model", "effort":"effort", "permission_mode":"permission_mode",
-                    "previous_non_plan":"modo_nao_plan", "usage":"usage", "context_window":"context_window", "cost":"cost",
-                    "commands":"comandos"}.items():
+                    "previous_non_plan":"modo_nao_plan", "usage":"usage", "context_window":"context_window", "cost":"cost"}.items():
                     if source in view:
                         setattr(sess, target, copy.deepcopy(view[source]))
-                if "terminal_commands" in view:
-                    sess.comandos_terminal = frozenset(view["terminal_commands"] or [])
             else:
                 for field in ("model", "effort", "mode", "token_usage", "rate_limits"):
                     if field in view:
@@ -800,10 +797,6 @@ class RuntimeAdapter:
             state = state.model_copy(update={"problema":"headless_turno_erro", "problema_detalhe":"Estado do runtime indisponível; aguarde a reposição."})
         return state
 
-    def comandos(self, name):
-        data = self.view(name).data
-        return data.get("commands"), frozenset(data.get("terminal_commands") or [])
-
     def problema_de(self, name):
         state = self.snapshot(name)
         if self.provider == "codex":
@@ -1018,7 +1011,7 @@ _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "ste
     "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
 _CODEX_OPENS_IN_RUST = {"restart", "set_permission_mode_sem_terminal", "open_terminal"}
-_SYNC = {"snapshot", "escolhas", "comandos", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
+_SYNC = {"snapshot", "escolhas", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 
 
 async def reserve_call(coordinator, original, adapter, method, name, arguments, args, kwargs):

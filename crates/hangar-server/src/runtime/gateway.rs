@@ -1161,6 +1161,24 @@ impl RuntimeRegistry {
         };
         Some(handle.view().await.map(|view|view["subagents"].clone()))
     }
+
+    /// Leitura do catálogo também com o processo estacionado; não passa pela porta de escrita.
+    pub async fn claude_catalog_view(&self,name:&str) -> Option<Result<(Value,Value),RuntimeError>> {
+        let found = {
+            let entries = self.entries.lock().await;
+            let entry = entries.values().filter(|e| e.name == name && e.provider == "claude").max_by_key(|e| e.generation)?;
+            match &entry.handle {
+                EntryHandle::Headless(handle) => Some((entry.runtime_target.as_ref()?.metadata.clone(), handle.clone())),
+                _ => None,
+            }
+        };
+        let (metadata,handle) = found?;
+        Some(handle.view().await.map(|view| (metadata,view)))
+    }
+
+    pub(crate) async fn catalog_provider(&self,name:&str) -> Option<String> {
+        self.entries.lock().await.values().filter(|entry| entry.name == name).max_by_key(|entry| entry.generation).map(|entry| entry.provider.clone())
+    }
     /// `session_key` é a conversa, como na descoberta: o hub a compara com o `conversation` do vínculo.
     pub async fn claude_info(&self,name:&str)->Option<crate::transcript::InternalInfo> {
         let entries=self.entries.lock().await;
