@@ -364,7 +364,7 @@ else send({id:m.id,error:{code:-32601,message:'método inesperado'}});
 def _worker() -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from unittest.mock import patch
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request as HttpRequest
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
     from app import api, codex_contas_login, credenciais, account_bridge, dictation_bridge
@@ -536,16 +536,19 @@ def _worker() -> None:
         return account_bridge.request_claude("auth", path=path)
     app.include_router(credenciais.credenciais_router)
 
-    @app.post("/api/sessions")
-    async def birth(body: dict):
+    async def birth(request):
         task = asyncio.current_task()
         births["task"] = task
         try:
-            return await api.create_session(api.CreateBody.model_validate(body))
+            return await api.create_session(request)
         except asyncio.CancelledError:
             return JSONResponse({"cancelled": True}, status_code=499)
         finally:
             births.pop("task", None)
+    # Com `from __future__ import annotations` a anotação viraria texto lido no módulo, onde
+    # `Request` é o do urllib: a classe vai direto.
+    birth.__annotations__ = {"request": HttpRequest}
+    app.post("/api/sessions")(birth)
 
     @app.post("/api/sessions/{name}/rename")
     async def rename(name: str, body: dict):

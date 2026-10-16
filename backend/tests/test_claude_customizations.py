@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from pydantic import ValidationError
 
 from app import claude_customizations as customizations
 from app.adapters.claude import ClaudeAdapter
@@ -121,31 +120,6 @@ def test_terminal_binding_carries_choices_for_the_active_conversation(tmp_path, 
 
     assert binding is not None and binding.meta["session_id"] == SID
     assert binding.meta["claude_settings"] == SETTINGS
-
-
-def test_creation_accepts_typed_choices_but_not_arbitrary_settings():
-    from app.api import CreateBody
-
-    body = CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-        "plugins": {"superpowers@claude-plugins-official": False},
-        "skills": {"falar": False},
-        "blocked_skills": ["superpowers:brainstorming"],
-    }})
-
-    assert body.claude_customizations is not None
-    assert body.claude_customizations.model_dump() == {
-        "plugins": {"superpowers@claude-plugins-official": False},
-        "skills": {"falar": False},
-        "blocked_skills": ["superpowers:brainstorming"],
-    }
-    with pytest.raises(ValidationError):
-        CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-            "env": {"ANTHROPIC_BASE_URL": "other"},
-        }})
-    with pytest.raises(ValidationError):
-        CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-            "plugins": {"superpowers@claude-plugins-official": "false"},
-        }})
 
 
 def test_clear_keeps_choices_and_reports_unavailable_persistence_without_blocking_init(tmp_path, monkeypatch):
