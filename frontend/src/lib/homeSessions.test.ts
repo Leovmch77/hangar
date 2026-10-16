@@ -21,6 +21,13 @@ describe('groupHomeSessions', () => {
     expect(groupHomeSessions(rows, true)[2].sessions.map((s) => s.name)).toEqual(['a', 'd', 'e']);
   });
 
+  it('prontas vêm da que terminou por último para a mais antiga', () => {
+    const ready = [row('antiga', 'idle', { last_activity: 100 }), row('recente', 'idle', { last_activity: 300 }),
+      row('meio', 'idle', { last_activity: 200 })];
+    expect(groupHomeSessions(ready, false)[0].sessions.map((s) => s.name)).toEqual(['recente']);
+    expect(groupHomeSessions(ready, true)[0].sessions.map((s) => s.name)).toEqual(['recente', 'meio', 'antiga']);
+  });
+
   it('grupo vazio não aparece', () => {
     expect(groupHomeSessions([row('a', 'working')], false).map((s) => s.state)).toEqual(['working']);
   });

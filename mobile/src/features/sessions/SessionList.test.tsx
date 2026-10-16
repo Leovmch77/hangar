@@ -132,6 +132,18 @@ afterEach(async () => {
 });
 
 describe('SessionList', () => {
+  it('home mostra recolhida a pronta que terminou por último', async () => {
+    await mount({ variant: 'home' });
+    const row = useSessions.getState().rows[0];
+    const rows = [
+      { ...row, name: 'antiga', state: 'idle', last_activity: 100 },
+      { ...row, name: 'recente', state: 'idle', last_activity: 300 },
+      { ...row, name: 'meio', state: 'idle', last_activity: 200 },
+    ] as AggSession[];
+    await act(async () => useSessions.setState({ rows, loading: false }));
+    expect([...container.querySelectorAll('[data-row]')].map((el) => el.textContent)).toEqual(['recente']);
+  });
+
   it('home reúne máquinas por estado, ignora organizar e expande prontas sem perder ações', async () => {
     calls.organizar = 'conversations';
     const onClose = vi.fn();

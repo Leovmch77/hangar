@@ -248,6 +248,8 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const sections = useMemo<Section[]>(() => {
     if (home) return (['awaiting_input', 'working', 'idle'] as const).flatMap((state) => {
       const anchors = rows.filter((row) => !row.outside && row.state === state);
+      // Prontas: a que terminou por último aparece primeiro, e é a que fica à vista recolhida.
+      if (state === 'idle') anchors.sort((a, b) => (b.last_activity ?? 0) - (a.last_activity ?? 0));
       if (!anchors.length) return [];
       const visible = state === 'idle' && !readyExpanded ? anchors.slice(0, 1) : anchors;
       const data = visible.flatMap((anchor) => [anchor, ...rows.filter((row) => row.state !== 'dead' &&
