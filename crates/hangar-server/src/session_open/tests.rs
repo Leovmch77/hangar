@@ -796,6 +796,23 @@ fn an_unknown_engine_window_is_read_again_on_reopen() {
     }
 }
 
+/// T-004 no Claude sem terminal: a subida relê a janela que ficou desconhecida na criação e a grava no
+/// sidecar, para a sessão de motor não subir sem `--context` para sempre.
+#[test]
+fn a_headless_launch_reads_the_unknown_engine_window_and_records_it() {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key = "d".repeat(32);
+    std::fs::write(dir.path().join("s1.json"), json!({"name": "s1", "key": key, "context_window": null}).to_string()).unwrap();
+    let mut spec = SessionSpec { key: key.clone(), name: "s1".into(), model: Some("k3".into()), account: Account::Engine { name: "e".into(),
+        account: None, config_dir: None, context_window: None, context_window_unknown: true }, ..fixture_spec("create_claude_terminal_default") };
+    let facts = FixtureFacts { window: Ok(Some(262144)), ..FixtureFacts::of(&fixture) };
+    crate::runtime::claude_launch::refresh_window(&mut spec, &facts, dir.path(), "s1");
+    assert!(matches!(spec.account, Account::Engine { context_window: Some(262144), context_window_unknown: false, .. }));
+    let meta: Value = serde_json::from_slice(&std::fs::read(dir.path().join("s1.json")).unwrap()).unwrap();
+    assert_eq!(meta["context_window"], 262144);
+}
+
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
 #[test]
 fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {

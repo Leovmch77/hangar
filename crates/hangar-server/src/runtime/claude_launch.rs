@@ -181,12 +181,27 @@ pub fn relaunch_meta(mut sidecar: Value, conversation: &str, mode: &str, model: 
     sidecar
 }
 
+/// T-004: a janela do motor que a abertura não leu é relida a cada subida; lida, vai ao sidecar.
+pub(crate) fn refresh_window(spec: &mut SessionSpec, facts: &dyn crate::session_open::OpenFacts, sidecar_dir: &Path, name: &str) {
+    if !matches!(spec.account, Account::Engine { context_window_unknown: true, .. }) { return; }
+    spec.refresh_engine_window(facts);
+    let Account::Engine { context_window: Some(window), context_window_unknown: false, .. } = spec.account else { return };
+    let patch = [("context_window".to_owned(), Value::from(window))].into_iter().collect();
+    match super::codex_sidecar::update_if(sidecar_dir, name, &[("key", Value::from(spec.key.clone()))], &patch) {
+        Ok(Some(_)) => {}
+        Ok(None) => tracing::warn!(session = %name, "sidecar mudou de vida; a janela do motor não foi gravada"),
+        Err(error) => tracing::warn!(session = %name, kind = ?error.kind(), "a janela do motor não foi gravada no sidecar"),
+    }
+}
+
 /// A subida de agora da sessão `name` (o sidecar é `meta`): o spec vivo, a configuração do servidor, a
 /// conta ChatGPT fixa do motor e o Fast, relidos aqui. Bloqueante: chamar fora do runtime.
 pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &Value, name: &str,
                runtime: tokio::runtime::Handle) -> Result<Launch, RuntimeError> {
-    let spec = crate::session_open::record::claude_live(&env.home, meta, name)
+    let mut spec = crate::session_open::record::claude_live(&env.home, meta, name)
         .map_err(|error| refused("launch_meta", &format!("registro da sessão ilegível: {error}")))?;
+    let facts = crate::session_open::facts::LocalFacts::new(env.clone(), runtime);
+    refresh_window(&mut spec, &facts, &env.home.join(".hangar").join("claude-headless"), name);
     let config = super::codex_launch::runtime_config(env);
     let roots = crate::session_open::claude::plugin_roots(&env.home);
     let (engine, account) = match &spec.account {
@@ -201,7 +216,7 @@ pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &V
     };
     let fast = spec.service_tier.is_some() && {
         use crate::session_open::OpenFacts;
-        crate::session_open::facts::LocalFacts::new(env.clone(), runtime).supports_fast(engine, spec.model.as_deref())
+        facts.supports_fast(engine, spec.model.as_deref())
     };
     plan(&spec, meta, &Context { env, runtime_config: &config, plugin_roots: &roots, bridge, engine_route: route.as_ref(), fast })
 }
