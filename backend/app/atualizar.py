@@ -729,7 +729,7 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
     if publicado == _git_quiet("rev-parse", "--verify", "--quiet", topo).stdout.strip():
         return topo, release
     if _git_quiet("merge-base", "--is-ancestor", publicado, topo).returncode == 0:
-        return publicado, release
+        return _ultimo_com_o_binario(publicado, topo), release
     # Binário de commit fora desta branch: o último commit dela que fala o mesmo contrato.
     if _protocol_at(topo) == want:
         return topo, release
