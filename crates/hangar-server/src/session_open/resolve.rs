@@ -211,7 +211,11 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         !request.read_only && matches!(provider, AgentProvider::Claude | AgentProvider::Codex) && facts.defaults().headless
     });
     let model = validate(request, caller, provider, headless, config_dir.as_deref(), codex_account.as_deref(), permission.as_deref(), facts)?;
-    let name = validate_name(&request.name, provider, headless, request, facts)?;
+    let raw = match &request.name {
+        Some(raw) => raw.clone(),
+        None => folder_name(&request.cwd, facts)?,
+    };
+    let name = validate_name(&raw, provider, headless, request, facts)?;
 
     let permission_mode = match provider {
         AgentProvider::Claude => Some(match permission.as_deref() {
@@ -497,6 +501,18 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
     {
         let names: Vec<_> = PermissionMode::CODEX.iter().map(|m| m.name()).collect();
         return Err(conflict(format!("permission_mode: use um de {}", names.join(", "))));
+    }
+    Ok(name)
+}
+
+/// S-52: o nome que ninguém escolheu, pela regra do `uniqueSessionName` das telas.
+fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
+    let folder = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
+    let base = Some(crate::list::discover_other::sanitize_session_name(folder)).filter(|n| !n.is_empty()).unwrap_or_else(|| "sessao".into());
+    let mut name = base.clone();
+    for n in 2.. {
+        if !facts.name_in_use(&name)? { break; }
+        name = format!("{base}-{n}");
     }
     Ok(name)
 }

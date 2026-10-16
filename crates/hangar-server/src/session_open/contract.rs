@@ -294,7 +294,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
                 Err(error) => (error.status, error.body()),
             },
             Err(error) => {
-                if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, super::open::requested_provider(&request), &error) { host.diary(events); }
+                if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), request.name.as_deref().unwrap_or(""), super::open::requested_provider(&request), &error) { host.diary(events); }
                 (error.status, error.body())
             }
         };

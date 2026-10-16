@@ -63,7 +63,7 @@ fn omitted_and_null_are_different_cases() {
     assert!(parse(r#"{"name":" ","cwd":"/x"}"#).is_ok());
     assert!(parse(r#"{"name":"s"}"#).is_err());
     // Chave repetida: vale a última, como o `json.loads`.
-    assert_eq!(parse(r#"{"name":"a","cwd":"/x","name":"b"}"#).unwrap().name, "b");
+    assert_eq!(parse(r#"{"name":"a","cwd":"/x","name":"b"}"#).unwrap().name.as_deref(), Some("b"));
 }
 
 #[test]
@@ -844,6 +844,24 @@ fn session_names_fold_like_python() {
         ("会话", ""), ("ﬁle①", "file1"), ("  -x- ", "x"), ("Ǆemal", "DZemal"), ("a\u{301}b", "ab")];
     for (raw, expected) in python {
         assert_eq!(crate::list::discover_other::sanitize_session_name(raw), expected, "{raw:?}");
+    }
+}
+
+/// S-52: nome omitido sai da pasta pela regra do `uniqueSessionName` (`packages/core/src/api.ts`):
+/// sanitizada, `sessao` se vazia, `-2`/`-3` contra as sessões que existem.
+#[test]
+fn an_omitted_name_comes_from_the_folder_like_the_screens() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let cases = [("<ROOT>/work/Área de trabalho", json!([]), "Area-de-trabalho"),
+        ("<ROOT>/work/proj", json!([{"name": "proj"}, {"name": "proj-2"}]), "proj-3"),
+        ("<ROOT>/work/会话", json!([]), "sessao")];
+    for (cwd, taken, expected) in cases {
+        let step = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+        step.remove("name");
+        step.insert("cwd".into(), json!(cwd));
+        fixture["scenario"]["state"]["dirs"] = json!([cwd]);
+        fixture["scenario"]["state"]["tmux_sessions"] = taken;
+        assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.name).ok().as_deref(), Some(expected), "{cwd}");
     }
 }
 

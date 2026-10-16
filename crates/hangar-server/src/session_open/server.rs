@@ -388,7 +388,7 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(error) => {
-            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), &request.name, super::open::requested_provider(&request), &error) { host.diary(events); }
+            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), request.name.as_deref().unwrap_or(""), super::open::requested_provider(&request), &error) { host.diary(events); }
             return Decision::Refused(error);
         }
     };
@@ -426,8 +426,8 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if !owner && guest.is_none() { return pass(parts, bytes).await; }
     let Ok(request) = SessionOpenRequest::parse(&bytes) else { return pass(parts, bytes).await };
     // O passo vale também para a criação que segue ao Python: ele não tem mais o dele.
-    let _progress = super::open::Progress::track(&request.name);
-    let name = request.name.clone();
+    let _progress = super::open::Progress::track(request.name.as_deref().unwrap_or(""));
+    let name = request.name.clone().unwrap_or_default();
     let caller = guest.as_ref().map_or(OpenCaller::Owner, |g| OpenCaller::Guest { root: g.root.clone() });
     match decide_detached(&st, request, caller, guest).await {
         Decision::Opened(opened) => {

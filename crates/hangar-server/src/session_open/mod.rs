@@ -149,7 +149,9 @@ pub struct ClaudeCustomizations {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionOpenRequest {
-    pub name: String,
+    /// Omitido: o servidor deriva da pasta (S-52).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
@@ -211,7 +213,7 @@ impl SessionOpenRequest {
         let value: Value = serde_json::from_slice(body).map_err(|e| OpenError::invalid_body(&e.to_string()))?;
         let request: Self = serde_json::from_value(value).map_err(|e| OpenError::invalid_body(&e.to_string()))?;
         // `min_length=1` do Pydantic: só o texto vazio cai, espaço passa.
-        let short = [("name", Some(&request.name)), ("cwd", Some(&request.cwd)), ("branch", request.branch.as_ref()),
+        let short = [("name", request.name.as_ref()), ("cwd", Some(&request.cwd)), ("branch", request.branch.as_ref()),
             ("base", request.base.as_ref()), ("creator", request.creator.as_ref())]
             .into_iter().find(|(_, value)| value.is_some_and(|v| v.is_empty()));
         if let Some((field, _)) = short {
