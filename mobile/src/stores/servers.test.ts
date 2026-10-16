@@ -547,3 +547,124 @@ describe('entradas de par externo', () => {
     expect(ownServers(useServers.getState().servers).map((s) => s.baseUrl)).toEqual(['http://10.0.0.2:8765']);
   });
 });
+
+describe('update de máquina própria', () => {
+  const { lan: _lan, ...serverWithoutLan } = SAVED_SERVER;
+
+  test('trocar URL esquece a rota anterior e a LAN aprendida', async () => {
+    const { baseOf, decidirRota } = await import('@hangar/core');
+    const oldServer = { ...SAVED_SERVER, baseUrl: 'http://127.0.0.1:8765' };
+    vault.set(VAULT_KEY, JSON.stringify({ servers: [oldServer], activeId: oldServer.id }));
+    await useServers.getState().load();
+    await decidirRota(useServers.getState().active()!);
+    expect(baseOf(oldServer)).toBe(oldServer.baseUrl);
+
+    useServers.getState().update(oldServer.id, { baseUrl: 'http://10.0.0.4:8765' });
+
+    expect(baseOf(useServers.getState().active()!)).toBe('http://10.0.0.4:8765');
+    expect(useServers.getState().active()!.lan).toBeUndefined();
+    await useServers.getState().load();
+    expect(useServers.getState().active()).toEqual({ ...serverWithoutLan, baseUrl: 'http://10.0.0.4:8765' });
+  });
+
+  test.each([
+    { label: 'Outro nome' },
+    { baseUrl: 'http://127.0.0.1:8765' },
+  ])('mantém rota e LAN sem mudança de URL: %j', async (patch) => {
+    const { baseOf, decidirRota, rotaDecidida } = await import('@hangar/core');
+    const oldServer = { ...SAVED_SERVER, baseUrl: 'http://127.0.0.1:8765' };
+    vault.set(VAULT_KEY, JSON.stringify({ servers: [oldServer], activeId: oldServer.id }));
+    await useServers.getState().load();
+    await decidirRota(useServers.getState().active()!);
+
+    useServers.getState().update(oldServer.id, patch);
+    await useServers.getState().load();
+
+    expect(rotaDecidida(oldServer.id)).toBe(true);
+    expect(baseOf(useServers.getState().active()!)).toBe(oldServer.baseUrl);
+    expect(useServers.getState().active()).toEqual({ ...oldServer, ...patch });
+  });
+
+  test('persiste a edição sem trocar id, token ou ativa e sobrevive ao load', async () => {
+    const other = { ...SAVED_SERVER, id: 'other', token: 'other-token', baseUrl: 'http://10.0.0.3:8765' };
+    vault.set(VAULT_KEY, JSON.stringify({ servers: [SAVED_SERVER, other], activeId: other.id }));
+    await useServers.getState().load();
+    const patch = { label: 'Máquina editada', baseUrl: 'http://10.0.0.4:8765', id: 'changed', token: 'changed', activeId: 'changed' };
+
+    useServers.getState().update(SAVED_SERVER.id, patch);
+    await settle();
+
+    const expected = { servers: [{ ...serverWithoutLan, label: patch.label, baseUrl: patch.baseUrl }, other], activeId: other.id };
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(expected);
+    await useServers.getState().load();
+    expect(useServers.getState()).toMatchObject(expected);
+  });
+
+  test.each([
+    [{ label: 'Outro nome' }, { ...SAVED_SERVER, label: 'Outro nome' }],
+    [{ baseUrl: 'http://10.0.0.4:8765' }, { ...serverWithoutLan, baseUrl: 'http://10.0.0.4:8765' }],
+  ])('aceita edição parcial: %j', async (patch, expected) => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+
+    useServers.getState().update(SAVED_SERVER.id, patch);
+    await useServers.getState().load();
+
+    expect(useServers.getState().servers).toEqual([expected]);
+    expect(useServers.getState().activeId).toBe(SAVED_SERVER.id);
+  });
+
+  test('id inexistente não cria entrada nem troca a ativa', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+
+    useServers.getState().update('missing', { label: 'Não criar', baseUrl: 'http://10.0.0.4:8765' });
+    await useServers.getState().load();
+
+    expect(useServers.getState()).toMatchObject(SAVED);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(SAVED);
+  });
+
+  test('não edita convite salvo nem temporário', async () => {
+    const invite = { ...SAVED_SERVER, id: 'invite', label: 'Convite', token: 'guest-token', invite: true };
+    const saved = { servers: [SAVED_SERVER, invite], activeId: SAVED_SERVER.id };
+    vault.set(VAULT_KEY, JSON.stringify(saved));
+    await useServers.getState().load();
+    useServers.getState().applyPairs([PAIR]);
+    const before = structuredClone(useServers.getState().servers);
+
+    for (const server of before.filter((s) => s.invite)) {
+      useServers.getState().update(server.id, { label: 'Não editar', baseUrl: 'http://10.0.0.4:8765' });
+    }
+    await useServers.getState().load();
+
+    expect(useServers.getState().servers).toEqual(before);
+    expect(useServers.getState().activeId).toBe(SAVED_SERVER.id);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(saved);
+  });
+
+  test('aguarda o cofre ilegível e reaplica a edição sem perder máquinas recuperadas', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error('bloqueado'));
+    await useServers.getState().load();
+    useServers.getState().limparAviso();
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+
+    useServers.getState().update(SAVED_SERVER.id, { label: 'Máquina recuperada' });
+    await settle();
+
+    expect(useServers.getState().vaultReadable).toBe(false);
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(SAVED));
+    const unseen = { ...SAVED_SERVER, id: 'unseen', baseUrl: 'http://10.0.0.5:8765', token: 'unseen-token' };
+    read.resolve(JSON.stringify({ servers: [SAVED_SERVER, unseen], activeId: unseen.id }));
+    await useServers.getState().load();
+
+    const expected = { servers: [{ ...SAVED_SERVER, label: 'Máquina recuperada' }, unseen], activeId: unseen.id };
+    expect(useServers.getState()).toMatchObject({ ...expected, vaultReadable: true, aviso: null });
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(expected);
+    await useServers.getState().load();
+    expect(useServers.getState()).toMatchObject(expected);
+  });
+});

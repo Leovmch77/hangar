@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
-import { reconcilePairEntries, registrarDiag } from '@hangar/core';
+import { esquecerRota, reconcilePairEntries, registrarDiag } from '@hangar/core';
 import type { ExternalPair, LanInfo, PairAttach, Server } from '@hangar/core';
 
 const KEY = 'cp_servers_v1';
@@ -51,6 +51,7 @@ export interface ServersState {
   load(): Promise<void>;
   add(s: Omit<Server, 'id' | 'label'> & { label?: string }): Server;
   remove(id: string): void;
+  update(id: string, patch: Partial<Pick<Server, 'label' | 'baseUrl'>>): void;
   setActive(id: string): void;
   active(): Server | null;
   markInvalid(id: string): void;
@@ -197,6 +198,20 @@ export const useServers = create<ServersState>((set, get) => {
       const servers = p.servers.filter((s) => s.id !== target);
       return { servers, activeId: p.activeId === target ? (ownServers(servers)[0]?.id ?? null) : p.activeId };
     });
+  },
+  update(id, patch) {
+    change((p) => ({
+      ...p,
+      servers: p.servers.map((s) => {
+        if (s.id !== resolveId(id) || s.invite) return s;
+        const server = { ...s, label: patch.label ?? s.label, baseUrl: patch.baseUrl ?? s.baseUrl };
+        if (server.baseUrl !== s.baseUrl) {
+          esquecerRota(s.id);
+          delete server.lan;
+        }
+        return server;
+      }),
+    }));
   },
   setActive(id) {
     change((p) => ({ ...p, activeId: resolveId(id) }));

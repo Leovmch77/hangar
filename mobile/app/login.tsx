@@ -8,7 +8,7 @@ import { Sheet } from '../src/ui/Sheet';
 import { QrScanner } from '../src/features/login/QrScanner';
 import { parsePairing } from '../src/features/login/pairing';
 import { useServers } from '../src/stores/servers';
-import { getSessions } from '@hangar/core';
+import { verifyLoginMachine } from '../src/features/machines/loginMachine';
 import * as m from '../src/paraglide/messages';
 import { superficie } from '../src/theme/superficie';
 
@@ -48,10 +48,11 @@ export default function Login() {
     setError('');
 
     // add é síncrono em memória, mas persist é async (emenda 2) — o probe só roda depois
-    const added = useServers.getState().add({ baseUrl: p.base, token: p.token });
+    const existing = useServers.getState().servers.some((s) => s.baseUrl === p.base && !s.invite);
+    const added = useServers.getState().add({ baseUrl: p.base, token: p.token, label: new URL(p.base).hostname });
 
     try {
-      await getSessions();
+      await verifyLoginMachine(added, !existing);
       router.replace('/');
     } catch (e) {
 
