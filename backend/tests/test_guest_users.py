@@ -171,7 +171,7 @@ def test_a_claim_written_by_the_rust_is_seen_and_kept(tmp_path):
     assert set(json.loads(path.read_text())["sessions"]) == {"rust", "py"}
 
 
-def test_writing_waits_for_the_lock_the_rust_holds(tmp_path):
+def test_python_writes_serialize_on_the_guests_lock(tmp_path):
     import threading
     from app import atomico
     g, _ = _guest(tmp_path)
@@ -180,7 +180,7 @@ def test_writing_waits_for_the_lock_the_rust_holds(tmp_path):
     with atomico.locked(tmp_path / "guests.lock"):
         writer = threading.Thread(target=lambda: (guest_users.claim("s1", g.id), done.set()))
         writer.start()
-        assert not done.wait(0.2), "gravou com a trava do Rust presa"
+        assert not done.wait(0.2), "gravou com a trava presa"
     assert done.wait(30)
     writer.join()
     assert guest_users.owner_name("s1") == "ana"

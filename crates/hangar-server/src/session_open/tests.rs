@@ -1225,6 +1225,29 @@ fn the_bridge_refuses_a_guest_field_that_is_not_an_id() {
     }
 }
 
+/// O Rust espera a trava que o próprio `atomico.locked` do Python segura no `guests.lock`.
+#[cfg(unix)]
+#[test]
+fn the_rust_claim_waits_for_the_lock_python_holds() {
+    use std::io::BufRead;
+    let base = tempfile::tempdir().unwrap();
+    let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend");
+    let script = "import sys\nfrom app import atomico\nwith atomico.locked(sys.argv[1]):\n    print('preso', flush=True)\n    sys.stdin.read()\n";
+    let mut python = std::process::Command::new("python3").args(["-c", script]).arg(base.path().join("guests.lock")).current_dir(&backend)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(python.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "preso");
+    let (done, wait) = std::sync::mpsc::channel();
+    let dir = base.path().to_path_buf();
+    let writer = std::thread::spawn(move || done.send(server::claim_guest(&dir, "s1", "g1", None).is_ok()).unwrap());
+    assert!(wait.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "gravou com a trava do Python presa");
+    drop(python.stdin.take());
+    assert_eq!(wait.recv_timeout(std::time::Duration::from_secs(30)), Ok(true));
+    writer.join().unwrap();
+    assert!(python.wait().unwrap().success());
+}
+
 /// A fila que a sessão morta deixou no nome sai antes do pane novo (o histórico do Rust a mostraria
 /// como mensagens dela); a de outro nome fica.
 #[test]
