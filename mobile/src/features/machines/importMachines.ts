@@ -87,7 +87,8 @@ export async function discoverSavedMachines(sources?: Server[]): Promise<Machine
   });
   if (freshIssues.length) {
     // A busca roda a cada abertura: o aviso diz só onde falhou; o motivo de cada uma fica na importação explícita.
-    const hosts = [...new Set(freshIssues.map((issue) => (issue.machine ?? issue.source ?? '').replace(/\.ts\.net(:\d+)?$/, '').split('.tail')[0]).filter(Boolean))];
+    const hosts = [...new Set(freshIssues.flatMap((issue) => [issue.machine, issue.source])
+      .map((host) => (host ?? '').replace(/\.ts\.net(:\d+)?$/, '').split('.tail')[0]).filter(Boolean))];
     toast.aviso(hosts.length ? m.machine_import_warning_short({ hosts: hosts.join(', ') }) : m.machine_import_warning({ count: freshIssues.length }));
   }
   return result;
