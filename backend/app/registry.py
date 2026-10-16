@@ -1026,8 +1026,11 @@ def _rename_pair_python(old: str, new: str) -> None:
 
 
 class SessionOpenNeedsRust(Exception):
-    """Claude com terminal nasce no Rust (abertura única); sem ele, abrir não tem quem faça."""
+    """Abrir e subir sessão é do Rust (abertura única); sem ele, não tem quem faça."""
     code = "session_open_needs_rust_server"
+
+    def __init__(self):
+        super().__init__("abrir e reabrir sessão precisam do servidor Rust, que não está rodando")
 
 
 class GroupCleanupFailed(ValueError):

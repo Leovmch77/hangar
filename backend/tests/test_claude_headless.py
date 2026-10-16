@@ -388,125 +388,6 @@ def test_context_ganha_tabela_de_limites_da_conta(adapter):
     assert A._tabela_limites([]) == ""
 
 
-def test_estaciona_so_sessao_parada_sem_nada_em_aberto(adapter, monkeypatch):
-    relogio = [5000.0]
-    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
-    sess = adapter._sessions["s1"]
-    sess.ativa_em = relogio[0]
-    pode = lambda: _run(adapter._pode_estacionar(sess))   # noqa: E731
-
-    assert not pode()                       # acabou de trabalhar
-    relogio[0] += A._OCIOSA_S + 1
-    assert pode()
-    sess.pending["r1"] = {"tool_name": "Bash"}
-    sess.state = "awaiting_input"
-    assert not pode()                       # permissão em aberto
-    sess.pending.clear()
-    sess.state = "idle"
-    fila = [{"id": "q1", "delivered": False}]
-
-    class _Fila:
-        def __init__(self, name):
-            pass
-
-        def load(self):
-            return fila
-    monkeypatch.setattr(A, "PromptQueue", _Fila)
-    assert not pode()                       # fila por entregar
-    fila[0]["delivered"] = True
-    assert pode()
-    sess.in_progress = True
-    assert not pode()
-
-
-def test_prompt_que_chega_durante_a_leitura_da_fila_segura_o_estacionar(adapter, monkeypatch):
-    relogio = [5000.0]
-    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
-    sess = adapter._sessions["s1"]
-    sess.ativa_em = relogio[0] - A._OCIOSA_S - 1
-
-    class _Fila:
-        def __init__(self, name):
-            pass
-
-        def load(self):
-            sess.ativa_em = relogio[0]   # send_prompt marcou atividade no meio da leitura
-            return []
-    monkeypatch.setattr(A, "PromptQueue", _Fila)
-    assert _run(adapter._pode_estacionar(sess)) is False
-
-
-def test_vigia_encerra_o_cano_da_ociosa(adapter, monkeypatch):
-    sess = adapter._sessions["s1"]
-    mortos = []
-    monkeypatch.setattr(A, "_VIGIA_S", 0)
-    monkeypatch.setattr(ClaudeHeadlessAdapter, "_matar", staticmethod(lambda s, meta=None: mortos.append(s.name)))
-
-    async def sempre(s):
-        return True
-    adapter._pode_estacionar = sempre  # type: ignore[method-assign]
-    _run(asyncio.wait_for(adapter._vigiar_ociosas(), 2))
-    # Fora da memória: sem isto a sessão seguia "viva" e o próximo prompt não subia outro processo.
-    assert mortos == ["s1"] and "s1" not in adapter._sessions and sess.name == "s1"
-
-
-def test_prompt_waits_for_idle_shutdown_and_uses_new_process(adapter, monkeypatch):
-    old = adapter._sessions["s1"]
-    old.ativa_em -= A._OCIOSA_S + 1
-    old.meta["cano"] = {"pid": 4242}
-    release = threading.Event()
-    delivered_to = []
-    monkeypatch.setattr(A, "_VIGIA_S", 0)
-    monkeypatch.setattr(adapter, "_garantir_vigia", lambda: None)
-
-    async def spawn(sess, **kwargs):
-        sess.proc = _Proc()
-        sess.initialize_ok = True
-        sess.initialize_done.set()
-        return True
-
-    async def write(sess, obj):
-        delivered_to.append(sess)
-
-    monkeypatch.setattr(adapter, "_spawn", spawn)
-    monkeypatch.setattr(adapter, "_write", write)
-
-    async def flow():
-        stopping = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        def stop(*args):
-            loop.call_soon_threadsafe(stopping.set)
-            assert release.wait(5)
-
-        monkeypatch.setattr(A, "_matar_grupo", stop)
-
-        async def send():
-            async with adapter.delivery_lock("s1"):
-                return await adapter.send_prompt("s1", "mensagem durante o encerramento")
-
-        watcher = asyncio.create_task(adapter._vigiar_ociosas())
-        prompt = None
-        try:
-            await asyncio.wait_for(stopping.wait(), 2)
-            prompt = asyncio.create_task(send())
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(prompt), 0.05)
-            assert not delivered_to
-            release.set()
-            assert await asyncio.wait_for(prompt, 2) == "sent"
-            assert delivered_to == [adapter._sessions["s1"]]
-            assert delivered_to[0] is not old
-        finally:
-            release.set()
-            tasks = [watcher] + ([prompt] if prompt is not None else [])
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    _run(flow())
-
-
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
     # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
     ad = ClaudeHeadlessAdapter()
@@ -1393,6 +1274,8 @@ def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch)
         assert list(sess.pending) == ["perm-1"] and sess.cost == 0.02 and sess.context_window == 200000
         ev = ad._evento(sess)
         assert ev.question == "Permitir Bash? ls" and "39k" not in (ev.status_line or "")
+        # O Python não sobe a sessão de volta: religada no modo python, ela nunca é estacionada.
+        assert not any("_vigiar_ociosas" in repr(t.get_coro()) for t in asyncio.all_tasks())
     _run(fluxo())
 
 
