@@ -82,15 +82,15 @@ export function machineImportIssue(stage: MachineImportIssue['stage'], error: un
   };
 }
 
-async function readImportJson(server: Server, path: string): Promise<unknown> {
-  const response = await probeServerResponse(server, path);
+async function readImportJson(server: Server, path: string, init?: RequestInit): Promise<unknown> {
+  const response = await probeServerResponse(server, path, init);
   // Não incorpora o corpo do erro: ele pode ecoar o token que recebeu.
   if (!response.ok) throw Object.assign(new Error('machine_import_request_failed'), { status: response.status });
   return response.json();
 }
 
-export async function readMachineIdentity(server: Server): Promise<LanInfo> {
-  const identity = await readImportJson(server, '/api/peers/identificador');
+export async function readMachineIdentity(server: Server, init?: RequestInit): Promise<LanInfo> {
+  const identity = await readImportJson(server, '/api/peers/identificador', init);
   if (!object(identity) || typeof identity.identificador !== 'string' || identity.identificador.length > 256
     || /[\u0000-\u001f\u007f]/.test(identity.identificador)
     || (identity.lan_url !== undefined && typeof identity.lan_url !== 'string')) throw invalid();
@@ -99,9 +99,9 @@ export async function readMachineIdentity(server: Server): Promise<LanInfo> {
 
 export async function confirmImportedMachine(server: Server): Promise<Server> {
   const target = { ...server, id: SERVIDOR_CANDIDATO };
-  const sessions: unknown = await getSessions(target);
+  const sessions: unknown = await getSessions(target, { redirect: 'error' });
   if (!Array.isArray(sessions)) throw invalid();
-  const lan = await readMachineIdentity(target);
+  const lan = await readMachineIdentity(target, { redirect: 'error' });
   return { ...server, label: lan.id || server.label, lan };
 }
 

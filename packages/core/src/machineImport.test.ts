@@ -1,6 +1,8 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { configureApi } from './apiEnv';
 import {
-  createMachineImportLink, isLocalMachineUrl, machineImportIssue, mergeImportedMachines, normalizeMachineUrl, parseMachineImportPayload,
+  confirmImportedMachine, createMachineImportLink, discoverMachineCandidates, isLocalMachineUrl, machineImportIssue,
+  mergeImportedMachines, normalizeMachineUrl, parseMachineImportPayload, readMachineIdentity,
 } from './machineImport';
 import type { Server } from './servers';
 
@@ -21,6 +23,54 @@ test('contexto seguro guarda somente host validado, sem corpo, caminho, token ou
   url.hash = 'fixture-fragment';
   expect(machineImportIssue('candidate', error, url.toString()))
     .toEqual({ stage: 'candidate', status: 403 });
+});
+
+describe('confirmação e redirecionamentos', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+    configureApi({ getBaseUrl: () => 'https://active.test', getToken: () => 'active-token', origin: null,
+      onUnauthorized: () => { throw new Error('unexpected_active_reset'); }, createEventSource: vi.fn() });
+    fetchMock.mockImplementation(async (input) => String(input).endsWith('/api/sessions') ? json([]) : json({ identificador: 'confirmed-home', lan_url: '' }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  test('confirmação envia redirect error nas duas requisições da candidata', async () => {
+    expect(await confirmImportedMachine(machine)).toEqual({ ...machine, label: 'confirmed-home', lan: { id: 'confirmed-home', url: '' } });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://home.test/api/sessions', 'https://home.test/api/peers/identificador']);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.redirect).toBe('error');
+      expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${machine.token}`);
+    }
+  });
+
+  test.each(['/api/sessions', '/api/peers/identificador'])('recusa da fronteira fetch por redirect rejeita confirmação em %s', async (path) => {
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith(path) && init?.redirect === 'error') throw new TypeError('fixture-redirect-refused');
+      return String(input).endsWith('/api/sessions') ? json([]) : json({ identificador: 'confirmed-home', lan_url: '' });
+    });
+    await expect(confirmImportedMachine(machine)).rejects.toThrow('fixture-redirect-refused');
+  });
+
+  test('identidade avulsa e descoberta de peers, app-list e token conservam redirect padrão', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/peers')) return json([{ id: 'remote', base_url: 'https://remote.test', token: '••••mask' }]);
+      if (url.endsWith('/app-list')) return json({ rev: 'r1', servers: [] });
+      if (url.endsWith('/token')) return json({ token: 'fixture-remote-token' });
+      return json({ identificador: 'confirmed-home', lan_url: '' });
+    });
+    await readMachineIdentity(machine);
+    const result = await discoverMachineCandidates([machine], () => [machine]);
+    expect(result.candidates).toEqual([{ id: 'remote', label: 'remote', baseUrl: 'https://remote.test', token: 'fixture-remote-token' }]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://home.test/api/peers/identificador', 'https://home.test/api/peers',
+      'https://home.test/api/peers/app-list', 'https://home.test/api/peers/remote/token',
+    ]);
+    for (const [, init] of fetchMock.mock.calls) expect(init).not.toHaveProperty('redirect');
+  });
 });
 
 describe('payload de importação de máquinas', () => {

@@ -14,7 +14,7 @@ import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, creat
 import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
-import { probeServerResponse } from './api';
+import { fetchSessionsForServer, getSessions, probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
 import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, selectOption, selectOptionForServer, sendInputForServer, showPluginPane, skipQuestion, submitSelected, submitSelectedForServer } from './api';
 import type { AskQuestionPayload, StateEvent } from './types';
@@ -27,6 +27,42 @@ import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTran
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 /** O campo `V18-campo` da vitrine, como o `inputControl` o tira da árvore. */
 const CAMPO = { plugin: 'vitrine', key: 'V18-campo' };
+
+describe('opções da leitura de sessões', () => {
+  const selected = { id: 'sessions-selected', label: 'fixture-selected', baseUrl: 'https://b.test', token: 'token-b' };
+  const readers = [
+    { name: 'getSessions explícito', read: (init?: RequestInit) => getSessions(selected, init), base: 'https://b.test', auth: 'Bearer token-b' },
+    { name: 'fetchSessionsForServer', read: (init?: RequestInit) => fetchSessionsForServer(selected, init), base: 'https://b.test', auth: 'Bearer token-b' },
+    { name: 'getSessions sem servidor', read: (init?: RequestInit) => getSessions(null, init), base: 'https://a.test', auth: 'Bearer token-a' },
+  ];
+
+  it.each(readers)('$name propaga RequestInit até fetch sem trocar o destino ou credencial', async ({ read, base, auth }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('[]'));
+    const signal = new AbortController().signal;
+    await read({ redirect: 'error', signal, cache: 'no-store', headers: { 'X-Fixture': 'fixture-value' } });
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(`${base}/api/sessions`, expect.objectContaining({
+      redirect: 'error', signal, cache: 'no-store',
+      headers: expect.objectContaining({ Authorization: auth, 'X-Fixture': 'fixture-value' }),
+    }));
+  });
+
+  it.each(readers)('$name conserva timeout de 4000 ms e não define redirect por padrão', async ({ read }) => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('[]'));
+    await read();
+    expect(timeout).toHaveBeenCalledWith(4000);
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(timeout.mock.results[0].value);
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('redirect');
+  });
+
+  it.each(readers)('$name conserva o signal padrão quando só redirect é informado', async ({ read }) => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('[]'));
+    await read({ redirect: 'error' });
+    expect(timeout).toHaveBeenCalledWith(4000);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ signal: timeout.mock.results[0].value, redirect: 'error' });
+  });
+});
 
 it('teste de transcrição informa o prazo real do servidor selecionado', async () => {
   vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('prazo excedido', 'TimeoutError'));

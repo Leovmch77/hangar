@@ -43,6 +43,30 @@ function network(extra: (url: string, init: RequestInit) => Response | Promise<R
   });
 }
 
+describe('política de redirecionamento da candidata', () => {
+  test.each(['/api/sessions', '/api/peers/identificador'])('fetch recusando redirect em %s retorna falha sem guardar candidata', async (path) => {
+    network((url, init) => {
+      if (url === `${owner.baseUrl}/api/peers`) return json([{ id: remote.id, base_url: remote.baseUrl, token: '••••mask' }]);
+      if (url === `${owner.baseUrl}/api/peers/remote/token`) return json({ token: remote.token });
+      if (url === `${remote.baseUrl}${path}` && init.redirect === 'error') throw new TypeError('fixture-redirect-refused');
+      return undefined;
+    });
+    const result = await discoverSavedMachines([owner]);
+    await settle();
+    expect(result.added).toEqual([]);
+    expect(result.issues).toEqual([{ stage: 'candidate', machine: 'remote.test' }]);
+    expect(useServers.getState().servers.some((s) => s.baseUrl === remote.baseUrl)).toBe(false);
+    expect(stored().servers.some((s: Server) => s.baseUrl === remote.baseUrl)).toBe(false);
+    expect(useServers.getState().activeId).toBe(other.id);
+    for (const [url, init] of mocks.fetch.mock.calls) {
+      if (String(url).startsWith(remote.baseUrl)) expect(init.redirect).toBe('error');
+      else expect(init).not.toHaveProperty('redirect');
+    }
+    expect(paths()).toContain(`${owner.baseUrl}/api/peers/identificador`);
+    expect(paths()).toContain(`${owner.baseUrl}/api/peers/remote/token`);
+  });
+});
+
 describe('identidades confirmadas das máquinas', () => {
   test.each([
     { host: 'owner-empty.test', identifier: '' },

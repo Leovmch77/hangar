@@ -409,20 +409,20 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
   return res.json() as Promise<T>;
 }
 
-export function getSessions(server?: Server | null): Promise<SessionInfo[]> {
-  if (server) return fetchSessionsForServer(server);
+export function getSessions(server?: Server | null, init?: RequestInit): Promise<SessionInfo[]> {
+  if (server) return fetchSessionsForServer(server, init);
   // Timeout curto: este alimenta polls (ex. nav do Chat a cada 5s) — socket pendurado (tailscale
   // pra nó morto nao recusa) empilhava um fetch por tick até esgotar as 6 conexões do host.
-  return apiFetch<SessionInfo[]>('/api/sessions', { signal: AbortSignal.timeout(4000) });
+  return apiFetch<SessionInfo[]>('/api/sessions', { signal: AbortSignal.timeout(4000), ...init });
 }
 
 // Lista sessões de UM servidor específico (baseUrl+token explícitos), sem mexer no ativo. A visão
 // agregada chama um por um e renderiza cada resposta assim que chega (sem esperar os outros), então
 // um servidor lento/offline não segura os demais. Timeout de 4s: servidor morto falha rápido (< o
 // intervalo de poll de 5s) em vez de pendurar no timeout default do browser.
-export async function fetchSessionsForServer(s: Server): Promise<SessionInfo[]> {
+export async function fetchSessionsForServer(s: Server, init?: RequestInit): Promise<SessionInfo[]> {
   const res = await apiFetchRes('/api/sessions', {
-    signal: AbortSignal.timeout(4000),
+    signal: AbortSignal.timeout(4000), ...init,
   }, s);
   if (!res.ok) throw Object.assign(new Error(`${res.status}`), { status: res.status });
   return res.json() as Promise<SessionInfo[]>;
