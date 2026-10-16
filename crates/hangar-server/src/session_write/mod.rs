@@ -16,6 +16,7 @@ pub mod engine;
 pub mod input;
 pub mod permissions;
 pub mod relaunch;
+pub mod resume;
 pub mod table;
 
 use std::net::SocketAddr;

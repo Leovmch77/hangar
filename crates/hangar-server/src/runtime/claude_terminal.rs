@@ -62,6 +62,9 @@ fn generation(state_path: &Path) -> Result<u64, RuntimeError> {
     }
 }
 
+/// O Claude de um pane sem conversa provada.
+pub struct BareClaude { pub pane_pid: i64, pub agent: i64, pub cwd: String, pub key: String, pub created: f64 }
+
 /// O que o pane prova: o agente, a conta e a conversa dele.
 struct Proven { agent: u32, config_dir: PathBuf, conversation: String, transcript: PathBuf, plugin_key: Option<String>, pane_birth: Option<f64> }
 
@@ -173,24 +176,50 @@ impl Watcher {
         }
     }
 
+    /// A chave da fila da sessão: a `CP_SESSION_KEY` do pane, a que o Python deu a esta vida, ou uma nova,
+    /// gravada na sessão do multiplexador para a próxima adoção (outro processo do Rust) achar a mesma fila.
+    async fn pane_key(&self, name: &str, target_pane: &str, created: u64) -> Result<String, RuntimeError> {
+        let shown = self.mux_text(&["show-environment", "-t", &session_target(name), "CP_SESSION_KEY"]).await.unwrap_or_default();
+        if let Some(key) = session_key(&shown) { return Ok(key); }
+        let (queue, owned, pane_id) = (self.cfg.queue_dir.clone(), name.to_owned(), target_pane.to_owned());
+        let legacy = tokio::task::spawn_blocking(move || legacy_key(&queue, &owned, &pane_id, created)).await.ok().flatten();
+        let key = legacy.unwrap_or_else(|| crate::mods::state::random_hex(16));
+        if self.mux_text(&["set-environment", "-t", &session_target(name), "CP_SESSION_KEY", &key]).await.is_none() {
+            return Err(refused("claude_terminal_key", "a chave da sessão não foi gravada no terminal"));
+        }
+        Ok(key)
+    }
+
+    /// O Claude de um pane sem conversa provada (aberto sem id, sem o registro nativo): o pane, o agente,
+    /// a pasta dele (não a do pane, que um `cd` no shell muda, S-23) e a chave da fila. `Ok(None)`: o pane
+    /// não roda um Claude.
+    pub async fn bare_claude(&self, name: &str) -> Result<Option<BareClaude>, RuntimeError> {
+        let panes = self.cfg.mux.list_panes().await.map_err(|e| refused("mux_unavailable", e.code))?;
+        let Some(pane) = panes.iter().filter(|p| p.session == name).max_by_key(|p| p.active).cloned() else { return Ok(None) };
+        let mine: Vec<Pane> = panes.into_iter().filter(|p| p.session == name).collect();
+        let base = self.cfg.home.join(".claude");
+        let found = tokio::task::spawn_blocking(move || {
+            let procs = SystemProcs::default();
+            let children = procs.children(Duration::ZERO).map_err(|_| refused("claude_terminal_process_unavailable", "os processos da máquina não puderam ser lidos"))?;
+            let mut resolver = crate::list::discover::Resolver::default();
+            let rows = crate::list::discover::discover_panes(&mine, &procs, &children, &base.join("projects"), &mut resolver, &|_| false);
+            let Some(row) = rows.into_iter().next().filter(|r| r.provider == "claude") else { return Ok(None) };
+            let (Some(agent), Some(pane_pid)) = (row.agent_pid.filter(|p| *p > 0), row.pane_pid) else { return Ok(None) };
+            if procs.argv_checked(agent).is_ok_and(|argv| login(&argv)) { return Ok(None); }
+            let cwd = procs.cwd(agent).map(|p| p.to_string_lossy().into_owned()).unwrap_or(row.cwd);
+            Ok(Some((agent, pane_pid, cwd)))
+        }).await.unwrap_or_else(|_| Err(refused("claude_terminal_process_unavailable", "a leitura dos processos parou no meio")))?;
+        let Some((agent, pane_pid, cwd)) = found else { return Ok(None) };
+        let created = pane.session_created.ok_or_else(|| refused("claude_terminal_pane", "o multiplexador não informou quando a sessão nasceu"))?;
+        let key = self.pane_key(name, &pane.target().unwrap_or_else(|| format!("={name}:")), created).await?;
+        Ok(Some(BareClaude { pane_pid, agent, cwd, key, created: created as f64 }))
+    }
+
     async fn open_claude(&self, registry: &RuntimeRegistry, name: &str, pane: &Pane, proven: Proven) -> Result<(), RuntimeError> {
         let created = pane.session_created.ok_or_else(|| refused("claude_terminal_pane", "o multiplexador não informou quando a sessão nasceu"))?;
         let target_pane = pane.target().unwrap_or_else(|| format!("={name}:"));
         let program = self.cfg.mux_program.to_string_lossy().into_owned();
-        let shown = self.mux_text(&["show-environment", "-t", &session_target(&name), "CP_SESSION_KEY"]).await.unwrap_or_default();
-        let key = match session_key(&shown) {
-            Some(key) => key,
-            None => {
-                let (queue, owned, pane_id) = (self.cfg.queue_dir.clone(), name.to_owned(), target_pane.clone());
-                let legacy = tokio::task::spawn_blocking(move || legacy_key(&queue, &owned, &pane_id, created)).await.ok().flatten();
-                let key = legacy.unwrap_or_else(|| crate::mods::state::random_hex(16));
-                // Gravada na sessão: a próxima adoção (outro processo do Rust) acha a mesma fila.
-                if self.mux_text(&["set-environment", "-t", &session_target(&name), "CP_SESSION_KEY", &key]).await.is_none() {
-                    return Err(refused("claude_terminal_key", "a chave da sessão não foi gravada no terminal"));
-                }
-                key
-            }
-        };
+        let key = self.pane_key(name, &target_pane, created).await?;
         let (state_path, lease_path) = super::codex_terminal::queue_files(&self.cfg.queue_dir, &key);
         let generation = { let path = state_path.clone(); tokio::task::spawn_blocking(move || generation(&path)).await.map_err(|_| refused("queue_io", "fila da sessão inacessível"))?? };
         let binding = TerminalBinding { name: name.to_owned(), pane: target_pane, conversation: proven.conversation.clone(), generation, created,

@@ -48,6 +48,8 @@ enum Life {
     Terminal { target:TerminalTarget },
     /// Sem terminal: o sidecar e, aberta aqui, a geração da entrada.
     Headless { meta:Value, open:bool },
+    /// Com terminal e sem conversa provada (aberto sem id): só o pane, sem entrada aqui.
+    Bare { pane_pid:i64 },
 }
 
 /// A sessão Claude como está: o spec dela (gravado ⊕ observado), a conversa, a chave, a geração da fila
@@ -130,8 +132,14 @@ fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&V
 /// Spec de um Claude com terminal aberto antes do registro, lido do processo vivo: o que o `para_headless`
 /// do Python lia do `/proc`. Só para essas sessões; a reabertura grava o spec dali em diante.
 fn legacy_terminal_spec(target:&TerminalTarget,name:&str,cwd:String) -> Result<(SessionSpec,Option<Value>),RuntimeError> {
+    let mut spec=process_spec(i64::from(target.metadata.agent_pid),&target.key,name,cwd,target.created)?;
+    spec.0.conversation=Some(target.binding.conversation.clone());
+    Ok(spec)
+}
+
+/// O spec do Claude que roda no processo `pid`: conta, motor, modelo, esforço, modo, Fast, Jev e só leitura.
+fn process_spec(pid:i64,key:&str,name:&str,cwd:String,created:f64) -> Result<(SessionSpec,Option<Value>),RuntimeError> {
     let procs=SystemProcs::default();
-    let pid=i64::from(target.metadata.agent_pid);
     let env=|var:&str|procs.env_var(pid,var).ok().flatten().map(|v|v.to_string_lossy().into_owned()).filter(|v|!v.is_empty());
     let argv=procs.argv_checked(pid).map_err(|_|refused("lifecycle_process_read","o processo do Claude não pôde ser lido"))?;
     let flag=|name:&str|argv.windows(2).find(|w|w[0]==name).map(|w|w[1].clone())
@@ -145,13 +153,13 @@ fn legacy_terminal_spec(target:&TerminalTarget,name:&str,cwd:String) -> Result<(
     let engine=matches!(account,Account::Engine{..});
     let settings=env("HANGAR_CLAUDE_SETTINGS").and_then(|raw|serde_json::from_str::<Value>(&raw).ok()).filter(|v|v.as_object().is_some_and(|o|!o.is_empty()));
     let tier=env("CP_ENGINE_SERVICE_TIER").and_then(|t|serde_json::from_value(Value::from(t)).ok());
-    let spec=SessionSpec { version:crate::session_open::SPEC_VERSION,key:target.key.clone(),name:name.into(),cwd,
+    let spec=SessionSpec { version:crate::session_open::SPEC_VERSION,key:key.into(),name:name.into(),cwd,
         provider:crate::session_open::AgentProvider::Claude,surface:Surface::Terminal,account,account_source:crate::session_open::AccountSource::Explicit,
         model:flag("--model"),effort:flag("--effort"),service_tier:tier,
         permission_mode:flag("--permission-mode").as_deref().and_then(PermissionMode::claude),
         subagent_model:if engine {None} else {env("CLAUDE_CODE_SUBAGENT_MODEL")},customizations:None,
         jev:env("HANGAR_JEV").as_deref()==Some("on"),read_only:env("HANGAR_ORQ_READ_ONLY").as_deref()==Some("1"),
-        worktree:None,creator:None,created_at:target.created,conversation:Some(target.binding.conversation.clone()) };
+        worktree:None,creator:None,created_at:created,conversation:None };
     Ok((spec,settings))
 }
 
@@ -174,7 +182,7 @@ impl RuntimeRegistry {
             Ok(Some(_))=>{},
             Ok(None)=>if let Err(error)=self.watcher_ref()?.adopt_claude(self,name).await? {return Some(Err(error));},
         }
-        Some(self.claude_current(name,false).await.map(|current|current.spec))
+        Some(self.claude_current(name,false,false).await.map(|current|current.spec))
     }
 
     /// A sessão Claude `name` está sem terminal (tem sidecar)? `None` com o sidecar ilegível.
@@ -196,21 +204,54 @@ impl RuntimeRegistry {
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(surface) {
             return Some(Ok(Reopened { spec:None,changed:false }));
         }
-        Some(self.reopen_by_spec(name,change,between).await)
+        Some(self.reopen_by_spec(name,change,between,None).await)
     }
 
-    async fn reopen_by_spec(&self,name:&str,change:SessionChange,between:Option<&dyn Between>) -> Result<Reopened,ReopenFailure> {
+    /// `/resume`: a sessão Claude `name` volta na conversa `sid`, que já existe, pelo mesmo caminho das outras
+    /// reaberturas (S-22): a vida nova é montada antes, a antiga sai inteira antes de a nova subir (S-17) e a
+    /// falha volta pelo spec de antes (S-16). O pane sem conversa provada também. `None` = não é Claude daqui.
+    pub async fn resume_claude_session(&self,name:&str,sid:&str) -> Option<Result<Reopened,ReopenFailure>> {
+        if let Err(error)=self.claude_resume_spec(name).await? {return Some(Err(ReopenFailure::refused(error)));}
+        let change=SessionChange { reason:crate::session_open::ChangeReason::Resume,surface:None,account:None,permission_mode:None,
+            model:None,effort:None,service_tier:None };
+        Some(self.reopen_by_spec(name,change,None,Some(sid)).await)
+    }
+
+    /// O spec da sessão Claude `name` para retomar outra conversa: sem terminal, adotada ou com o pane sem
+    /// conversa provada (o caso do `/resume`). `None` = não é Claude daqui.
+    pub async fn claude_resume_spec(&self,name:&str) -> Option<Result<SessionSpec,RuntimeError>> {
+        match self.claude_sidecar(name).await {
+            Err(error)=>return Some(Err(error)),
+            Ok(Some(_))=>return Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            Ok(None)=>{},
+        }
+        let watcher=self.watcher_ref()?;
+        match watcher.adopt_claude(self,name).await {
+            Some(Ok(()))=>Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            // Sem conversa provada é o caso do `/resume`: a sessão aberta sem id.
+            Some(Err(error)) if error.code!="claude_terminal_conversation_unproved"=>Some(Err(error)),
+            _=>match watcher.bare_claude(name).await {
+                Ok(Some(_))=>Some(self.bare_current(name).await.map(|current|current.spec)),
+                Ok(None)=>None,
+                Err(error)=>Some(Err(error)),
+            },
+        }
+    }
+
+    async fn reopen_by_spec(&self,name:&str,change:SessionChange,between:Option<&dyn Between>,resume:Option<&str>) -> Result<Reopened,ReopenFailure> {
         let _ingress=super::lifecycle::ClosedIngress::acquire(self.ingress(),name).await.map_err(ReopenFailure::refused)?;
         // Conferido de novo sob a porta: outra troca pode ter terminado enquanto esta esperava.
         let now=match self.claude_sidecar(name).await.map_err(ReopenFailure::refused)? {Some(_)=>Surface::Headless,None=>Surface::Terminal};
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
             return Ok(Reopened { spec:None,changed:false });
         }
-        let current=self.claude_current(name,true).await.map_err(ReopenFailure::refused)?;
+        let current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
+        let sid=resume.unwrap_or(&current.sid).to_owned();
         let mut next=current.spec.with(&change);
+        next.conversation=Some(sid.clone());
         if let Some(between)=between {between.adjust(&mut next);}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
-        let start=self.prepare_start(name,&next,&current).await.map_err(ReopenFailure::refused)?;
+        let start=self.prepare_start(name,&next,&current,&sid).await.map_err(ReopenFailure::refused)?;
         match self.stop_claude(name,&current,next.surface).await {
             Ok(())=>{},
             Err(Stop::Before(error))=>return Err(ReopenFailure::refused(error)),
@@ -224,7 +265,7 @@ impl RuntimeRegistry {
         if let Some(between)=between && let Err(error)=between.apply(&current.spec,&next,&current.sid).await {
             return Err(self.restore_claude(name,&current,error).await);
         }
-        match self.start_claude(name,&next,&current,start).await {
+        match self.start_claude(name,&next,start,&sid).await {
             Ok(())=>{
                 if valid_spec_key(&next.key) && let Err(error)=crate::session_open::record::write(&self.codex_environment().home,&next) {
                     // A sessão nova está de pé: o registro velho só deixa a próxima reabertura sem esta mudança.
@@ -250,7 +291,7 @@ impl RuntimeRegistry {
     }
 
     /// A sessão, o spec dela e se ela está parada. Ocupada recusa com o motivo, antes de qualquer efeito.
-    async fn claude_current(&self,name:&str,checks:bool) -> Result<Current,RuntimeError> {
+    async fn claude_current(&self,name:&str,checks:bool,bare:bool) -> Result<Current,RuntimeError> {
         let env=self.codex_environment();
         if let Some(meta)=self.claude_sidecar(name).await? {
             let mut spec=crate::session_open::record::claude_live(&env.home,&meta,name).map_err(|e|refused("launch_meta",&format!("registro da sessão ilegível: {e}")))?;
@@ -279,7 +320,10 @@ impl RuntimeRegistry {
             let settings=meta.get("claude_settings").filter(|s|s.as_object().is_some_and(|o|!o.is_empty())).cloned();
             return Ok(Current { spec,sid,generation,life:Life::Headless { meta,open:view.is_some() },previous_non_plan,settings });
         }
-        let (target,handle)=self.claude_terminal_entry(name).await.ok_or_else(||refused("runtime_binding","a sessão não está aberta aqui"))?;
+        let Some((target,handle))=self.claude_terminal_entry(name).await else {
+            if bare {return self.bare_current(name).await;}
+            return Err(refused("runtime_binding","a sessão não está aberta aqui"));
+        };
         let cwd={let procs=SystemProcs::default();procs.cwd(i64::from(target.metadata.agent_pid)).map(|p|p.to_string_lossy().into_owned())};
         let recorded=if valid_spec_key(&target.key) {
             crate::session_open::record::read(&env.home,&target.key).map_err(|e|refused("session_spec_read",&format!("registro da sessão ilegível: {e}")))?
@@ -310,8 +354,32 @@ impl RuntimeRegistry {
             settings,spec,life:Life::Terminal { target } })
     }
 
+    /// O pane Claude sem conversa provada: o spec gravado pela chave dele, senão o lido do processo; o modo
+    /// desconhecido é o da conta, que é onde a CLI aberta sem `--permission-mode` estava. A conversa de agora
+    /// não existe para a reabertura: a volta, se a nova falhar, é numa conversa nova na mesma sessão.
+    async fn bare_current(&self,name:&str) -> Result<Current,RuntimeError> {
+        let env=self.codex_environment();
+        let watcher=self.watcher_ref().ok_or_else(||refused("runtime_binding","sem a vigia do terminal"))?;
+        let bare=watcher.bare_claude(name).await?.ok_or_else(||refused("runtime_binding","a sessão não roda um Claude"))?;
+        let recorded=if valid_spec_key(&bare.key) {
+            crate::session_open::record::read(&env.home,&bare.key).map_err(|e|refused("session_spec_read",&format!("registro da sessão ilegível: {e}")))?
+        } else {None};
+        let settings_of=|pid:i64|SystemProcs::default().env_var(pid,"HANGAR_CLAUDE_SETTINGS").ok().flatten()
+            .and_then(|raw|serde_json::from_str::<Value>(&raw.to_string_lossy()).ok()).filter(|v|v.as_object().is_some_and(|o|!o.is_empty()));
+        let (mut spec,settings)=match recorded {
+            Some(spec)=>(spec,settings_of(bare.agent)),
+            None=>process_spec(bare.agent,&bare.key,name,bare.cwd.clone(),bare.created)?,
+        };
+        spec.name=name.into();
+        spec.surface=Surface::Terminal;
+        if spec.permission_mode.is_none() {spec.permission_mode=Some(super::claude_launch::account_mode(&env,spec.account.config_dir())?);}
+        let generation=self.queue_generation(&spec.key).await?;
+        let sid=crate::session_open::open::uuid4(&crate::mods::state::random_hex(16));
+        Ok(Current { spec,sid,generation,life:Life::Bare { pane_pid:bare.pane_pid },previous_non_plan:None,settings })
+    }
+
     /// O comando da vida nova, com tudo que pode recusar antes de encerrar a antiga.
-    async fn prepare_start(&self,name:&str,next:&SessionSpec,current:&Current) -> Result<Start,RuntimeError> {
+    async fn prepare_start(&self,name:&str,next:&SessionSpec,current:&Current,sid:&str) -> Result<Start,RuntimeError> {
         let env=self.codex_environment();
         let mode=next.permission_mode.ok_or_else(||refused("permission_mode_unknown","o modo de permissão da sessão não é conhecido; nada foi reaberto"))?;
         if mode==PermissionMode::BypassPermissions {
@@ -334,7 +402,7 @@ impl RuntimeRegistry {
         match next.surface {
             Surface::Headless=>{
                 if next.read_only {return Err(refused("headless_read_only",super::claude_launch::READ_ONLY_MSG));}
-                let mut meta=crate::session_open::open::headless_sidecar(next,&current.sid,previous_non_plan,current.settings.as_ref(),route.as_ref());
+                let mut meta=crate::session_open::open::headless_sidecar(next,sid,previous_non_plan,current.settings.as_ref(),route.as_ref());
                 if let Life::Headless { meta:old,.. }=&current.life {
                     // O que só o sidecar guarda (o `created`, o `problema` da conta) segue com a sessão.
                     // O aviso da conta anterior (limite batido, sem login) não vale noutra conta.
@@ -365,11 +433,11 @@ impl RuntimeRegistry {
                 let bridge=self.policy_plugin_bridge();
                 let key=crate::mods::state::random_hex(16);
                 // A troca de conta só leva a conversa depois de encerrar: a de agora diz se ela já existe.
-                let resume=super::claude_launch::transcript(&env,next,&current.sid).exists() || super::claude_launch::transcript(&env,&current.spec,&current.sid).exists();
+                let resume=super::claude_launch::transcript(&env,next,sid).exists() || super::claude_launch::transcript(&env,&current.spec,sid).exists();
                 let ctx=ClaudeContext { plugin_roots:&roots,bridge:bridge.as_ref(),bridge_key:&key,runtime_config:&runtime,server_env:&env.base,
                     settings:current.settings.as_ref(),read_only:read_only.as_deref(),windows:terminal.windows,initial_prompt:None,engine_route:route.as_ref(),
                     resume,allow_bypass:previous_non_plan==Some(PermissionMode::BypassPermissions) };
-                Ok(Start::Terminal(Box::new(crate::session_open::claude::pane(next,&current.sid,&ctx)),terminal))
+                Ok(Start::Terminal(Box::new(crate::session_open::claude::pane(next,sid,&ctx)),terminal))
             },
         }
     }
@@ -393,6 +461,15 @@ impl RuntimeRegistry {
                 if !killed {return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));}
                 wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
             },
+            Life::Bare { pane_pid }=>{
+                let lives=tree(*pane_pid).map_err(before)?;
+                let watcher=self.watcher_ref().ok_or_else(||Stop::Before(refused("runtime_binding","sem a vigia do terminal")))?;
+                let session=if cfg!(windows) {name.to_owned()} else {format!("={name}")};
+                if watcher.mux_text(&["kill-session","-t",&session]).await.is_none() {
+                    return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));
+                }
+                wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
+            },
             Life::Headless { meta,open }=>{
                 let cano=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok());
                 let lives=match &cano {Some(cano)=>tree(i64::from(cano.pid)).map_err(before)?,None=>Vec::new()};
@@ -414,7 +491,7 @@ impl RuntimeRegistry {
     }
 
     /// Dá a partida na vida nova e confirma: o Claude na conversa e no modo pedidos.
-    async fn start_claude(&self,name:&str,next:&SessionSpec,current:&Current,start:Start) -> Result<(),RuntimeError> {
+    async fn start_claude(&self,name:&str,next:&SessionSpec,start:Start,sid:&str) -> Result<(),RuntimeError> {
         let env=self.codex_environment();
         let mode=next.permission_mode.map(PermissionMode::name).unwrap_or_default();
         match start {
@@ -430,7 +507,7 @@ impl RuntimeRegistry {
                 loop {
                     if let Some(Ok(()))=watcher.adopt_claude(self,name).await
                         && let Some((target,_))=self.claude_terminal_entry(name).await
-                        && target.binding.conversation==current.sid
+                        && target.binding.conversation==sid
                         && super::lifecycle::permission_mode(&io,&target.binding).await.is_ok_and(|shown|shown==mode) {return Ok(());}
                     if tokio::time::Instant::now()>=deadline {
                         self.drop_failed_terminal(name).await?;
@@ -454,7 +531,7 @@ impl RuntimeRegistry {
                 loop {
                     if let Some((_,view))=self.claude_headless_view(name).await {
                         if view["alive"]==false {break;}
-                        if view["initialized"]==true && view["conversation"]==current.sid.as_str() {
+                        if view["initialized"]==true && view["conversation"]==sid {
                             if view["permission_mode"]==mode {return Ok(());}
                             break;
                         }
@@ -481,8 +558,8 @@ impl RuntimeRegistry {
                 tracing::warn!(session=%name,code=%error.code,"sidecar da tentativa que falhou ficou");
                 continue;
             }
-            let back=match self.prepare_start(name,&spec,current).await {
-                Ok(start)=>self.start_claude(name,&spec,current,start).await,
+            let back=match self.prepare_start(name,&spec,current,&current.sid).await {
+                Ok(start)=>self.start_claude(name,&spec,start,&current.sid).await,
                 Err(error)=>Err(error),
             };
             match back {

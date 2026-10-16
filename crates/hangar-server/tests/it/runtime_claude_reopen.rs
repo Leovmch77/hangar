@@ -37,7 +37,8 @@ case "$1" in
     env -u CLAUDE_CONFIG_DIR bash -c 'exec -a claude sleep 120' </dev/null >/dev/null 2>&1 &
     pid=$!; for i in $(seq 100); do tr '\0' ' ' < /proc/$pid/cmdline | grep -q '^claude ' && break; sleep 0.01; done
     echo "$4 $pid 1700000100" > "$S"
-    echo "{{\"pid\":$pid,\"sessionId\":\"{SID}\"}}" > '{sessions}'/$pid.json;;
+    sid=$(printf '%s\n' "$@" | grep -oE -- '--(resume|session-id) [0-9a-f-]{{36}}' | head -1 | cut -d' ' -f2); [ -n "$sid" ] || sid='{SID}'
+    echo "{{\"pid\":$pid,\"sessionId\":\"$sid\"}}" > '{sessions}'/$pid.json;;
   has-session) read_state && [ "$3" = "=$NAME" ];;
   kill-session) read_state && kill "$PID" 2>/dev/null; rm -f "$S";;
   list-panes) read_state && printf '%s\t1\t%s\t%s\t%%7\t\tclaude\t%s\t0\t0\n' "$NAME" "$PID" '{c}' "$BORN";;
@@ -232,5 +233,36 @@ async fn the_account_route_moves_a_terminal_conversation_to_the_new_account_and_
     assert_eq!(trusted["projects"][fx.cwd.to_string_lossy().as_ref()]["hasTrustDialogAccepted"],true,"a pasta confiada na conta nova");
     let (found,_) = registry.terminal_view("s1").await.unwrap();
     registry.close(&found,2).await.unwrap();
+    fx.finish();
+}
+
+/// `/resume` numa sessão aberta sem id (o pane roda `claude` sem o registro nativo, ninguém prova a
+/// conversa): pelo caminho das outras reaberturas (S-22), a vida nova é montada antes, a antiga sai inteira
+/// antes de a nova subir (S-17) e a nova é conferida na conversa pedida; o spec grava a conversa.
+#[tokio::test]
+async fn a_session_opened_without_an_id_resumes_the_chosen_conversation() {
+    const OTHER:&str = "22222222-2222-4222-8222-222222222222";
+    let fx = fixture();
+    let project = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy()));
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{OTHER}.jsonl")),"{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(fx.home.join(".claude/settings.json"),r#"{"permissions":{"defaultMode":"acceptEdits"}}"#).unwrap();
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd).status().unwrap();
+    let old_agent = fx.agent().unwrap();
+    // Sem o registro nativo e sem transcript: a conversa do pane não tem prova.
+    std::fs::remove_file(fx.home.join(format!(".claude/sessions/{old_agent}.json"))).unwrap();
+    let registry = fx.registry().await;
+    let resumed = registry.resume_claude_session("s1",OTHER).await.expect("é sessão Claude daqui");
+    let resumed = resumed.map_err(|f|(f.error.code,f.error.message,f.stopped)).unwrap();
+    assert!(resumed.changed);
+    assert!(std::fs::read_to_string(format!("/proc/{old_agent}/cmdline")).unwrap_or_default().is_empty(),"o Claude antigo saiu antes");
+    let args = fx.args();
+    let command = args.last().unwrap();
+    assert!(command.contains(&format!("claude --resume {OTHER}")),"a conversa escolhida: {command}");
+    assert!(command.contains("--permission-mode acceptEdits"),"o modo da conta, explícito: {command}");
+    let (key,_) = registry.terminal_view("s1").await.expect("adotado na conversa nova");
+    let spec:Value = serde_json::from_slice(&std::fs::read(fx.home.join(format!(".hangar/session-specs/{key}.json"))).unwrap()).unwrap();
+    assert_eq!(spec["conversation"],OTHER,"o spec guarda a conversa retomada");
+    registry.close(&key,2).await.unwrap();
     fx.finish();
 }
