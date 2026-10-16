@@ -103,6 +103,7 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
 
 type ModelView = Pick<ReturnType<typeof useModelControl>, 'display' | 'items' | 'select'> &
   Partial<Pick<ReturnType<typeof useModelControl>, 'failed' | 'loading' | 'error' | 'notice' | 'load'>>;
+const modelItemKey = (item: ModelView['items'][number]) => item.id ?? item.hint ?? item.label;
 type EffortView = Pick<ReturnType<typeof useEffortControl>, 'items' | 'select'> &
   Partial<Pick<ReturnType<typeof useEffortControl>, 'hidden' | 'value' | 'loading' | 'applying' | 'error' | 'notice' | 'load'>>;
 type FastView = Pick<ReturnType<typeof useServiceTierControl>, 'on' | 'available' | 'toggle'> &
@@ -138,8 +139,8 @@ export function SessionSettingsControl({ open, onOpen, onClose, model, effort, f
         {header}
         <Title text={m.native_ctl_model_title()} /><Notice text={model.notice} />
         {model.loading ? <Skeleton rows={5} /> : model.error ? <Failure text={model.error} onRetry={() => void model.load?.()} /> :
-          <SettingsList items={model.items.map((it, i) => ({ id: String(i), label: it.label, hint: it.hint, selected: it.selected, disabled: !!it.unavailable }))}
-            onPick={(id) => { const it = model.items[Number(id)]; if (it.selected) onClose(); else void model.select(it); }} />}
+          <SettingsList items={model.items.map((it) => ({ id: modelItemKey(it), label: it.label, hint: it.hint, selected: it.selected, disabled: !!it.unavailable }))}
+            onPick={(id) => { const it = model.items.find((item) => modelItemKey(item) === id); if (!it) return; if (it.selected) onClose(); else void model.select(it); }} />}
         {effort.hidden ? null : <>
           <Separator /><Title text={m.native_new_chat_reasoning()} />
           {effort.loading ? <Skeleton rows={1} /> : effort.error ? <Failure text={effort.error} onRetry={() => void effort.load?.()} />

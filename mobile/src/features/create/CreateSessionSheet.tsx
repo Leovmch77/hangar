@@ -737,7 +737,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
             toggle: async () => {
               if (!fastAvailable) return;
               if (provider === 'codex' && !modelo && codexFastModel) chooseModel(valorModelo(codexFastModel));
-              setServiceTier(serviceTier === 'priority' ? undefined : 'priority');
+              setServiceTier((cur) => cur === 'priority' ? undefined : 'priority');
             } }}>
           <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
             onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>

@@ -478,7 +478,7 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
   });
 
-  it('desligar Fast omite service_tier sem desfazer o modelo escolhido', async () => {
+  it.each([false, true])('desligar Fast omite service_tier sem desfazer o modelo escolhido (mesmo lote: %s)', async (batched) => {
     calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
     calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
       { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
@@ -487,9 +487,12 @@ describe('CreateSessionSheet Codex', () => {
     await openSettings(container);
     await act(async () => button(container, 'Sol')!.click());
     const fast = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
-    await act(async () => fast().click());
-    expect(fast().getAttribute('aria-checked')).toBe('true');
-    await act(async () => fast().click());
+    if (batched) await act(async () => { fast().click(); fast().click(); });
+    else {
+      await act(async () => fast().click());
+      expect(fast().getAttribute('aria-checked')).toBe('true');
+      await act(async () => fast().click());
+    }
     expect(fast().getAttribute('aria-checked')).toBe('false');
     await send(container);
     expect(calls.create.mock.calls[0][1].model).toBe('sol');
