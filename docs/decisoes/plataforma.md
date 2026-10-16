@@ -1433,14 +1433,27 @@ dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem
 
 **O Rust volta sozinho (D-014, 15/10/2026).** Com a abertura de sessão migrando para o Rust, a
 reserva até o próximo restart deixaria abrir e reabrir sem dono. Depois da desistência o Python
-atende a porta e, a cada espera de `RETRY_DELAYS` (30 s, 1, 2, 5 e 10 min, a última repetida;
-zera quando o Rust volta), solta a porta, solta as sessões (`leave_python`: clientes de cano
-Claude e Codex fechados, trava e fila de cada registro Python devolvidas, modo `pending`) e só
-então sobe o filho. Subiu: `hangar_server.voltou`, e o `_enter_rust` reabre as sessões como depois
-de uma queda. Não subiu (mesmas regras: calado, outro protocolo, 3 quedas): nova desistência,
-`enter_python` as retoma e o gancho do modo Python roda de novo. Cada tentativa vai ao diário como
-`hangar_server.religar` (com `tentativa`); falha ao soltar as sessões, `hangar_server.religar_falhou`.
-A janela entre soltar e o filho responder deixa a porta sem dono por até `START_TIMEOUT`.
+atende a porta e, a cada espera de `RETRY_DELAYS` (30 s, 1, 2, 5 e 10 min, a última repetida),
+tenta devolvê-la. Ordem: primeiro as sessões saem do Python pela passagem normal (`leave_python`:
+operação em curso termina em até 5 s, `quiesce` com o ack da escrita em voo, trava solta, modo
+`pending`); os SSE com estado do Python fecham (`state_owner_changed`) e o app reconecta. Só então
+as conexões da porta pública são fechadas, a porta é solta e o filho nasce. Falhou ao soltar (ou há
+Codex com processo do próprio Python, que soltar mataria): o Python segue com tudo e o Rust não
+sobe naquela tentativa (`hangar_server.religar_falhou`). Subiu: `hangar_server.voltou`, e o
+`_enter_rust` reabre as sessões como depois de uma queda. Não subiu: nova desistência, `enter_python`
+as retoma e o gancho do modo Python roda de novo. A contagem só zera com o Rust de pé por uma
+`CRASH_WINDOW` inteira; um Rust que sobe e cai em seguida segue esperando mais. Calado, outro
+protocolo ou sem endereço privado com o MESMO binário falhariam igual: nesses casos a porta só é
+solta de novo depois de o binário mudar no disco (inode, tamanho ou mtime). Sinal de parada no meio
+da troca encerra sem subir o filho.
+
+A porta fica sem dono do fechamento das conexões até o filho escutar (subida do binário, sem a
+espera da saúde) e, se ele não subir, até o Python reabri-la: até `START_TIMEOUT` (10 s) por
+tentativa no pior caso. Os SSE da porta pública não esperam o prazo de parada do uvicorn: a conexão
+fechada é a desconexão que eles já tratam. O `sse_starlette` vigia o `should_exit` de qualquer
+uvicorn do processo e, ao ver o da porta pública, encerraria para sempre todo SSE do processo
+(inclusive os que o Rust abre no Python); por isso a vigia automática fica desligada e só o
+`Server.handle_exit` (sinal real) marca a saída.
 
 **Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
 `pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
