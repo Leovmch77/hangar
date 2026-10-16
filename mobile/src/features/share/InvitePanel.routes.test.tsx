@@ -6,7 +6,7 @@ import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const boundary = vi.hoisted(() => ({
-  params: {} as Record<string, string | string[]>, replace: vi.fn(), redeem: vi.fn(), sessions: vi.fn(),
+  params: {} as Record<string, string | string[]>, replace: vi.fn(), redeem: vi.fn(), sessions: vi.fn(), fetch: vi.fn(),
   scan: null as null | ((event: { data: string }) => void), vault: new Map<string, string>(),
 }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), redeemInvite: boundary.redeem, getSessions: boundary.sessions }));
@@ -66,12 +66,22 @@ beforeEach(async () => {
   boundary.scan = null;
   boundary.redeem.mockReset().mockResolvedValue(RESULT);
   boundary.sessions.mockReset().mockResolvedValue([]);
+  boundary.fetch.mockReset().mockImplementation(async (url: string) => {
+    if (url !== 'http://10.0.0.5:8765/api/peers/identificador') throw new Error('unexpected-fetch');
+    return new Response(JSON.stringify({ identificador: 'fixture-owner', lan_url: '' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', boundary.fetch);
   boundary.replace.mockReset();
   boundary.vault.clear();
   useServers.setState({ servers: [], activeId: null, ready: false, vaultReadable: false, aviso: null });
   await useServers.getState().load();
 });
-afterEach(async () => { await act(async () => { roots.splice(0).forEach((root) => root.unmount()); }); });
+afterEach(async () => {
+  await act(async () => { roots.splice(0).forEach((root) => root.unmount()); });
+  vi.unstubAllGlobals();
+});
 
 describe('entrada de convite nas rotas', () => {
   it('rota conserva link recebido, confirma e abre o chat no ID persistido', async () => {
