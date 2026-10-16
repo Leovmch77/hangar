@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 TOKEN = "mods-ui-fixture"
 CHANGED = threading.Condition()
-STATE = {"version": 0, "active": "pm", "question": False, "question_id": 1, "fail": False, "content": "normal", "removed": False}
+STATE = {"version": 0, "active": "pm", "question": False, "question_id": 1, "fail": False, "content": "normal", "removed": False, "compact": False}
 LOG = []
 
 
@@ -59,7 +59,26 @@ def surfaces():
                    {"type": "Input", "props": {"key": "filter", "label": "Filtro", "placeholder": "Digite para filtrar"}, "press": {"plugin": "proof", "key": "filter"}}])
     panes = [{"id": key, "title": title, "columns": 100, "tree": body} for key, title, body in (
         ("mr", "MR", mr), ("pm", "DEMO-10001", pm), ("jenkins", "Jenkins", jenkins))]
-    return {"source": "surface", "above": tree([text("DEMO-10001 · servicos · Configuração", dimColor=True)]),
+    progress = base64.b64encode(b"".join(struct.pack("<III", ord(c), 0x5599FF if i < 34 else 0x555965, 0x01000000)
+                                           for i, c in enumerate(("━━━━━━━━━━━━━━━ " * 6).ljust(100)))).decode()
+    band = tree([
+        {"type": "Box", "props": {"flexDirection": "row", "justifyContent": "space-between", "width": 100}, "children": [
+            button("▾ DEMO-10001 · Plano de exemplo", "progress-toggle", plain=True),
+            text("2/6 passos · 3m 29s", dimColor=True),
+        ]},
+        {"type": "Box", "props": {"flexDirection": "row", "gap": 1}, "children": [
+            {"type": "Raster", "props": {"columns": 100, "rows": 1, "cells": progress}}, text("33%") ]},
+        text("Código                         Validação                    Fechamento", dimColor=True),
+        {"type": "Box", "props": {"flexDirection": "row", "width": 100, "gap": 1}, "children": [
+            button("▸ DEMO-10001", "open-panes", plain=True),
+            text(" · servicos", dimColor=True),
+            {"type": "Box", "props": {"flexDirection": "row"}, "children": [
+                button("Configuração", "settings", plain=True)]},
+        ]},
+    ])
+    if STATE["compact"]:
+        band["children"] = [button("▸ DEMO-10001 · Plano de exemplo", "progress-toggle", plain=True), band["children"][-1]]
+    return {"source": "surface", "above": band,
             "panes": [] if STATE["removed"] else panes, "shown_id": None if STATE["removed"] else STATE["active"]}
 
 
@@ -133,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "remove":
                     STATE["removed"] = True
                 elif action == "reset":
-                    STATE.update(active="pm", question=False, fail=False, content="normal", removed=False)
+                    STATE.update(active="pm", question=False, fail=False, content="normal", removed=False, compact=False)
                 if action != "log":
                     STATE["version"] += 1
                     CHANGED.notify_all()
@@ -187,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["question"] = False
             elif path.endswith("/plugin/show"):
                 STATE["active"] = body["site"]
+            elif path.endswith("/plugin/press") and body.get("key") == "progress-toggle":
+                STATE["compact"] = not STATE["compact"]
             elif not path.endswith(("/plugin/press", "/plugin/input")):
                 self.send_json({"detail": "Ação inesperada na prova."}, 400)
                 return
