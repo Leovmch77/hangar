@@ -229,7 +229,14 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
     for row in rows.iter().filter(|r| !r.headless) {
         let Some(provider) = AgentProvider::parse(&row.provider) else { continue };
         let Some(key) = session_key(program, &row.name).await else { continue };
-        let Ok(Some(spec)) = super::record::read(home, &key) else { continue };
+        let (spec, unreadable) = recorded(home, &key, &row.name);
+        if let Some(line) = unreadable && let Some(dir) = crate::diag::diary_dir() {
+            tracing::warn!(session = %row.name, "spec ilegível; a sessão fica fora da fotografia");
+            if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
+                tracing::warn!(kind = ?error.kind(), "spec ilegível não gravado no diário");
+            }
+        }
+        let Some(spec) = spec else { continue };
         if spec.surface != Surface::Terminal { continue; }
         let conversation = row.jsonl.as_deref().filter(|_| row.tracked).and_then(|j| conversation_of(provider, j));
         let permission_mode = match (provider, &conversation, st.state.runtime.get()) {
@@ -239,6 +246,16 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
         out.insert(key, Entry { name: row.name.clone(), provider, conversation, permission_mode, missing_since: None });
     }
     Some(out)
+}
+
+/// O spec gravado da sessão viva; o ilegível devolve também a linha do diário (sem ela a sessão some da
+/// fotografia sem rastro).
+fn recorded(home: &Path, key: &str, name: &str) -> (Option<super::SessionSpec>, Option<serde_json::Value>) {
+    match super::record::read(home, key) {
+        Ok(spec) => (spec, None),
+        Err(error) => (None, Some(json!({"evento": "sessao.restauro_spec_ilegivel", "nivel": "erro", "sessao": name,
+            "codigo": "session_restore_spec_unreadable", "detalhe": error.to_string()}))),
+    }
 }
 
 /// A conversa em que a sessão volta: a do Codex mora no sidecar dele (o lançador a atualiza).
@@ -380,6 +397,21 @@ pub fn spawn(st: Arc<crate::routes::AppState>) -> Option<tokio::task::JoinHandle
 
 #[cfg(test)]
 mod tests {
+    /// SF6: o spec ilegível de uma sessão viva vai ao diário; o ausente não.
+    #[test]
+    fn an_unreadable_spec_of_a_live_session_goes_to_the_diary() {
+        let home = tempfile::tempdir().unwrap();
+        let key = "ab".repeat(16);
+        assert_eq!(super::recorded(home.path(), &key, "s1").1, None, "sem registro: nada a dizer");
+        let dir = super::super::record::dir(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{key}.json")), "{torto").unwrap();
+        let (spec, line) = super::recorded(home.path(), &key, "s1");
+        assert!(spec.is_none());
+        let line = line.expect("linha do diário");
+        assert_eq!((line["codigo"].as_str(), line["sessao"].as_str()), (Some("session_restore_spec_unreadable"), Some("s1")));
+    }
+
     use super::*;
 
     fn entry(name: &str, conversation: Option<&str>) -> Entry {
