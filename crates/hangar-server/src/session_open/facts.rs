@@ -116,7 +116,9 @@ impl LocalFacts {
                 &mut Default::default(), name, &pane.cwd, pid).jsonl
         });
         let cache = Mutex::new(crate::list::capped::Capped::new(1));
-        let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten());
+        // Sem fala no transcript, o modo de abertura (CRI-030).
+        let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten()
+            .or_else(|| super::record::launch_mode(&self.env().home, Path::new(&jsonl).file_stem()?.to_str()?)));
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
     }
 }
@@ -331,11 +333,61 @@ fn normalize_base(url: &str) -> String {
     url.strip_suffix("/v1").map_or(url, |u| u.trim_end_matches('/')).to_owned()
 }
 
+/// `cli_probe.sondar_providers`: o CLI que o pane acha pelo PATH do shell de login, com permissão de
+/// execução. Resultado por 60 s, por shell e PATH do servidor.
+pub(crate) fn installed_providers(env: &BTreeMap<String, String>) -> Vec<AgentProvider> {
+    type Cache = Mutex<BTreeMap<(Option<String>, Option<String>), (std::time::Instant, Vec<AgentProvider>)>>;
+    static CACHE: LazyLock<Cache> = LazyLock::new(Default::default);
+    let key = (env.get("SHELL").cloned(), env.get("PATH").cloned());
+    // A trava cobre a sondagem: duas aberturas com o cache vencido não sondam em paralelo.
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, found)) = cache.get(&key) && at.elapsed() < std::time::Duration::from_secs(60) { return found.clone(); }
+    let path = login_path(env);
+    let found: Vec<AgentProvider> = AgentProvider::ALL.into_iter().filter(|p| runnable_in(p.name(), &path)).collect();
+    cache.insert(key, (std::time::Instant::now(), found.clone()));
+    found
+}
+
+/// `$SHELL -l -c 'printenv PATH'` (5 s); sem shell, falha ou saída vazia, o PATH do servidor. No
+/// Windows, sempre o do servidor.
+fn login_path(env: &BTreeMap<String, String>) -> String {
+    let own = || env.get("PATH").cloned().unwrap_or_default();
+    let Some(shell) = env.get("SHELL").filter(|s| !s.is_empty() && cfg!(unix)) else { return own() };
+    let mut child = match std::process::Command::new(shell).args(["-l", "-c", "printenv PATH"]).env_clear().envs(env)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
+        Ok(child) => child,
+        Err(_) => return own(),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline { std::thread::sleep(std::time::Duration::from_millis(10)); }
+    let Ok(Some(status)) = child.try_wait() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return own();
+    };
+    let mut out = String::new();
+    let _ = std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out);
+    let out = out.trim();
+    if status.success() && !out.is_empty() { out.to_owned() } else { own() }
+}
+
+/// Arquivo executável no PATH; no Windows, só com extensão que o pane roda como CLI.
+fn runnable_in(name: &str, path: &str) -> bool {
+    std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).any(|dir| {
+        if cfg!(windows) {
+            return [".exe", ".cmd", ".bat", ".com"].iter().any(|ext| dir.join(format!("{name}{ext}")).is_file());
+        }
+        let file = dir.join(name);
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; file.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0) }
+        #[cfg(not(unix))]
+        { file.is_file() }
+    })
+}
+
 impl OpenFacts for LocalFacts {
     fn providers(&self) -> Result<ProviderCatalog, OpenError> {
-        let path: Vec<(String, String)> = self.env().base.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let available: Vec<AgentProvider> = AgentProvider::ALL.into_iter()
-            .filter(|p| crate::runtime::process::resolve_program(p.name(), &path).is_some()).collect();
+        let available = installed_providers(&self.env().base);
         let claude_logins: Vec<Option<bool>> = if available.contains(&AgentProvider::Claude) {
             // Login ilegível só deixa de preferir quem está conectado, como no Python.
             let accounts = self.accounts.claude_accounts().unwrap_or_else(|error| {

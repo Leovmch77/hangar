@@ -35,6 +35,8 @@ pub trait Mux: Send + Sync {
     /// Prefixo do escopo transiente do systemd (`systemd-run … --`); vazio sem ele.
     fn scope(&self) -> BoxFuture<'_, Vec<String>>;
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput>;
+    /// Uma linha do diário exportável sobre o próprio multiplexador.
+    fn diary(&self, line: serde_json::Value);
 }
 
 /// O que vem da máquina e não do pedido.
@@ -193,6 +195,7 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     }
     if !scope.is_empty() && !output.ok() && output.stderr.trim_start().starts_with("Failed to ") {
         tracing::warn!(code = "systemd_scope_refused", cause = %tail(&output.stderr), "escopo do systemd recusado; o terminal sobe sem ele");
+        mux.diary(serde_json::json!({"evento": "mux.scope_perdido", "nivel": "aviso", "retorno": output.code, "comando": "new-session"}));
         output = mux.run(argv).await;
     }
     // S-32: sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
@@ -284,9 +287,10 @@ pub fn client_command(program: &str) -> tokio::process::Command {
 /// O processo de verdade, sem os segredos do servidor no ambiente do cliente (que vira o do
 /// servidor tmux quando é ele quem o sobe).
 /// `probe`: a sondagem do escopo (a do systemd; os testes trocam por uma falsa).
-pub struct ProcessMux { pub timeout: Duration, pub probe: fn() -> Vec<String> }
+/// `diary`: a pasta do diário (sem ela, nada é gravado: os testes não escrevem no da máquina).
+pub struct ProcessMux { pub timeout: Duration, pub probe: fn() -> Vec<String>, pub diary: Option<PathBuf> }
 
-impl Default for ProcessMux { fn default() -> Self { Self { timeout: Duration::from_secs(5), probe: systemd_scope } } }
+impl Default for ProcessMux { fn default() -> Self { Self { timeout: Duration::from_secs(5), probe: systemd_scope, diary: None } } }
 
 /// Bloqueante: a primeira chamada roda o `systemd-run` da sondagem.
 pub(crate) fn systemd_scope() -> Vec<String> {
@@ -307,18 +311,74 @@ impl Mux for ProcessMux {
         })
     }
 
+    fn diary(&self, line: serde_json::Value) {
+        let Some(dir) = self.diary.clone() else { return };
+        tokio::task::spawn_blocking(move || write_diary(&dir, line));
+    }
+
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
         Box::pin(async move {
             let Some((program, args)) = argv.split_first() else { return MuxOutput::default() };
+            let simultaneous = RUNNING.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let started = std::time::Instant::now();
             let mut command = client_command(program);
             command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
-            match tokio::time::timeout(self.timeout, command.output()).await {
-                Ok(Ok(out)) => MuxOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&out.stderr).into_owned() },
-                Ok(Err(error)) => MuxOutput { code: None, stdout: String::new(), stderr: error.to_string() },
-                Err(_) => MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() },
+            let (out, failure) = match tokio::time::timeout(self.timeout, command.output()).await {
+                Ok(Ok(out)) => (MuxOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned() }, None),
+                Ok(Err(error)) => (MuxOutput { code: None, stdout: String::new(), stderr: error.to_string() }, Some(("OSError", error.raw_os_error()))),
+                Err(_) => (MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() }, Some(("TimeoutExpired", None))),
+            };
+            RUNNING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(dir) = self.diary.clone()
+                && let Some(line) = command_line(&argv, &out, failure, started.elapsed(), self.timeout, simultaneous) {
+                let _ = tokio::task::spawn_blocking(move || write_diary(&dir, line)).await;
             }
+            out
         })
+    }
+}
+
+static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Os subcomandos que o diário nomeia; o resto vira "outro" (nunca o argv, que pode levar texto da sessão).
+const DIARY_COMMANDS: [&str; 19] = ["list-sessions", "list-panes", "has-session", "show-options", "display-message", "display",
+    "new-session", "new-window", "set-option", "kill-session", "rename-session", "send-keys", "capture-pane", "set-buffer",
+    "show-buffer", "delete-buffer", "load-buffer", "paste-buffer", "resize-window"];
+/// Consultas cujo "não existe" (rc 1) é resposta, não falha.
+const ABSENCE_OK: [&str; 4] = ["list-sessions", "list-panes", "has-session", "show-options"];
+
+/// A linha `mux.comando` do `tmux._run` do Python: comando falho (fora a ausência esperada), sem
+/// resposta ou de 1 s ou mais. Nem argv nem stderr.
+fn command_line(argv: &[String], out: &MuxOutput, failure: Option<(&str, Option<i32>)>, elapsed: Duration, limit: Duration,
+                simultaneous: usize) -> Option<serde_json::Value> {
+    let mux = Path::new(&argv[0]).file_stem().is_some_and(|s| s == "tmux" || s == "psmux");
+    let command = if argv[0] == "systemd-run" { "systemd-scope" }
+        else { argv.get(1).filter(|c| mux && DIARY_COMMANDS.contains(&c.as_str())).map_or("outro", String::as_str) };
+    let failed = out.code.is_some_and(|code| code != 0);
+    let stderr = out.stderr.as_str();
+    let absent = ["no server", "no sessions", "can't find session", "no such session", "invalid option: @cp_hidden"].iter().any(|p| stderr.starts_with(p))
+        || (stderr.starts_with("error connecting to ") && stderr.trim_end().ends_with("(No such file or directory)"));
+    let expected = failure.is_none() && out.code == Some(1) && ABSENCE_OK.contains(&command) && absent;
+    let ms = elapsed.as_millis() as u64;
+    if failure.is_none() && !(failed && !expected) && ms < 1000 { return None; }
+    let mut line = serde_json::json!({"evento": "mux.comando", "nivel": if failed && !expected { "erro" } else { "aviso" }, "comando": command,
+        "ms": ms, "limite_ms": limit.as_millis() as u64, "simultaneos": simultaneous, "retorno": out.code,
+        "erro_tipo": failure.map_or(if failed { "retorno" } else { "" }, |(kind, _)| kind), "errno": failure.and_then(|(_, errno)| errno)});
+    #[cfg(target_os = "linux")]
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        let kb = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.trim().split_whitespace().next()?.parse::<u64>().ok());
+        if let (Some(total), Some(free)) = (kb("MemTotal:"), kb("MemAvailable:")) {
+            line["memoria_total_mb"] = (total / 1024).into();
+            line["memoria_disponivel_mb"] = (free / 1024).into();
+        }
+    }
+    Some(line)
+}
+
+fn write_diary(dir: &Path, line: serde_json::Value) {
+    if let Err(error) = crate::diag::write_diary(dir, &[line], chrono::Local::now()) {
+        tracing::warn!(kind = ?error.kind(), "linha do multiplexador no diário não gravada");
     }
 }
 
@@ -330,7 +390,8 @@ pub(crate) mod tests {
 
     /// Multiplexador falso: responde na ordem as saídas dadas, cada uma depois de `delay`, e guarda cada argv.
     #[derive(Default)]
-    pub(crate) struct FakeMux { pub scope: Vec<String>, pub replies: Mutex<Vec<MuxOutput>>, pub seen: Mutex<Vec<Vec<String>>>, pub delay: Duration }
+    pub(crate) struct FakeMux { pub scope: Vec<String>, pub replies: Mutex<Vec<MuxOutput>>, pub seen: Mutex<Vec<Vec<String>>>, pub delay: Duration,
+        pub notes: Mutex<Vec<Value>> }
 
     impl FakeMux {
         pub(crate) fn answering(replies: Vec<MuxOutput>) -> Self { Self { replies: Mutex::new(replies), ..Default::default() } }
@@ -351,6 +412,7 @@ pub(crate) mod tests {
                 reply
             })
         }
+        fn diary(&self, line: Value) { self.notes.lock().unwrap().push(line); }
     }
 
     pub(crate) fn ok() -> MuxOutput { MuxOutput { code: Some(0), ..Default::default() } }
@@ -504,6 +566,31 @@ pub(crate) mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][..6], scope[..]);
         assert_eq!(runs[1][0], "tmux", "a segunda vez sem o escopo");
+        // TMX-035: o escopo perdido vai ao diário, como o `mux.scope_perdido` do Python.
+        assert_eq!(*mux.notes.lock().unwrap(), [serde_json::json!({"evento": "mux.scope_perdido", "nivel": "aviso", "retorno": 1, "comando": "new-session"})]);
+    }
+
+    /// CRI-101: comando do multiplexador que falha (fora a ausência esperada) ou passa de 1 s vai ao
+    /// diário como `mux.comando`, sem argv nem stderr.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_mux_command_goes_to_the_diary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tmux = dir.path().join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\ncase \"$1\" in new-session) echo segredo >&2; exit 1;; has-session) echo \"can't find session: x\" >&2; exit 1;; esac\n").unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let diary = dir.path().join("diario");
+        let mux = ProcessMux { diary: Some(diary.clone()), ..ProcessMux::default() };
+        let tmux = tmux.to_string_lossy().into_owned();
+        mux.run(vec![tmux.clone(), "has-session".into(), "-t".into(), "=x".into()]).await;
+        mux.run(vec![tmux, "new-session".into(), "-d".into(), "-s".into(), "s1".into()]).await;
+        let text: String = std::fs::read_dir(&diary).unwrap().flatten().map(|f| std::fs::read_to_string(f.path()).unwrap()).collect();
+        let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.len(), 1, "a ausência esperada do has-session não entra: {text}");
+        assert_eq!((&lines[0]["evento"], &lines[0]["nivel"], &lines[0]["comando"], &lines[0]["retorno"], &lines[0]["erro_tipo"], &lines[0]["limite_ms"]),
+            (&serde_json::json!("mux.comando"), &serde_json::json!("erro"), &serde_json::json!("new-session"), &serde_json::json!(1), &serde_json::json!("retorno"), &serde_json::json!(5000)));
+        assert!(!text.contains("segredo") && !text.contains("s1"), "{text}");
     }
 
     /// S-31: a recusa passageira do systemd a escopos criados juntos se repete, com espera, até três

@@ -232,7 +232,13 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
             json!({"conta":chosen["label"],"pct":pct})),&parts.headers);
     }
     let spec=match runtime.claude_spec(&name).await {
-        None=>return forward_whole(&st,parts,bytes,&fwd).await,
+        None=>{
+            let provider=st.list.discover(None).await.map(|rows|rows.iter().find(|r|r.name==name).map(|r|r.provider.clone())).map_err(|e|e.code);
+            return match without_claude_spec(provider.as_ref().map(|p|p.as_deref()).map_err(|e|*e)) {
+                Some((status,body))=>reply(status,body,&parts.headers),
+                None=>forward_whole(&st,parts,bytes,&fwd).await,
+            };
+        }
         Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body("erro_troca_conta",&format!("não troquei de conta: {}",error.message),json!({"erro":error.message,"code":error.code})),&parts.headers),
         Some(Ok(spec))=>spec,
     };
@@ -257,9 +263,33 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     reply(status,body,&parts.headers)
 }
 
+/// Sem spec Claude: sessão inexistente é 404 e de outro provedor é 409, como o `_trocar_conta`; a lista
+/// fora do ar é 503 com o código dela. `None` = Claude, segue.
+fn without_claude_spec(provider: Result<Option<&str>, &'static str>) -> Option<(StatusCode, Value)> {
+    match provider {
+        Err(code) => Some((StatusCode::SERVICE_UNAVAILABLE, detail_body(code, "a lista de sessões não respondeu", json!({})))),
+        Ok(None) => Some((StatusCode::NOT_FOUND, detail_body("erro_sessao_inexistente", "sessão não encontrada", json!({})))),
+        Ok(Some("claude")) => None,
+        Ok(Some(_)) => Some((StatusCode::CONFLICT, detail_body("erro_conta_so_claude", "só sessão Claude troca de conta por esta rota", json!({})))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CRA-045: sem spec Claude, a sessão que não existe é 404 e a de outro provedor (Pi, omp, Kimi,
+    /// Codex com `config_dir`) é 409, como o Python; lista fora do ar é 503 com o código dela.
+    #[test]
+    fn without_a_claude_spec_the_refusal_is_the_python_one() {
+        let code = |r: Option<(StatusCode, Value)>| r.map(|(s, b)| (s, b["detail"]["code"].clone()));
+        assert_eq!(code(without_claude_spec(Ok(None))), Some((StatusCode::NOT_FOUND, json!("erro_sessao_inexistente"))));
+        for provider in ["pi", "omp", "kimi", "codex"] {
+            assert_eq!(code(without_claude_spec(Ok(Some(provider)))), Some((StatusCode::CONFLICT, json!("erro_conta_so_claude"))), "{provider}");
+        }
+        assert_eq!(code(without_claude_spec(Err("erro_lista_indisponivel"))), Some((StatusCode::SERVICE_UNAVAILABLE, json!("erro_lista_indisponivel"))));
+        assert_eq!(without_claude_spec(Ok(Some("claude"))), None, "Claude sem spec segue como antes");
+    }
 
     #[test]
     fn only_one_destination_and_the_whole_legacy_body() {

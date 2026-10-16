@@ -73,6 +73,8 @@ struct FakeTmux { sessions: Mutex<BTreeMap<String, Value>>, force: Value, record
 impl Mux for FakeTmux {
     fn scope(&self) -> BoxFuture<'_, Vec<String>> { Box::pin(async { SCOPE.map(str::to_owned).into() }) }
 
+    fn diary(&self, line: Value) { self.record.lock().unwrap().diary.push(line); }
+
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
         let scoped = argv.first().is_some_and(|a| a == "systemd-run");
         let inner: Vec<String> = if scoped { argv.iter().skip_while(|a| *a != "--").skip(1).cloned().collect() } else { argv };

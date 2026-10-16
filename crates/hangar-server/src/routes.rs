@@ -723,7 +723,7 @@ pub(crate) async fn pass_any(
 }
 
 /// Id de correlação do diário: cabeçalho x-hangar-req; o EventSource só manda ?diag_req.
-fn diag_req(req: &Request) -> String {
+pub(crate) fn diag_req(req: &Request) -> String {
     let h: String = req
         .headers()
         .get("x-hangar-req")

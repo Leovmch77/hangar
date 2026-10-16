@@ -126,6 +126,9 @@ const MANAGED_BLOCK: &str = "# >>> hangar:";
 /// thread e sem sidecar. Lê o TOML de verdade (tabela escrita de outro jeito também conta) e só
 /// insere a que falta; nunca impede a abertura.
 pub fn pretrust(codex_home: &Path, cwd: &str) {
+    // `_pretrust_lock`: ler e regravar sem ela, duas aberturas juntas perdem a confiança de uma.
+    static PRETRUST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PRETRUST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let config = codex_home.join("config.toml");
     let result = (|| -> std::io::Result<()> {
         let raw = match std::fs::read_to_string(&config) {
@@ -162,6 +165,20 @@ mod tests {
 
     fn launch() -> Launch {
         Launch { cwd: "/w".into(), codex_home: "/h/.codex".into(), account: "default".into(), mode: "Full Access".into(), ..Launch::default() }
+    }
+
+    /// CDX-025: aberturas ao mesmo tempo na mesma conta não perdem a confiança uma da outra.
+    #[test]
+    fn simultaneous_pretrusts_keep_every_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(24));
+        let threads: Vec<_> = (0..24).map(|i| {
+            let (home, barrier) = (home.path().to_owned(), barrier.clone());
+            std::thread::spawn(move || { barrier.wait(); pretrust(&home, &format!("/w/{i}")); })
+        }).collect();
+        for thread in threads { thread.join().unwrap(); }
+        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(home.path().join("config.toml")).unwrap()).unwrap();
+        assert_eq!(parsed["projects"].as_table().unwrap().len(), 24);
     }
 
     /// A ordem e os nomes do `comando_do_lancador`; a política vai sempre explícita.

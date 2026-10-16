@@ -442,6 +442,39 @@ fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
     assert_eq!(total, (43, 43, 29));
 }
 
+/// CRI-094: o POST que o Rust atende deixa a linha do middleware de acesso do Python.
+#[test]
+fn a_post_answered_in_rust_leaves_the_access_line() {
+    assert_eq!(server::access_line("POST /api/sessions", 409, 209, "r-1"),
+        json!({"evento": "api.servidor", "nivel": "aviso", "detalhe": "POST /api/sessions", "codigo": "409", "ms": 209,
+            "etapa": "cabecalhos", "req": "r-1"}));
+    assert_eq!(server::access_line("POST /api/sessions", 200, 3, "")["nivel"], "ok");
+    assert_eq!(server::access_line("POST /api/archive/{project}/{session_id}/resume", 503, 3, "")["nivel"], "erro");
+}
+
+/// CRI-030: criadora com terminal que ainda não falou (sem modo no transcript) passa o modo com que
+/// nasceu, o do registro gravado na abertura dela, e não o padrão da conta.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminal_creator_without_transcript_passes_its_launch_mode() {
+    let runtime = test_runtime();
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_terminal_creator").unwrap();
+    let files = fixture["scenario"]["state"]["files"].as_object_mut().unwrap();
+    files.retain(|path, _| !path.ends_with(".jsonl"));
+    files.insert("<ROOT>/home/.hangar/session-specs/0123456789abcdef0123456789abcdef.json".into(),
+        json!({"conversation": "22222222-2222-4222-8222-222222222222", "permission_mode": "auto"}));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    materialize(&fixture, &root);
+    let body = String::from_utf8(request_body(&fixture)).unwrap().replace("<ROOT>", &root.to_string_lossy());
+    let env = [("HOME", root.join("home")), ("PATH", root.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
+    let facts = facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
+        .with_terminal(crate::list::mux::Mux::with_program(root.join("bin/tmux"), std::time::Duration::from_secs(2)),
+            std::sync::Arc::new(crate::list::procs::ProcFs::with_root(root.join("proc"))));
+    let resolved = resolve::resolve_open(&SessionOpenRequest::parse(body.as_bytes()).unwrap(), &OWNER, &facts).unwrap();
+    assert_eq!(resolved.spec.permission_mode, Some(PermissionMode::Auto));
+}
+
 /// O caminho da raiz de teste volta a ser `<ROOT>`, como nas fixtures.
 fn unroot(result: Result<resolve::Resolved, OpenError>, root: &std::path::Path) -> Result<resolve::Resolved, OpenError> {
     let root = root.to_string_lossy();
@@ -1121,6 +1154,35 @@ fn the_folder_is_pretrusted_and_a_foreign_default_model_is_dropped() {
     assert_eq!(std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(), r#"{"model": "opus[1m]"}"#);
 }
 
+/// CRI-111: o que a criação mudou sozinha fica também no log do servidor, como no Python: a conta
+/// trocada pela cota, o modelo estrangeiro tirado do `settings.json` e o aviso da reconciliação.
+#[test]
+fn what_the_creation_changed_by_itself_is_in_the_log() {
+    #[derive(Clone)] struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(data); Ok(data.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move || capture.clone()).finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_quota_switch").unwrap();
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let warning = resolve::resolve_open(&request, &OWNER, &FixtureFacts::of(&fixture)).unwrap().warnings.remove(0);
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), r#"{"model": "gpt-6"}"#).unwrap();
+    claude::drop_foreign_model(home.path(), None);
+    claude::prep_result("b", Some(0), "hangar-conta: plugin x atualizado\n").unwrap();
+    let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    for expected in [format!("create_session s1: {warning}"), "modelo padrão 'gpt-6' não é da Anthropic; removido do settings.json".into(),
+                     "conta b: plugin x atualizado".into()] {
+        assert!(text.contains(&expected), "falta {expected:?} em {text}");
+    }
+}
+
 /// O auxiliar do Jev de antes da configuração única vem do `jev_texto_*` sem o `/chat/completions`.
 #[test]
 fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
@@ -1614,6 +1676,19 @@ fn the_initial_prompt_of_pi_omp_and_kimi_waits_in_the_durable_queue() {
     assert!(!root.join("home/.claude/.hangar-queue/p1.jsonl").exists(), "pane que não nasceu deixou a fila");
 }
 
+/// RET-078: a ponte de skills roda antes de abrir Pi e Kimi, como no Python; o omp não a usa.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_skill_bridge_runs_for_pi_and_kimi_only() {
+    for (name, runs) in [("create_pi_terminal", true), ("create_kimi_terminal", true), ("create_omp_terminal", false)] {
+        let (raw, _dir, _root) = run_contract(name, |_| {});
+        assert_eq!(raw["steps"][0]["status"], 200, "{name}: {}", raw["steps"][0]["body"]);
+        let bridged = raw["subprocesses"].as_array().unwrap().iter()
+            .any(|p| p["argv"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|x| x.ends_with("skill_bridge.py")))));
+        assert_eq!(bridged, runs, "{name}");
+    }
+}
+
 /// Sem o registro a sessão não tem como ser reaberta nem reconhecida pela chave: falhar ao gravá-lo é
 /// falha da abertura, antes do pane, e a worktree que ela criou é desfeita.
 #[cfg(target_os = "linux")]
@@ -1661,6 +1736,21 @@ fn an_uncertain_terminal_keeps_the_worktree() {
         (json!(504), json!("session_open_uncertain")), "{}", raw["steps"][0]["body"]);
     let branches = std::process::Command::new("git").arg("-C").arg(root.join("home/pessoal/repo")).args(["branch", "--list", "feat/y"]).output().unwrap();
     assert!(String::from_utf8_lossy(&branches.stdout).contains("feat/y"), "a branch criada fica");
+}
+
+/// CRI-004: o só leitura é conferido antes de qualquer efeito; recusado, a worktree nem chega a nascer.
+#[cfg(target_os = "linux")]
+#[test]
+fn read_only_is_refused_before_the_worktree() {
+    let (raw, _dir, root) = run_contract_with("create_worktree_new_branch", |s| s["steps"][0]["json"]["read_only"] = json!(true), |root| {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = root.join("home/pessoal/repo/.git/hooks/post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", root.join("checked-out").display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    });
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(400), json!("erro_criacao_sessao")), "{}", raw["steps"][0]["body"]);
+    assert!(!root.join("checked-out").exists(), "a worktree foi criada antes da recusa do só leitura");
 }
 
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
@@ -1790,6 +1880,37 @@ fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> fac
     facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
         .with_terminal(crate::list::mux::Mux::with_program(home.join("bin/tmux"), std::time::Duration::from_secs(2)),
             std::sync::Arc::new(crate::list::procs::SystemProcs::default()))
+}
+
+/// CRI-010: instalado é o que o shell de login acha (quem roda o CLI é o pane, pelo `$SHELL`), com
+/// permissão de execução; o resultado vale 60 s.
+#[cfg(unix)]
+#[test]
+fn installed_clis_come_from_the_login_shell_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let (bin, login) = (home.path().join("bin"), home.path().join("login-bin"));
+    for dir in [&bin, &login] { std::fs::create_dir_all(dir).unwrap(); }
+    let exec = |path: std::path::PathBuf, mode: u32| {
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    exec(login.join("pi"), 0o755);
+    exec(login.join("codex"), 0o644);
+    exec(bin.join("kimi"), 0o755);
+    let shell = home.path().join("login-shell");
+    std::fs::write(&shell, format!("#!/bin/sh\necho x >> {}\necho {}\n", home.path().join("calls").display(), login.display())).unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env: std::collections::BTreeMap<String, String> = [("HOME", home.path()), ("PATH", &bin), ("SHELL", &shell)]
+        .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
+    assert_eq!(facts::installed_providers(&env), vec![AgentProvider::Pi], "PATH do login, e o `codex` sem permissão não conta");
+    assert_eq!(facts::installed_providers(&env), vec![AgentProvider::Pi]);
+    assert_eq!(std::fs::read_to_string(home.path().join("calls")).unwrap().lines().count(), 1, "a segunda leitura sai do cache");
+    let broken = home.path().join("broken-shell");
+    exec(broken.clone(), 0o755);
+    std::fs::write(&broken, "#!/bin/sh\nexit 1\n").unwrap();
+    let env: std::collections::BTreeMap<String, String> = env.into_iter().map(|(k, v)| if k == "SHELL" { (k, broken.to_string_lossy().into_owned()) } else { (k, v) }).collect();
+    assert_eq!(facts::installed_providers(&env), vec![AgentProvider::Kimi], "shell de login quebrado cai no PATH do processo");
 }
 
 fn test_runtime() -> tokio::runtime::Runtime {
