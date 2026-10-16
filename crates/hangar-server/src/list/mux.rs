@@ -103,6 +103,8 @@ impl Mux {
             .stdin(std::process::Stdio::null()).kill_on_drop(true);
         let out = match tokio::time::timeout(self.timeout, command.output()).await {
             Err(_) => return Err(unavailable("mux_timeout", None, None)),
+            // Sem o programa não há sessão de terminal nenhuma; quem só pergunta por nome lê assim.
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return Err(unavailable("mux_missing", Some(&error), None)),
             Ok(Err(error)) => return Err(unavailable("mux_spawn_failed", Some(&error), None)),
             Ok(Ok(out)) => out,
         };
@@ -195,7 +197,7 @@ mod tests {
         let mux = Mux::with_program(&path, Duration::from_millis(200));
         assert_eq!(mux.list_panes().await, Err(MuxUnavailable { code: "mux_timeout" }));
         let missing = Mux::with_program("/nonexistent/tmux", Duration::from_secs(1));
-        assert_eq!(missing.list_panes().await, Err(MuxUnavailable { code: "mux_spawn_failed" }));
+        assert_eq!(missing.list_panes().await, Err(MuxUnavailable { code: "mux_missing" }));
     }
 
     #[cfg(unix)]

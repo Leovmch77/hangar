@@ -484,8 +484,13 @@ impl OpenFacts for LocalFacts {
 
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError> {
         if self.headless_sidecar(name).exists() || self.codex_sidecar(name).exists() { return Ok(true); }
-        // Sem resposta do multiplexador o nome não está livre: só a ausência conhecida é "nenhum pane".
-        let panes = self.runtime.block_on(self.mux.list_panes()).map_err(|e| super::open::mux_unavailable(e.code))?;
+        // Sem resposta do multiplexador o nome não está livre: só a ausência conhecida (sem servidor ou
+        // sem o programa) é "nenhum pane".
+        let panes = match self.runtime.block_on(self.mux.list_panes()) {
+            Ok(panes) => panes,
+            Err(e) if e.code == "mux_missing" => Vec::new(),
+            Err(e) => return Err(super::open::mux_unavailable(e.code)),
+        };
         Ok(panes.iter().any(|p| p.session == name))
     }
 

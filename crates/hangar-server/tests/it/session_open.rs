@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use crate::fake::*;
 
-/// Claude com terminal é do Rust (a recusa também); o resto segue ao Python com o corpo intacto, e
-/// só o que o Rust olhou leva a marca de "já olhei" (a do cliente não passa).
+/// Claude com terminal é do Rust (a recusa também); o resto segue ao Python com o corpo intacto, sem
+/// marca nenhuma (a do cliente não passa): o Python não volta ao Rust pelo que veio da 8765.
 #[tokio::test]
 async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     let (fake, up) = spawn_fake().await;
@@ -21,7 +21,7 @@ async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     let codex = br#"{"name":"s1","cwd":"/x","provider":"codex"}"#;
     assert_eq!(post(codex).await.unwrap().text().await.unwrap(), "from-python");
     assert_eq!(fake.last_body(), codex, "corpo repassado byte a byte");
-    assert_eq!(fake.last_hit().1["x-hangar-open"], "python", "o Rust olhou e devolveu");
+    assert!(fake.last_hit().1.get("x-hangar-open").is_none(), "a marca do cliente não passa");
     for body in [&br#"{"name":"s1","cwd":"/x","bogus":1}"#[..], b"nem json"] {
         let resp = client().post(format!("http://{srv}/api/sessions")).bearer_auth(OWNER)
             .header("content-type", "application/json").header("x-hangar-open", "python").body(body.to_vec()).send().await.unwrap();
@@ -173,7 +173,7 @@ async fn the_command_opens_claude_with_terminal_locally_with_the_server_down() {
     materialize(&fixture, &root);
     std::fs::create_dir_all(root.join("bin")).unwrap();
     let tmux = root.join("bin/tmux");
-    std::fs::write(&tmux, "#!/bin/sh\nd=${0%/*}\necho \"$@\" >> \"$d/tmux.log\"\ncase \"$1\" in\n  new-session) : > \"$d/alive\" ;;\n  has-session) [ -f \"$d/alive\" ] ;;\n  list-panes) exit 1 ;;\nesac\n").unwrap();
+    std::fs::write(&tmux, "#!/bin/sh\nd=${0%/*}\necho \"$@\" >> \"$d/tmux.log\"\ncase \"$1\" in\n  new-session) : > \"$d/alive\" ;;\n  has-session) [ -f \"$d/alive\" ] ;;\n  list-panes) echo 'no server running on /tmp/tmux-teste/default' >&2; exit 1 ;;\nesac\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
     let bin = install(&root, "CP_AUTH_TOKEN=x\nCP_PORT=1\n");
     let body = fixture["scenario"]["steps"][0]["json"].to_string().replace("<ROOT>", &root.to_string_lossy());
