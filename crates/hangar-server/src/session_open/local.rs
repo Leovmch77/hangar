@@ -52,9 +52,22 @@ impl OpenHost for LocalHost {
     fn customizations(&self, _args: Value) -> BoxFuture<'_, Result<Value, OpenError>> {
         Box::pin(async { Err(OpenError::new(503, "claude_customizations_unavailable", "plugins e skills por sessão precisam do servidor no ar")) })
     }
-    // ponytail: grupo, fila e `then` do nome reusado ficam para o servidor (a varredura de membro
-    // morto e a adoção); sem ele não há onde limpá-los.
-    fn leave_old_group<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> { Box::pin(async { Ok(()) }) }
+    /// Sem o servidor não há quem limpe grupo, `then` e fila do nome reusado: com algum deles no disco
+    /// a sessão nova nasceria no grupo da antiga, com a fila e o encadeamento dela. Recusa.
+    fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
+        Box::pin(async move {
+            let claude = crate::accounts::environment::AccountEnvironment::from_map(self.env.clone()).claude_base;
+            let stem = crate::groups::store::file_stem(name);
+            let left = [claude.join(".hangar-pair").join(format!("{stem}.json")), claude.join(".hangar-chain").join(format!("{stem}.json")),
+                crate::locate::queue_path(&claude, name)];
+            match left.iter().find(|path| path.try_exists().unwrap_or(true)) {
+                Some(path) => Err(OpenError::new(409, "session_open_name_needs_server", format!(
+                    "o nome '{name}' ainda tem estado da sessão antiga ({}); com o servidor fora ninguém o limpa — suba o servidor ou use outro nome",
+                    path.display())).with_params(serde_json::json!({"nome": name}))),
+                None => Ok(()),
+            }
+        })
+    }
     fn release_name<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> { Box::pin(async { Ok(()) }) }
     fn born<'a>(&'a self, _born: &'a Born) -> BoxFuture<'a, Vec<String>> { Box::pin(async { Vec::new() }) }
     fn diary(&self, _events: Vec<Value>) {}

@@ -1074,6 +1074,25 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
+/// Com o servidor fora, `hangar-open` não tem como limpar o que o nome reusado deixou (grupo, `then`,
+/// fila): recusa, em vez de a sessão nova nascer com o grupo e a fila da antiga.
+#[test]
+fn the_terminal_command_refuses_a_name_with_leftovers() {
+    use open::OpenHost;
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let host = local::LocalHost::new([("HOME".to_owned(), home.path().to_string_lossy().into_owned())].into(), None);
+    runtime.block_on(host.leave_old_group("par externo")).expect("nada ficou: abre");
+    for left in [".hangar-pair/par-externo.json", ".hangar-chain/par-externo.json", ".hangar-queue/par-externo.jsonl"] {
+        let path = home.path().join(".claude").join(left);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        let error = runtime.block_on(host.leave_old_group("par externo")).err().unwrap_or_else(|| panic!("{left} ficou e abriu"));
+        assert_eq!((error.status, error.code), (409, Some("session_open_name_needs_server")), "{left}");
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
 /// Duas aberturas do mesmo nome não correm juntas: a segunda é "nome em uso" até a primeira acabar.
 #[test]
 fn a_name_being_opened_is_in_use_until_the_open_ends() {
