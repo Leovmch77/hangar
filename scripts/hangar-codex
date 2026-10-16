@@ -23,6 +23,14 @@ class BackendTransportError(RuntimeError):
     """O backend não pôde ser contactado; só esta falha permite o caminho local."""
 
 
+class BackendUncertainError(RuntimeError):
+    """O pedido pode ter chegado e a resposta não veio: só a lista diz se a sessão nasceu."""
+
+
+# O mesmo prazo de criação das telas: preparo de conta e worktree passam dos 30 s.
+PRAZO_CRIACAO = 120
+
+
 class BackendHttpError(RuntimeError):
     def __init__(self, status: int, detail):
         self.status = status
@@ -89,7 +97,8 @@ def _api(method: str, path: str, body: dict | None = None):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        prazo = PRAZO_CRIACAO if (method, path) == ("POST", "/api/sessions") else 30
+        with urllib.request.urlopen(req, timeout=prazo) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
@@ -101,7 +110,12 @@ def _api(method: str, path: str, body: dict | None = None):
             detail = detail["detail"]
         raise BackendHttpError(exc.code, detail) from exc
     except (OSError, TimeoutError, urllib.error.URLError) as exc:
-        raise BackendTransportError(f"backend inacessivel em 127.0.0.1:{port}: {exc}") from exc
+        texto = f"backend inacessivel em 127.0.0.1:{port}: {exc}"
+        motivo = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        # Só a conexão recusada garante que o pedido não chegou; o resto, num pedido que escreve, é incerto.
+        if method != "GET" and not isinstance(motivo, ConnectionRefusedError):
+            raise BackendUncertainError(texto) from exc
+        raise BackendTransportError(texto) from exc
 
 
 def _base_name(cwd: str) -> str:
@@ -153,6 +167,15 @@ def _open(body: dict) -> dict:
         return _api("POST", "/api/sessions", body)
     except BackendTransportError:
         return _open_local(body)
+    except BackendUncertainError as exc:
+        # Repetir criaria uma segunda sessão (o nome em uso viraria `base-2`).
+        try:
+            vivas = _api("GET", "/api/sessions")
+        except RuntimeError:
+            vivas = []
+        if any(s.get("name") == body["name"] and s.get("cwd") == body["cwd"] for s in vivas):
+            return {"name": body["name"]}
+        raise RuntimeError(f"{exc}; a sessão {body['name']} pode estar nascendo: confira no app antes de abrir outra") from None
 
 
 def _conta_do_codex_home() -> str | None:
