@@ -115,16 +115,16 @@ def ultimo_nao_plan(name: str, padrao: str = "manual") -> str:
 
 
 def _launch_mode(session_id: str) -> str | None:
-    """Modo da abertura da conversa, do registro que o Rust grava (o transcript só o grava na primeira
-    fala). `plan` não diz a classe: o Claude Code conta plan vindo de bypass como bypass."""
+    """Modo da abertura no registro mais recente da conversa (o transcript só o grava na 1ª fala); sem `plan`."""
+    achados = []
     for path in (Path.home() / ".hangar" / "session-specs").glob("*.json"):
         try:
             spec = json.loads(atomico.read(path))
         except (OSError, ValueError):
             continue
         if spec.get("conversation") == session_id and spec.get("permission_mode") not in (None, "plan"):
-            return spec["permission_mode"]
-    return None
+            achados.append((spec.get("created_at") or 0, spec["permission_mode"]))
+    return max(achados, default=(0, None))[1]
 
 
 def known_non_plan(name: str) -> str | None:

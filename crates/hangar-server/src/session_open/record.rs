@@ -39,13 +39,15 @@ pub fn remove(home: &Path, key: &str) -> io::Result<()> {
     }
 }
 
-/// O modo com que a conversa nasceu, fora de `plan` (que não diz a classe). O Python lê igual
+/// O modo com que a conversa nasceu, fora de `plan` (que não diz a classe), no registro mais recente dela:
+/// o de uma chave fechada fica, e o Arquivo reabre a mesma conversa com outra. O Python lê igual
 /// (`permission_mode._launch_mode`).
 pub fn launch_mode(home: &Path, conversation: &str) -> Option<String> {
-    std::fs::read_dir(dir(home)).ok()?.flatten().find_map(|entry| {
+    std::fs::read_dir(dir(home)).ok()?.flatten().filter_map(|entry| {
         let spec: Value = serde_json::from_slice(&crate::runtime::queue::read_replaced(&entry.path()).ok()?).ok()?;
-        (spec["conversation"] == conversation).then(|| text(&spec, "permission_mode")).flatten().filter(|mode| mode != "plan")
-    })
+        let mode = (spec["conversation"] == conversation).then(|| text(&spec, "permission_mode")).flatten().filter(|mode| mode != "plan")?;
+        Some((spec["created_at"].as_f64().unwrap_or(0.0), mode))
+    }).max_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, mode)| mode)
 }
 
 /// `Ok(None)` só quando não existe; arquivo ilegível ou de outra versão é erro, nunca um spec inventado.
@@ -157,4 +159,23 @@ pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>>
         subagent_model: None, customizations: None, jev: meta["jev"] == true, read_only: meta["read_only"] == true,
         worktree: None, creator: None, created_at: created(&codex_path), conversation: text(&meta, "thread_id"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// SO4: o Arquivo reabre a mesma conversa com chave nova e o spec antigo fica: vale o mais recente.
+    #[test]
+    fn the_launch_mode_is_the_one_of_the_latest_spec_of_the_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = super::dir(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        // Vários antigos: a ordem da leitura do diretório não decide.
+        let mut specs: Vec<(String, &str, f64)> = vec![("a".repeat(32), "acceptEdits", 20.0), ("b".repeat(32), "plan", 30.0)];
+        specs.extend((1..9).map(|i| (format!("{i}").repeat(32), "bypassPermissions", f64::from(i))));
+        for (key, mode, created) in specs {
+            let spec = serde_json::json!({"key": key, "conversation": "c1", "permission_mode": mode, "created_at": created});
+            std::fs::write(dir.join(format!("{key}.json")), spec.to_string()).unwrap();
+        }
+        assert_eq!(super::launch_mode(home.path(), "c1").as_deref(), Some("acceptEdits"));
+    }
 }
