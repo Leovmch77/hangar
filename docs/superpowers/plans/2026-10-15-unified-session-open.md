@@ -132,7 +132,7 @@ claro pedindo reiniciar, e isso é avisado ao usuário antes)
 - [x] **Step 1: Decisão do usuário sobre a recuperação (D-014)**
   Hoje, 3 quedas em 60 s (`rust_server.py:526-531`) → `hand_to_python` → o Python assume a 8765
   até alguém reiniciar o backend.
-- [ ] **Step 2: Religar o Rust sozinho e devolver a ele**
+- [x] **Step 2: Religar o Rust sozinho e devolver a ele** (52217e4d5, correções 43564db89..e97f9b43c)
   Depois da desistência, o Supervisor segue tentando subir o Rust com espera crescente; quando ele
   responde com o protocolo certo, o Python solta a porta e as sessões, e tudo volta ao Rust
   (`pending` → `rust`, como nas quedas 1–2). Nunca as duas portas ao mesmo tempo; nunca uma sessão
@@ -141,7 +141,7 @@ claro pedindo reiniciar, e isso é avisado ao usuário antes)
   O Rust não descobre sessão Claude sozinho: toda entrada no `RuntimeRegistry` nasce de um open do
   Python (`_send_managed` → `prepare_session`). Migrar o registro é a responsabilidade inteira, que
   vai com a Task 6 (Claude sem terminal) e a 8 (reabrir). O `then` do nome reusado saiu (106247cca).
-- [ ] **Step 4: Apagar o Python substituído**
+- [x] **Step 4: Apagar o Python substituído** (nada a apagar além do `then`; o registro vai com a Task 6)
 
 ### Task 5b: Atualizar só com Python e Rust no mesmo contrato (D-015)
 
@@ -213,10 +213,10 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Criar e retomar Pi, omp e Kimi no Rust**
+- [x] **Step 1: Criar Pi, omp e Kimi no Rust** (a855b564f, correções 011e2f32f..4d7e75302; retomar vai com a Task 10, junto da rota do Arquivo)
   Perfil do omp, `CP_PI_SESSION` (S-58), ticket do Kimi, omp no Windows sem perder o perfil (S-73).
-- [ ] **Step 2: Apagar o Python substituído**
-  Os ramos de Pi/omp/Kimi no `registry.create`/`resume`.
+- [x] **Step 2: Apagar o Python substituído**
+  Os ramos de criação de Pi/omp/Kimi no `registry.create` (d71b9f40a); os de `resume` saem na Task 10.
 
 ### Task 10: Retomar e restaurar depois do reboot (R5)
 
@@ -268,16 +268,17 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: `/mcp` no Rust com o SDK oficial (`rmcp`, versão fixada)**
+- [x] **Step 1: `/mcp` no Rust com o SDK oficial (`rmcp`, versão fixada)** (a93aca25a..f0cabcc77, mesclado em f2571ab99)
   Mesmas 14 tools, nomes, descrições e parâmetros; bearer conferido antes do servidor MCP.
-- [ ] **Step 2: Identidade de quem chamou no Rust**
+- [x] **Step 2: Identidade de quem chamou no Rust**
   Porta do `quem_chama.py`: chave vence pane, pane vence nome, pane ambíguo não resolve, nada
   resolvido é erro.
-- [ ] **Step 3: Cada tool chama a mesma rota que o `hangar-send`/`hangar-preview` chama**
+- [x] **Step 3: Cada tool chama a mesma rota que o `hangar-send`/`hangar-preview` chama**
   `new_session` e `close_session` direto no `open_session`/fechar do Rust, com o conjunto inteiro de
   parâmetros.
-- [ ] **Step 4: Apagar o Python substituído**
-  `mcp_server.py` e `quem_chama.py` (se sem outro chamador).
+- [x] **Step 4: Apagar o Python substituído**
+  `mcp_server.py` e `pages_bridge.py` apagados; `quem_chama.py` fica (`/api/whoami` e `plugin_bridge`).
+  Com o Rust fora, `/mcp` responde 503 `mcp_needs_rust_server`.
 
 ### Task 13: Estacionar a sessão parada (R10, D-006)
 
