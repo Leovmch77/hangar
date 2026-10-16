@@ -129,7 +129,7 @@ def _collect(name):
         return None
     mux_pid, created = int(fields[1]), int(fields[2])
     # A chave que o Rust deu à sessão (o spec, ou a da adoção): os dois lados abrem a mesma fila.
-    shown = tmux._run(['tmux', 'show-environment', '-t', f'={name}', 'CP_SESSION_KEY'])
+    shown = tmux._run(['tmux', 'show-environment', '-t', name if os.name == 'nt' else f'={name}', 'CP_SESSION_KEY'])
     session_key = shown.stdout.strip().removeprefix('CP_SESSION_KEY=') if not shown.returncode else ''
     namespace = f'{fields[0]}:{mux_pid}:{psutil.Process(mux_pid).create_time()}'
     pane_birth = psutil.Process(pane['pid']).create_time()

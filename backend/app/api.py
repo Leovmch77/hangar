@@ -3759,6 +3759,11 @@ def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict
     from app import runtime_coordinator
     from app.runtime_adapter import run_sync
     coordinator = runtime_coordinator.current()
+    # Claude com terminal, com o Rust de pé: o Rust o adota e entrega, numa fila só (um sentido).
+    if _rust_mode(coordinator) and not _headless(name) and _provider_of(name) == "claude" and (
+            rust := runtime_coordinator.rust_claude(name, "input", "POST", json.dumps({"text": text, "steer": False}).encode())):
+        reply = json.loads(rust[1] or b"{}")
+        return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}
     if coordinator is not None and coordinator.managed_runtime(name):
         return run_sync(lambda: _send_managed(name, text, coordinator.slot(name).binding.provider,
             track_entry=track_entry), coordinator.loop)

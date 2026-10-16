@@ -755,7 +755,9 @@ def test_codex_service_tier_requires_auth_and_codex(api_client):
     fake.set_service_tier = AsyncMock()
     with patch("app.api._provider_of", return_value="claude"), patch("app.api.get_adapter", return_value=fake):
         assert api_client.post("/api/sessions/cc/service-tier", json={"service_tier": "priority"}).status_code == 401
-        assert api_client.post("/api/sessions/cc/service-tier", headers=_h(), json={"service_tier": "priority"}).status_code == 400
+        # O Fast do Claude reabre a sessão: é do Rust, e sem ele a rota diz isso.
+        response = api_client.post("/api/sessions/cc/service-tier", headers=_h(), json={"service_tier": "priority"})
+        assert (response.status_code, response.json()["detail"]["code"]) == (503, "session_open_needs_rust_server")
     fake.set_service_tier.assert_not_awaited()
 
 

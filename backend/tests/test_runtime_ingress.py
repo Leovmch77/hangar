@@ -377,8 +377,9 @@ def test_available_without_rust_binding_is_an_error(monkeypatch):
         monkeypatch.setattr(api, "_enviar_nativo", lambda *a: pytest.fail("socket nativo"))
         return await asyncio.to_thread(api._send_one_available, "s", "oi")
     result = asyncio.run(scenario())
+    # O texto vai ao Rust pela ponte; sem ela de pé o erro tem o código dela, e nada é digitado aqui.
     assert result["ok"] is False and result["delivered"] is False
-    assert "vínculo no Rust" in str(result["error"])
+    assert result["error"]["code"] == "claude_bridge_failed"
 
 
 # --- rodada de correção --------------------------------------------------------------------
