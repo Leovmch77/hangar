@@ -32,6 +32,8 @@ pub trait OpenHost: Send + Sync {
     fn bridge(&self) -> Option<PluginBridge>;
     /// `projects` da conta do servidor.
     fn server_projects(&self) -> PathBuf;
+    /// A pasta `backend/` do Hangar (a venv e o `skill_bridge.py`).
+    fn backend_dir(&self) -> Option<PathBuf>;
     fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput>;
     /// A operação `prepare` das escolhas de plugins e skills; devolve o `{"settings": …}`.
     fn customizations(&self, args: Value) -> BoxFuture<'_, Result<Value, OpenError>>;
@@ -418,10 +420,14 @@ async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_on
     Ok((pane, jsonl, route))
 }
 
-/// `hangar-skills-sync`: a skill instalada no Claude vale já nesta sessão de Pi, omp ou Kimi. Nunca
-/// impede a abertura.
+/// A ponte de skills (`skill_bridge.py`): a skill instalada no Claude vale já nesta sessão de Pi, omp
+/// ou Kimi. Nunca impede a abertura.
 async fn sync_skills(host: &dyn OpenHost) {
-    let out = host.run(vec!["hangar-skills-sync".into()], Duration::from_secs(30)).await;
+    let Some(argv) = host.backend_dir().and_then(|dir| agents::skill_bridge_argv(&dir, host.terminal().windows)) else {
+        tracing::warn!(backend = ?host.backend_dir(), "ponte de skills sem a venv do backend; não refeita antes de abrir a sessão");
+        return;
+    };
+    let out = host.run(argv, Duration::from_secs(30)).await;
     if out.code != Some(0) {
         tracing::warn!(code = ?out.code, stderr = %out.stderr.trim(), "ponte de skills não refeita antes de abrir a sessão");
     }

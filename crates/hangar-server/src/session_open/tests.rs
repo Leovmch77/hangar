@@ -1001,6 +1001,23 @@ fn pi_omp_and_kimi_resume_with_their_own_verb() {
     assert_eq!(command(&kimi, agents::Conversation::Resume(ID)).unwrap_err().msg, "session_id invalido");
 }
 
+/// A ponte de skills roda o `skill_bridge.py` do backend com o Python da venv dele, nas duas
+/// plataformas (o `hangar-skills-sync` é sh, e o `python` solto do Windows pode ser o atalho da Store).
+#[test]
+fn the_skill_bridge_runs_with_the_backend_python() {
+    let backend = tempfile::tempdir().unwrap();
+    let b = backend.path();
+    assert_eq!(agents::skill_bridge_argv(b, false), None, "sem venv não roda");
+    for (windows, python) in [(false, ".venv/bin/python"), (true, ".venv/Scripts/python.exe")] {
+        std::fs::create_dir_all(b.join(python).parent().unwrap()).unwrap();
+        std::fs::write(b.join(python), "").unwrap();
+        std::fs::create_dir_all(b.join("app")).unwrap();
+        std::fs::write(b.join("app/skill_bridge.py"), "").unwrap();
+        assert_eq!(agents::skill_bridge_argv(b, windows), Some(vec![b.join(python).to_string_lossy().into_owned(),
+            b.join("app").join("skill_bridge.py").to_string_lossy().into_owned(), "--quiet".into()]), "windows={windows}");
+    }
+}
+
 /// `kimi_sessions.pretrust_cwd` (test_kimi_sessions::test_pretrust_writes_workspace_trust_once): grava
 /// `{root, trustedAt}` na chave do CLI uma vez; já confiada não reescreve.
 #[test]

@@ -656,10 +656,12 @@ def _created_agent(raw: dict) -> list[tuple[dict, str]]:
 
 
 def _rule_skills_sync(expected: dict, raw: dict, scenario: dict) -> bool | None:
-    """Matriz, item 16: Pi, omp e Kimi abrem com as skills sincronizadas (`hangar-skills-sync`); o
-    Python refazia a ponte no próprio processo, e o omp ficava de fora."""
-    synced = [p for p in raw.get("subprocesses", []) if p.get("prog") == "hangar-skills-sync"]
-    raw["subprocesses"] = [p for p in raw.get("subprocesses", []) if p.get("prog") != "hangar-skills-sync"]
+    """Matriz, item 16: Pi, omp e Kimi abrem com as skills sincronizadas (`skill_bridge.py` com o
+    Python da venv do backend); o Python refazia a ponte no próprio processo, e o omp ficava de fora."""
+    def bridge(p: dict) -> bool:
+        return str(p.get("prog", "")).startswith("python") and str((p.get("argv") or [""])[0]).endswith("skill_bridge.py")
+    synced = [p for p in raw.get("subprocesses", []) if bridge(p)]
+    raw["subprocesses"] = [p for p in raw.get("subprocesses", []) if not bridge(p)]
     return bool(synced) if _created_agent(raw) else None
 
 

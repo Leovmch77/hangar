@@ -168,6 +168,7 @@ impl OpenHost for Host {
     fn mux(&self) -> &dyn Mux { &self.mux }
     fn bridge(&self) -> Option<PluginBridge> { Some(PluginBridge { port: 8765, secret: self.env.get("CP_AUTH_TOKEN").cloned().unwrap_or_default() }) }
     fn server_projects(&self) -> PathBuf { self.home.join(".claude/projects") }
+    fn backend_dir(&self) -> Option<PathBuf> { Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend")) }
 
     fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
         Box::pin(async move {

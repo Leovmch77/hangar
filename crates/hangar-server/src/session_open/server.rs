@@ -217,6 +217,8 @@ impl OpenHost for ServerHost {
     fn mux(&self) -> &dyn Mux { &self.mux }
     fn bridge(&self) -> Option<PluginBridge> { Some(PluginBridge { port: self.st.cfg.listen.port(), secret: self.st.cfg.auth_token.clone() }) }
     fn server_projects(&self) -> PathBuf { self.env.claude_base.join("projects") }
+    /// O servidor roda na `backend/` (é de lá que ele lê o `.env`).
+    fn backend_dir(&self) -> Option<PathBuf> { std::env::current_dir().ok() }
 
     fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
         Box::pin(run_program(&self.env.base, argv, timeout))

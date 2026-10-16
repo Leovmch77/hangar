@@ -46,6 +46,11 @@ impl OpenHost for LocalHost {
     fn server_projects(&self) -> PathBuf {
         crate::accounts::environment::AccountEnvironment::from_map(self.env.clone()).claude_base.join("projects")
     }
+    /// A `backend/` da cópia do Hangar onde o comando mora (`<cópia>/…/hangar-open`).
+    fn backend_dir(&self) -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+        exe.ancestors().skip(1).map(|dir| dir.join("backend")).find(|dir| dir.join("app").join("skill_bridge.py").is_file())
+    }
     fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, ProgramOutput> {
         Box::pin(super::server::run_program(&self.env, argv, timeout))
     }
