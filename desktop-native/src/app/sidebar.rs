@@ -575,7 +575,7 @@ impl Hangar {
                 .or_else(|| (!targets.is_empty()).then_some(0));
             if let Some(index) = next && let Some(focus) = self.row_focus(&targets[index]) {
                 focus.focus(window, cx);
-                self.tabs_scroll.scroll_to_item(index);
+                self.scroll_target_tab(&targets[index]);
             } else { self.root_focus.focus(window, cx); }
         }
         self.refresh_group_ask();
