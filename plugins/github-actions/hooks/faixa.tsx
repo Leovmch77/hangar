@@ -233,10 +233,11 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
   const total = p ? p.checks : contar(atual.flatMap(w => w.jobs))
   const temTotal = total.ok + total.falhou + total.rodando > 0
   const todos = atual.flatMap(w => w.jobs)
+  const terminal = o.superficie === 'terminal'
 
   const cabecalho = (
-    <Box key="cab" flexDirection="row" justifyContent="space-between" alignItems="center" width={o.colunas} columnGap={1}>
-      <Box flexDirection="row" alignItems="center" flexShrink={1} columnGap={1}>
+    <Box key="cab" flexDirection={terminal ? 'row' : 'column'} justifyContent="space-between" alignItems={terminal ? 'center' : 'stretch'} width={o.colunas} columnGap={1}>
+      <Box flexDirection="row" alignItems="center" flexShrink={terminal ? 1 : 0} columnGap={1} {...(terminal ? {} : { flexWrap: 'wrap' })}>
         <Button key="alternar" label={o.recolhida ? '▸' : '▾'} plain onPress={acoes.alternar} />
         {p ? <Text bold>{`PR #${p.numero}`}</Text> : <Text bold>{`⎇ ${v.branch || 'GitHub'}`}</Text>}
         {p ? <Box flexShrink={1}><Text dimColor wrap="truncate-end">{p.titulo}</Text></Box> : null}
@@ -246,11 +247,14 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
           ? <Box flexShrink={1}><Text color={AMBAR} wrap="truncate-end">{`⚠ ${v.aviso}`}</Text></Box>
           : null}
       </Box>
-      <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-        {o.recolhida && todos.length ? desenhaBarra(todos, BARRA_RECOLHIDA, percentual(todos)) : null}
+      <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} {...(terminal ? {} : { flexWrap: 'wrap' })}>
+        {terminal && o.recolhida && todos.length ? desenhaBarra(todos, BARRA_RECOLHIDA, percentual(todos)) : null}
         {o.recolhida && atual.length ? <Text dimColor>{progresso(atual, o.agora)}</Text> : null}
         {p ? <Button key="abrir-pr" label="abrir PR" dimColor onPress={() => acoes.abrir(p.url)} /> : null}
       </Box>
+      {!terminal && o.recolhida && todos.length
+        ? <Box flexDirection="row">{desenhaBarra(todos, BARRA_RECOLHIDA, percentual(todos))}</Box>
+        : null}
     </Box>
   )
   if (o.recolhida) return <Box flexDirection="column">{cabecalho}</Box>
@@ -273,13 +277,13 @@ export function desenharFaixa(t: Tabela, v: GhView, o: Opcoes, acoes: Acoes): JS
     const chaveWf = chaveDe('wf', w.nome)
     const wfAberto = o.abertos.includes(chaveWf)
     corpo.push(
-      <Box key={`wf-${w.id}`} flexDirection="row" justifyContent="space-between" width={largura} columnGap={1} marginTop={1}>
-        <Box flexDirection="row" flexShrink={1} columnGap={1}>
+      <Box key={`wf-${w.id}`} flexDirection={terminal ? 'row' : 'column'} justifyContent="space-between" width={largura} columnGap={1} marginTop={1}>
+        <Box flexDirection="row" flexShrink={terminal ? 1 : 0} columnGap={1} {...(terminal ? {} : { flexWrap: 'wrap' })}>
           {pinta(w.situacao, ICONE[w.situacao], true)}
           {alterna(chaveWf, `${wfAberto ? '▾' : '▸'} ${curto(w.nome, MAX_ROTULO)}`)}
           <Text dimColor>{w.sha.slice(0, 7)}</Text>
         </Box>
-        <Box flexDirection="row" columnGap={2} flexShrink={0}>
+        <Box flexDirection="row" columnGap={2} flexShrink={0} {...(terminal ? {} : { flexWrap: 'wrap' })}>
           <Text dimColor>{progresso([w], o.agora)}</Text>
           {w.jobs.length ? pinta(w.situacao, percentual(w.jobs), true) : null}
           {/* Um run por workflow aqui: o nome já faz o rótulo único, que é como o Hangar acha o botão. */}
