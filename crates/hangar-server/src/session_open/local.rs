@@ -13,6 +13,18 @@ use super::claude::PluginBridge;
 use super::open::{Born, OpenHost, ProgramOutput};
 use super::terminal::{Mux, ProcessMux, TerminalEnv};
 
+/// `CHAVE=valor` por linha do `backend/.env`; a última vale, como o `install-native` lê.
+pub fn dotenv(text: &str) -> BTreeMap<String, String> {
+    text.lines().filter_map(|line| {
+        let line = line.trim();
+        let (key, value) = line.strip_prefix("export ").unwrap_or(line).split_once('=')?;
+        let value = value.trim();
+        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))).unwrap_or(value);
+        (!key.trim().starts_with('#')).then(|| (key.trim().to_owned(), value.to_owned()))
+    }).collect()
+}
+
 pub struct LocalHost { home: PathBuf, env: BTreeMap<String, String>, terminal: TerminalEnv, mux: ProcessMux, bridge: Option<PluginBridge> }
 
 impl LocalHost {

@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::session_open::claude::PluginBridge;
-use hangar_server::session_open::local::LocalHost;
+use hangar_server::session_open::local::{LocalHost, dotenv};
 use hangar_server::session_open::open::open_claude_terminal;
 use hangar_server::session_open::{AgentProvider, OpenCaller, OpenError, SessionOpenRequest, Surface, facts::LocalFacts, resolve_open};
 
@@ -108,18 +108,6 @@ fn main() -> ExitCode {
 fn env_file() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     exe.ancestors().skip(1).map(|dir| dir.join("backend").join(".env")).find(|path| path.is_file())
-}
-
-/// `CHAVE=valor` por linha; a última vale, como o `install-native` lê.
-fn dotenv(text: &str) -> BTreeMap<String, String> {
-    text.lines().filter_map(|line| {
-        let line = line.trim();
-        let (key, value) = line.strip_prefix("export ").unwrap_or(line).split_once('=')?;
-        let value = value.trim();
-        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))).unwrap_or(value);
-        (!key.trim().starts_with('#')).then(|| (key.trim().to_owned(), value.to_owned()))
-    }).collect()
 }
 
 /// O ambiente que o servidor teria: a conta e as opções `CP_*` de quem chama não valem (uma sessão

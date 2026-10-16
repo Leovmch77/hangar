@@ -32,9 +32,20 @@ pub struct ServerHost {
     mux: ProcessMux,
 }
 
+/// O ambiente do servidor para a abertura: o do processo e as opções `CP_*` do `backend/.env`, que o
+/// pydantic do Python lê sem exportar (`env_file=".env"`, na pasta de trabalho que o Rust herda dele).
+/// Como lá, a variável do processo vence a do arquivo.
+pub fn server_env(mut process: BTreeMap<String, String>, dotenv: &Path) -> BTreeMap<String, String> {
+    let file = std::fs::read_to_string(dotenv).map(|text| super::local::dotenv(&text)).unwrap_or_default();
+    for (key, value) in file.into_iter().filter(|(key, _)| key.starts_with("CP_")) {
+        process.entry(key).or_insert(value);
+    }
+    process
+}
+
 impl ServerHost {
     pub fn new(st: Arc<AppState>) -> Self {
-        let env = AccountEnvironment::capture();
+        let env = AccountEnvironment::from_map(server_env(std::env::vars().collect(), Path::new(".env")));
         let terminal = TerminalEnv::local(&env.home, &env.base);
         Self { st, env, terminal, mux: ProcessMux::default() }
     }

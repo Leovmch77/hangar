@@ -1074,6 +1074,23 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
+/// O `backend/.env` que o pydantic do Python lê (sem exportar) vale para a abertura do Rust: a
+/// variável do processo vence a do arquivo, e só as `CP_*` entram.
+#[test]
+fn the_server_env_reads_the_backend_dotenv_like_python() {
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(".env");
+    std::fs::write(&file, "CP_SCAN_ROOTS=~/a,~/b\nexport CP_CLAUDE_FUNCTION_HOOKS=\"on\"\nCP_AUTH_TOKEN=velho\nOUTRA=x\n# CP_X=y\n").unwrap();
+    let process: BTreeMap<String, String> = [("CP_AUTH_TOKEN", "novo"), ("HOME", "/h")].map(|(k, v)| (k.to_owned(), v.to_owned())).into();
+    let env = server::server_env(process, &file);
+    assert_eq!(env.get("CP_SCAN_ROOTS").map(String::as_str), Some("~/a,~/b"));
+    assert_eq!(env.get("CP_CLAUDE_FUNCTION_HOOKS").map(String::as_str), Some("on"));
+    assert_eq!(env.get("CP_AUTH_TOKEN").map(String::as_str), Some("novo"), "o processo vence o arquivo");
+    assert!(!env.contains_key("OUTRA") && !env.contains_key("CP_X"), "{env:?}");
+    assert_eq!(server::server_env(BTreeMap::new(), &dir.path().join("ausente")), BTreeMap::new());
+}
+
 /// Um cenário de criação pelo lado Rust do harness, com `patch` no cenário e os repositórios Git dele
 /// inicializados. Devolve o resultado e a raiz (viva enquanto o `TempDir` viver).
 #[cfg(target_os = "linux")]
