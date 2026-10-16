@@ -509,8 +509,17 @@ impl RuntimeRegistry {
             let config=next.account.config_dir().map_or_else(||env.claude_base.clone(),PathBuf::from);
             bypass_policy(&config,std::path::Path::new(&next.cwd),current.settings.as_ref(),&env.base)?;
         }
-        let previous_non_plan=current.previous_non_plan.as_deref().and_then(PermissionMode::claude)
-            .filter(|_|mode==PermissionMode::Plan);
+        // A base do plano: a guardada; sem ela, a do transcript da conversa e, por último, o modo da conta.
+        let previous_non_plan=if mode==PermissionMode::Plan {
+            let remembered=current.previous_non_plan.as_deref().and_then(PermissionMode::claude);
+            let transcript=||[&current.spec,next].into_iter().map(|spec|super::claude_launch::transcript(&env,spec,sid)).find_map(|path|
+                crate::terminal_facts::transcript_mode(&path,&std::sync::Mutex::new(Default::default())).ok().flatten()
+                    .as_deref().and_then(PermissionMode::claude));
+            match remembered.or_else(transcript) {
+                Some(mode)=>Some(mode),
+                None=>Some(super::claude_launch::account_mode(&env,current.spec.account.config_dir())?),
+            }
+        } else {None};
         let route=match &next.account {
             Account::Engine { name:engine,account:Some(account),.. }=>Some(crate::session_open::facts::fixed_account(
                 &crate::accounts::AccountService::new(env.clone()),engine,account).map_err(|e|refused("launch_engine_account",&e.msg))?),

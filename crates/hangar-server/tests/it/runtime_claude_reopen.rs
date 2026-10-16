@@ -472,3 +472,26 @@ async fn fast_checks_the_model_in_use_not_the_recorded_one() {
     assert_eq!((status,body["detail"]["code"].as_str()),(400,Some("erro_fast_indisponivel")),"{body}");
     fx.finish();
 }
+
+/// CRA-020: no plano sem a base guardada (memória ou sidecar), a base é a do transcript e, sem ela, a do
+/// modo da conta; base bypass leva a licença de voltar ao bypass ao sair do plano.
+#[tokio::test]
+async fn a_plan_without_a_remembered_base_takes_it_from_the_transcript_then_the_account() {
+    for (transcript,settings) in [(Some("bypassPermissions"),Some("acceptEdits")),(None,None)] {
+        let fx = fixture();
+        let dir = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = transcript.map_or_else(||json!({"type":"user"}),|mode|json!({"type":"user","permissionMode":mode}));
+        std::fs::write(dir.join(format!("{SID}.jsonl")),format!("{line}\n{}\n",json!({"type":"user","permissionMode":"plan"}))).unwrap();
+        if let Some(mode) = settings { std::fs::write(fx.home.join(".claude/settings.json"),json!({"permissions":{"defaultMode":mode}}).to_string()).unwrap(); }
+        fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+            "permission_mode":"plan","cano":null}));
+        std::fs::write(fx.state.with_extension("screen"),"\n❯ \n  ⏸ plan mode on (shift+tab to cycle)\n").unwrap();
+        let registry = fx.registry().await;
+        registry.reopen_claude_session("s1",mode_switch(true),None).await.unwrap().map_err(|f|f.error.code).unwrap();
+        let command = command(&fx.args());
+        assert!(command.contains("--allow-dangerously-skip-permissions"),"base bypass ({transcript:?}): {command}");
+        registry.close(&"ab".repeat(16),2).await.unwrap();
+        fx.finish();
+    }
+}
