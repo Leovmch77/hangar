@@ -1363,7 +1363,11 @@ fn the_codex_open_follows_the_python_fixtures() {
             && at("sessao.criar_etapa:criar_terminal") < at("sessao.criada:terminal_criado"), "{name}: {order:?}");
     }
 
+    // A primeira mensagem entregue depois de a sessão nascer tem passo próprio (`recado`).
+    let progress = open::Progress::track("cx");
     let (fixture, raw, specs, root, _dir) = run("create_codex_headless_default", json!({"initial_prompt": "comece"}));
+    drop(progress);
+    assert_eq!(raw["progress_seen"], json!(["recado"]), "o passo quando o aquecimento leva a mensagem");
     let place = |text: &str| placed(&root, text);
     let expected = &fixture["result"];
     assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
@@ -1419,6 +1423,13 @@ fn the_creation_progress_belongs_to_whoever_opened_it() {
     assert_eq!(open::progress(name), json!({"step": null, "params": {}}));
     open::progress_step(name, "criando", json!({}));
     assert_eq!(open::progress(name)["step"], Value::Null, "passo sem criação em curso não fica");
+}
+
+/// O bastão com resumo pelo modelo mostra esse passo (o mais longo, até 180 s), como o Python mostrava.
+#[test]
+fn the_baton_step_says_when_the_model_writes_the_summary() {
+    assert_eq!(server::baton_step(&json!({"name": "b", "resumo_por_modelo": true})), "resumo_modelo");
+    assert_eq!(server::baton_step(&json!({"name": "b"})), "resumo");
 }
 
 /// Duas aberturas do mesmo nome não correm juntas: a segunda é "nome em uso" até a primeira acabar.

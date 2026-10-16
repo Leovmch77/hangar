@@ -503,6 +503,11 @@ pub async fn creation_progress(State(st): State<Arc<AppState>>, ConnectInfo(peer
     response
 }
 
+/// O passo do preparo do bastão: a reescrita pelo modelo (até 180 s) tem passo próprio.
+pub(super) fn baton_step(asked: &Value) -> &'static str {
+    if asked["resumo_por_modelo"] == true { "resumo_modelo" } else { "resumo" }
+}
+
 /// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e devolve o
 /// pedido de abertura da sucessora em vez de abrir; o Rust a abre com o kick-off como primeira mensagem.
 pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
@@ -514,9 +519,10 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     };
     let headers = parts.headers.clone();
     if owner { parts.headers.insert(DECLINED, axum::http::HeaderValue::from_static("rust")); }
-    let successor = serde_json::from_slice::<Value>(&bytes).ok().and_then(|b| b["name"].as_str().map(str::to_owned)).unwrap_or_default();
+    let asked = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+    let successor = asked["name"].as_str().unwrap_or_default().to_owned();
     let _progress = super::open::Progress::track(&successor);
-    super::open::progress_step(&successor, "resumo", json!({}));
+    super::open::progress_step(&successor, baton_step(&asked), json!({}));
     let response = crate::routes::pass(&st, Request::from_parts(parts, Body::from(bytes)), &fwd).await;
     if !owner || response.headers().get(DECLINED).is_none_or(|v| v != "rust") { return response; }
     let prepared: Value = match to_bytes(response.into_body(), crate::session_write::BODY_LIMIT).await {

@@ -570,6 +570,7 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
     // S-40: a primeira mensagem já está na fila durável quando a criação responde; quem sobe a sessão
     // (o acordar, a subida do servidor, a próxima escrita) a entrega, e falhar a subida não a perde.
     if let Some(text) = initial_prompt.filter(|p| !p.is_empty()) {
+        progress_step(&spec.name, "recado", json!({}));
         let queue_dir = crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()).claude_base.join(".hangar-queue");
         let (key, name, text) = (spec.key.clone(), spec.name.clone(), text.to_owned());
         let queued = tokio::task::spawn_blocking(move || enqueue_first(&queue_dir, &key, &name, &text)).await
@@ -639,6 +640,7 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
     let mut warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
+    if initial_prompt.is_some_and(|p| !p.is_empty()) { progress_step(&spec.name, "recado", json!({})); }
     warnings.extend(host.warm_codex(&spec.name, initial_prompt).await);
     Ok(warnings)
 }
@@ -703,6 +705,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     let queued = match initial_prompt.filter(|p| !claude && codex_home.is_none() && !p.is_empty()) {
         None => None,
         Some(text) => {
+            progress_step(&spec.name, "recado", json!({}));
             let base = host.server_projects().parent().map(Path::to_path_buf).unwrap_or_default();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
             match agents::queue_initial_prompt(&base, &spec.name, text, now) {

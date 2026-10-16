@@ -71,8 +71,9 @@ impl DeviceLink {
 enum Forwarded {
     Reply(CallId),
     Switch(CallId, Key),
-    /// `reopened`: conversa fechada que voltou (`reopen_conversation`), não sessão nova.
-    Opened { call: CallId, name: String, sent: Option<Result<Delivery, String>>, reopened: bool },
+    /// `reopened`: conversa fechada que voltou (`reopen_conversation`), não sessão nova. `notice`: os avisos do servidor, já
+    /// em frase, que vão no fim de toda resposta (D-003).
+    Opened { call: CallId, name: String, sent: Option<Result<Delivery, String>>, reopened: bool, notice: String },
     /// O Jev agiu: a confirmação falada e a nota ao organizador só saem quando o aparelho confirma.
     JevSwitch { turn: String, key: Key, machine: String },
     JevAction { turn: String, label: String },
@@ -101,7 +102,7 @@ enum Done {
     Closed { call: CallId, key: Key, result: Result<(), String> },
     /// A sessão aceitou o plano: o próximo nasce para a sessão da tela de então.
     PlanDelivered,
-    Opened { call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool },
+    Opened { call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool, notice: String },
     AskFailed(Key),
     /// `reopen_conversation` de uma sessão que está aberta: vira a troca de tela.
     Switch { call: CallId, name: String },
@@ -388,7 +389,7 @@ impl Controller {
                     Err(text) => self.fail(call, "close_session", text),
                 }
             }
-            Done::Opened { call, machine, name, sent, reopened } => self.opened(call, machine, name, sent, reopened),
+            Done::Opened { call, machine, name, sent, reopened, notice } => self.opened(call, machine, name, sent, reopened, notice),
             Done::Switch { call, name } if !self.can("switch_session") => self.voice.reply(call, tool_reply(format!(
                 "A sessão {name} está aberta, não fechada; este aparelho não troca de sessão pela voz."), true)),
             Done::Switch { call, name } => self.lookup(Want::Switch { call, name }),
@@ -515,13 +516,13 @@ impl Controller {
             Forwarded::Reply(id) if !ok && text.trim().is_empty() => self.voice.reply(id, tool_reply(UNSUPPORTED_TOOL, false)),
             Forwarded::Reply(id) => self.voice.reply(id, tool_reply(text, ok)),
             Forwarded::Switch(id, key) => self.switched(id, key, ok, text),
-            Forwarded::Opened { call, name, reopened: true, .. } if ok => self.voice.reply(call, tool_reply(format!(
-                "Conversa reaberta como sessão {name} e aberta na tela; a troca já foi anunciada, não repita. {}", super::rules::after_switch(&name)), true)),
-            Forwarded::Opened { call, name, reopened: true, .. } =>
-                self.fail(call, "reopen_conversation", format!("A conversa voltou como sessão {name}, mas não abriu na tela; não reabra de novo.")),
-            Forwarded::Opened { call, name, sent, .. } => match super::rules::opened_reply(&name, ok, sent.as_ref()) {
-                Ok(reply) => self.voice.reply(call, tool_reply(reply, true)),
-                Err(reply) => self.fail(call, "open_session", reply),
+            Forwarded::Opened { call, name, reopened: true, notice, .. } if ok => self.voice.reply(call, tool_reply(format!(
+                "Conversa reaberta como sessão {name} e aberta na tela; a troca já foi anunciada, não repita. {}{notice}", super::rules::after_switch(&name)), true)),
+            Forwarded::Opened { call, name, reopened: true, notice, .. } =>
+                self.fail(call, "reopen_conversation", format!("A conversa voltou como sessão {name}, mas não abriu na tela; não reabra de novo.{notice}")),
+            Forwarded::Opened { call, name, sent, notice, .. } => match super::rules::opened_reply(&name, ok, sent.as_ref()) {
+                Ok(reply) => self.voice.reply(call, tool_reply(reply + &notice, true)),
+                Err(reply) => self.fail(call, "open_session", reply + &notice),
             },
             Forwarded::JevSwitch { turn, key, machine } => self.jev_switched(turn, key, machine, ok),
             Forwarded::JevAction { turn, label } => self.jev_acted(turn, label, ok, text),
@@ -541,8 +542,8 @@ impl Controller {
         match pending {
             Forwarded::Reply(call) | Forwarded::Switch(call, _) => self.voice.reply(call, tool_reply(text, false)),
             // A sessão já existe: tentar de novo criaria outra.
-            Forwarded::Opened { call, name, .. } => self.voice.reply(call, tool_reply(
-                format!("A sessão {name} foi criada, mas não abriu na tela: {text} Não crie outra; peça para trocar para ela."), false)),
+            Forwarded::Opened { call, name, notice, .. } => self.voice.reply(call, tool_reply(
+                format!("A sessão {name} foi criada, mas não abriu na tela: {text} Não crie outra; peça para trocar para ela.{notice}"), false)),
             Forwarded::JevSwitch { .. } | Forwarded::JevAction { .. } => log("jev act abandoned"),
         }
     }

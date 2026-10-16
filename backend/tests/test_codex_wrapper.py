@@ -264,3 +264,48 @@ def test_recusa_local_nao_repete(w, monkeypatch, tmp_path, codigo, saida):
     with pytest.raises(RuntimeError):
         w._create("/tmp/proj", None)
     assert len(pedidos()) == 1
+
+
+def _urlopen_falso(w, monkeypatch, listadas):
+    """POST da criação estoura o prazo; GET devolve a lista com `listadas`. Grava (método, prazo)."""
+    chamadas = []
+
+    def urlopen(req, timeout):
+        chamadas.append((req.get_method(), timeout))
+        if req.get_method() == "POST":
+            raise TimeoutError("timed out")
+        return io.BytesIO(json.dumps([{"name": n, "cwd": "/tmp/proj"} for n in listadas]).encode())
+
+    monkeypatch.setattr(w, "_env", lambda: {"CP_AUTH_TOKEN": "token"})
+    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
+    return chamadas
+
+
+def test_prazo_estourado_nao_refaz_a_criacao_e_acha_a_que_nasceu(w, monkeypatch, tmp_path):
+    # S-29: o timeout não é "servidor fora"; refazer pelo `hangar-server open` criava `proj-2`.
+    chamadas = _urlopen_falso(w, monkeypatch, ["proj"])
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj-2"})]])
+    assert w._create("/tmp/proj", None) == "proj"
+    assert pedidos() == []
+    assert chamadas == [("POST", 120), ("GET", 30)], "o prazo de criação das telas, e uma criação só"
+
+
+def test_prazo_estourado_sem_a_sessao_na_lista_para_sem_criar_outra(w, monkeypatch, tmp_path):
+    chamadas = _urlopen_falso(w, monkeypatch, [])
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj-2"})]])
+    with pytest.raises(RuntimeError, match="proj"):
+        w._create("/tmp/proj", None)
+    assert pedidos() == []
+    assert [m for m, _ in chamadas].count("POST") == 1
+
+
+def test_recusa_do_servidor_mostra_a_frase_e_nao_abre_o_codex_oficial(w, monkeypatch, tmp_path, capsys):
+    # T-016 (CDX-124): só a falta de conexão cai no `codex` oficial (código 3).
+    def api(method, path, body=None):
+        raise w.BackendHttpError(400, {"code": "erro_cwd_inexistente", "msg": "a pasta não existe"})
+
+    lancador = _servidor_falso(tmp_path, monkeypatch, [])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
+    assert codigo not in (0, 3)
+    assert "a pasta não existe" in capsys.readouterr().err
+    assert chamadas == [] and lancador() == []

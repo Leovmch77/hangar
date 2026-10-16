@@ -20,7 +20,9 @@ struct Api { sessions: Value, history: HashMap<String, Value>, inputs: Vec<(Stri
     shortcuts: String, shells: Vec<(String, Value)>,
     /// Resposta de `project-shortcuts`; `Null` = projeto `/p/hangar` sem atalhos, `"falha"` = 500.
     project: Value,
-    interrupted: Vec<String>, created: Vec<Value> }
+    interrupted: Vec<String>, created: Vec<Value>,
+    /// `avisos` que o servidor devolve ao criar (troca de conta perto do limite).
+    create_warnings: Value }
 type Shared = Arc<Mutex<Api>>;
 
 async fn fake_api(api: Shared) -> SocketAddr {
@@ -29,8 +31,9 @@ async fn fake_api(api: Shared) -> SocketAddr {
             .post(|State(api): State<Shared>, body: String| async move {
                 let body: Value = serde_json::from_str(&body).unwrap();
                 let name = body["name"].clone();
-                api.lock().unwrap().created.push(body);
-                js(json!({"name": name}))
+                let mut api = api.lock().unwrap();
+                api.created.push(body);
+                js(json!({"name": name, "avisos": api.create_warnings.clone()}))
             }))
         .route("/api/archive/recent", get(|State(api): State<Shared>| async move { js(api.lock().unwrap().recent.clone()) }))
         .route("/api/archive/{p}/{id}/resume", post(|State(api): State<Shared>, Path((p, id)): Path<(String, String)>, body: String| async move {
@@ -1117,6 +1120,21 @@ async fn open_session_passes_what_the_user_said_and_leaves_the_mode_to_the_accou
     assert!(created[2]["model"].is_null() && created[2]["effort"].is_null(), "{}", created[2]);
     for key in ["headless", "config_dir", "engine", "permission_mode"] {
         assert!(created[2].get(key).is_none(), "{key}: {}", created[2]);
+    }
+}
+
+/// D-003: a troca de conta perto do limite é dita, como nas telas de criação, com ou sem troca de tela.
+#[tokio::test]
+async fn open_session_says_the_account_switch_warning() {
+    let aviso = "A conta b estava em 96%; a sessão nasceu na conta c.";
+    for caps in [&["switch_session"][..], &[][..]] {
+        let mut rig = rig(caps, None).await;
+        rig.api.lock().unwrap().create_warnings = json!([aviso]);
+        push_speech(&rig.push, "turn-1", "abre uma sessão na pasta x");
+        push_tool(&rig.push, "n1", "open_session", json!({"folder": "/p/x", "name": "x"}), "turn-1");
+        if !caps.is_empty() { let (call, ..) = rig.tool().await; rig.answer(call, true, "ok"); }
+        let reply = rig.reply("n1").await;
+        assert!(text(&reply).contains(aviso), "{caps:?}: {reply}");
     }
 }
 

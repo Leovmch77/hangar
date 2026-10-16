@@ -379,9 +379,9 @@ export function probeServerResponse(server: Server, path: string, init?: Request
 // de repositório grande. Teto ainda existe para máquina fora do ar atrás de VPN não prender a tela.
 const SESSION_FILE_TIMEOUT_MS = 60_000;
 
-// `comCodigo`: o erro também leva o `code` e o `envelope` do servidor, como o do `apiFetch`. Opcional porque
-// quem já trata o erro destas chamadas pelo texto ou pelo status não muda de comportamento sem querer.
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000, comCodigo = false): Promise<T> {
+// O erro leva o `code` e o `envelope` do servidor, como o do `apiFetch`: quem decide pela recusa
+// (nome em uso, conversa já aberta) decide pelo código, não pelo texto.
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
   // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
@@ -402,7 +402,6 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
     throw e;
   }
   if (!res.ok) {
-    if (!comCodigo) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
     const { msg, code, envelope } = await lerErro(res);
     throw Object.assign(new Error(`${res.status}: ${msg}`), { status: res.status, code, envelope });
   }
@@ -1211,13 +1210,13 @@ export async function folderGitActionForServer(server: Server, cwd: string, acti
 // `erro_git_folder_sessions` pede confirmação e reenvio com confirmSessions.
 export async function folderGitSwitchForServer(server: Server, cwd: string, branch: string, confirmSessions = false, root?: string): Promise<FolderGit> {
   const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd, branch, confirm_sessions: confirmSessions });
-  return apiFetchForServer(server, '/api/fs/git/switch', { method: 'POST', body }, FOLDER_ACTION_MS, true);
+  return apiFetchForServer(server, '/api/fs/git/switch', { method: 'POST', body }, FOLDER_ACTION_MS);
 }
 export async function folderGitBranchForServer(server: Server, cwd: string, name: string,
   opts: { checkout: boolean; base?: string; confirmSessions?: boolean }, root?: string): Promise<FolderGit> {
   const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd, name, checkout: opts.checkout,
     confirm_sessions: !!opts.confirmSessions, ...(opts.base ? { base: opts.base } : {}) });
-  return apiFetchForServer(server, '/api/fs/git/branch', { method: 'POST', body }, FOLDER_ACTION_MS, true);
+  return apiFetchForServer(server, '/api/fs/git/branch', { method: 'POST', body }, FOLDER_ACTION_MS);
 }
 
 export interface WorktreeChoice { branch: string; new_branch?: boolean; base?: string | null }
@@ -2852,7 +2851,7 @@ export async function pressPluginButton(
 function postPluginPress(name: string, body: Record<string, string>, server?: Server): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
   const init = { method: 'POST', body: JSON.stringify(body) };
-  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
 
@@ -2871,7 +2870,7 @@ async function retryWithoutMod<T>(send: (withMod: boolean) => Promise<T>): Promi
 function postPluginPane(action: 'close' | 'show', name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/${action}`;
   const init = { method: 'POST', body: JSON.stringify({ site }) };
-  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true) : apiFetch<{ ok: boolean }>(path, init);
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000) : apiFetch<{ ok: boolean }>(path, init);
 }
 
 /** Fecha o painel de mod `site`, como o ✕ do cabeçalho dele (`plugin/close`). */
@@ -2901,7 +2900,7 @@ export async function inputPluginField(
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
   return retryWithoutMod((withMod) => {
     const init = { method: 'POST', body: JSON.stringify(withMod ? { site, plugin: field.plugin, key: field.key, kind, value } : { site, key: field.key, kind, value }) };
-    return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
+    return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000)
                   : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
   });
 }
