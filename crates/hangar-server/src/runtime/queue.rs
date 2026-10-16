@@ -1201,13 +1201,21 @@ static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Lê um arquivo que outro escritor troca por `atomic_write`. No Windows quem abre no instante da
 /// troca recebe NotFound ou acesso negado, inclusive na troca POSIX: ausente ou recusado de verdade é o
-/// que continua assim depois da espera curta.
+/// que continua assim depois da espera curta. As primeiras tentativas não dependem do relógio (a
+/// thread preemptada perderia a espera inteira entre duas leituras) e só cedem a vez, porque o sono
+/// de 1 ms dura um tique (~15 ms); depois dorme, para o arquivo ausente de verdade não girar a CPU.
 pub fn read_replaced(path: &Path) -> io::Result<Vec<u8>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    let mut attempts = 0u32;
     loop {
+        attempts += 1;
         match std::fs::read(path) {
             Err(error) if cfg!(windows) && matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
-                && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(1)),
+                && (attempts <= 100 || std::time::Instant::now() < deadline) => if attempts <= 100 {
+                    std::thread::yield_now()
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                },
             outcome => return outcome,
         }
     }
