@@ -60,6 +60,16 @@ describe('registro de outros servidores', () => {
     expect(JSON.parse(writes()[0][1].body)).toEqual({ id: 'remote', base_url: remote.baseUrl, token: 'explicit-secret' });
   });
 
+  it('exige token explícito mesmo com máquina salva no mesmo endereço e outro identificador digitado', async () => {
+    await act(async () => { useServers.getState().add(remote); });
+    await render();
+    await type(m.mobile_machines_peer_id(), 'other-machine'); await type(m.mobile_machines_peer_url(), remote.baseUrl);
+    await click(m.mobile_machines_add_peer());
+    expect(el.textContent).toContain(m.mobile_machines_token_required());
+    expect(writes()).toHaveLength(0);
+    expect(JSON.stringify(mocks.fetch.mock.calls)).not.toContain(remote.token);
+  });
+
   it('recusa endereços locais que apontariam para o próprio servidor', async () => {
     await render(); await type(m.mobile_machines_peer_id(), 'remote'); await type(m.mobile_machines_token(), 'explicit-secret');
     for (const url of ['http://localhost:8765', 'http://127.2.3.4:8765', 'http://0.0.0.0:8765', 'http://[::1]:8765', 'http://[::]:8765']) {

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import React, { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi } from '@hangar/core';
 
@@ -35,6 +36,10 @@ import * as m from '../../paraglide/messages';
 const machine = { id: 'own-a', label: 'fixture-name', baseUrl: 'http://10.0.0.2:8765', token: 'secret-a' };
 const config = { campos: { term_origins: { valor: 'http://old.test', origem: 'app', definido: true } }, somente_leitura: { lan_bind_ip: '0.0.0.0', port: 8765, public_url: 'https://public.test' } };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+function identityProof(url: string, identificador = 'server-a', token = machine.token) {
+  const challenge = new URL(url).searchParams.get('desafio')!;
+  return json({ identificador, prova: createHmac('sha256', token).update(`${challenge}|${identificador}`).digest('hex') });
+}
 let container: HTMLDivElement;
 let root: Root;
 async function render() { await act(async () => root.render(<Maquinas />)); }
@@ -62,6 +67,7 @@ beforeEach(async () => {
   vi.stubGlobal('fetch', mocks.fetch);
   mocks.fetch.mockImplementation(async (url: string) => {
     if (url.endsWith('/api/config')) return json(config);
+    if (new URL(url).pathname === '/api/peers/prova') return identityProof(url);
     if (url.endsWith('/api/peers/identificador')) return json({ identificador: 'server-a', lan_url: '' });
     if (url.endsWith('/api/peers')) return json([]);
     if (url.endsWith('/api/alcance')) return json({ loopback: false, bind: '0.0.0.0', enderecos: [] });
@@ -87,7 +93,7 @@ describe('Máquinas: cadastro do aparelho', () => {
     await type(m.mobile_machines_endpoint(), 'https://new.test');
     expect(mocks.fetch.mock.calls.some(([url]) => String(url).startsWith('https://new.test'))).toBe(false);
     const original = mocks.fetch.getMockImplementation()!;
-    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => String(url).startsWith('https://new.test') ? json({ detail: 'fixture-refused' }, 403) : original(url, init));
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => url === 'https://new.test/api/config' ? json({ detail: 'fixture-refused' }, 403) : original(url, init));
     await click(m.mobile_machines_save());
     expect(useServers.getState().servers[0]).toEqual(machine);
     expect(container.textContent).toContain('fixture-refused');
@@ -96,39 +102,74 @@ describe('Máquinas: cadastro do aparelho', () => {
   });
 
   it.each([
-    { name: 'outra-identidade', known: 'owner', target: 'other', error: '', expected: 'other' },
-    { name: 'identidade-atual-ausente', known: '', target: 'owner', error: '', expected: '' },
-    { name: 'identidade-destino-ausente', known: 'owner', target: '', error: '', expected: '—' },
-    { name: 'leitura-atual-falhou', known: 'owner', target: 'owner', error: 'current', expected: '' },
-    { name: 'leitura-destino-falhou', known: 'owner', target: 'owner', error: 'target', expected: '' },
-  ])('recusa trocar URL sem confirmar a mesma máquina: $name', async ({ known, target, error, expected }) => {
+    { name: 'mesmo-identificador-hmac-falso', known: 'owner', target: 'owner', token: 'attacker', error: '' },
+    { name: 'outra-identidade', known: 'owner', target: 'other', token: machine.token, error: '' },
+    { name: 'identidade-atual-ausente', known: '', target: 'owner', token: machine.token, error: '' },
+    { name: 'identidade-destino-ausente', known: 'owner', target: '', token: machine.token, error: '' },
+    { name: 'leitura-atual-falhou', known: 'owner', target: 'owner', token: machine.token, error: 'current' },
+    { name: 'prova-destino-falhou', known: 'owner', target: 'owner', token: machine.token, error: 'target' },
+  ])('recusa trocar URL sem comprovar identidade, sem enviar token: $name', async ({ known, target, token, error }) => {
     const original = mocks.fetch.getMockImplementation()!;
     mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/identificador')) {
-        const destination = url.startsWith('https://replacement.test');
-        if ((destination && error === 'target') || (!destination && error === 'current')) return json({ detail: 'fixture-id-unavailable' }, 503);
-        return json({ identificador: destination ? target : known, lan_url: '' });
+        if (error === 'current') return json({ detail: 'fixture-id-unavailable' }, 503);
+        return json({ identificador: known, lan_url: '' });
+      }
+      if (url.startsWith('https://replacement.test/api/peers/prova?')) {
+        return error === 'target' ? json({ detail: 'fixture-proof-unavailable' }, 503) : identityProof(url, target, token);
       }
       return original(url, init);
     });
     await render(); await click(m.mobile_machines_configure());
+    await type(m.mobile_machines_label(), 'fixture-draft');
     await type(m.mobile_machines_endpoint(), 'https://replacement.test');
     expect(mocks.fetch.mock.calls.some(([url]) => String(url).startsWith('https://replacement.test'))).toBe(false);
     await click(m.mobile_machines_save());
+    const destination = mocks.fetch.mock.calls.filter(([url]) => String(url).startsWith('https://replacement.test'));
+    expect(destination.every(([, init]) => !new Headers(init?.headers).has('Authorization'))).toBe(true);
+    expect(destination.filter(([url]) => String(url).endsWith('/api/config'))).toHaveLength(0);
+    expect(destination).toHaveLength(known && error !== 'current' ? 1 : 0);
     expect(useServers.getState().servers[0]).toEqual(machine);
+    expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0]).toEqual(machine);
     expect((container.querySelector(`input[aria-label="${m.mobile_machines_endpoint()}"]`) as HTMLInputElement).value).toBe('https://replacement.test');
-    if (error) expect(container.textContent).toContain('fixture-id-unavailable');
+    expect((container.querySelector(`input[aria-label="${m.mobile_machines_label()}"]`) as HTMLInputElement).value).toBe('fixture-draft');
+    if (error === 'current') expect(container.textContent).toContain('fixture-id-unavailable');
     else if (!known) expect(container.textContent).toContain(m.mobile_machines_known_identifier_required());
-    else expect(container.textContent).toContain(m.mobile_machines_other_machine({ expected: known, actual: expected }));
+    else expect(container.textContent).toContain(m.mobile_machines_identity_unconfirmed());
   });
 
-  it('salva URL diferente somente depois de ler o mesmo identificador no destino', async () => {
+  it('só envia token após a prova e só salva URL depois de testar o acesso', async () => {
     await render(); await click(m.mobile_machines_configure());
+    let resolveProof!: (response: Response) => void;
+    let resolveConfig!: (response: Response) => void;
+    const pendingProof = new Promise<Response>((done) => { resolveProof = done; });
+    const pendingConfig = new Promise<Response>((done) => { resolveConfig = done; });
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith('https://same-machine.test/api/peers/prova?')) return pendingProof;
+      if (url === 'https://same-machine.test/api/config') return pendingConfig;
+      return original(url, init);
+    });
     await type(m.mobile_machines_endpoint(), 'https://same-machine.test');
     await click(m.mobile_machines_save());
-    expect(calls('/identificador').some(([url]) => url === 'https://same-machine.test/api/peers/identificador')).toBe(true);
+    const destination = () => mocks.fetch.mock.calls.filter(([url]) => String(url).startsWith('https://same-machine.test'));
+    expect(destination()).toHaveLength(1);
+    const [proofUrl, proofInit] = destination()[0];
+    expect(new URL(proofUrl).pathname).toBe('/api/peers/prova');
+    expect(new Headers(proofInit?.headers).has('Authorization')).toBe(false);
+    expect(proofInit?.credentials).toBe('omit');
+    expect(useServers.getState().servers[0]).toEqual(machine);
+    expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0]).toEqual(machine);
+    await act(async () => resolveProof(identityProof(proofUrl)));
+    expect(destination()).toHaveLength(2);
+    expect(destination()[1][0]).toBe('https://same-machine.test/api/config');
+    expect(new Headers(destination()[1][1]?.headers).get('Authorization')).toBe(`Bearer ${machine.token}`);
+    expect(useServers.getState().servers[0]).toEqual(machine);
+    expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0]).toEqual(machine);
+    await act(async () => resolveConfig(json(config)));
     expect(useServers.getState().servers[0]).toEqual({ ...machine, baseUrl: 'https://same-machine.test' });
     expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0].baseUrl).toBe('https://same-machine.test');
+    expect(destination().slice(1).every(([, init]) => new Headers(init?.headers).get('Authorization') === `Bearer ${machine.token}`)).toBe(true);
   });
 });
 
@@ -200,14 +241,25 @@ describe('Máquinas: conexão e saída', () => {
     expect(mocks.fetch.mock.calls.filter(([, init]) => init?.method && init.method !== 'GET')).toHaveLength(0);
   });
 
-  it('fechar a folha invalida resposta atrasada do teste de URL', async () => {
+  it('fechar a folha cancela a prova atrasada sem enviar token nem persistir', async () => {
     await render(); await click(m.mobile_machines_configure());
     let resolve!: (response: Response) => void;
     const pending = new Promise<Response>((done) => { resolve = done; });
-    mocks.fetch.mockImplementation(() => pending);
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => url.startsWith('https://late.test/api/peers/prova?')
+      ? pending : original(url, init));
     await type(m.mobile_machines_endpoint(), 'https://late.test'); await click(m.mobile_machines_save());
+    const destination = () => mocks.fetch.mock.calls.filter(([url]) => String(url).startsWith('https://late.test'));
+    expect(destination()).toHaveLength(1);
+    const [proofUrl, proofInit] = destination()[0];
+    expect(new URL(proofUrl).pathname).toBe('/api/peers/prova');
+    expect(proofInit?.signal?.aborted).toBe(false);
     await click(m.sessao_fechar());
-    await act(async () => resolve(json(config)));
+    expect(proofInit?.signal?.aborted).toBe(true);
+    await act(async () => resolve(identityProof(proofUrl)));
+    expect(destination()).toHaveLength(1);
+    expect(destination().every(([, init]) => !new Headers(init?.headers).has('Authorization'))).toBe(true);
     expect(useServers.getState().servers[0]).toEqual(machine);
+    expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0]).toEqual(machine);
   });
 });

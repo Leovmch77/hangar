@@ -86,7 +86,7 @@ export function PeerSettings({ server }: { server: Server }) {
       <View style={styles.actions}><Pill label={write.busy ? m.mobile_machines_busy() : m.mobile_machines_add_peer()} disabled={busy}
         onPress={() => write.run((signal) => {
           const base = normalizeUrl(address);
-          const credential = token.trim() || candidates.find((s) => s.baseUrl.replace(/\/+$/, '') === base)?.token || '';
+          const credential = token.trim();
           return registerPeer(server, identifier, base, credential, signal);
         }, applyPeers, m.mobile_machines_saved())} /></View>
     </View>
