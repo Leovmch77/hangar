@@ -1182,7 +1182,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             }
         }
         // Resposta reservada apta sai antes da mensagem comum: ela responde a uma pergunta já feita.
-        let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some())} else {engine.view()["deliverable"]==true};
+        let limit_held = || engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|registry|registry.limit_held(&target.name));
+        let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some()) && !limit_held()} else {engine.view()["deliverable"]==true};
         let reserved = if target.metadata["lifecycle_pending"]==true { None } else { engine.ready_async_answer_entry() };
         if drain_requested && !drain_active && turn_hold.is_none() && !closed.load(Ordering::Acquire) && (deliverable || reserved.is_some())
             && !roots.values().any(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {

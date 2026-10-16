@@ -179,6 +179,24 @@ async fn a_message_waiting_in_the_queue_holds_the_reload_with_the_python_code() 
     assert!(fx.sidecar_path("s1").exists(),"nada mudou");
 }
 
+#[tokio::test]
+async fn the_queue_held_by_the_usage_limit_goes_along_with_the_reopen() {
+    use hangar_server::runtime::{gateway::LimitHit,protocol::UsageLimit};
+    let fx = fixture();
+    let key = "ef".repeat(16);
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,"permission_mode":"manual","cano":null}));
+    std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+    std::fs::write(fx.queue.join(format!("runtime/{key}.json")),json!({"key":key,"owner_key":key,"generation":1,"name":"s1",
+        "rows":[{"id":"1","text":"oi","delivered":false}]}).to_string()).unwrap();
+    let registry = fx.registry().await;
+    let (sink,_hits) = tokio::sync::mpsc::unbounded_channel();
+    registry.set_limit_sink(sink);
+    registry.usage_limit(LimitHit { name:"s1".into(),provider:"claude".into(),account:None,limit:UsageLimit { window:"five_hour".into(),resets_at:None } });
+    let (_python, server) = crate::runtime_codex_watch::serve_owner(registry).await;
+    let (_,body) = post(server,"recarregar",json!({})).await;
+    assert_ne!(body["detail"]["code"].as_str(),Some("erro_fila_pendente"),"{body}");
+}
+
 /// O servidor com as contas desta casa de teste (nunca as do HOME de quem roda os testes).
 async fn serve_with_accounts(fx:&Fixture,registry:Arc<RuntimeRegistry>) -> std::net::SocketAddr {
     let (_python, upstream) = crate::fake::spawn_fake().await;

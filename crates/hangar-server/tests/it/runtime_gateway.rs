@@ -120,6 +120,60 @@ async fn opened(dir:&std::path::Path) -> (Arc<RuntimeRegistry>,serde_json::Value
     (registry,ready,cano)
 }
 
+/// O mesmo registro de `opened`, com o cano falso devolvendo cada linha que recebe.
+async fn opened_recording(dir:&std::path::Path) -> (Arc<RuntimeRegistry>,tokio::sync::mpsc::UnboundedReceiver<String>,tokio::task::JoinHandle<()>) {
+    use hangar_server::runtime::protocol::*;
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (lines,received) = tokio::sync::mpsc::unbounded_channel();
+    let cano = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { let _ = lines.send(std::mem::take(&mut raw)); }
+    });
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+        transcript:dir.join("chat.jsonl"),created:0.0 };
+    registry.open(target).await.unwrap();
+    (registry,received,cano)
+}
+
+/// A primeira linha recebida pelo cano que traz um dos textos, até o prazo.
+async fn first_written(lines:&mut tokio::sync::mpsc::UnboundedReceiver<String>,texts:&[&str],within:std::time::Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let line = tokio::time::timeout_at(deadline,lines.recv()).await.ok()??;
+        if let Some(text) = texts.iter().find(|text|line.contains(**text)) { return Some((*text).to_owned()); }
+    }
+}
+
+#[tokio::test]
+async fn a_queue_held_by_the_usage_limit_delivers_nothing_until_let_go() {
+    use hangar_server::runtime::{gateway::LimitHit,protocol::UsageLimit,queue::Action};
+    let dir = tempfile::tempdir().unwrap();
+    let (registry,mut lines,cano) = opened_recording(dir.path()).await;
+    let (sink,_hits) = tokio::sync::mpsc::unbounded_channel();
+    registry.set_limit_sink(sink);
+    registry.usage_limit(LimitHit { name:"session".into(),provider:"claude".into(),account:None,
+        limit:UsageLimit { window:"five_hour".into(),resets_at:None } });
+    registry.queue_action("session","q1".into(),Action::Append { text:"mensagem-na-fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("q1".into()) }).await.unwrap();
+    assert_eq!(first_written(&mut lines,&["mensagem-na-fila"],std::time::Duration::from_millis(500)).await,None,"a fila segurada entregou");
+    registry.release_limit("session");
+    assert_eq!(first_written(&mut lines,&["mensagem-na-fila"],std::time::Duration::from_secs(10)).await.as_deref(),Some("mensagem-na-fila"));
+    registry.close("key",1).await.unwrap();
+    cano.abort();
+}
+
 #[tokio::test]
 async fn readonly_headless_binding_comes_from_the_owner_feed() {
     let dir=tempfile::tempdir().unwrap();let (registry,_,cano)=opened(dir.path()).await;

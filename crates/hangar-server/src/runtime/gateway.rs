@@ -106,6 +106,8 @@ pub struct RuntimeRegistry {
     native:super::native_message::Inbox,
     /// Quem troca de conta quando a sessão para no limite de uso (`session_write::limit_switch`).
     limits:std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<LimitHit>>,
+    /// Sessões Claude paradas no limite à espera da troca: a fila não entrega nada até ela terminar.
+    limit_holds:std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// Sessão que parou no limite de uso da conta.
@@ -301,15 +303,29 @@ impl RuntimeRegistry {
         Self { diag:crate::diag::DiagClient::new(upstream,secret.clone()),reopening:Default::default(),terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
-            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default(),limits:std::sync::OnceLock::new() }
+            watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default(),limits:std::sync::OnceLock::new(),limit_holds:Default::default() }
     }
     /// Escrita para sessão doente, ou a conversa aberta: a sessão em erro é reaberta aqui, em segundo plano
     /// e uma por vez; a saudável só refaz a projeção da fila. Responde na hora; quem escreveu recebe o 503
     /// e tenta de novo. Falha vai ao diário.
     /// Liga a troca de conta no limite; sem ela o aviso de limite só fica no estado da sessão.
     pub fn set_limit_sink(&self,sink:tokio::sync::mpsc::UnboundedSender<LimitHit>) { let _ = self.limits.set(sink); }
+    /// A fila do Claude para já, no mesmo passo do aviso: o que estiver nela iria para a conta esgotada.
     pub fn usage_limit(&self,hit:LimitHit) {
-        if let Some(sink) = self.limits.get() { let _ = sink.send(hit); }
+        let Some(sink) = self.limits.get() else { return };
+        if hit.provider == "claude" { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).insert(hit.name.clone()); }
+        let _ = sink.send(hit);
+    }
+    pub fn limit_held(&self,name:&str) -> bool { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).contains(name) }
+    /// Fim da troca (feita ou não): a fila volta a entregar, a começar pelo recado de continuar.
+    /// A drenagem corre à parte: ela só responde quando a entrega termina, e a troca não espera o turno.
+    pub fn release_limit(&self,name:&str) {
+        if !self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).remove(name) { return; }
+        let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            if let Err(error) = registry.drain(&name).await { tracing::warn!(session=%name,code=%error.code,"fila solta depois do limite não drenou agora"); }
+        });
     }
     pub fn request_reopen(&self,name:&str) {
         let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
@@ -983,6 +999,14 @@ impl RuntimeRegistry {
             },
             EntryHandle::CodexTerminal {..}=>Err(failure("runtime_provider")),
         }
+    }
+    /// Uma ação na fila durável da sessão viva `name`, pelo ator dela.
+    pub async fn queue_action(&self,name:&str,id:String,action:Action)->Result<Value,RuntimeError> {
+        let handle={
+            let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name);
+            let entry=matches.next().ok_or_else(||failure("runtime_binding"))?;
+            if matches.next().is_some() {return Err(failure("runtime_binding"));}entry.handle.clone()
+        };handle.queue(id,action).await
     }
     pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
         let handle={

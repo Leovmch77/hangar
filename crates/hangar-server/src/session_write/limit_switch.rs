@@ -99,7 +99,10 @@ const UNKNOWN_RESET_S:f64 = 5.0 * 3600.0;
 
 /// Resultado da reabertura pedida ao servidor.
 #[derive(Debug,PartialEq)]
-pub enum Reopen { Done, NotRust, Failed(String) }
+pub enum Reopen { Done, NotRust, Busy(String), Failed(String) }
+
+/// Tentativas da reabertura recusada por sessão ocupada, com `Host::pause` entre elas.
+const BUSY_TRIES:usize = 20;
 
 /// O que a troca usa do servidor; nos testes, um falso que registra as chamadas.
 pub trait Host: Send + Sync {
@@ -110,6 +113,10 @@ pub trait Host: Send + Sync {
     fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>>;
     fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen>;
     fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>>;
+    /// A fila da sessão, segurada desde o aviso de limite, volta a entregar.
+    fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()>;
+    /// A espera entre duas tentativas com a sessão ocupada.
+    fn pause(&self) -> BoxFuture<'_,()>;
     fn diary(&self,name:&str,code:&str,reason:&'static str);
     fn now(&self) -> f64;
 }
@@ -121,7 +128,7 @@ struct Switcher {
     handled:Mutex<BTreeMap<String,UsageLimit>>,
 }
 
-enum Outcome { Switched { label:String, explicit:bool }, Stayed(&'static str), Failed(String) }
+enum Outcome { Switched { label:String, explicit:bool }, Stayed(&'static str), Failed(String), Busy(String) }
 
 impl Switcher {
     fn first_time(&self,name:&str,limit:&UsageLimit) -> bool {
@@ -147,10 +154,17 @@ impl Switcher {
             Decision::Switch { path,label }=>(path,label),
             Decision::Stay(code)=>return Outcome::Stayed(code),
         };
-        match host.reopen(&hit.name,&spec,&path).await {
-            Reopen::NotRust=>return Outcome::Stayed("limit_switch_not_rust"),
-            Reopen::Failed(code)=>return Outcome::Failed(code),
-            Reopen::Done=>{},
+        // A fila está segurada, mas a sessão pode estar terminando o turno ou com uma pergunta aberta.
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match host.reopen(&hit.name,&spec,&path).await {
+                Reopen::NotRust=>return Outcome::Stayed("limit_switch_not_rust"),
+                Reopen::Failed(code)=>return Outcome::Failed(code),
+                Reopen::Busy(code) if tries >= BUSY_TRIES=>return Outcome::Busy(code),
+                Reopen::Busy(_)=>host.pause().await,
+                Reopen::Done=>break,
+            }
         }
         if let Err(code) = host.deliver(&hit.name,CONTINUE).await {
             return Outcome::Failed(format!("limit_switch_continue_{code}"));
@@ -159,8 +173,10 @@ impl Switcher {
     }
 
     async fn handle(&self,host:&dyn Host,hit:LimitHit) {
-        if !self.first_time(&hit.name,&hit.limit) { return; }
-        let outcome = self.switch(host,&hit).await;
+        let outcome = if self.first_time(&hit.name,&hit.limit) { Some(self.switch(host,&hit).await) } else { None };
+        // Todo aviso segura a fila, inclusive o repetido: qualquer fim a solta.
+        host.release(&hit.name).await;
+        let Some(outcome) = outcome else { return };
         let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
         match outcome {
             Outcome::Switched { label,explicit } => {
@@ -183,6 +199,12 @@ impl Switcher {
             Outcome::Failed(code) => {
                 tracing::warn!(session=%hit.name,%code,"limite de uso: a troca de conta falhou");
                 report(&code,"limite de uso: a troca de conta falhou; a sessão fica parada");
+            }
+            Outcome::Busy(code) => {
+                // Não conta como tratado: o próximo aviso do mesmo limite, com a sessão parada, tenta de novo.
+                if let Ok(mut handled) = self.handled.lock() { handled.remove(&hit.name); }
+                tracing::warn!(session=%hit.name,%code,"limite de uso: a sessão seguiu ocupada; a troca fica para o próximo aviso");
+                report(&code,"limite de uso: a sessão seguiu ocupada e a troca de conta não aconteceu");
             }
         }
     }
@@ -221,6 +243,8 @@ impl Host for Native {
         Box::pin(async move {
             match super::account::reopen_in(&self.st,&self.runtime,name,spec,path,false,ChangeReason::LimitSwitch).await {
                 None=>Reopen::NotRust,
+                Some(Err(failure)) if !failure.stopped && (crate::runtime::claude_reopen::busy_message(&failure.error.code).is_some()
+                    || matches!(failure.error.code.as_str(),"lifecycle_busy" | "session_transfer_busy")) => Reopen::Busy(failure.error.code),
                 Some(Err(failure))=>Reopen::Failed(failure.error.code),
                 Some(Ok(_))=>Reopen::Done,
             }
@@ -231,6 +255,8 @@ impl Host for Native {
             super::input::deliver_text(&self.st,name,text).await.map_err(|detail|detail["code"].as_str().unwrap_or("failed").to_owned())
         })
     }
+    fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()> { self.runtime.release_limit(name); Box::pin(async {}) }
+    fn pause(&self) -> BoxFuture<'_,()> { Box::pin(tokio::time::sleep(std::time::Duration::from_secs(3))) }
     fn diary(&self,name:&str,code:&str,reason:&'static str) { self.st.diag.report("session.limit_switch",name,code,reason); }
     fn now(&self) -> f64 { crate::state::monitor::wall_now() }
 }
@@ -390,6 +416,8 @@ mod tests {
         fn deliver<'a>(&'a self,_:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>> {
             Box::pin(async move { self.log.lock().unwrap().push(format!("deliver {text}")); Ok(()) })
         }
+        fn release<'a>(&'a self,_:&'a str) -> BoxFuture<'a,()> { Box::pin(async move { self.log.lock().unwrap().push("release".into()); }) }
+        fn pause(&self) -> BoxFuture<'_,()> { Box::pin(async move { self.log.lock().unwrap().push("pause".into()); }) }
         fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
         fn now(&self) -> f64 { 1000.0 }
     }
@@ -402,7 +430,7 @@ mod tests {
     async fn the_stopped_session_reopens_in_the_roomiest_account_and_is_told_to_continue() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}")]);
+        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}"),"release".into()]);
         assert_eq!(fake.diary(),vec!["switched"]);
     }
 
@@ -423,8 +451,39 @@ mod tests {
         let switcher = Switcher::default();
         // O aviso veio da conta /a, mas a pessoa já trocou a sessão para /b pelo /conta.
         switcher.handle(&fake,hit("/a",2000.0)).await;
-        assert!(fake.log().is_empty(),"{:?}",fake.log());
+        assert_eq!(fake.log(),vec!["release"]);
         assert!(!switcher.spent.is_spent("/b",1000.0),"a conta atual não bateu limite nenhum");
+    }
+
+    #[tokio::test]
+    async fn a_busy_session_is_tried_again_and_the_queue_is_let_go_only_at_the_end() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().push(Reopen::Busy("erro_sessao_trabalhando".into()));
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),"pause".into(),"reopen /c".into(),format!("deliver {CONTINUE}"),"release".into()]);
+        assert_eq!(fake.diary(),vec!["switched"]);
+    }
+
+    #[tokio::test]
+    async fn a_session_busy_to_the_end_is_not_marked_handled_and_lets_the_queue_go() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().extend((0..BUSY_TRIES).map(|_|Reopen::Busy("erro_sessao_esperando_resposta".into())));
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log().last().map(String::as_str),Some("release"));
+        assert_eq!(fake.diary(),vec!["erro_sessao_esperando_resposta"]);
+        // O mesmo limite, quando a sessão voltar a parar, ainda troca.
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.diary().last().map(String::as_str),Some("switched"));
+    }
+
+    #[tokio::test]
+    async fn every_ending_lets_the_queue_go() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0)]);
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log(),vec!["release","release"],"sem folga e o aviso repetido também soltam a fila");
     }
 
     #[tokio::test]
@@ -444,7 +503,7 @@ mod tests {
         let fake = Fake::new("/a",Vec::new());
         *fake.quotas.lock().unwrap() = Err("quota_read_failed".into());
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
-        assert!(fake.log().is_empty());
+        assert_eq!(fake.log(),vec!["release"]);
         assert_eq!(fake.diary(),vec!["quota_read_failed"]);
     }
 
