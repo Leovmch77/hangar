@@ -671,3 +671,75 @@ async fn a_folder_that_cannot_be_trusted_refuses_before_anything_stops() {
     assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
 }
 
+/// O que a troca vê no meio dela: a marca da troca em curso, com a conta de destino.
+struct SeeMark { marks:PathBuf, seen:std::sync::Mutex<Option<Value>> }
+impl hangar_server::runtime::claude_reopen::Between for SeeMark {
+    fn check<'a>(&'a self,_:&'a hangar_server::session_open::SessionSpec,_:&'a hangar_server::session_open::SessionSpec,_:&'a str)
+        -> futures_util::future::BoxFuture<'a,Result<(),hangar_server::runtime::protocol::RuntimeError>> { Box::pin(async { Ok(()) }) }
+    fn apply<'a>(&'a self,_:&'a hangar_server::session_open::SessionSpec,_:&'a hangar_server::session_open::SessionSpec,_:&'a str)
+        -> futures_util::future::BoxFuture<'a,Result<(),hangar_server::runtime::protocol::RuntimeError>> {
+        Box::pin(async {
+            let mark = std::fs::read(self.marks.join(format!("{}.switching","ab".repeat(16)))).ok().and_then(|raw|serde_json::from_slice(&raw).ok());
+            *self.seen.lock().unwrap() = mark;
+            Ok(())
+        })
+    }
+    fn undo<'a>(&'a self,_:&'a hangar_server::session_open::SessionSpec,_:&'a hangar_server::session_open::SessionSpec,_:&'a str)
+        -> futures_util::future::BoxFuture<'a,Result<(),hangar_server::runtime::protocol::RuntimeError>> { Box::pin(async { Ok(()) }) }
+}
+
+/// RR4: enquanto a conversa muda de conta a troca fica marcada com o destino, e a marca sai quando a vida nova
+/// está de pé e gravada.
+#[tokio::test]
+async fn a_conversation_move_is_marked_while_it_happens() {
+    let fx = fixture();
+    let b = account_b(&fx);
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    let registry = fx.registry().await;
+    let marks = fx.home.join(".hangar/session-specs");
+    let see = SeeMark { marks:marks.clone(),seen:Default::default() };
+    let change = SessionChange { reason:ChangeReason::AccountSwitch,surface:Some(Surface::Terminal),
+        account:Some(hangar_server::session_open::Account::Claude { config_dir:b.to_string_lossy().into_owned() }),
+        permission_mode:None,model:None,effort:None,service_tier:None };
+    let reopened = registry.reopen_claude_session("s1",change,Some(&see)).await.expect("é sessão Claude daqui");
+    let seen = see.seen.lock().unwrap().clone();
+    if reopened.is_ok() { registry.close(&"ab".repeat(16),2).await.unwrap(); fx.finish(); }
+    assert_eq!(seen.as_ref().map(|m|m["account"]["config_dir"].clone()),Some(json!(b)),"{seen:?}");
+    assert!(!marks.join(format!("{}.switching","ab".repeat(16))).exists(),"a marca sai no fim");
+}
+
+/// RR4: na subida, a troca que parou no meio vale pela conta em que a conversa está: o registro e o arquivo da
+/// sessão sem terminal passam para ela; a que não chegou a mover fica como estava.
+#[test]
+fn a_switch_cut_in_the_middle_settles_on_the_account_holding_the_conversation() {
+    let fx = fixture();
+    let b = account_b(&fx);
+    let key = "ab".repeat(16);
+    let project = hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy());
+    std::fs::create_dir_all(b.join(format!("projects/{project}"))).unwrap();
+    std::fs::write(b.join(format!("projects/{project}/{SID}.jsonl")),"{}\n").unwrap();
+    let spec = |config_dir:Option<&PathBuf>| json!({"version":1,"key":key,"name":"s1","cwd":fx.cwd,"provider":"claude","surface":"headless",
+        "account":config_dir.map_or(json!({"kind":"default"}),|dir|json!({"kind":"claude","config_dir":dir})),"account_source":"explicit",
+        "model":null,"effort":null,"service_tier":null,"permission_mode":"acceptEdits","subagent_model":null,"customizations":null,
+        "jev":false,"read_only":false,"worktree":null,"creator":"mae","created_at":1.0,"conversation":SID});
+    let specs = fx.home.join(".hangar/session-specs");
+    std::fs::create_dir_all(&specs).unwrap();
+    std::fs::write(specs.join(format!("{key}.json")),spec(None).to_string()).unwrap();
+    std::fs::write(specs.join(format!("{key}.switching")),spec(Some(&b)).to_string()).unwrap();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,"permission_mode":"acceptEdits","config_dir":null}));
+    let env = AccountEnvironment::from_map([("HOME".to_owned(),fx.home.to_string_lossy().into_owned())].into());
+    hangar_server::runtime::claude_reopen::settle_switches(&env);
+    let read = |path:PathBuf|serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(read(specs.join(format!("{key}.json")))["account"],json!({"kind":"claude","config_dir":b}));
+    assert_eq!(read(fx.sidecar_path("s1"))["config_dir"],json!(b));
+    assert!(!specs.join(format!("{key}.switching")).exists());
+    // A que não moveu: a conversa segue na conta de antes, nada muda além da marca.
+    std::fs::remove_file(b.join(format!("projects/{project}/{SID}.jsonl"))).unwrap();
+    std::fs::write(specs.join(format!("{key}.json")),spec(None).to_string()).unwrap();
+    std::fs::write(specs.join(format!("{key}.switching")),spec(Some(&b)).to_string()).unwrap();
+    hangar_server::runtime::claude_reopen::settle_switches(&env);
+    assert_eq!(read(specs.join(format!("{key}.json")))["account"],json!({"kind":"default"}));
+    assert!(!specs.join(format!("{key}.switching")).exists());
+}

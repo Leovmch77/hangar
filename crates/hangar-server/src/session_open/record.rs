@@ -31,6 +31,19 @@ pub fn write(home: &Path, spec: &SessionSpec) -> io::Result<()> {
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(spec)?)
 }
 
+/// A troca de conta em curso: o spec de destino, gravado antes de a conversa mudar de conta e apagado quando
+/// a vida nova está de pé e registrada. Sobrando na subida, a troca parou no meio. Fora do `*.json`: quem
+/// varre os registros não o confunde com um.
+pub fn switching_path(home: &Path, key: &str) -> io::Result<PathBuf> {
+    path(home, key).map(|p| p.with_extension("switching"))
+}
+
+pub fn write_switching(home: &Path, spec: &SessionSpec) -> io::Result<()> {
+    let path = switching_path(home, &spec.key)?;
+    std::fs::create_dir_all(dir(home))?;
+    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(spec)?)
+}
+
 /// A abertura que não nasceu tira o registro que gravou.
 pub fn remove(home: &Path, key: &str) -> io::Result<()> {
     match std::fs::remove_file(path(home, key)?) {

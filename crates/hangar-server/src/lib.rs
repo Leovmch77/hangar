@@ -150,6 +150,11 @@ pub async fn serve_until_with_guest(
         refresh_loop=Some(accounts::claude_refresh::start(state.accounts.clone(),quota_bridge,registry.clone()));
         let _watchdog = std::env::home_dir().map(|home| AbortOnDrop(tokio::spawn(
             watchdog::run(state.http.clone(), cfg.upstream, cfg.internal_secret.clone(), home))));
+        // A troca de conta que o Rust anterior deixou no meio, antes de qualquer sessão subir pelo spec.
+        { let env=registry.codex_environment();
+          if tokio::task::spawn_blocking(move||runtime::claude_reopen::settle_switches(&env)).await.is_err() {
+              tracing::warn!("trocas de conta interrompidas não foram conferidas");
+          } }
         // A vigia do Codex com terminal precisa das pastas da lista (sidecars e fila).
         let _codex_watch = match state.list.env().dirs.clone() {
             Some(dirs) => {

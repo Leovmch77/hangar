@@ -340,6 +340,59 @@ fn spec_of(procs:&dyn ProcessView,pid:i64,key:&str,name:&str,cwd:String,created:
     Ok((spec,settings))
 }
 
+/// A marca da troca de conta em curso; sai quando a reabertura termina, de qualquer jeito.
+struct SwitchMark(PathBuf);
+impl SwitchMark {
+    fn write(home:&std::path::Path,next:&SessionSpec) -> Result<Self,RuntimeError> {
+        let unmarked=|_|refused("reopen_switch_mark","a troca não pôde ser marcada; nada foi reaberto");
+        crate::session_open::record::write_switching(home,next).map_err(unmarked)?;
+        crate::session_open::record::switching_path(home,&next.key).map(SwitchMark).map_err(unmarked)
+    }
+}
+impl Drop for SwitchMark {
+    fn drop(&mut self) {
+        if let Err(error)=std::fs::remove_file(&self.0) && error.kind()!=std::io::ErrorKind::NotFound {
+            tracing::warn!(kind=?error.kind(),"marca da troca de conta ficou; a subida a resolve");
+        }
+    }
+}
+
+/// A troca de conta interrompida no meio (o Rust caiu entre mover a conversa e gravar a vida nova): na subida,
+/// vale a conta em que a conversa está. Com ela no destino, o registro e o arquivo da sessão sem terminal passam
+/// para ele; senão nada muda. Bloqueante.
+pub fn settle_switches(env:&crate::accounts::environment::AccountEnvironment) {
+    let dir=crate::session_open::record::dir(&env.home);
+    let Ok(entries)=std::fs::read_dir(&dir) else {return};
+    for path in entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|x|x=="switching")) {
+        let to=std::fs::read(&path).ok().and_then(|raw|serde_json::from_slice::<SessionSpec>(&raw).ok());
+        match to {
+            Some(to) if to.conversation.as_deref().is_some_and(|sid|super::claude_launch::transcript(env,&to,sid).is_file())=>{
+                tracing::warn!(session=%to.name,"troca de conta interrompida; a sessão fica na conta em que a conversa está");
+                if let Err(error)=crate::session_open::record::write(&env.home,&to) {tracing::warn!(kind=?error.kind(),"registro da troca interrompida não gravado");}
+                settle_sidecar(env,&to);
+            },
+            Some(_)=>{},
+            None=>tracing::warn!(path=%path.display(),"marca de troca de conta ilegível; descartada"),
+        }
+        let _=std::fs::remove_file(&path);
+    }
+}
+
+/// O sidecar sem terminal da sessão passa a dizer a conta de destino (é dele que a subida lê a conta).
+fn settle_sidecar(env:&crate::accounts::environment::AccountEnvironment,to:&SessionSpec) {
+    let dir=env.home.join(".hangar").join("claude-headless");
+    let Ok(Some(mut meta))=super::codex_sidecar::read(&super::codex_sidecar::path(&dir,&to.name)) else {return};
+    if meta.get("key").and_then(Value::as_str)!=Some(to.key.as_str()) {return;}
+    let fresh=crate::session_open::open::headless_sidecar(to,to.conversation.as_deref().unwrap_or_default(),None,None,None);
+    for field in ["config_dir","engine","model","effort","context_window","service_tier"] {
+        match fresh.get(field).filter(|v|!v.is_null()) {Some(value)=>{meta.insert(field.into(),value.clone());},None=>{meta.remove(field);}}
+    }
+    if !matches!(to.account,Account::Engine{..}) {
+        for field in ["engine_account","engine_credential_id","engine_account_base_url"] {meta.remove(field);}
+    }
+    if let Err(error)=super::codex_sidecar::put(&dir,&to.name,&meta) {tracing::warn!(kind=?error.kind(),"sidecar da troca interrompida não gravado");}
+}
+
 impl RuntimeRegistry {
     fn claude_sidecars(&self) -> PathBuf { self.codex_environment().home.join(".hangar").join("claude-headless") }
 
@@ -460,6 +513,12 @@ impl RuntimeRegistry {
         if !warnings.is_empty() {self.diag.report("runtime.reopen_engine_gone",name,"reopen_engine_gone","o motor saiu do catálogo e a sessão volta na conta Anthropic");}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
         let start=self.prepare_start(name,&next,&current,&sid).await.map_err(ReopenFailure::refused)?;
+        // A conversa que muda de conta fica marcada até a vida nova estar gravada: o Rust que cair no meio
+        // sobe pela conta em que ela estiver (`settle_switches`).
+        let _switching=match between {
+            Some(_)=>Some(SwitchMark::write(&self.codex_environment().home,&next).map_err(ReopenFailure::refused)?),
+            None=>None,
+        };
         match self.stop_claude(name,&current,next.surface).await {
             Ok(())=>{},
             Err(Stop::Before(error))=>return Err(ReopenFailure::refused(error)),
