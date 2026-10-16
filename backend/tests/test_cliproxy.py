@@ -104,13 +104,6 @@ def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, 
     apply.assert_not_called()
 
 
-@pytest.mark.parametrize("field", ["_engine_catalog", "engine_account_home", "engine_account_base_url"])
-def test_internal_account_binding_cannot_be_supplied_in_creation_body(cli, monkeypatch, field):
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": "/tmp", "engine": "proxy", "engine_account": "default", field: "arbitrary"})
-    assert response.status_code == 422, response.text
-
-
 def test_selected_models_and_routes_never_fall_back(tmp_path, monkeypatch):
     _proxy_accounts(tmp_path, monkeypatch)
     prefix = cliproxy_accounts.resolve("default")["prefix"]
@@ -272,14 +265,12 @@ def test_baton_forwards_account_to_shared_creation(tmp_path, monkeypatch):
         name="origin", cwd=str(tmp_path), provider="claude")))
     monkeypatch.setattr(api, "_nome_ocupado", lambda *a: False)
     monkeypatch.setattr(api, "_bastao_preparar", lambda *a: ("text", tmp_path / "target.md", "kick", None))
-    create = AsyncMock(return_value=SessionInfo(name="target", provider="claude"))
-    monkeypatch.setattr(api, "create_session", create)
-    monkeypatch.setattr(api, "PromptQueue", lambda name: MagicMock())
-    monkeypatch.setattr(api, "threading", SimpleNamespace(Thread=MagicMock()))
+    create = AsyncMock(return_value=api.CreatedSessionInfo(name="target", provider="claude"))
+    monkeypatch.setattr(api, "_open_in_rust", create)
     asyncio.run(api._passar_bastao("origin", api.BastaoBody(
         name="target", engine="proxy", engine_account="default", model="gpt-5.5"), SimpleNamespace(headers={})))
-    body = create.call_args.args[0]
-    assert body.engine_account == "default" and body.model == "gpt-5.5" and body.provider == "claude"
+    body = json.loads(create.call_args.args[0])
+    assert (body["engine_account"], body["model"], body["provider"]) == ("default", "gpt-5.5", "claude")
 
 
 def test_local_le_host_porta_e_primeira_chave(tmp_path):

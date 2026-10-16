@@ -8,8 +8,8 @@ import pytest
 from app.runtime_coordinator import Binding, RuntimeCoordinator, WriterLease
 
 
-def binding(tmp_path, headless=True):
-    return Binding(name="session", key="key", provider="claude", headless=headless,
+def binding(tmp_path, headless=True, provider="claude"):
+    return Binding(name="session", key="key", provider=provider, headless=headless,
         meta={"key": "key", "cano": {"pid": 42, "escuta": "tcp:127.0.0.1:1", "token": "test", "versao": 2}},
         jsonl=str(tmp_path / "chat.jsonl"), projection_dir=tmp_path / "projection",
         state_path=tmp_path / "key.queue-state.json", lock_path=tmp_path / "key.lock", generation=1)
@@ -355,8 +355,8 @@ class ReopenLegacy(Legacy):
         return self.target
 
 
-def _rust_session(tmp_path, gateway):
-    target = binding(tmp_path)
+def _rust_session(tmp_path, gateway, provider="claude"):
+    target = binding(tmp_path, provider=provider)
     legacy = ReopenLegacy(target)
     sent = _python_ops(legacy)
     coordinator = RuntimeCoordinator(gateway, legacy)
@@ -383,10 +383,11 @@ def test_rust_failure_raises_with_code_and_session_stays_rust(tmp_path):
 
 
 def test_headless_in_error_reopens_in_rust_once(tmp_path):
+    # Codex: o Claude sem terminal o próprio Rust reabre (`request_reopen`), nunca o coordenador.
     async def flow():
         from app.rust_server import RustOpError
         gateway = Reopenable()
-        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
+        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway, "codex")
         await _open(coordinator)
         gateway.launches.clear()
         gateway.broken, slot.cache_valid = "cano_closed", False
@@ -409,7 +410,7 @@ def test_headless_in_error_reopens_in_rust_once(tmp_path):
 def test_history_reopens_dead_session_once(tmp_path):
     async def flow():
         gateway = Reopenable()
-        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
+        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway, "codex")
         await _open(coordinator)
         gateway.broken, slot.cache_valid = "gone", False
         await coordinator.op("session", {"kind": "ensure_projection"}, "projection")

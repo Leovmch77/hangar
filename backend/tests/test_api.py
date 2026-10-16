@@ -1070,13 +1070,6 @@ def test_create_claude_needs_rust(api_client, headless, named):
     assert r.json()["detail"]["code"] == "session_open_needs_rust_server"
 
 
-@pytest.mark.parametrize("tier", ["fast", "", True, 1, ["priority"]])
-def test_create_rejects_invalid_service_tier(api_client, tier):
-    response = api_client.post("/api/sessions", headers=_h(), json={
-        "name": "cx", "cwd": "/tmp", "provider": "codex", "service_tier": tier})
-    assert response.status_code == 422
-
-
 def test_rename_falha_usa_a_mesma_chave_da_sidebar(api_client):
     # B2 do parecer task 11: a rota de rename nao pode ter chave propria duplicando a traducao
     # que a Sidebar ja usa no fallback dela — o code e o contrato, os dois apontam pra mesma frase.

@@ -25,17 +25,22 @@ def _env(monkeypatch, tmp_path):
     internal_api.set_secret(None)
 
 
-def _post(path, body):
-    return TestClient(api_mod.app, client=("127.0.0.1", 50000)).post(path, json=body, headers={"X-Hangar-Internal": SECRET})
+def _python_routes(path):
+    # Pela tabela de rotas e não pelo status: com `frontend/dist` presente o estático montado em "/"
+    # responde 405 ao POST que nenhuma rota atende.
+    from starlette.routing import Match, Mount
+    scope = {"type": "http", "path": path, "method": "POST", "root_path": ""}
+    return [r for r in api_mod.app.router.routes if not isinstance(r, Mount) and r.matches(scope)[0] != Match.NONE]
 
 
 def test_release_and_birth_are_all_rust():
-    assert _post("/internal/sessions/s1/release", {}).status_code == 404, "soltar o nome é todo do Rust"
-    assert _post("/internal/sessions/s1/born", {}).status_code == 404, "o nascimento é todo do Rust"
+    assert _python_routes("/api/sessions"), "o casador acha uma rota que o Python atende"
+    assert _python_routes("/internal/sessions/s1/release") == [], "soltar o nome é todo do Rust"
+    assert _python_routes("/internal/sessions/s1/born") == [], "o nascimento é todo do Rust"
 
 
 def test_the_guest_claim_is_written_by_the_rust_not_here():
-    assert _post("/internal/guests/claim", {"session": "s1", "guest": "g1"}).status_code == 404
+    assert _python_routes("/internal/guests/claim") == []
 
 
 def _body(**kw):

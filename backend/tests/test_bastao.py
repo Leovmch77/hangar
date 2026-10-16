@@ -482,6 +482,18 @@ def test_rota_404_sem_transcript(api_client_bastao):
 # POST: dossiê gravado -> sessão criada -> kick-off na fila
 # ---------------------------------------------------------------------------
 
+def _abertura_fingida(criadas: list):
+    """A criação da sucessora vai ao Rust por `_open_in_rust`; aqui ela só é registrada."""
+    from types import SimpleNamespace
+    from app.models import CreatedSessionInfo
+
+    async def abrir(raw, request=None):
+        corpo = SimpleNamespace(**json.loads(raw))
+        criadas.append(corpo)
+        return CreatedSessionInfo(name=corpo.name, cwd=corpo.cwd)
+    return abrir
+
+
 @pytest.fixture
 def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     """Cliente + origem viva + criação de sessão fingida. Devolve (post, criadas)."""
@@ -492,11 +504,7 @@ def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     origem = SessionInfo(name="cc", cwd=str(tmp_path), jsonl=str(FIX / "jsonl_samples.jsonl"))
     criadas: list = []
 
-    async def fake_create(body, request=None):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     # Sem nome ocupado por padrão (e sem consultar o tmux da máquina que roda os testes).
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
@@ -697,17 +705,12 @@ def test_get_bastao_404_quando_nem_viva_nem_arquivada(api_client_bastao):
 
 def test_post_bastao_de_sessao_morta_usa_o_cwd_do_transcript(api_client_bastao, monkeypatch, tmp_path):
     from unittest.mock import AsyncMock, patch
-    from app.models import SessionInfo
     import app.api as api_mod
     cfg, proj, sid = _arquivo_morto(tmp_path)
     _conta_conhecida(monkeypatch, cfg)
     criadas = []
 
-    async def fake_create(body, request=None):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     monkeypatch.setattr(api_mod, "_default_session_provider", AsyncMock(return_value="claude"))
@@ -727,22 +730,17 @@ def test_post_bastao_origem_morta_usa_origem_provider_pra_achar_o_transcript(api
     """origem_provider endereça só a origem MORTA no archive — o provider da sucessora (`provider`)
     não pode ser arrastado junto, senão passar o bastão de um Pi morto força a sucessora pro Pi."""
     from unittest.mock import patch
-    from app.models import SessionInfo
     import app.api as api_mod
     cfg, proj, sid = _arquivo_morto(tmp_path)
     _conta_conhecida(monkeypatch, cfg)
     criadas = []
     vistos = []
 
-    async def fake_create(body, request=None):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
     def fake_jsonl(project, session_id, config_dir, provider):
         vistos.append(provider)
         return FIX / "jsonl_samples.jsonl"
 
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     monkeypatch.setattr(api_mod, "archive_jsonl", fake_jsonl)
@@ -778,11 +776,7 @@ def test_post_bastao_codex_herda_conta_da_origem(api_client_bastao, monkeypatch,
                          codex_home=str(work.home))
     criadas = []
 
-    async def fake_create(body, request=None):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
@@ -810,7 +804,7 @@ def test_post_bastao_codex_recusa_conta_sucessora_diferente(api_client_bastao, m
     rollout.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n")
     origem = SessionInfo(name="cx", cwd=str(tmp_path), jsonl=str(rollout), provider="codex",
                          codex_home=str(work.home))
-    monkeypatch.setattr(api_mod, "create_session", lambda body, request=None: pytest.fail("nao cria"))
+    monkeypatch.setattr(api_mod, "_open_in_rust", lambda raw, request=None: pytest.fail("nao cria"))
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
         response = api_client_bastao.post(
