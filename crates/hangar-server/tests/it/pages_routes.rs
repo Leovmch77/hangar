@@ -1,4 +1,4 @@
-//! Páginas da conversa: publicação pela porta privada, leitura do dono no Rust, convidado no Python.
+//! Páginas da conversa: publicação do `html_render`, leitura do dono no Rust, convidado no Python.
 use crate::fake;
 
 use std::net::SocketAddr;
@@ -6,28 +6,30 @@ use std::sync::Arc;
 
 use fake::*;
 use hangar_server::pages::store::Store;
+use hangar_server::routes::AppState;
 use serde_json::{Value, json};
 
-struct Scene { python: Arc<Fake>, public: SocketAddr, private: String, _dir: tempfile::TempDir }
+struct Scene { python: Arc<Fake>, public: SocketAddr, state: Arc<AppState>, _dir: tempfile::TempDir }
 
 /// Servidor com a sessão `s1` (chave `k`), páginas numa pasta temporária e sem Chromium.
 async fn scene() -> Scene {
     let (python, upstream) = spawn_fake().await;
     python.set_info(json!({"provider": "claude", "jsonl": "/t/k.jsonl", "session_key": "k", "history": {}}));
     let dir = tempfile::tempdir().unwrap();
-    let mut state = hangar_server::routes::AppState::new(config(upstream, "127.0.0.1"));
+    let mut state = AppState::new(config(upstream, "127.0.0.1"));
     state.pages = Arc::new(Store::new(dir.path().into()));
     state.chromium = || None;
-    let public = spawn_state(state).await;
-    let health: Value = serde_json::from_str(&client().get(format!("http://{public}/__hangar_server/health")).send().await.unwrap().text().await.unwrap()).unwrap();
-    let private = health["terminal_address"].as_str().unwrap().to_owned();
-    Scene { python, public, private, _dir: dir }
+    state.side.locate = fake_locate(upstream);
+    let state = Arc::new(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public = listener.local_addr().unwrap();
+    let app = hangar_server::routes::router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Scene { python, public, state, _dir: dir }
 }
 
 async fn publish(s: &Scene, body: Value) -> Value {
-    let r = client().post(format!("http://{}/__hangar_server/pages", s.private)).header("x-hangar-internal", SECRET)
-        .header("content-type", "application/json").body(body.to_string()).send().await.unwrap();
-    serde_json::from_str(&r.text().await.unwrap()).unwrap()
+    hangar_server::pages::routes::publish_value(&s.state, body).await
 }
 
 async fn owner_get(s: &Scene, path: &str) -> reqwest::Response {
@@ -145,17 +147,6 @@ async fn guest_is_passed_to_python() {
     let r = client().get(format!("http://{}/api/sessions/s1/pages/abc", s.public)).send().await.unwrap();
     assert_eq!(r.text().await.unwrap(), "from-python");
     assert_eq!(s.python.hits_to("/api/sessions/s1/pages/abc"), 1);
-}
-
-#[tokio::test]
-async fn bridge_is_private_and_needs_the_secret() {
-    let s = scene().await;
-    let body = json!({"session": "s1", "html": "<p>oi</p>", "title": "Oi"});
-    let public = client().post(format!("http://{}/__hangar_server/pages", s.public)).header("x-hangar-internal", SECRET)
-        .body(body.to_string()).send().await.unwrap();
-    assert_eq!(public.status(), 404);
-    let no_secret = client().post(format!("http://{}/__hangar_server/pages", s.private)).body(body.to_string()).send().await.unwrap();
-    assert_eq!(no_secret.status(), 404);
 }
 
 #[tokio::test]

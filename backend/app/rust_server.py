@@ -373,12 +373,11 @@ class Supervisor:
         `address` (endereço privado ausente ou inválido na saúde)."""
         global terminal_panel
         terminal_panel = None
-        from app import account_bridge, groups_bridge, list_bridge, pages_bridge, push, workspace_bridge, transcription_bridge
+        from app import account_bridge, groups_bridge, list_bridge,push, workspace_bridge, transcription_bridge
         account_bridge.configure_preparation(None, None)
         workspace_bridge.configure(None, None)
         claude_customizations.configure(None, None)
         list_bridge.configure(None, None)
-        pages_bridge.configure(None, None)
         groups_bridge.configure(None, None)
         transcription_bridge.configure(None, None)
         push.configure_presence(None, None)
@@ -430,7 +429,6 @@ class Supervisor:
                     account_bridge.configure_preparation(address, env["HANGAR_INTERNAL_SECRET"])
                     claude_customizations.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     list_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
-                    pages_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     groups_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     transcription_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     push.configure_presence(address, env["HANGAR_INTERNAL_SECRET"])
@@ -442,7 +440,6 @@ class Supervisor:
                     workspace_bridge.configure(None, None)
                     claude_customizations.configure(None, None)
                     list_bridge.configure(None, None)
-                    pages_bridge.configure(None, None)
                     groups_bridge.configure(None, None)
                     transcription_bridge.configure(None, None)
                     push.configure_presence(None, None)
@@ -505,14 +502,13 @@ class Supervisor:
                             _log.warning("registro de contenção do hangar-server não gravou: %s", e)
                             diag.registrar("hangar_server.registro_falhou", "aviso", **diag.erro_campos(e))
                         record_failed = True
-                from app import account_bridge, groups_bridge, list_bridge, pages_bridge, push, workspace_bridge, transcription_bridge
+                from app import account_bridge, groups_bridge, list_bridge,push, workspace_bridge, transcription_bridge
                 account_bridge.configure_preparation(None, None)
                 groups_bridge.configure(None, None)
                 transcription_bridge.configure(None, None)
                 workspace_bridge.configure(None, None)
                 claude_customizations.configure(None, None)
                 list_bridge.configure(None, None)
-                pages_bridge.configure(None, None)
                 push.configure_presence(None, None)
                 costs_sources.set_served_by_rust(False)
                 terminal_observer.configure(None, None)
@@ -538,14 +534,13 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
-        from app import account_bridge, costs_sources, groups_bridge, list_bridge, pages_bridge, workspace_bridge, transcription_bridge
+        from app import account_bridge, costs_sources, groups_bridge, list_bridge,workspace_bridge, transcription_bridge
         account_bridge.configure_preparation(None, None)
         groups_bridge.configure(None, None)
         transcription_bridge.configure(None, None)
         workspace_bridge.configure(None, None)
         claude_customizations.configure(None, None)
         list_bridge.configure(None, None)
-        pages_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
         self._cancel_snapshot_retry()

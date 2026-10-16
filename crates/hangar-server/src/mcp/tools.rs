@@ -358,10 +358,7 @@ impl Tools {
         for (key, value) in [("height", a.height.map(Value::from)), ("width", a.width.map(Value::from)), ("theme", a.theme.map(Value::from))] {
             if let Some(value) = value { payload[key] = value; }
         }
-        let answer = match serde_json::from_value(payload) {
-            Ok(body) => crate::pages::routes::publish(&self.st, body).await,
-            Err(_) => json!({"ok": false, "error": {"code": "erro_pagina_invalida", "detail": "corpo inválido"}}),
-        };
+        let answer = crate::pages::routes::publish_value(&self.st, payload).await;
         if answer["ok"] != true {
             let (code, detail) = (answer["error"]["code"].as_str().unwrap_or("erro_paginas_indisponivel"), answer["error"]["detail"].as_str().unwrap_or(""));
             return Err(if detail.is_empty() { code.to_owned() } else { format!("{code}: {detail}") });

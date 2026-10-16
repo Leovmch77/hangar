@@ -62,20 +62,21 @@ def test_only_what_entered_python_directly_goes_to_the_rust_open(monkeypatch):
         payload = json.loads(body)
         return (200, json.dumps({"info": INFO, "undo": None}).encode()) if payload["request"].get("provider") == "claude" else None
     monkeypatch.setattr(runtime_coordinator, "rust_claude", bridge)
-    info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), None))
+    connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
+    info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), connect))
     assert (info.name, info.provider, info.owner) == ("s1", "claude", None)
     # Ausente continua ausente: o Rust decide o provedor padrão.
     assert sent[0] == ("s1", "open", "POST", {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest_root": None})
-    assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), None)) is None
-    connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
-    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect)) is not None
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), connect)) is None
     upstream = SimpleNamespace(scope={"server": ("127.0.0.1", 49152)})
     assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), upstream)) is None
-    assert len(sent) == 3, "o que entrou pela 8765 o Rust já decidiu: não volta a ele"
+    # Sem pedido HTTP ninguém cria por dentro do Python: o MCP abre no Rust.
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None)) is None
+    assert len(sent) == 2, "o que entrou pela 8765 o Rust já decidiu: não volta a ele"
     monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: (
         409, json.dumps({"detail": {"code": "erro_nome_em_uso", "params": {}, "msg": "ja existe uma sessao com esse nome"}}).encode()))
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+        asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect))
     assert (refused.value.status_code, refused.value.detail["code"]) == (409, "erro_nome_em_uso")
 
 
@@ -83,7 +84,8 @@ def test_a_failed_guest_claim_undoes_the_worktree_this_open_created(monkeypatch,
     """S-66: o registro do convidado falhou depois de a sessão nascer: ela é encerrada e a worktree (e a
     branch que esta abertura criou) sai junto, senão a nova tentativa daria 409 na branch."""
     from app import guest_users, runtime_coordinator
-    undo = {"source": "/r/repo", "path": "/r/repo-feat-x", "branch": "feat/x", "branch_created": True}
+    from app.connect_port import CONNECT_PORT
+    undo ={"source": "/r/repo", "path": "/r/repo-feat-x", "branch": "feat/x", "branch_created": True}
     monkeypatch.setattr(runtime_coordinator, "rust_claude",
                         lambda *args: (200, json.dumps({"info": INFO, "undo": undo}).encode()))
     killed, undone = [], []
@@ -99,7 +101,7 @@ def test_a_failed_guest_claim_undoes_the_worktree_this_open_created(monkeypatch,
     marker = guest_users.current.set(SimpleNamespace(id="g1", name="ana", root=str(tmp_path)))
     try:
         with pytest.raises(OSError):
-            asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+            asyncio.run(api_mod._open_in_rust(_body(provider="claude"), SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})))
     finally:
         guest_users.current.reset(marker)
     assert killed == ["s1"]

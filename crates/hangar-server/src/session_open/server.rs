@@ -1,5 +1,5 @@
 //! A abertura no servidor: o `POST /api/sessions` do dono e do convidado com login, o bastão do dono,
-//! a ponte privada por onde o Python repassa o que entrou direto nele (Connect, MCP) e o `OpenHost`
+//! a ponte privada por onde o Python repassa o que entrou direto nele (Connect) e o `OpenHost`
 //! com os serviços do Rust e o que ainda mora no Python (o registro em espera e o `then` do nome
 //! reusado, o dono da sessão do convidado).
 use std::collections::BTreeMap;
@@ -384,7 +384,7 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 }
 
 /// `/__hangar_server/claude/<nome>/open`: o que entrou direto no Python (Connect, com o convidado e a
-/// pasta dele; o MCP, que roda lá) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o
+/// pasta dele, e o bastão por ele) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o
 /// que não é do Rust volta 421 e o Python segue. A worktree criada volta junto: o registro do
 /// convidado no Python a desfaz se falhar.
 pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {

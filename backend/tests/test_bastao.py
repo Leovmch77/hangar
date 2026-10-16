@@ -492,7 +492,7 @@ def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     origem = SessionInfo(name="cc", cwd=str(tmp_path), jsonl=str(FIX / "jsonl_samples.jsonl"))
     criadas: list = []
 
-    async def fake_create(body):
+    async def fake_create(body, request=None):
         criadas.append(body)
         return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
 
@@ -704,7 +704,7 @@ def test_post_bastao_de_sessao_morta_usa_o_cwd_do_transcript(api_client_bastao, 
     _conta_conhecida(monkeypatch, cfg)
     criadas = []
 
-    async def fake_create(body):
+    async def fake_create(body, request=None):
         criadas.append(body)
         return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
 
@@ -735,7 +735,7 @@ def test_post_bastao_origem_morta_usa_origem_provider_pra_achar_o_transcript(api
     criadas = []
     vistos = []
 
-    async def fake_create(body):
+    async def fake_create(body, request=None):
         criadas.append(body)
         return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
 
@@ -779,7 +779,7 @@ def test_post_bastao_codex_herda_conta_da_origem(api_client_bastao, monkeypatch,
                          codex_home=str(work.home))
     criadas = []
 
-    async def fake_create(body):
+    async def fake_create(body, request=None):
         criadas.append(body)
         return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
 
@@ -811,7 +811,7 @@ def test_post_bastao_codex_recusa_conta_sucessora_diferente(api_client_bastao, m
     rollout.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n")
     origem = SessionInfo(name="cx", cwd=str(tmp_path), jsonl=str(rollout), provider="codex",
                          codex_home=str(work.home))
-    monkeypatch.setattr(api_mod, "create_session", lambda body: pytest.fail("nao cria"))
+    monkeypatch.setattr(api_mod, "create_session", lambda body, request=None: pytest.fail("nao cria"))
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
         response = api_client_bastao.post(
