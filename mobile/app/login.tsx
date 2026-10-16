@@ -8,7 +8,9 @@ import { Sheet } from '../src/ui/Sheet';
 import { QrScanner } from '../src/features/login/QrScanner';
 import { parsePairing } from '../src/features/login/pairing';
 import { useServers } from '../src/stores/servers';
+import { parseInviteLink } from '@hangar/core';
 import { verifyLoginMachine } from '../src/features/machines/loginMachine';
+import { InvitePanel } from '../src/features/share/InvitePanel';
 import * as m from '../src/paraglide/messages';
 import { superficie } from '../src/theme/superficie';
 
@@ -19,11 +21,19 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteLink, setInviteLink] = useState('');
 
   const handleScan = (texto: string) => {
     const cru = texto.trim();
-    const p = parsePairing(cru);
     setScanning(false);
+    if (parseInviteLink(cru)) {
+      setInviteLink(cru);
+      setInviteOpen(true);
+      setError('');
+      return;
+    }
+    const p = parsePairing(cru);
     if (!p) {
       setError(cru.includes('://') ? m.login_url_token_invalidos() : m.login_qr_sem_url());
       return;
@@ -134,6 +144,9 @@ export default function Login() {
             <Pressable style={styles.scanBtn} onPress={() => setScanning(true)} accessibilityLabel={m.login_qr()}>
               <Text style={styles.scanText}>{m.login_qr()}</Text>
             </Pressable>
+            <Pressable style={styles.scanBtn} onPress={() => { setInviteLink(''); setInviteOpen(true); }} accessibilityRole="button" accessibilityLabel={m.mobile_share_invite_open()}>
+              <Text style={styles.scanText}>{m.mobile_share_invite_open()}</Text>
+            </Pressable>
           </View>
         </Glass>
       </View>
@@ -141,6 +154,15 @@ export default function Login() {
       {/* `scrollable` é o que faz a sheet dar a altura do detent ao conteúdo; sem ele o flex:1 da câmera colapsa numa faixa. */}
       <Sheet open={scanning} sizes={['large']} scrollable onDismiss={() => setScanning(false)}>
         <QrScanner onScan={handleScan} onClose={() => setScanning(false)} />
+      </Sheet>
+      <Sheet open={inviteOpen} sizes={['auto', 'large']} scrollable onDismiss={() => setInviteOpen(false)}>
+        {inviteOpen ? <View style={styles.inviteForm}>
+          <InvitePanel key={inviteLink} initialLink={inviteLink}
+            onAccepted={(server, session) => router.replace(`/s/${encodeURIComponent(server.id)}/${encodeURIComponent(session)}`)} />
+          <Pressable style={styles.scanBtn} onPress={() => setInviteOpen(false)} accessibilityRole="button" accessibilityLabel={m.comum_cancelar()}>
+            <Text style={styles.scanText}>{m.comum_cancelar()}</Text>
+          </Pressable>
+        </View> : null}
       </Sheet>
     </Screen>
   );
@@ -155,6 +177,7 @@ const styles = StyleSheet.create((theme, rt) => ({
     paddingHorizontal: theme.base.space[6],
     paddingBottom: theme.base.space[6],
   },
+  inviteForm: { padding: theme.base.space[4], gap: theme.base.space[3] },
   card: {
     width: '100%',
     maxWidth: 400,

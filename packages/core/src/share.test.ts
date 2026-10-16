@@ -84,6 +84,33 @@ describe('redeemInvite', () => {
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ code: 'K7P2', device: 'Navegador · Linux' });
   });
+  it('agrega sessão ao token de convite existente e nunca segue redirect com esse token', async () => {
+    const f = vi.fn(async () => resposta(200, { token: 'tg', session: 's2', owner: 'Ana', address: 'https://dono.ts.net:8443' }));
+    await redeemInvite('https://dono.ts.net:8443/convite/NOVO', 'Android', f as unknown as typeof fetch, 'tg');
+    const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ code: 'NOVO', device: 'Android', token: 'tg' });
+    expect(init.redirect).toBe('error');
+  });
+  it.each([
+    'http://dono.ts.net:8443',
+    'ftp://dono.ts.net:8443',
+    'https://outro.ts.net:8443',
+    'https://dono.ts.net:8766',
+  ])('origem diferente na resposta conserva o endereço do link: %s', async (address) => {
+    const f = vi.fn(async () => resposta(200, { token: 'tg', session: 's1', owner: 'Ana', address }));
+    const result = await redeemInvite('https://dono.ts.net:8443/convite/K7P2', 'browser', f as unknown as typeof fetch);
+    expect(result).toEqual({ token: 'tg', session: 's1', owner: 'Ana', address: 'https://dono.ts.net:8443' });
+  });
+  it.each([
+    ['https://dono.ts.net:8443/convite/K7P2', 'https://dono.ts.net:8443/'],
+    ['http://192.168.77.142:8766/convite/K7P2', 'http://192.168.77.142:8766/'],
+  ])('preserva endereço válido da mesma origem sem token opcional: %s', async (link, address) => {
+    const f = vi.fn(async () => resposta(200, { token: 'tg', session: 's1', owner: 'Ana', address }));
+    expect(await redeemInvite(link, 'browser', f as unknown as typeof fetch))
+      .toEqual({ token: 'tg', session: 's1', owner: 'Ana', address });
+    const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ code: 'K7P2', device: 'browser' });
+  });
   it('410 vira o motivo certo (envelope com params ou detail cru)', async () => {
     const usado = vi.fn(async () => resposta(410, { detail: { code: 'erro_convite_usado', params: { reason: 'used' }, msg: 'x' } }));
     await expect(redeemInvite('https://d:8443/convite/A', 'x', usado as unknown as typeof fetch))

@@ -15,6 +15,9 @@ import {
   queuedMessages,
   registrarDiag,
   parsePluginToast,
+  parsePluginUi,
+  applyPluginUiDelta,
+  type PluginSurfaces,
   parseQueuePanel,
   queueEditPayload,
   queueEditExitText,
@@ -84,6 +87,8 @@ export interface ChatState {
   statusLine: string | null;
   // Faixa de estatísticas do último turno (evento SSE `stats`).
   stats: StatsEvent | null;
+  pluginUi: PluginSurfaces | null;
+  pluginUiError: string | null;
   loading: boolean;
   error: string;
   // Carga do histórico antigo falhou ('failed' = rede/backend, tocar tenta de novo) ou veio
@@ -163,6 +168,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     askPiDismissed: null,
     statusLine: null,
     stats: null,
+    pluginUi: null,
+    pluginUiError: null,
     loading: true,
     error: '',
     olderFailed: '',
@@ -431,6 +438,24 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es = openEventStreamForServer(target, name, undefined, lastEventId);
     const source = es;
     let queueSeen = false;
+    let pluginUiRaw: unknown = null;
+
+    for (const type of ['plugin_ui', 'plugin_ui_delta']) {
+      es.addEventListener(type, (e) => {
+        if (es !== source || !alive) return;
+        try {
+          const data: unknown = JSON.parse(e.data);
+          const next = type === 'plugin_ui_delta' ? applyPluginUiDelta(pluginUiRaw, data) : data;
+          const pluginUi = parsePluginUi(next);
+          pluginUiRaw = next;
+          useChatStore.setState({ pluginUi, pluginUiError: null });
+        } catch {
+          quadroFalhou(type);
+          useChatStore.setState({ pluginUiError: m.plugin_ui_falhou() });
+          onStreamError(new Error(type));
+        }
+      });
+    }
 
     // Prova de vida pro watchdog do adapter: SEM listener registrado o wrap do adapter
     // não roda rearmar() e o stream saudável morre aos 25s (mesmo padrão do sessions.ts).
@@ -606,6 +631,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     });
 
     es.addEventListener('reset', () => {
+      pluginUiRaw = null;
+      useChatStore.setState({ pluginUi: null, pluginUiError: null });
       // Transcript trocado (/clear): ids do arquivo antigo não valem mais — zera e recarrega.
       lastEventId = null;
       etag = null;
@@ -650,7 +677,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       }, QUEUE_SNAPSHOT_MS);
     };
     // Fechar a fonte deixa apenas este backoff dono da repetição, sem polling em paralelo.
-    es.onerror = (error) => {
+    function onStreamError(error: unknown) {
       if (es !== source) return;
       const status = (error as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
       const refused = status >= 400 && status < 500 && status !== 408 && status !== 429;
@@ -666,7 +693,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (base !== undefined) registrarDiag({ evento: 'sse.retentativa', tela: 'chat',
         espera_ms: retryDelay }, base);
       retryDelay = Math.min(retryDelay * 2, SSE_RETRY_MAX_MS);
-    };
+    }
+    es.onerror = onStreamError;
   }
 
   // Aviso de falha da fila: some sozinho, como o aviso do PWA, sem ficar sobre uma fila que já mudou.

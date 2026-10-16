@@ -1,13 +1,17 @@
 // @vitest-environment happy-dom
-import { act, createElement, StrictMode, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { act, createElement, StrictMode, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const calls = vi.hoisted(() => ({
   roots: vi.fn(), scan: vi.fn(), sessions: vi.fn(), configs: vi.fn(), engines: vi.fn(), save: vi.fn(),
   target: null as null | { id: string; label: string; baseUrl: string; token: string },
   accounts: vi.fn(),
   providers: vi.fn(),
+  mutate: vi.fn(),
+  contextFetch: vi.fn(),
   models: vi.fn(),
   prepare: vi.fn(),
   preparation: vi.fn(),
@@ -31,10 +35,13 @@ vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return {
   ...actual,
-  AccessibilityInfo: { ...actual.AccessibilityInfo, sendAccessibilityEvent: vi.fn() },
+  AccessibilityInfo: { ...actual.AccessibilityInfo, sendAccessibilityEvent: vi.fn(), announceForAccessibility: vi.fn() },
+  Switch: ({ value, onValueChange, disabled, accessibilityLabel }: { value: boolean; onValueChange: (v: boolean) => void; disabled?: boolean; accessibilityLabel?: string }) =>
+    createElement('button', { role: 'switch', 'aria-label': accessibilityLabel, 'aria-checked': value, disabled, onClick: () => onValueChange(!value) }),
   // O mock global só achata arrays; o estilo por função do Pressable precisa ser resolvido antes.
-  Pressable: (props: { style?: unknown }) => (actual.Pressable as unknown as (p: object) => ReactNode)({
-    ...props, style: typeof props.style === 'function' ? props.style({ pressed: false }) : props.style,
+  Pressable: (props: { style?: unknown; onLongPress?: () => void; accessibilityState?: { expanded?: boolean } }) => (actual.Pressable as unknown as (p: object) => ReactNode)({
+    ...props, onContextMenu: props.onLongPress, 'aria-expanded': props.accessibilityState?.expanded,
+    style: typeof props.style === 'function' ? props.style({ pressed: false }) : props.style,
   }),
   Alert: { alert: calls.alert },
   TextInput: (props: { value?: string; accessibilityLabel?: string; onChangeText?: (value: string) => void }) => createElement('textarea', {
@@ -49,41 +56,31 @@ vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ ch
 vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('../../chat/draftAttachments', () => ({ retainDraftAttachment: vi.fn(async (a: unknown) => a), removeDraftAttachment: vi.fn() }));
-vi.mock('../ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
+vi.mock('../ditado/EstiloPill', () => ({
+  DictationStyleMenu: ({ open }: { open: boolean }) => open ? createElement('div', { role: 'dialog', 'aria-label': 'ditado_estilo_titulo' }) : null,
+  useDictationStyleLabel: () => 'estilo',
+}));
 vi.mock('../usage/HomeUsageCard', async (original) => ({ ...await original<object>(), HomeUsageCard: () => null }));
 vi.mock('../../ui/AttachSheet', () => ({ AttachSheet: () => null }));
 vi.mock('../ditado/useDitado', () => ({ useDitado: () => ({ gravando: false, rms: 0, iniciar: () => {}, parar: () => {} }) }));
-vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open = false, children, onDismiss }: { open?: boolean; children: ReactNode; onDismiss?: () => void }) => {
-  const [retained, setRetained] = useState(open);
-  const callback = useRef(onDismiss);
-  const pending = useRef<null | (() => void)>(null);
-  callback.current = onDismiss;
-  const queueDismiss = useCallback(() => {
-    if (pending.current) return;
-    const dismiss = () => {
-      pending.current = null;
-      if (calls.dismiss === dismiss) calls.dismiss = null;
-      setRetained(false);
-      callback.current?.();
-    };
-    pending.current = dismiss;
-    calls.dismiss = dismiss;
-  }, []);
-  useEffect(() => {
-    if (open) setRetained(true);
-    else if (retained) queueDismiss();
-  }, [open, retained, queueDismiss]);
-  useEffect(() => () => {
-    if (calls.dismiss === pending.current) calls.dismiss = null;
-    pending.current = null;
-  }, []);
-  return open || retained ? createElement('div', { 'data-testid': 'options-sheet', 'data-open': String(open) },
-    children, createElement('button', { onClick: queueDismiss }, 'fechar-folha'),
-  ) : null;
-} }));
 vi.mock('../../ui/AnchoredPanel', () => ({
-  AnchoredPanel: ({ open, children }: { open: boolean; children: ReactNode }) =>
-    open ? createElement('div', { 'data-testid': 'folder-panel' }, children) : null,
+  AnchoredPanel: ({ open, children, label, onClose, onDismissed }: {
+    open: boolean; children: ReactNode; label: string; onClose: () => void; onDismissed?: () => void;
+  }) => {
+    const [retained, setRetained] = useState(open);
+    const callback = useRef(onDismissed);
+    callback.current = onDismissed;
+    useEffect(() => {
+      if (label !== 'native_new_chat_folder') return;
+      if (open) setRetained(true);
+      else if (retained) calls.dismiss = () => { setRetained(false); calls.dismiss = null; callback.current?.(); };
+    }, [open, retained, label]);
+    const shown = open || (label === 'native_new_chat_folder' && retained);
+    return shown ? createElement('div', { 'data-testid': 'folder-panel', 'aria-label': label,
+      'data-folder-panel': label === 'native_new_chat_folder' ? 'true' : undefined, 'data-open': String(open) }, children,
+      createElement('button', { onClick: onClose, 'aria-label': 'close-panel' }),
+      createElement('button', { onClick: onClose, 'aria-label': 'back-panel' })) : null;
+  },
 }));
 vi.mock('./CwdPicker', async (original) => {
   const { CwdPicker } = await original<typeof import('./CwdPicker')>();
@@ -102,7 +99,7 @@ vi.mock('../../stores/servers', () => ({
     // A máquina da conversa sai da pílula de máquina, não do servidor ativo: `target` só entra na lista.
     (selector: (state: { activeId: string; servers: typeof server[] }) => unknown) =>
       selector({ activeId: server.id, servers: calls.target ? [server, calls.target] : [server] }),
-    { getState: () => ({ servers: [server], active: () => server }) },
+    { getState: () => ({ servers: calls.target ? [server, calls.target] : [server], active: () => server }) },
   ),
 }));
 vi.mock('../../stores/prefs', () => ({ prefs: {
@@ -110,19 +107,11 @@ vi.mock('../../stores/prefs', () => ({ prefs: {
   set: (key: string, value: string) => { calls.save(key, value); localStorage.setItem(key, value); },
   remove: (key: string) => localStorage.removeItem(key),
 } }));
-vi.mock('./ProviderPicker', () => ({ ProviderPicker: ({ onChange }: { onChange: (provider: string) => void }) => createElement('div', null,
-  createElement('button', { onClick: () => onChange('codex'), 'data-picker': 'codex' }, 'Codex'),
-  createElement('button', { onClick: () => onChange('claude'), 'data-picker': 'claude' }, 'Claude'),
-) }));
-vi.mock('./CodexContextControl', () => ({ CodexContextControl: () => null }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('@react-native-menu/menu', () => ({
-  MenuView: ({ actions, onPressAction, children }: { actions: { id: string; title: string }[]; onPressAction: (event: { nativeEvent: { event: string } }) => void; children: ReactNode }) => createElement('div', null,
-    children,
-    ...actions.map((action) => createElement('button', { key: action.id, onClick: () => onPressAction({ nativeEvent: { event: action.id } }) }, action.title)),
-  ),
+  MenuView: () => { throw new Error('creation-must-use-anchored-panel'); },
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
@@ -132,6 +121,9 @@ vi.mock('@hangar/core', async (original) => ({
   getEnginesForServer: calls.engines,
   // Sonda de providers da folha nova: sem ela o teste fazia fetch de verdade para b.local.
   getProvidersForServer: calls.providers,
+  setServiceTier: calls.mutate, setModelEffort: calls.mutate, setCodexModel: calls.mutate,
+  setEngineModel: calls.mutate, setPiModel: calls.mutate, setKimiModel: calls.mutate,
+  setPermissionMode: calls.mutate,
   modelOptions: vi.fn().mockResolvedValue({ models: [], reduced: false }),
   getSessions: vi.fn().mockResolvedValue([]),
   getCodexAccountsForServer: calls.accounts,
@@ -174,6 +166,8 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_ler_falhou: () => 'ler_falhou', arquivo_pasta_nao_encontrada: () => 'pasta_nao_encontrada',
   arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
+  native_create_provider_missing: ({ p }: { p: string }) => `native_create_provider_missing:${p}`,
+  native_create_provider_execution_denied: ({ p }: { p: string }) => `native_create_provider_execution_denied:${p}`,
   native_create_roots: () => 'native_create_roots', native_create_roots_failed: () => 'native_create_roots_failed',
   native_create_search: () => 'native_create_search', native_create_path: () => 'native_create_path',
   native_create_use_folder: () => 'native_create_use_folder', native_create_computer_folder: () => 'native_create_computer_folder',
@@ -214,10 +208,16 @@ vi.mock('../../paraglide/messages', () => ({
     'home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming ' +
     'home_usage_warming_timeout native_close native_create_checkout_branch native_create_checkout_current native_create_checkout_failed ' +
     'native_create_checkout_loading native_create_checkout_worktree ' +
-    'native_create_codex_account native_create_provider_missing native_loading native_new_chat_machine ' +
+    'native_create_codex_account native_loading native_new_chat_machine ' +
     'native_new_chat_no_accounts nova_conversa_anexo_falhou nova_conversa_candidata nova_conversa_conferir_erro nova_conversa_criando ' +
     'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry ' +
-    'worktree_base worktree_modo worktree_modo_ajuda worktree_nome_branch worktree_nova_branch'
+    'worktree_base worktree_modo worktree_modo_ajuda worktree_nome_branch worktree_nova_branch ' +
+    'composer_session_settings composer_session_settings_hint native_ctl_model_title native_ctl_search native_ctl_no_results ' +
+    'comum_nenhum_modelo native_new_chat_reasoning modelo_sem_niveis native_ctl_loading native_ctl_retry native_ctl_failed ' +
+    'native_ctl_fast native_ctl_fast_on native_ctl_fast_off native_ctl_fast_hint native_ctl_fast_unavailable ' +
+    'reasoning_level_low reasoning_level_medium reasoning_level_high reasoning_level_xhigh reasoning_level_max reasoning_level_ultra ' +
+    'native_mode_plan native_mode_manual native_mode_auto native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk chat_mode_plan config_motores_modelo_padrao ' +
+    'codex_contexto_titulo codex_contexto_padrao codex_contexto_salvando comum_falha_aplicar config_server_tentar_de_novo'
   ).split(' ').map((k) => [k, () => k])),
 }));
 
@@ -237,8 +237,10 @@ function deferred<T>() {
 }
 
 describe('CreateSessionSheet Codex', () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
   beforeEach(() => {
+    calls.contextFetch.mockReset().mockImplementation(async () => new Response(JSON.stringify({ contexto_estendido: true })));
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => calls.contextFetch(input, init));
     calls.dismiss = null;
     calls.pickerActive = 0;
     calls.pickerPeak = 0;
@@ -252,6 +254,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.configs.mockReset().mockResolvedValue([]);
     calls.engines.mockReset().mockResolvedValue({ motores: {} });
     calls.accounts.mockReset().mockResolvedValue([connected]);
+    calls.mutate.mockReset();
     calls.providers.mockReset().mockResolvedValue({});
     calls.models.mockReset().mockResolvedValue({ models: [], reduced: false });
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
@@ -269,8 +272,10 @@ describe('CreateSessionSheet Codex', () => {
     _resetCarriedForTests();
   });
 
-  const button = (container: HTMLElement, text: string) =>
-    [...container.querySelectorAll('button')].find((b) => b.textContent === text || b.getAttribute('aria-label') === text);
+  const button = (container: HTMLElement, text: string) => {
+    const buttons = [...container.querySelectorAll('button')];
+    return buttons.find((b) => b.getAttribute('aria-label') === text) ?? buttons.find((b) => b.textContent === text);
+  };
 
   function type(container: HTMLElement, text: string) {
     const input = container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement;
@@ -279,9 +284,42 @@ describe('CreateSessionSheet Codex', () => {
   }
 
   async function send(container: HTMLElement, text = 'oi') {
+    for (const panel of container.querySelectorAll<HTMLElement>('[data-testid="folder-panel"][data-open="true"]')) {
+      await act(async () => button(panel, 'close-panel')!.click());
+    }
+    if (calls.dismiss) await flushDismiss();
     await act(async () => type(container, text));
     await act(async () => button(container, 'nova_conversa_enviar')!.click());
     for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+  }
+
+  async function openSettings(container: HTMLElement) {
+    if (!container.querySelector('[data-testid="folder-panel"][aria-label="composer_session_settings"]')) {
+      await act(async () => button(container, 'composer_session_settings')!.click());
+    }
+  }
+
+  async function closePanel(container: HTMLElement, label?: string) {
+    const panel = label ? container.querySelector(`[data-testid="folder-panel"][aria-label="${label}"]`) : container;
+    await act(async () => button(panel as HTMLElement, 'close-panel')!.click());
+  }
+
+  async function openOptions(container: HTMLElement) {
+    await openSettings(container);
+    const more = button(container, 'criar_mais_opcoes')!;
+    if (more.getAttribute('aria-expanded') !== 'true') await act(async () => more.click());
+  }
+
+  async function openFolder(container: HTMLElement) {
+    const trigger = [...container.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label')?.startsWith('native_new_chat_folder:'))!;
+    await act(async () => trigger.click());
+  }
+
+  async function pickAccount(container: HTMLElement, value: string, codex = true) {
+    const label = codex ? 'native_create_codex_account' : 'comum_conta_claude';
+    const trigger = [...container.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label')?.startsWith(`${label}:`))!;
+    await act(async () => trigger.click());
+    await act(async () => button(container, value)!.click());
   }
 
   async function flushDismiss() {
@@ -295,12 +333,419 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
     await act(async () => Promise.resolve());
     if (chooseCodex) {
-      await act(async () => button(container, 'criar_mais_opcoes')!.click());
-      await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
+      await openSettings(container);
+      await act(async () => button(container, 'Codex')!.click());
+      await closePanel(container, 'composer_session_settings');
     }
     await act(async () => Promise.resolve());
     return { container, root };
   }
+
+  it('abre a máquina em painel ancorado e não cria sessão ao trocar o destino', async () => {
+    calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
+    const { container, root } = await renderSheet(false, false);
+    expect(container.querySelector('[aria-label="native_new_chat_machine"]')).toBeNull();
+    await act(async () => type(container, 'rascunho entre máquinas'));
+    await act(async () => button(container, 'native_new_chat_machine: Servidor B')!.click());
+    expect(container.querySelector('[data-testid="folder-panel"][aria-label="native_new_chat_machine"]')).not.toBeNull();
+    await act(async () => button(container, 'Servidor C')!.click());
+    expect(button(container, 'native_new_chat_machine: Servidor C')).toBeTruthy();
+    expect(container.querySelector('[data-testid="folder-panel"]')).toBeNull();
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('rascunho entre máquinas');
+    await act(async () => button(container, 'nova_conversa_enviar')!.click());
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(calls.target, expect.objectContaining({ cwd: '/repo' }));
+    expect(calls.send).toHaveBeenCalledWith(calls.target, 'nova', 'rascunho entre máquinas');
+    root.unmount();
+  });
+
+  it.each([
+    { defaultModel: 'sol', alias: false, active: false, available: true },
+    { defaultModel: undefined, alias: false, active: true, available: false },
+    { defaultModel: undefined, alias: false, active: false, available: false },
+    { defaultModel: undefined, alias: true, active: false, available: false },
+  ])('Fast fixa somente padrão Codex identificado: $defaultModel / alias=$alias / active=$active', async ({ defaultModel, alias, active, available }) => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, default: defaultModel, models: [
+      { id: alias ? 'default' : 'sol', name: 'Sol', active, context_length: 272000,
+        efforts: ['low', 'high'], default_effort: 'low', service_tiers: [{ id: 'priority', hidden: false }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    const fast = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
+    expect(fast.disabled).toBe(!available);
+    await act(async () => fast.click());
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await send(container);
+    if (available) expect(calls.create.mock.calls[0][1]).toMatchObject({ model: 'sol', service_tier: 'priority' });
+    else {
+      expect(calls.create.mock.calls[0][1].model).toBeNull();
+      expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    }
+    root.unmount();
+  });
+
+  it('contas Claude tardias não recarregam nem apagam escolhas do catálogo Codex', async () => {
+    const configs = deferred<{ path: string; label: string; active: boolean }[]>();
+    calls.configs.mockReturnValue(configs.promise);
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['low', 'high'], default_effort: 'low', service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    await act(async () => button(container, 'reasoning_level_high')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!.click());
+    const codexReads = calls.models.mock.calls.filter((call) => call[1] === 'codex').length;
+    await act(async () => configs.resolve([{ path: '/late-claude', label: 'Conta tardia', active: true }]));
+    expect(calls.models.mock.calls.filter((call) => call[1] === 'codex')).toHaveLength(codexReads);
+    expect(container.querySelector('[role="switch"][aria-label="native_ctl_fast"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(button(container, 'composer_session_settings')!.textContent).toContain('Sol high');
+    await send(container);
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, expect.objectContaining({
+      provider: 'codex', model: 'sol', effort: 'high', service_tier: 'priority', codex_account: 'work',
+    }));
+    root.unmount();
+  });
+
+  it.each([
+    { closing: 'recolher', failure: false }, { closing: 'fechar', failure: false },
+    { closing: 'recolher', failure: true }, { closing: 'fechar', failure: true },
+  ])('contexto global termina a escrita após $closing extras, com erro=$failure', async ({ closing, failure }) => {
+    const post = deferred<Response>();
+    calls.contextFetch.mockImplementation(async (_url, init) => init?.method === 'POST'
+      ? post.promise : new Response(JSON.stringify({ contexto_estendido: true })));
+    const { container, root } = await renderSheet();
+    try {
+      await openOptions(container);
+      const contextSwitch = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="codex_contexto_titulo"]')!;
+      expect(contextSwitch().getAttribute('aria-checked')).toBe('true');
+      await act(async () => contextSwitch().click());
+      const write = calls.contextFetch.mock.calls.find((call) => call[1]?.method === 'POST')!;
+      expect(write[0]).toBe('https://b.local/api/harness/codex/opcoes');
+      expect(write[1].body).toBe('{"contexto_estendido":false}');
+      if (closing === 'recolher') await act(async () => button(container, 'criar_mais_opcoes')!.click());
+      else await closePanel(container, 'composer_session_settings');
+      expect((write[1].signal as AbortSignal).aborted).toBe(false);
+      await act(async () => type(container, 'mensagem aguardando contexto'));
+      expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+      await act(async () => post.resolve(failure
+        ? new Response(JSON.stringify({ detail: 'context-write-failed' }), { status: 500 })
+        : new Response(JSON.stringify({ contexto_estendido: false }))));
+      expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
+      if (failure) expect(container.textContent).toContain('context-write-failed');
+      await openOptions(container);
+      expect(contextSwitch().getAttribute('aria-checked')).toBe(String(failure));
+      if (failure) expect(container.textContent).toContain('context-write-failed');
+      expect(calls.contextFetch.mock.calls.filter((call) => call[1]?.method === 'GET')).toHaveLength(1);
+      expect(calls.create).not.toHaveBeenCalled();
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('fechar contexto cancela só GET e uma leitura antiga não vence a reabertura', async () => {
+    const oldRead = deferred<Response>();
+    calls.contextFetch.mockReturnValueOnce(oldRead.promise)
+      .mockImplementation(async () => new Response(JSON.stringify({ contexto_estendido: false })));
+    const { container, root } = await renderSheet();
+    try {
+      await openOptions(container);
+      const readSignal = calls.contextFetch.mock.calls[0][1].signal as AbortSignal;
+      await closePanel(container, 'composer_session_settings');
+      expect(readSignal.aborted).toBe(true);
+      await openOptions(container);
+      await act(async () => oldRead.resolve(new Response(JSON.stringify({ contexto_estendido: true }))));
+      expect(container.querySelector('[role="switch"][aria-label="codex_contexto_titulo"]')!.getAttribute('aria-checked')).toBe('false');
+      expect(calls.contextFetch.mock.calls.every((call) => call[1]?.method === 'GET')).toBe(true);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('voltar à linha Padrão após Fast limpa tier e conserva model null no envio', async () => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, default: 'sol', models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!.click());
+    await act(async () => button(container, 'criar_padrao')!.click());
+    await send(container);
+    expect(calls.create.mock.calls[0][1].model).toBeNull();
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
+
+  it.each([false, true])('desligar Fast omite service_tier sem desfazer o modelo escolhido (mesmo lote: %s)', async (batched) => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    const fast = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
+    if (batched) await act(async () => { fast().click(); fast().click(); });
+    else {
+      await act(async () => fast().click());
+      expect(fast().getAttribute('aria-checked')).toBe('true');
+      await act(async () => fast().click());
+    }
+    expect(fast().getAttribute('aria-checked')).toBe('false');
+    await send(container);
+    expect(calls.create.mock.calls[0][1].model).toBe('sol');
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
+
+  it('pílula abre modelos, provider e esforço reais; escolhas só saem ao Enviar', async () => {
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', context_length: 272000, efforts: ['low', 'high'], default_effort: 'low', service_tiers: [{ id: 'priority', hidden: false }] },
+      { id: 'mini', name: 'Mini', context: '128K', efforts: ['low'], default_effort: 'low', service_tiers: [] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    expect(button(container, 'Sol')).toBeUndefined();
+    const chip = button(container, 'composer_session_settings');
+    expect(chip).toBeTruthy();
+    await act(async () => chip!.click());
+    await act(async () => button(container, 'Codex')!.click());
+    await act(async () => button(container, 'Sol')!.click());
+    await act(async () => button(container, 'reasoning_level_high')!.click());
+    const fast = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]');
+    expect(fast).not.toBeNull();
+    await act(async () => fast!.click());
+    expect(button(container, 'composer_session_settings')!.textContent).toBe('Sol · 272K high · native_ctl_fast');
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await act(async () => button(container, 'close-panel')!.click());
+    expect(button(container, 'Sol')).toBeUndefined();
+    await send(container);
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, expect.objectContaining({
+      provider: 'codex', model: 'sol', effort: 'high', service_tier: 'priority', codex_account: 'work',
+    }));
+    root.unmount();
+  });
+
+  it.each([
+    { tiers: [{ id: 'priority' }], available: true },
+    { tiers: [{ id: 'priority', hidden: true }], available: false },
+    { tiers: [], available: false },
+  ])('Fast na criação usa apenas o modelo selecionado: $tiers', async ({ tiers, available }) => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: tiers },
+      { id: 'other', name: 'Other', efforts: ['low'], service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    expect(button(container, 'composer_session_settings')).toBeTruthy();
+    await act(async () => button(container, 'composer_session_settings')!.click());
+    await act(async () => button(container, 'Sol')!.click());
+    const fast = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]');
+    expect(fast).not.toBeNull();
+    expect(fast!.disabled).toBe(!available);
+    await act(async () => fast!.click());
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await send(container);
+    const payload = calls.create.mock.calls[0][1];
+    if (available) expect(payload.service_tier).toBe('priority');
+    else expect(payload).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
+
+  it('toque longo no microfone da criação abre o estilo sem criar nem enviar', async () => {
+    const { container, root } = await renderSheet(false, false);
+    const mic = button(container, 'composer_gravar_audio')!;
+    await act(async () => mic.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
+    expect(container.querySelector('[role="dialog"][aria-label="ditado_estilo_titulo"]')).not.toBeNull();
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('Mais opções expande no mesmo painel ancorado, sem trocar o modal do modelo', async () => {
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    const panel = container.querySelector('[data-testid="folder-panel"][aria-label="composer_session_settings"]');
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    expect(container.querySelector('[data-testid="folder-panel"][aria-label="composer_session_settings"]')).toBe(panel);
+    expect(container.querySelectorAll('[data-testid="folder-panel"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    expect(container.querySelector('textarea[aria-label="comum_nome"]')).not.toBeNull();
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    expect(container.querySelector('textarea[aria-label="comum_nome"]')).toBeNull();
+    expect(container.querySelector('[data-testid="folder-panel"][aria-label="composer_session_settings"]')).toBe(panel);
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('extras do mesmo painel guardam nome, permissão e subagente só para o Enviar', async () => {
+    calls.models.mockResolvedValue({ kind: 'claude', reduced: false, models: [
+      { id: 'opus', name: 'Opus', context_length: 1000000 }, { id: 'sonnet', name: 'Sonnet', context_length: 200000 },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    expect(container.querySelector('[data-testid="folder-panel"][aria-label="composer_session_settings"]')).not.toBeNull();
+    await act(async () => {
+      const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+      field.value = 'conversa-local';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => button(container, 'criar_permissao_padrao')!.click());
+    await act(async () => button(container, 'bypassPermissions')!.click());
+    await act(async () => button(container, 'criar_subagente_padrao')!.click());
+    const subagents = container.querySelector<HTMLElement>('[data-testid="folder-panel"][aria-label="criar_subagente_padrao"]')!;
+    await act(async () => button(subagents, 'Sonnet')!.click());
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await send(container);
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, expect.objectContaining({
+      name: 'conversa-local', permission_mode: 'bypassPermissions', subagent_model: 'sonnet', model: null,
+    }));
+    root.unmount();
+  });
+
+  it('mantém indicador visível no Enviar enquanto a criação espera resposta', async () => {
+    calls.create.mockReturnValue(new Promise(() => {}));
+    const { container, root } = await renderSheet(false, false);
+    await send(container);
+    expect(button(container, 'nova_conversa_enviar')!.textContent).toBe('loading');
+    root.unmount();
+  });
+
+  it.each([
+    { provider: 'claude', motivo: 'nao_encontrado', reason: 'native_create_provider_missing:OMP' },
+    { provider: 'codex', motivo: 'nao_encontrado', reason: 'native_create_provider_missing:OMP' },
+    { provider: 'claude', motivo: 'sem_permissao', reason: 'native_create_provider_execution_denied:OMP' },
+    { provider: 'codex', motivo: 'sem_permissao', reason: 'native_create_provider_execution_denied:OMP' },
+    { provider: 'claude', motivo: null, reason: 'native_create_provider_missing:OMP' },
+    { provider: 'codex', motivo: null, reason: 'native_create_provider_missing:OMP' },
+  ])('traduz motivo da API para OMP indisponível com $provider ativo: $motivo', async ({ provider, motivo, reason }) => {
+    calls.providers.mockResolvedValue({
+      claude: { disponivel: true, motivo: null, default: provider === 'claude' },
+      codex: { disponivel: true, motivo: null, default: provider === 'codex' },
+      omp: { disponivel: false, motivo, default: false },
+    });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await openSettings(container);
+      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain('nao_encontrado');
+      expect(container.textContent).not.toContain('sem_permissao');
+      expect(button(container, 'OMP')!.disabled).toBe(true);
+      expect(button(container, provider === 'claude' ? 'Claude' : 'Codex')!.disabled).toBe(false);
+      await act(async () => button(container, 'OMP')!.click());
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('mostra o motivo do provider indisponível sem permitir escolhê-lo', async () => {
+    calls.providers.mockResolvedValue({ claude: { disponivel: true }, kimi: { disponivel: false, motivo: 'Kimi não instalado nesta máquina' } });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    expect(button(container, 'Kimi')!.disabled).toBe(true);
+    expect(container.textContent).toContain('Kimi não instalado nesta máquina');
+    await act(async () => button(container, 'Kimi')!.click());
+    await send(container);
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));
+    root.unmount();
+  });
+
+  it('descarta esforço guardado incompatível com Haiku', async () => {
+    localStorage.setItem('create.choices.v1:server-b', JSON.stringify({ provider: 'claude', model: 'haiku', effort: 'high' }));
+    calls.models.mockResolvedValue({ kind: 'claude', reduced: false, models: [{ id: 'haiku', name: 'Haiku' }] });
+    const { container, root } = await renderSheet(false, false);
+    await send(container);
+    expect(calls.create.mock.calls[0][1].effort).toBeNull();
+    root.unmount();
+  });
+
+  it('conta e terminal abrem painéis e não aplicam nada à sessão antes de Enviar', async () => {
+    calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
+    const { container, root } = await renderSheet(false, false);
+    expect(button(container, 'Conta B')).toBeUndefined();
+    await pickAccount(container, 'Conta B', false);
+    await act(async () => button(container, 'criar_modo_exec: criar_modo_exec_headless')!.click());
+    expect(container.querySelector('[data-testid="folder-panel"][aria-label="criar_modo_exec"]')).not.toBeNull();
+    await act(async () => button(container, 'criar_modo_exec_tmux')!.click());
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    expect(calls.models).toHaveBeenLastCalledWith(server, 'claude', null, '/b', null, expect.any(AbortSignal));
+    await send(container);
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, expect.objectContaining({ config_dir: '/b', headless: false }));
+    root.unmount();
+  });
+
+  it.each([
+    { kind: 'engine', global: true, model: true, visible: true, available: true },
+    { kind: 'engine', global: true, model: false, visible: true, available: false },
+    { kind: 'engine', global: false, model: true, visible: false, available: false },
+    { kind: 'claude', global: true, model: true, visible: false, available: false },
+  ])('Fast Claude exige motor e metadata do catálogo: $kind / $global / $model', async ({ kind, global, model, visible, available }) => {
+    calls.engines.mockResolvedValue({ motores: { local: { label: 'Motor local', model: 'sol' } } });
+    calls.models.mockResolvedValue({ kind, reduced: false, supports_fast: global, models: [{ id: 'sol', name: 'Sol', supports_fast: model }] });
+    const { container, root } = await renderSheet(false, false);
+    await openOptions(container);
+    await act(async () => button(container, 'criar_claude_sua_conta')!.click());
+    await act(async () => button(container, 'Motor local')!.click());
+    await closePanel(container, 'composer_session_settings');
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    const fast = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]');
+    expect(!!fast).toBe(visible);
+    if (fast) { expect(fast.disabled).toBe(!available); await act(async () => fast.click()); }
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await send(container);
+    const payload = calls.create.mock.calls[0][1];
+    expect(payload.engine).toBe('local');
+    if (available) expect(payload.service_tier).toBe('priority');
+    else expect(payload).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
+
+  it.each(['priority', 'default'])('Fast %s não vaza ao trocar para modelo sem suporte ou outro provider', async (tier) => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
+      { id: 'mini', name: 'Mini', efforts: ['low'], service_tiers: [] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    const fast = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
+    await act(async () => fast().click());
+    if (tier === 'default') await act(async () => fast().click());
+    await act(async () => button(container, 'Mini')!.click());
+    expect(fast().disabled).toBe(true);
+    expect(fast().getAttribute('aria-checked')).toBe('false');
+    await act(async () => button(container, 'Claude')!.click());
+    expect(fast()).toBeNull();
+    await send(container);
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    expect(calls.mutate).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it.each([
+    { provider: 'claude', models: [{ id: 'sonnet', name: 'Sonnet de outra sessão', active: true, context_length: 1000000 }], label: 'config_motores_modelo_padrao', catalogDefault: undefined },
+    { provider: 'claude', models: [{ id: 'default', name: 'Default (recommended)', context_length: 200000 }], label: 'criar_padrao · 200K', catalogDefault: undefined },
+    { provider: 'claude', models: [{ id: 'opus', name: 'Opus 5.5' }], label: 'config_motores_modelo_padrao', catalogDefault: undefined },
+    { provider: 'kimi', models: [{ id: 'kimi-k2', name: 'Kimi K2', context_length: 256000 }], label: 'Kimi K2 · 256K', catalogDefault: 'kimi-k2' },
+  ])('sem preferências o chip informa o modelo conhecido ou padrão honestamente: $provider / $models.0.id / $label', async ({ provider, models, label, catalogDefault }) => {
+    calls.providers.mockResolvedValue({ [provider]: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: provider, reduced: false, models, default: catalogDefault });
+    const { container, root } = await renderSheet(false, false);
+    expect(button(container, 'composer_session_settings')!.textContent).toBe(label);
+    await send(container);
+    expect(calls.create.mock.calls[0][1].model).toBeNull();
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
 
   it('usa o padrão GPT do servidor e sua conta conectada sem selecionar Claude', async () => {
     calls.providers.mockResolvedValue({
@@ -322,9 +767,8 @@ describe('CreateSessionSheet Codex', () => {
     const pending = deferred<Record<string, unknown>>();
     calls.providers.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet(false, false);
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    // O chip do provider também mostra "Claude"; o clique tem de ser no seletor.
-    await act(async () => container.querySelector<HTMLButtonElement>('button[data-picker="claude"]')!.click());
+    await openSettings(container);
+    await act(async () => button(container, 'Claude')!.click());
     await act(async () => pending.resolve({ codex: { disponivel: true, default: true } }));
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));
@@ -337,7 +781,7 @@ describe('CreateSessionSheet Codex', () => {
     expect(container.textContent).toContain('provider-probe-failed');
     await send(container);
     expect(calls.create).not.toHaveBeenCalled();
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await openSettings(container);
     await act(async () => button(container, 'Codex')!.click());
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex' }));
@@ -351,23 +795,20 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => root.render(createElement(CreateSessionSheet)));
     await act(async () => type(container, 'primeira mensagem'));
     expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
-    await act(async () => button(container, 'criar_outra_pasta')!.click());
-    // A raiz lembrada já abre ativa; tocar nela agora escolhe a própria raiz, então desce direto na linha.
+    await openFolder(container);
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
-    await act(async () => button(container, 'fechar-folha')!.click());
     await flushDismiss();
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await openSettings(container);
     await act(async () => button(container, 'Codex')!.click());
-    await act(async () => button(container, 'Trabalho')!.click());
+    await closePanel(container, 'composer_session_settings');
+    await pickAccount(container, 'Trabalho');
+    await openSettings(container);
     await act(async () => button(container, 'Sol')!.click());
-    await act(async () => button(container, 'high')!.click());
-    await act(async () => button(container, 'fechar-folha')!.click());
-    await flushDismiss();
+    await act(async () => button(container, 'reasoning_level_high')!.click());
+    await closePanel(container, 'composer_session_settings');
     expect(button(container, 'native_new_chat_folder: child')).toBeTruthy();
-    expect(button(container, 'composer_modelo · Codex: Sol · high')).toBeTruthy();
-    expect(container.textContent).toContain('Sol · high');
+    expect(button(container, 'composer_session_settings')!.textContent).toBe('Sol high');
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
     await act(async () => button(container, 'nova_conversa_enviar')!.click());
     for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
@@ -389,7 +830,7 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     await act(async () => root.render(createElement(CreateSessionSheet)));
     await act(async () => type(container, 'primeira mensagem'));
-    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    expect(container.querySelector('[data-folder-panel]')).toBeNull();
     expect(calls.pickerActive).toBe(1);
     // Carregando agora é esqueleto, sem texto: nada escolhível enquanto as raízes não chegam.
     expect(button(container, 'native_create_use_folder')).toBeUndefined();
@@ -421,33 +862,29 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.pickerActive).toBe(picked ? 0 : 1);
     const initialSignal = calls.roots.mock.calls[0][1] as AbortSignal;
     if (!picked) expect(initialSignal.aborted).toBe(false);
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    const sheet = container.querySelector('[data-testid="options-sheet"]')!;
+    await openFolder(container);
+    const sheet = container.querySelector('[data-folder-panel]')!;
     expect(sheet).toBeTruthy();
-    expect(sheet.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(picked ? 0 : 1);
-    const sheetSignal = !picked ? calls.roots.mock.calls.at(-1)![1] as AbortSignal : null;
+    expect(sheet.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(1);
+    const sheetSignal = calls.roots.mock.calls.at(-1)![1] as AbortSignal;
     if (sheetSignal) {
       expect(initialSignal.aborted).toBe(true);
       expect(sheetSignal.aborted).toBe(false);
     }
-    if (picked) expect(button(container, 'criar_outra_pasta')).toBeTruthy();
-    await act(async () => button(container, closing === 'gesto' ? 'fechar-folha' : 'nova_conversa_opcoes_fechar')!.click());
+    if (picked) expect(button(container, 'native_create_use_folder')).toBeTruthy();
+    await act(async () => button(container, closing === 'gesto' ? 'back-panel' : 'close-panel')!.click());
     expect(calls.dismiss).toBeTruthy();
-    expect(container.querySelector('[data-testid="options-sheet"]')).toBe(sheet);
-    expect(sheet.getAttribute('data-open')).toBe(closing === 'gesto' ? 'true' : 'false');
+    expect(container.querySelector('[data-folder-panel]')).toBe(sheet);
+    expect(sheet.getAttribute('data-open')).toBe('false');
     expect(calls.pickerActive).toBe(picked ? 0 : 1);
     expect(calls.pickerPeak).toBe(1);
-    if (sheetSignal) expect(sheetSignal.aborted).toBe(closing === 'controlado');
-    if (closing === 'controlado') {
-      expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeNull();
-      expect(button(sheet as HTMLElement, 'criar_outra_pasta')).toBeUndefined();
-      if (picked) expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
-      else expect(container.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(1);
-    } else if (!picked) {
-      expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeTruthy();
-    }
+    if (sheetSignal) expect(sheetSignal.aborted).toBe(true);
+    expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeNull();
+    expect(button(sheet as HTMLElement, 'native_create_use_folder')).toBeUndefined();
+    if (picked) expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+    else expect(container.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(1);
     await flushDismiss();
-    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    expect(container.querySelector('[data-folder-panel]')).toBeNull();
     expect(calls.pickerActive).toBe(picked ? 0 : 1);
     if (sheetSignal) expect(sheetSignal.aborted).toBe(true);
     expect(calls.pickerHistory.every((active) => active <= 1)).toBe(true);
@@ -479,10 +916,9 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => root.render(createElement(CreateSessionSheet)));
     await act(async () => type(container, 'antes da folha'));
     expect(container.textContent).toContain(message);
-    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    await act(async () => button(container, 'nova_conversa_opcoes_fechar')!.click());
-    await flushDismiss();
+    expect(container.querySelector('[data-folder-panel]')).toBeNull();
+    await openOptions(container);
+    await closePanel(container, 'composer_session_settings');
     await act(async () => type(container, 'depois da folha'));
     expect(container.textContent).toContain(message);
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('depois da folha');
@@ -497,8 +933,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.accounts.mockRejectedValue(new Error('conta_recusada'));
     const { container, root } = await renderSheet();
     await act(async () => type(container, 'texto da conta'));
-    await act(async () => button(container, 'fechar-folha')!.click());
-    await flushDismiss();
+    await openOptions(container);
+    await closePanel(container, 'composer_session_settings');
     expect(container.textContent).toContain('conta_recusada');
     expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
     await act(async () => type(container, 'texto corrigido'));
@@ -514,6 +950,7 @@ describe('CreateSessionSheet Codex', () => {
     localStorage.setItem('create.project.v1:server-b', JSON.stringify({ root: 'C:\\work', cwd: path }));
     calls.roots.mockResolvedValue([{ name: 'Work', path: 'C:\\work' }]);
     const { container, root } = await renderSheet();
+    await openOptions(container);
     expect(container.textContent).toContain(path);
     expect(calls.scan).toHaveBeenCalledWith(server, 'C:\\work', path, expect.any(AbortSignal));
     root.unmount();
@@ -522,20 +959,24 @@ describe('CreateSessionSheet Codex', () => {
   it('valida a subpasta escolhida e restaura ao reabrir', async () => {
     const { container, root } = await renderSheet();
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
-    await act(async () => button(container, 'criar_outra_pasta')!.click());
-    // A raiz lembrada já abre ativa; tocar nela agora escolhe a própria raiz, então desce direto na linha.
+    await openFolder(container);
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
+    await flushDismiss();
+    await openOptions(container);
     expect(container.textContent).toContain('/repo/child');
     expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo/child"}');
     root.unmount();
     const reopened = await renderSheet();
+    await openOptions(reopened.container);
     expect(reopened.container.textContent).toContain('/repo/child');
     reopened.root.unmount();
   });
 
   it('cria Claude no destino explícito do projeto', async () => {
     const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Claude')!.click());
+    await openSettings(container);
+    await act(async () => button(container, 'Claude')!.click());
+    await openOptions(container);
     await act(async () => {
       const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
       field.value = 'meu-nome';
@@ -553,7 +994,7 @@ describe('CreateSessionSheet Codex', () => {
     const antiga: CotaContaResumo = { id: 'claude:/a', estado: 'lida', janelas: [{ rotulo: '5h', pct: 42 }], motivo: 'sem-resposta' };
     calls.cotas = [antiga];
     const { container, root } = await renderSheet(false, false);
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await openOptions(container);
     expect(motivoCotaAntiga(antiga)).toBeTruthy();
     expect(container.textContent).toContain(`5h 42% · ${motivoCotaAntiga(antiga)}`);
     root.unmount();
@@ -590,8 +1031,9 @@ describe('CreateSessionSheet Codex', () => {
     calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
     calls.roots.mockResolvedValue([{ name: 'Other', path: '/other' }]);
     await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => button(container, 'native_new_chat_machine: Servidor B')!.click());
     await act(async () => button(container, 'Servidor C')!.click());
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await openOptions(container);
     await act(async () => { scan.resolve({ entries: [] }); configs.resolve([{ path: '/old', label: 'Conta antiga', active: true }]); models.resolve({ models: [{ id: 'old', name: 'Modelo antigo' }], reduced: false }); });
     expect(container.textContent).toContain('/other');
     expect(container.textContent).not.toContain('/repo');
@@ -605,6 +1047,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.save.mockImplementation(() => { throw new Error('storage failed'); });
     const { container, root } = await renderSheet();
     expect(container.textContent).toContain('projeto_salvar_erro');
+    await openOptions(container);
     expect(container.textContent).toContain('/repo');
     root.unmount();
   });
@@ -683,13 +1126,15 @@ describe('CreateSessionSheet Codex', () => {
       { id: 'mini', name: 'Mini', efforts: ['low'] },
     ], reduced: false });
     const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Sol')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'high')!.click());
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    await act(async () => button(container, 'reasoning_level_high')!.click());
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ model: 'sol', effort: 'high', codex_account: 'work' }));
     calls.create.mockClear();
     await act(async () => button(container, 'nova_conversa_descartar')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Mini')!.click());
+    await openSettings(container);
+    await act(async () => button(container, 'Mini')!.click());
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ model: 'mini', effort: null, codex_account: 'work' }));
     root.unmount();
@@ -699,6 +1144,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.archives.mockResolvedValue([archived]);
     const { container, root } = await renderSheet();
     await act(async () => Promise.resolve());
+    await openOptions(container);
+    await act(async () => button(container, 'criar_retomar_escolha')!.click());
     expect(container.textContent).toContain('última mensagem');
     const option = [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem');
     expect(option).toBeTruthy();
@@ -730,12 +1177,12 @@ describe('CreateSessionSheet Codex', () => {
     const pending = deferred<{ name: string; state: 'idle' }>();
     calls.resume.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Trabalho')!.click());
+    await pickAccount(container, 'Trabalho');
     await act(async () => Promise.resolve());
-    // A conversa antiga escolhida no menu da caixa já começa a retomada.
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
+    await act(async () => button(container, 'criar_retomar')!.click());
+    await act(async () => button(container, 'última mensagem')!.click());
     expect(calls.resume).toHaveBeenCalledOnce();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Padrão')!.click());
+    await pickAccount(container, 'Padrão');
     await act(async () => type(container, 'oi'));
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
     await act(async () => pending.resolve({ name: 'retomada', state: 'idle' }));
@@ -748,7 +1195,9 @@ describe('CreateSessionSheet Codex', () => {
     const pending = deferred<{ name: string; state: 'idle' }>();
     calls.resume.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
+    expect(button(container, 'última mensagem')).toBeUndefined();
+    await act(async () => button(container, 'criar_retomar')!.click());
+    await act(async () => button(container, 'última mensagem')!.click());
     expect(calls.resume).toHaveBeenCalledOnce();
     root.unmount();
     await act(async () => pending.resolve({ name: 'retomada', state: 'idle' }));

@@ -6,6 +6,61 @@ use std::collections::HashSet;
 fn event(value: Value) -> ChatEvent { serde_json::from_value(value).unwrap() }
 
 #[test]
+fn review_notices_and_empty_replies_leave_no_rows_in_history_or_live_updates() {
+    let mut events = vec![
+        event(json!({"id":"notice","kind":"user_msg","text":"[painel: revisão do PR] Evento de acompanhamento"})),
+        event(json!({"id":"empty","kind":"assistant_msg","text":" \n "})),
+        event(json!({"id":"missing","kind":"assistant_msg"})),
+        event(json!({"id":"user","kind":"user_msg","text":"Como está a revisão do PR?"})),
+        event(json!({"id":"panel","kind":"user_msg","text":"[painel: grupo de trabalho] Grupo alterado"})),
+        event(json!({"id":"peer","kind":"user_msg","text":"[de: revisão do PR] Recado"})),
+        event(json!({"id":"answer","kind":"assistant_msg","text":"Correção enviada."})),
+    ];
+    let expected = vec![Item::Event(3), Item::Event(4), Item::Event(5), Item::Event(6)];
+    let mut fold = Incremental::default();
+    for n in 1..=events.len() {
+        fold.update(&events[..n], n - 1, View::default());
+        assert_eq!(fold.items, conversation::build(&events[..n], View::default(), &HashSet::new()));
+    }
+    assert_eq!(fold.items, expected);
+    events[1].text = Some("Resposta recebida depois.".into());
+    fold.update(&events, 1, View::default());
+    assert_eq!(fold.items, vec![Item::Event(1), Item::Event(3), Item::Event(4), Item::Event(5), Item::Event(6)]);
+}
+
+#[test]
+fn agent_duration_tracks_execution_and_freezes_at_the_real_finish() {
+    let start = event(json!({"id":"agent","kind":"tool_use","tool_use_id":"a","tool_name":"Agent","ts":1000.0}));
+    let launch = event(json!({"id":"launch","kind":"tool_result","tool_use_id":"a","bg_agent_id":"worker","ts":1002.0}));
+    let finish = event(json!({"id":"finish","kind":"tool_result","tool_use_id":"task:worker","ts":1192.0}));
+    let foreground = event(json!({"id":"foreground","kind":"tool_result","tool_use_id":"a","ts":1075.0}));
+    let untimed = event(json!({"id":"untimed","kind":"tool_result","tool_use_id":"task:worker"}));
+    let untimed_foreground = event(json!({"id":"untimed-fg","kind":"tool_result","tool_use_id":"a"}));
+    let duplicate = event(json!({"id":"duplicate","kind":"tool_result","tool_use_id":"task:worker","ts":1250.0}));
+    let notification = event(json!({"id":"note","kind":"user_msg","text":"<task-notification><task-id>worker</task-id></task-notification>","ts":1192.0}));
+    for (events, running, seconds) in [
+        (vec![start.clone()], true, 300),
+        (vec![start.clone(), launch.clone()], true, 300),
+        (vec![start.clone(), foreground.clone()], false, 75),
+        (vec![start.clone(), untimed_foreground, foreground], false, 75),
+        (vec![start.clone(), launch.clone(), untimed.clone(), finish.clone(), duplicate], false, 192),
+        (vec![start.clone(), untimed, finish.clone(), launch.clone()], false, 192),
+        (vec![start.clone(), launch.clone(), finish.clone()], false, 192),
+        (vec![start.clone(), finish, launch.clone()], false, 192),
+        (vec![start, launch, notification], false, 192),
+    ] {
+        let mut fold = Incremental::default();
+        for n in 1..=events.len() { fold.update(&events[..n], n - 1, View::default()); }
+        for activity in [&fold.activity, &conversation::fold_activity(&events)] {
+            let run = &activity.agents[0];
+            assert_eq!(run.running, running);
+            assert_eq!(run.elapsed(1300.0).map(|d| d.as_secs()), Some(seconds));
+            if !running { assert_eq!(run.elapsed(1600.0).map(|d| d.as_secs()), Some(seconds)); }
+        }
+    }
+}
+
+#[test]
 fn ordinary_results_do_not_rebuild_historical_activity() {
     let mut fold = super::ActivityFold::default();
     for i in 0..200 {

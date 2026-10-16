@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import { esquecerRota, reconcilePairEntries, registrarDiag } from '@hangar/core';
-import type { ExternalPair, LanInfo, PairAttach, Server } from '@hangar/core';
+import type { ExternalPair, InviteRedeemResult, LanInfo, PairAttach, Server } from '@hangar/core';
+import * as m from '../paraglide/messages';
 
 const KEY = 'cp_servers_v1';
 
@@ -50,6 +51,7 @@ export interface ServersState {
   aviso: AvisoServidores | null;
   load(): Promise<void>;
   add(s: Omit<Server, 'id' | 'label'> & { label?: string }): Server;
+  addInvite(result: InviteRedeemResult, activate?: boolean): Server;
   remove(id: string): void;
   update(id: string, patch: Partial<Pick<Server, 'label' | 'baseUrl'>>): void;
   setActive(id: string): void;
@@ -191,6 +193,32 @@ export const useServers = create<ServersState>((set, get) => {
       };
     });
     return s;
+  },
+  addInvite(result, activate = true) {
+    const base = result.address.replace(/\/+$/, '');
+    const matches = (server: Server) => {
+      try { return new URL(server.baseUrl).origin === new URL(base).origin; }
+      catch { return false; }
+    };
+    const id = `s_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    let saved!: Server;
+    change((p) => {
+      const existing = p.servers.find((server) => server.invite && !server.ephemeral && matches(server))
+        ?? p.servers.find((server) => server.invite && matches(server));
+      const server: Server = {
+        ...existing,
+        id: existing?.id ?? id,
+        label: m.mobile_share_invite_label({ owner: result.owner }),
+        baseUrl: base, token: result.token, invite: true, ephemeral: false,
+        inviteEnded: false, disabled: false, removed: false,
+      };
+      saved = server;
+      return {
+        servers: existing ? p.servers.map((entry) => entry.id === existing.id ? server : entry) : [...p.servers, server],
+        activeId: activate ? server.id : p.activeId,
+      };
+    });
+    return saved;
   },
   remove(id) {
     change((p) => {

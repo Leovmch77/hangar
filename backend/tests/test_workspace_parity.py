@@ -13,8 +13,15 @@ _BINARY = Path(os.environ.get("CP_WORKSPACE_CONTRACT_BIN", Path(__file__).parent
 
 
 def rust(operation, **arguments):
+    child_env = os.environ.copy()
+    if operation == "create_worktree":
+        # Só o filho recebe a pasta pessoal; as preferências do servidor real ficam fora da prova.
+        child_home = Path(arguments["cwd"]).parent / ".contract-home"
+        child_home.mkdir(exist_ok=True)
+        child_env.update(HOME=str(child_home), USERPROFILE=str(child_home))
     result = subprocess.run([str(_BINARY)], input=json.dumps({"op": operation, "args": arguments},
-        default=os.fspath, ensure_ascii=False) + "\n", text=True, encoding="utf-8", capture_output=True, check=True)
+        default=os.fspath, ensure_ascii=False) + "\n", text=True, encoding="utf-8", capture_output=True, check=True,
+        env=child_env)
     return json.loads(result.stdout)
 
 
@@ -253,8 +260,8 @@ def _worktree_pair(repo):
     return sides
 
 
-def _worktree_effects(root):
-    target = root / "repo-wt"
+def _worktree_effects(root, *, rust_location=False):
+    target = root / ".contract-home/.hangar/worktrees/repo/wt" if rust_location else root / "repo-wt"
     config = git_ops._run(str(root / "repo"), "config", "--get-regexp", r"^branch\.")
     return {
         "files": sorted(str(p.relative_to(target)) for p in target.rglob("*")
@@ -272,7 +279,11 @@ def _both(sides, operation, **args):
     except git_ops.GitError as e:
         expected = {"ok": False, "error": {"status": e.status, "detail": e.detail}}
     actual = rust(operation, cwd=sides["rs"] / "repo", allowed_root=sides["rs"], **args)
-    if actual["ok"] and actual["result"][0].startswith(str(sides["rs"])):
+    if actual["ok"] and actual["result"][1]:
+        assert actual["result"][0] == str(sides["rs"] / ".contract-home/.hangar/worktrees/repo/wt")
+        # O caminho mudou por contrato; o restante dos efeitos Git continua tendo paridade.
+        actual["result"][0] = str(sides["py"] / "repo-wt")
+    elif actual["ok"] and actual["result"][0].startswith(str(sides["rs"])):
         actual["result"][0] = str(sides["py"]) + actual["result"][0][len(str(sides["rs"])):]
     return expected, actual
 
@@ -290,7 +301,7 @@ def test_create_worktree_new_branch_and_base_contract(repo, args):
     sides = _worktree_pair(repo)
     expected, actual = _both(sides, "create_worktree", **args)
     assert actual == expected
-    assert _worktree_effects(sides["rs"]) == _worktree_effects(sides["py"])
+    assert _worktree_effects(sides["rs"], rust_location=True) == _worktree_effects(sides["py"])
 
 
 def test_create_worktree_new_branch_from_remote_base(repo):
@@ -303,7 +314,26 @@ def test_create_worktree_new_branch_from_remote_base(repo):
         git_ops._run(str(root / "repo"), "fetch", "-q", "origin")
     expected, actual = _both(sides, "create_worktree", branch="nova", name="wt", new_branch=True, base="so-remota")
     assert expected["ok"] and actual == expected
-    assert _worktree_effects(sides["rs"]) == _worktree_effects(sides["py"])
+    assert _worktree_effects(sides["rs"], rust_location=True) == _worktree_effects(sides["py"])
+
+
+def test_create_worktree_uses_server_location_only_for_future_operations(repo):
+    sides = _worktree_pair(repo)
+    home = sides["rs"] / ".contract-home"
+    (home / ".hangar").mkdir(parents=True)
+    settings = {"location": str(repo / "chosen"), "inactive_days": None, "delete_merged": False,
+                "delete_unchanged": False, "keep_when": "uncommitted-changes"}
+    config = home / ".hangar/worktree-settings.json"
+    config.write_text(json.dumps(settings), encoding="utf-8")
+    args = {"cwd": sides["rs"] / "repo", "allowed_root": sides["rs"], "new_branch": True, "base": "main"}
+    first = rust("create_worktree", branch="first-new", name="first", **args)
+    first_path = repo / "chosen/repo/first"
+    assert first == {"ok": True, "result": [str(first_path), True]}
+    settings["location"] = str(repo / "future")
+    config.write_text(json.dumps(settings), encoding="utf-8")
+    second = rust("create_worktree", branch="second-new", name="second", **args)
+    assert second == {"ok": True, "result": [str(repo / "future/repo/second"), True]}
+    assert (first_path / ".git").is_file()
 
 
 @pytest.mark.parametrize("force", [False, True])

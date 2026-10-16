@@ -104,13 +104,36 @@ def _infos(scene):
     return [SimpleNamespace(**s) for s in scene.sessions]
 
 
+def _legacy_status(value):
+    value = dict(value)
+    reference = f"refs/heads/{value['branch']}" if value["branch"] else "HEAD"
+    cwd = value["path"] if value["exists"] else value["repo"]
+    expected_head = git_ops._run(cwd, "rev-parse", "--verify", reference).stdout.strip()
+    assert value.pop("head") == expected_head
+    assert value.pop("merge_method") == ("ancestor" if value["merged"] else None)
+    # O remoto da fixture é um repositório em disco, sem provedor de PR nem consulta de rede.
+    assert value.pop("merge_problem") is None
+    return value
+
+
+def _legacy_repos(repos):
+    legacy = []
+    for repo in repos:
+        repo = dict(repo)
+        assert repo.pop("discovery_partial") is False
+        assert repo.pop("discovery_problem", None) is None
+        repo["worktrees"] = [_legacy_status(wt) for wt in repo["worktrees"]]
+        legacy.append(repo)
+    return legacy
+
+
 def test_list_matches_python(scene):
     cwds = [str(scene.dirty), str(scene.repo), str(scene.root)]
     expected = worktrees.list_all(cwds, _infos(scene), [scene.root], None, False)
     got = rust("list_worktrees", cwds=cwds, sessions=scene.sessions, roots=[str(scene.root)],
                repo=None, measure=False, project_bases=[str(scene.projects)])
     assert got["ok"], got
-    assert got["result"] == json.loads(json.dumps(expected))
+    assert _legacy_repos(got["result"]) == json.loads(json.dumps(expected))
     by = {Path(w["path"]).name: w for w in got["result"][0]["worktrees"]}
     # O cenário cobre cada ramo da situação, para a igualdade acima valer alguma coisa.
     assert by["repo-merged"]["merged"] and not by["repo-squash"]["merged"]
@@ -128,7 +151,8 @@ def test_list_by_repo_and_outside_roots(scene):
     expected = worktrees.list_all([], _infos(scene), None, str(scene.dirty), False)
     got = rust("list_worktrees", cwds=[], sessions=scene.sessions, repo=str(scene.dirty),
                measure=False, project_bases=[str(scene.projects)])
-    assert got == {"ok": True, "result": json.loads(json.dumps(expected))}
+    assert got["ok"]
+    assert _legacy_repos(got["result"]) == json.loads(json.dumps(expected))
     assert rust("list_worktrees", cwds=[str(scene.repo)], sessions=[],
                 roots=[str(scene.root / "nada")], measure=False) == {"ok": True, "result": []}
 
@@ -139,4 +163,5 @@ def test_detail_matches_python(scene, which):
     expected = worktrees.status(path, _infos(scene), measure=False)
     got = rust("worktree_status", path=path, sessions=scene.sessions, measure=False,
                project_bases=[str(scene.projects)])
-    assert got == {"ok": True, "result": json.loads(json.dumps(expected))}
+    assert got["ok"]
+    assert _legacy_status(got["result"]) == json.loads(json.dumps(expected))
