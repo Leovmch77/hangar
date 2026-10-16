@@ -277,6 +277,37 @@ async fn an_old_sidecar_without_endpoint_is_relaunched_by_the_rust_and_a_failure
     assert_eq!(gave_up.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_relaunch_gave_up".into())));
 }
 
+/// O relançamento usa o lançador único da criação: o pane roda o `hangar-codex-tui` com a chave, o
+/// ambiente da sessão por `-e` (cores, Kimi, provedor) e a política explícita do modo gravado (S-56, S-57).
+#[tokio::test]
+async fn the_relaunch_pane_is_the_creation_launcher_with_the_session_environment() {
+    let fx = fixture();
+    fx.put_sidecar("cx-old",legacy_meta(&fx));
+    std::fs::write(&fx.panes,"").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let bin = fx.root.join("bin");
+    crate::write_executable(&bin.join("hangar-codex-tui"),"#!/bin/sh\nexit 0\n");
+    crate::write_executable(&bin.join("codex"),"#!/bin/sh\nexit 0\n");
+    let asked = fx.root.join("new-session.args");
+    let tmux = fx.root.join("tmux-record");
+    crate::write_executable(&tmux,format!("#!/bin/sh\ncase \"$1\" in\n  list-panes) cat '{}';;\n  \
+        new-session) for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'; exit 1;;\n  *) exit 1;;\nesac\n",fx.panes.display(),asked.display()));
+    let watcher = relaunch_watcher(&fx,&tmux);
+    registry.bind_watcher(watcher.clone());
+    let refused = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(refused.map(|r|r.map_err(|e|e.code)),Some(Err("terminal_nao_criado".into())),"o tmux falso não cria a sessão");
+    let args:Vec<String> = std::fs::read_to_string(&asked).expect("o pane foi pedido ao tmux").lines().map(str::to_owned).collect();
+    let key = key_of(&fx.sidecar("cx-old").unwrap());
+    for env in ["CP_SESSION_NAME=cx-old","CP_PROVIDER=codex",&format!("CP_SESSION_KEY={key}"),"COLORTERM=truecolor","KIMI_CODE_TUI_FULL_SCREEN=1","HANGAR_JEV=off"] {
+        assert!(args.windows(2).any(|w|w[0] == "-e" && w[1] == env),"-e {env}: {args:?}");
+    }
+    let command = args.last().unwrap();
+    assert!(!command.contains("--session-relaunch"),"sem o auxiliar com IPC: {command}");
+    let launcher = format!("hangar-codex-tui --cwd {} --codex-home {} --codex-account default --resume thread-1 --approval-policy never --sandbox danger-full-access",
+        fx.root.display(),fx.home.join(".codex").display());
+    assert!(command.starts_with("exec env ") && command.ends_with(&launcher),"{command}");
+}
+
 #[tokio::test]
 async fn reload_of_an_old_terminal_sidecar_refuses_without_relaunching_it() {
     // Recarregar só vale sem terminal: perguntar se é do Rust não pode relançar o terminal antigo.
@@ -571,6 +602,29 @@ async fn refused_preconditions_leave_the_terminal_owned_and_untouched() {
     let error = watcher.switch_mode(&registry,"cx-proof",false,known()).await.expect("Codex do Rust").unwrap_err();
     assert_eq!(error.code,"session_transfer_busy");
     untouched(&fx,&registry,&ready,&mut app,&mut tui);
+    finish(&mut [&mut app,&mut tui]);
+}
+
+/// S-28: o terminal só leitura (bwrap) não vai para sem terminal, onde a proteção não existe; nada morre.
+#[tokio::test]
+async fn a_read_only_terminal_refuses_to_go_headless_and_kills_nothing() {
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let mut app = crate::runtime_open::with_app_server_argv(std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",&server.endpoint])
+        .env("HANGAR_ORQ_READ_ONLY","1").spawn().unwrap(),&server.endpoint);
+    let mut tui = tui();
+    fx.put_sidecar("cx-proof",relaunch_meta(&fx,&server.endpoint,&app,&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = relaunch_registry(&fx).await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.round(&registry).await;
+    let before = fx.sidecar("cx-proof").unwrap();
+    let error = switch_until_settled(&watcher,&registry,||PermissionRead::Known("Full Access".into())).await;
+    assert_eq!(error.code,"erro_troca_modo");
+    assert!(error.message.contains("só leitura"),"{}",error.message);
+    untouched(&fx,&registry,&before,&mut app,&mut tui);
+    assert!(registry.ingress().enter("cx-proof",Duration::ZERO).await.is_ok(),"a porta reabriu");
     finish(&mut [&mut app,&mut tui]);
 }
 

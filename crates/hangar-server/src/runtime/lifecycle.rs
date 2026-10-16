@@ -226,34 +226,6 @@ fn patch_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,pat
     Ok(json!({"updated":true,"metadata":meta,"digest":sidecar_hash(&written)}))
 }
 
-pub(crate) async fn stage_session(io:&dyn TerminalIo,mux_argv:&[String],name:&str,cwd:&std::path::Path,env_e:&[(String,String)],endpoint:&str,windows:bool)->Result<(String,i64),RuntimeError> {
-    if name.is_empty() || name.len()>64 || !name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("relaunch_session_name"));}
-    let allowed=["CP_SESSION_KEY","CP_SESSION_NAME","CP_PROVIDER","COLORTERM","CLAUDE_CODE_TMUX_TRUECOLOR","CLAUDE_CODE_NO_FLICKER","CP_HEADLESS"];
-    if env_e.iter().any(|(key,value)|!allowed.contains(&key.as_str()) || value.chars().any(|c|c.is_control()) || value.len()>256) {return Err(failure("relaunch_public_environment"));}
-    let exe=std::env::current_exe().map_err(|_|failure("relaunch_binary"))?;
-    let mut shell=[exe.to_str().ok_or_else(||failure("relaunch_binary"))?,super::claude_relaunch::RELAUNCH_FLAG,endpoint].iter().map(|arg|super::claude_relaunch::quote(arg,windows)).collect::<Vec<_>>().join(" ");
-    if !windows {shell=format!("exec {shell}");}
-    let (program,prefix)=mux_argv.split_first().ok_or_else(||failure("lifecycle_mux"))?;
-    let mut args=prefix.to_vec();args.extend(["new-session".into(),"-d".into(),"-P".into(),"-F".into(),"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-s".into(),name.into(),"-c".into(),cwd.to_str().ok_or_else(||failure("relaunch_cwd"))?.into(),"-x".into(),"200".into(),"-y".into(),"50".into()]);
-    for (key,value) in env_e {args.extend(["-e".into(),format!("{key}={value}")]);}
-    args.push(shell);
-    let scope=tokio::task::spawn_blocking(super::process::scope_command).await.map_err(|_|failure("relaunch_scope"))?.map_err(|_|failure("relaunch_scope"))?;
-    let (program,args)=if let Some((leader,scope_args))=scope.split_first() {
-        let mut scoped=scope_args.iter().map(|a|a.to_str().ok_or_else(||failure("relaunch_scope")).map(str::to_owned)).collect::<Result<Vec<_>,_>>()?;
-        scoped.push(program.clone());scoped.extend(args);
-        (leader.to_str().ok_or_else(||failure("relaunch_scope"))?.to_owned(),scoped)
-    } else {(program.clone(),args)};
-    let output=io.command(CommandRequest {program,args,stdin:vec![]}).await.map_err(|_|failure("relaunch_stage"))?;
-    if !output.success {return Err(failure("relaunch_stage"));}
-    let raw=std::str::from_utf8(&output.stdout).map_err(|_|failure("relaunch_stage"))?;
-    let fields:Vec<_>=raw.trim_end().split('\t').collect();
-    if fields.len()!=5 || fields[0]!=name || !fields[1..3].iter().all(|s|!s.is_empty() && s.bytes().all(|b|b.is_ascii_digit())) || windows && raw.contains('\u{fffd}') {return Err(failure("relaunch_stage"));}
-    let pid=fields[4].parse::<i64>().ok().filter(|pid|*pid>0).ok_or_else(||failure("relaunch_stage"))?;
-    let target=if windows {format!("={name}:{}.{}",fields[1],fields[2])} else {fields[3].to_owned()};
-    if !windows && !target.strip_prefix('%').is_some_and(|s|!s.is_empty() && s.bytes().all(|b|b.is_ascii_digit())) {return Err(failure("relaunch_stage"));}
-    Ok((target,pid))
-}
-
 pub async fn stage(io:&dyn TerminalIo,binding:&TerminalBinding,endpoint:&str)->Result<(String,i64),RuntimeError> {
     let exe=std::env::current_exe().map_err(|_|failure("relaunch_binary"))?;
     let executable=exe.to_str().ok_or_else(||failure("relaunch_binary"))?;

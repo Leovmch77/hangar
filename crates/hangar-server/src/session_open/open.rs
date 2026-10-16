@@ -212,14 +212,21 @@ impl Drop for NameClaim {
 
 /// `orq_readonly.prepare`: o envelope `bwrap` que deixa o código só leitura, provado com `/bin/true`.
 async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&str>) -> Result<Vec<String>, OpenError> {
+    read_only_envelope(host.env(), host.home(), cwd, config_dir, &|argv, timeout| host.run(argv, timeout)).await
+}
+
+/// O envelope do só leitura com o ambiente, a casa e quem roda programas: a abertura e o relançamento do
+/// Codex (que o reaplica, S-28) usam o mesmo.
+pub(crate) async fn read_only_envelope<'a>(env: &BTreeMap<String, String>, home: &Path, cwd: &str, config_dir: Option<&str>,
+    run: &'a (dyn Fn(Vec<String>, Duration) -> BoxFuture<'a, ProgramOutput> + Sync)) -> Result<Vec<String>, OpenError> {
     let refuse = |msg: String| OpenError::new(400, "erro_criacao_sessao", msg);
     if !cfg!(target_os = "linux") { return Err(refuse("read-only exige Linux com bubblewrap (bwrap)".into())); }
-    let path: Vec<(String, String)> = host.env().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let path: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let bwrap = crate::runtime::process::resolve_program("bwrap", &path)
         .ok_or_else(|| refuse("read-only exige bubblewrap: instale bwrap antes de criar a sessão".into()))?;
     let root = Path::new(cwd).canonicalize().map_err(|e| refuse(format!("read-only não pôde preparar a proteção: {e}")))?;
     let mut paths = vec![root.clone()];
-    let git = host.run(["git", "-C", &root.to_string_lossy(), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+    let git = run(["git", "-C", &root.to_string_lossy(), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
         "--show-toplevel"].map(str::to_owned).into(), Duration::from_secs(5)).await;
     if git.code == Some(0) {
         for line in git.stdout.lines().filter(|l| !l.is_empty()) {
@@ -229,14 +236,14 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
     } else if root.ancestors().any(|p| p.join(".git").exists()) {
         return Err(refuse("read-only não conseguiu localizar os metadados Git".into()));
     }
-    let home = host.home().canonicalize().unwrap_or_else(|_| host.home().to_owned());
-    if paths.iter().any(|p| home.starts_with(p)) {
+    let home_real = home.canonicalize().unwrap_or_else(|_| home.to_owned());
+    if paths.iter().any(|p| home_real.starts_with(p)) {
         return Err(refuse("read-only não pode proteger a HOME inteira ou um diretório acima dela".into()));
     }
-    let mut runtimes: Vec<PathBuf> = [".claude", ".codex", ".pi", ".omp", ".kimi-code", ".hangar"].iter().map(|n| host.home().join(n)).collect();
+    let mut runtimes: Vec<PathBuf> = [".claude", ".codex", ".pi", ".omp", ".kimi-code", ".hangar"].iter().map(|n| home.join(n)).collect();
     runtimes.extend(config_dir.map(PathBuf::from));
     runtimes.extend(["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_CONFIG_DIR", "KIMI_CODE_HOME"]
-        .iter().filter_map(|k| host.env().get(*k).filter(|v| !v.is_empty())).map(PathBuf::from));
+        .iter().filter_map(|k| env.get(*k).filter(|v| !v.is_empty())).map(PathBuf::from));
     let resolved = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
     if runtimes.iter().any(|r| paths.iter().any(|p| resolved(r).starts_with(p))) {
         return Err(refuse("read-only recusado: o código protegido contém o runtime de um agente".into()));
@@ -248,7 +255,7 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
     argv.push("--".into());
     let mut probe = argv.clone();
     probe.push("/bin/true".into());
-    let out = host.run(probe, Duration::from_secs(5)).await;
+    let out = run(probe, Duration::from_secs(5)).await;
     match out.code {
         Some(0) => Ok(argv),
         None => Err(refuse(format!("read-only não pôde preparar a proteção: {}", out.stderr.trim()))),

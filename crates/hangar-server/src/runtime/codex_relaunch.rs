@@ -15,6 +15,7 @@ use crate::list::procs::{ProcessView,SystemProcs,exited};
 use crate::mods::state::random_hex;
 use crate::permission_control::PermissionAction;
 use crate::state::capture::{MuxProcess,TIMEOUT};
+use crate::session_open::terminal::PaneSpec;
 use serde_json::{Value,json};
 use std::path::{Path,PathBuf};
 use std::sync::Arc;
@@ -352,10 +353,9 @@ impl Watcher {
             let meta = self.load(name).await.ok_or_else(gone)?;
             let key = terminal::text(&meta,"key").filter(|key|terminal::valid_key(key)).map_or_else(||random_hex(16),str::to_owned);
             let wanted = cleared(terminal_settings(meta,&json!({}),&key)?,false);
-            let (base,check) = (registry.codex_environment(),Value::Object(wanted.clone()));
             launched = true;
-            tokio::task::spawn_blocking(move||super::codex_pane::launch_recipe(&base,&check).map(|_|())).await.map_err(|_|job())??;
-            self.open_terminal(registry,name,&key,&wanted,None).await
+            let pane = self.terminal_pane(registry,name,&key,&wanted).await?;
+            self.open_terminal(registry,name,&key,&wanted,None,&pane).await
         }.await;
         let mut failures = self.legacy_failures.lock().await;
         match &result {
@@ -409,7 +409,26 @@ impl Watcher {
             if self.transfer_busy(name,&meta).await { return Err(busy()); }
             if to_terminal { self.to_terminal(registry,name).await } else { self.to_headless(registry,name,read).await }
         }.await;
+        if switched.is_ok() { self.remember_switch(name).await; }
         Some(switched.map(|()|json!({"ok":true,"terminal":to_terminal})))
+    }
+
+    /// O spec gravado acompanha a troca (passo 4 da `SessionChange`): a superfície e o que a sessão tem
+    /// agora no sidecar (o modo que o lançador gravou vence, T-003). Falha não desfaz a troca, que já
+    /// valeu; aparece no log com o código.
+    async fn remember_switch(&self,name:&str) {
+        use crate::session_open::{ChangeReason,SessionChange,record};
+        let (home,owned) = (self.cfg.home.clone(),name.to_owned());
+        let written = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let Some(now) = record::from_sidecars(&home,&owned)? else { return Ok(()) };
+            let spec = record::read(&home,&now.key)?.unwrap_or_else(||now.clone());
+            let change = SessionChange { reason:ChangeReason::ModeSwitch,surface:Some(now.surface),account:None,permission_mode:now.permission_mode,
+                model:now.model.clone(),effort:now.effort.clone(),service_tier:now.service_tier };
+            record::write(&home,&spec.with(&change))
+        }).await;
+        if !matches!(written,Ok(Ok(()))) {
+            tracing::warn!(session=%name,code="session_spec_unwritten","o registro da sessão não acompanhou a troca de modo");
+        }
     }
 
     /// As recusas do Python antes de mexer em processo, com a frase dele.
@@ -440,11 +459,45 @@ impl Watcher {
         Ok(view)
     }
 
-    /// O caminho de volta ao terminal existe antes de derrubar o terminal (`_exigir_lancador_codex`).
-    async fn launcher_ready(&self,registry:&RuntimeRegistry,meta:&Meta) -> Result<(),RuntimeError> {
-        let (base,meta) = (registry.codex_environment(),Value::Object(meta.clone()));
-        tokio::task::spawn_blocking(move||super::codex_pane::launch_recipe(&base,&meta).map(|_|())).await.map_err(|_|job())?
-            .map_err(|error|refuse(&error.message))
+    /// O pane do terminal pelo lançador único, o mesmo da criação: a receita sai do sidecar desta vida
+    /// (modo gravado, nunca Full Access calado) e o só leitura do registro volta com ela (S-28). Montado
+    /// antes de mexer em processo: lançador ausente ou envelope que não sobe recusam com tudo intacto.
+    async fn terminal_pane(&self,registry:&RuntimeRegistry,name:&str,key:&str,meta:&Meta) -> Result<PaneSpec,RuntimeError> {
+        use crate::session_open::codex;
+        let base = registry.codex_environment();
+        let refused = |error:crate::session_open::OpenError|refuse(&error.msg);
+        // `_exigir_lancador_codex`: o pane morreria na hora com o `new-session` devolvendo sucesso.
+        let path:Vec<(String,String)> = base.base.iter().map(|(k,v)|(k.clone(),v.clone())).collect();
+        if super::process::resolve_program(codex::LAUNCHER,&path).is_none() {
+            return Err(RuntimeError::new("codex_launcher_missing","hangar-codex-tui não está no PATH deste servidor; instale o lançador"));
+        }
+        if super::process::resolve_program("codex",&path).is_none() {
+            return Err(RuntimeError::new("codex_cli_missing","codex não está no PATH deste servidor"));
+        }
+        let text = |field:&str|terminal::text(meta,field).map(str::to_owned);
+        let cwd = text("cwd").ok_or_else(||refuse("A pasta da sessão não é um caminho absoluto; a sessão foi mantida."))?;
+        let account = text("codex_account").unwrap_or_else(||"default".into());
+        let codex_home = match text("codex_home") { Some(home)=>home, None=>codex::home(&base.base,&account).map_err(refused)? };
+        let launch = codex::Launch { cwd:cwd.clone(),codex_home,account,service_tier:text("service_tier"),resume:text("thread_id"),
+            model:text("model"),effort:text("effort"),mode:super::codex_launch::stored_mode(&Value::Object(meta.clone()))?.into(),
+            tool_output_token_limit:meta.get("tool_output_token_limit").and_then(Value::as_u64),prompt:None };
+        let read_only = if self.read_only(key).await? {
+            let run = |argv:Vec<String>,timeout:Duration|->futures_util::future::BoxFuture<'_,crate::session_open::open::ProgramOutput> {
+                Box::pin(crate::session_open::server::run_program(&base.base,argv,timeout)) };
+            Some(crate::session_open::open::read_only_envelope(&base.base,&base.home,&cwd,Some(&launch.codex_home),&run).await.map_err(refused)?)
+        } else { None };
+        let config = super::codex_launch::runtime_config(&base);
+        codex::pane(name,key,&launch,meta.get("jev").is_some_and(truthy),&config,read_only.as_deref(),cfg!(windows)).map_err(refused)
+    }
+
+    /// Só leitura pelo registro da sessão; ilegível não prova que não é, e recusa.
+    async fn read_only(&self,key:&str) -> Result<bool,RuntimeError> {
+        let (home,key) = (self.cfg.home.clone(),key.to_owned());
+        match tokio::task::spawn_blocking(move||crate::session_open::record::read(&home,&key)).await.map_err(|_|job())? {
+            Ok(spec)=>Ok(spec.is_some_and(|spec|spec.read_only)),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput=>Ok(false),
+            Err(_)=>Err(refuse("Não consegui ler o registro da sessão; a sessão foi mantida.")),
+        }
     }
 
     /// Terminal → sem terminal (desenho 1.1).
@@ -453,6 +506,15 @@ impl Watcher {
         let EntryHandle::CodexTerminal { target,handle,cell } = found.handle else { return Err(gone()) };
         let meta = self.load(name).await.filter(|meta|terminal::text(meta,"key") == Some(target.key.as_str())).ok_or_else(gone)?;
         let mut view = self.preconditions(registry,&handle,&meta,false).await?;
+        // S-28: sem terminal não há o envelope do só leitura; a sessão protegida fica no terminal.
+        let marked = match terminal::pid(&meta,"app_pid").map(i64::from) {
+            Some(pid)=>tokio::task::spawn_blocking(move||SystemProcs::default().env_var(pid,"HANGAR_ORQ_READ_ONLY")).await.map_err(|_|job())?
+                .map_err(|_|refuse("Não consegui ler o ambiente do terminal (só leitura); a sessão foi mantida."))?.is_some_and(|v|v == "1"),
+            None=>false,
+        };
+        if marked || self.read_only(&target.key).await? {
+            return Err(refuse("Sessão só leitura não continua sem terminal: a proteção do código só existe no terminal. A sessão foi mantida."));
+        }
         // O `/model` digitado na TUI pode não ter avisado o motor: a configuração sai da conversa, como o
         // `thread/resume` do Python. Sem ela a troca não sai: subiria com modelo, esforço ou modo velhos.
         let settings_read = handle.command(RuntimeCommand { operation_id:random_hex(16),kind:OperationKind::ReadSettings,payload:json!({"include_turns":false}) });
@@ -505,7 +567,7 @@ impl Watcher {
         }
         let back = cleared(settings.clone(),false);
         let headless = cleared(settings,true);
-        self.launcher_ready(registry,&back).await?;
+        let back_pane = self.terminal_pane(registry,name,&target.key,&back).await.map_err(|error|refuse(&error.message))?;
         let mode = collaboration(&view);
         self.confirm_life(&target).await.map_err(|error|refuse(&error.message))?;
         let pane_pid = self.cfg.mux.list_panes().await.ok().and_then(|panes|terminal::pane_of(&panes,name).and_then(|pane|pane.pid));
@@ -550,7 +612,7 @@ impl Watcher {
         // O sem terminal que falhou não saiu: outro terminal não sobe ao lado dele.
         if kill_phase(&error) { return Err(error); }
         tracing::warn!(session=%name,code=%error.code,"troca para sem terminal falhou; voltando ao terminal");
-        match self.open_terminal(registry,name,&target.key,&back,mode.as_deref()).await {
+        match self.open_terminal(registry,name,&target.key,&back,mode.as_deref(),&back_pane).await {
             Ok(())=>Err(refuse(&format!("A troca falhou; a conversa continua no terminal: {}",error.message))),
             Err(restore)=>Err(restored_failure(&format!("A troca falhou ({}) e o terminal não voltou: {}",error.message,restore.message),&restore)),
         }
@@ -564,7 +626,7 @@ impl Watcher {
         let settings = terminal_settings(meta.clone(),&view,&key)?;
         let back = cleared(settings.clone(),true);
         let wanted = cleared(settings,false);
-        self.launcher_ready(registry,&wanted).await?;
+        let pane = self.terminal_pane(registry,name,&key,&wanted).await.map_err(|error|refuse(&error.message))?;
         match MuxProcess::new(&self.cfg.mux_program,TIMEOUT).has_session(name).await {
             Some(false)=>{},
             Some(true)=>return Err(refuse("Já existe um terminal com este nome.")),
@@ -584,7 +646,7 @@ impl Watcher {
             return Err(alive_error("O processo antigo ainda está vivo; nenhum terminal foi aberto. A sessão ficou parada: \
                 feche-a e abra a conversa de novo quando esses processos saírem.",&left));
         }
-        let Err(error) = self.open_terminal(registry,name,&key,&wanted,mode.as_deref()).await else { return Ok(()) };
+        let Err(error) = self.open_terminal(registry,name,&key,&wanted,mode.as_deref(),&pane).await else { return Ok(()) };
         // Pane que não fechou: outro processo não sobe ao lado dele.
         if kill_phase(&error) { return Err(error); }
         tracing::warn!(session=%name,code=%error.code,"troca para terminal falhou; voltando ao sem terminal");
@@ -631,18 +693,20 @@ impl Watcher {
         Err(error)
     }
 
-    /// Grava o sidecar de terminal, cria o pane com o lançador (`codex_pane`, auxiliar do 7l), espera a TUI,
-    /// adota e restaura o modo depois da assinatura. Falhou: pane, ator e processos desta tentativa saem.
-    async fn open_terminal(&self,registry:&RuntimeRegistry,name:&str,key:&str,meta:&Meta,mode:Option<&str>) -> Result<(),RuntimeError> {
+    /// Grava o sidecar de terminal, cria o pane pelo lançador único (`session_open::terminal`, o mesmo da
+    /// criação, com o ambiente da sessão e as variáveis de tela), espera a TUI, adota e restaura o modo
+    /// depois da assinatura. Falhou: pane, ator e processos desta tentativa saem.
+    async fn open_terminal(&self,registry:&RuntimeRegistry,name:&str,key:&str,meta:&Meta,mode:Option<&str>,pane:&PaneSpec) -> Result<(),RuntimeError> {
         self.sidecar_put(name,meta).await?;
         self.advance(key,name).await?;
         let thread = terminal::text(meta,"thread_id").unwrap_or_default().to_owned();
         let mux = MuxProcess::new(&self.cfg.mux_program,TIMEOUT);
         let result = async {
-            let (io,procs,base) = (crate::terminal_input::ProcessIo::default(),SystemProcs::default(),registry.codex_environment());
-            let mux_argv = vec![self.cfg.mux_program.to_string_lossy().into_owned()];
-            let opened = super::codex_pane::open(&io,&mux_argv,&procs,&base,&Value::Object(meta.clone()),cfg!(windows)).await?;
-            opened.consumed.start().await.map_err(|_|RuntimeError::new("relaunch_start_unknown","o lançador do terminal não confirmou a largada"))?;
+            let (base,program) = (registry.codex_environment(),self.cfg.mux_program.to_string_lossy().into_owned());
+            let env = tokio::task::spawn_blocking(move||crate::session_open::terminal::TerminalEnv {
+                program,..crate::session_open::terminal::TerminalEnv::local(&base.home,&base.base) }).await.map_err(|_|job())?;
+            crate::session_open::terminal::spawn(&crate::session_open::terminal::ProcessMux::default(),&env,pane).await
+                .map_err(|error|RuntimeError::new(error.code,&format!("o terminal não abriu: {}",error.stderr)))?;
             let up = super::codex_pane::wait_terminal(&mux,&codex_sidecar::dir(&self.cfg.home),name,key,&thread,super::codex_pane::TERMINAL_WAIT).await?;
             same_permission(&up,meta)?;
             match self.adopt_locked(registry,name).await {
