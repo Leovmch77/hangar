@@ -165,3 +165,30 @@ async fn nothing_is_adopted_while_a_reopen_holds_the_gate() {
     registry.close(&key,1).await.unwrap();
     finish(&mut agent);
 }
+
+/// `claude` digitado num pane do tmux (o CLI cru) não nasceu pelo Hangar e não tem spec: a adoção o grava,
+/// lido do processo, para o restore depois do reboot reabri-lo pelo Rust. O spec que já existe não é trocado.
+#[tokio::test]
+async fn adopting_a_raw_claude_records_its_spec_for_the_restore() {
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let registry = fx.registry().await;
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    let (key,_) = registry.terminal_view("s1").await.unwrap();
+    let path = fx.home.join(format!(".hangar/session-specs/{key}.json"));
+    let spec:serde_json::Value = serde_json::from_slice(&std::fs::read(&path).expect("spec gravado na adoção")).unwrap();
+    assert_eq!((spec["name"].as_str(),spec["provider"].as_str(),spec["surface"].as_str(),spec["conversation"].as_str()),
+        (Some("s1"),Some("claude"),Some("terminal"),Some(SID)));
+    assert_eq!(spec["cwd"].as_str().map(PathBuf::from),std::env::current_dir().ok(),"a pasta do agente");
+    registry.close(&key,1).await.unwrap();
+    // A próxima adoção não reescreve o spec que já existe.
+    std::fs::write(&path,"{\"marca\":1}").unwrap();
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(),"{\"marca\":1}");
+    let (key,generation) = registry.terminal_view("s1").await.map(|(k,_)|(k,1)).unwrap();
+    let _ = registry.close(&key,generation).await;
+    finish(&mut agent);
+}

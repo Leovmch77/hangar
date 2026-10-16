@@ -220,6 +220,7 @@ impl Watcher {
         let target_pane = pane.target().unwrap_or_else(|| format!("={name}:"));
         let program = self.cfg.mux_program.to_string_lossy().into_owned();
         let key = self.pane_key(name, &target_pane, created).await?;
+        self.record_raw_spec(registry, name, &key, &proven, created).await;
         let (state_path, lease_path) = super::codex_terminal::queue_files(&self.cfg.queue_dir, &key);
         let generation = { let path = state_path.clone(); tokio::task::spawn_blocking(move || generation(&path)).await.map_err(|_| refused("queue_io", "fila da sessão inacessível"))?? };
         let binding = TerminalBinding { name: name.to_owned(), pane: target_pane, conversation: proven.conversation.clone(), generation, created,
@@ -229,6 +230,25 @@ impl Watcher {
         let target = TerminalTarget { key, generation, name: name.to_owned(), binding, lease_path, state_path, projection_dir: self.cfg.queue_dir.clone(),
             transcript: proven.transcript, created: proven.pane_birth.unwrap_or(created as f64).max(created as f64), plugin_key: proven.plugin_key, metadata };
         registry.open_terminal(target).await.map(|_| ())
+    }
+
+    /// O Claude que nasceu fora do Hangar (o CLI cru digitado no tmux) ganha o spec lido do processo: sem ele
+    /// o restore depois do reboot não teria como reabri-lo. O spec que já existe fica. Falha só avisa.
+    async fn record_raw_spec(&self, registry: &RuntimeRegistry, name: &str, key: &str, proven: &Proven, created: u64) {
+        let home = registry.codex_environment().home;
+        let (owned, key, agent, conversation) = (name.to_owned(), key.to_owned(), i64::from(proven.agent), proven.conversation.clone());
+        let written = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            match crate::session_open::record::read(&home, &key) {
+                Ok(None) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return Ok(()),
+                other => return other.map(|_| ()).map_err(|e| e.to_string()),
+            }
+            let cwd = SystemProcs::default().cwd(agent).map(|p| p.to_string_lossy().into_owned()).ok_or("pasta do Claude ilegível")?;
+            let (mut spec, _) = super::claude_reopen::process_spec(agent, &key, &owned, cwd, created as f64).map_err(|e| e.code)?;
+            spec.conversation = Some(conversation);
+            crate::session_open::record::write(&home, &spec).map_err(|e| e.to_string())
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(error) = written { tracing::warn!(session = %name, %error, "spec do Claude adotado não gravado; o restore não o reabre"); }
     }
 
     /// Saída de um comando do multiplexador que deu certo.

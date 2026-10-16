@@ -32,7 +32,8 @@ elif args[0] == 'show-environment':
 ''')
     tmux.chmod(0o755)
     env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
-    # Só a sessão com spec gravado é do servidor; a `hangar b` (aberta antes do registro) fica.
+    # Só a sessão com spec gravado é do servidor (a adoção grava o do Claude cru); a `hangar b`, com a chave
+    # e sem spec (a gravação falhou), fica com o resurrect em vez de sumir no reboot.
     (root / ".hangar/session-specs").mkdir(parents=True)
     (root / f".hangar/session-specs/{KEY}.json").write_text("{}")
     save = resurrect / "tmux_resurrect_20261016T000000.txt"
