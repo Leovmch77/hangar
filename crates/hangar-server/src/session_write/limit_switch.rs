@@ -92,7 +92,7 @@ pub trait Host: Send + Sync {
     fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>>;
     fn current_dir(&self,spec:&SessionSpec) -> String;
     fn catalog(&self) -> Result<Value,String>;
-    fn quotas(&self) -> BoxFuture<'_,Vec<Value>>;
+    fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>>;
     fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen>;
     fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>>;
     fn diary(&self,name:&str,code:&str,reason:&'static str);
@@ -125,7 +125,7 @@ impl Switcher {
         let current = host.current_dir(&spec);
         self.spent.mark(&current,hit.limit.resets_at.filter(|reset|*reset > now).unwrap_or(now + UNKNOWN_RESET_S));
         let catalog = match host.catalog() { Ok(catalog)=>catalog, Err(code)=>return Outcome::Failed(code) };
-        let quotas = host.quotas().await;
+        let quotas = match host.quotas().await { Ok(quotas)=>quotas, Err(code)=>return Outcome::Failed(code) };
         let (path,label) = match decide(&spec,&current,&catalog,&quotas,&self.spent,now) {
             Decision::Switch { path,label }=>(path,label),
             Decision::Stay(code)=>return Outcome::Stayed(code),
@@ -186,10 +186,10 @@ impl Host for Native {
     }
     fn current_dir(&self,spec:&SessionSpec) -> String { super::account::current_dir(&self.runtime,spec) }
     fn catalog(&self) -> Result<Value,String> { self.st.accounts.claude_catalog().map_err(|error|error.code.into()) }
-    fn quotas(&self) -> BoxFuture<'_,Vec<Value>> {
+    fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>> {
         Box::pin(async move {
-            let quotas = self.st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
-            quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect()
+            let quotas = self.st.accounts.quotas(None,false,true).await.map_err(|error|error.code.to_string())?;
+            Ok(quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect())
         })
     }
     fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen> {
@@ -312,7 +312,7 @@ mod tests {
     struct Fake {
         spec:Mutex<SessionSpec>,
         catalog:Value,
-        quotas:Mutex<Vec<Value>>,
+        quotas:Mutex<Result<Vec<Value>,String>>,
         /// Respostas da reabertura, na ordem; vazia = feita.
         reopens:Mutex<Vec<Reopen>>,
         log:Mutex<Vec<String>>,
@@ -321,7 +321,7 @@ mod tests {
 
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
-            Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(quotas),
+            Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
                 reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()) }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
@@ -334,7 +334,7 @@ mod tests {
         }
         fn current_dir(&self,spec:&SessionSpec) -> String { spec.account.config_dir().unwrap_or("/default").to_owned() }
         fn catalog(&self) -> Result<Value,String> { Ok(self.catalog.clone()) }
-        fn quotas(&self) -> BoxFuture<'_,Vec<Value>> { Box::pin(async move { self.quotas.lock().unwrap().clone() }) }
+        fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>> { Box::pin(async move { self.quotas.lock().unwrap().clone() }) }
         fn reopen<'a>(&'a self,_:&'a str,_:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen> {
             Box::pin(async move {
                 self.log.lock().unwrap().push(format!("reopen {path}"));
@@ -361,6 +361,15 @@ mod tests {
         Switcher::default().handle(&fake,hit(2000.0)).await;
         assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}")]);
         assert_eq!(fake.diary(),vec!["switched"]);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_quota_is_a_failure_with_its_code_not_no_room() {
+        let fake = Fake::new("/a",Vec::new());
+        *fake.quotas.lock().unwrap() = Err("quota_read_failed".into());
+        Switcher::default().handle(&fake,hit(2000.0)).await;
+        assert!(fake.log().is_empty());
+        assert_eq!(fake.diary(),vec!["quota_read_failed"]);
     }
 
     #[test]
