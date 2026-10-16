@@ -224,26 +224,31 @@ fn restore_conversation(home: &Path, entry: &Entry) -> Option<String> {
     meta.get("thread_id").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(str::to_owned).or_else(|| entry.conversation.clone())
 }
 
+/// A abertura que traz a sessão de volta: o spec dela, na conversa em que estava, como a mesma sessão
+/// (grupo, fila e par do nome ficam).
+pub fn resolved_for(home: &Path, server_projects: &Path, key: &str, entry: &Entry) -> Result<super::Resolved, String> {
+    let mut spec = spec_for_restore(home, key, entry)?;
+    if spec.surface != Surface::Terminal { return Err("restore_no_spec".into()); }
+    spec.name = entry.name.clone();
+    let conversation = restore_conversation(home, entry).ok_or("restore_no_conversation")?;
+    if spec.provider == AgentProvider::Claude && !super::claude::transcript(&spec, &conversation, server_projects).is_file() {
+        return Err("restore_transcript_missing".into());
+    }
+    Ok(super::Resolved { spec, warnings: Vec::new(), initial_prompt: None, remember_provider: false, previous_non_plan: None,
+        resume: Some(conversation), restore: true })
+}
+
 /// Reabre uma sessão pelo spec gravado, na conversa dela; devolve o código da falha.
 async fn reopen(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
     let host = super::server::ServerHost::new(st.clone()).await;
-    let home = super::open::OpenHost::home(&host).to_owned();
-    let mut spec = spec_for_restore(&home, key, entry)?;
-    if spec.surface != Surface::Terminal { return Err("restore_no_spec".into()); }
-    spec.name = entry.name.clone();
-    let conversation = restore_conversation(&home, entry).ok_or("restore_no_conversation")?;
-    if spec.provider == AgentProvider::Claude
-        && !super::claude::transcript(&spec, &conversation, &super::open::OpenHost::server_projects(&host)).is_file() {
-        return Err("restore_transcript_missing".into());
-    }
+    let mut resolved = resolved_for(super::open::OpenHost::home(&host), &super::open::OpenHost::server_projects(&host), key, entry)?;
     let env = crate::accounts::environment::AccountEnvironment::from_map(super::open::OpenHost::env(&host).clone());
     let runtime = tokio::runtime::Handle::current();
-    let spec = tokio::task::spawn_blocking(move || {
+    let mut spec = resolved.spec;
+    resolved.spec = tokio::task::spawn_blocking(move || {
         spec.refresh_engine_window(&super::facts::LocalFacts::new(env, runtime));
         spec
     }).await.map_err(|_| "restore_spec_job".to_owned())?;
-    let resolved = super::Resolved { spec, warnings: Vec::new(), initial_prompt: None, remember_provider: false, previous_non_plan: None,
-        resume: Some(conversation), restore: true };
     super::open::open_session(&host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
 }
 

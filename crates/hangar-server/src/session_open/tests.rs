@@ -2012,3 +2012,35 @@ fn the_archive_moves_the_conversation_to_the_asked_account_and_back_only_on_a_cl
     assert_eq!(raw["steps"][0]["body"]["detail"]["code"], "session_open_uncertain", "{}", raw["steps"][0]["body"]);
     assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "incerta: a conversa fica com a sessão que pode ter nascido");
 }
+
+/// A sessão da fotografia volta pelo spec inteiro (modelo, modo da hora em que caiu, Jev, chave), na conversa
+/// em que estava e com o comando direto no `new-session`; o grupo e a fila do nome, que são dela, ficam.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_snapshot_entry_comes_back_with_its_whole_spec_keeping_its_group_and_queue() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let key = "ab".repeat(16);
+    let spec = json!({"version": 1, "key": key, "name": "velho", "cwd": "<ROOT>/work/proj", "provider": "claude", "surface": "terminal",
+        "account": {"kind": "default"}, "account_source": "default", "model": "opus", "effort": "high", "service_tier": null,
+        "permission_mode": "bypassPermissions", "subagent_model": null, "customizations": null, "jev": true, "read_only": false,
+        "worktree": null, "creator": null, "created_at": 1.0, "conversation": SID});
+    let (_, raw, _dir, root) = run_resume_patched("archive_resume_claude", |s| {
+        s["state"]["files"][format!("<ROOT>/home/.hangar/session-specs/{key}.json")] = spec.clone();
+        s["state"]["files"]["<ROOT>/home/.claude/.hangar-pair/proj.json"] = json!({"gid": "g1", "peers": ["outra"]});
+        s["state"]["files"]["<ROOT>/home/.claude/.hangar-queue/proj.jsonl"] = json!({"id": "q1", "text": "depois", "delivered": false});
+        s["steps"] = json!([{"call": "restore", "key": key,
+            "entry": {"name": "proj", "provider": "claude", "conversation": SID, "permission_mode": "acceptEdits"}}]);
+    }, |_| {});
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+    let argv: Vec<&str> = created["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    let command = argv.last().unwrap();
+    for part in [format!("claude --resume {SID}"), "--model opus".into(), "--effort high".into(), "--permission-mode acceptEdits".into()] {
+        assert!(command.contains(&part), "{part} em {command}");
+    }
+    for env in [format!("CP_SESSION_KEY={key}"), "CP_SESSION_NAME=proj".into(), "HANGAR_JEV=on".into()] {
+        assert!(argv.windows(2).any(|w| w == ["-e", env.as_str()]), "{env} em {argv:?}");
+    }
+    assert_eq!(raw["cleaned"], json!([]), "a mesma sessão voltando não limpa grupo, fila nem `then` do nome");
+    assert!(root.join("home/.claude/.hangar-pair/proj.json").is_file() && root.join("home/.claude/.hangar-queue/proj.jsonl").is_file());
+}
