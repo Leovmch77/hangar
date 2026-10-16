@@ -86,7 +86,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   const [wt, setWt] = useState<{ server: Server; path: string } | null>(null);
   const [convite, setConvite] = useState<PairTarget | null>(null);
   const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
-  const deleting = useRef(new Set<string>());
+  const deleting = useRef(new Map<string, { confirmed: boolean }>());
 
   // 1 stream por servidor via refcount compartilhado
   useEffect(() => {
@@ -98,9 +98,10 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   const comServidor = useCallback((s: AggSession, fn: () => void) => {
     if (!useServers.getState().ensureActive(s.serverId)) {
       toast.erro(m.servidor_nao_existe());
-      return;
+      return false;
     }
     fn();
+    return true;
   }, []);
 
   const abrir = useCallback((s: AggSession) => {
@@ -124,15 +125,23 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     (s: AggSession) => {
       const key = `${s.serverId}::${s.name}`;
       if (deleting.current.has(key)) return;
+      const reservation = { confirmed: false };
+      deleting.current.set(key, reservation);
+      const release = () => {
+        if (deleting.current.get(key) === reservation) deleting.current.delete(key);
+      };
+      const cancel = () => {
+        if (!reservation.confirmed) release();
+      };
       Alert.alert(m.sessao_excluir(), s.name, [
-        { text: m.comum_cancelar(), style: 'cancel' },
+        { text: m.comum_cancelar(), style: 'cancel', onPress: cancel },
         {
           text: m.sessao_excluir_curto(),
           style: 'destructive',
-          onPress: () =>
-            comServidor(s, () => {
-              if (deleting.current.has(key)) return;
-              deleting.current.add(key);
+          onPress: () => {
+            if (deleting.current.get(key) !== reservation || reservation.confirmed) return;
+            reservation.confirmed = true;
+            if (!comServidor(s, () => {
               useSessions.getState().markDeleting(s.serverId, s.name);
               deleteSession(s.name)
                 .then((r) => {
@@ -145,10 +154,11 @@ export function SessionList({ onClose, onOpenServers }: Props) {
                   useSessions.getState().unmarkDeleting(s.serverId, s.name);
                   toast.erro(mensagemDe(e));
                 })
-                .finally(() => deleting.current.delete(key));
-            }),
+                .finally(release);
+            })) release();
+          },
         },
-      ]);
+      ], { cancelable: true, onDismiss: cancel });
     },
     [comServidor],
   );

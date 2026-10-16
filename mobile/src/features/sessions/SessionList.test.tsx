@@ -99,6 +99,7 @@ function confirm(index = 0): () => void {
 beforeEach(() => {
   _resetSessionsForTests();
   vi.clearAllMocks();
+  calls.deleteSession.mockReset();
   calls.listeners.clear();
   calls.stream.addEventListener.mockImplementation((event: string, listener: (event: { data: string }) => void) => calls.listeners.set(event, listener));
   useServers.setState({ servers: [server], ready: true, activeId: server.id });
@@ -121,11 +122,10 @@ describe('SessionList', () => {
     const row = container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!;
     expect(row).not.toBeNull();
     await act(async () => { row.click(); row.click(); });
-    expect(calls.alert).toHaveBeenCalledTimes(2);
+    expect(calls.alert).toHaveBeenCalledTimes(1);
     const first = confirm();
-    const duplicate = confirm(1);
 
-    await act(async () => { first(); duplicate(); });
+    await act(async () => { first(); first(); });
 
     expect(calls.deleteSession).toHaveBeenCalledExactlyOnceWith('fixture');
     expect(container.querySelector('[data-row="srv1::fixture"]')).toBeNull();
@@ -143,6 +143,82 @@ describe('SessionList', () => {
     await act(async () => { emit([]); });
     await act(async () => { emit([{ ...calls.sessions[0], jsonl: '/tmp/recreated.jsonl' }]); });
     expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+    await act(async () => { first(); });
+    expect(calls.deleteSession).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!.click(); });
+    expect(calls.alert).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['cancel', 'dismiss'] as const)('%s libera o diálogo e callbacks antigas não confirmam nem liberam o próximo', async (action) => {
+    calls.deleteSession.mockResolvedValueOnce({ ok: true, warning: null });
+    await mount();
+    const row = container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!;
+    await act(async () => { row.click(); });
+    const first = confirm();
+    const close = action === 'cancel'
+      ? calls.alert.mock.calls[0][2].find((button: { style?: string }) => button.style === 'cancel').onPress
+      : calls.alert.mock.calls[0][3]?.onDismiss;
+    expect(close).toBeTypeOf('function');
+
+    await act(async () => { close(); });
+    expect(calls.deleteSession).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+    await act(async () => { row.click(); });
+    expect(calls.alert).toHaveBeenCalledTimes(2);
+
+    await act(async () => { first(); close(); row.click(); });
+    expect(calls.deleteSession).not.toHaveBeenCalled();
+    expect(calls.alert).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+    await act(async () => { confirm(1)(); });
+    expect(calls.deleteSession).toHaveBeenCalledExactlyOnceWith('fixture');
+    expect(container.querySelector('[data-row="srv1::fixture"]')).toBeNull();
+  });
+
+  it('cancelamento e dispensa tardios não liberam uma exclusão pendente', async () => {
+    let resolve!: (value: { ok: boolean; warning: null }) => void;
+    calls.deleteSession.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    await mount();
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!.click(); });
+    const first = confirm();
+    const cancel = calls.alert.mock.calls[0][2].find((button: { style?: string }) => button.style === 'cancel').onPress;
+    const dismiss = calls.alert.mock.calls[0][3]?.onDismiss;
+    expect(cancel).toBeTypeOf('function');
+    expect(dismiss).toBeTypeOf('function');
+    await act(async () => { first(); first(); });
+    expect(calls.deleteSession).toHaveBeenCalledExactlyOnceWith('fixture');
+    expect(container.querySelector('[data-row="srv1::fixture"]')).toBeNull();
+
+    await act(async () => { cancel(); dismiss(); emit([]); });
+    await act(async () => { emit([{ ...calls.sessions[0], jsonl: '/tmp/recreated.jsonl' }]); });
+    expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!.click(); first(); });
+    expect(calls.alert).toHaveBeenCalledTimes(1);
+    expect(calls.deleteSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolve({ ok: true, warning: null }); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!.click(); });
+    expect(calls.alert).toHaveBeenCalledTimes(2);
+  });
+
+  it('servidor indisponível libera a confirmação sem DELETE e permite abrir outra', async () => {
+    vi.mocked(useServers.getState().ensureActive).mockReturnValueOnce(false);
+    calls.deleteSession.mockResolvedValueOnce({ ok: true, warning: null });
+    await mount();
+    const row = container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!;
+    await act(async () => { row.click(); });
+    const first = confirm();
+    await act(async () => { first(); first(); });
+    expect(calls.deleteSession).not.toHaveBeenCalled();
+    expect(calls.error).toHaveBeenCalledWith('servidor_nao_existe');
+    expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
+
+    await act(async () => { row.click(); });
+    expect(calls.alert).toHaveBeenCalledTimes(2);
+    await act(async () => { confirm(1)(); });
+    expect(calls.deleteSession).toHaveBeenCalledExactlyOnceWith('fixture');
+    expect(container.querySelector('[data-row="srv1::fixture"]')).toBeNull();
   });
 
   it('falha do DELETE restaura a linha, mostra a causa e permite tentar de novo', async () => {
