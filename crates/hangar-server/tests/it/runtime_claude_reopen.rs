@@ -610,3 +610,53 @@ async fn an_unanswered_delivery_goes_back_to_the_queue_on_reopen() {
     registry.close(&key,2).await.unwrap();
     fx.finish();
 }
+
+/// SF1: o `engines.json` que não se lê (vírgula sobrando, gravação no meio) não é "motor sumiu": recusa antes
+/// de encerrar, em vez de reabrir a sessão de motor na conta Anthropic sem o modelo dela.
+#[tokio::test]
+async fn an_unreadable_engine_catalog_refuses_before_anything_stops() {
+    let fx = fixture();
+    std::fs::write(fx.home.join(".claude/engines.json"),"{\"e\":{\"base_url\":\"http://x/v1\"},}").unwrap();
+    let (outcome,args) = to_terminal(&fx,json!({"engine":"e","model":"gpt-5.4"})).await;
+    assert_eq!(outcome,Err(("reopen_engines_unreadable".into(),false)));
+    assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}
+
+/// Sem terminal parada com `extra`, levada ao terminal: o que a reabertura devolveu.
+async fn reopened_to_terminal(fx:&Fixture,extra:Value) -> hangar_server::runtime::claude_reopen::Reopened {
+    fx.transcript();
+    let mut meta = json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null});
+    for (field,value) in extra.as_object().unwrap() { meta[field] = value.clone(); }
+    fx.put_sidecar(meta);
+    let registry = fx.registry().await;
+    let reopened = registry.reopen_claude_session("s1",mode_switch(true),None).await.expect("é sessão Claude daqui").expect("reabriu");
+    registry.close(&"ab".repeat(16),2).await.unwrap();
+    fx.finish();
+    reopened
+}
+
+/// SF1: o motor que sumiu de verdade volta na conta Anthropic e a pessoa fica sabendo.
+#[tokio::test]
+async fn an_engine_gone_from_the_catalog_is_told_to_the_caller() {
+    let fx = fixture();
+    let reopened = reopened_to_terminal(&fx,json!({"engine":"gone","model":"gpt-5.4"})).await;
+    assert!(reopened.warnings.iter().any(|w|w.contains("gone")),"{:?}",reopened.warnings);
+}
+
+/// SF2: o registro que não grava depois da vida nova de pé deixa a próxima reabertura na conta antiga: a
+/// pessoa fica sabendo.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_spec_not_written_after_the_reopen_is_told_to_the_caller() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let specs = fx.home.join(".hangar/session-specs");
+    std::fs::create_dir_all(&specs).unwrap();
+    std::fs::set_permissions(&specs,std::fs::Permissions::from_mode(0o555)).unwrap();
+    let reopened = reopened_to_terminal(&fx,json!({})).await;
+    std::fs::set_permissions(&specs,std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(reopened.changed);
+    assert!(!reopened.warnings.is_empty(),"o registro não gravado aparece");
+}
+

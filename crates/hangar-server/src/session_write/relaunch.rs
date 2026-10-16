@@ -91,7 +91,7 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         None => return forward_whole(&st, parts, bytes, &fwd).await,
         Some(Relaunched::Codex(Ok(value))) => (StatusCode::OK, value),
         Some(Relaunched::Codex(Err(error))) => mode_refusal(&error),
-        Some(Relaunched::Claude(Ok(_), _)) => (StatusCode::OK, json!({"ok": true, "terminal": terminal})),
+        Some(Relaunched::Claude(Ok(reopened), _)) => (StatusCode::OK, reopened.answer(json!({"ok": true, "terminal": terminal}))),
         Some(Relaunched::Claude(Err(failure), _)) => claude_refusal("não troquei de modo", &failure),
     };
     // A identidade da sessão mudou (ou pode ter mudado no meio de uma falha).
@@ -121,7 +121,7 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         None => return pass(&st, req, &fwd).await,
         Some(Relaunched::Codex(Ok(value))) => (StatusCode::OK, value),
         Some(Relaunched::Codex(Err(error))) => reload_refusal(&error),
-        Some(Relaunched::Claude(Ok(_), _)) => (StatusCode::OK, json!({"ok": true})),
+        Some(Relaunched::Claude(Ok(reopened), _)) => (StatusCode::OK, reopened.answer(json!({"ok": true}))),
         Some(Relaunched::Claude(Err(failure), from_terminal)) if failure.ended_without_terminal(from_terminal) =>
             (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &failure.error.message,
                 json!({"erro": failure.error.message, "code": failure.error.code}))),

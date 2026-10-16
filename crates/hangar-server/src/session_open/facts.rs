@@ -129,6 +129,18 @@ static SAFE_MODEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z0-9]
 
 fn cliproxy(msg: impl Into<String>) -> OpenError { OpenError::new(400, "erro_cliproxy_conta", msg) }
 
+/// Os motores do `engines.json`, separando o ausente (nenhum motor) do ilegível, que não diz se um motor
+/// sumiu: quem reabre recusa em vez de tirar a sessão do motor.
+pub(crate) fn engine_names(env: &AccountEnvironment) -> Result<Vec<String>, String> {
+    let path = env.base.get("CP_ENGINES_FILE").filter(|p| !p.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| env.home.join(".claude").join("engines.json"));
+    match read_json(&path)? {
+        None => Ok(Vec::new()),
+        Some(Value::Object(map)) => Ok(map.keys().filter(|name| ENGINE_NAME.is_match(name)).cloned().collect()),
+        Some(_) => Err(format!("{}: não é um objeto", path.display())),
+    }
+}
+
 fn engines_of(env: &AccountEnvironment) -> Value {
     let path = env.base.get("CP_ENGINES_FILE").filter(|p| !p.is_empty()).map(PathBuf::from)
         .unwrap_or_else(|| env.home.join(".claude").join("engines.json"));

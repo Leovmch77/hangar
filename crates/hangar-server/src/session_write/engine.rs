@@ -90,11 +90,11 @@ pub(crate) async fn switch(st:&Arc<AppState>,runtime:&Arc<RuntimeRegistry>,name:
     // Pânico no meio: a vida antiga pode já ter saído, então nunca "nada aconteceu".
     let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:crate::runtime::protocol::RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
     match outcome {
-        Some(Ok(_))=>(StatusCode::OK,match wanted.tier {
+        Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(match wanted.tier {
             Some(tier)=>json!({"ok":true,"service_tier":tier.name()}),
             None if wanted.model.is_some()=>json!({"ok":true,"model":wanted.model}),
             None=>json!({"ok":true,"engine_account":account}),
-        }),
+        })),
         Some(Err(failure))=>failure_body(&failure),
         None=>(StatusCode::CONFLICT,detail_body("erro_troca_conta","a sessão não está aberta aqui",json!({}))),
     }

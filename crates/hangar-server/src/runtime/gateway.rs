@@ -93,7 +93,7 @@ pub struct RuntimeRegistry {
     watcher:std::sync::OnceLock<Arc<super::codex_terminal::Watcher>>,
     /// Acorda a vigia quando um ator adotado perde o app-server.
     codex_wake:Arc<tokio::sync::Notify>,
-    diag:crate::diag::DiagClient,
+    pub(super) diag:crate::diag::DiagClient,
     /// Sessões com uma reabertura em erro em voo: o pedido seguinte da mesma sessão não abre outra.
     reopening:std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// Problema do último retrato de cada ator com terminal (chave → geração, código), para a lista

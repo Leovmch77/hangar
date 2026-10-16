@@ -59,9 +59,17 @@ struct Current { spec:SessionSpec, sid:String, generation:u64, life:Life, previo
 /// O que a vida nova precisa, montado antes de encerrar a antiga.
 enum Start { Terminal(Box<PaneSpec>,TerminalEnv), Headless(Value) }
 
-/// O que a reabertura devolve: o spec da vida que ficou de pé (`None` sem mudança).
+/// O que a reabertura devolve: o spec da vida que ficou de pé (`None` sem mudança) e o que a pessoa precisa
+/// saber da troca que deu certo (motor que sumiu, registro não gravado), para a resposta mostrar.
 #[derive(Debug)]
-pub struct Reopened { pub spec:Option<SessionSpec>, pub changed:bool }
+pub struct Reopened { pub spec:Option<SessionSpec>, pub changed:bool, pub warnings:Vec<String> }
+impl Reopened {
+    /// A resposta de sucesso da rota com os avisos em `avisos`, como a da criação.
+    pub fn answer(&self,mut body:Value) -> Value {
+        if !self.warnings.is_empty() {body["avisos"]=json!(self.warnings);}
+        body
+    }
+}
 
 /// Recusa (`stopped: false`: nada mudou) ou falha depois de encerrar a vida antiga (a mensagem diz onde a
 /// sessão ficou).
@@ -207,17 +215,24 @@ static ANTHROPIC:std::sync::LazyLock<regex::Regex>=std::sync::LazyLock::new(||re
 
 /// O que a vida nova leva e a CLI recusaria, conferido antes de encerrar a antiga (o `_comando_terminal` e o
 /// `para_headless` do Python): o motor que sumiu, o modelo malformado ou de outro provedor, o Fast sem
-/// suporte e o corpo do motor ilegível. Bloqueante.
+/// suporte e o corpo do motor ilegível. Bloqueante. Devolve os avisos para a pessoa (o motor que sumiu).
 fn preflight(env:&crate::accounts::environment::AccountEnvironment,next:&mut SessionSpec,settings:Option<&Value>,
-             runtime:tokio::runtime::Handle) -> Result<(),RuntimeError> {
+             runtime:tokio::runtime::Handle) -> Result<Vec<String>,RuntimeError> {
     use crate::session_open::OpenFacts;
     let facts=crate::session_open::facts::LocalFacts::new(env.clone(),runtime);
-    if let Account::Engine { name,account,config_dir,.. }=&next.account && !facts.engines().contains(name) {
-        if account.is_some() {return Err(refused("reopen_engine_missing","motor da conta ChatGPT fixa indisponível; nada foi reaberto"));}
-        // A escolha lida é do motor: numa conta Anthropic ela criaria uma sessão inviável.
-        tracing::warn!(session=%next.name,engine=%name,"motor sumiu do catálogo; a sessão volta na conta Anthropic");
-        next.account=config_dir.clone().map_or(Account::Default,|config_dir|Account::Claude { config_dir });
-        (next.model,next.effort,next.service_tier)=(None,None,None);
+    let mut warnings=Vec::new();
+    if let Account::Engine { name,account,config_dir,.. }=&next.account {
+        // Ilegível não diz que o motor sumiu: tirar a sessão dele seria trocar a conta calado.
+        let engines=crate::session_open::facts::engine_names(env)
+            .map_err(|_|refused("reopen_engines_unreadable","o catálogo de motores (engines.json) não pôde ser lido; nada foi reaberto"))?;
+        if !engines.contains(name) {
+            if account.is_some() {return Err(refused("reopen_engine_missing","motor da conta ChatGPT fixa indisponível; nada foi reaberto"));}
+            // A escolha lida é do motor: numa conta Anthropic ela criaria uma sessão inviável.
+            tracing::warn!(session=%next.name,engine=%name,"motor sumiu do catálogo; a sessão volta na conta Anthropic");
+            warnings.push(format!("O motor {name} saiu do catálogo: a sessão voltou na conta Anthropic, sem o modelo, o esforço e o Fast dele."));
+            next.account=config_dir.clone().map_or(Account::Default,|config_dir|Account::Claude { config_dir });
+            (next.model,next.effort,next.service_tier)=(None,None,None);
+        }
     }
     if let Some(model)=next.model.as_deref() && !crate::session_open::resolve::valid_model(model) {
         return Err(refused("reopen_model_invalid","model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)"));
@@ -234,7 +249,7 @@ fn preflight(env:&crate::accounts::environment::AccountEnvironment,next:&mut Ses
         next.service_tier=None;
     }
     if next.service_tier.is_some() {engine_body(env,next.account.config_dir(),std::path::Path::new(&next.cwd),settings)?;}
-    Ok(())
+    Ok(warnings)
 }
 
 /// O pré-voo do `engines.service_tier_settings`: o `CLAUDE_CODE_EXTRA_BODY` que o lançador do motor vai
@@ -375,7 +390,7 @@ impl RuntimeRegistry {
             },
         };
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(surface) {
-            return Some(Ok(Reopened { spec:None,changed:false }));
+            return Some(Ok(Reopened { spec:None,changed:false,warnings:Vec::new() }));
         }
         Some(self.reopen_by_spec(name,change,between,None).await)
     }
@@ -423,7 +438,7 @@ impl RuntimeRegistry {
         // Conferido de novo sob a porta: outra troca pode ter terminado enquanto esta esperava.
         let now=match self.claude_sidecar(name).await.map_err(ReopenFailure::refused)? {Some(_)=>Surface::Headless,None=>Surface::Terminal};
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
-            return Ok(Reopened { spec:None,changed:false });
+            return Ok(Reopened { spec:None,changed:false,warnings:Vec::new() });
         }
         let mut current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
         // Outra conversa leva as escolhas de plugins e skills guardadas dela, não as do processo de agora.
@@ -437,9 +452,12 @@ impl RuntimeRegistry {
         let mut next=current.spec.with(&change);
         next.conversation=Some(sid.clone());
         if let Some(between)=between {between.adjust(&mut next);}
+        let mut warnings;
         {let (env,mut spec,settings,handle)=(self.codex_environment(),next,current.settings.clone(),tokio::runtime::Handle::current());
-            next=tokio::task::spawn_blocking(move||preflight(&env,&mut spec,settings.as_ref(),handle).map(|()|spec)).await
+            (next,warnings)=tokio::task::spawn_blocking(move||preflight(&env,&mut spec,settings.as_ref(),handle).map(|w|(spec,w))).await
                 .map_err(|_|ReopenFailure::refused(refused("reopen_preflight","a subida nova não pôde ser conferida")))?.map_err(ReopenFailure::refused)?;}
+        // O único aviso do pré-voo é o motor que sumiu.
+        if !warnings.is_empty() {self.diag.report("runtime.reopen_engine_gone",name,"reopen_engine_gone","o motor saiu do catálogo e a sessão volta na conta Anthropic");}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
         let start=self.prepare_start(name,&next,&current,&sid).await.map_err(ReopenFailure::refused)?;
         match self.stop_claude(name,&current,next.surface).await {
@@ -465,10 +483,12 @@ impl RuntimeRegistry {
         match self.start_claude(name,&next,start,&sid).await {
             Ok(())=>{
                 if valid_spec_key(&next.key) && let Err(error)=crate::session_open::record::write(&self.codex_environment().home,&next) {
-                    // A sessão nova está de pé: o registro velho só deixa a próxima reabertura sem esta mudança.
+                    // A sessão nova está de pé, mas o restore e a próxima troca leriam o registro velho.
                     tracing::warn!(session=%name,kind=?error.kind(),"spec da reabertura não gravado");
+                    self.diag.report("runtime.reopen_spec_unwritten",name,"reopen_spec_unwritten","a sessão reabriu e o registro dela não foi gravado");
+                    warnings.push("A sessão reabriu, mas o registro dela não foi gravado: o restore e a próxima reabertura podem voltar como antes.".into());
                 }
-                Ok(Reopened { spec:Some(next),changed:true })
+                Ok(Reopened { spec:Some(next),changed:true,warnings })
             },
             // A vida nova que não saiu não divide a conversa com a de antes restaurada.
             Err(error) if error.code==NEW_ALIVE=>{

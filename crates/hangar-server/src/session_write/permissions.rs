@@ -99,7 +99,7 @@ async fn bypass_reopen(runtime:&crate::runtime::gateway::RuntimeRegistry,name:&s
     use crate::session_open::{ChangeReason,PermissionMode,SessionChange};
     let change=SessionChange {reason:ChangeReason::Bypass,surface:None,account:None,permission_mode:Some(PermissionMode::BypassPermissions),model:None,effort:None,service_tier:None};
     match runtime.reopen_claude_session(name,change,None).await {
-        Some(Ok(_))=>(StatusCode::OK,json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true})),
+        Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true}))),
         Some(Err(failure))=>{
             let error=&failure.error;
             if let Some(message)=crate::runtime::claude_reopen::busy_message(&error.code) {

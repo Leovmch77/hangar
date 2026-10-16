@@ -258,7 +258,7 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     let outcome=reopen_in(&st,&runtime,&name,&spec,&destination,leave_engine,ChangeReason::AccountSwitch).await;
     let (status,body)=match outcome {
         None=>return forward_whole(&st,parts,bytes,&fwd).await,
-        Some(Ok(_))=>(StatusCode::OK,json!({"ok":true,"config_dir":destination})),
+        Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(json!({"ok":true,"config_dir":destination}))),
         Some(Err(failure))=>refusal(&failure),
     };
     reply(status,body,&parts.headers)
