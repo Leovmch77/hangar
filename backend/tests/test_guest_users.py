@@ -184,3 +184,22 @@ def test_writing_waits_for_the_lock_the_rust_holds(tmp_path):
     assert done.wait(30)
     writer.join()
     assert guest_users.owner_name("s1") == "ana"
+
+
+def test_a_read_that_fails_mid_swap_is_retried_on_the_next_call(tmp_path, monkeypatch):
+    """No Windows a leitura no meio da troca do Rust falha: ela passa pelo `atomico.read` e a
+    próxima chamada tenta de novo, sem esperar outra gravação."""
+    from app import atomico
+    g, _ = _guest(tmp_path)
+    LIVES["s1"] = "t:100"
+    guest_users.claim("s1", g.id)
+    guest_users._reset()
+    real, calls = atomico.read, []
+
+    def flaky(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError("em uso")
+        return real(path)
+    monkeypatch.setattr(atomico, "read", flaky)
+    assert [guest_users.owner_name("s1"), guest_users.owner_name("s1")] == [None, "ana"]

@@ -86,7 +86,7 @@ def _load() -> dict:
         if _state is None or _sig() != _state_sig:
             _state_sig, _unreadable = _sig(), False
             try:
-                raw = json.loads(_path().read_text(encoding="utf-8"))
+                raw = json.loads(atomico.read(_path()).decode("utf-8"))
                 _state = {"guests": {g["id"]: Guest(**g) for g in raw.get("guests", [])},
                           "sessions": dict(raw.get("sessions", {}))}
             except FileNotFoundError:
@@ -97,6 +97,9 @@ def _load() -> dict:
                              _path(), e)
                 _state = {"guests": {}, "sessions": {}}
                 _unreadable = True
+                if isinstance(e, OSError):
+                    # Leitura que falhou no meio da troca (Windows): a próxima chamada tenta de novo.
+                    _state_sig = None
         return _state
 
 
