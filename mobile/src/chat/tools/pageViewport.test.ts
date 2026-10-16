@@ -1,10 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { withDeviceViewport } from './pageViewport';
 
-vi.mock('@hangar/core', () => ({}));
-vi.mock('../../stores/servers', () => ({ useServers: () => null }));
-
-describe('withDeviceViewport', async () => {
-  const { withDeviceViewport } = await import('./pageDocument');
+describe('withDeviceViewport', () => {
   const meta = '<meta name="viewport" content="width=device-width, initial-scale=1">';
 
   it('põe a largura da tela logo depois do <head>', () => {

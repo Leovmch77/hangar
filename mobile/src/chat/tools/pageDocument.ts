@@ -7,6 +7,7 @@ import {
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
+import { withDeviceViewport } from './pageViewport';
 
 export type ThemeParams = { theme: 'dark' | 'light'; styles: { variables: Record<string, string> } };
 
@@ -128,11 +129,4 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
     return fetchPageSource(pageUrls(base, sessionName, page.id).source, { Authorization: auth });
   }, [base, auth, sessionName, page.id]);
   return { key, state, doc, reported, setReported, load, params, loadSource };
-}
-
-// Sem meta viewport o WebView do iOS desenha a página com 980 pt de largura e a encolhe inteira.
-export function withDeviceViewport(doc: string): string {
-  if (!doc || /<meta[^>]+name\s*=\s*["']?viewport/i.test(doc)) return doc;
-  const meta = '<meta name="viewport" content="width=device-width, initial-scale=1">';
-  return /<head[^>]*>/i.test(doc) ? doc.replace(/<head[^>]*>/i, (h) => h + meta) : meta + doc;
 }
