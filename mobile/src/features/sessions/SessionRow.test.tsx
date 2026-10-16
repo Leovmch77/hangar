@@ -8,8 +8,11 @@ import type { AggSession } from '@hangar/core';
 
 // O menu expõe os ids das ações: são o único caminho visível pro Git, Renomear e Excluir.
 vi.mock('@react-native-menu/menu', () => ({
-  MenuView: ({ children, actions }: { children: ReactNode; actions: { id: string }[] }) =>
-    createElement('div', { 'data-menu': actions.map((a) => a.id).join(' ') }, children),
+  MenuView: ({ children, actions, onPressAction }: { children: ReactNode; actions: { id: string; title: string }[];
+    onPressAction: (e: { nativeEvent: { event: string } }) => void }) =>
+    createElement('div', { 'data-menu': actions.map((a) => a.id).join(' ') }, children,
+      ...actions.map((a) => createElement('button', { key: a.id, 'data-action': a.id,
+        onClick: () => onPressAction({ nativeEvent: { event: a.id } }) }, a.title))),
 }));
 // O mock comum passa `style` direto ao DOM, e o da linha é função de `pressed`.
 vi.mock('react-native', async (original) => ({
@@ -24,6 +27,7 @@ vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   orq_row_badge: () => 'orq_row_badge',
   sessao_excluir_curto: () => 'sessao_excluir_curto',
+  convite_parar: () => 'convite_parar',
   sessao_renomear: () => 'sessao_renomear',
   sessao_retomar: () => 'sessao_retomar',
   sessao_sem_id: () => 'sessao_sem_id',
@@ -111,6 +115,18 @@ describe('SessionRow', () => {
       { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree: undefined });
     expect(container.textContent).toContain('hangar-x');
     expect(container.querySelector('[aria-label^="sessao_worktree"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('convite oferece parar de acompanhar, nunca excluir a sessão', async () => {
+    const onExcluir = vi.fn();
+    const session = { ...base, name: 'convidada', provider: 'claude' as const, serverInvite: true };
+    const { container, root } = await render(session, { onExcluir });
+    expect(container.querySelector('[data-action="delete"]')).toBeNull();
+    const stop = container.querySelector<HTMLButtonElement>('[data-action="stop-following"]');
+    expect(stop?.textContent).toBe('convite_parar');
+    await act(async () => stop!.click());
+    expect(onExcluir).toHaveBeenCalledExactlyOnceWith(session);
     act(() => root.unmount());
   });
 

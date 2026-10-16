@@ -139,6 +139,22 @@ describe('galeria de anexos', () => {
     act(() => root.unmount());
   });
 
+  it.each([
+    ['relatório final.pdf', 'pdf', 'relat%C3%B3rio%20final.pdf'],
+    ['página final.html', 'html', 'p%C3%A1gina%20final.html'],
+  ])('%s abre o upload no visor, no servidor da conversa', async (filename, kind, encoded) => {
+    h.list.mockResolvedValueOnce({ files: [file(filename)] });
+    const { container, root } = await render();
+    await act(async () => byLabel(container, filename)!.click());
+    expect(h.doc).toHaveBeenLastCalledWith({
+      uri: `https://a.test/api/sessions/sess/uploads/${encoded}`,
+      headers: { Authorization: 'Bearer token-a' }, name: filename, kind,
+    });
+    expect(h.push).not.toHaveBeenCalled();
+    expect(servers.activeId).toBe('s2');
+    act(() => root.unmount());
+  });
+
   it('lista e mídia da rota ficam em A com B ativo', async () => {
     h.list.mockResolvedValueOnce({ files: [file('ditado.m4a'), file('clip.mp4')] });
     const { container, root } = await render();
