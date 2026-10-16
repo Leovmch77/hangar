@@ -1099,10 +1099,20 @@ impl Engine {
         }
         // Cano vivo já tem o esforço que a vida anterior aplicou: como no Python, religar não o reenvia.
         if let Some(effort) = self.metadata["effort"].as_str().filter(|_|self.fresh_process).map(str::to_owned) {
+            // O modelo escolhido vai junto (S-77): sem ele o Codex aplica o nível ao modelo que a thread abriu.
+            let model = self.metadata["model"].as_str().map(str::to_owned).or_else(||self.model.clone());
             let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
-                effort:Some(Some(effort)),..Default::default() });
+                model:model.map(Some),effort:Some(Some(effort)),..Default::default() });
             self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
         } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
+    }
+
+    /// S-77: processo novo sem terminal que devolve outro Fast que o gravado não sobe (o Python recusava): a
+    /// escolha fica no arquivo da sessão e a recusa aparece, em vez de abrir num Fast que ninguém escolheu.
+    fn fast_dropped(&self,rpc:&Rpc,result:&Value) -> Option<String> {
+        let parent = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread")?["parent"].as_str()?.to_owned();
+        let wanted = self.metadata["service_tier"].as_str().filter(|_|self.headless && self.fresh_process)?;
+        (result.get("serviceTier")?.as_str().unwrap_or("default") != wanted).then_some(parent)
     }
 
     /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
@@ -1739,6 +1749,16 @@ impl Engine {
                 }
             }
             "thread/resume" | "thread/start" => {
+                if let Some(parent) = self.fast_dropped(&rpc,&result) {
+                    const DROPPED:&str = "O Codex não preservou a escolha Fast ao retomar";
+                    tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), method = %rpc.method, "{DROPPED}");
+                    effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:rpc.method.clone() });
+                    self.state.problema = Some("codex_conversa_nao_abriu".into());
+                    self.state.problema_detalhe = Some(DROPPED.into());
+                    effects.push(Effect::Reply { operation_id:parent,disposition:Disposition::Rejected,payload:json!({"error":DROPPED}) });
+                    self.changed(effects,true);
+                    return Ok(());
+                }
                 let Some(response) = opened.take() else { return Err(error(UNPROVEN_THREAD)) };
                 if response.thread.id != self.thread_id {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);

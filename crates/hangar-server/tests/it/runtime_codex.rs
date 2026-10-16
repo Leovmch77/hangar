@@ -1143,6 +1143,30 @@ fn refused_effort_is_a_problem_not_a_failure() {
     assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
 }
 
+/// S-77: processo novo que devolve outro Fast que o escolhido não sobe; a recusa aparece com o motivo.
+#[test]
+fn a_fresh_process_that_drops_the_chosen_fast_does_not_come_up() {
+    for (method,meta) in [("thread/resume",json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","service_tier":"priority"})),
+        ("thread/start",json!({"name":"s","headless":true,"cwd":"/p","service_tier":"priority"}))] {
+        let (mut engine,sent) = bootstrapped(meta);
+        let open = find_method(&sent,method);
+        let effects = line(&mut engine,json!({"id":open["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"serviceTier":null}}),12.0);
+        assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")),"{method}");
+        assert_eq!(engine.control_view()["ready"],false,"{method}");
+        assert_eq!(engine.view()["problema_detalhe"],"O Codex não preservou a escolha Fast ao retomar","{method}");
+    }
+}
+
+/// S-77: o esforço depois de abrir leva o modelo escolhido junto (o `thread/settings/update` do Python).
+#[test]
+fn the_effort_after_opening_carries_the_chosen_model() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"high","model":"gpt-chosen"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"model":"gpt-default"}}),12.0);
+    let update = find_method(&frames(&effects),"thread/settings/update");
+    assert_eq!(update["params"],json!({"threadId":"t1","model":"gpt-chosen","effort":"high"}));
+}
+
 #[test]
 fn select_without_pending_approval_says_no_pending_permission() {
     // Sem pedido aberto não há identidade atual: a mostrada antes da resolução fica desatualizada.

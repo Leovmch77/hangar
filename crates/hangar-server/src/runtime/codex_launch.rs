@@ -144,7 +144,18 @@ pub fn launch_env(base:&AccountEnvironment,sidecar_dir:&Path,meta:&Value) -> Res
     if let (Some(current),Value::Object(fields)) = (current,&mut meta) && current.get("key").is_some_and(|key|Some(key) == fields.get("key")) {
         fields.extend(current);
     }
-    Ok(Launch { program:argv(&meta)?,env:environment(base,&meta,&runtime_config(base))? })
+    let env = environment(base,&meta,&runtime_config(base))?;
+    let mut program = argv(&meta)?;
+    program.extend(identity(&env));
+    Ok(Launch { program,env })
+}
+
+/// `identity_override`: a identidade da sessão no shell dos comandos do Codex, por `set` (vale com
+/// qualquer `inherit` e soma ao `set` do usuário). Só as variáveis presentes no ambiente da subida.
+fn identity(env:&BTreeMap<String,String>) -> Vec<String> {
+    ["CP_SESSION_NAME","CP_SESSION_KEY","HANGAR_CANO_KEY","TMUX","TMUX_PANE"].into_iter()
+        .filter_map(|name|env.get(name).filter(|v|!v.is_empty()).map(|value|(name,value)))
+        .flat_map(|(name,value)|["-c".to_owned(),format!("shell_environment_policy.set.{name}={}",Value::from(value.as_str()))]).collect()
 }
 
 #[cfg(test)]
@@ -172,6 +183,18 @@ mod tests {
             json!({"tool_output_token_limit":true}),json!({"permission_mode":3})] {
             assert!(argv(&bad).is_err(),"{bad}");
         }
+    }
+
+    /// S-77: a identidade da sessão vai ao shell dos comandos do Codex (`identity_override` do Python);
+    /// sem ela, com `inherit` diferente de `all`, o `hangar-send` de dentro assinava `cli`.
+    #[test]
+    fn launch_carries_the_session_identity_to_the_command_shell() {
+        let home = tempfile::tempdir().unwrap();
+        let sidecars = home.path().join("sidecars");
+        let launch = launch_env(&base(home.path()),&sidecars,&json!({"name":"cx \"a\"","key":"k1","permission_mode":"Full Access"})).unwrap();
+        let tail:Vec<&str> = launch.program.iter().map(String::as_str).skip(7).collect();
+        assert_eq!(tail,["-c","shell_environment_policy.set.CP_SESSION_NAME=\"cx \\\"a\\\"\"","-c","shell_environment_policy.set.CP_SESSION_KEY=\"k1\"",
+            "-c","shell_environment_policy.set.HANGAR_CANO_KEY=\"k1\""],"TMUX e TMUX_PANE saem do ambiente do cano: nada a repassar");
     }
 
     #[test]
