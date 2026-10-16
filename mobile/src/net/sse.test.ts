@@ -128,6 +128,20 @@ test('repassa data e lastEventId ao listener e não manda timeout de teto', () =
   expect(mock.opts.timeout).toBeUndefined();
 });
 
+test.each(['plugin_ui', 'plugin_ui_delta'])('evento %s normaliza payload e rearma o watchdog', (type) => {
+  vi.useFakeTimers();
+  const es = createEventSource('http://x/api/sessions/a/events?token=t', { withCredentials: false });
+  const listener = vi.fn();
+  es.addEventListener(type, listener);
+  emitNative('open');
+  vi.advanceTimersByTime(20000);
+  emitNative(type, { data: '{"panes":[]}', lastEventId: null });
+  expect(listener).toHaveBeenCalledWith({ data: '{"panes":[]}', lastEventId: undefined });
+  vi.advanceTimersByTime(20000);
+  expect(ultimo!.close).not.toHaveBeenCalled();
+  es.close();
+});
+
 test('watchdog não fecha com ping a cada 10s por 60s', () => {
   vi.useFakeTimers();
   ultimo = null;
