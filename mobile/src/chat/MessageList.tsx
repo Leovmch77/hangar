@@ -37,7 +37,7 @@ interface Props {
   preview: string;
   previewMd?: boolean; // prévia do agente = markdown (default true = comportamento antigo)
   previewFull?: boolean;
-  session?: SessionInfo | null;
+  session?: Pick<SessionInfo, 'provider' | 'headless'> | null;
   olderFailed: '' | 'failed' | 'unjoinable';
   onLoadOlder: () => void;
   pending?: PendingMsg[];

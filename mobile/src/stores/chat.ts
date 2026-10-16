@@ -213,16 +213,42 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
   let queueErrorTimer: ReturnType<typeof setTimeout> | undefined;
   const pluginToastsSeen = new Set<string>();
+  // Um setState por token re-renderizava a conversa a cada caractere: o primeiro sai na hora, o resto
+  // junta num quadro.
+  let previewQueued: { preview: string; previewMd: boolean; previewFull: boolean } | null = null;
+  let previewFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  const PREVIEW_FRAME_MS = 50;
+  function currentPreview(): string {
+    return previewQueued?.preview ?? useChatStore.getState().preview;
+  }
+  function flushPreview(): void {
+    previewFlushTimer = undefined;
+    if (!previewQueued) return;
+    const patch = previewQueued;
+    previewQueued = null;
+    useChatStore.setState(patch);
+    previewFlushTimer = setTimeout(flushPreview, PREVIEW_FRAME_MS);
+  }
+  function publishPreview(patch: { preview: string; previewMd: boolean; previewFull: boolean }): void {
+    previewQueued = patch;
+    if (previewFlushTimer === undefined) flushPreview();
+  }
+  function dropQueuedPreview(): void {
+    clearTimeout(previewFlushTimer);
+    previewFlushTimer = undefined;
+    previewQueued = null;
+  }
 
   function limparPreview(): void {
     clearTimeout(previewDropTimer);
     previewDropTimer = undefined;
+    dropQueuedPreview();
     previewMd = false;
     previewFull = false;
     useChatStore.setState({ preview: '', previewMd: false, previewFull: false });
   }
   function dropPreviewSoon(): void {
-    if (previewDropTimer !== undefined || !useChatStore.getState().preview) return;
+    if (previewDropTimer !== undefined || !currentPreview()) return;
     previewDropTimer = setTimeout(limparPreview, 5000);
   }
   function cancelPreviewDrop(): void {
@@ -419,7 +445,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     if (ev.kind === 'thinking' && useChatStore.getState().pensamento) limparPensamento();
     if (ev.kind === 'tool_use' && useChatStore.getState().ferramenta) limparFerramenta();
     // Swap prévia->bolha: o bloco real chegou, a prévia sai no MESMO flush.
-    if (ev.kind === 'assistant_msg' && ev.text && useChatStore.getState().preview) limparPreview();
+    if (ev.kind === 'assistant_msg' && ev.text && currentPreview()) limparPreview();
   }
 
   function connectSSE(): void {
@@ -515,7 +541,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       try {
         const ev = JSON.parse(e.data as string) as PreviewEvent;
         const t = ev.text ?? '';
-        const atual = useChatStore.getState().preview;
+        const atual = currentPreview();
         // Frame transitório do pane às vezes chega como PREFIXO do texto já mostrado:
         // ignorar, senão o texto recua e re-cresce. Só vale DENTRO da mesma fonte
         // (md/full trocados = fonte nova, passa sempre).
@@ -537,7 +563,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         cancelPreviewDrop();
         previewMd = !!ev.md;
         previewFull = !!ev.full;
-        useChatStore.setState({ preview: t, previewMd: !!ev.md, previewFull: !!ev.full });
+        publishPreview({ preview: t, previewMd: !!ev.md, previewFull: !!ev.full });
       } catch {
         quadroFalhou('preview');
         // frame ilegível: mantém o último bom
@@ -640,6 +666,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       previewMd = false;
       previewFull = false;
       cancelPreviewDrop();
+      dropQueuedPreview();
       clearTimeout(pensamentoTimer);
       pensamentoTimer = undefined;
       clearTimeout(ferramentaTimer);
@@ -823,6 +850,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es = null;
       clearTimeout(retryTimer);
       clearTimeout(queueAbsentTimer);
+      if (previewQueued) useChatStore.setState(previewQueued);
+      dropQueuedPreview();
       // Soltar a tela fecha leituras; POST, ecos e identidade continuam na origem.
     },
     loadOlder,

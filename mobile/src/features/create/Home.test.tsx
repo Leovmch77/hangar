@@ -22,6 +22,7 @@ vi.mock('react-native', async (original) => ({
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: calls.push, setParams: calls.setParams }),
   useLocalSearchParams: () => calls.params,
+  useIsFocused: () => true,
   useFocusEffect: (callback: () => void | (() => void)) => useEffect(() => calls.focused ? callback() : undefined, [callback, calls.focused]),
 }));
 vi.mock('../../stores/servers', async () => {

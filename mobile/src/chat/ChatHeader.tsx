@@ -42,9 +42,11 @@ export function ChatHeader({
   // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
   const params = useLocalSearchParams<{ server?: string | string[] }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : params.server;
-  const row = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
-  const serverLabel = useServers((s) => s.servers.find((x) => x.id === serverId)?.label) ?? row?.serverLabel ?? '';
-  const pasta = row?.cwd ? cwdParts(row.cwd).base : '';
+  // Campos soltos: a linha inteira muda de identidade a cada publicação da lista.
+  const rowServerLabel = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.serverLabel);
+  const cwd = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.cwd);
+  const serverLabel = useServers((s) => s.servers.find((x) => x.id === serverId)?.label) ?? rowServerLabel ?? '';
+  const pasta = cwd ? cwdParts(cwd).base : '';
   const destino = pasta && serverLabel ? `${pasta} @ ${serverLabel}` : pasta || serverLabel;
   const corEstado = (state && theme.tokens.pill?.[PILL[state]]?.fg) || theme.tokens.text.muted;
   return (
@@ -66,7 +68,7 @@ export function ChatHeader({
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
           accessibilityRole="button"
           // Nome, estado e destino completos para o leitor de tela; a ação vai na dica.
-          accessibilityLabel={[name, state ? rotuloEstado(state) : '', serverLabel, row?.cwd].filter(Boolean).join(', ')}
+          accessibilityLabel={[name, state ? rotuloEstado(state) : '', serverLabel, cwd].filter(Boolean).join(', ')}
           accessibilityHint={m.sessao_trocar_de()}
         >
           {state === 'working' ? <WorkingMark size={18} color={corEstado} /> : <HangarMark size={18} color={corEstado} />}

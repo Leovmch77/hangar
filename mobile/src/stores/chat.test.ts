@@ -254,6 +254,7 @@ test('(c) preview some quando o assistant_msg real chega', async () => {
   expect(chat.use.getState().preview).toBe('pensando…');
 
   created[0].trigger('preview', JSON.stringify({ text: 'pensando mais', md: true, full: true }));
+  await new Promise((r) => setTimeout(r, 60));
   expect(chat.use.getState().preview).toBe('pensando mais');
 
   created[0].trigger(
@@ -936,6 +937,36 @@ test.each(['codex', undefined])('interaction_id distingue formulários idêntico
   created[0].trigger('ask_question', 'null');
   expect(chat.use.getState().askOpen).toBe(false);
   expect(chat.use.getState().stateEvent?.interaction_id).toBe('approval-a');
+});
+
+test('tokens de prévia seguidos viram um setState por quadro, com o primeiro na hora', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    const vistos: string[] = [];
+    const unsub = chat.use.subscribe((s, prev) => { if (s.preview !== prev.preview) vistos.push(s.preview); });
+    created[0].trigger('preview', JSON.stringify({ text: 'a' }));
+    expect(chat.use.getState().preview).toBe('a');
+    created[0].trigger('preview', JSON.stringify({ text: 'ab' }));
+    created[0].trigger('preview', JSON.stringify({ text: 'abc' }));
+    expect(chat.use.getState().preview).toBe('a');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(chat.use.getState().preview).toBe('abc');
+    expect(vistos).toEqual(['a', 'abc']);
+    // O bloco real apaga também o que ainda esperava o quadro.
+    created[0].trigger('preview', JSON.stringify({ text: 'abcd' }));
+    created[0].trigger('message', JSON.stringify(ev({ id: 'm:9', kind: 'assistant_msg', text: 'fim' })));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(chat.use.getState().preview).toBe('');
+    unsub();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('preview md flag espelha no store', async () => {

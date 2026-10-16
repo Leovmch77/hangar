@@ -1,7 +1,8 @@
-import type { ReactNode, Ref } from 'react';
-import { useWindowDimensions } from 'react-native';
+import { useContext, useState, type ReactNode, type Ref } from 'react';
+import { useWindowDimensions, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import Animated, { interpolate, useAnimatedStyle, useReducedMotion, type SharedValue } from 'react-native-reanimated';
+import Animated, { interpolate, useAnimatedReaction, useAnimatedStyle, useReducedMotion, type SharedValue } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import ReanimatedDrawerLayout, {
   DrawerKeyboardDismissMode,
@@ -9,6 +10,7 @@ import ReanimatedDrawerLayout, {
   type DrawerLayoutMethods,
 } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Glass } from '../../ui/Glass';
+import { WorkingMarkPaused } from '../../ui/WorkingMark';
 import { SessionList } from './SessionList';
 
 // Gaveta de sessões da tela inicial e do chat. Ocupa a altura toda (passa por baixo da barra de
@@ -55,21 +57,31 @@ function DrawerContent({ progress, children }: { progress?: SharedValue<number>;
   );
 }
 
-// A sombra acompanha a abertura: fixa, ela vazaria na borda esquerda com a gaveta fechada.
+// A sombra acompanha a abertura: fixa, ela vazaria na borda esquerda com a gaveta fechada. Anima só
+// a opacidade de uma sombra pronta; o vidro e as marcas de trabalho só existem com a gaveta aberta.
 function DrawerPanel({ progress, children }: { progress: SharedValue<number>; children: ReactNode }) {
-  const shadow = useAnimatedStyle(() => ({
-    boxShadow: `0px 0px 28px rgba(0,0,0,${0.35 * progress.value})`,
-  }));
+  const [open, setOpen] = useState(false);
+  const paused = useContext(WorkingMarkPaused);
+  useAnimatedReaction(() => progress.value > 0, (now, before) => {
+    if (now !== before) scheduleOnRN(setOpen, now);
+  });
+  const shadow = useAnimatedStyle(() => ({ opacity: progress.value }));
   return (
-    <Animated.View style={[styles.drawerShadow, shadow]}>
-      <Glass variant="panel" style={styles.drawer}>{children}</Glass>
-    </Animated.View>
+    <View style={styles.content}>
+      <Animated.View style={[StyleSheet.absoluteFill, styles.shadow, shadow]} pointerEvents="none" />
+      <View style={styles.panel}>
+        {open ? <Glass variant="panel" style={[StyleSheet.absoluteFill, styles.drawer]} pointerEvents="none" /> : null}
+        <WorkingMarkPaused.Provider value={paused || !open}>{children}</WorkingMarkPaused.Provider>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create(() => ({
   content: { flex: 1, backgroundColor: 'transparent' },
-  drawerShadow: { flex: 1 },
+  // O recorte fica dentro: a sombra é de fora da caixa.
+  panel: { flex: 1, overflow: 'hidden' },
+  shadow: { boxShadow: '0px 0px 28px rgba(0,0,0,0.35)' },
   // Altura toda e colada na borda: só o fio do lado que fica sobre a tela.
   drawer: { flex: 1, borderRadius: 0, borderWidth: 0, borderRightWidth: StyleSheet.hairlineWidth },
 }));

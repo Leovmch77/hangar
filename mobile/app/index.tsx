@@ -2,10 +2,11 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { BackHandler, Keyboard, PanResponder, Platform, Text, View } from 'react-native';
 import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DrawerLayoutMethods } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Screen } from '../src/ui/Screen';
+import { WorkingMarkPaused } from '../src/ui/WorkingMark';
 import { Icon } from '../src/ui/Icon';
 import { SessionsDrawer } from '../src/features/sessions/SessionsDrawer';
 import { SessionList } from '../src/features/sessions/SessionList';
@@ -19,6 +20,7 @@ import { useAparencia, type HomeScreen } from '../src/stores/aparencia';
 
 export default function Index() {
   const router = useRouter();
+  const focused = useIsFocused();
   const params = useLocalSearchParams<{ compose?: string | string[] }>();
   const compose = Array.isArray(params.compose) ? params.compose[0] : params.compose;
   const activeId = useServers((s) => s.activeId);
@@ -68,7 +70,9 @@ export default function Index() {
     </Pressable>
   );
 
+  // Com o chat por cima, as marcas desta tela param.
   return (
+    <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
       <SessionsDrawer ref={drawer} onClose={closeDrawer} onNewConversation={newFromDrawer} onOpenServers={() => setServersOpen(true)}>
         <View style={styles.bar} {...swipe.panHandlers}>
@@ -89,6 +93,7 @@ export default function Index() {
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
     </Screen>
+    </WorkingMarkPaused.Provider>
   );
 }
 
