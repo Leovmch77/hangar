@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`hangar-open <claude|pi|omp|kimi> [args do CLI]`: chamado pelos wrappers de shell fora do tmux e em
 terminal. Pede a sessão ao lançador do Hangar (`hangar-server open`, o mesmo do app) e anexa o
-terminal a ela. Saída 100 = os argumentos não cabem no pedido, ou não há `hangar-server`: o wrapper
+terminal a ela. Saída 100 = os argumentos não cabem no pedido, ou não há `hangar-server` que abra (ausente, antigo ou sem token): o wrapper
 roda o CLI cru. Qualquer outra saída diferente de 0 é erro já mostrado; não se abre uma segunda vez.
 """
 import json
@@ -74,6 +74,11 @@ def main() -> int:
         print(f"hangar: hangar-server não encontrado; abrindo o {provider} sem o Hangar", file=sys.stderr)
         return RAW
     opened = subprocess.run([exe, "open", json.dumps(body)], stdout=subprocess.PIPE, text=True)
+    # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado: segue cru.
+    if opened.returncode in (2, 4):
+        print(f"hangar: o hangar-server não abriu a sessão (saída {opened.returncode}); abrindo o {provider} sem o Hangar",
+              file=sys.stderr)
+        return RAW
     if opened.returncode != 0:
         # Saída 3 (resolvido mas não aberto aqui) traz o spec no stdout.
         if opened.stdout.strip():

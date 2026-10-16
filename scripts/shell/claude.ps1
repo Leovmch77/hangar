@@ -117,10 +117,15 @@ function claude {
                     tmux attach-session -t "=$nome"
                     return
                 }
-                # Saida 3 (resolvido mas nao aberto aqui) traz o spec no stdout.
-                if ($saida) { [Console]::Error.WriteLine(($saida -join "`n")) }
-                $global:LASTEXITCODE = $codigo
-                return
+                # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado: segue cru.
+                if ($codigo -eq 2 -or $codigo -eq 4) {
+                    [Console]::Error.WriteLine("hangar: o hangar-server nao abriu a sessao (saida $codigo); abrindo o claude sem o Hangar")
+                } else {
+                    # Saida 3 (resolvido mas nao aberto aqui) traz o spec no stdout.
+                    if ($saida) { [Console]::Error.WriteLine(($saida -join "`n")) }
+                    $global:LASTEXITCODE = $codigo
+                    return
+                }
             }
         }
     }

@@ -607,6 +607,8 @@ mkdir -p "$HS_DIR"
 cat >"$HS_DIR/hangar-server" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = open ] || { echo "fake hangar-server: esperava open, veio '$1'" >&2; exit 2; }
+# 2 = binário antigo sem `open`; 4 = sem token no .env. Nos dois nada foi enviado.
+[ -n "${CP_TEST_HS_EXIT:-}" ] && { echo "fake hangar-server: saída $CP_TEST_HS_EXIT" >&2; exit "$CP_TEST_HS_EXIT"; }
 printf '%s' "$2" > "$CP_TEST_HS"
 if [ -n "${CP_TEST_HS_FAIL:-}" ]; then echo '{"detail":"recusado no teste"}' >&2; exit 1; fi
 echo '{"name":"x","provider":"qualquer","warnings":[]}'
@@ -641,6 +643,7 @@ tty_case() {
     [ -n "${CASE_ENGINE:-}" ] && extra+=("CP_ENGINE=$CASE_ENGINE" "CP_ENGINES_FILE=$CP_ENGINES_FILE")
     [ -n "${CASE_PROFILE:-}" ] && extra+=("OMP_PROFILE=$CASE_PROFILE")
     [ "$mode" = fail ] && extra+=(CP_TEST_HS_FAIL=1)
+    case "$mode" in exit*) extra+=("CP_TEST_HS_EXIT=${mode#exit}") ;; esac
     [ "$mode" = pipe ] && pty=()
     if [ "$sh" = fish ]; then
         run=(fish --no-config -c 'source $argv[1]; '"$cli"' $argv[2..-1]; echo "RC=$status" > $CP_TEST_RC' \
@@ -712,6 +715,12 @@ for SH in bash zsh fish; do
     d=$(tty_case "$SH" claude none)
     check_raw "$SH claude sem hangar-server vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+$'
     grep -qF 'hangar-server não encontrado' "$d/tty" || { echo "FAIL: $SH claude sem hangar-server — sem aviso"; fail=1; }
+
+    for code in 2 4; do
+        d=$(tty_case "$SH" claude "exit$code")
+        check_raw "$SH claude hangar-server sai $code vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+$'
+        grep -qF 'abrindo o claude sem o Hangar' "$d/tty" || { echo "FAIL: $SH claude hangar-server sai $code — sem aviso"; fail=1; }
+    done
 
     d=$(tty_case "$SH" claude fail)
     if [ -f "$d/cli" ] || grep -q attach-session "$d/tmux" 2>/dev/null || grep -qx 'RC=0' "$d/rc" 2>/dev/null \
