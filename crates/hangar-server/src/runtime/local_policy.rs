@@ -213,7 +213,7 @@ fn default_effort(config_dir: &Value) -> Option<String> {
     settings.get("effortLevel").and_then(text).map(str::to_owned)
 }
 
-fn local_hhmm(secs: i64) -> Option<String> {
+pub(crate) fn local_hhmm(secs: i64) -> Option<String> {
     #[cfg(unix)]
     {
         // A crate `libc` não expõe `tzset`.

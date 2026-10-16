@@ -192,6 +192,20 @@ async fn the_continue_note_goes_ahead_of_what_waited_in_the_held_queue() {
 }
 
 #[tokio::test]
+async fn the_limit_switch_that_did_not_happen_shows_in_the_live_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (registry,_,cano) = opened(dir.path()).await;
+    let mut live = registry.live("session");
+    registry.show_limit_problem("session",Some(("limit_switch_no_room".into(),"17:30".into()))).await;
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(10),live.wait_for(|state|state.as_ref()
+        .is_some_and(|state|state.public_state["problema"] == "limit_switch_no_room"))).await;
+    let state = shown.expect("o estado ao vivo não mostrou o problema").unwrap().clone().unwrap();
+    assert_eq!(state.public_state["problema_detalhe"],"17:30");
+    registry.close("key",1).await.unwrap();
+    cano.abort();
+}
+
+#[tokio::test]
 async fn readonly_headless_binding_comes_from_the_owner_feed() {
     let dir=tempfile::tempdir().unwrap();let (registry,_,cano)=opened(dir.path()).await;
     let binding=registry.interaction_binding_readonly("session").await.unwrap();assert_eq!(binding.key,"key");assert_eq!(binding.generation,1);assert_eq!(binding.conversation,"sid-1");

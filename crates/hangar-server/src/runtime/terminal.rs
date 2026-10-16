@@ -1352,6 +1352,8 @@ impl Executor {
         let rows=self.action(Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:entry}).await?;
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();
+        // A sessão voltou a receber mensagem: o aviso da troca por limite que não aconteceu já passou.
+        if let Some(sender)=&self.options.status {terminal_status::publish_limit(sender,None);}
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
         let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id),steer).await?;
         Ok(json!({"drained":1,"reply":outcome}))

@@ -470,7 +470,7 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
 async fn terminal_runtime_status_reopening_resets_old_error_before_subscribing() {
     let f=Fixture::new().await;
     for _ in 0..2 {
-        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None});
+        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None,limit:None});
         let h=f.start();
         h.snapshot().await.unwrap();
         let late=f.status.subscribe();

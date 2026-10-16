@@ -317,6 +317,15 @@ impl ClaudeEngine {
         effects.push(Effect::Policy { kind:kind.into(),request_id,payload });
     }
 
+    /// Problema que vem de fora do motor; o próximo turno bem-sucedido o apaga, como os dele.
+    pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        let mut effects = Vec::new();
+        self.changed(&mut effects,false);
+        effects
+    }
+
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
         // A faixa recebe `isWorking`: começo e fim de turno pedem um desenho novo dela.
         let (now,working) = (self.clock.monotonic_s,self.in_progress);

@@ -1000,6 +1000,21 @@ impl RuntimeRegistry {
             EntryHandle::CodexTerminal {..}=>Err(failure("runtime_provider")),
         }
     }
+    /// Por que a sessão Claude ficou parada no limite, no estado ao vivo dela. Sem terminal o ator o leva até
+    /// o próximo turno bom; com terminal ele fica no canal de estado até a próxima entrega ou `None`.
+    pub async fn show_limit_problem(&self,name:&str,problem:Option<(String,String)>) {
+        let handle={
+            let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name&&entry.provider=="claude");
+            match (matches.next(),matches.next()) {(Some(entry),None)=>entry.handle.clone(),_=>return}
+        };
+        match handle {
+            EntryHandle::Headless(handle)=>if let Some((code,detail))=problem && let Err(error)=handle.show_problem(&code,Some(detail)).await {
+                tracing::warn!(session=%name,code=%error.code,"o problema do limite não chegou ao estado da sessão");
+            },
+            EntryHandle::Terminal {..}=>super::terminal_status::publish_limit(&self.terminal_status_sender(name),problem),
+            EntryHandle::CodexTerminal {..}=>{},
+        }
+    }
     /// Uma ação na fila durável da sessão viva `name`, pelo ator dela.
     pub async fn queue_action(&self,name:&str,id:String,action:Action)->Result<Value,RuntimeError> {
         let handle={

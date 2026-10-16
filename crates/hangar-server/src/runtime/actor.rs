@@ -138,6 +138,10 @@ impl RuntimeEngine {
     fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
         match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
     }
+    /// O problema que vem de fora do ator (`Message::Problem`), nos dois provedores.
+    fn show_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(core)=>core.set_problem(code,detail) }
+    }
     pub fn with_interactions(mut self,key:String,store:Arc<crate::interactions::InteractionStore>) -> Result<Self,RuntimeError> {
         match &mut self.core {
             Core::Claude(core)=>core.set_interactions(key.clone(),store.clone()),
@@ -381,6 +385,8 @@ enum Message {
     Stop { response:oneshot::Sender<Result<(),RuntimeError>>,kill:bool },
     LifecycleReady {proof:ModeProof,response:oneshot::Sender<Result<(),RuntimeError>>},
     HoldTurns(oneshot::Sender<Result<TurnHold,RuntimeError>>),
+    /// Problema que o motor não vê (a troca por limite que não aconteceu); sai no próximo turno bom.
+    Problem { code:String,detail:Option<String> },
 }
 
 /// Recusa da `hold_turns`: turno em voo, pedido do app-server pendente ou fila já despachando.
@@ -436,6 +442,9 @@ impl RuntimeHandle {
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
+    }
+    pub async fn show_problem(&self,code:&str,detail:Option<String>) -> Result<(),RuntimeError> {
+        self.sender.send(Message::Problem { code:code.to_owned(),detail }).await.map_err(|_|self.gone("runtime_closed"))
     }
     pub async fn confirm(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|self.gone("runtime_closed"))?;
@@ -1297,6 +1306,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Job::Root { id,result }
                         });
                     }
+                    Message::Problem { code,detail } => { effects.extend(engine.show_problem(&code,detail)); }
                     Message::Mods { call,deadline,response } => {
                         effects.extend(take_mods(&mut engine,&mut mods_waiters,&mut mods_token,call,deadline,response,clock(start)));
                     }

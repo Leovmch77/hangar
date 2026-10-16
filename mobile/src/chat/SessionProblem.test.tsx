@@ -21,5 +21,7 @@ describe('SessionProblem', () => {
   it('traduz os códigos do estado do Rust', async () => {
     expect(await texto('state_facts_unavailable')).toBe(m.problema_state_facts_unavailable());
     expect(await texto('permission_observe_failed')).toBe(m.problema_permission_observe_failed());
+    expect(await texto('limit_switch_no_room')).toBe(m.problema_limit_switch_no_room());
+    expect(await texto('limit_switch_failed')).toBe(m.problema_limit_switch_failed());
   });
 });

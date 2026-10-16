@@ -130,9 +130,14 @@ pub trait Host: Send + Sync {
     fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()>;
     /// A espera entre duas tentativas com a sessão ocupada.
     fn pause(&self) -> BoxFuture<'_,()>;
+    /// Por que a sessão ficou parada, no estado ao vivo dela; `Clear` apaga depois da troca feita.
+    fn show_problem<'a>(&'a self,name:&'a str,problem:LimitProblem) -> BoxFuture<'a,()>;
     fn diary(&self,name:&str,code:&str,reason:&'static str);
     fn now(&self) -> f64;
 }
+
+#[derive(Debug,PartialEq)]
+pub enum LimitProblem { NoRoom { resets_at:Option<f64> }, Failed { code:String }, Clear }
 
 #[derive(Default)]
 struct Switcher {
@@ -194,14 +199,14 @@ impl Switcher {
         host.release(&hit.name).await;
         let Some(outcome) = outcome else { return };
         let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
-        match outcome {
+        match &outcome {
             Outcome::Switched { label,explicit } => {
                 // Na conta nova o limite é outro, mesmo com o mesmo reset arredondado.
                 if let Ok(mut handled) = self.handled.lock() { handled.remove(&hit.name); }
                 tracing::info!(session=%hit.name,window=%hit.limit.window,to=%label,explicit,"limite de uso: sessão reaberta em outra conta");
                 report("switched","limite de uso: a sessão reabriu na conta de mais folga e recebeu o recado para continuar");
                 // O limite vence a conta escolhida pela pessoa, e isso fica registrado.
-                if explicit { report("explicit_account","limite de uso: a conta escolhida pela pessoa foi trocada"); }
+                if *explicit { report("explicit_account","limite de uso: a conta escolhida pela pessoa foi trocada"); }
             }
             Outcome::Stayed("limit_switch_no_room") => {
                 tracing::warn!(session=%hit.name,window=%hit.limit.window,"limite de uso: nenhuma conta com folga; a sessão fica parada");
@@ -223,6 +228,13 @@ impl Switcher {
                 report(&code,"limite de uso: a sessão seguiu ocupada e a troca de conta não aconteceu");
             }
         }
+        let problem = match &outcome {
+            Outcome::Switched { .. }=>Some(LimitProblem::Clear),
+            Outcome::Stayed("limit_switch_no_room")=>Some(LimitProblem::NoRoom { resets_at:hit.limit.resets_at }),
+            Outcome::Failed(code) | Outcome::Busy(code)=>Some(LimitProblem::Failed { code:code.clone() }),
+            Outcome::Stayed(_)=>None,
+        };
+        if let Some(problem) = problem { host.show_problem(&hit.name,problem).await; }
     }
 }
 
@@ -277,6 +289,15 @@ impl Host for Native {
     }
     fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()> { self.runtime.release_limit(name); Box::pin(async {}) }
     fn pause(&self) -> BoxFuture<'_,()> { Box::pin(tokio::time::sleep(std::time::Duration::from_secs(3))) }
+    fn show_problem<'a>(&'a self,name:&'a str,problem:LimitProblem) -> BoxFuture<'a,()> {
+        let shown = match problem {
+            LimitProblem::NoRoom { resets_at }=>Some(("limit_switch_no_room".to_owned(),
+                resets_at.and_then(|at|crate::runtime::local_policy::local_hhmm(at.floor() as i64)).unwrap_or_default())),
+            LimitProblem::Failed { code }=>Some(("limit_switch_failed".to_owned(),code)),
+            LimitProblem::Clear=>None,
+        };
+        Box::pin(self.runtime.show_limit_problem(name,shown))
+    }
     fn diary(&self,name:&str,code:&str,reason:&'static str) { self.st.diag.report("session.limit_switch",name,code,reason); }
     fn now(&self) -> f64 { crate::state::monitor::wall_now() }
 }
@@ -404,6 +425,7 @@ mod tests {
         reopens:Mutex<Vec<Reopen>>,
         log:Mutex<Vec<String>>,
         diary:Mutex<Vec<String>>,
+        problems:Mutex<Vec<LimitProblem>>,
         /// A sessão fechou ou foi renomeada antes da troca.
         gone:std::sync::atomic::AtomicBool,
     }
@@ -411,7 +433,7 @@ mod tests {
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
             Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
-                reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),gone:Default::default() }
+                reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),problems:Mutex::new(Vec::new()),gone:Default::default() }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
         fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
@@ -441,6 +463,9 @@ mod tests {
         }
         fn release<'a>(&'a self,_:&'a str) -> BoxFuture<'a,()> { Box::pin(async move { self.log.lock().unwrap().push("release".into()); }) }
         fn pause(&self) -> BoxFuture<'_,()> { Box::pin(async move { self.log.lock().unwrap().push("pause".into()); }) }
+        fn show_problem<'a>(&'a self,_:&'a str,problem:LimitProblem) -> BoxFuture<'a,()> {
+            Box::pin(async move { self.problems.lock().unwrap().push(problem); })
+        }
         fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
         fn now(&self) -> f64 { 1000.0 }
     }
@@ -521,6 +546,24 @@ mod tests {
         switcher.handle(&fake,hit("/a",2000.0)).await;
         switcher.handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec!["release","release"],"sem folga e o aviso repetido também soltam a fila");
+    }
+
+    #[tokio::test]
+    async fn the_session_shows_why_it_stayed_stopped_and_a_switch_clears_it() {
+        let problems = |fake:&Fake|std::mem::take(&mut *fake.problems.lock().unwrap());
+        let fake = Fake::new("/a",vec![quota("/a",100.0)]);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(problems(&fake),vec![LimitProblem::NoRoom { resets_at:Some(2000.0) }]);
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().push(Reopen::Failed("erro_troca".into()));
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(problems(&fake),vec![LimitProblem::Failed { code:"erro_troca".into() }]);
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(problems(&fake),vec![LimitProblem::Clear]);
+        let fake = Fake::new("/b",vec![quota("/c",20.0)]);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert!(problems(&fake).is_empty(),"aviso velho não mexe no estado");
     }
 
     #[tokio::test]

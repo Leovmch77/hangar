@@ -17,7 +17,7 @@ pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
         };
         return Some(("runtime_falhou".into(), text.chars().take(300).collect()));
     }
-    let stalled = view.input_stalled.as_deref().filter(|s| !s.is_empty())?;
+    let Some(stalled) = view.input_stalled.as_deref().filter(|s| !s.is_empty()) else { return view.limit.clone() };
     let code = match stalled {
         "composer_busy" => "terminal_input_composer_busy",
         "composer_unreadable" => "terminal_input_composer_unreadable",
@@ -39,7 +39,7 @@ pub(crate) fn explained(stalled: Option<&str>, error: &str) -> bool {
 }
 
 /// Problema que veio do runtime, e não da observação nem dos fatos.
-pub fn is_runtime_problem(code: &str) -> bool { code == "runtime_falhou" || code.starts_with("terminal_input_") }
+pub fn is_runtime_problem(code: &str) -> bool { code == "runtime_falhou" || code.starts_with("terminal_input_") || code.starts_with("limit_switch_") }
 
 /// O pane aceita texto livre: fora de pergunta e de menu.
 pub fn deliverable(event: &StateEvent) -> bool {
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn runtime_problem_like_python() {
         let v = |error: Option<&str>, message: Option<&str>, stalled: Option<&str>| RuntimeView {
-            error: error.map(Into::into), message: message.map(Into::into), input_stalled: stalled.map(Into::into) };
+            error: error.map(Into::into), message: message.map(Into::into), input_stalled: stalled.map(Into::into), limit: None };
         assert_eq!(runtime_problem(&v(None, None, None)), None);
         assert_eq!(runtime_problem(&v(Some("queue_io"), Some("disco"), Some("composer_busy"))),
             Some(("runtime_falhou".into(), "queue_io: disco".into())), "erro vence a entrada parada");
@@ -90,5 +90,15 @@ mod tests {
         assert_eq!(runtime_problem(&v(Some("terminal_facts"), None, Some("no_safe_delivery"))),
             Some(("terminal_input_no_safe_delivery".into(), "no_safe_delivery".into())));
         assert_eq!(runtime_problem(&v(Some("queue_io"), None, Some("no_safe_delivery"))).unwrap().0, "runtime_falhou", "outro erro continua vencendo");
+    }
+
+    #[test]
+    fn the_failed_limit_switch_shows_with_its_own_code_behind_errors_and_stalls() {
+        let limit = Some(("limit_switch_no_room".to_owned(), "17:30".to_owned()));
+        let view = RuntimeView { limit: limit.clone(), ..Default::default() };
+        assert_eq!(runtime_problem(&view), limit);
+        assert!(is_runtime_problem("limit_switch_no_room") && is_runtime_problem("limit_switch_failed"), "sai e entra sem rodada nova");
+        let stalled = RuntimeView { input_stalled: Some("composer_busy".into()), ..view };
+        assert_eq!(runtime_problem(&stalled).unwrap().0, "terminal_input_composer_busy");
     }
 }
