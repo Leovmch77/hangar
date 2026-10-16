@@ -477,7 +477,8 @@ impl RuntimeRegistry {
         if let Some((target,_))=self.claude_terminal_entry(name).await {let _=self.close_claude_entry(&target.key,target.generation).await;}
         let Some(watcher)=self.watcher_ref() else {return};
         let mut command=crate::terminal_input::child_command(watcher.mux_program());
-        command.args(["kill-session","-t",&format!("={name}")]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        let session=if cfg!(windows) {name.to_owned()} else {format!("={name}")};
+        command.args(["kill-session","-t",&session]).stdin(std::process::Stdio::null()).kill_on_drop(true);
         let _=tokio::time::timeout(Duration::from_secs(5),command.output()).await;
     }
 

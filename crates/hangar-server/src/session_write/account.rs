@@ -121,9 +121,12 @@ impl Between for MoveConversation {
                     .map_err(|_|io_refusal("erro_mover_conversa","a conversa não foi movida".into()))?
                     .map_err(|e|io_refusal("erro_mover_conversa",format!("nao consegui mover a conversa de conta ({e}); ela ficou na conta de antes")))?;
             }
-            // A confiança na pasta é por conta: sem ela o terminal abre no aviso, em "No, exit".
-            let config=account_dir(&self.env,to);
-            let file=if config==self.env.home.join(".claude") {self.env.home.join(".claude.json")} else {config.join(".claude.json")};
+            // A confiança na pasta é por conta: sem ela o terminal abre no aviso, em "No, exit". O arquivo
+            // é o que o CLI daquela conta lê, pela mesma regra do `-e CLAUDE_CONFIG_DIR` (S-07).
+            let terminal=crate::session_open::terminal::TerminalEnv { windows:self.windows,program:String::new(),display:Vec::new(),
+                server_config_dir:self.env.base.get("CLAUDE_CONFIG_DIR").filter(|v|!v.is_empty()).cloned(),
+                default_config_dir:self.env.home.join(".claude"),birth:std::time::Duration::ZERO };
+            let file=crate::session_open::claude::claude_json(&terminal,&self.env.home,to.account.config_dir());
             crate::session_open::claude::pretrust(&file,&to.cwd,self.windows);
             Ok(())
         })
@@ -167,14 +170,15 @@ pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conn
     let (fwd,owner)=gate(&st,peer,&req);
     let runtime=st.state.runtime.get().cloned();
     let (Some(runtime),true,Some(name))=(runtime,owner,session_name(req.uri().path())) else {return pass(&st,req,&fwd).await};
-    let spec=match runtime.claude_spec(&name).await {
-        None=>return pass(&st,req,&fwd).await,
-        Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({})),req.headers()),
-        Some(Ok(spec))=>spec,
-    };
     let env=runtime.codex_environment();
-    // No motor, mesmo a conta atual é destino: a sessão volta para a conta Claude sem mover nada.
-    let current=(!matches!(spec.account,Account::Engine{..})).then(||account_dir(&env,&spec).to_string_lossy().into_owned());
+    // No motor, mesmo a conta atual é destino: a sessão volta para a conta Claude sem mover nada. Sessão
+    // que não é Claude não tem conta Claude atual: todas são destino.
+    let current=match runtime.claude_spec(&name).await {
+        Some(Ok(spec))=>(!matches!(spec.account,Account::Engine{..})).then(||account_dir(&env,&spec).to_string_lossy().into_owned()),
+        Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({})),req.headers()),
+        None if runtime.has_entry(None,&name).await=>None,
+        None=>return reply(StatusCode::NOT_FOUND,detail_body("erro_sessao_inexistente","sessão não encontrada",json!({})),req.headers()),
+    };
     let catalog=match st.accounts.claude_catalog() {
         Ok(catalog)=>catalog,
         Err(error)=>return reply(StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),detail_body(error.code,&error.message,json!({})),req.headers()),
