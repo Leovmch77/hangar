@@ -1354,6 +1354,19 @@ fn a_reused_name_does_not_inherit_the_dead_session_queue() {
     server::forget_queue(base.path(), "nenhuma").expect("sem fila é nada a apagar");
 }
 
+/// O vínculo `then` (`ThenLink`, `.hangar-chain/<nome>.json`) da sessão morta sai com o nome reusado,
+/// como `ThenLink(name).clear()`; o de outro nome fica.
+#[test]
+fn a_reused_name_does_not_inherit_the_dead_session_then_link() {
+    let base = tempfile::tempdir().unwrap();
+    let chain = base.path().join(".hangar-chain");
+    std::fs::create_dir_all(&chain).unwrap();
+    for file in ["par-externo.json", "par-externo.json.tmp", "outra.json"] { std::fs::write(chain.join(file), "{}").unwrap(); }
+    server::forget_queue(base.path(), "par externo").unwrap();
+    let left: Vec<String> = std::fs::read_dir(&chain).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(left, ["outra.json"]);
+}
+
 /// O provedor lembrado vai ao `runtime-config.json` sem mexer no resto dele; o mesmo valor não regrava
 /// e o arquivo ilegível fica como está, com a falha devolvida.
 #[test]

@@ -541,10 +541,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3
   quedas em 60 s, um segundo `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo
   lifespan. O processo tem um modo só (`pending`/`rust`/`python`): queda 1–2 deixa as sessões
-  Claude sem dono por segundos (`pending`, até 30 s) e o Rust novo as reabre; só a desistência as
-  passa ao Python, cada uma uma vez. Isso ainda vale para perguntas, permissões e Codex com
-  terminal, contra o contrato da migração: o desenho de recuperação aguarda decisão do usuário e
-  não se mexe no Supervisor sem ela. O segredo interno nunca entra no `os.environ`. Formato de
+  Claude sem dono por segundos (`pending`, até 30 s) e o Rust novo as reabre; a desistência as
+  passa ao Python, cada uma uma vez, e o Supervisor religa o Rust sozinho com espera crescente
+  (`RETRY_DELAYS`, zera só após uma `CRASH_WINDOW` de pé): o Python solta as sessões pela passagem
+  normal (`leave_python`, de volta a `pending`; falhou = não sobe), depois a porta, e só então o
+  filho nasce; não subiu, nova desistência. Falha determinística só tenta de novo com o binário
+  mudado. Nunca duas portas nem dois donos; a saída dos SSE é do sinal real, não do `should_exit`. O segredo interno nunca entra no `os.environ`. Formato de
   `ChatEvent`, ids de evento e contrato interno
   mudam nos dois lados no mesmo commit. Mexeu no contrato interno (rotas `/internal`, eventos do
   `side-events`, variáveis do filho): suba `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL`

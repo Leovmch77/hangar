@@ -799,6 +799,61 @@ def test_third_crash_recovers_each_session_once(birth, monkeypatch):
     assert owner.slot("s1").phase == runtime_coordinator.Phase.Python
 
 
+def test_rust_back_after_give_up_takes_python_sessions_back(birth, monkeypatch):
+    from app.adapters.claude_headless.adapter import _Sessao
+    from app.runtime_adapter import LegacyBridge
+    owner, transport, _ = _opened(birth)
+    async def reconnect(self, descriptor, carry):
+        return {"hydrated":True}
+    monkeypatch.setattr(LegacyBridge, "reconnect", reconnect)
+    transport.alive = False
+    second = LockingTransport()
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.lease.close()
+        await owner.enter_pending()
+        await owner.enter_python(SimpleNamespace(containment_clean=lambda: True))
+        assert owner.slot("s1").phase == runtime_coordinator.Phase.Python
+        birth.adapter._sessions["s1"] = _Sessao("s1", birth.sessions.load("s1"))    # cliente da reserva
+        await owner.leave_python()
+        assert owner.mode == "pending"
+        await _enter(owner, second)
+    asyncio.run(scenario())
+    assert second.kinds() == ["open"] and owner.mode == "rust"
+    slot = owner.slot("s1")
+    assert slot.phase == runtime_coordinator.Phase.Rust and slot.lease is None and slot.store is None
+    assert "s1" not in birth.adapter._sessions, "o cliente Python solta o cano antes de o Rust abrir"
+    second.lease.close()
+
+
+def test_failed_retry_gives_sessions_back_to_python(birth, monkeypatch):
+    from app.runtime_adapter import LegacyBridge
+    owner, transport, _ = _opened(birth)
+    reconnected, hooks = [], []
+    async def reconnect(self, descriptor, carry):
+        reconnected.append(descriptor["name"])
+        return {"hydrated":True}
+    monkeypatch.setattr(LegacyBridge, "reconnect", reconnect)
+    async def python_hook():
+        hooks.append("python")
+    owner.mode_hooks["python"] = python_hook
+    transport.alive = False
+    contained = SimpleNamespace(containment_clean=lambda: True)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.lease.close()
+        await owner.enter_pending()
+        await owner.enter_python(contained)
+        await owner.leave_python()          # a tentativa de religar o Rust não subiu
+        await owner.enter_python(contained)
+    asyncio.run(scenario())
+    assert reconnected == ["s1", "s1"] and hooks == ["python", "python"] and owner.mode == "python"
+    slot = owner.slot("s1")
+    assert slot.phase == runtime_coordinator.Phase.Python and slot.lease is not None
+
+
 def test_transfer_recovery_waits_for_owner(birth):
     owner = _pending_owner(birth)
     ran = []
