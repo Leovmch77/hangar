@@ -100,7 +100,7 @@ Status: ready-for-agent
 - [x] **Step 5: Despacho provisório do `POST /api/sessions` no Rust**
   Por provider × com/sem terminal; o que ainda não migrou responde 421 e segue ao Python só durante
   a branch. Sai na Task 11.
-- [ ] **Step 6: Modo `python` e atualização**
+- [x] **Step 6: Modo `python` e atualização**
   `session_open_needs_rust_server` no app e no diário (feito em 99ddc16d5). A parte da atualização
   passou para a Task 5b (D-015).
 
@@ -137,21 +137,22 @@ claro pedindo reiniciar, e isso é avisado ao usuário antes)
   responde com o protocolo certo, o Python solta a porta e as sessões, e tudo volta ao Rust
   (`pending` → `rust`, como nas quedas 1–2). Nunca as duas portas ao mesmo tempo; nunca uma sessão
   com dois donos. Diário registra cada tentativa e a volta.
-- [ ] **Step 3: Registro e travas de troca no Rust**
-  O que o coordenador guarda (registro das sessões, travas de troca, `runtime_coordinator.py:377-395,
-  407-466, 791-833, 1659`) passa para o Rust.
+- [x] **Step 3: Registro e travas de troca no Rust → movido para a Task 6**
+  O Rust não descobre sessão Claude sozinho: toda entrada no `RuntimeRegistry` nasce de um open do
+  Python (`_send_managed` → `prepare_session`). Migrar o registro é a responsabilidade inteira, que
+  vai com a Task 6 (Claude sem terminal) e a 8 (reabrir). O `then` do nome reusado saiu (106247cca).
 - [ ] **Step 4: Apagar o Python substituído**
 
 ### Task 5b: Atualizar só com Python e Rust no mesmo contrato (D-015)
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Achar por que a trava de hoje falha**
+- [x] **Step 1: Achar por que a trava de hoje falha**
   `pinned_target` (`atualizar.py:686`) já deveria segurar o checkout no último commit com o contrato
   do binário publicado. Suspeita a provar: com o manifesto publicado e o build deste sistema ainda
   não pronto, ele devolve o topo (`:719-720`) e o Python passa à frente do Rust. Provar com o diário
   de atualizações e um caso reproduzido; ler antes "Regras vigentes" de `docs/decisoes/instalacao.md`.
-- [ ] **Step 2: Atualização atômica**
+- [x] **Step 2: Atualização atômica**
   Só troca o checkout quando há binário do Rust com o mesmo contrato para este sistema; senão fica
   onde está e mostra "atualização aguardando o build". Inclui `git pull` manual no aviso do
   `verificar-local`/instalador quando aplicável.
@@ -163,7 +164,10 @@ Status: ready-for-agent
 
 - [ ] **Step 1: Criar Claude sem terminal no Rust**
   Grava o registro e lança pelo plano de lançamento do spec, não pela receita do processo vivo.
-  Itens CSH.
+  Itens CSH. Inclui o registro das sessões e as travas de troca do coordenador Python (veio da Task 5,
+  Step 3): `_reopen_registered`, `register_claude_sessions`, `_register_durable_terminals`,
+  `_has_pending`, o primeiro open repassado ao Python (`session_write/mod.rs:134`), e a metade
+  "registro em espera" da rota `/internal/sessions/{name}/release`.
 - [ ] **Step 2: Relançar e reabrir pelo spec**
   `schedule_claude_respawn`/`reopen_headless_locked` usam o spec; ordem da `SessionChange` da spec
   (prepara parada, encerra e confirma, dá a partida e confirma); o modo observado da CLI vai ao
@@ -245,7 +249,7 @@ Status: ready-for-agent
   `claude`/`pi`/`omp`/`kimi` (`.posix.sh`, `.fish`; `claude.ps1`) chamam o comando de terminal da
   Task 3. `-p`, pipe, `--resume` explícito e flag desconhecida seguem rodando o CLI cru
   (`claude.posix.sh:59-100`).
-- [ ] **Step 3: Convidado e Connect**
+- [x] **Step 3: Convidado e Connect** (a08765f72..85fdea970: o Rust grava o dono no `guests.json` sob a trava comum; o Connect vai pela ponte do Claude com `guest: <id>`)
   Criar como convidado e pela porta 8768 sem Rust → Python → Rust e sem dois escritores do
   `guests.json` (`guest_user_gate.py:182-195`, `guest_users.py:170-199`).
 - [ ] **Step 4: Chamadores que faltavam**
