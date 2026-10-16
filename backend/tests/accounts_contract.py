@@ -426,19 +426,6 @@ def _worker() -> None:
     launcher_options = {}
     original_popen = subprocess.Popen
     from app import account_lifecycle
-    original_publish = account_lifecycle.publish_terminal_birth
-
-    def publish_at_barrier(*args, **kwargs):
-        barrier = barriers.get("birth_publication")
-        if barrier:
-            barrier[0].set()
-            if not barrier[1].wait(25):
-                raise RuntimeError("barreira de publicação não foi liberada")
-        if launcher_options.get("unknown_instance"):
-            with patch.object(account_bridge, "terminal_instances", side_effect=RuntimeError("snapshot indisponível")):
-                return original_publish(*args, **kwargs)
-        return original_publish(*args, **kwargs)
-
     def launcher_pids(key):
         """Dublê da varredura do Rust: o lançador vivo que nomeia a conta no `--codex-home`."""
         return [child.pid for child in children if child.poll() is None and "--codex-home" in child.args
@@ -622,13 +609,6 @@ def _worker() -> None:
             task.cancel()
         return {"cancelled": task is not None}
 
-    @app.post("/__contract__/reserve-other")
-    async def reserve_other():
-        from app import codex_contas
-        lease = service.reserve_creation(codex_contas.resolve_account("zeta"))
-        lease.release()
-        return {"ok": True}
-
     @app.get("/__contract__/usage")
     def usage():
         """O que o Python publica para o leitor de uso do Rust (`accounts/usage.rs`): processo com a
@@ -651,12 +631,6 @@ def _worker() -> None:
         assert published.wait(20)
         return {"published": True}
 
-    @app.post("/__contract__/retire-birth")
-    def retire_birth():
-        for state in list(api._codex_live_leases.values()):
-            state["lease"].retire_birth()
-        return {"ok": True}
-
     @app.post("/__contract__/stop-launcher")
     def stop_launcher():
         for child in children:
@@ -671,8 +645,6 @@ def _worker() -> None:
         for child in children:
             if child.poll() is None:
                 child.communicate(b"release\n", timeout=10)
-        for state in list(api._codex_live_leases.values()):
-            state["lease"].release()
         return {"ok": True}
 
     @app.middleware("http")
@@ -772,7 +744,6 @@ def _worker() -> None:
             patch.object(runtime_coordinator, "current", return_value=instance), \
             patch.object(api.app.state, "codex_contas_login", service, create=True), \
             patch.object(api.registry, "create", side_effect=create_at_barrier), \
-            patch.object(account_lifecycle, "publish_terminal_birth", side_effect=publish_at_barrier), \
             patch.object(api, "_codex_require_idle_preparation"), \
             patch.object(api, "_invalidate_lists"), \
             patch.object(codex_contas_sync, "_prepare_account_guarded", side_effect=prepare_at_barrier), \

@@ -131,74 +131,6 @@ from app import desktop_palette
 _log = logging.getLogger("hangar")
 
 
-_codex_live_leases: dict[str, dict] = {}
-
-
-def _codex_lease_released(name: str) -> None:
-    state = _codex_live_leases.pop(name, None)
-    if state is not None:
-        state["lease"].release()
-
-
-def _codex_lease_renamed(old: str, new: str) -> None:
-    state = _codex_live_leases.pop(old, None)
-    if state is not None:
-        state["renaming"] = True
-        state["revision"] = state.get("revision", 0) + 1
-        state["name"] = new
-        _codex_live_leases[new] = state
-
-
-def _codex_lease_rename_finished(name: str) -> None:
-    state = _codex_live_leases.get(name)
-    if state is not None:
-        state["renaming"] = False
-        state["revision"] = state.get("revision", 0) + 1
-
-
-async def _watch_codex_lease(state: dict) -> None:
-    def session_alive(name):
-        state["lease"].retire_birth()
-        return tmux.has_session(name)
-
-    try:
-        while True:
-            if state.get("renaming"):
-                await asyncio.sleep(0.05)
-                continue
-            name = state["name"]
-            revision = state.get("revision", 0)
-            try:
-                alive = await asyncio.to_thread(session_alive, name)
-            except Exception:
-                alive = True
-            if (state["name"] != name or state.get("revision", 0) != revision
-                    or state.get("renaming")):
-                continue
-            if not alive:
-                break
-            await asyncio.sleep(1)
-    finally:
-        current = _codex_live_leases.get(state["name"])
-        if current is state:
-            _codex_live_leases.pop(state["name"], None)
-        state["lease"].release()
-
-
-async def _hold_codex_lease(name: str, lease) -> None:
-    from app.account_lifecycle import complete_on_cancel
-    await complete_on_cancel(asyncio.to_thread(lease.mark_live, name))
-    state = {"name": name, "lease": lease, "renaming": False, "revision": 0}
-    _codex_live_leases[name] = state
-    task = asyncio.create_task(_watch_codex_lease(state), name=f"codex-lease-{name}")
-    tasks = getattr(app.state, "codex_creation_tasks", None)
-    if tasks is None:
-        tasks = set()
-        app.state.codex_creation_tasks = tasks
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
-
-
 def _codex_service():
     return getattr(app.state, "codex_contas_login", None)
 
@@ -416,7 +348,6 @@ async def _lifespan(app: FastAPI):
     app.state.codex_contas_login = codex_contas_login
     # Referência guardada: task sem dono pode ser coletada no meio.
     app.state.codex_auth_aquecer = asyncio.create_task(codex_contas_login.aquecer())
-    app.state.codex_creation_tasks = set()
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
         enabled=settings.omp_plugin_sync_enabled,
@@ -446,11 +377,6 @@ async def _lifespan(app: FastAPI):
         codex_warm_task.cancel()
         app.state.codex_auth_aquecer.cancel()
         await asyncio.gather(codex_warm_task, app.state.codex_auth_aquecer, return_exceptions=True)
-        creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
-        for creation_task in creation_tasks:
-            creation_task.cancel()
-        if creation_tasks:
-            await asyncio.gather(*creation_tasks, return_exceptions=True)
         try:
             await integracao_codex.fechar()
         except Exception:
@@ -794,8 +720,6 @@ app.include_router(share_bridge.router)
 app.include_router(migration_status.router)
 app.include_router(internal_api.router)
 registry = SessionRegistry()
-registry_mod.apos_saida_codex = _codex_lease_released
-registry_mod.apos_renomear_codex = _codex_lease_renamed
 terminal = TerminalInput()
 
 # Teto de mensagem: o _BodySizeLimitMiddleware ignora scope != http de propósito (api.py:83), então
@@ -2338,15 +2262,9 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
     body, account_source, avisos_extra = await _inherit_from_creator(body)
     headless = body.headless if body.headless is not None else (
         not body.read_only and body.provider in ("claude", "codex") and bool(runtime_config.get("headless_default")))
-    if body.provider in ("claude", "pi", "omp", "kimi") and not headless:
-        # Com terminal, Claude, Pi, omp e Kimi abrem no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
+    if (body.provider in ("claude", "pi", "omp", "kimi") and not headless) or body.provider == "codex":
+        # Com terminal (e o Codex nos dois modos) a sessão abre no Rust (`_open_in_rust`): aqui só chega com ele fora, antes de efeito.
         raise registry_mod.SessionOpenNeedsRust()
-    # Convidado fica na conta Codex padrão: as outras contas são do dono.
-    if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
-        connected = await _connected_codex_accounts()
-        if connected and not any(account.is_default for account in connected):
-            body = body.model_copy(update={"codex_account": connected[0].id})
-            avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
     if not explicit_account and body.provider == "claude" and not body.engine:
         # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
         # mais folga, e a resposta diz que trocou.
@@ -2495,17 +2413,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     if body.codex_account is not None and body.provider != "codex":
         raise HTTPException(400, detail=erro("codex_account_so_codex",
                                              "codex_account só vale para provider codex"))
-    codex_account_obj = None
-    codex_service = _codex_service() if body.provider == "codex" else None
-    if body.provider == "codex":
-        codex_account_obj = _resolve_codex_account(body.codex_account)
-        if body.read_only:
-            try:
-                await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(str(codex_account_obj.home),))
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
-        if body.codex_account is not None:
-            await _codex_require_idle_preparation(codex_account_obj, codex_service)
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -2515,9 +2422,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
         if body.engine not in await asyncio.to_thread(engines.listar):
             raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
-    # permission_mode só vale para claude — e para o Codex sem terminal (vira sandbox/approval).
-    if body.permission_mode is not None and body.provider != "claude" \
-            and not (body.provider == "codex" and body.headless):
+    if body.permission_mode is not None and body.provider != "claude":
         raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
     if body.omp_profile and body.provider != "omp":
         raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
@@ -2533,39 +2438,13 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
     try:
-        # O modo do Codex sem terminal tem lista própria (sem_terminal.MODOS), validada no registry.
-        model_args.validar(body.provider, body.model, body.effort,
-                           None if body.provider == "codex" else body.permission_mode)
+        model_args.validar(body.provider, body.model, body.effort, body.permission_mode)
     except ValueError as e:
         # permission_mode fora da lista deve ser 409 com código específico, não 400 genérico
         msg = str(e)
         if "permission_mode" in msg:
             raise HTTPException(409, detail=erro("erro_permissao_invalida", msg)) from None
         raise HTTPException(400, str(e)) from None
-    # O nível do Codex não tem lista fechada em model_args (varia POR MODELO), então quem cruza
-    # modelo×nível é o catálogo. Sem isto, `--effort ultra` num `gpt-5.5` sobe a sessão e o binário
-    # descarta o nível calado — sucesso reportado sobre escolha que não valeu.
-    if body.provider == "codex" and (body.model or body.effort or body.service_tier is not None):
-        try:
-            checar_kw = ({"codex_home": codex_account_obj.home}
-                         if body.codex_account is not None else {})
-            if body.service_tier is not None:
-                checar_kw["service_tier"] = body.service_tier
-            await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort,
-                                    **checar_kw)
-        except ValueError as e:
-            raise HTTPException(422, detail=erro("erro_codex_escolha_invalida", str(e), erro=str(e))) from None
-        except codex_models.CodexIndisponivel as e:
-            if body.service_tier == "priority":
-                raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido",
-                                                     f"Fast não pôde ser conferido: {e}", erro=str(e))) from None
-            # Catálogo fora do ar (ou `codex` ausente — o CodexAusente é um RuntimeError) não pode
-            # IMPEDIR de abrir sessão: mesma decisão da janela do motor, logo abaixo. A escolha
-            # segue pro comando e o CLI decide. A falha não some — fica no log.
-            _log.warning("codex: catalogo indisponivel, escolha nao conferida: %s", e)
-        except (codex_models.CodexRecusado, codex_models.CodexRespostaInvalida) as e:
-            raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido", str(e),
-                                                 erro=str(e))) from None
 
     if body.new_branch and body.branch is None:
         raise HTTPException(400, detail=erro("erro_criacao_sessao", "branch nova sem nome"))
@@ -2615,31 +2494,17 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             # sessão ainda cria"). A sessão sobe sem a var e o CLI usa o default dele.
             janela = None
 
-    codex_lease = None
-    if body.provider == "codex" and (body.codex_account is not None or codex_service is not None):
-        if codex_service is None:
-            raise HTTPException(503, detail=erro("codex_account_service_unavailable",
-                                                 "serviço de contas Codex indisponível"))
-        try:
-            codex_lease = codex_service.reserve_creation(codex_account_obj)
-        except codex_accounts.AccountError as exc:
-            raise HTTPException(exc.status, detail=erro(exc.code, "criação da conta Codex recusada",
-                                                        **exc.params)) from None
-
     async def _create_registry(kwargs: dict):
         """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
-        nonlocal codex_lease
         def create():
             if body.engine_account is not None:
                 kwargs["engine_account"] = body.engine_account
                 kwargs["engine_models"] = account_models
             from app.account_lifecycle import AccountKey, AccountLockError, acquire
             from contextlib import nullcontext
-            home = (codex_account_obj.home if body.provider == "codex"
-                    else Path(tmux.config_dir_de(body.config_dir)))
+            home = Path(tmux.config_dir_de(body.config_dir))
             try:
-                guard = (acquire(AccountKey.new("codex" if body.provider == "codex" else "claude", home))
-                         if body.provider in ("claude", "codex") else nullcontext())
+                guard = acquire(AccountKey.new("claude", home)) if body.provider == "claude" else nullcontext()
             except AccountLockError as exc:
                 # Exclusão ou login segura a conta: o app mostra "tente de novo", não um 500.
                 raise HTTPException(409, detail=erro(exc.code, "a conta está ocupada por outra operação")) from None
@@ -2654,31 +2519,11 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             return info
 
         worker = asyncio.create_task(asyncio.to_thread(create))
-        if codex_lease is None:
-            try:
-                return await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                await asyncio.shield(worker)
-                raise
         try:
-            info = await asyncio.shield(worker)
+            return await asyncio.shield(worker)
         except asyncio.CancelledError:
-            try:
-                info = await asyncio.shield(worker)
-            except BaseException:
-                codex_lease.release()
-                codex_lease = None
-                raise
-            await _hold_codex_lease(info.name, codex_lease)
-            codex_lease = None
+            await asyncio.shield(worker)
             raise
-        except BaseException:
-            codex_lease.release()
-            codex_lease = None
-            raise
-        await _hold_codex_lease(info.name, codex_lease)
-        codex_lease = None
-        return info
 
     # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
     def _registry_kwargs() -> dict:
@@ -2694,8 +2539,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             kw["jev"] = True
         if body.initial_prompt is not None:
             kw["initial_prompt"] = body.initial_prompt
-        if body.codex_account is not None:
-            kw["codex_account"] = body.codex_account
         if body.service_tier is not None:
             kw["service_tier"] = body.service_tier
         if body.read_only:
@@ -2751,10 +2594,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
                 raise HTTPException(e.status, e.detail) from None
     try:
         info = await _create_registry(_registry_kwargs())
-        if body.headless and body.provider == "codex":
-            # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
-            _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
-        elif body.headless:
+        if body.headless:
             wake = {"engine_models": account_models} if body.engine_account else {}
             get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
         return info
@@ -2990,20 +2830,8 @@ async def _reload_session(name: str):
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
     if info.provider == "codex":
-        # No Codex é a saída de um turno que nunca fecha, então vale com a sessão trabalhando.
-        codex = get_adapter("codex")
-        async with codex.delivery_lock(name):
-            try:
-                await codex.restart(name)
-            except ValueError as exc:
-                raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal", str(exc)))
-            except Exception as exc:
-                # A sessão antiga já saiu da memória; o motivo fica em `problema` e o
-                # watch_sessions tenta de novo. Quem clicou precisa saber que não voltou.
-                _log.warning("codex: reiniciar falhou name=%s: %s", name, exc)
-                raise HTTPException(502, detail=erro("erro_codex_nao_reiniciou",
-                                                     f"o Codex não subiu de novo: {str(exc)[:200]}"))
-        return {"ok": True}
+        # Reiniciar o Codex é do Rust (`codex_relaunch`): aqui só chega com ele fora.
+        raise registry_mod.SessionOpenNeedsRust()
     if info.provider != "claude" or not _headless(name):
         raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
                                              "recarregar só vale para sessão Claude sem terminal"))
@@ -3153,19 +2981,8 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
     if info.provider == "codex":
         if info.headless != body.terminal:
             return {"ok": True, "terminal": body.terminal}
-        codex = get_adapter("codex")
-        async with codex.delivery_lock(name):
-            task = asyncio.create_task(codex.open_terminal(name) if body.terminal else codex.open_headless(name))
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
-            except Exception as exc:
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {exc}", erro=str(exc))) from exc
-        # Fora do laço: com o Rust dono, esquecer é uma chamada à ponte.
-        await asyncio.to_thread(registry._forget, name)
-        return {"ok": True, "terminal": body.terminal}
+        # A troca de modo do Codex é do Rust (`codex_relaunch`): aqui só chega com ele fora.
+        raise registry_mod.SessionOpenNeedsRust()
     if info.provider != "claude":
         raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
     headless = _headless(name)
@@ -3692,24 +3509,14 @@ def _rename_session(name: str, body: RenameBody):
     if tmux.has_session(new) or headless_sessions.exists(new):
         raise HTTPException(409, detail=erro("erro_nome_em_uso", "ja existe uma sessao com esse nome"))
     grouped = _rename_group_first(name, new)
-    # Atualiza a reserva antes do rename do tmux: durante o boot o sidecar ainda pode não existir.
-    if registry_mod.apos_renomear_codex:
-        registry_mod.apos_renomear_codex(name, new)
     try:
         renamed = tmux.rename_session(name, new)
     except Exception:
-        if registry_mod.apos_renomear_codex:
-            registry_mod.apos_renomear_codex(new, name)
-        _codex_lease_rename_finished(name)
         _undo_group_rename(grouped, name, new)
         raise
     if not renamed:
-        if registry_mod.apos_renomear_codex:
-            registry_mod.apos_renomear_codex(new, name)
-        _codex_lease_rename_finished(name)
         _undo_group_rename(grouped, name, new)
         raise HTTPException(500, detail=erro("sessao_falha_renomear", "falha ao renomear"))
-    _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     # O Rust move convites e pares externos; fora do ar, o rename segue e o aviso volta na resposta.
     share_failed = share_bridge.rename(name, new)
@@ -4305,10 +4112,10 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
         headless=bool(body.headless))
-    if creation.provider in ("claude", "pi", "omp", "kimi") and not creation.headless:
-        # Com terminal, Claude, Pi, omp e Kimi nascem no Rust com o kick-off como primeira mensagem
-        # (o Claude no comando, os outros na fila durável). Pela 8765 o Rust já olhou o pedido e abre
-        # ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+    if (creation.provider in ("claude", "pi", "omp", "kimi") and not creation.headless) or creation.provider == "codex":
+        # Nascem no Rust com o kick-off como primeira mensagem (Claude e Codex com terminal no
+        # comando, os outros pela entrega). Pela 8765 o Rust já olhou o pedido e abre ele mesmo com o
+        # que volta daqui (sem voltar a ele de dentro dele).
         creation = creation.model_copy(update={"initial_prompt": kick})
         if request.headers.get("x-hangar-open") == "rust":
             return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
@@ -6778,20 +6585,6 @@ def _codex_sem_terminal(name: str) -> bool:
     return bool((codex_sessions.load(name) or {}).get("headless"))
 
 
-_tarefas_soltas: set[asyncio.Task] = set()
-
-
-async def _aquecer_codex_sem_terminal(name: str) -> None:
-    try:
-        await get_adapter("codex").ensure_running(name)
-    except Exception:
-        # Aqui só o log: no modo python o watch_sessions tenta de novo (até o teto de subidas); com o
-        # Rust dono, o próximo envio abre a sessão nele.
-        _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
-    finally:
-        _tarefas_soltas.discard(asyncio.current_task())
-
-
 @app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def permissoes_do_codex(name: str):
     if _codex_sem_terminal(name):
@@ -7345,10 +7138,6 @@ async def _codex_auth_states() -> list[tuple]:
             result = {"status": "unavailable"}
         states.append((account, result))
     return states
-
-
-async def _connected_codex_accounts() -> list:
-    return [account for account, login in await _codex_auth_states() if login.get("status") == "connected"]
 
 
 async def _default_session_provider(config_dir=None, engine=None, codex_account=None, omp_profile=None,

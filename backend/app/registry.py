@@ -1005,8 +1005,6 @@ def _claude_reading(info, pid: Optional[int]) -> tuple[Optional[dict], Optional[
 _STATUS_TTL = 20.0
 _STATUS_BUDGET = 2
 
-apos_saida_codex: Optional[Callable[[str], None]] = None
-apos_renomear_codex: Optional[Callable[[str, str], None]] = None
 
 
 class KillFailed(Exception):
@@ -2165,8 +2163,8 @@ class SessionRegistry:
                engine_account: str | None = None, engine_models: list[dict] | None = None,
                service_tier: str | None = None,
                claude_customizations: dict | None = None) -> SessionInfo:
-        # Sessão nova com terminal de Claude, Pi, omp e Kimi abre no Rust; a retomada do Arquivo ainda passa aqui.
-        if provider in ("claude", "pi", "omp", "kimi") and not headless and resume_session_id is None:
+        # Sessão nova com terminal (e o Codex nos dois modos) abre no Rust; a retomada do Arquivo ainda passa aqui.
+        if resume_session_id is None and (provider == "codex" or (provider in ("claude", "pi", "omp", "kimi") and not headless)):
             raise SessionOpenNeedsRust()
         if claude_customizations is not None and provider != "claude":
             raise ValueError("plugins e skills por sessão só valem para Claude")
@@ -2228,13 +2226,6 @@ class SessionRegistry:
                 raise ValueError("sessao sem terminal so vale para provider claude ou codex")
             if read_only or initial_prompt:
                 raise ValueError("sessao sem terminal nao aceita read_only nem prompt inicial")
-            if provider == "codex":
-                if engine:
-                    raise ValueError("motor so vale para provider claude")
-                return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
-                                                   permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit, transfer_rollout_path,
-                                                   service_tier=service_tier)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
                                          jev, engine_account,
@@ -2378,17 +2369,8 @@ class SessionRegistry:
             # spawn_command vem do Adapter do provider (import local: get_adapter->ClaudeAdapter nao
             # importa registry, mas evita qualquer ciclo se um adapter futuro vier a importar daqui).
             from app.adapters import get_adapter
-            # initial_prompt so vai pro Codex: e a TUI dele que abre a thread, entao o 1o prompt tem
-            # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
-            # e aceitar o argumento neles seria escolha que some calada.
-            extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
-            if provider == "codex":
-                extra["codex_home"] = codex_home
-                extra["codex_account"] = account.id
-                if service_tier is not None:
-                    extra["service_tier"] = service_tier
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
-                cwd, sid, model, effort, permission_mode, **extra))
+                cwd, sid, model, effort, permission_mode))
         if engine:
             # `hangar-engine --exec` aplica o env DENTRO do pane (os.execvpe). Não usamos `tmux -e` porque
             # a key ficaria em /proc/<pid>/cmdline, legível por qualquer usuário da máquina. Depois do
@@ -2551,55 +2533,6 @@ class SessionRegistry:
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
                            headless=True, engine=engine, engine_account=engine_account,
                            conta=engine_credential_id if engine_account else None)
-
-    def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
-                               model: str | None, effort: str | None, permission_mode: str | None,
-                               codex_account: str | None, jev: bool = False,
-                               transfer_id: str | None = None,
-                               tool_output_token_limit: int | None = None,
-                               transfer_rollout_path: str | None = None,
-                               service_tier: str | None = None) -> SessionInfo:
-        """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
-        pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
-        from app.adapters.codex import sem_terminal
-        try:
-            account = codex_contas.resolve_account(codex_account or "default")
-        except codex_contas.AccountError as exc:
-            raise ValueError(f"{exc.code}: {exc.params}") from None
-        codex_home = str(account.home.expanduser().absolute())
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider="codex",
-                           detalhe="nome_ja_em_uso")
-            raise ValueError("ja existe uma sessao com esse nome")
-        model_args.validar("codex", model, effort)
-        if permission_mode is not None and not any(
-                m[0].lower() == permission_mode.strip().lower() for m in sem_terminal.MODOS):
-            raise ValueError("permission_mode: use um de " + ", ".join(m[0] for m in sem_terminal.MODOS))
-        diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
-        if transfer_id is None:
-            codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        self._forget(name, required=True)
-        target = {}
-        if transfer_id:
-            from app.conversation_transfer import load_transfer
-            target = load_transfer(transfer_id).destination_meta
-        rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
-        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
-        _retire_waiting_runtime(name)
-        PromptQueue(name).clear()
-        codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
-                            codex_home=codex_home, codex_account=codex_account,
-                            headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
-                            jev=jev, transfer_id=transfer_id,
-                            tool_output_token_limit=tool_output_token_limit,
-                            previous_non_plan=target.get("previous_non_plan"), service_tier=service_tier)
-        ThenLink(name).clear()
-        # Nome reusado não herda o par externo da sessão antiga.
-        _encerrar_pares_externos(name)
-        _log_leave_warnings(name, self._clear_pair(name))
-        diag.registrar("sessao.criada", sessao=name, provider="codex", etapa="sidecar_gravado")
-        return SessionInfo(name=name, cwd=cwd, jsonl=rollout or None, tracked=True, provider="codex",
-                           headless=True, conta=f"codex:{codex_home}", codex_home=codex_home)
 
     # ── Troca terminal ⇄ sem terminal (mesma conversa) ──────────────────────────────────────
     # É troca, não cópia: o antigo morre antes do novo nascer, e fila, `then` e pareamento ficam
@@ -3101,8 +3034,6 @@ class SessionRegistry:
         # senão o par ficaria pareado com um fantasma e o unpair simétrico quebrava. Sob o lock do
         # módulo pair (rename_pair): sem ele, um unpair concorrente podia ser ressuscitado.
         _rename_pair_python(old, new)
-        if apos_renomear_codex:
-            apos_renomear_codex(old, new)
         # L71 da revisao final: o shell escondido e keyed por NOME (`term-<nome>`) e NAO acompanha o
         # rename sozinho -- ele ficava orfa pra sempre, invisivel no app (marcado @cp_hidden) e fora
         # do alcance do `kill()`, que so procura `term-<nome NOVO>`. Pior: a aba Shell do nome novo
@@ -3154,8 +3085,6 @@ class SessionRegistry:
             shortcut_terminals.close_all(name)
             self._forget_local(name)
             ThenLink(name).clear()
-            if apos_saida_codex:
-                apos_saida_codex(name)
             return []
 
         # Levanta KillFailed quando a sessao SOBREVIVE. Antes o retorno do tmux era descartado e a
@@ -3201,8 +3130,6 @@ class SessionRegistry:
             PromptQueue(name).clear()
             ThenLink(name).clear()
             warnings = self._clear_pair(name)
-            if apos_saida_codex:
-                apos_saida_codex(name)
             return warnings
         # Limpa o sidecar do AskUserQuestion ANTES de matar (precisa do processo vivo pra resolver o
         # jsonl), best-effort: cleanup nunca bloqueia/quebra o kill. Senao um stale reabriria o stepper

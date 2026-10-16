@@ -1257,33 +1257,6 @@ def test_codex_close_falls_back_to_python_kill_when_rust_had_no_process(codex_bi
     assert killed == ["cx"], "sem a sessão aberta no Rust, o processo não fica vivo sem dono"
 
 
-def test_codex_restart_and_permission_go_to_rust(codex_birth, monkeypatch):
-    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
-    async def scenario():
-        owner.loop = asyncio.get_running_loop()
-        await owner.ensure_open("cx")
-        await codex_birth.codex.restart("cx")       # o que o `/recarregar` chama no Codex
-        return await api.trocar_permissao_do_codex("cx", api.CodexPermissionBody(mode="ask for approval"))
-    result = asyncio.run(scenario())
-    controls = [(command["control"], command["payload"]) for command in transport.commands if command["kind"] == "control"]
-    assert controls == [("restart", {}), ("set_permission_mode", {"mode": "ask for approval"})]
-    assert result == {"current": "Ask for approval"}
-    assert transport.kinds().count("open") == 1, "trocar o processo é do Rust: nada fecha nem reabre aqui"
-
-
-def test_codex_restart_of_a_stopped_session_opens_in_rust(codex_birth, monkeypatch):
-    # Parada (máquina reiniciada, sem fila): nada aberto no Rust, e o Python não sobe o processo.
-    owner, transport = _lifecycle_owner(codex_birth, monkeypatch)
-    async def scenario():
-        owner.loop = asyncio.get_running_loop()
-        await codex_birth.codex.restart("cx")
-    asyncio.run(scenario())
-    controls = [command["control"] for command in transport.commands if command["kind"] == "control"]
-    assert transport.kinds() == ["open", "control"] and controls == ["restart"]
-    assert owner.slot("cx").phase == runtime_coordinator.Phase.Rust
-    assert "cx" not in codex_birth.codex._sessions
-
-
 def test_codex_sandbox_switch_of_a_stopped_session_goes_to_rust(codex_birth, monkeypatch):
     # Cano gravado mas morto e a sessão fora do Rust: a troca não pode virar 503 de cliente Python.
     codex_birth.codex_sessions.update("cx", cano={"pid":999_999_999, "escuta":"unix:/tmp/morto.sock", "token":"t", "ts":1.0})

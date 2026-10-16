@@ -331,28 +331,6 @@ def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path
                 pass
         reference.close()
 
-def test_codex_birth_blocks_login_before_and_after_restart(tmp_path):
-    from accounts_contract import RustCodex
-    reference = PythonReference(tmp_path / "home")
-    barrier = reference.block("session_before_registration")
-    birth = reference.start_session_async(provider="codex", account_id="alpha")
-    server = RustCodex(reference)
-    try:
-        assert barrier.entered.wait()
-        for index in range(2):
-            response = server.request("POST", "/api/codex-contas/alpha/login")
-            assert response.status_code == 409
-            assert response.json()["detail"]["code"] == "codex_account_in_use"
-            assert server.native_calls("alpha") == []
-            if index == 0:
-                server.close()
-                server = RustCodex(reference)
-        barrier.release.set()
-        assert birth.result(timeout=20).status_code == 200
-    finally:
-        barrier.release.set()
-        server.close()
-        reference.close()
 
 def test_codex_uncertain_usage_refuses_login_without_cli(tmp_path):
     from accounts_contract import RustCodex, publish_unknown_birth

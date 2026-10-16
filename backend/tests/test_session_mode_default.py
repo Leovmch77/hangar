@@ -17,7 +17,7 @@ def _sem_pino_do_conftest(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "codex", "pi"])
+@pytest.mark.parametrize("provider", ["claude", "pi"])
 @pytest.mark.parametrize("default", [False, True])
 @pytest.mark.parametrize("requested", [None, False, True])
 async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, default, requested):
@@ -27,7 +27,6 @@ async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, defaul
     create = Mock(return_value=SessionInfo(name="test-mode", cwd=str(tmp_path), provider=provider))
     monkeypatch.setattr(api.registry, "create", create)
     monkeypatch.setattr(api, "get_adapter", Mock())
-    monkeypatch.setattr(api, "_aquecer_codex_sem_terminal", AsyncMock())
     body = api.CreateBody(name="test-mode", cwd=str(tmp_path), provider=provider, headless=requested)
     await api._criar_sessao(body, {})
     effective = requested if requested is not None else default and provider in ("claude", "codex")
@@ -38,7 +37,7 @@ async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, defaul
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("provider", ["claude"])
 @pytest.mark.parametrize("requested", [None, False, True])
 async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_path, monkeypatch, provider, requested):
     from app import orq_readonly
@@ -49,7 +48,7 @@ async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_
     prepare = Mock()
     monkeypatch.setattr(orq_readonly, "prepare", prepare)
     # Uma regressão na recusa nunca pode abrir processo real durante este teste.
-    for method in ("_create_headless", "_create_codex_headless"):
+    for method in ("_create_headless",):
         monkeypatch.setattr(api.registry, method, Mock(side_effect=AssertionError("unexpected session creation")))
     create = Mock(wraps=api.registry.create) if requested is True else Mock(
         return_value=SessionInfo(name="read-only-mode", cwd=str(tmp_path), provider=provider))

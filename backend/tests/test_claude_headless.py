@@ -179,19 +179,6 @@ def test_kill_failure_preserves_process_identity(adapter, monkeypatch):
     assert not session.encerrando
 
 
-def test_codex_replacement_waits_for_termination_off_loop(monkeypatch):
-    from app.adapters.codex.adapter import CodexAdapter
-    from app.adapters.codex import sem_terminal
-    owner_thread = threading.get_ident()
-    def fail_stop(meta):
-        assert threading.get_ident() != owner_thread
-        raise RuntimeError("process still alive")
-    monkeypatch.setattr(sem_terminal, "matar", fail_stop)
-    monkeypatch.setattr(sem_terminal, "subir", lambda meta: pytest.fail("spawn before stop"))
-    with pytest.raises(RuntimeError, match="process still alive"):
-        _run(CodexAdapter()._subir_sem_terminal("s1", {}))
-
-
 @pytest.mark.parametrize("failure", ["exit_code", "timeout", "still_alive"])
 def test_windows_termination_failure_is_reported(monkeypatch, failure):
     import subprocess

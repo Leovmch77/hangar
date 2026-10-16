@@ -288,45 +288,6 @@ def test_account_switch_refuses_when_protection_cannot_be_read(monkeypatch, tmp_
     assert order == []
 
 
-def test_codex_launcher_is_inside_protected_pane(monkeypatch, tmp_path):
-    from app import registry
-
-    prefix = ["/usr/bin/bwrap", "--bind", "/", "/", "--ro-bind", str(tmp_path), str(tmp_path), "--"]
-    monkeypatch.setattr(orq_readonly, "prepare", Mock(return_value=prefix))
-    monkeypatch.setattr(registry, "_exigir_lancador_codex", lambda: None)
-    monkeypatch.setattr(registry.tmux, "has_session", lambda _: False)
-    monkeypatch.setattr(registry.codex_sessions, "exists", lambda _: False)
-    monkeypatch.setattr(registry.codex_sessions, "pretrust_cwd", lambda *a, **kw: None)
-    pane = Mock(return_value=False)
-    monkeypatch.setattr(registry.tmux, "new_session", pane)
-    with pytest.raises(ValueError, match="falha ao criar sessao"):
-        registry.SessionRegistry(projects_dir=tmp_path).create(
-            "readonly-codex", str(tmp_path), provider="codex", read_only=True,
-            initial_prompt="review only", model="gpt-6-astra", effort="high")
-    argv = shlex.split(pane.call_args.args[2])
-    assert argv[:-3] == prefix
-    assert argv[-3:-1] == ["/bin/sh", "-c"]
-    launcher = shlex.split(argv[-1])
-    assert launcher[0] == "hangar-codex-tui"
-    assert launcher[launcher.index("--prompt") + 1] == "review only"
-    assert launcher[launcher.index("--model") + 1] == "gpt-6-astra"
-
-
-def test_api_checks_protection_before_creation_and_passes_flag(monkeypatch, tmp_path):
-    from fastapi import HTTPException
-    from app import api
-
-    prepare = Mock(side_effect=ValueError("bwrap unavailable"))
-    monkeypatch.setattr(orq_readonly, "prepare", prepare)
-    create = Mock()
-    monkeypatch.setattr(api.registry, "create", create)
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(api.create_session(api.CreateBody(
-            name="readonly", cwd=str(tmp_path), provider="codex", read_only=True)))
-    assert error.value.status_code == 400
-    create.assert_not_called()
-
-
 @pytest.mark.skipif(sys.platform != "linux" or not shutil.which("bash"),
                     reason="stub de curl usa executável POSIX")
 @pytest.mark.parametrize("status", [200, 422])

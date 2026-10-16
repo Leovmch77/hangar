@@ -1094,47 +1094,6 @@ def test_create_claude_with_terminal_needs_rust(api_client):
     cr.assert_not_called()
 
 
-def test_create_codex_provider_routes_to_create_normal(api_client):
-    # Desde o lancador unico o Codex nao tem mais caminho de criacao proprio: ele passa pelo MESMO
-    # registry.create dos outros, com o provider chegando la (senao o pane subiria claude).
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="cx", cwd="/tmp", provider="codex", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "codex"
-    # jsonl vazio como no Pi/Kimi: o rollout so existe depois que a TUI abre a thread.
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("cx", "/tmp", None, provider="codex", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_codex_descarta_snapshot_da_sessao_anterior(api_client, monkeypatch):
-    from app import api as api_mod
-    old = SessionInfo(name="cx", provider="claude", jsonl="/antiga.jsonl")
-    new = SessionInfo(name="cx", provider="codex", tracked=False, jsonl=None)
-    monkeypatch.setattr(api_mod, "_list_snap", {"snap": (api_mod.time.monotonic(), [old])})
-    with patch.object(api_mod.registry, "create", return_value=new), \
-         patch.object(api_mod.registry, "list", return_value=[new]):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-        assert r.status_code == 200
-        assert api_mod._cached_info_sync("cx").provider == "codex"
-
-
-def test_create_codex_forwards_wrapper_initial_prompt(api_client):
-    # O prompt inicial vai no COMANDO do pane (a TUI e quem abre a thread), entao ele precisa
-    # atravessar ate o create.
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="cx", cwd="/tmp", provider="codex")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex",
-            "initial_prompt": "revise este projeto",
-        })
-    assert r.status_code == 200
-    assert cr.call_args.kwargs["initial_prompt"] == "revise este projeto"
-
-
 @pytest.mark.parametrize("tier", ["fast", "", True, 1, ["priority"]])
 def test_create_rejects_invalid_service_tier(api_client, tier):
     with patch("app.api.registry.create") as create:
@@ -1153,61 +1112,6 @@ def test_create_service_tier_only_accepts_codex(api_client, provider):
             "headless": provider == "claude"})
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "erro_criacao_sessao"
-    create.assert_not_called()
-
-
-@pytest.mark.parametrize("tier", ["priority", "default"])
-@pytest.mark.parametrize("headless", [False, True])
-def test_create_forwards_service_tier_before_codex_warmup(api_client, tier, headless):
-    from unittest.mock import AsyncMock
-    account = codex_contas.Account("work", Path("/tmp/codex-work"), False)
-    info = SessionInfo(name="cx", cwd="/tmp", provider="codex", headless=headless)
-    with patch("app.api._resolve_codex_account", return_value=account), \
-         patch("app.api._codex_require_idle_preparation"), \
-         patch("app.api._codex_service", return_value=None), \
-         patch("app.api.codex_models.checar_escolha") as check, \
-         patch("app.api.registry.create", return_value=info) as create, \
-         patch("app.api._aquecer_codex_sem_terminal", new_callable=AsyncMock) as warm:
-        # Sem codex_account: os clientes antigos continuam sem keyword codex_home.
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex", "headless": headless,
-            "model": "native-model", "service_tier": tier})
-    assert response.status_code == 200
-    check.assert_called_once_with("native-model", None, service_tier=tier)
-    assert create.call_args.kwargs["service_tier"] == tier
-    if not headless:
-        warm.assert_not_called()
-
-
-@pytest.mark.parametrize("tier,status", [("priority", 502), ("default", 200), (None, 200)])
-def test_create_priority_cannot_skip_unavailable_catalog(api_client, tier, status):
-    body = {"name": "cx", "cwd": "/tmp", "provider": "codex", "headless": False, "model": "native-model"}
-    if tier is not None:
-        body["service_tier"] = tier
-    with patch("app.api.codex_models.checar_escolha", side_effect=api_mod.codex_models.CodexIndisponivel("offline")), \
-         patch("app.api.registry.create", return_value=SessionInfo(name="cx", provider="codex")) as create:
-        response = api_client.post("/api/sessions", headers=_h(), json=body)
-    assert response.status_code == status
-    assert create.called == (status == 200)
-    if status == 502:
-        assert response.json()["detail"]["code"] == "erro_codex_catalogo_invalido"
-    elif tier is None:
-        assert "service_tier" not in create.call_args.kwargs
-
-
-def test_create_priority_without_announced_service_is_rejected(api_client, monkeypatch):
-    monkeypatch.setattr(api_mod.codex_models, "listar", lambda **options: [{
-        "id": "native-model", "efforts": [], "service_tiers": [], "additional_speed_tiers": ["fast"]}])
-    def refused(operation, payload):
-        assert operation == "validate_model"
-        assert payload["model"] == "native-model"
-        raise api_mod.dictation_bridge.BridgeError(400, "dictation_model_unavailable", "service_tier priority indisponível para native-model")
-    monkeypatch.setattr(api_mod.dictation_bridge, "request", refused)
-    with patch("app.api.registry.create") as create:
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex", "model": "native-model", "service_tier": "priority"})
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "erro_codex_escolha_invalida"
     create.assert_not_called()
 
 
@@ -1255,14 +1159,6 @@ def test_create_sem_terminal_sobe_o_processo_na_criacao(api_client):
                             json={"name": "hl", "cwd": "/tmp", "provider": "claude", "headless": True})
     assert r.status_code == 200
     adapter.acordar.assert_called_once_with("hl")
-
-
-def test_create_codex_conflict_maps_to_409(api_client):
-    fake = MagicMock(side_effect=ValueError("ja existe uma sessao com esse nome"))
-    with patch("app.api.registry.create", fake):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-    assert r.status_code == 409
 
 
 # ---------------------------------------------------------------------------

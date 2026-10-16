@@ -88,11 +88,3 @@ async def test_pensamento_ao_vivo_vai_para_a_fonte_e_some_com_a_resposta(codex, 
     await until(lambda: pushed[-1:] == [""])
 
 
-async def test_app_server_morto_com_turno_no_ar_fica_marcado_para_conferir(codex):
-    adapter, queue, _, client = codex
-    adapter._sessions["cx"]["headless"] = True
-    bomba = adapter._sessions["cx"]["bomba"]
-    client.closed = True
-    await queue.put(None)
-    await bomba
-    assert "cx" in adapter._cortados and "cx" not in adapter._sessions

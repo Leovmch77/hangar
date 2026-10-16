@@ -70,11 +70,12 @@ def decisao(option: int) -> str:
 
 
 def politica(modo: str | None) -> tuple[str, str]:
-    """(approval_policy, sandbox_mode) do modo do app; modo desconhecido cai no padrão."""
+    """(approval_policy, sandbox_mode) do modo do app; ausente é o padrão da abertura, desconhecido
+    recusa (S-05): abrir em Full Access por engano é pior que não abrir."""
     for nome, approval, sandbox, _ in MODOS:
         if nome.lower() == (modo or MODO_PADRAO).strip().lower():
             return approval, sandbox
-    return politica(MODO_PADRAO)
+    raise ValueError(f"modo de permissão desconhecido: {modo!r}; a sessão não foi aberta")
 
 
 def modos_para_tela(atual: str | None) -> dict:
