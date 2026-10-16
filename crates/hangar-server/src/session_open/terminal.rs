@@ -312,8 +312,7 @@ impl Mux for ProcessMux {
     }
 
     fn diary(&self, line: serde_json::Value) {
-        let Some(dir) = self.diary.clone() else { return };
-        tokio::task::spawn_blocking(move || write_diary(&dir, line));
+        if self.diary.is_some() { crate::diag::record(self.diary.clone(), vec![line], "multiplexador"); }
     }
 
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
@@ -330,9 +329,9 @@ impl Mux for ProcessMux {
                 Err(_) => (MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() }, Some(("TimeoutExpired", None))),
             };
             RUNNING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            if let Some(dir) = self.diary.clone()
+            if self.diary.is_some()
                 && let Some(line) = command_line(&argv, &out, failure, started.elapsed(), self.timeout, simultaneous) {
-                let _ = tokio::task::spawn_blocking(move || write_diary(&dir, line)).await;
+                let _ = crate::diag::record(self.diary.clone(), vec![line], "multiplexador").await;
             }
             out
         })
@@ -374,12 +373,6 @@ fn command_line(argv: &[String], out: &MuxOutput, failure: Option<(&str, Option<
         }
     }
     Some(line)
-}
-
-fn write_diary(dir: &Path, line: serde_json::Value) {
-    if let Err(error) = crate::diag::write_diary(dir, &[line], chrono::Local::now()) {
-        tracing::warn!(kind = ?error.kind(), "linha do multiplexador no diário não gravada");
-    }
 }
 
 #[cfg(test)]

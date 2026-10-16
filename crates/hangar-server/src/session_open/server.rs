@@ -320,17 +320,7 @@ impl OpenHost for ServerHost {
         })
     }
 
-    fn diary(&self, events: Vec<Value>) {
-        let Some(dir) = crate::diag::diary_dir() else {
-            tracing::warn!("diário da criação sem pasta de logs; não gravado");
-            return;
-        };
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) = crate::diag::write_diary(&dir, &events, chrono::Local::now()) {
-                tracing::warn!(kind = ?error.kind(), "diário da criação não gravado");
-            }
-        });
-    }
+    fn diary(&self, events: Vec<Value>) { crate::diag::record(crate::diag::diary_dir(), events, "criação"); }
 
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
@@ -428,12 +418,7 @@ pub(crate) fn access_line(route: &str, status: u16, ms: u64, req: &str) -> Value
 
 fn access_diary(route: &str, response: &Response, started: Instant, req: &str) {
     let line = access_line(route, response.status().as_u16(), started.elapsed().as_millis() as u64, req);
-    let Some(dir) = crate::diag::diary_dir() else { return };
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
-            tracing::warn!(kind = ?error.kind(), "linha de acesso do diário não gravada");
-        }
-    });
+    crate::diag::record(crate::diag::diary_dir(), vec![line], "acesso");
 }
 
 /// Os avisos de saída que não chegaram ao grupo antigo, na frase que a criação devolve em `avisos`.

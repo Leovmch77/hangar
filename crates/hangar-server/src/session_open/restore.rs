@@ -238,11 +238,9 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
             let mut reported = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if unreadable.is_some() { reported.insert(key.clone()) } else { reported.remove(&key); false }
         };
-        if first && let Some(line) = unreadable && let Some(dir) = crate::diag::diary_dir() {
+        if first && let Some(line) = unreadable {
             tracing::warn!(session = %row.name, "spec ilegível; a sessão fica fora da fotografia");
-            if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
-                tracing::warn!(kind = ?error.kind(), "spec ilegível não gravado no diário");
-            }
+            crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[line], "spec ilegível");
         }
         let Some(spec) = spec else { continue };
         if spec.surface != Surface::Terminal { continue; }
@@ -334,9 +332,7 @@ async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry
         event["nivel"] = json!("erro");
         event["codigo"] = json!(code);
     }
-    if let Some(dir) = crate::diag::diary_dir() && let Err(error) = crate::diag::write_diary(&dir, &[event], chrono::Local::now()) {
-        tracing::warn!(kind = ?error.kind(), "diário do restore não gravado");
-    }
+    crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[event], "restore");
     result
 }
 

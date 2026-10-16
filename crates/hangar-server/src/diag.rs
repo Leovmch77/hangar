@@ -107,6 +107,19 @@ pub fn write_diary(dir: &std::path::Path, events: &[serde_json::Value], now: chr
     std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(text.as_bytes())
 }
 
+/// `write_diary` agora; falha vira aviso no log, nunca erro para quem chama. Bloqueante.
+pub fn record_blocking(dir: Option<&std::path::Path>, events: &[serde_json::Value], what: &'static str) {
+    let Some(dir) = dir else { return tracing::warn!(what, "diário sem pasta de logs; linha não gravada") };
+    if let Err(error) = write_diary(dir, events, chrono::Local::now()) {
+        tracing::warn!(kind = ?error.kind(), what, "linha do diário não gravada");
+    }
+}
+
+/// `record_blocking` numa tarefa de bloqueio; quem precisa da ordem espera o retorno.
+pub fn record(dir: Option<std::path::PathBuf>, events: Vec<serde_json::Value>, what: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || record_blocking(dir.as_deref(), &events, what))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

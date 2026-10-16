@@ -331,12 +331,8 @@ fn move_with(rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>, server_projec
             let message = format!("nao consegui mover a conversa de conta: {error}; a conversa ficou partida entre as contas: {} e {}",
                 dst.join(&file).display(), src.join(sid).display());
             tracing::error!(back = %back, "{message}");
-            if let Some(dir) = crate::diag::diary_dir() {
-                let line = json!({"evento": "sessao.conversa_partida", "nivel": "erro", "codigo": "erro_mover_conversa", "detalhe": message});
-                if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
-                    tracing::warn!(kind = ?error.kind(), "conversa partida não gravada no diário");
-                }
-            }
+            let line = json!({"evento": "sessao.conversa_partida", "nivel": "erro", "codigo": "erro_mover_conversa", "detalhe": message});
+            crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[line], "conversa partida");
             return Err(OpenError::new(500, "erro_mover_conversa", message).with_params(json!({"erro": error.to_string()})));
         }
         return Err(failed(error));

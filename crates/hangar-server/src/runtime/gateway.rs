@@ -528,12 +528,7 @@ impl RuntimeRegistry {
                 Ok(Some(idle))=>{
                     tracing::info!(session=%name,idle_s=idle as u64,"sessão sem terminal parada estacionada");
                     let event=json!({"evento":"sessao.estacionada","nivel":"ok","sessao":name,"provider":"claude","parada_s":idle as u64});
-                    match crate::diag::diary_dir_in(&self.policy.codex_environment()) {
-                        Some(dir)=>{ tokio::task::spawn_blocking(move||if let Err(error)=crate::diag::write_diary(&dir,&[event],chrono::Local::now()) {
-                            tracing::warn!(kind=?error.kind(),"estacionamento não gravado no diário");
-                        }); },
-                        None=>tracing::warn!("diário sem pasta de logs; estacionamento não gravado"),
-                    }
+                    crate::diag::record(crate::diag::diary_dir_in(&self.policy.codex_environment()),vec![event],"estacionamento");
                 },
                 Err(error)=>{
                     tracing::warn!(session=%name,code=%error.code,"sessão parada não foi estacionada");
