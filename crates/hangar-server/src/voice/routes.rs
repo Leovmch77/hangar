@@ -188,11 +188,9 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
         Method::PUT => {
             let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
             let Ok(dto) = serde_json::from_slice::<SettingsDto>(&bytes) else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
-            let known = |list: &[String], voice: &str| list.iter().any(|v| v == voice);
-            if let Some(voice) = dto.voice.as_deref() && match st.voice.voices(st, &dto.codex_account).await {
-                (list, true) => !known(&list, voice),
-                (_, false) => !settings::VOICES.contains(&voice) && !settings::V3_ADDED.contains(&voice),
-            } {
+            if let Some(voice) = dto.voice.as_deref()
+                && let (list, read) = st.voice.voices(st, &dto.codex_account).await
+                && settings::voice_refused(read.then_some(list.as_slice()), voice) {
                 return refuse(StatusCode::BAD_REQUEST, "invalid_voice");
             }
             if !st.voice.account_ids(&st.accounts).await.unwrap_or_default().contains(&dto.codex_account) { return refuse(StatusCode::BAD_REQUEST, "unknown_account"); }
