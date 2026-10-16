@@ -18,6 +18,10 @@ vi.mock('./ImageThumb', () => ({ ImageThumb: ({ items }: { items: { uri: string 
   createElement('span', { 'data-images': items.map((item) => item.uri).join(',') }) }));
 vi.mock('./BubbleActions', () => ({ BubbleActions: ({ text }: { text: string }) =>
   createElement('output', null, text) }));
+vi.mock('./AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }), mkMutedMarkdownStyle: () => ({ paragraph: {} }) }));
+vi.mock('react-native-enriched-markdown', () => ({
+  EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('pre', null, markdown),
+}));
 
 import { UserBubble } from './UserBubble';
 
