@@ -16,7 +16,9 @@ import { toast } from '../ui/Toast';
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock('react-native', async importOriginal => {
   const original = await importOriginal<typeof import('react-native')>();
-  return { ...original, TextInput: ({ value, editable, onChangeText, onFocus, onBlur, onSubmitEditing }: {
+  return { ...original,
+    Text: ({ numberOfLines, ellipsizeMode, ...props }: import('react-native').TextProps) => createElement(original.Text, { ...props, ...{ 'data-lines': numberOfLines, 'data-ellipsis': ellipsizeMode } }),
+    TextInput: ({ value, editable, onChangeText, onFocus, onBlur, onSubmitEditing }: {
     value: string; editable?: boolean; onChangeText: (value: string) => void; onFocus: () => void; onBlur: () => void; onSubmitEditing: () => void;
   }) => createElement('input', { value, disabled: editable === false, onFocus, onBlur,
     onChange: (event: ChangeEvent<HTMLInputElement>) => onChangeText(event.target.value),
@@ -294,6 +296,48 @@ test.each([false, true])('árvore real do progresso mantém linha alinhada e SVG
   expect(trailing.style.flexShrink).toBe('0');
   expect(drawing.style.maxWidth).toBe(collapsed ? '308px' : '721px');
   expect(drawing.style.alignSelf).toBe('center');
+});
+
+test.each(['CI', 'Server'])('grupo que cede largura corta Text e Button numa linha e preserva o lado fixo: %s', title => {
+  useMods.setState({ visible: true });
+  const container = renderUi();
+  act(() => chatStore('srv2', 'sess').use.setState({ pluginUi: parsePluginUi({
+    columns: 110, source: 'surface', panes: [], above: { type: 'Box', props: { flexDirection: 'column' }, children: [
+      { type: 'Box', props: { flexDirection: 'row', width: 108, justifyContent: 'space-between', columnGap: 1 }, children: [
+        { type: 'Box', props: { flexDirection: 'row', flexShrink: 1, columnGap: 1 }, children: [
+          { type: 'Text', children: ['✓'] },
+          { type: 'Button', props: { key: 'toggle', label: `▸ ${title}`, plain: true }, press: { plugin: 'fixture-mod' } },
+          { type: 'Text', props: { dimColor: true }, children: ['abc1234'] },
+        ] },
+        { type: 'Box', props: { flexDirection: 'row', flexShrink: 0, columnGap: 2 }, children: [
+          { type: 'Text', children: ['7/7 jobs · 9m 28s'] }, { type: 'Text', children: ['100%'] },
+          { type: 'Button', props: { key: 'open', label: `open-${title}` }, press: { plugin: 'fixture-mod' } },
+        ] },
+      ] },
+    ] },
+  }) }));
+  const hash = [...container.querySelectorAll<HTMLElement>('span')].find(el => el.textContent === 'abc1234')!;
+  expect(hash.dataset.lines).toBe('1');
+  expect(hash.dataset.ellipsis).toBe('tail');
+  expect(hash.style.flexShrink).toBe('1');
+  expect(Number.parseFloat(hash.parentElement!.style.minWidth)).toBe(0);
+  const button = labeled(container, `▸ ${title}`);
+  expect(button.style.flexShrink).toBe('1');
+  expect(button.querySelector<HTMLElement>('span')!.dataset.lines).toBe('1');
+  const fixed = [...container.querySelectorAll<HTMLElement>('span')].find(el => el.textContent === '7/7 jobs · 9m 28s')!;
+  expect(fixed.style.flexShrink).toBe('0');
+  expect(labeled(container, `open-${title}`).style.flexShrink).toBe('0');
+});
+
+test('grupo fixo interrompe a herança de corte; texto primitivo no grupo flexível recebe o corte', () => {
+  const container = render({ type: 'Box', props: { flexDirection: 'row', flexShrink: 1 }, children: [
+    'flexible-primitive',
+    { type: 'Box', props: { flexDirection: 'row', flexShrink: 0 }, children: [{ type: 'Text', children: ['fixed-label'] }] },
+  ] });
+  const primitive = [...container.querySelectorAll<HTMLElement>('span')].find(el => el.textContent === 'flexible-primitive')!;
+  expect(primitive.dataset.lines).toBe('1');
+  const fixed = [...container.querySelectorAll<HTMLElement>('span')].find(el => el.textContent === 'fixed-label')!;
+  expect(fixed.style.flexShrink).toBe('0');
 });
 
 test.each([false, true])('muitas linhas usam região limitada com conteúdo natural: painel=%s', withPane => {

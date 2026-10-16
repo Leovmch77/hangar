@@ -27,6 +27,7 @@ export interface PluginTreeProps {
   onPress?: (button: PluginControl) => void;
   disabled?: boolean;
   inText?: boolean;
+  shrinkRow?: boolean;
   onInput?: (field: PluginControl, kind: PluginInputKind, value: string) => Promise<unknown>;
 }
 
@@ -41,17 +42,21 @@ async function openLink(value: unknown) {
   catch { toast.erro(m.plugin_clique_falhou()); }
 }
 
-export function PluginTree({ node, place, onPress, onInput, disabled, inText = false }: PluginTreeProps) {
+export function PluginTree({ node, place, onPress, onInput, disabled, inText = false, shrinkRow = false }: PluginTreeProps) {
   const { theme } = useUnistyles();
   const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
-  if (typeof node === 'string' || typeof node === 'number') return inText ? node : <Text style={styles.text}>{node}</Text>;
+  if (typeof node === 'string' || typeof node === 'number') return inText ? node : <Text style={[styles.text, shrinkRow && styles.truncated]} numberOfLines={shrinkRow ? 1 : undefined} ellipsizeMode="tail">{node}</Text>;
   if (!node || typeof node !== 'object') return null;
   const p = node.props ?? {};
   if (p.display === 'none') return null;
+  const shrink = finite(p.flexShrink);
+  const childShrinkRow = node.type === 'Box'
+    ? !str(p.flexDirection).startsWith('column') && p.position !== 'absolute' && (shrink === undefined ? shrinkRow : shrink > 0)
+    : shrinkRow;
   const kids = (node.children ?? []).map((child, index) => {
     const key = child && typeof child === 'object' && typeof child.props?.key === 'string'
       ? JSON.stringify([child.type, child.press?.plugin, child.props.key]) : index;
-    return <PluginTree key={key} node={child} place={place} onPress={onPress} onInput={onInput} disabled={disabled} inText={inText || node.type === 'Text'} />;
+    return <PluginTree key={key} node={child} place={place} onPress={onPress} onInput={onInput} disabled={disabled} inText={inText || node.type === 'Text'} shrinkRow={childShrinkRow} />;
   });
   const cell = theme.base.text.sm * 0.6;
   const line = theme.base.text.sm * 1.4;
@@ -68,7 +73,7 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
   switch (node.type) {
     case 'Text': {
       const wrap = str(p.wrap);
-      const truncate = !inText && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle');
+      const truncate = !inText && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle' || shrinkRow && !wrap);
       return <Text style={[!inText && styles.text, textStyle, truncate && styles.truncated]} numberOfLines={truncate ? 1 : undefined}
         ellipsizeMode={wrap.endsWith('start') ? 'head' : wrap.endsWith('middle') || wrap === 'middle' ? 'middle' : 'tail'}>{kids}</Text>;
     }
@@ -104,10 +109,10 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
     case 'Button': {
       const control = buttonControl(node);
       const label = str(p.label) || textOf(node.children);
-      const body = <Text style={[styles.text, textStyle, p.variant === 'primary' && !color && { color: theme.tokens.accent.base }]}>{label}</Text>;
+      const body = <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.text, textStyle, shrinkRow && styles.truncated, p.variant === 'primary' && !color && { color: theme.tokens.accent.base }]}>{label}</Text>;
       return onPress && control
-        ? <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} accessibilityState={{ disabled: !!disabled }} hitSlop={12} onPress={() => onPress(control)} style={[styles.button, p.plain === true && styles.plain, disabled && { opacity: 0.5 }]}>{body}</Pressable>
-        : <View style={[styles.button, p.plain === true && styles.plain]}>{body}</View>;
+        ? <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} accessibilityState={{ disabled: !!disabled }} hitSlop={12} onPress={() => onPress(control)} style={[styles.button, shrinkRow && styles.truncated, p.plain === true && styles.plain, disabled && { opacity: 0.5 }]}>{body}</Pressable>
+        : <View style={[styles.button, shrinkRow && styles.truncated, p.plain === true && styles.plain]}>{body}</View>;
     }
     case 'Link': {
       const label = str(p.label) || textOf(node.children) || str(p.href);
