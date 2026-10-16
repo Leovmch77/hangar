@@ -4892,7 +4892,7 @@
   "native_ask_progress": "{done} of {total} answered",
   "native_ask_write": "Or write your answer",
   "native_ask_written": "Written answer selected",
-  "native_ask_draft_kept": "Your draft and choices are kept when minimized.",
+  "native_ask_draft_kept": "Your draft and choices are kept until you send, even if you switch sessions.",
   "native_ask_previous": "Previous",
   "native_ask_multi": "Check one or more options.",
   "native_ask_tab": "Question {n}",

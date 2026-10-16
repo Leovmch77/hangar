@@ -4892,7 +4892,7 @@
   "native_ask_progress": "{done} de {total} respondidas",
   "native_ask_write": "Ou escreva sua resposta",
   "native_ask_written": "Resposta digitada selecionada",
-  "native_ask_draft_kept": "O rascunho e as escolhas são mantidos ao minimizar.",
+  "native_ask_draft_kept": "O rascunho e as escolhas ficam guardados até você enviar, mesmo trocando de sessão.",
   "native_ask_previous": "Anterior",
   "native_ask_multi": "Marque uma ou mais opções.",
   "native_ask_tab": "Pergunta {n}",
