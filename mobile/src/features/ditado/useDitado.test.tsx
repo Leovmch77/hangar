@@ -64,6 +64,7 @@ vi.mock('react-native', async () => {
 
 import { useDitado } from './useDitado';
 import { useDitadoEstiloStore } from './ditadoEstiloStore';
+import { setLiveVoiceAudioActive, useVoiceAudioState } from '../voice/audioSession';
 import type { MotivoFim } from '@hangar/core';
 
 function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; onErroParada?: (e: Error) => void }) {
@@ -97,6 +98,7 @@ function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; 
 }
 
 beforeEach(() => {
+  useVoiceAudioState.setState({ voiceActive: false, dictations: 0 });
   vi.useFakeTimers();
   recordDiagnostic.mockClear();
   configureDiag({ registrar: recordDiagnostic, novoReq: () => '' });
@@ -127,6 +129,8 @@ afterEach(async () => {
   configureDiag({ registrar: () => {}, novoReq: () => '' });
   vi.clearAllTimers();
   vi.useRealTimers();
+  expect(useVoiceAudioState.getState().dictations).toBe(0);
+  useVoiceAudioState.setState({ voiceActive: false, dictations: 0 });
 });
 
 function deferred<T>() {
@@ -145,6 +149,40 @@ function emitRecordingStatus(status: Partial<RecordingStatus> = {}) {
     id: 'fake', isFinished: true, hasError: false, error: null, url: fakeRec.uri, ...status,
   });
 }
+
+describe('useDitado — coexistência com voz ao vivo', () => {
+  it.each(['denied', 'permission', 'mode', 'record'] as const)('libera o áudio depois da falha em %s', async (failure) => {
+    const error = new Error(failure === 'denied' ? 'permission_denied' : 'áudio indisponível');
+    requestPermission.mockImplementationOnce(async () => {
+      expect(useVoiceAudioState.getState().dictations).toBe(1);
+      if (failure === 'permission') throw error;
+      return { granted: failure !== 'denied' };
+    });
+    if (failure === 'mode') setAudioMode.mockRejectedValueOnce(error);
+    if (failure === 'record') fakeRec.record.mockImplementationOnce(() => { throw error; });
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await expect(h.getHook().iniciar()).rejects.toThrow(error.message); });
+    expect(useVoiceAudioState.getState().dictations).toBe(0);
+    expect(onFim).not.toHaveBeenCalled();
+    await h.unmount();
+    expect(useVoiceAudioState.getState().dictations).toBe(0);
+  });
+
+  it('avisa início e fim do ditado sem encerrar a chamada já ativa', async () => {
+    setLiveVoiceAudioActive(true);
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    expect(useVoiceAudioState.getState()).toEqual({ voiceActive: true, dictations: 1 });
+    await act(async () => { await h.getHook().parar('botao'); });
+    expect(useVoiceAudioState.getState()).toEqual({ voiceActive: true, dictations: 0 });
+    expect(onFim).toHaveBeenCalledTimes(1);
+    await h.unmount();
+  });
+});
 
 describe('useDitado — parar() propaga falha via onErroParada', () => {
   it('stop() rejeita → onErroParada é chamado e onFim não', async () => {
@@ -256,6 +294,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
       await h.getHook().iniciar();
     });
     expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(useVoiceAudioState.getState().dictations).toBe(1);
     expect(createRecorder).not.toHaveBeenCalled();
     await h.mount({ onFim: replacement });
     await act(async () => {
@@ -291,12 +330,14 @@ describe('useDitado — interrupção e origem da gravação', () => {
   });
 
   it.each([
-    ['permission', 'unmount'],
-    ['prepare', 'background'], ['prepare', 'unmount'], ['prepare', 'inactive'],
+    ['permission', 'unmount'], ['permission', 'cancel'],
+    ['mode', 'unmount'], ['mode', 'cancel'],
+    ['prepare', 'background'], ['prepare', 'unmount'], ['prepare', 'inactive'], ['prepare', 'cancel'],
   ] as const)('cancela início pendente em %s após %s', async (stage, interruption) => {
     const permission = deferred<{ granted: boolean }>();
     const preparation = deferred<void>();
     if (stage === 'permission') requestPermission.mockReturnValue(permission.promise);
+    else if (stage === 'mode') setAudioMode.mockReturnValue(preparation.promise);
     else fakeRec.prepareToRecordAsync.mockReturnValue(preparation.promise);
     const onFim = vi.fn();
     const h = mountHook({ onFim });
@@ -304,11 +345,14 @@ describe('useDitado — interrupção e origem da gravação', () => {
     let starting!: Promise<void>;
     await act(async () => { starting = h.getHook().iniciar(); });
     if (stage === 'prepare') expect(fakeRec.prepareToRecordAsync).toHaveBeenCalledTimes(1);
+    expect(useVoiceAudioState.getState().dictations).toBe(1);
     if (interruption === 'unmount') await h.unmount();
+    else if (interruption === 'cancel') await act(async () => { await h.getHook().parar('botao'); });
     else await act(async () => {
       changeAppState(interruption === 'inactive' ? 'inactive' : 'background');
       changeAppState('active');
     });
+    expect(useVoiceAudioState.getState().dictations).toBe(1);
     expect(fakeRec.release).not.toHaveBeenCalled();
     await act(async () => {
       permission.resolve({ granted: true });
@@ -319,6 +363,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     expect(fakeRec.stop).not.toHaveBeenCalled();
     expect(onFim).not.toHaveBeenCalled();
     expect(fakeRec.release).toHaveBeenCalledTimes(stage === 'prepare' ? 1 : 0);
+    expect(useVoiceAudioState.getState().dictations).toBe(0);
     if (interruption !== 'unmount') {
       await act(async () => {
         await h.getHook().iniciar();
@@ -390,6 +435,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     else await act(async () => { changeAppState('inactive'); });
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     expect(fakeRec.release).not.toHaveBeenCalled();
+    expect(useVoiceAudioState.getState().dictations).toBe(1);
     await act(async () => {
       stop.resolve();
       emitRecordingStatus();
@@ -424,6 +470,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     });
     expect(fakeRec.record).toHaveBeenCalledTimes(1);
     expect(fakeRec.release).not.toHaveBeenCalled();
+    expect(useVoiceAudioState.getState().dictations).toBe(1);
     expect(h.getHook().gravando).toBe(true);
     await act(async () => {
       audio.resolve(new Blob(['audio']));

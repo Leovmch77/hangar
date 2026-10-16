@@ -36,6 +36,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
 ));
 
 import { BubbleActions, pararTts } from './BubbleActions';
+import { setLiveVoiceAudioActive, useVoiceAudioState } from '../features/voice/audioSession';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 
 const roots: Root[] = [];
@@ -58,6 +59,7 @@ async function openTool(serverId: string | undefined = 's1') {
 }
 
 beforeEach(() => {
+  useVoiceAudioState.setState({ voiceActive: false, dictations: 0 });
   vi.resetAllMocks();
   vi.useFakeTimers();
   servers.activeId = 's2';
@@ -73,7 +75,60 @@ beforeEach(() => {
 afterEach(() => {
   act(() => { for (const root of roots.splice(0)) root.unmount(); });
   pararTts();
+  useVoiceAudioState.setState({ voiceActive: false, dictations: 0 });
   vi.useRealTimers();
+});
+
+describe('ações de áudio durante voz ao vivo', () => {
+  it('cala o TTS mesmo se a bolha já saiu da tela e não retoma no fim da chamada', async () => {
+    h.synth.mockResolvedValue({ url: '/api/tts/audio/1.mp3' });
+    const { container, root } = await mount(createElement(BubbleActions, { text: 'resposta', serverId: 's1', defaultOpen: true }));
+    await act(async () => button(container, 'bubble_ouvir').click());
+    expect(h.play).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(null));
+    act(() => setLiveVoiceAudioActive(true));
+    expect(h.remove).toHaveBeenCalledTimes(1);
+    act(() => setLiveVoiceAudioActive(false));
+    expect(h.play).toHaveBeenCalledTimes(1);
+  });
+
+  it('recusa Ouvir já enfileirado antes da API; copiar e compartilhar continuam', async () => {
+    const { container } = await mount(createElement(BubbleActions, { text: 'resposta', serverId: 's1', defaultOpen: true }));
+    act(() => {
+      setLiveVoiceAudioActive(true);
+      // O DOM ainda mostra o botão habilitado até o React publicar o estado.
+      button(container, 'bubble_ouvir').click();
+    });
+    expect(button(container, 'bubble_ouvir').disabled).toBe(true);
+    expect(h.synth).not.toHaveBeenCalled();
+    expect(h.player).not.toHaveBeenCalled();
+    await act(async () => button(container, 'bubble_copiar').click());
+    await act(async () => button(container, 'bolha_compartilhar').click());
+    expect(h.copy).toHaveBeenCalledWith('resposta');
+    expect(h.share).toHaveBeenCalledWith({ message: 'resposta' });
+    expect(h.toast).not.toHaveBeenCalled();
+    act(() => setLiveVoiceAudioActive(false));
+    expect(button(container, 'bubble_ouvir').disabled).toBe(false);
+  });
+
+  it.each([false, true])('descarta síntese anterior à chamada; chamada encerrada=%s', async (ended) => {
+    let finish!: (r: TtsResposta) => void;
+    h.synth.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { container } = await mount(createElement(BubbleActions, { text: 'resposta', serverId: 's1', defaultOpen: true }));
+    await act(async () => button(container, 'bubble_ouvir').click());
+    act(() => {
+      setLiveVoiceAudioActive(true);
+      if (ended) setLiveVoiceAudioActive(false);
+    });
+    await act(async () => finish({ url: '/api/tts/audio/1.mp3', chars: 8, cached: false, provider: 'local' }));
+    expect(h.player).not.toHaveBeenCalled();
+    expect(h.play).not.toHaveBeenCalled();
+    if (!ended) act(() => setLiveVoiceAudioActive(false));
+    h.synth.mockResolvedValueOnce({ url: '/api/tts/audio/2.mp3' });
+    await act(async () => button(container, 'bubble_ouvir').click());
+    expect(h.player).toHaveBeenCalledExactlyOnceWith('https://a.test/api/tts/audio/2.mp3?token=token-a');
+    expect(h.play).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('ações da conversa usam o servidor da rota', () => {
