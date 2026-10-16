@@ -161,6 +161,10 @@ impl Switcher {
                 tracing::warn!(session=%hit.name,window=%hit.limit.window,"limite de uso: nenhuma conta com folga; a sessão fica parada");
                 report("limit_switch_no_room","limite de uso: nenhuma conta Claude com folga; a sessão fica parada até o reset");
             }
+            Outcome::Stayed(code @ "limit_switch_not_rust") => {
+                tracing::warn!(session=%hit.name,code,"limite de uso: a sessão saiu do Rust antes da troca");
+                report(code,"limite de uso: a sessão fechou ou mudou de nome antes da troca de conta");
+            }
             Outcome::Stayed(code) => tracing::info!(session=%hit.name,code,"limite de uso sem troca de conta"),
             Outcome::Failed(code) => {
                 tracing::warn!(session=%hit.name,%code,"limite de uso: a troca de conta falhou");
@@ -325,12 +329,14 @@ mod tests {
         reopens:Mutex<Vec<Reopen>>,
         log:Mutex<Vec<String>>,
         diary:Mutex<Vec<String>>,
+        /// A sessão fechou ou foi renomeada antes da troca.
+        gone:std::sync::atomic::AtomicBool,
     }
 
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
             Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
-                reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()) }
+                reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),gone:Default::default() }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
         fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
@@ -338,7 +344,7 @@ mod tests {
 
     impl Host for Fake {
         fn spec<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
-            Box::pin(async move { Some(Ok(self.spec.lock().unwrap().clone())) })
+            Box::pin(async move { (!self.gone.load(std::sync::atomic::Ordering::Relaxed)).then(||Ok(self.spec.lock().unwrap().clone())) })
         }
         fn account_dir(&self,config_dir:Option<&str>) -> String { config_dir.unwrap_or("/default").to_owned() }
         fn catalog(&self) -> Result<Value,String> { Ok(self.catalog.clone()) }
@@ -390,6 +396,18 @@ mod tests {
         switcher.handle(&fake,hit("/a",2000.0)).await;
         assert!(fake.log().is_empty(),"{:?}",fake.log());
         assert!(!switcher.spent.is_spent("/b",1000.0),"a conta atual não bateu limite nenhum");
+    }
+
+    #[tokio::test]
+    async fn a_session_gone_before_the_switch_goes_to_the_diary() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.gone.store(true,std::sync::atomic::Ordering::Relaxed);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.diary(),vec!["limit_switch_not_rust"]);
+        fake.gone.store(false,std::sync::atomic::Ordering::Relaxed);
+        fake.reopens.lock().unwrap().push(Reopen::NotRust);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.diary(),vec!["limit_switch_not_rust","limit_switch_not_rust"]);
     }
 
     #[tokio::test]

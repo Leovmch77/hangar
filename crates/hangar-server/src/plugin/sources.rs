@@ -257,14 +257,21 @@ impl Sources for NativeSources {
             let state = self.state()?;
             let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
             let Ok(Some(target)) = registry.terminal_target(&identity.name).await else { return Ok(()) };
-            let (live, transcript) = registry.context_transcript(&identity.name).await.map_err(|_| ServiceError("plugin_context_source_missing"))?;
-            if live != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
-            let now = crate::state::monitor::wall_now();
-            let found = tokio::task::spawn_blocking(move || crate::session_write::limit_switch::file_limit(&transcript, now)).await
-                .map_err(|_| ServiceError("plugin_context_source_missing"))?;
-            if let Some(limit) = found {
-                registry.usage_limit(crate::runtime::gateway::LimitHit { name: identity.name.clone(), provider: "claude".into(),
-                    account: Some(target.metadata.config_dir.to_string_lossy().into_owned()), limit });
+            let read = async {
+                let (live, transcript) = registry.context_transcript(&identity.name).await.map_err(|_| ServiceError("plugin_context_source_missing"))?;
+                if live != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
+                let now = crate::state::monitor::wall_now();
+                tokio::task::spawn_blocking(move || crate::session_write::limit_switch::file_limit(&transcript, now)).await
+                    .map_err(|_| ServiceError("plugin_context_source_missing"))
+            };
+            match read.await {
+                Ok(Some(limit)) => registry.usage_limit(crate::runtime::gateway::LimitHit { name: identity.name.clone(), provider: "claude".into(),
+                    account: Some(target.metadata.config_dir.to_string_lossy().into_owned()), limit }),
+                Ok(None) => {},
+                Err(error) => {
+                    state.diag.report("session.limit_switch", &identity.name, error.0, "fim de turno com erro: o limite de uso não foi conferido");
+                    return Err(error);
+                }
             }
             Ok(())
         })
