@@ -77,7 +77,7 @@ const ehTask = (ev: ChatEvent) => ev.kind === 'tool_use' && (ev.tool_name === 'T
 
 // Com a Lista de tarefas ligada, as chamadas de tarefa saem da conversa e o bloco entra ONDE a
 // última delas aconteceu: logo depois da linha que tem o evento anterior a ela (como o web).
-function comTarefas(rows: ConversationRow[], eventos: ChatEvent[]): ConversationRow[] {
+function comTarefas(rows: ConversationRow[], eventos: ChatEvent[], tasks: ReturnType<typeof foldTasks>): ConversationRow[] {
   let ancora: string | null = null;
   let tem = false;
   for (let i = eventos.length - 1; i >= 0 && !tem; i--) {
@@ -91,9 +91,26 @@ function comTarefas(rows: ConversationRow[], eventos: ChatEvent[]): Conversation
   const pos = ancora === null ? -1
     : rows.findIndex((r) => (r.type === 'event' || r.type === 'page' ? r.ev.id === ancora : r.type === 'fold' && r.parts.some((p) => p.id === ancora)));
   const out = [...rows];
-  out.splice(pos + 1, 0, { type: 'tasks', id: 'tasks' });
+  out.splice(pos + 1, 0, { type: 'tasks', id: 'tasks', tasks });
   return out;
 }
+
+const resultKey = (ev: ChatEvent) => ev.tool_use_id ?? '';
+
+// A linha que não mudou (mesmos eventos, mesmos resultados) devolve o objeto da rodada anterior: a
+// célula da lista e o item `memo` comparam por referência, e cada evento novo refaz todas as linhas.
+function sameRow(a: ConversationRow, b: ConversationRow, now: Map<string, ChatEvent>, before: Map<string, ChatEvent>): boolean {
+  const sameResult = (ev: ChatEvent) => now.get(resultKey(ev)) === before.get(resultKey(ev));
+  switch (a.type) {
+    case 'event': return b.type === 'event' && a.ev === b.ev;
+    case 'page': return b.type === 'page' && a.ev === b.ev && sameResult(a.ev);
+    case 'tasks': return b.type === 'tasks' && a.tasks === b.tasks;
+    case 'fold': return b.type === 'fold' && a.parts.length === b.parts.length
+      && a.parts.every((p, i) => p === b.parts[i] && sameResult(p));
+  }
+}
+
+const keyOf = (row: ConversationRow) => row.id;
 
 export function MessageList({
   events,
@@ -137,6 +154,12 @@ export function MessageList({
   // refeita a cada token, em vez de só o rodapé, que é onde a prévia mora. Os itens são `memo`
   // pelo mesmo motivo; sem as duas metades, qualquer uma sozinha não adianta.
   const resultDe = useCallback((t: ChatEvent) => results.get(t.tool_use_id ?? '') ?? null, [results]);
+  // Para as linhas, a leitura é pelo mapa atual sem trocar de função: quem tem resultado novo já
+  // recebe linha nova pelo `sameRow`, e o resto não refaz a cada evento.
+  const resultsRef = useRef(results);
+  resultsRef.current = results;
+  const resultOfRow = useCallback((t: ChatEvent) => resultsRef.current.get(t.tool_use_id ?? '') ?? null, []);
+  const previous = useRef<{ rows: Map<string, ConversationRow>; results: Map<string, ChatEvent> }>({ rows: new Map(), results: new Map() });
   // Layout do nativo: o que vem entre duas mensagens (raciocínio, chamadas, grupos) vira UM trecho
   // dobrado. O agrupamento continua o do core; o foldConversation só junta o desenho.
   const tasks = useMemo(
@@ -159,8 +182,15 @@ export function MessageList({
       return sessionName && r && !r.is_error ? htmlPageFromResult(ev.tool_name, r.result) : null;
     };
     const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree', pageOf);
-    return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
-  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks.length, rodandoIds, queuePanel]);
+    const fresh = tarefasLigadas && tasks.length ? comTarefas(rows, events, tasks) : rows;
+    const before = previous.current;
+    const out = fresh.map((row) => {
+      const old = before.rows.get(row.id);
+      return old && sameRow(row, old, results, before.results) ? old : row;
+    });
+    previous.current = { rows: new Map(out.map((r) => [r.id, r])), results };
+    return out;
+  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks, rodandoIds, queuePanel]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
   // Toque numa citação: rola até a resposta de origem pelo índice da linha (a lista é virtualizada,
   // então não há nó para procurar). Origem fora do histórico carregado: nada acontece.
@@ -212,9 +242,9 @@ export function MessageList({
   const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
     switch (item.type) {
       case 'fold':
-        return <ToolGroup parts={item.parts} resultOf={resultDe} onAbrir={abrirDetalhe} look={look} />;
+        return <ToolGroup parts={item.parts} resultOf={resultOfRow} onAbrir={abrirDetalhe} look={look} />;
       case 'tasks':
-        return <TaskList tasks={tasks} />;
+        return <TaskList tasks={item.tasks} />;
       case 'page':
         return <HtmlPageCard page={item.page} sessionName={sessionName ?? ''} serverId={serverId} />;
       case 'event': {
@@ -248,7 +278,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
+  }, [resultOfRow, abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
@@ -327,7 +357,7 @@ export function MessageList({
       onScroll={onScroll}
       scrollEventThrottle={100}
       data={data}
-      keyExtractor={(i) => i.id}
+      keyExtractor={keyOf}
       renderItem={renderItem}
       recycleItems={false}
       estimatedItemSize={72}

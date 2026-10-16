@@ -1,4 +1,4 @@
-import { toolGroupTitulo, type ChatEvent, type HtmlPageRef, type ItemConversa } from '@hangar/core';
+import { toolGroupTitulo, type ChatEvent, type HtmlPageRef, type ItemConversa, type Task } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 // Linha da lista do chat no layout do nativo: mensagem, ou um trecho de trabalho (raciocínios e
@@ -7,7 +7,7 @@ export type ConversationRow =
   | { type: 'event'; id: string; ev: ChatEvent }
   /** `source`: de que item do core o trecho veio; ausente quando a Árvore juntou vários. */
   | { type: 'fold'; id: string; parts: ChatEvent[]; source?: 'tool' | 'group' | 'pensamento' }
-  | { type: 'tasks'; id: string }
+  | { type: 'tasks'; id: string; tasks: Task[] }
   /** Página publicada pelo html_render: fora de qualquer trecho, ela existe para ser vista. */
   | { type: 'page'; id: string; ev: ChatEvent; page: HtmlPageRef };
 
