@@ -718,6 +718,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `WAYLAND_DISPLAY`, `DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` e `XDG_RUNTIME_DIR` pelo `systemctl --user show-environment`
   (prazo de 3 s) e, sem ele, pela pasta de runtime; o que o processo ou a entrada do `~/.claude.json` já tem vence. É o
   módulo único para isso no Rust: a abertura de sessões passa a usá-lo também.
+- **Voz: a lista de vozes é a do Codex instalado.** O servidor lê `thread/realtime/listVoices` uma vez (app-server da
+  conta escolhida, prazo de 5 s) e guarda: usa `v3` quando vem (Codex 0.163.0+, 16 vozes a mais) e `v1` quando não
+  vem, porque o Codex anterior valida a v3 pela v1. Sem leitura, vale a lista fixa `settings::VOICES`. A mesma lista
+  valida o `PUT` e a abertura da chamada; os clientes só mostram o que o servidor manda.
 - **Voz: pedido completo tem uma confirmação curta.** Ao encaminhar pedido completo, sobretudo longo ou
   demorado, a voz diz numa frase o que entendeu e aguarda; nunca a cada pedaço de fala nem narrando passos.
   O `delegationAckFiller` continua desligado: é ele quem falava a cada delegação. Como o prompt sozinho não

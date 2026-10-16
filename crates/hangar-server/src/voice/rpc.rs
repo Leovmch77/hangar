@@ -92,6 +92,21 @@ pub async fn handshake(rpc: &Rpc) -> Result<Value, RpcError> {
     Ok(rpc.request("config/read", json!({"includeLayers": false})).await?["config"].clone())
 }
 
+/// As vozes da v3 que este Codex aceita; Codex anterior ao campo `v3` valida a v3 pela lista `v1`.
+pub fn voices_from(listed: &Value) -> Option<Vec<String>> {
+    let names = |key: &str| listed[key].as_array().map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>())
+        .filter(|list| !list.is_empty());
+    if listed.get("v3").is_some() { names("v3") } else { names("v1") }
+}
+
+/// A lista do próprio Codex, com aperto de mão; `None` em qualquer falha.
+pub async fn fetch_voices(spawn: super::call::Spawn) -> Option<Vec<String>> {
+    let (rpc, _incoming) = spawn().await.ok()?;
+    handshake(&rpc).await.ok()?;
+    let listed = rpc.request_within("thread/realtime/listVoices", json!({}), Duration::from_secs(5)).await.ok()?;
+    voices_from(&listed["voices"])
+}
+
 /// Modelos que a conta oferece (`id` e `model` de cada item, ocultos incluídos); `None` quando a lista não veio inteira.
 pub async fn account_models(rpc: &Rpc) -> Option<Vec<String>> {
     let (mut names, mut cursor) = (Vec::new(), Value::Null);
@@ -149,5 +164,27 @@ mod tests {
         let (r, w) = tokio::io::split(ours);
         let (rpc, _incoming) = Rpc::over_lines(r, w);
         assert!(matches!(rpc.request("x", json!({})).await, Err(RpcError::Server(m)) if m == "conversation is not running"));
+    }
+}
+
+#[cfg(test)]
+mod voice_list_tests {
+    use super::*;
+
+    #[test]
+    fn the_v3_list_wins_and_an_older_codex_falls_back_to_v1() {
+        let both = json!({"v1": ["cove"], "v2": ["marin"], "v3": ["cove", "aube"], "defaultV1": "cove", "defaultV2": "marin"});
+        assert_eq!(voices_from(&both), Some(vec!["cove".to_owned(), "aube".to_owned()]));
+        let old = json!({"v1": ["cove", "sol"], "v2": ["marin"], "defaultV1": "cove", "defaultV2": "marin"});
+        assert_eq!(voices_from(&old), Some(vec!["cove".to_owned(), "sol".to_owned()]), "sem v3, a v3 valida pela v1");
+        assert_eq!(voices_from(&json!({"v3": []})), None, "lista vazia não substitui nada");
+        assert_eq!(voices_from(&json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn the_list_comes_from_the_codex_itself() {
+        let (spawn, _seen, _push) = crate::voice::test_support::fake_app_server();
+        let voices = fetch_voices(spawn).await.expect("o Codex respondeu");
+        assert!(voices.contains(&"viola".to_owned()) && voices.contains(&"sol".to_owned()), "{voices:?}");
     }
 }
