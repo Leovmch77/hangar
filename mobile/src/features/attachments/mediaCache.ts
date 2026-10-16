@@ -1,5 +1,9 @@
 import { Platform, Share } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
+import { startActivityAsync } from 'expo-intent-launcher';
+import * as m from '../../paraglide/messages';
+
+const FLAG_GRANT_READ_URI_PERMISSION = 1;
 
 // Arquivo do servidor exige o token no header, e nem o player do WebView (pede a mídia em pedaços,
 // sem header) nem o "Abrir em…" do sistema o mandam: baixa pro cache e entrega o local.
@@ -21,6 +25,32 @@ export async function localCopy(uri: string, headers: Record<string, string> | u
     throw e;
   }
   return target;
+}
+
+export async function openPdfFile(uri: string, headers: Record<string, string> | undefined, name: string, isMounted: () => boolean): Promise<void> {
+  let file: File;
+  try {
+    file = await localCopy(uri, headers, name);
+    if (!isMounted()) return;
+    const dir = new Directory(Paths.cache, 'pdf-reader', file.name);
+    dir.create({ idempotent: true, intermediates: true });
+    const safeName = name.replace(/[^\w.-]/g, '_');
+    const filename = !safeName || safeName === '.' || safeName === '..' ? 'documento.pdf' : safeName;
+    const target = new File(dir, filename);
+    file.moveSync(target, { overwrite: true });
+    file = target;
+  } catch (e) {
+    throw new Error(m.native_pdf_download_failed({ reason: e instanceof Error ? e.message : String(e) }));
+  }
+  try {
+    await startActivityAsync('android.intent.action.VIEW', {
+      data: file.contentUri, type: 'application/pdf', flags: FLAG_GRANT_READ_URI_PERMISSION,
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    if (reason.includes('ActivityNotFoundException')) throw new Error(m.arq_pdf_sem_leitor());
+    throw new Error(m.native_pdf_reader_failed({ reason }));
+  }
 }
 
 // Só o iOS compartilha arquivo pelo Share do RN (o Android só manda texto): ali a folha do sistema

@@ -23,6 +23,8 @@ pub fn fake_app_server() -> (Spawn, tokio::sync::mpsc::UnboundedReceiver<Value>,
             let result = match msg["method"].as_str() {
                 Some("initialize") => json!({}),
                 Some("config/read") => json!({"config": {"model": "gpt-test"}}),
+                Some("thread/realtime/listVoices") => json!({"voices": {"v1": ["cove", "sol"], "v2": ["marin"], "v3": ["cove", "sol", "aube", "viola"],
+                    "defaultV1": "cove", "defaultV2": "marin"}}),
                 Some("thread/start") => json!({"thread": {"id": "t1"}, "model": "gpt-test"}),
                 Some("thread/realtime/start") => {
                     starts += 1;
