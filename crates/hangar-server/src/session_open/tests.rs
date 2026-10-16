@@ -1985,3 +1985,30 @@ fn pi_omp_kimi_and_codex_resume_from_the_archive_with_their_own_verb() {
     assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
         (json!(409), json!("session_transfer_resume_unsupported")));
 }
+
+/// O Arquivo com outra conta: a conversa muda para ela e a sessão nasce lá; a abertura recusada a devolve
+/// para a conta de antes; a incerta (o tmux calou, a sessão pode estar de pé) não a devolve, senão o
+/// transcript se partiria entre as duas contas.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_archive_moves_the_conversation_to_the_asked_account_and_back_only_on_a_clear_failure() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let terminal = |root: &std::path::Path| std::fs::write(root.join("home/.claude/runtime-config.json"), r#"{"headless_default": false}"#).unwrap();
+    let run = |fake: Value| run_resume_patched("archive_resume_claude", |s| {
+        s["steps"][0]["json"] = json!({"config_dir": "<ROOT>/home/.claude-b"});
+        s["fakes"]["tmux_new_session"] = fake;
+    }, terminal);
+    let at = |root: &std::path::Path, account: &str| {
+        let project = hangar_workspace::worktrees::sanitize_cwd(&root.join("work/proj").to_string_lossy());
+        root.join(format!("home/{account}/projects/{project}/{SID}.jsonl")).is_file()
+    };
+    let (_, raw, _dir, root) = run(Value::Null);
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "a conversa foi para a conta pedida");
+    let (_, raw, _dir, root) = run(json!({"rc": 1, "stderr": "boom"}));
+    assert_ne!(raw["steps"][0]["status"], 200);
+    assert!(at(&root, ".claude") && !at(&root, ".claude-b"), "recusada: a conversa voltou");
+    let (_, raw, _dir, root) = run(json!({"silent": true}));
+    assert_eq!(raw["steps"][0]["body"]["detail"]["code"], "session_open_uncertain", "{}", raw["steps"][0]["body"]);
+    assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "incerta: a conversa fica com a sessão que pode ter nascido");
+}

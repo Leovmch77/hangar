@@ -345,7 +345,8 @@ pub async fn open(host: &dyn super::open::OpenHost, plan: Plan, mut resolved: su
             Ok(body)
         }
         Err(error) => {
-            if moved && let Err(undo) = move_conversation(&server_projects, project, sid, to.as_deref(), from.as_deref()) {
+            // Incerta, a sessão pode estar de pé na conta nova: devolver partiria o transcript em dois.
+            if moved && error.code != Some("session_open_uncertain") && let Err(undo) = move_conversation(&server_projects, project, sid, to.as_deref(), from.as_deref()) {
                 tracing::error!(code = undo.code.unwrap_or("-"), "a conversa da retomada que falhou ficou na conta nova");
             }
             Err(error)
