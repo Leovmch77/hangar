@@ -1,6 +1,7 @@
 //! Bandeja das abas: as listas já abertas de cada máquina, sem streams próprios.
 use super::*;
 use super::sidebar::Target;
+use gpui_kit::component::switch::Switch;
 
 pub(super) struct Tray { pub(super) open: bool, focus: FocusHandle }
 
@@ -9,6 +10,28 @@ impl Tray {
 }
 
 impl Hangar {
+    pub(super) fn tab_targets(&self) -> Vec<Target> {
+        let active = self.active_key();
+        let mut targets = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
+            .map(|s| Target::new(&active, &s.name)).collect::<Vec<_>>();
+        if appearance::get().show_remote_tabs {
+            for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
+                let key = servers::norm(&entry.address);
+                if key == active { continue; }
+                targets.extend(self.sessions_of(&key).iter().filter(|s| !self.sidebar.is_hidden(&key, &s.name))
+                    .map(|s| Target::new(&key, &s.name)));
+            }
+        }
+        targets
+    }
+
+    fn other_machines_attention(&self) -> usize {
+        let active = self.active_key();
+        self.servers.iter().filter(|entry| servers::has_section(entry)).map(|entry| servers::norm(&entry.address))
+            .filter(|key| key != &active).map(|key| self.sessions_of(&key).iter()
+                .filter(|s| s.state == "awaiting_input" || s.pending_questions > 0).count()).sum()
+    }
+
     fn tray_sessions<'a>(&'a self, key: &str) -> Vec<&'a SessionInfo> {
         let mut sessions: Vec<_> = self.sessions_of(key).iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).collect();
         sessions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -25,10 +48,17 @@ impl Hangar {
 
     pub(super) fn render_machines_tray_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let occupied = self.other_machines_have_sessions();
-        let tip = tr(if occupied { "machines_tray_occupied" } else { "machines_tray_open" });
-        let icon = div().relative().size(px(18.)).child(svg().path(crate::MACHINES_GLYPH).size_full().text_color(theme::muted()))
-            .when(occupied, |el| el.child(div().id("machines-tray-dot").absolute().right(px(-2.)).top(px(-2.))
-                .size(px(5.)).rounded_full().bg(theme::warning())));
+        let attention = self.other_machines_attention();
+        let tip = if attention > 0 { tr("machines_tray_attention").replace("{count}", &attention.to_string()) }
+            else { tr(if occupied { "machines_tray_occupied" } else { "machines_tray_open" }) };
+        let icon = div().relative().size(px(18.)).child(svg().path(crate::MACHINES_GLYPH).size_full()
+            .text_color(if attention > 0 { theme::warning() } else { theme::muted() }))
+            .when(occupied && attention == 0, |el| el.child(div().id("machines-tray-dot").absolute().right(px(-2.)).top(px(-2.))
+                .size(px(5.)).rounded_full().bg(theme::faint())))
+            .when(attention > 0, |el| el.child(div().id("machines-tray-attention").absolute().right(px(-6.)).top(px(-6.))
+                .min_w(px(13.)).h(px(13.)).px(px(2.)).rounded_full().bg(theme::warning()).text_color(theme::chrome())
+                .text_size(px(9.)).font_weight(FontWeight::BOLD).flex().items_center().justify_center()
+                .child(if attention > 99 { "99+".to_owned() } else { attention.to_string() })));
         let button = Button::new("machines-tray-toggle").ghost().size(px(28.)).rounded(px(6.)).child(icon)
             .selected(self.machines_tray.open).tooltip(tip.clone()).accessibility_label(tip)
             .on_click(cx.listener(|this, _, window, cx| {
@@ -71,6 +101,15 @@ impl Hangar {
                         this.close_popups();
                         this.root_focus.focus(window, cx);
                         cx.notify();
+                    }))))
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_xs().whitespace_normal().child(tr("machines_tray_show_remote_tabs")))
+                .child(Switch::new("machines-tray-show-remote-tabs").checked(appearance::get().show_remote_tabs)
+                    .accessibility_label(tr("machines_tray_show_remote_tabs"))
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.cancel_session_numbers(cx);
+                        this.apply_appearance(appearance::Appearance { show_remote_tabs: *on, ..appearance::get() }, true, cx);
+                        this.redraw(panes::Area::Nav, cx);
                     }))))
             .child(div().id("machines-tray-columns").relative().w_full().min_w_0().overflow_x_scroll()
                 .flex().items_start().gap(px(12.)).children(columns))

@@ -4607,6 +4607,8 @@
   "native_machines_tray_title": "Máquinas e convidados",
   "native_machines_tray_open": "Abrir sessões de todas as máquinas e convidados",
   "native_machines_tray_occupied": "Máquinas e convidados — há sessões abertas em outras máquinas ou convites",
+  "native_machines_tray_attention": "Máquinas e convidados — sessões em outras máquinas que precisam de atenção: {count}",
+  "native_machines_tray_show_remote_tabs": "Mostrar sessões de outras máquinas na barra de abas",
   "native_machines_tray_pair_hint": "Arraste uma sessão sobre outra para parear, ou use o menu da sessão.",
   "native_machines_tray_read_only": "Leitura",
   "native_empty_chat": "Nenhuma mensagem ainda",
