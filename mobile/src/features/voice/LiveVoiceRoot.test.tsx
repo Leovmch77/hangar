@@ -135,6 +135,15 @@ test('AppState não encerra chamada; sem botão flutuante, o painel aberto pelo 
   expect(remove).toHaveBeenCalledOnce();
 });
 
+test('fora das telas com botão no topo, a chamada aberta ganha o botão flutuante', async () => {
+  harness.segments = ['config'];
+  act(() => useLiveVoice.setState({ view: { ...idle(), phase: 'live', serverLabel: a.label } }));
+  const { container } = await mount(<LiveVoiceRoot />);
+  await act(async () => button(container, 'open-call').click());
+  expect(useLiveVoice.getState().open).toBe(true);
+  expect(button(container, 'open-call')).toBeNull();
+});
+
 test('botão da conversa usa A com B ativo; falha de settings continua visível e convite não liga', async () => {
   act(() => useLiveVoice.setState({ settingsByServer: { [a.id]: { server: a, view: { ...idle().settings, error: 'settings_failed' } } } }));
   const { container, root } = await mount(<LiveVoiceChatButton serverId={a.id} name="session-a" />);

@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
-import { AppState } from 'react-native';
+import { AppState, View } from 'react-native';
 import { useGlobalSearchParams, useRouter, useSegments } from 'expo-router';
 import { useServers } from '../../stores/servers';
+import { LiveVoiceButton } from './LiveVoiceButton';
 import { LiveVoiceSheet } from './LiveVoiceSheet';
 import { useLiveVoice, type LiveVoiceDestination } from './liveVoiceStore';
 
@@ -54,7 +55,14 @@ export function LiveVoiceRoot() {
   useEffect(() => { useLiveVoice.getState().reconcileServers(); }, [servers]);
 
   const store = useLiveVoice.getState();
+  // A tela inicial, a lista e a conversa já têm o botão no topo; nas outras a chamada aberta precisa de um caminho de volta.
+  const topBarRoute = segments.length === 0 || chatRoute;
+  const hasCall = view.phase === 'connecting' || view.phase === 'live' || !!view.error;
   return <>
+    {!topBarRoute && !open && hasCall ? <View pointerEvents="box-none" style={{ position: 'absolute', right: 16, bottom: 32 }}>
+      <LiveVoiceButton phase={view.phase} muted={view.muted} error={!!view.error} visible
+        onPress={() => useLiveVoice.setState({ open: true })} />
+    </View> : null}
     <LiveVoiceSheet open={open} view={view} onDismiss={store.dismiss}
       onStart={() => { void store.start(); }} onStop={() => { void store.stop(); }} onToggleMute={store.toggleMute}
       onMode={store.setMode} onRetry={() => { void store.retry(); }}
