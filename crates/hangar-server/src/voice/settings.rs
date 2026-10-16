@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 /// Só as vozes que o realtime v3 aceita; as outras derrubam a chamada.
 pub const VOICES: [&str; 9] = ["arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"];
+/// As 16 vozes que o Codex 0.163.0 juntou à v3: sem a lista dele, salvar uma delas não é recusado.
+pub const V3_ADDED: [&str; 16] = ["aube", "bubbie", "haetsal", "hanul", "himari", "leher", "miko", "neer", "porto", "rindo", "rio",
+    "rivage", "selva", "sonna", "tinta", "viola"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PairDto { #[serde(default)] pub model: Option<String>, #[serde(default = "default_effort")] pub effort: String, #[serde(default)] pub tier: Option<String> }

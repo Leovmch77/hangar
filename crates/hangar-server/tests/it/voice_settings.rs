@@ -48,6 +48,9 @@ async fn invalid_voice_and_unknown_account_are_refused() {
     assert_eq!(put(addr, bad).await, (400, json!({"error_code": "invalid_voice"})));
     let mut bad = base.clone(); bad["codex_account"] = json!("nao-existe");
     assert_eq!(put(addr, bad).await, (400, json!({"error_code": "unknown_account"})));
+    // Sem a lista do Codex, uma voz nova da v3 é aceita: quem a valida é o Codex na abertura.
+    let mut newer = base.clone(); newer["voice"] = json!("aube");
+    assert_eq!(put(addr, newer).await.0, 200);
 }
 
 #[tokio::test]
