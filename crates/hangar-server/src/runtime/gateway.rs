@@ -433,11 +433,15 @@ impl RuntimeRegistry {
             return Some(Err(RuntimeError::new("claude_headless_entry_conflict","já há outra sessão aberta aqui com este nome ou chave")));
         }
         let (state_path,lease_path) = super::codex_terminal::queue_files(&queue_dir,&key);
+        // Sem a trava da fila: outra abertura desta sessão pode estar em curso (e o ator a segura a vida
+        // toda); quem decide entre as duas é a barreira do `open_attempt`, que acha a sessão já aberta.
         let generation = {
-            let (state_path,lease_path,queue_dir,key,owned) = (state_path.clone(),lease_path.clone(),queue_dir.clone(),key.clone(),name.to_owned());
-            let read = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
-                let _lease = super::codex_terminal::lease_blocking(&lease_path)?;
-                Ok(Store::open(&state_path,&queue_dir,QueueState::new(&key,1,&owned,Vec::new()))?.state().generation)
+            let state_path = state_path.clone();
+            let read = tokio::task::spawn_blocking(move || match super::queue::read_replaced(&state_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(1),
+                Err(error) => Err(error),
+                Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().and_then(|state|state["generation"].as_u64())
+                    .ok_or_else(||std::io::Error::from(std::io::ErrorKind::InvalidData)),
             }).await;
             match read {
                 Ok(Ok(generation))=>generation,
@@ -2291,11 +2295,15 @@ mod tests {
         }
     }
     /// Cano Claude falso que responde o retrato e fica ouvindo.
-    async fn fake_cano() -> (String,tokio::task::JoinHandle<()>) {
+    async fn fake_cano() -> (String,tokio::task::JoinHandle<()>) { fake_cano_gated(None).await }
+
+    /// Com `gate`: avisa ao receber a conexão e só manda o retrato quando liberado.
+    async fn fake_cano_gated(gate:Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>) -> (String,tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let server=tokio::spawn(async move {
             let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            if let Some((accepted,release))=&gate {accepted.notify_one();release.notified().await;}
             let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
             socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
             loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}}
@@ -2328,6 +2336,28 @@ mod tests {
         registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
         assert!(registry.entries.lock().await.get(&key).unwrap().auto_respawn.is_some(),"o processo que cai é religado aqui");
         assert!(matches!(registry.open_claude_headless("cl",false).await,Some(Ok(()))),"aberta não abre de novo");
+        registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// A 1ª mensagem chega enquanto a sessão recém-criada ainda sobe: a segunda abertura espera a primeira
+    /// e acha a sessão aberta, sem disputar a trava da fila (que o ator segura a vida toda) nem marcar erro.
+    #[tokio::test]
+    async fn a_second_open_during_the_first_finds_the_session_open() {
+        let home=tempfile::tempdir().unwrap();
+        let (accepted,release)=(Arc::new(tokio::sync::Notify::new()),Arc::new(tokio::sync::Notify::new()));
+        let (escuta,server)=fake_cano_gated(Some((accepted.clone(),release.clone()))).await;
+        let key="ef".repeat(16);
+        let (registry,_hubs)=claude_registry(home.path(),&[json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":escuta,"token":"fixture","versao":2}})]);
+        let first={let registry=registry.clone();tokio::spawn(async move {registry.open_claude_headless("cl",false).await})};
+        accepted.notified().await;
+        let second={let registry=registry.clone();tokio::spawn(async move {registry.open_claude_headless("cl",false).await})};
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        assert!(matches!(first.await.unwrap(),Some(Ok(()))));
+        let second=tokio::time::timeout(Duration::from_secs(10),second).await.unwrap().unwrap();
+        assert!(matches!(second,Some(Ok(()))),"a segunda abertura achou a sessão aberta: {:?}",second.map(|r|r.err().map(|e|e.code)));
+        assert!(registry.runtime_lost("cl").await.is_none(),"sessão saudável sem erro marcado");
         registry.close(&key,1).await.unwrap();server.abort();
     }
 
