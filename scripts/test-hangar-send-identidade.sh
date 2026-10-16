@@ -107,7 +107,7 @@ checa "psmux sem formato não fornece identidade" "cli" "$(me 2>/dev/null)"
 #    operador que subiu o backend de dentro de um tmux, e um carimbo obsoleto pós-rename.
 mkdir -p "$TMP/headless"
 # Formato compacto, o que o hangar-server grava.
-printf '{"name":"renomeada","provider":"claude","headless":true,"key":"abc123","session_id":"x"}\n' > "$TMP/headless/renomeada.json"
+printf '{"name":"renomeada","provider":"claude","headless":true,"key":"abc123","cano":{"name":"aninhado"}}\n' > "$TMP/headless/renomeada.json"
 export HANGAR_HEADLESS_DIR="$TMP/headless" CP_SESSION_KEY="abc123" CP_SESSION_NAME="nome-do-nascimento"
 export TMUX=1 TMUX_PANE="%1" PANES_FAKE=$'%1 outra' SESSAO_ATUAL="outra"
 checa "sem terminal (chave do sidecar)" "renomeada" "$(me 2>/dev/null)"
