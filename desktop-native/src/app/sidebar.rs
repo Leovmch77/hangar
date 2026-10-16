@@ -1141,6 +1141,10 @@ impl Hangar {
                     Write::Rename(_, seq) => self.sidebar.editing.as_ref().is_some_and(|e| !e.inline && e.status.borrow().sent == Some(seq) && e.target == target),
                     _ => false,
                 };
+                let warnings = match (&what, &result) {
+                    (Write::Mode(_) | Write::Reload | Write::Account { .. }, Ok(value)) => super::controls::reopen_warnings(value),
+                    _ => None,
+                };
                 let note = match (&what, result) {
                     (Write::Rename(new, _), Ok(value)) => {
                         self.sidebar.renaming.remove(&target);
@@ -1196,6 +1200,7 @@ impl Hangar {
                     }
                 };
                 if let Some(note) = note { window.push_notification(note, cx); }
+                if let Some(warnings) = warnings { window.push_notification(Notification::warning(warnings), cx); }
                 cx.notify();
             }
         }

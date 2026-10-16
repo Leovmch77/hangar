@@ -201,6 +201,12 @@ fn spaced(label: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `avisos` de uma reabertura (motor que saiu do catálogo, registro não gravado), numa linha.
+pub(super) fn reopen_warnings(value: &Value) -> Option<String> {
+    let avisos: Vec<&str> = value.get("avisos").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    (!avisos.is_empty()).then(|| avisos.join(" · "))
+}
+
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }
 
 fn catalog_engine_matches(catalog: &Value, engine: Option<&str>) -> bool {
@@ -758,6 +764,7 @@ impl Hangar {
                         if self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) && !partial { self.controls.open = None; }
                         let note = if pending { (tr("ctl_pending_confirm"), true) }
                             else if partial { (tr("ctl_effort_not_applied"), true) }
+                            else if let Some(warnings) = reopen_warnings(&value) { (warnings, true) }
                             else { (tr("ctl_applied").replace("{what}", &tr(&format!("ctl_{}", ctl.key()))).replace("{value}", &shown(ctl, label)), false) };
                         self.action_feedback.insert(key, note);
                     }
@@ -1367,7 +1374,15 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, spaced, step_free};
+    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, reopen_warnings, spaced, step_free};
+
+    #[test]
+    fn reopen_warnings_join_what_the_server_sent() {
+        assert_eq!(reopen_warnings(&serde_json::json!({"ok": true, "avisos": ["motor saiu", "registro não gravado"]})).as_deref(),
+            Some("motor saiu · registro não gravado"));
+        assert_eq!(reopen_warnings(&serde_json::json!({"ok": true})), None);
+        assert_eq!(reopen_warnings(&serde_json::json!({"ok": true, "avisos": []})), None);
+    }
 
     #[test]
     fn mode_reply_resends_only_while_the_backend_moves() {
