@@ -1759,6 +1759,8 @@ mod terminal_async {
 
     const QUESTION:&str = "async:thread-1:q1:0";
     const ANSWER:&str = "> Qual pasta?\n\nA";
+    // A assinatura e a entrega incluem o diário durável; o prazo cobre a E/S do Windows.
+    const WAIT_TIMEOUT:std::time::Duration = std::time::Duration::from_secs(30);
 
     fn async_turns() -> Value {
         json!([{"id":"t0","status":"completed","items":[{"id":"q1","type":"agentMessage","delivery":"async",
@@ -1840,18 +1842,20 @@ mod terminal_async {
 
 
     async fn until(what:&str,check:impl Fn() -> bool) {
-        tokio::time::timeout(std::time::Duration::from_secs(5),async { while !check() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+        tokio::time::timeout(WAIT_TIMEOUT,async { while !check() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
             .await.unwrap_or_else(|_|panic!("{what}"));
     }
 
     async fn view_until(handle:&RuntimeHandle,what:&str,check:impl Fn(&Value) -> bool) -> Value {
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        let mut last = Value::Null;
+        tokio::time::timeout(WAIT_TIMEOUT,async {
             loop {
                 let view = handle.view().await.unwrap();
                 if check(&view) { return view; }
+                last = view;
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-        }).await.unwrap_or_else(|_|panic!("{what}"))
+        }).await.unwrap_or_else(|_|panic!("{what}: último estado = {last}"))
     }
 
     fn question_open(view:&Value) -> bool { view["async_questions"].as_array().is_some_and(|q|q.iter().any(|pair|pair[0] == QUESTION)) }

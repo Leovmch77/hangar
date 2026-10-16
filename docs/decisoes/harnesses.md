@@ -148,6 +148,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   terminal e sem terminal preserva a thread e suas escolhas; só confirma quando o destino
   carregou a conversa. Assinar eventos com `thread/resume` não sobrescreve sandbox nem aprovação.
 
+- **Codex: `/clear` abre outra conversa, nunca vira prompt.** Sem terminal, o ator chama
+  `thread/start` e restaura esforço e modo antes de liberar o envio; com terminal, dirige o
+  `/clear` da TUI e confirma a troca da thread. Turno, pergunta ou mensagem esperando na fila
+  impedem a limpeza. Conta, pasta e chave da sessão continuam as mesmas. Ver
+  [limpeza da conversa Codex](#codex-clear-abre-outra-conversa).
+
 - **`omp` é um FORK do Pi** — mesmo JSONL, mesmas extensões, e as diferenças pequenas já custaram
   bugs calados (binário próprio, raiz `~/.omp/agent`, sem `--session-id`, outros nomes de evento,
   subagente no mesmo processo). Raiz do agente omp tem UMA resposta: `app/omp_dirs.agent_dir()`.
@@ -1215,6 +1221,34 @@ backend), 3 rodadas, mediana, arquivo em cache: `limit=400` 0,71 s → 0,36 s; `
 transcripts reais × 3 limites comparados com o atalho desligado, zero diferenças. O relógio do
 anexo pulado continua contando porque decide o `ts` herdado por linha sem timestamp e por entrada
 de fila sem `ts`.
+
+## Codex: /clear abre outra conversa
+
+Em 16/10/2026, o `/input` do Codex só distinguia `/compact`: `/clear` passava pela preparação
+de skills e seguia como texto de `turn/start`. O teste do terminal verificava somente que o
+pedido não chegava ao Python, sem conferir conversa nova.
+
+O comando agora entra pelo mesmo tratamento no HTTP e nas entregas internas. No sem terminal,
+`thread/start` conserva pasta, modelo, sandbox, aprovação e Fast; `thread/settings/update`
+restaura esforço e colaboração. Alterações de configuração durante essa sequência são recusadas.
+Resposta tardia ainda termina a sequência. Falha ao abrir conserva a conversa anterior;
+falha ao restaurar impede o envio, registra o modo padrão da thread nova e pede recarregar e
+conferir as escolhas. A fila pendente nunca é descartada para limpar.
+
+No terminal, a sequência compartilha a trava do pane, recusa menu, modo de cópia e rascunho,
+confere o `/clear` digitado e só repete Enter se o comando exato ainda estiver no composer.
+Aceitação exige outra thread publicada pelo ator. A TUI conserva a decisão sobre a conversa nova.
+
+Prova no Linux com codex-cli 0.162.1, conta e configuração temporárias, app-server e TUI reais,
+usando um provedor HTTP local sem credenciais: uma mensagem antes, `/clear` e outra depois.
+Nos dois modos o UUID mudou, a segunda chamada ao provedor não continha o marcador anterior e
+o comando não virou pedido ao modelo. No sem terminal, o esforço `high` continuou aplicado.
+A captura da TUI depois da limpeza mostrou o composer vazio e nenhum texto da conversa anterior.
+O `thread/start` devolveu `path` antes de existir o rollout: a descoberta conserva esse caminho,
+e o hub pode trocar o histórico antes da primeira mensagem, sem exigir `is_file`.
+
+Regressões cobrem abertura, recusa, respostas tardias, configuração concorrente, falha de
+restauração de Plan, envio seguinte à thread nova, persistência do sidecar e proteção do composer.
 
 ## Codex: compactação e ida ao terminal
 

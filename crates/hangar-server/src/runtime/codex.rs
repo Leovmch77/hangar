@@ -1081,6 +1081,19 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    fn fail_clear(&mut self,parent:&str,opening:bool,message:Value,effects:&mut Vec<Effect>) {
+        self.ready = opening;
+        if !self.ready {
+            // A thread recém-aberta está no modo padrão; não guardar Plan como se a restauração tivesse ocorrido.
+            self.mode = Some("default".into());
+            self.policy("session.patch_meta",json!({"mode":self.mode,"effort":self.effort}),effects);
+            self.state.problema = Some("codex_clear_settings_failed".into());
+            self.state.problema_detalhe = Some("A conversa nova abriu, mas não consegui restaurar sua configuração. Recarregue e confira o modo e o esforço antes de enviar.".into());
+        }
+        effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Rejected,payload:json!({"error":message}) });
+        self.changed(effects,true);
+    }
+
     /// Modo para lançar/retomar sem terminal (sempre conhecido ali); desconhecido cai no mais restrito, nunca em Full Access.
     fn launch_mode(&self) -> &str { self.permission_mode.as_deref().unwrap_or("Ask for approval") }
 
@@ -1230,6 +1243,11 @@ impl Engine {
             return Ok(effects);
         }
         if !self.alive { return Err(error("runtime sem terminal indisponível")); }
+        if self.headless && self.rpc.values().any(|rpc|rpc.continuation.as_ref().is_some_and(|next|
+            matches!(next["kind"].as_str(),Some("clear_thread" | "clear_ready"))))
+            && matches!(command.kind,OperationKind::Clear | OperationKind::SetModel | OperationKind::SetEffort | OperationKind::SetServiceTier | OperationKind::SetMode | OperationKind::SetPermissionMode) {
+            return Err(error("Espere o /clear terminar antes de mudar a configuração da conversa."));
+        }
         // Catálogo fechado do terminal: as mesmas transformações do sem terminal, sem a tabela de
         // aprovação/sandbox dele (já ausente nos ramos abaixo quando `headless` é falso).
         if !self.headless && !terminal_operation(command.kind) {
@@ -1289,6 +1307,12 @@ impl Engine {
                 // Sem assinatura o fim da compactação não chega e a sessão ficaria "Compactando…".
                 if !self.idle() || !self.headless && !self.subscribed { return Err(error("espere o Codex terminar e responda às perguntas antes de compactar")); }
                 self.send(id,ClientRequest::ThreadCompactStart(wire::ThreadCompactStartParams { thread_id:self.thread_id.clone() }),None,&mut effects);
+            }
+            OperationKind::Clear => {
+                if !self.idle() { return Err(error("Espere o Codex terminar e responda às perguntas antes de limpar a conversa.")); }
+                let next = json!({"kind":"clear_thread","parent":id,"effort":self.effort,"mode":self.mode});
+                self.send(format!("{id}:thread"),self.bootstrap_start(),Some(next),&mut effects);
+                self.ready = false;
             }
             OperationKind::ListModels => self.send(id,ClientRequest::ModelList(Default::default()),None,&mut effects),
             OperationKind::ListSkills => self.send(id,self.skills_list(),None,&mut effects),
@@ -1673,6 +1697,10 @@ impl Engine {
             if opened.is_some() { line } else { json!({"id":line["id"],"error":{"message":UNPROVEN_THREAD}}) }
         } else { line };
         if !line["error"].is_null() && !already_initialized {
+            if let Some(next) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("clear_thread" | "clear_ready"))) {
+                self.fail_clear(next["parent"].as_str().unwrap_or(""),next["kind"] == "clear_thread",line["error"]["message"].clone(),effects);
+                return Ok(());
+            }
             if rpc.method == "thread/backgroundTerminals/terminate" {
                 let text = format!("O comando do turno interrompido não foi encerrado ({}): {}",
                     rpc.params["processId"].as_str().unwrap_or("?"),line["error"]["message"].as_str().unwrap_or("erro do Codex"));
@@ -1740,6 +1768,13 @@ impl Engine {
             }
             "thread/resume" | "thread/start" => {
                 let Some(response) = opened.take() else { return Err(error(UNPROVEN_THREAD)) };
+                if rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "clear_thread") {
+                    self.async_questions = AsyncQuestions::default();
+                    self.token_usage = Value::Null;
+                    self.state.status_line = None;
+                    self.first_response_start = None;
+                    self.response_started = false;
+                }
                 if response.thread.id != self.thread_id {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
@@ -1796,11 +1831,30 @@ impl Engine {
             _ => {},
         }
         if let Some(next) = rpc.continuation.clone() {
-            if rpc.timed_out {
+            // Mesmo após o prazo, a conversa que abriu precisa terminar de aplicar as escolhas e liberar o envio.
+            if rpc.timed_out && !matches!(next["kind"].as_str(),Some("clear_thread" | "clear_ready")) {
                 effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Accepted,payload:result });
                 self.changed(effects,true); return Ok(());
             }
             match next["kind"].as_str() {
+                Some("clear_thread") => {
+                    let parent = next["parent"].as_str().unwrap_or("");
+                    if next["mode"] == "plan" && self.model.is_none() {
+                        self.fail_clear(parent,false,json!("Não consegui identificar o modelo para restaurar o modo Plan."),effects);
+                        return Ok(());
+                    }
+                    let collaboration_mode = next["mode"].as_str().zip(self.model.clone()).map(|(mode,model)|wire::CollaborationMode {
+                        mode:mode.into(),settings:wire::CollaborationSettings { model,reasoning_effort:string(&next["effort"]),developer_instructions:None } });
+                    let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams {
+                        thread_id:self.thread_id.clone(),effort:Some(string(&next["effort"])),collaboration_mode,..Default::default() });
+                    self.send(format!("{parent}:settings"),request,Some(json!({"kind":"clear_ready","parent":parent})),effects);
+                }
+                Some("clear_ready") => {
+                    self.ready = true;
+                    effects.push(Effect::Reply { operation_id:next["parent"].as_str().unwrap_or("").into(),disposition:Disposition::Accepted,
+                        payload:json!({"thread_id":self.thread_id}) });
+                    effects.push(Effect::WakeQueue);
+                }
                 Some("bootstrap") if rpc.method == "initialize" => {
                     let parent = next["parent"].as_str().unwrap_or("");
                     let notification = format!("{parent}:initialized");
