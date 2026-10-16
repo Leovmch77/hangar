@@ -1850,7 +1850,13 @@ proptest! {
 /// Uma fixture de retomada (grupo `d-resume`) rodada pela abertura do Rust, como o harness a roda.
 #[cfg(target_os = "linux")]
 fn run_resume_fixture(name: &str, before: impl FnOnce(&std::path::Path)) -> (Value, Value, tempfile::TempDir, PathBuf) {
-    let fixture: Value = serde_json::from_slice(&std::fs::read(fixture_dir().join(format!("{name}.json"))).unwrap()).unwrap();
+    run_resume_patched(name, |_| {}, before)
+}
+
+#[cfg(target_os = "linux")]
+fn run_resume_patched(name: &str, patch: impl FnOnce(&mut Value), before: impl FnOnce(&std::path::Path)) -> (Value, Value, tempfile::TempDir, PathBuf) {
+    let mut fixture: Value = serde_json::from_slice(&std::fs::read(fixture_dir().join(format!("{name}.json"))).unwrap()).unwrap();
+    patch(&mut fixture["scenario"]);
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     materialize(&fixture, &root);
@@ -1920,4 +1926,62 @@ fn an_archived_conversation_follows_the_headless_default() {
     let sidecar: Value = serde_json::from_slice(&std::fs::read(root.join("home/.hangar/claude-headless/proj.json")).unwrap()).unwrap();
     assert_eq!(sidecar["session_id"], "11111111-1111-4111-8111-111111111111", "a subida retoma a conversa do Arquivo");
     assert!(raw["runtime_requests"].as_array().unwrap().iter().any(|r| r["op"] == "claude_headless.acordar"));
+}
+
+/// Pi, omp, Kimi e Codex retomam do Arquivo com o verbo de cada um (RET-062 a RET-065): a conversa vem
+/// do armazenamento do agente e a pasta do cabeçalho dela. O rollout que veio de uma transferência
+/// Claude→Codex é recusado (a transferência fica no Python, T-008).
+#[cfg(target_os = "linux")]
+#[test]
+fn pi_omp_kimi_and_codex_resume_from_the_archive_with_their_own_verb() {
+    const ID: &str = "33333333-3333-4333-8333-333333333333";
+    let kimi = format!("session_{ID}");
+    let files = json!({
+        format!("<ROOT>/home/.pi/agent/sessions/--w--/2026-10-01T00-00-00-000Z_{ID}.jsonl"):
+            format!("{{\"type\":\"session\",\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}\n"),
+        format!("<ROOT>/home/.omp/agent/sessions/-/2026-10-01T00-00-00-000Z_{ID}.jsonl"):
+            format!("{{\"type\":\"session\",\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}\n"),
+        "<ROOT>/home/.kimi-code/session_index.jsonl":
+            format!("{{\"sessionId\":\"{kimi}\",\"sessionDir\":\"<ROOT>/home/.kimi-code/sessions/w/{kimi}\",\"workDir\":\"<ROOT>/work/proj\"}}\n"),
+        format!("<ROOT>/home/.kimi-code/sessions/w/{kimi}/agents/main/wire.jsonl"): "{}\n",
+        format!("<ROOT>/home/.codex/sessions/2026/10/01/rollout-2026-10-01T00-00-00-{ID}.jsonl"):
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}}}\n"),
+    });
+    let run = |provider: &str, sid: &str, before: &dyn Fn(&std::path::Path)| run_resume_patched("archive_resume_claude", |s| {
+        for (k, v) in files.as_object().unwrap() { s["state"]["files"][k] = v.clone(); }
+        s["steps"][0]["path"] = json!(format!("/api/archive/x/{sid}/resume"));
+        s["steps"][0]["json"] = json!({"provider": provider});
+    }, before);
+    let terminal = |root: &std::path::Path| std::fs::write(root.join("home/.claude/runtime-config.json"), r#"{"headless_default": false}"#).unwrap();
+    for (provider, sid, verb) in [("pi", ID.to_owned(), format!("pi --session-id {ID}")), ("omp", ID.to_owned(), "omp -r ".to_owned()),
+                                  ("kimi", kimi.clone(), format!("kimi --session {kimi}"))] {
+        let (_, raw, _dir, root) = run(provider, &sid, &|_| {});
+        assert_eq!(raw["steps"][0]["status"], 200, "{provider}: {}", raw["steps"][0]["body"]);
+        assert_eq!(raw["steps"][0]["body"]["cwd"], json!(root.join("work/proj")), "{provider}: a pasta do cabeçalho");
+        let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+        let command = created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap();
+        assert!(command.contains(&verb), "{provider}: {command}");
+        if provider == "omp" { assert!(command.contains(&format!("_{ID}.jsonl")), "o omp retoma pelo caminho: {command}"); }
+    }
+    let (_, raw, _dir, root) = run("codex", ID, &terminal);
+    assert_eq!(raw["steps"][0]["status"], 200, "codex: {}", raw["steps"][0]["body"]);
+    let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+    assert!(created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap().contains(&format!("--resume {ID}")), "{created}");
+    let (_, raw, _dir, root2) = run("codex", ID, &|_| {});
+    assert_eq!(raw["steps"][0]["status"], 200, "codex sem terminal: {}", raw["steps"][0]["body"]);
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root2.join("home/.hangar/codex-sessions/proj.json")).unwrap()).unwrap();
+    assert_eq!(sidecar["thread_id"], ID, "a subida retoma a thread do Arquivo");
+    let _ = root;
+    // A transferência: o índice da thread na conta dona.
+    let transferred = |root: &std::path::Path| {
+        let home = root.join("home/.codex").canonicalize().unwrap().to_string_lossy().into_owned();
+        let key = format!("[{}, {}]", serde_json::to_string(&home).unwrap(), serde_json::to_string(ID).unwrap());
+        let digest: String = ring::digest::digest(&ring::digest::SHA256, key.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let index = root.join(format!("home/.hangar/conversation-transfers/indexes/thread-{digest}.json"));
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::write(index, r#"["44444444-4444-4444-8444-444444444444"]"#).unwrap();
+    };
+    let (_, raw, _dir, _root) = run("codex", ID, &transferred);
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(409), json!("session_transfer_resume_unsupported")));
 }
