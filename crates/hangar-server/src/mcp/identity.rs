@@ -44,7 +44,8 @@ pub async fn resolve(headers: &HeaderMap, local: &Local<'_>, secret: &str) -> Re
     }
     let text = |name| header(headers, name).map(|v| String::from_utf8_lossy(v).into_owned());
     if let Some(key) = text("x-hangar-key") {
-        if let Some(name) = by_key(local.home, &key) { return Ok((name, Origin::Key)); }
+        let found = { let (home, key) = (local.home.to_path_buf(), key.clone()); tokio::task::spawn_blocking(move || by_key(&home, &key)).await.ok().flatten() };
+        if let Some(name) = found { return Ok((name, Origin::Key)); }
         // Sessão com terminal aberta pelo Rust: a chave mora no registro dela, sem sidecar, e quem
         // diz o nome atual é o pane.
         if !record_exists(local.home, &key) {
@@ -82,23 +83,18 @@ pub fn voice_signature_valid(value: &[u8], secret: &str) -> bool {
     bool::from(expected.as_bytes().ct_eq(signature))
 }
 
-fn sidecars(dir: &Path) -> Vec<Value> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
-    paths.sort();
-    paths.iter().filter_map(|p| serde_json::from_slice::<Value>(&std::fs::read(p).ok()?).ok()).filter(Value::is_object).collect()
-}
-
 /// A chave no sidecar do Claude sem terminal (com `name` e `session_id`, como o `list_all` de lá) ou
 /// no do Codex.
 // ponytail: o Codex em preparação de transferência também conta; ele não chama o MCP antes de nascer.
 fn by_key(home: &Path, key: &str) -> Option<String> {
-    let hangar = home.join(".hangar");
-    let claude = sidecars(&hangar.join("claude-headless")).into_iter().filter(|m| m["session_id"].as_str().is_some_and(|s| !s.is_empty()));
-    claude.chain(sidecars(&hangar.join("codex-sessions")))
-        .find(|m| m["key"].as_str() == Some(key) && m["name"].as_str().is_some_and(|n| !n.is_empty()))
-        .and_then(|m| m["name"].as_str().map(str::to_owned))
+    use crate::list::discover_other::sidecars;
+    let (hangar, mut problems) = (home.join(".hangar"), crate::list::discover::Problems::default());
+    let text = |m: &serde_json::Map<String, Value>, field: &str| m.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+    let claude = sidecars(&hangar.join("claude-headless"), "claude", &mut problems);
+    let codex = sidecars(&hangar.join("codex-sessions"), "codex", &mut problems);
+    claude.iter().filter(|(_, m)| text(m, "session_id").is_some()).chain(codex.iter())
+        .find(|(_, m)| m.get("key").and_then(Value::as_str) == Some(key) && text(m, "name").is_some())
+        .and_then(|(_, m)| text(m, "name"))
 }
 
 /// `~/.hangar/session-specs/<chave>.json`, que o Rust grava ao abrir (32 hex).

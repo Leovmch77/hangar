@@ -6,7 +6,7 @@
 //!
 //! Uma sessão sai da fotografia só depois de ausente por `ABSENT` com o servidor de pé: o desligamento
 //! derruba as sessões e o servidor em segundos, e fechar uma sessão de propósito a tira da próxima subida.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,13 +134,19 @@ async fn mux_format(program: &std::ffi::OsStr, format: &str) -> Result<Option<St
 
 /// Quando o servidor do multiplexador subiu: o `#{start_time}` do tmux; sem ele (o psmux pode não ter), o
 /// nascimento do processo do servidor (`#{pid}`); sem os dois, a subida da máquina.
-pub async fn mux_start(program: &std::ffi::OsStr) -> MuxStart {
-    let start = match mux_format(program, "#{start_time}").await {
-        Err(()) => return MuxStart::Unknown,
-        Ok(None) => return MuxStart::NoServer,
-        Ok(Some(text)) => text.parse::<u64>().ok(),
+pub async fn mux_start(program: &std::ffi::OsStr) -> MuxStart { mux_now(program).await.0 }
+
+/// `mux_start` e o `#{server_sessions}` do mesmo servidor, numa consulta só.
+async fn mux_now(program: &std::ffi::OsStr) -> (MuxStart, Option<u64>) {
+    let (start, sessions) = match mux_format(program, "#{start_time}|#{server_sessions}").await {
+        Err(()) => return (MuxStart::Unknown, None),
+        Ok(None) => return (MuxStart::NoServer, None),
+        Ok(Some(text)) => {
+            let (start, sessions) = text.split_once('|').unwrap_or((&text, ""));
+            (start.trim().parse::<u64>().ok(), sessions.trim().parse::<u64>().ok())
+        }
     };
-    if let Some(at) = start.filter(|at| *at > 0) { return MuxStart::Started(at); }
+    if let Some(at) = start.filter(|at| *at > 0) { return (MuxStart::Started(at), sessions); }
     let pid = mux_format(program, "#{pid}").await.ok().flatten().and_then(|p| p.parse::<u32>().ok());
     let born = pid.and_then(|pid| {
         let mut system = sysinfo::System::new();
@@ -148,7 +154,7 @@ pub async fn mux_start(program: &std::ffi::OsStr) -> MuxStart {
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         system.process(pid).map(sysinfo::Process::start_time)
     });
-    MuxStart::Started(born.unwrap_or_else(sysinfo::System::boot_time))
+    (MuxStart::Started(born.unwrap_or_else(sysinfo::System::boot_time)), sessions)
 }
 
 fn path(home: &Path) -> PathBuf { home.join(".hangar").join(FILE) }
@@ -226,24 +232,23 @@ async fn session_key(program: &std::ffi::OsStr, name: &str) -> Option<String> {
 static UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 /// As sessões do Hangar com terminal abertas agora: a chave, o nome, o agente e a conversa que a lista prova.
-async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::OsStr) -> Option<BTreeMap<String, Entry>> {
+/// `known` guarda nome → (chave, agente) das sessões com terminal já provadas: só o nome novo paga a
+/// consulta ao multiplexador e a leitura do spec.
+// ponytail: o mesmo nome recriado com outra chave dentro de um tique segue com a chave antiga até sumir da lista.
+async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::OsStr,
+               known: &mut HashMap<String, (String, AgentProvider)>) -> Option<BTreeMap<String, Entry>> {
     let rows = st.list.discover(None).await.ok()?;
+    known.retain(|name, _| rows.iter().any(|r| !r.headless && r.name == *name));
     let mut out = BTreeMap::new();
     for row in rows.iter().filter(|r| !r.headless) {
         let Some(provider) = AgentProvider::parse(&row.provider) else { continue };
-        let Some(key) = session_key(program, &row.name).await else { continue };
-        let (spec, unreadable) = recorded(home, &key, &row.name);
-        // Uma linha por spec ilegível, não uma a cada fotografia; volta a avisar depois de lido de novo.
-        let first = {
-            let mut reported = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if unreadable.is_some() { reported.insert(key.clone()) } else { reported.remove(&key); false }
+        let key = match known.get(&row.name).filter(|(_, p)| *p == provider) {
+            Some((key, _)) => key.clone(),
+            None => match proven(home, program, &row.name).await {
+                Some(key) => { known.insert(row.name.clone(), (key.clone(), provider)); key }
+                None => continue,
+            },
         };
-        if first && let Some(line) = unreadable {
-            tracing::warn!(session = %row.name, "spec ilegível; a sessão fica fora da fotografia");
-            crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[line], "spec ilegível");
-        }
-        let Some(spec) = spec else { continue };
-        if spec.surface != Surface::Terminal { continue; }
         let conversation = row.jsonl.as_deref().filter(|_| row.tracked).and_then(|j| conversation_of(provider, j));
         let permission_mode = match (provider, &conversation, st.state.runtime.get()) {
             (AgentProvider::Claude, Some(sid), Some(runtime)) => runtime.observed_claude_mode(sid),
@@ -252,6 +257,22 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
         out.insert(key, Entry { name: row.name.clone(), provider, conversation, permission_mode, missing_since: None });
     }
     Some(out)
+}
+
+/// A chave da sessão `name` quando o spec dela é de uma sessão com terminal.
+async fn proven(home: &Path, program: &std::ffi::OsStr, name: &str) -> Option<String> {
+    let key = session_key(program, name).await?;
+    let (spec, unreadable) = recorded(home, &key, name);
+    // Uma linha por spec ilegível, não uma a cada fotografia; volta a avisar depois de lido de novo.
+    let first = {
+        let mut reported = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if unreadable.is_some() { reported.insert(key.clone()) } else { reported.remove(&key); false }
+    };
+    if first && let Some(line) = unreadable {
+        tracing::warn!(session = %name, "spec ilegível; a sessão fica fora da fotografia");
+        crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[line], "spec ilegível");
+    }
+    (spec?.surface == Surface::Terminal).then_some(key)
 }
 
 /// O spec gravado da sessão viva; o ilegível devolve também a linha do diário (sem ela a sessão some da
@@ -286,17 +307,16 @@ pub fn resolved_for(home: &Path, server_projects: &Path, key: &str, entry: &Entr
 }
 
 /// Reabre uma sessão pelo spec gravado, na conversa dela; devolve o código da falha.
-async fn reopen(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
-    let host = super::server::ServerHost::new(st.clone()).await;
-    let mut resolved = resolved_for(super::open::OpenHost::home(&host), &super::open::OpenHost::server_projects(&host), key, entry)?;
-    let env = crate::accounts::environment::AccountEnvironment::from_map(super::open::OpenHost::env(&host).clone());
+async fn reopen(host: &super::server::ServerHost, key: &str, entry: &Entry) -> Result<(), String> {
+    let mut resolved = resolved_for(super::open::OpenHost::home(host), &super::open::OpenHost::server_projects(host), key, entry)?;
+    let env = crate::accounts::environment::AccountEnvironment::from_map(super::open::OpenHost::env(host).clone());
     let runtime = tokio::runtime::Handle::current();
     let mut spec = resolved.spec;
     resolved.spec = tokio::task::spawn_blocking(move || {
         spec.refresh_engine_window(&super::facts::LocalFacts::new(env, runtime));
         spec
     }).await.map_err(|_| "restore_spec_job".to_owned())?;
-    super::open::open_session(&host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
+    super::open::open_session(host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
 }
 
 /// Tentativas de uma sessão que falhou por um motivo passageiro (conta ocupada, multiplexador calado).
@@ -323,8 +343,8 @@ fn settle(results: &[(String, Result<(), String>)], attempts: &mut std::collecti
 }
 
 /// Reabre uma sessão e grava o resultado no diário.
-async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
-    let result = reopen(st, key, entry).await;
+async fn restore_one(host: &super::server::ServerHost, key: &str, entry: &Entry) -> Result<(), String> {
+    let result = reopen(host, key, entry).await;
     let mut event = json!({"evento": "sessao.restaurada", "nivel": "ok", "sessao": entry.name, "provider": entry.provider.name()});
     if let Err(code) = &result {
         tracing::warn!(session = %entry.name, code = %code, "sessão com terminal não restaurada");
@@ -342,15 +362,16 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
     let mut snap = read(&home);
     let (mut attempts, mut done) = (std::collections::HashMap::new(), HashSet::new());
     let mut last_count: Option<u64> = None;
+    let mut known = HashMap::new();
     loop {
-        let current = mux_start(&program).await;
+        let (current, count) = mux_now(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
         let same = matches!(current, MuxStart::Started(at) if snap.mux_started == Some(at));
         hold(&snap, same);
         match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
             (true, _) => {
-                last_count = mux_format(&program, "#{server_sessions}").await.ok().flatten().and_then(|n| n.parse().ok());
-                if let Some(alive) = alive(&st, &home, &program).await {
+                last_count = count;
+                if let Some(alive) = alive(&st, &home, &program, &mut known).await {
                     let mut next = observe(&snap, &alive, now(), snap.mux_started);
                     let mut closed = CLOSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     drop_closed(&mut next, &mut closed);
@@ -375,7 +396,10 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                 let pending: Vec<(String, Entry)> = pending.into_iter().filter(|(key, _)| !done.contains(key)).collect();
                 if !pending.is_empty() { tracing::info!(count = pending.len(), "restaurando as sessões com terminal que o multiplexador perdeu"); }
                 let mut results = Vec::new();
-                for (key, entry) in &pending { results.push((key.clone(), restore_one(&st, key, entry).await)); }
+                if !pending.is_empty() {
+                    let host = super::server::ServerHost::new(st.clone()).await;
+                    for (key, entry) in &pending { results.push((key.clone(), restore_one(&host, key, entry).await)); }
+                }
                 // Só com nada mais a tentar o servidor de agora (o restore pode tê-lo subido) passa a ser o da
                 // fotografia; antes disso as entradas ficam, e um reinício só do Rust não reabre nada.
                 if settle(&results, &mut attempts, &mut done) && let MuxStart::Started(at) = mux_start(&program).await {

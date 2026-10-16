@@ -186,7 +186,7 @@ impl ServerHost {
         };
         tracing::warn!(cause, "o dono da sessão do convidado não foi registrado; a sessão sai");
         // No psmux o `=` não vale no `kill-session` e o nome cru já é exato.
-        self.mux.run(vec![self.terminal.program.clone(), "kill-session".into(), "-t".into(), super::terminal::target(&self.terminal, &name)]).await;
+        self.mux.run(vec![self.terminal.program.clone(), "kill-session".into(), "-t".into(), super::terminal::target(self.terminal.windows, &name)]).await;
         if let Err(error) = super::record::remove(&self.env.home, &opened.key) {
             tracing::warn!(kind = ?error.kind(), "registro da sessão do convidado ficou para trás");
         }
@@ -357,8 +357,9 @@ pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
 async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller, claim: Option<LoginGuest>) -> Decision {
     let st = st.clone();
     tokio::spawn(async move {
-        match (decide(&st, request, caller).await, claim) {
-            (Decision::Opened(opened), Some(guest)) => match ServerHost::new(st.clone()).await.claim(opened, &guest).await {
+        let host = ServerHost::new(st.clone()).await;
+        match (decide(&st, &host, request, caller).await, claim) {
+            (Decision::Opened(opened), Some(guest)) => match host.claim(opened, &guest).await {
                 Ok(opened) => Decision::Opened(opened),
                 Err(error) => Decision::Refused(error),
             },
@@ -369,8 +370,7 @@ async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller
 
 /// Resolve e abre o que é do Rust: com terminal de todo provedor, e o Claude e o Codex sem terminal.
 /// Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
-pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
-    let host = ServerHost::new(st.clone()).await;
+pub async fn decide(st: &Arc<AppState>, host: &ServerHost, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
     let facts_env = host.env.clone();
     let runtime = tokio::runtime::Handle::current();
     let (request_for_facts, caller_for_facts) = (request.clone(), caller.clone());
@@ -387,7 +387,7 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
     };
     if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
     if let super::Account::Codex { account_id } = &resolved.spec.account { codex_preparation_warning(st, account_id).await; }
-    match super::open::open_session(&host, resolved, &caller).await {
+    match super::open::open_session(host, resolved, &caller).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
     }

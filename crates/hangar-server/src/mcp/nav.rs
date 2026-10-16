@@ -34,13 +34,19 @@ pub fn url_before(home: &Path, name: &str) -> Option<String> {
 
 pub async fn verb(http: &reqwest::Client, home: &Path, name: &str, verb: &str, args: &[String], tab: Option<i64>, timeout: Duration)
     -> Result<String, Unavailable> {
+    verb_on(http, home, sidecar(home, name).as_ref(), verb, args, tab, timeout).await
+}
+
+/// `verb` com o sidecar já lido.
+async fn verb_on(http: &reqwest::Client, home: &Path, sc: Option<&Value>, verb: &str, args: &[String], tab: Option<i64>, timeout: Duration)
+    -> Result<String, Unavailable> {
     let srv: Value = std::fs::read(nav_dir(home).join("_srv.json")).ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok()).ok_or_else(|| Unavailable(NOT_OPEN.into()))?;
     let port = srv["porta"].as_u64().or_else(|| srv["porta"].as_str().and_then(|p| p.parse().ok())).filter(|p| *p > 0);
     let (Some(port), Some(token)) = (port, srv["token"].as_str().filter(|t| !t.is_empty())) else {
         return Err(Unavailable(NOT_OPEN.into()));
     };
-    let Some(key) = sidecar(home, name).and_then(|sc| sc["chave"].as_str().map(str::to_owned)) else {
+    let Some(key) = sc.and_then(|sc| sc["chave"].as_str()) else {
         return Err(Unavailable("esta sessão não tem navegador aberto".into()));
     };
     let mut body = json!({"chave": key, "verbo": verb, "args": args});
@@ -73,12 +79,12 @@ pub async fn wait_ready(http: &reqwest::Client, home: &Path, name: &str, since_m
         // Pausado pelo usuário o app não navega: dizer na hora em vez de esgotar o prazo.
         if sc.is_some() && !pause_checked {
             pause_checked = true;
-            if verb(http, home, name, "estado", &[], None, left()).await.is_ok_and(|t| t.trim() == "pausado") {
+            if verb_on(http, home, sc.as_ref(), "estado", &[], None, left()).await.is_ok_and(|t| t.trim() == "pausado") {
                 return Err(Unavailable(PAUSED.into()));
             }
         }
-        if let Some(sc) = sc && sc["ts"].as_f64().unwrap_or(0.0) as u64 >= since_ms && navigated(sc["url"].as_str().unwrap_or_default(), before, asked) {
-            let text = verb(http, home, name, "url", &[], None, left()).await.unwrap_or_else(|e| e.0);
+        if let Some(sc) = &sc && sc["ts"].as_f64().unwrap_or(0.0) as u64 >= since_ms && navigated(sc["url"].as_str().unwrap_or_default(), before, asked) {
+            let text = verb_on(http, home, Some(sc), "url", &[], None, left()).await.unwrap_or_else(|e| e.0);
             if let Some(value) = text.strip_prefix("ok:") {
                 let value = value.trim();
                 return Ok(match serde_json::from_str::<Value>(value) {

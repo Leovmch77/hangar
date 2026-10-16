@@ -741,7 +741,7 @@ impl RuntimeRegistry {
                 let lives=tree(pane.pid).map_err(before)?;
                 let (program,prefix)=target.binding.mux_argv.split_first().ok_or_else(||Stop::Before(refused("lifecycle_mux","sem o multiplexador")))?;
                 self.close_claude_entry(&key,current.generation).await.map_err(before)?;
-                let session=if target.binding.windows {name.to_owned()} else {format!("={name}")};
+                let session=crate::session_open::terminal::target(target.binding.windows,name);
                 let mut command=crate::terminal_input::child_command(program);
                 command.args(prefix).args(["kill-session","-t",&session]).stdin(std::process::Stdio::null()).kill_on_drop(true);
                 let killed=tokio::time::timeout(Duration::from_secs(5),command.output()).await.ok().and_then(Result::ok).is_some_and(|o|o.status.success());
@@ -751,7 +751,7 @@ impl RuntimeRegistry {
             Life::Bare { pane_pid }=>{
                 let lives=tree(*pane_pid).map_err(before)?;
                 let watcher=self.watcher_ref().ok_or_else(||Stop::Before(refused("runtime_binding","sem a vigia do terminal")))?;
-                let session=if cfg!(windows) {name.to_owned()} else {format!("={name}")};
+                let session=crate::session_open::terminal::target(cfg!(windows),name);
                 if watcher.mux_text(&["kill-session","-t",&session]).await.is_none() {
                     return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));
                 }
@@ -893,7 +893,7 @@ impl RuntimeRegistry {
     async fn drop_failed_terminal(&self,name:&str) -> Result<(),RuntimeError> {
         if let Some((target,_))=self.claude_terminal_entry(name).await {let _=self.close_claude_entry(&target.key,target.generation).await;}
         let watcher=self.watcher_ref().ok_or_else(||refused(NEW_ALIVE,"sem a vigia do terminal para fechar a tentativa"))?;
-        let session=if cfg!(windows) {name.to_owned()} else {format!("={name}")};
+        let session=crate::session_open::terminal::target(cfg!(windows),name);
         let lives=match watcher.mux_text(&["display-message","-p","-t",&session,"#{pane_pid}"]).await.and_then(|pid|pid.trim().parse::<i64>().ok()) {
             Some(pid)=>tree(pid)?,
             None=>Vec::new(),

@@ -262,13 +262,13 @@ async fn wait_exit(pid: i32, deadline: tokio::time::Instant) -> Option<bool> {
 async fn wait_exit(_pid: i32, _deadline: tokio::time::Instant) -> Option<bool> { None }
 
 /// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
-pub(crate) fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
+pub(crate) fn target(windows: bool, name: &str) -> String { if windows { name.into() } else { format!("={name}") } }
 
 /// A sessão `pane.name` existe e carrega a chave deste pedido. `Absent` também quando a de mesmo nome é outra.
 async fn is_this_one(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Presence {
     let (exists, _) = presence(mux, env, &pane.name).await;
     if exists != Presence::Present { return exists; }
-    let key = mux.run(vec![env.program.clone(), "show-environment".into(), "-t".into(), target(env, &pane.name), "CP_SESSION_KEY".into()]).await;
+    let key = mux.run(vec![env.program.clone(), "show-environment".into(), "-t".into(), target(env.windows, &pane.name), "CP_SESSION_KEY".into()]).await;
     match key.code {
         None => Presence::Unknown,
         Some(0) if key.stdout.trim() == format!("CP_SESSION_KEY={}", pane.key) => Presence::Present,
