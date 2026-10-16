@@ -464,6 +464,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
+    let api = public_routes(state.clone(), pair);
+    // O MCP chama as tools pelas mesmas rotas que o `hangar-send` chama: o roteador público inteiro.
+    api.clone().merge(crate::mcp::router(state, api))
+}
+
+fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
     session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))

@@ -1,0 +1,758 @@
+[
+ {
+  "name": "who_am_i",
+  "description": "Quem é esta sessão no Hangar (nome e por qual cabeçalho foi resolvida). Diagnóstico; equivale a `hangar-send` descobrindo a própria sessão.",
+  "inputSchema": {
+   "properties": {},
+   "title": "who_am_iArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": {
+    "type": "string"
+   },
+   "title": "who_am_iDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "sessions",
+  "description": "Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). `voce: true` marca esta sessão; mesmo `grupo` = mesmo grupo de trabalho. Equivale a `hangar-send --list` sem os servidores remotos.",
+  "inputSchema": {
+   "properties": {},
+   "title": "sessionsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "title": "Result",
+     "type": "array"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "title": "sessionsOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "send",
+  "description": "Manda um recado 1:1 pra outra sessão, como `hangar-send <sessao> <msg>`: chega lá como `[de: <você>] texto`. `alvo` aceita `servidor::sessao` pra outro servidor. O backend escolhe o transporte (socket nativo, plugin, tmux ou fila) e diz se entregou. O texto vira prompt pago lá: só a informação ou o pedido, sem saudação nem apresentação (o cabeçalho já diz quem manda).",
+  "inputSchema": {
+   "properties": {
+    "alvo": {
+     "title": "Alvo",
+     "type": "string"
+    },
+    "texto": {
+     "title": "Texto",
+     "type": "string"
+    },
+    "tmux": {
+     "default": false,
+     "title": "Tmux",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "alvo",
+    "texto"
+   ],
+   "title": "sendArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "sendDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "group",
+  "description": "Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um `[grupo: …]` com isto. O backend escolhe o transporte pra cada membro. Uma frase direta, sem saudação: cada membro paga o texto como prompt. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "texto": {
+     "title": "Texto",
+     "type": "string"
+    },
+    "tmux": {
+     "default": false,
+     "title": "Tmux",
+     "type": "boolean"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "texto"
+   ],
+   "title": "groupArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "groupDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "pair",
+  "description": "Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> <tarefa>`: registra no app e injeta o protocolo nos dois lados. `alvo` aceita `servidor::sessao`. `tarefa` é o título do grupo na lista: chave + assunto numa linha (ex: `ABC-1234 Tela de login`); o combinado vai por `send`. Só quando o usuário pedir pareamento. `orq`: grupo de orquestração (skill orquestrar), como `--pair --orq`; com `alvo` vazio o grupo tem só esta sessão. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "alvo": {
+     "default": "",
+     "title": "Alvo",
+     "type": "string"
+    },
+    "tarefa": {
+     "default": "",
+     "title": "Tarefa",
+     "type": "string"
+    },
+    "substituir_tarefa": {
+     "default": false,
+     "title": "Substituir Tarefa",
+     "type": "boolean"
+    },
+    "orq": {
+     "default": false,
+     "title": "Orq",
+     "type": "boolean"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "title": "pairArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "pairDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "unpair",
+  "description": "Desfaz o pareamento desta sessão (`hangar-send --unpair`). `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "title": "unpairArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "unpairDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "new_session",
+  "description": "Cria outra sessão nesta máquina, como `hangar-send --new <nome> <cwd>`. Nunca `tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi. O que for omitido HERDA de quem chama: a conta (claude/pi/omp), o modo de permissão (claude; `plan` herda o modo de base) e o sem terminal (`headless`, só claude/codex). Parâmetro explícito vence: `headless: false` força terminal, `conta` (caminho do config dir) força outra conta. Conta herdada com 95% ou mais de uso nasce na conta de mais folga (como `--conta auto`); a resposta devolve `config_dir` e `account_source` (`inherited` ou `quota`) — confira. Pra conta que ainda precisa ser preparada, use o CLI (`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do Jev no ambiente, e só aí o `hangar-preview objetivo` (o laço que navega e preenche tela sozinho) funciona nela. Omitido, vale o padrão do servidor. `service_tier`: `priority` liga o Fast, `default` desliga; só Codex ou Claude com motor GPT no CLIProxyAPI local. Worktree: `branch` com `new_branch: true` e `base` cria uma branch nova numa cópia separada de `cwd`; `branch` sem `new_branch` usa uma branch que já existe. `codex_account`: id da conta Codex cadastrada. `subagent_model`: modelo dos subagentes (claude sem motor). `initial_prompt`: primeira mensagem da sessão nova. `engine_account`: conta do motor. `omp_profile`: perfil do omp (já define a conta). `claude_customizations`: plugins e skills da conversa, como na tela de criação. `inherit: false`: o omitido cai no padrão da conta em vez de herdar de quem chama. `remember_provider`: o provider vira o padrão das próximas sessões.",
+  "inputSchema": {
+   "properties": {
+    "nome": {
+     "title": "Nome",
+     "type": "string"
+    },
+    "cwd": {
+     "title": "Cwd",
+     "type": "string"
+    },
+    "provider": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Provider"
+    },
+    "engine": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Engine"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Model"
+    },
+    "effort": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Effort"
+    },
+    "permissao": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Permissao"
+    },
+    "headless": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Headless"
+    },
+    "read_only": {
+     "default": false,
+     "title": "Read Only",
+     "type": "boolean"
+    },
+    "conta": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Conta"
+    },
+    "jev": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Jev"
+    },
+    "service_tier": {
+     "anyOf": [
+      {
+       "enum": [
+        "default",
+        "priority"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Service Tier"
+    },
+    "branch": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Branch"
+    },
+    "new_branch": {
+     "default": false,
+     "title": "New Branch",
+     "type": "boolean"
+    },
+    "base": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Base"
+    },
+    "codex_account": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Account"
+    },
+    "subagent_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Subagent Model"
+    },
+    "initial_prompt": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Initial Prompt"
+    },
+    "engine_account": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Engine Account"
+    },
+    "omp_profile": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Omp Profile"
+    },
+    "claude_customizations": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Claude Customizations"
+    },
+    "inherit": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Inherit"
+    },
+    "remember_provider": {
+     "default": false,
+     "title": "Remember Provider",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "nome",
+    "cwd"
+   ],
+   "title": "new_sessionArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "new_sessionDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "close_session",
+  "description": "Fecha OUTRA sessão desta máquina, com ou sem terminal, como `hangar-send --close <sessao>`: ela sai do grupo sem aviso. Nunca a própria. Use para a sessão que você abriu e que já terminou o trabalho.",
+  "inputSchema": {
+   "properties": {
+    "alvo": {
+     "title": "Alvo",
+     "type": "string"
+    }
+   },
+   "required": [
+    "alvo"
+   ],
+   "title": "close_sessionArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "close_sessionDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "browser_open",
+  "description": "Abre (ou navega) o navegador embutido desta sessão no app desktop do Hangar (= `hangar-preview open <url>`) e só volta com ele pronto: o verbo seguinte já funciona. Devolve a URL carregada. O painel aparece para o usuário só quando ele abrir esta sessão no app: diga que a página está aberta no navegador da sessão, nunca que apareceu na tela dele. Página já aberta: prefira browser goto. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "url": {
+     "title": "Url",
+     "type": "string"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "url"
+   ],
+   "title": "browser_openArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "browser_openDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "html_render",
+  "description": "Mostra uma página HTML pronta (gráfico, tabela, diagrama, mock de tela, comparação) DENTRO desta conversa, no lugar desta chamada e acima do seu texto final; chame antes de escrever a resposta. O leitor já vê a página: a resposta não a anuncia, não diz onde ela está e não repete o que ela mostra — diga só o que ela não diz. Confira antes de publicar com draft=true: devolve o print da página como imagem, `console` e `heights`; width (240-1600, padrão 728; ~390 para celular) e theme (dark|light, padrão dark) escolhem o print, para conferir a versão de celular e a clara. Com o app desktop aberto, passe a `url` do rascunho a browser_open exatamente como veio (caminho relativo; o servidor completa endereço e acesso) e use browser para passar o mouse e clicar. Página publicada não muda: corrigir é publicar de novo. INTERAÇÃO: mock de tela é funcional, não imagem. O que parece clicável funciona com JS embutido (abas trocam, menu e modal abrem e fecham, formulário valida e mostra o erro, lista filtra), com dados de exemplo no próprio documento e sem chamada de rede; os estados (vazio, carregando, erro, selecionado) se alcançam pela própria página. Antes de publicar um mock, clique nele no rascunho com browser. url (http/https, no lugar de html) abre um site de verdade dentro da conversa, com o login do navegador do app; só aparece vivo no app desktop; use para app rodando em localhost ou site que exige login. PÁGINA: um documento só, com <style> e <script> embutidos. Imagem local por caminho absoluto (src=\"/abs/a.png\", url(/abs/b.webp) ou string JS) é embutida sozinha; arquivo que não é imagem é recusado. URL http(s) (biblioteca de gráfico em CDN) carrega como está; file: não. LAYOUT: a moldura não tem borda e fica sobre o fundo da conversa, na largura da coluna (cerca de 728px no desktop, 360px no celular). Deixe html, body e o elemento mais externo SEM cor de fundo. Largura fluida, sem padding horizontal no elemento externo, sem cartão, borda ou título de banner em volta: a página é parte da resposta. Caixa que precisa de fundo próprio leva padding de 16px ou mais e cantos var(--radius). Gráfico com altura fixa em pixel. Nada de 100vh nem height:100% em html/body: a moldura cresce com a página. TEMA: use as variáveis --foreground, --muted-foreground, --surface, --border, --accent, --accent-foreground, --danger, --warning, --success, --info, --code-background, --code-foreground, --chart-1 a --chart-6, --radius, --font-sans, --font-mono; para componente, também --card, --popover, --muted, --secondary, --primary, --input, --ring e --destructive; --destructive-foreground, --warning-foreground, --success-foreground e --info-foreground são o texto sobre a cor cheia. Superfícies suaves: --accent-surface (texto --accent-surface-foreground), --destructive-surface e --warning-surface (texto na própria cor, --danger e --warning). --background é transparente. Elas seguem o tema claro/escuro do app; seu CSS pode sobrescrever. own_theme=true para mock de outro produto/site ou página que precisa das próprias cores: ela leva o próprio fundo e paleta, como foi desenhada, e não recebe o tema do app; sem ele, a página segue o tema do app. height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "title": {
+     "title": "Title",
+     "type": "string"
+    },
+    "html": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Html"
+    },
+    "url": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Url"
+    },
+    "height": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Height"
+    },
+    "draft": {
+     "default": false,
+     "title": "Draft",
+     "type": "boolean"
+    },
+    "own_theme": {
+     "default": false,
+     "title": "Own Theme",
+     "type": "boolean"
+    },
+    "width": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Width"
+    },
+    "theme": {
+     "anyOf": [
+      {
+       "enum": [
+        "dark",
+        "light"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Theme"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "title"
+   ],
+   "title": "html_renderArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "html_renderDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "browser",
+  "description": "Um verbo do navegador desta sessão (= `hangar-preview <verbo>`); abra antes com browser_open. LER: snapshot (árvore de acessibilidade com estados; só acionáveis têm ref @eN; refs morrem a cada navegação ou re-render: refaça; args [\"--refs\"] traz só os acionáveis), text (texto visível, bem mais barato), url, console [--limpar] (log, erros de JS não tratados, diálogos e downloads recusados), network (liga na 1ª chamada: chame ANTES da ação; mostra método, status e falhas). AGIR: click/hover <ref>, fill <ref> <texto>, type <texto> (campo já focado), press <tecla>. NAVEGAR: goto <url>, back, reload (voltam com a página carregada). ESPERAR (nunca sleep): wait --idle | --text <t> (ignora maiúsculas) | --url <t> | @eN | <ms>, teto com --timeout <ms> até 40000. VER: shot (devolve a imagem e o caminho do PNG). DIÁLOGO: alert/confirm/prompt ficam abertos e a resposta do verbo avisa; responda com dialog accept [texto] ou dialog dismiss antes de outra ação. tema claro|escuro|sistema, layout mobile|desktop|<l> <a>, close (terminou, feche). login [site]: pede ao usuário, na tela dele, o login do Chrome para o site (espera até 110 s; uma chamada por necessidade, nunca em laço). Pausado pelo usuário, as ações voltam erro: espere ele retomar. `erro:` volta como erro da tool. Tela desconhecida com várias ações: browser_goal (sessão com o Jev). Só no Electron antigo: tab-list, tab-new <url>, tab-switch <id>, tab-close [id] e `aba`. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "verbo": {
+     "title": "Verbo",
+     "type": "string"
+    },
+    "args": {
+     "anyOf": [
+      {
+       "items": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "integer"
+         }
+        ]
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Args"
+    },
+    "aba": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Aba"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "verbo"
+   ],
+   "title": "browserArguments",
+   "type": "object"
+  }
+ },
+ {
+  "name": "browser_batch",
+  "description": "Vários verbos já conhecidos do navegador numa chamada, como `hangar-preview batch`: para no primeiro que falhar e diz em qual (seguir depois de um click que falhou faria o próximo fill digitar no lugar errado). Cada passo é {verbo, args?}, os mesmos verbos da tool browser. Tela que você ainda não viu: browser_goal. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "passos": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "title": "Passos",
+     "type": "array"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "passos"
+   ],
+   "title": "browser_batchArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "browser_batchDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "browser_goal",
+  "description": "O Jev dirige o navegador desta sessão sozinho até cumprir um objetivo (navegar até uma tela, preencher um cadastro, escolher num combobox): uma chamada no lugar de vários snapshot+click. Só em sessão aberta com o Jev. `dados`: valores para os campos, com as chaves que quiser (o Jev casa cada um com o rótulo). Resposta: os passos, `parou:`, `url:`, `texto:` e, se faltou valor, `falta-dado: <campo>` — chame de novo com ele em `dados`; a página fica onde parou. Erro = não cumpriu. O objetivo que deu certo vira roteiro em `.hangar/roteiros/` na raiz do git da sessão (ou em `pasta`) e a próxima chamada igual o repete sem o Jev decidir cada passo; `refazer: true` ignora o roteiro. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "objetivo": {
+     "title": "Objetivo",
+     "type": "string"
+    },
+    "dados": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dados"
+    },
+    "passos": {
+     "default": 15,
+     "title": "Passos",
+     "type": "integer"
+    },
+    "refazer": {
+     "default": false,
+     "title": "Refazer",
+     "type": "boolean"
+    },
+    "pasta": {
+     "default": "",
+     "title": "Pasta",
+     "type": "string"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "objetivo"
+   ],
+   "title": "browser_goalArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "title": "Result",
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "title": "browser_goalOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "browser_check",
+  "description": "O Jev diz se a tela do navegador desta sessão já mostra um estado (\"o diálogo fechou e a lista mostra o item novo\"): use antes do shot ou para saber se uma ação deu certo, sem ler a árvore. Só em sessão aberta com o Jev. Devolve `sim` e a confiança. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "estado": {
+     "title": "Estado",
+     "type": "string"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "required": [
+    "estado"
+   ],
+   "title": "browser_checkArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "browser_checkDictOutput",
+   "type": "object"
+  }
+ }
+]

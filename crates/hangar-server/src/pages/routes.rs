@@ -113,7 +113,7 @@ fn machine_name() -> Option<String> {
     std::env::var("COMPUTERNAME").ok().map(|n| n.to_ascii_lowercase()).filter(|n| !n.is_empty())
 }
 
-async fn publish(st: &AppState, b: PublishBody) -> Value {
+pub(crate) async fn publish(st: &AppState, b: PublishBody) -> Value {
     let site = match (&b.html, &b.url) {
         (Some(html), None) => {
             let chars = html.chars().count();
