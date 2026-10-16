@@ -2143,11 +2143,20 @@ comparação usava `main` local para todas; ela estava atrasada, e `fetch --all 
 avança. O pull resolveu apenas o caso da `main`. O reflog das seis branches guardava a origem
 remota correta, permitindo resolver o destino sem consulta a um provedor de PRs.
 
-**Exclusão conservadora:** só ancestralidade com pontas distintas comprova a integração.
-Apagar o upstream também ocorre sem merge; isso deixou de ser prova suficiente, inclusive
-para squash. Squash/rebase sem ancestralidade não são detectados automaticamente. Pontas
-iguais continuam protegidas, pois também representam uma worktree recém-criada. Commit
-posterior ao merge volta a impedir a classificação de mesclada.
+**Exclusão conservadora:** ancestralidade com pontas distintas comprova a integração.
+Sem ela, um PR mesclado só confirma o mesmo SHA da ponta, com origem, destino e identidade
+dos repositórios conferidos. Apagar o upstream não comprova merge. Pontas iguais sem essa
+prova continuam protegidas, pois também representam uma worktree recém-criada. Commit
+posterior ao merge volta a impedir a classificação de mesclada. Falha na consulta do PR
+mantém a classificação Git local e informa que a conferência externa não foi concluída.
+
+**Ampliação (16/10/2026):** a prova externa cobre squash e rebase que não conservam
+ancestralidade. Os cenários usam Git real descartável e respostas controladas somente na
+fronteira de hospedagem, incluindo SHA, destino e repositório incompatíveis, branch reutilizada
+e commit posterior ao merge. A descoberta também consulta as raízes autorizadas, com limites
+e cache, para não depender apenas de conversas dos últimos 30 dias; varredura parcial leva
+aviso. A limpeza automática é opcional, conserva branches e conversas e reconfere identidade,
+uso e arquivos antes de remover. Leitura incerta conserva a worktree.
 
 **Prova:** consulta das worktrees reais com o Python corrigido e o contrato Rust compilado:
 os dois reconheceram as cinco mescladas e mantiveram a sexta em andamento, contra suas bases

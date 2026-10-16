@@ -147,6 +147,26 @@ def _teammate_eventos(texto, id_: str) -> Optional[list[ChatEvent]]:
     return eventos
 
 
+# Parada pelo usuário: o Claude Code avisa só com as descrições dos agentes, sem task-id.
+_STOPPED_ONE_RE = re.compile(r'Background agent "(.*)" was stopped by the user\.', re.S)
+_STOPPED_MANY_RE = re.compile(r'\d+ background agents were stopped by the user: "(.*)"\.', re.S)
+
+
+def _stopped_agents(texto, id_: str, ts=None) -> Optional[list[ChatEvent]]:
+    if isinstance(texto, list):
+        texto = "\n".join(b.get("text", "") for b in texto if isinstance(b, dict) and b.get("type") == "text")
+    if not isinstance(texto, str):
+        return None
+    if m := _STOPPED_ONE_RE.fullmatch(texto.strip()):
+        nomes = [m.group(1)]
+    elif m := _STOPPED_MANY_RE.fullmatch(texto.strip()):
+        nomes = m.group(1).split('", "')
+    else:
+        return None
+    return [ChatEvent(kind="tool_result", id=f"{id_}:{k}", tool_use_id=f"task:stopped:{nome}",
+                      result="task-notification", ts=ts) for k, nome in enumerate(nomes)]
+
+
 def _agent_msg(texto, id_: str) -> Optional[list[ChatEvent]]:
     if not isinstance(texto, str) or not (m := _AGENT_MSG_RE.fullmatch(texto.strip())):
         return None
@@ -497,6 +517,9 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         if (colega := _teammate_eventos(queued, "queued-teammate:" + hashlib.md5(
                 str(queued).encode("utf-8", "replace")).hexdigest()[:8])) is not None:
             return colega
+        if (parados := _stopped_agents(queued, "queued-stopped:" + hashlib.md5(
+                str(queued).encode("utf-8", "replace")).hexdigest()[:8])) is not None:
+            return parados
         if isinstance(queued, str) and queued.lstrip().startswith("<task-notification>"):
             m = _TASK_NOTIF_RE.search(queued)
             if m:
@@ -549,6 +572,8 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
     if etype == "attachment":
         att = obj.get("attachment")
         if isinstance(att, dict) and att.get("type") == "queued_command":
+            if (parados := _stopped_agents(att.get("prompt"), uid, _ts(obj))) is not None:
+                return parados
             texto = "\n".join(
                 b.get("text", "") for b in (att.get("prompt") or [])
                 if isinstance(b, dict) and b.get("type") == "text"

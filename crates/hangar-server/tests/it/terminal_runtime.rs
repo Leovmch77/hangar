@@ -59,6 +59,11 @@ impl TerminalIo for Io {
                 if self.ring_returns.load(std::sync::atomic::Ordering::Acquire) {*self.mods_screen.lock().unwrap()=None;}
                 vec![]
             },
+            "paste-buffer"=>{
+                let bytes=self.calls.lock().unwrap().iter().rev().find(|call|call.args[0]=="load-buffer").unwrap().stdin.clone();
+                *self.text.lock().unwrap()=String::from_utf8(bytes).unwrap();
+                vec![]
+            },
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 self.refresh_record();
@@ -166,6 +171,13 @@ impl Fixture {
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     fn state(&self)->Value {
         serde_json::from_slice(&queue::read_replaced(&self.target.state_path).unwrap_or_else(|error|panic!("estado ilegível: {error}"))).unwrap()
+    }
+    fn sent_prompts(&self)->Vec<String> {
+        self.io.calls.lock().unwrap().iter().filter_map(|call| {
+            if call.args[0]=="load-buffer" {Some(String::from_utf8(call.stdin.clone()).unwrap())}
+            else if call.args[0]=="send-keys" && call.args.contains(&"-l".into()) && call.args.last().is_some_and(|text|text!="\r") {call.args.last().cloned()}
+            else {None}
+        }).collect()
     }
     /// Espera com prazo; no estouro mostra onde a operação parou (multiplexador e diário).
     /// O teto cobre o runner Windows, onde cada leitura de fatos grava o diário durável em ~0,1–0,3 s.
@@ -528,18 +540,102 @@ async fn terminal_runtime_unknown_survives_restart_and_never_requeues() {
     assert_eq!(f.state()["rows"][0]["delivered"],true); h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_idle_timer_drains_without_sse_and_claims_one() {
+async fn queued_batch_terminal_sends_one_prompt_and_confirms_all_members() {
+    let f=Fixture::new().await;
+    f.turn_start_ms.store(60_000,std::sync::atomic::Ordering::Release);
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    let h=f.start();
+    for (id,text) in [("a","primeira"),("b","segunda"),("c","terceira")] {
+        assert_eq!(h.command(f.command(id,text)).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    }
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("o driver escreveu",||f.io.calls.lock().unwrap().iter().any(|call|call.args[0]=="send-keys" && call.args.last().is_some_and(|key|key=="\r"))).await;
+    let sent=f.sent_prompts();
+    assert_eq!(sent,vec!["primeira\nsegunda\nterceira"],"o driver recebe um único prompt inteiro");
+    let state=f.state();assert_eq!(state["rows"].as_array().unwrap().len(),1);
+    assert_eq!(state["rows"][0]["batch_entries"].as_array().unwrap().len(),3);
+    std::fs::write(&f.target.transcript,format!("{}\n",json!({"type":"user","uuid":"batch-echo","sessionId":"sid","message":{"role":"user","content":"primeira\nsegunda\nterceira"}}))).unwrap();
+    h.confirm().await.unwrap();
+    assert!(f.state()["rows"][0]["batch_entries"].as_array().unwrap().iter().all(|row|row["confirmed"]==true));
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_batch_terminal_reservation_is_internal() {
+    let f=Fixture::new().await;let h=f.start();
+    assert_eq!(h.queue("outside-claim".into(),Action::ClaimBatch {min_ts:0.0}).await.unwrap_err().code,"terminal_queue_action");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_batch_terminal_oversized_batch_stays_editable() {
+    let f=Fixture::new().await;f.idle.store(false,std::sync::atomic::Ordering::Release);
+    let rows=["a","b"].into_iter().map(|id|json!({"id":id,"text":"x".repeat(hangar_server::runtime::protocol::MAX_FRAME/2),"ts":2.0,"delivered":false})).collect();
+    drop(Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",rows)).unwrap());
+    let h=f.start();
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    let snapshot=tokio::time::timeout(Duration::from_secs(60),async {loop {
+        let snapshot=h.snapshot().await.unwrap();
+        if !snapshot["error"].is_null() || snapshot["view"]["input_stalled"]=="queue_batch_too_large" {break snapshot;}
+        tokio::task::yield_now().await;
+    }}).await.unwrap();
+    assert!(snapshot["error"].is_null(),"o tamanho do lote não adoece a entrada: {}",snapshot["error"]);
+    assert_eq!(snapshot["view"]["input_stalled"],"queue_batch_too_large");
+    assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    assert_eq!(h.queue("edit-a".into(),Action::Edit {entry_id:"a".into(),text:"curta".into()}).await.unwrap(),"edited");
+    h.queue("edit-b".into(),Action::Edit {entry_id:"b".into(),text:"outra".into()}).await.unwrap();
+    f.idle.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("o lote reduzido saiu",||f.io.calls.lock().unwrap().iter().any(|call|call.args[0]=="load-buffer" && call.stdin==b"curta\noutra")).await;
+    assert!(h.snapshot().await.unwrap()["error"].is_null());
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_batch_terminal_size_block_rechecks_after_internal_queue_changes() {
+    for steer in [false,true] {
+        let f=Fixture::new().await;f.start_plugin();
+        let large="\"".repeat((hangar_server::runtime::protocol::MAX_FRAME-100)/4);
+        let small="\"".repeat(100);
+        let rows=vec![json!({"id":"small","text":small,"ts":2.0,"delivered":false}),
+            json!({"id":"b","text":large,"ts":2.0,"delivered":false}),json!({"id":"c","text":large,"ts":2.0,"delivered":false})];
+        let lease=crate::lease_when_free(&f.target.lease_path);
+        let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",rows)).unwrap();
+        let options=TerminalOptions {io:f.io.clone(),plugin:Some(f.plugin.clone()),interactions:Some(f.plugin.interactions().clone()),
+            tick:Duration::from_secs(600),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},turn_start_wait:Duration::ZERO,..TerminalOptions::default()};
+        let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+        h.drain().await.unwrap();
+        assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"queue_batch_too_large");
+        if steer {
+            let result=h.control("steer-small".into(),"steer_entry".into(),json!({"entry_id":"small"})).await.unwrap();
+            assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+            let remaining=format!("{large}\n{large}");
+            assert!(json!({"modo":"fill","text":remaining}).to_string().len()<hangar_server::runtime::protocol::MAX_FRAME);
+            // Para na leitura seguinte: prova a retentativa sem renderizar megabytes no dublê do pane.
+            f.io.capture_error.store(true,std::sync::atomic::Ordering::Release);
+            assert_eq!(h.drain().await.unwrap_err().code,"terminal_facts","o bloqueio antigo não impede reavaliar a entrega");
+            assert_eq!(f.sent_prompts(),vec![small.clone()]);
+        }else{
+            assert_eq!(h.command(f.command("new","nova mensagem")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+            assert!(h.snapshot().await.unwrap()["view"]["input_stalled"].is_null(),"a escrita interna invalida a avaliação anterior");
+        }
+        h.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn terminal_runtime_idle_timer_drains_without_sse_as_one_batch() {
     let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("queued1","Um")).await.unwrap(); h.command(f.command("queued2","Dois")).await.unwrap();
     assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"));
     f.idle.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("espera 1",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
-    let state=f.state(); assert_eq!(state["rows"].as_array().unwrap().len(),2); h.stop().await.unwrap();
+    let state=f.state(); assert_eq!(state["rows"].as_array().unwrap().len(),1);assert_eq!(state["rows"][0]["text"],"Um\nDois"); h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_queued_row_waits_for_idle_then_drains_one_by_one() {
-    // Com o Claude trabalhando a mensagem fica no Hangar (painel); parado, sai uma por vez.
-    // A espera do turno é maior que o prazo do teste: B só sai porque o Claude apareceu ocupado e parou de novo.
+async fn terminal_runtime_next_batch_waits_for_the_next_idle_turn() {
+    // A espera do turno cobre o intervalo entre a colagem do lote e o registro nativo passar a ocupado.
     let f=Fixture::new().await; f.turn_start_ms.store(60_000,std::sync::atomic::Ordering::Release);
     f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     let reply=h.command(f.command("one","Um")).await.unwrap();
@@ -549,10 +645,9 @@ async fn terminal_runtime_queued_row_waits_for_idle_then_drains_one_by_one() {
     assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]!="send-keys"),"nada digitado durante o turno");
     assert!(f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==false));
     f.idle.store(true,std::sync::atomic::Ordering::Release);
-    f.wait_for("primeira sai parada",||f.state()["rows"][0]["delivered"]==true).await;
-    // O registro ainda diz parado (a prova chegou antes do `busy`): a segunda não cai no mesmo turno.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(f.state()["rows"][1]["delivered"],false,"a segunda esperou o turno da primeira");
+    f.wait_for("o lote saiu parado",||f.io.calls.lock().unwrap().iter().any(|call|call.args[0]=="send-keys" && call.args.last().is_some_and(|text|text=="\r"))).await;
+    assert_eq!(f.state()["rows"][0]["text"],"Um\nDois");
+    // O registro ainda diz parado: a próxima mensagem não cai no mesmo turno.
     assert_eq!(h.command(f.command("three","Três")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred,"o /input novo também espera");
     // Ocupado até a drenagem ler de fato: cada leitura de fatos captura o pane, e o registro nativo é regravado
     // com `busy` na primeira chamada depois da troca. Três capturas depois dela incluem uma leitura inteira já
@@ -563,8 +658,9 @@ async fn terminal_runtime_queued_row_waits_for_idle_then_drains_one_by_one() {
     f.wait_for("a drenagem leu a sessão ocupada",||captures()>=before+3 && busy_since.elapsed()>=Duration::from_secs(1)).await;
     assert_eq!(f.state()["rows"][1]["delivered"],false);
     f.idle.store(true,std::sync::atomic::Ordering::Release);
-    f.wait_for("segunda sai depois",||f.state()["rows"][1]["delivered"]==true).await;
-    assert_eq!(f.state()["rows"][2]["delivered"],false,"uma por vez");
+    f.wait_for("o próximo lote saiu depois",||f.state()["rows"][1]["delivered"]==true).await;
+    assert_eq!(f.state()["rows"].as_array().unwrap().len(),2);
+    assert_eq!(f.state()["rows"][1]["text"],"Três");
     h.stop().await.unwrap();
 }
 #[tokio::test]
@@ -1182,13 +1278,16 @@ async fn terminal_runtime_claim_crash_before_intent_restores_safe_pending_row() 
     f.ready.store(true,std::sync::atomic::Ordering::Release); h.drain().await.unwrap(); assert_eq!(f.state()["rows"][0]["delivered"],true); assert_eq!(f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()=="Olá").count(),1); h.stop().await.unwrap();
 }
 #[tokio::test]
-async fn terminal_runtime_claim_only_one_entry_while_driver_is_in_flight() {
+async fn terminal_runtime_claims_one_batch_while_driver_is_in_flight() {
     let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("first-claim","Um")).await.unwrap(); h.command(f.command("second-claim","Dois")).await.unwrap();
     f.io.blocked.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
     let hc=h.clone(); let draining=tokio::spawn(async move {hc.drain().await});
     f.wait_for("espera 5",||f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys")).await;
-    let rows=f.state()["rows"].clone(); assert_eq!(rows[0]["delivered"],true); assert_eq!(rows[1]["delivered"],false);
+    let rows=f.state()["rows"].clone();assert_eq!(rows.as_array().unwrap().len(),1);
+    assert_eq!(rows[0]["delivered"],true);assert_eq!(rows[0]["text"],"Um\nDois");
+    let members:Vec<_>=rows[0]["batch_entries"].as_array().unwrap().iter().map(|row|row["id"].as_str().unwrap()).collect();
+    assert_eq!(members,["first-claim","second-claim"]);
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); draining.await.unwrap().unwrap(); h.stop().await.unwrap();
 }
 
@@ -1467,13 +1566,11 @@ async fn mods_hold_parks_writes_until_release() {
     assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)),"o clique segue lendo o pane");
     assert_eq!(h.pane(PaneOp::Release,far()).await.unwrap(),PaneReply::Done);
     direct.await.unwrap().unwrap();
-    let typed=|text:&str|f.io.calls.lock().unwrap().iter().filter(|r|r.args.iter().any(|a|a.contains(text))).count();
-    // A linha vira `delivered` no `Claim`, antes de digitar: a espera é pelas duas digitadas, e a parada,
-    // serial com a entrega em curso, garante que nada mais sai depois da contagem.
+    // A linha vira entregue antes de digitar: a prova observa o texto que chegou ao driver.
     f.wait_for("entregas depois do clique",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)
-        && typed("Na fila")>0 && typed("Durante o clique")>0).await;
+        && f.sent_prompts()==["Na fila\nDurante o clique"]).await;
     h.stop().await.unwrap();
-    assert_eq!((typed("Na fila"),typed("Durante o clique")),(1,1),"cada entrada sai uma vez");
+    assert_eq!(f.sent_prompts(),["Na fila\nDurante o clique"],"o lote sai uma vez e conserva a ordem");
 }
 
 /// Sem `Release` (a tarefa do clique sumiu), a reserva vence sozinha no prazo dela.
@@ -1919,11 +2016,8 @@ async fn new_message_waits_behind_older_deferred_row() {
     assert_eq!(second.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(second.payload["code"],"queue_ahead"); assert_eq!(second.payload["queued"],true);
     f.ready.store(true,std::sync::atomic::Ordering::Release);
-    let typed=||->Vec<String> {f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.contains(&"-l".into())).map(|r|r.args.last().unwrap().clone()).collect()};
-    f.wait_for("as duas digitadas",||typed().iter().any(|t|t=="Segunda")).await;
-    let typed=typed();
-    let (a,b)=(typed.iter().position(|t|t=="Primeira").unwrap(),typed.iter().position(|t|t=="Segunda").unwrap());
-    assert!(a<b,"ordem {typed:?}");
+    f.wait_for("as duas partes no mesmo prompt",||f.sent_prompts()==["Primeira\nSegunda"]).await;
+    assert_eq!(f.sent_prompts(),["Primeira\nSegunda"]);
     h.stop().await.unwrap();
 }
 

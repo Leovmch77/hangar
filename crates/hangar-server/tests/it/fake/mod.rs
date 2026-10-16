@@ -104,7 +104,8 @@ impl Fake {
         self.hits.lock().unwrap().iter().filter(|(p, _)| p.split('?').next() == Some(path)).count()
     }
     pub fn last_hit(&self) -> (String, HeaderMap) {
-        self.hits.lock().unwrap().last().cloned().expect("algum pedido repassado")
+        // As tarefas de fundo do servidor (varredura de worktrees) também chamam `/internal/*`.
+        self.hits.lock().unwrap().iter().rev().find(|(p, _)| !p.starts_with("/internal/")).cloned().expect("algum pedido repassado")
     }
     /// O `info` demora isto antes de responder.
     pub fn set_info_delay(&self, delay: Duration) {

@@ -61,19 +61,21 @@ function desafio(): string {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 }
 
-// Mesmo IP em outra rede pode ser outra máquina: o token só vai pro endereço local depois de ele
+// Mesmo IP em outra rede pode ser outra máquina: o token só vai ao destino depois de ele
 // provar que conhece o token (HMAC do desafio) e dizer o mesmo nome.
-async function testarLan(s: Server, lan: LanInfo | null | undefined): Promise<boolean> {
-  if (!lan?.url || !lan.id || !lanPermitida(lan.url)) return false;
+export async function verifyServerIdentity(s: Server, target: LanInfo | null | undefined, signal?: AbortSignal): Promise<boolean> {
+  if (!target?.url || !target.id || !lanPermitida(target.url)) return false;
   const d = desafio();
   let r: { identificador?: string; prova?: string } | null = null;
   try {
-    const res = await fetch(`${lan.url}/api/peers/prova?desafio=${d}`, { signal: AbortSignal.timeout(PRAZO_LAN_MS) });
+    const res = await fetch(`${target.url}/api/peers/prova?desafio=${d}`, {
+      signal: signal ?? AbortSignal.timeout(PRAZO_LAN_MS), credentials: 'omit',
+    });
     r = res.ok ? (await res.json()) as { identificador?: string; prova?: string } : null;
   } catch {
     return false;
   }
-  return r?.identificador === lan.id && r.prova === hmacSha256Hex(s.token, `${d}|${lan.id}`);
+  return r?.identificador === target.id && r.prova === hmacSha256Hex(s.token, `${d}|${target.id}`);
 }
 
 // O endereço local ganha só se provar a identidade ANTES de o principal responder: o mesmo IP
@@ -94,7 +96,7 @@ async function decidir(s: Server): Promise<void> {
       registrarDiag({ evento: 'rota.falhou', nivel: 'erro', codigo: e instanceof Error ? e.name : 'erro' }, s.baseUrl));
   }
   const inicioLan = Date.now();
-  const lanOk = await testarLan(s, lan);
+  const lanOk = await verifyServerIdentity(s, lan);
   const lanEm = Date.now() - inicioLan;
   const venceu = lanOk && lan?.url && (primeira ? lanEm <= principalEm : principalEm === Infinity);
   rotas.set(s.id, venceu ? lan!.url : s.baseUrl);

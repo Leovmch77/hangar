@@ -1,6 +1,6 @@
 //! Python falso das rotas de Git/arquivos: contexto, diário e o resto contado como repasse.
 #![allow(dead_code)]
-use crate::fake::{SECRET, config, spawn_server};
+use crate::fake::{SECRET, config};
 use axum::{
     Router,
     body::Bytes,
@@ -21,6 +21,7 @@ pub struct Fixture {
     pub hits: Arc<AtomicUsize>,
     /// Corpos recebidos em `/internal/diag`.
     pub diags: Diags,
+    _home: Option<tempfile::TempDir>,
 }
 
 impl Fixture {
@@ -41,6 +42,14 @@ impl Fixture {
 }
 
 pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
+    fixture_with_home(root,context_ok,None).await
+}
+
+pub async fn fixture_with_home(root: &std::path::Path, context_ok: bool, home: Option<&std::path::Path>) -> Fixture {
+    fixture_with_mux(root,context_ok,home,None).await
+}
+
+pub async fn fixture_with_mux(root: &std::path::Path, context_ok: bool, home: Option<&std::path::Path>, mux: Option<&std::path::Path>) -> Fixture {
     let hits = Arc::new(AtomicUsize::new(0));
     let diags: Diags = Arc::default();
     let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl"),"git_cwd":root}});
@@ -102,7 +111,30 @@ pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Fixture { addr: spawn_server(config(upstream, "127.0.0.1")).await, hits, diags }
+    let isolated_home=home.is_none().then(||tempfile::tempdir().unwrap());
+    let home=home.unwrap_or_else(||isolated_home.as_ref().unwrap().path());
+    let mut state=hangar_server::routes::AppState::new(config(upstream,"127.0.0.1"));
+    state.origins_home=home.into();
+    let mut env=hangar_server::list::bridge::ListEnv::from_env();
+    // Inventário vazio conhecido; a prova não depende do multiplexador instalado na máquina.
+    #[cfg(unix)]
+    let default_mux={
+        let script=home.join("fixture-mux");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&script,b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    };
+    #[cfg(windows)]
+    let default_mux={
+        let script=home.join("fixture-mux.cmd");
+        std::fs::write(&script,b"@echo off\r\nexit /b 0\r\n").unwrap();
+        script
+    };
+    env.mux=hangar_server::list::mux::Mux::with_program(mux.unwrap_or(&default_mux),std::time::Duration::from_secs(5));
+    state.list=Arc::new(hangar_server::list::bridge::ListBridge::new(env,hangar_server::list::facts::FactsClient::new(upstream,SECRET.into())));
+    let addr=crate::fake::spawn_state(state).await;
+    Fixture { addr, hits, diags,_home:isolated_home }
 }
 
 /// Corpo do 503 de Git/arquivos: mesmo formato das outras rotas do Rust, com o motivo em `params`.

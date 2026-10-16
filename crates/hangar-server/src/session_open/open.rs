@@ -368,8 +368,13 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         let stem = crate::list::discover_other::sanitize_session_name(&wt.branch);
         let stem = if stem.is_empty() { "worktree".to_owned() } else { stem };
         let source = spec.cwd.clone();
-        let made = tokio::task::spawn_blocking(move || hangar_workspace::git::create_branch_worktree(Path::new(&source), &wt.branch, &stem,
-            &root, wt.new_branch, wt.base.as_deref())).await.map_err(|_| creation("a criação da worktree não terminou"))?
+        let home = host.home().to_owned();
+        // A pasta das worktrees é a configurada neste servidor, como na rota de worktrees.
+        let made = tokio::task::spawn_blocking(move || {
+            let location = hangar_workspace::worktree_settings::WorktreeSettings::load_at(&home.join(".hangar/worktree-settings.json"))?
+                .location_path(&home)?;
+            hangar_workspace::git::create_branch_worktree(Path::new(&source), &wt.branch, &stem, &root, wt.new_branch, wt.base.as_deref(), &location)
+        }).await.map_err(|_| creation("a criação da worktree não terminou"))?
             .map_err(|e| OpenError::new(e.status, "erro_criacao_sessao", e.detail.as_str().map_or_else(|| e.detail.to_string(), str::to_owned)))?;
         if made.created {
             undo = Some(WorktreeUndo { source: spec.cwd.clone(), path: made.path.clone(), branch: spec.worktree.as_ref().unwrap().branch.clone(),

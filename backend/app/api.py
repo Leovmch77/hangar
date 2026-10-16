@@ -585,6 +585,23 @@ async def _contas_pelo_rust(request: Request, call_next):
 
 
 @app.middleware("http")
+async def _worktrees_pelo_rust(request: Request, call_next):
+    """Nas portas do Python, worktrees seguem ao mesmo dono das políticas e da classificação."""
+    from app import account_bridge
+    path, method = request.url.path, request.method
+    owned = (method == "GET" and path in {"/api/worktrees", "/api/worktrees/detail", "/api/worktrees/settings"}
+             or method == "PUT" and path == "/api/worktrees/settings"
+             or method == "POST" and path in {"/api/worktrees/create", "/api/worktrees/delete", "/api/worktrees/delete-merged"})
+    if not owned:
+        return await call_next(request)
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        return JSONResponse({"detail": "convidado não acessa worktrees"}, status_code=403)
+    if account_bridge.owner_mode() == "python" and path != "/api/worktrees/settings":
+        return await call_next(request)
+    return await _repasse_ao_rust(request, {"code": "worktrees_need_rust_server"}, "/__hangar_server/forwarded")
+
+
+@app.middleware("http")
 async def _jev_aux_pelo_rust(request: Request, call_next):
     """A busca de modelos do Jev é do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
     leria como servidor antigo."""

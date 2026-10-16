@@ -18,6 +18,9 @@ pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
         return Some(("runtime_falhou".into(), text.chars().take(300).collect()));
     }
     let Some(stalled) = view.input_stalled.as_deref().filter(|s| !s.is_empty()) else { return view.limit.clone() };
+    if stalled == "queue_batch_too_large" {
+        return Some(("terminal_input_stalled".into(),"O lote é grande demais. Edite ou remova mensagens da fila para enviar.".into()));
+    }
     let code = match stalled {
         "composer_busy" => "terminal_input_composer_busy",
         "composer_unreadable" => "terminal_input_composer_unreadable",

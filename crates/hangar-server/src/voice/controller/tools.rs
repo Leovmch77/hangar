@@ -50,8 +50,7 @@ impl Controller {
             },
             Want::Plan { name, text } => match self.resolve("finish_plan", &rows, &unreachable, &name) {
                 Ok(i) => self.send_plan_to((rows[i].0.clone(), rows[i].1.name.clone()), text),
-                Err(why) => self.voice.session_answer(format!("O plano não foi enviado nem perdido; continua guardado. {why} \
-                    Para reenviar, diga para qual sessão mandar e chame finish_plan de novo com session.")),
+                Err(why) => self.voice.plan_failed(format!("{why} Para reenviar, diga para qual sessão mandar e chame finish_plan de novo com session.")),
             },
             Want::Interrupt { call, name, confirmed, turn } => self.interrupt(call, &rows, &unreachable, &name, confirmed, &turn),
             Want::Machines(call) => self.list_machines(call, &rows, &unreachable),
@@ -342,7 +341,7 @@ impl Controller {
                     let _ = ctx.done.send(Done::PlanDelivered);
                 }
                 Err(error) => {
-                    ctx.voice.session_answer("O plano não chegou à sessão.".into());
+                    ctx.voice.plan_failed(error.text.clone());
                     let _ = ctx.done.send(Done::Failed { code: "send_plan", text: error.text });
                 }
             }

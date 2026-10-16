@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const calls = vi.hoisted(() => ({
   list: vi.fn(),
   credentials: vi.fn(),
+  engines: vi.fn(),
   login: null as { server: unknown; accountId?: string } | null,
 }));
 
@@ -19,6 +20,12 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   getCodexAccountsForServer: calls.list,
   getCredentialsForServer: calls.credentials,
+  getEnginesForServer: calls.engines,
+}));
+vi.mock('expo-linking', () => ({ openURL: vi.fn() }));
+vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn() }));
+vi.mock('../../ui/Sheet', () => ({
+  Sheet: ({ children, open }: { children: ReactNode; open?: boolean }) => open === false ? null : createElement('div', null, children),
 }));
 vi.mock('./CodexContaLogin', () => ({
   CodexContaLogin: (props: { server: unknown; accountId?: string; onComplete: () => void }) => {
@@ -44,7 +51,8 @@ vi.mock('./PageHeader', () => {
       createElement('header', null, title, ...(actions ?? []).map((a) => createElement(Pill, { key: a.label, ...a }))),
   };
 });
-vi.mock('../../paraglide/messages', () => ({
+vi.mock('../../paraglide/messages', async original => ({
+  ...await original<typeof import('../../paraglide/messages')>(),
   contas_modelos_titulo: () => 'Contas e modelos',
   contas_descricao: () => 'credenciais',
   contas_secao_claude_leg: () => 'leg assinaturas',
@@ -72,7 +80,7 @@ vi.mock('../../paraglide/messages', () => ({
   login_fechar: () => 'Fechar',
   erro_desconhecido: () => 'Erro',
 }));
-vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => typeof fn === 'function' ? fn({ tokens: { bg: { surface: '#eee' }, text: { primary: '#000', secondary: '#666', muted: '#999' }, accent: { base: '#00f' }, status: { error: '#f00', success: '#0a0' } }, base: { space: [0, 4, 8, 12, 16], text: { xs: 12, sm: 14, base: 16, lg: 18, xl: 20 }, radius: { md: 8, lg: 12 }, fontMono: 'monospace' } }) : fn } }));
+vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => typeof fn === 'function' ? fn({ tokens: { border: { default: '#ccc' }, bg: { surface: '#eee' }, text: { primary: '#000', secondary: '#666', muted: '#999' }, accent: { base: '#00f' }, status: { error: '#f00', success: '#0a0' } }, base: { space: [0, 4, 8, 12, 16], text: { xs: 12, sm: 14, base: 16, lg: 18, xl: 20 }, radius: { md: 8, lg: 12 }, fontMono: 'monospace' } }) : fn } }));
 
 import { motivoLoginIndisponivel, type Credencial } from '@hangar/core';
 import Contas from '../../../app/config/contas';
@@ -81,6 +89,8 @@ describe('contas Codex', () => {
   beforeEach(() => {
     calls.list.mockReset();
     calls.credentials.mockReset();
+    calls.engines.mockReset();
+    calls.engines.mockResolvedValue({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' });
     calls.login = null;
     calls.list.mockResolvedValue([
       { id: 'default', credential_id: 'codex:/default', name: 'Padrão', home: '/default', is_default: true, auth: { method: 'oauth', status: 'connected', email: 'a@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } },

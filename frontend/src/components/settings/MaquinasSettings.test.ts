@@ -2,8 +2,9 @@
 // Round 1/2 da 4b: logout idempotente — Sair e remover-último chamam onLogout UMA vez; enquanto a
 // Promise anda, as portas de saída ficam bloqueadas; rejeição vira erro visível recuperável (o
 // clear de credenciais é dono do App/lib/logout.ts, este componente não chama).
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
+import type { Window as HappyWindow } from 'happy-dom';
 import MaquinasSettings from './MaquinasSettings.svelte';
 import { criarProps } from './props-reativas.svelte';
 import * as m from '../../paraglide/messages';
@@ -112,6 +113,56 @@ async function abrirEste(el: HTMLElement) {
   await tick();
   return document.querySelector<HTMLElement>('.sd-dialogo')!;
 }
+
+describe('MaquinasSettings — abrir no app', () => {
+  const viewport = (width: number) => (window as unknown as HappyWindow).happyDOM.setWindowSize({ width, height: 844 });
+  afterEach(() => { viewport(1024); vi.restoreAllMocks(); });
+  const appButton = (el: HTMLElement) => [...el.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => b.textContent?.trim() === m.machine_import_open_app());
+
+  it('vista celular exporta as próprias, desligadas inclusive, sem alterar cp_servers ou ativa', async () => {
+    viewport(390);
+    const own = { ...SRV, baseUrl: 'https://home.test', token: 'literal%25/#?+', disabled: true };
+    const list = [own, { ...own, id: 'guest', invite: true }, { ...own, id: 'temporary', ephemeral: true }, { ...own, id: 'removed', removed: true }];
+    localStorage.setItem('cp_servers', JSON.stringify(list)); localStorage.setItem('cp_active', own.id);
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const { el, comp } = montar({ servers: list }); await tick();
+    const open = appButton(el); expect(open).toBeTruthy(); open!.click(); await tick();
+    const link = String(assign.mock.calls[0]?.[0]);
+    expect(link.startsWith('hangar://importar#')).toBe(true);
+    expect(new URL(link).search).toBe('');
+    expect(JSON.parse(decodeURIComponent(new URL(link).hash.slice(1))))
+      .toEqual([{ id: own.id, label: own.label, baseUrl: 'https://home.test', token: 'literal%25/#?+' }]);
+    expect(localStorage.getItem('cp_servers')).toBe(JSON.stringify(list));
+    expect(localStorage.getItem('cp_active')).toBe(own.id);
+    expect(authMock.removeServer).not.toHaveBeenCalled();
+    unmount(comp);
+  });
+
+  it('não oferece recurso no desktop e acompanha a passagem do breakpoint 820', async () => {
+    viewport(820);
+    const { el, comp } = montar(); await tick();
+    expect(appButton(el)).toBeUndefined();
+    // O happy-dom inicia a memória do listener como false, mesmo se a consulta já é true.
+    window.dispatchEvent(new Event('resize'));
+    viewport(819); await tick();
+    expect(appButton(el)).toBeTruthy();
+    viewport(820); await tick();
+    expect(appButton(el)).toBeUndefined();
+    unmount(comp);
+  });
+
+  it('payload inválido avisa na tela sem navegar nem expor a credencial', async () => {
+    viewport(390);
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const { el, comp } = montar({ servers: [{ ...SRV, baseUrl: 'https://bad.test?token=never-show-secret' }] }); await tick();
+    const open = appButton(el); expect(open).toBeTruthy(); open!.click(); await tick();
+    expect(assign).not.toHaveBeenCalled();
+    expect(el.querySelector('[role="alert"]')?.textContent).toContain(m.machine_import_invalid());
+    expect(el.querySelector('[role="alert"]')?.textContent).not.toContain('never-show-secret');
+    unmount(comp);
+  });
+});
 
 describe('MaquinasSettings — logout idempotente', () => {
   it('Sair + remover-último durante a Promise chamam onLogout UMA vez', async () => {

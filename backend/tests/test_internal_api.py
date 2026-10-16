@@ -49,13 +49,15 @@ def test_worktrees_context_has_folders_inside_roots_and_account_projects(tmp_pat
     inside = tmp_path / "repo"
     inputs = AsyncMock(return_value=([_info(cwd=str(inside), worktree_path=str(inside))], [str(inside)], [tmp_path]))
     with patch("app.api._worktree_inputs", inputs), \
-            patch("app.archive._contas", return_value=[(None, "", tmp_path / "projects")]):
+            patch("app.archive._contas", return_value=[(None, "", tmp_path / "projects")]), \
+            patch("app.api.list_folders", return_value=[SimpleNamespace(cwd=str(inside / "sub"), mtime=1.0)]):
         response = _client().get("/internal/worktrees/context", headers={"X-Hangar-Internal": SECRET})
     assert response.status_code == 200
     assert response.json() == {
         "roots": [str(tmp_path)], "cwds": [str(inside)],
-        "sessions": [{"name": "s1", "cwd": str(inside), "worktree_path": str(inside), "jsonl": "/p/abc-123.jsonl"}],
+        "sessions": [{"name": "s1", "cwd": str(inside), "git_cwd": str(inside), "worktree_path": str(inside), "jsonl": "/p/abc-123.jsonl"}],
         "project_bases": [str(tmp_path / "projects")],
+        "activities": [{"cwd": str(inside / "sub"), "mtime": 1.0}],
     }
 
 

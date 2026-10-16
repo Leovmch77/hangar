@@ -201,7 +201,7 @@ const PROBES: &[(&str, &str)] = &[
     ("GET", "/api/sessions/x/term"), ("POST", "/api/sessions/x/keys"),
     ("GET", "/api/sessions/x/git/log"), ("GET", "/api/sessions/x/files/list"), ("POST", "/api/sessions/x/git/commit"),
     ("POST", "/api/sessions/x/files/write"), ("GET", "/api/fs/roots"),
-    ("GET", "/api/worktrees"), ("GET", "/api/worktrees/detail"), ("POST", "/api/worktrees/create"), ("POST", "/api/worktrees/delete"),
+    ("GET", "/api/worktrees"), ("GET", "/api/worktrees/detail"), ("GET", "/api/worktrees/settings"), ("PUT", "/api/worktrees/settings"), ("POST", "/api/worktrees/delete-merged"), ("POST", "/api/worktrees/create"), ("POST", "/api/worktrees/delete"),
     ("GET", "/api/costs"), ("GET", "/api/uso"), ("GET", "/api/cotacao"), ("GET", "/api/sessions/x/cost"),
     ("GET", "/api/cotas"), ("GET", "/api/sessions/x/limits"),
     ("GET", "/api/codex-contas"), ("POST", "/api/sessions/x/codex-permissions"),
@@ -389,7 +389,7 @@ mod tests {
         assert!(rust_route(&Method::POST, "/api/mermaid") && !get("/api/mermaid"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/input") && rust_route(&Method::DELETE, "/api/sessions/a/queue/e1")
             && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && rust_route(&Method::POST, "/api/sessions/a/queue/e1/steer")
-            && rust_route(&Method::PATCH, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
+            && rust_route(&Method::PATCH, "/api/sessions/a/queue/e1") && get("/api/cotas") && rust_route(&Method::POST, "/api/worktrees/create"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/pair") && rust_route(&Method::DELETE, "/api/sessions/a/pair")
             && get("/api/sessions/a/pair/contract") && rust_route(&Method::POST, "/api/sessions/a/unpair-remote")
             && !get("/api/sessions/a/pair") && rust_route(&Method::POST, "/api/sessions/a/pair-invite"));

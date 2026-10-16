@@ -20,6 +20,7 @@ import { ownServers, useServers } from '../../stores/servers';
 import { useSessions } from '../../stores/sessions';
 import { useAparencia, ehGroupBy } from '../../stores/aparencia';
 import { HangarMark } from '../../ui/HangarMark';
+import { LiveVoiceChatButton } from '../voice/LiveVoiceChatButton';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
 import { SessionRow, type PairAction } from './SessionRow';
@@ -123,6 +124,11 @@ export function SessionList({ onClose, onOpenServers }: Props) {
 
   const excluir = useCallback(
     (s: AggSession) => {
+      const server = useServers.getState().servers.find((server) => server.id === s.serverId);
+      if (server?.invite) {
+        useServers.getState().remove(server.id);
+        return;
+      }
       const key = `${s.serverId}::${s.name}`;
       if (deleting.current.has(key)) return;
       const reservation = { confirmed: false };
@@ -297,8 +303,9 @@ export function SessionList({ onClose, onOpenServers }: Props) {
         {m.native_brand()}
       </Text>
       {/* Agrupar não se aplica à lista de conversas, que é só por recência. */}
-      {conversas ? null : <View style={styles.topoAcoes}>
-        <MenuView
+      <View style={styles.topoAcoes}>
+        {ativo ? <LiveVoiceChatButton serverId={ativo.id} /> : null}
+        {conversas ? null : <MenuView
           onPressAction={({ nativeEvent }) => {
             if (ehGroupBy(nativeEvent.event)) useAparencia.getState().setAgrupar(nativeEvent.event);
           }}
@@ -311,8 +318,8 @@ export function SessionList({ onClose, onOpenServers }: Props) {
           <View style={styles.icone} accessible accessibilityRole="button" accessibilityLabel={m.lista_agrupar()} accessibilityValue={{ text: ROTULO_AGRUPAR[agrupar]() }}>
             <Icon name="ListFilter" size={20} color={theme.tokens.text.secondary} />
           </View>
-        </MenuView>
-      </View>}
+        </MenuView>}
+      </View>
     </View>
   );
 

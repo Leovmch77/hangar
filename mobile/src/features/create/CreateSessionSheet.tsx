@@ -6,21 +6,22 @@ import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
-import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
-  SESSION_PROVIDERS, hasExecutionMode, contextRefsPlainText } from '@hangar/core';
+import { basename, ctxWindow, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
+  SESSION_PROVIDERS, hasExecutionMode, effortLevels, contextRefsPlainText } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
-import { MenuView, type MenuAction } from '@react-native-menu/menu';
+import { SessionSettingsControl } from '../../chat/SessionSettings';
+import { semEsforco } from '../pills/pills';
+import { SettingsList } from '../../ui/SettingsList';
 import { useServers } from '../../stores/servers';
 import { rememberProject } from '../../stores/createPreferences';
 import type { NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { BranchPicker } from './BranchPicker';
-import { CodexContextControl } from './CodexContextControl';
+import { CodexContextControl, useCodexContextControl } from './CodexContextControl';
 import { NewConversation } from './NewConversation';
 import { QuietPill } from './QuietPill';
 import { readChoices, readMachine, rememberChoices, rememberMachine, type NewChatChoices } from './choicesPrefs';
-import { ProviderGlyph } from '../../ui/ProviderGlyph';
 import { superficie } from '../../theme/superficie';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import * as m from '../../paraglide/messages';
@@ -31,8 +32,7 @@ function valorModelo(mm: ModelOption): string {
   return mm.provider ? `${mm.provider}/${mm.id}` : mm.id;
 }
 
-// pequeno wrapper pra MenuView — renderiza botão com valor atual e abre menu nativo
-function MenuSelect({
+function PanelSelect({
   value,
   options,
   onChange,
@@ -43,23 +43,19 @@ function MenuSelect({
   onChange: (v: string) => void;
   placeholder?: string;
 }) {
-  const actions = options.map((o) => ({
-    id: o.value,
-    title: o.label,
-    subtitle: o.hint ?? undefined,
-    state: (o.value === value ? 'on' : 'off') as 'on' | 'off',
-  }));
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<View>(null);
   const label = options.find((o) => o.value === value)?.label ?? placeholder ?? '—';
-  return (
-    <MenuView actions={actions} onPressAction={({ nativeEvent }) => onChange(nativeEvent.event)}>
-      <Pressable style={styles.selectBtn}>
-        <Text style={styles.selectTxt} numberOfLines={1}>
-          {label}
-        </Text>
-        <View style={styles.selectChevron}><Icon name="ChevronsUpDown" size={16} /></View>
-      </Pressable>
-    </MenuView>
-  );
+  return <>
+    <Pressable ref={anchor} onPress={() => setOpen(true)} style={styles.selectBtn} accessibilityRole="button" accessibilityLabel={label}>
+      <Text style={styles.selectTxt} numberOfLines={1}>{label}</Text>
+      <View style={styles.selectChevron}><Icon name="ChevronsUpDown" size={16} /></View>
+    </Pressable>
+    <AnchoredPanel open={open} anchor={anchor.current} onClose={() => setOpen(false)} label={label} closeLabel={m.native_close()} radius={12} padding={4}>
+      <SettingsList items={options.map((o) => ({ id: o.value, label: o.label, hint: o.hint, selected: o.value === value }))}
+        onPick={(id) => { onChange(id); setOpen(false); }} />
+    </AnchoredPanel>
+  </>;
 }
 
 export function CreateSessionSheet({ onClose, keyboardOffset }: { onClose?: () => void; keyboardOffset?: number }) {
@@ -94,10 +90,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const onWorktree = useCallback((v: WorktreeChoice | null) => setWorktree(v), []);
   const [branchOpen, setBranchOpen] = useState(false);
   const [hasSameFolder, setHasSameFolder] = useState(false);
-  const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
   const [catalogError, setCatalogError] = useState('');
-  const [browse, setBrowse] = useState(false);
   const [projectWarning, setProjectWarning] = useState('');
   const pickGeneration = useRef(0);
 
@@ -110,6 +104,14 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const providerTouched = useRef(false);
   const [providersLoading, setProvidersLoading] = useState(true);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [extrasOpen, setExtrasOpen] = useState(false);
+  const contextOpen = provider === 'codex' && settingsOpen && extrasOpen;
+  const context = useCodexContextControl(active, contextOpen);
+  const contextBusy = context.busy;
+  const [catalogFast, setCatalogFast] = useState(false);
+  const [catalogDefault, setCatalogDefault] = useState('');
+  const [serviceTier, setServiceTier] = useState<'priority' | undefined>();
 
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const [codexAccount, setCodexAccount] = useState('');
@@ -151,11 +153,18 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
 
   const contaCodex = codexAccounts.find((account) => account.id === codexAccount);
   const codexReady = provider !== 'codex' || (!!active && !!contaCodex && contaCodex.auth.status === 'connected' && !codexLoading);
-  const esforcosDoModelo = (value: string) => {
-    const selected = modelos.find((model) => valorModelo(model) === value || model.id === value);
-    return selected?.efforts ?? [];
-  };
-  const niveisEsforco = provider === 'codex' ? esforcosDoModelo(modelo) : (EFFORT_LEVELS[provider] ?? []);
+  const esforcosDoModelo = (value: string) => effortLevels('codex', modelos, value);
+  const niveisEsforco = provider === 'codex' ? esforcosDoModelo(modelo)
+    : provider === 'claude' && semEsforco(modelo) ? [] : (EFFORT_LEVELS[provider] ?? []);
+  const selectedModel = modelos.find((model) => valorModelo(model) === modelo || model.id === modelo);
+  const displayModel = modelo ? selectedModel : modelos.find((md) => md.id === catalogDefault || valorModelo(md) === catalogDefault)
+    ?? modelos.find((md) => md.id === 'default');
+  const codexFastModel = selectedModel ?? displayModel;
+  const fastVisible = provider === 'codex' || (provider === 'claude' && !!engine && catalogFast);
+  const fastAvailable = !modelsLoading && (provider === 'codex'
+    ? codexFastModel?.id !== 'default' && codexFastModel?.service_tiers?.some((tier) => tier.id === 'priority' && tier.hidden !== true) === true
+    : fastVisible && selectedModel?.supports_fast === true);
+  useEffect(() => { if (!fastAvailable) setServiceTier(undefined); }, [fastAvailable]);
 
   useEffect(() => {
     mounted.current = true;
@@ -268,11 +277,18 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     };
   }, [active]);
 
-  // modelos quando provider/config/engine mudam
+  const catalogEngine = provider === 'codex' ? null : engine || null;
+  const catalogConfig = provider === 'codex' ? null : selectedConfig;
+  const catalogAccount = provider === 'codex' ? codexAccount : null;
+
+  // modelos quando o destino efetivo do catálogo muda
   useEffect(() => {
     // reset incondicional — igual à PWA (CreateSessionSheet.svelte:141), evita vazar modelo/esforço pro Codex
     setModelo('');
     setModelos([]);
+    setCatalogFast(false);
+    setCatalogDefault('');
+    setServiceTier(undefined);
     setEsforco('');
     setSubagente('');
     setModelsLoading(false);
@@ -282,7 +298,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       setErroModelos('');
       return;
     }
-    if (provider === 'codex' && (!active || !codexAccount)) {
+    if (provider === 'codex' && (!active || !catalogAccount)) {
       setModelos([]);
       setListaReduzida(false);
       setErroModelos('');
@@ -297,16 +313,17 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       const { model, effort } = desired.current;
       const found = model ? models.find((md) => valorModelo(md) === model || md.id === model) : undefined;
       if (found) setModelo(model);
-      const levels = provider === 'codex' ? found?.efforts ?? [] : EFFORT_LEVELS[provider] ?? [];
+      const levels = provider === 'codex' ? found?.efforts ?? []
+        : provider === 'claude' && semEsforco(model) ? [] : EFFORT_LEVELS[provider] ?? [];
       if (effort && levels.includes(effort)) setEsforco(effort);
     };
-    const request = provider === 'codex'
-      ? modelOptionsForServer(active!, 'codex', null, null, codexAccount, controller.signal)
-      : modelOptionsForServer(active, provider, engine || null, selectedConfig, null, controller.signal);
+    const request = modelOptionsForServer(active, provider, catalogEngine, catalogConfig, catalogAccount, controller.signal);
     void request
       .then((r) => {
         if (!alive) return;
         setModelos(r.models);
+        setCatalogFast(r.kind === 'engine' && r.supports_fast === true);
+        setCatalogDefault(r.default ?? '');
         setListaReduzida(r.reduced);
         restore(r.models);
       })
@@ -321,7 +338,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       alive = false;
       controller.abort();
     };
-  }, [provider, engine, selectedConfig, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
+  }, [provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token]);
 
   useEffect(() => {
     const generation = ++archiveGeneration.current;
@@ -359,7 +376,6 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     const generation = ++pickGeneration.current;
     setPicked(p);
     setWorktree(null);
-    setBrowse(false);
     setError('');
     setProjectWarning('');
     if (root) {
@@ -391,7 +407,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       subagent_model: provider === 'claude' && !engine ? subagente || null : null,
       ...(canHeadless ? { headless } : {}),
     };
-  const body = picked && codexReady && !providersLoading && (!providersError || providerTouched.current) ? { ...settings, cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
+  const body = picked && codexReady && !providersLoading && (!providersError || providerTouched.current) ? { ...settings, ...(fastAvailable && serviceTier ? { service_tier: serviceTier } : {}), cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
 
   // Toda escolha feita aqui volta na próxima abertura desta máquina.
   const chooseProvider = (p: Provider) => {
@@ -403,10 +419,11 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     remember({ provider: p, model: '', effort: '' });
   };
   const chooseModel = (v: string) => {
+    if (!v) setServiceTier(undefined);
     providerTouched.current = true;
     setProvidersError('');
     let effort = esforco;
-    if (provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) effort = '';
+    if ((provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) || (provider === 'claude' && semEsforco(v))) effort = '';
     desired.current = { model: v, effort };
     setModelo(v);
     setEsforco(effort);
@@ -477,32 +494,15 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const destination = (
     <View style={styles.field}>
       <Text style={styles.label}>{active.label}</Text>
-      {picked && !browse ? (
-        <Pressable
-          onPress={() => { pickGeneration.current++; setBrowse(true); setPicked(null); }}
-          style={styles.picked}
-          accessibilityRole="button"
-          accessibilityLabel={m.criar_outra_pasta()}
-        >
-          <Text style={styles.pickedName}>{basename(picked)}</Text>
-          <Text style={styles.pickedPath}>{picked}</Text>
-          <Text style={styles.hintSm}>{m.criar_outra_pasta()}</Text>
-        </Pressable>
-      ) : (
-        <View style={styles.pickerWrap}>
-          <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={!browse} />
-        </View>
-      )}
+      <View style={styles.pickerWrap}>
+        <CwdPicker server={active} onPick={handlePick} selected={picked} />
+      </View>
     </View>
   );
 
-  const selectedModel = modelos.find((model) => valorModelo(model) === modelo || model.id === modelo);
-  const modelLabel = modelo ? selectedModel?.name ?? modelo : m.criar_padrao();
-  // Chip do provider: o logo e o modelo à vista; o resumo inteiro (motor, nível, permissão) no leitor de tela.
-  const chipLabel = retomavel ? m.criar_retomar()
-    : [modelo ? modelLabel : providerName(provider), settings.effort].filter(Boolean).join(' · ');
-  const chipAria = [m.composer_modelo(), providerName(provider), settings.engine ? motores[engine]?.label ?? engine : null,
-    settings.permission_mode].filter(Boolean).join(' · ');
+  const modelLabel = displayModel?.id === 'default' ? m.criar_padrao() : displayModel?.name ?? (modelo || displayModel?.id || m.config_motores_modelo_padrao());
+  const modelContext = displayModel?.context ?? (displayModel?.context_length ? ctxWindow(displayModel.context_length).toUpperCase() : '');
+  const chipLabel = retomavel ? m.criar_retomar() : [modelLabel, modelContext].filter(Boolean).join(' · ');
   const folderLabel = picked ? basename(picked) : m.native_new_chat_folder();
   const folderRef = useRef<View>(null);
   const branchRef = useRef<View>(null);
@@ -511,47 +511,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     : !worktree.new_branch ? worktree.branch
     : worktree.branch || name.trim() || m.worktree_nova_branch({ base: worktree.base ?? '' });
 
-  const probeOf = (p: string) => providerProbe?.[p];
   const on = (yes: boolean) => (yes ? 'on' : 'off') as 'on' | 'off';
-  // Lista do menu nativo com os quatro estados: carregando, falha (abre no padrão), vazia e cheia.
-  const modelActions: MenuAction[] = modelsLoading
-    ? [{ id: 'model-loading', title: m.comum_carregando(), attributes: { disabled: true } }]
-    : [
-      { id: 'model:', title: m.criar_padrao(), state: on(!modelo) },
-      ...modelos.filter((md) => md.id !== 'default').map((md) => ({
-        id: `model:${valorModelo(md)}`, title: md.name ?? md.id, subtitle: md.provider ?? undefined, state: on(valorModelo(md) === modelo),
-      })),
-      ...(erroModelos ? [{ id: 'model-error', title: m.criar_abre_padrao({ erro: erroModelos } as any), attributes: { disabled: true } }] : []),
-    ];
-  const chipActions: MenuAction[] = [
-    {
-      id: 'provider', title: m.comum_provider(), subtitle: providerName(provider),
-      subactions: SESSION_PROVIDERS.map((p) => {
-        const missing = probeOf(p)?.disponivel === false;
-        return {
-          id: `provider:${p}`, title: providerName(p), state: on(p === provider), attributes: { disabled: missing },
-          subtitle: missing ? probeOf(p)?.motivo ?? m.native_create_provider_missing({ p: providerName(p) }) : undefined,
-        };
-      }),
-    },
-    ...(retomavel ? [] : [{ id: 'model', title: m.composer_modelo(), subtitle: modelLabel, subactions: modelActions }]),
-    ...(!retomavel && niveisEsforco.length ? [{
-      id: 'effort', title: provider === 'pi' || provider === 'omp' ? m.criar_raciocinio() : m.composer_esforco(),
-      subtitle: esforco || m.criar_padrao(),
-      subactions: [{ id: 'effort:', title: m.criar_padrao(), state: on(!esforco) },
-        ...niveisEsforco.map((level) => ({ id: `effort:${level}`, title: level, state: on(level === esforco) }))],
-    }] : []),
-    { id: 'more', title: m.criar_mais_opcoes() },
-  ];
-  const onChipAction = (id: string, openOptions: () => void) => {
-    const at = id.indexOf(':');
-    const kind = at < 0 ? id : id.slice(0, at);
-    const value = at < 0 ? '' : id.slice(at + 1);
-    if (kind === 'provider') chooseProvider(value as Provider);
-    else if (kind === 'model') chooseModel(value);
-    else if (kind === 'effort') chooseEffort(value);
-    else if (kind === 'more') openOptions();
-  };
 
   const terminalOnly = m.nova_conversa_so_terminal({ provider: providerName(provider) });
   const terminalPill = (
@@ -652,6 +612,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       {!retomavel && listaReduzida ? <Text style={styles.hint}>{m.criar_lista_reduzida()}</Text> : null}
       {!retomavel && erroModelos ? <Text style={styles.hint} accessibilityRole="alert">{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
       {contextBusy ? <Text style={styles.hint} accessibilityLiveRegion="polite">{m.comum_carregando()}</Text> : null}
+      {!contextOpen && context.error ? <Text style={styles.error} accessibilityRole="alert">{context.error}</Text> : null}
       {retomavel ? <Text style={styles.hint}>{m.nova_conversa_retomada_selecionada()}</Text> : null}
       {provider === 'codex' && retomando && codexProgress ? <Text style={styles.hint} accessibilityLiveRegion="polite">{codexProgress}</Text> : null}
     </View>
@@ -659,6 +620,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
 
   const options = (
     <>
+      {picked ? <Text style={styles.pickedPath}>{picked}</Text> : null}
+      {quotaNotice}
       {!retomavel ? (
         <View style={styles.field}>
           <Text style={styles.label}>{m.comum_nome()}</Text>
@@ -676,54 +639,12 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         </View>
       ) : null}
 
-      <View style={styles.field}>
-        <Text style={styles.label}>{m.comum_provider()}</Text>
-        <ProviderPicker value={provider} onChange={chooseProvider} disabledMap={providerProbe ?? undefined} />
-      </View>
-
-      {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
-
-      {provider === 'codex' ? (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.criar_conta_aria()}</Text>
-          {codexLoading ? <Text style={styles.hint}>{m.comum_carregando()}</Text> : null}
-          {codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text> : null}
-          <MenuSelect
-            value={codexAccount}
-            options={codexAccounts.map((account) => ({
-              value: account.id,
-              label: account.name,
-              hint: account.auth.status === 'connected'
-                ? (account.auth.email ?? m.codex_ui_account())
-                : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
-            }))}
-            onChange={chooseCodexAccount}
-          />
-          {contaCodex?.auth.status !== 'connected' ? <Text style={styles.hint}>{m.contas_nao_conectada()}</Text> : null}
-        </View>
-      ) : null}
-
-      {provider === 'claude' && configs.length > 1 ? (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.comum_conta_claude()}</Text>
-          <MenuSelect
-            value={selectedConfig ?? ''}
-            options={configs.map((c) => ({
-              value: c.path,
-              label: c.label,
-              hint: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))]
-                .filter(Boolean).join(' · ') || undefined,
-            }))}
-            onChange={chooseConfig}
-          />
-          {quotaNotice}
-        </View>
-      ) : null}
+      {provider === 'codex' ? <CodexContextControl control={context} /> : null}
 
       {provider === 'claude' && Object.keys(motores).length ? (
         <View style={styles.field}>
           <Text style={styles.label}>{m.comum_motor()}</Text>
-          <MenuSelect
+          <PanelSelect
             value={engine}
             options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
             onChange={(v) => setEngine(v)}
@@ -731,34 +652,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         </View>
       ) : null}
 
-      {!retomavel && (provider === 'claude' || provider === 'codex' || provider === 'pi' || provider === 'kimi' || provider === 'omp') && (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.composer_modelo()}</Text>
-          <MenuSelect
-            value={modelo}
-            options={[{ value: '', label: m.criar_padrao() }, ...modelos.map((md) => ({ value: valorModelo(md), label: md.name ?? md.id, hint: [md.provider, (md as any).context ?? ((md as any).context_length ? `${Math.round(((md as any).context_length) / 1000)}K` : null), ((md as any).vision ?? (md as any).images) ? '👁' : null].filter(Boolean).join(' · ') }))]}
-            onChange={chooseModel}
-          />
-          {listaReduzida ? <Text style={styles.hintSm}>{m.criar_lista_reduzida()}</Text> : null}
-          {erroModelos ? <Text style={styles.hintSm}>{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
-        </View>
-      )}
-
-      {!retomavel && niveisEsforco.length > 0 && (
-        <View style={styles.field}>
-          <Text style={styles.label}>{provider === 'pi' || provider === 'omp' ? (m.criar_raciocinio()) : (m.composer_esforco())}</Text>
-          <MenuSelect
-            value={esforco}
-            options={[{ value: '', label: m.criar_padrao() }, ...niveisEsforco.map((n) => ({ value: n, label: n }))]}
-            onChange={chooseEffort}
-          />
-        </View>
-      )}
-
       {provider === 'claude' && (
         <View style={styles.field}>
           <Text style={styles.label}>{m.criar_permissao()}</Text>
-          <MenuSelect
+          <PanelSelect
             value={permissao}
             options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
             onChange={(v) => setPermissao(v)}
@@ -769,7 +666,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       {provider === 'claude' && !engine && modelos.length > 0 && (
         <View style={styles.field}>
           <Text style={styles.label}>{m.criar_subagente()}</Text>
-          <MenuSelect
+          <PanelSelect
             value={subagente}
             options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
             onChange={(v) => setSubagente(v)}
@@ -781,7 +678,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       {provider === 'codex' && retomaveis.length ? (
         <View style={styles.field}>
           <Text style={styles.label}>{m.criar_retomar()}</Text>
-          <MenuSelect
+          <PanelSelect
             value={retomavel}
             options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: contextRefsPlainText(entry.ultima || entry.preview || '') || entry.session_id }))]}
             onChange={setRetomavel}
@@ -832,15 +729,29 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         </>
       )}
       bottomPills={<>{accountPill}{terminalPill}</>}
-      providerChip={(openOptions) => (
-        <QuietPill
-          leading={<ProviderGlyph provider={provider} />}
-          label={chipLabel}
-          aria={chipAria}
-          strong
-          actions={chipActions}
-          onAction={(id) => onChipAction(id, openOptions)}
-        />
+      providerChip={(
+        <SessionSettingsControl open={settingsOpen} onOpen={() => setSettingsOpen(true)} onClose={() => setSettingsOpen(false)}
+          header={<ProviderPicker value={provider} onChange={chooseProvider} disabledMap={providerProbe ?? undefined} />}
+          model={{ display: chipLabel, loading: modelsLoading, notice: erroModelos,
+            items: retomavel ? [] : [{ id: '', label: m.criar_padrao(), selected: !modelo },
+              ...modelos.filter((md) => md.id !== 'default').map((md) => ({ id: valorModelo(md), label: md.name ?? md.id,
+                hint: [md.provider, md.context ?? (md.context_length ? ctxWindow(md.context_length).toUpperCase() : '')].filter(Boolean).join(' · '), selected: valorModelo(md) === modelo }))],
+            select: async (it) => chooseModel(it.id ?? '') }}
+          effort={{ value: esforco, hidden: !!retomavel || !niveisEsforco.length,
+            items: [{ id: '', label: m.criar_padrao(), selected: !esforco }, ...niveisEsforco.map((lv) => ({ label: lv, selected: lv === esforco }))],
+            select: async (value) => chooseEffort(value) }}
+          fast={{ hidden: !!retomavel || !fastVisible, on: fastAvailable && serviceTier === 'priority', available: fastAvailable,
+            toggle: async () => {
+              if (!fastAvailable) return;
+              if (provider === 'codex' && !modelo && codexFastModel) chooseModel(valorModelo(codexFastModel));
+              setServiceTier((cur) => cur === 'priority' ? undefined : 'priority');
+            } }}>
+          <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
+            onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>
+            <Text style={styles.hint}>{m.criar_mais_opcoes()}</Text>
+          </Pressable>
+          {extrasOpen ? <View style={styles.extras}>{options}</View> : null}
+        </SessionSettingsControl>
       )}
       resume={provider === 'codex' && retomaveis.length ? {
         entries: retomaveis.map((entry) => ({ id: entry.session_id, label: contextRefsPlainText(entry.ultima || entry.preview || '') || entry.session_id })),
@@ -848,7 +759,6 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         onPick: (id) => { void handleResume(id); },
       } : null}
       notices={notices}
-      options={options}
       body={body}
       blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
       keyboardOffset={keyboardOffset}
@@ -871,6 +781,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
 
 const styles = StyleSheet.create((theme) => ({
   pickerWrap: { minHeight: 380, flex: 1 },
+  more: { minHeight: 36, paddingHorizontal: 8, justifyContent: 'center' },
+  extras: { gap: 12, padding: 8 },
   input: {
     flex: 1,
     height: 44,
@@ -882,15 +794,6 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: 16,
     paddingHorizontal: theme.base.space[3],
   },
-  picked: {
-    padding: theme.base.space[3],
-    backgroundColor: superficie(theme),
-    borderWidth: 1,
-    borderColor: theme.tokens.border.subtle,
-    borderRadius: theme.base.radius.md,
-    gap: 2,
-  },
-  pickedName: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
   pickedPath: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },

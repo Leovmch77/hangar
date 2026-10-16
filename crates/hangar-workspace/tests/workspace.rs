@@ -229,20 +229,21 @@ fn undoing_a_worktree_deletes_only_the_branch_it_created() {
     git(&origin, &["branch", "remota"]);
     git(&root, &["clone", "-q", "origin", "repo"]);
     let repo = root.join("repo");
+    let worktrees = root.join("worktrees");
     let local = |name: &str| Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
         .status().unwrap().success();
-    let made = create_branch_worktree(&repo, "remota", "remota", &root, false, None).unwrap();
+    let made = create_branch_worktree(&repo, "remota", "remota", &root, false, None, &worktrees).unwrap();
     assert!(made.created && made.branch_created && local("remota"), "{made:?}");
     undo_worktree(&repo, &made, "remota").unwrap();
-    assert!(!local("remota") && !root.join("repo-remota").exists(), "a branch trazida do remoto sai junto");
+    assert!(!local("remota") && !worktrees.join("repo/remota").exists(), "a branch trazida do remoto sai junto");
     git(&repo, &["branch", "dev"]);
-    let made = create_branch_worktree(&repo, "dev", "dev", &root, false, None).unwrap();
+    let made = create_branch_worktree(&repo, "dev", "dev", &root, false, None, &worktrees).unwrap();
     assert!(made.created && !made.branch_created);
     undo_worktree(&repo, &made, "dev").unwrap();
     assert!(local("dev"), "a branch que já existia fica");
-    fs::create_dir_all(root.join("repo-nova")).unwrap();
-    let made = create_branch_worktree(&repo, "nova", "nova", &root, true, None).unwrap();
-    assert!(made.path.ends_with("repo-nova-2") && made.branch_created);
+    fs::create_dir_all(worktrees.join("repo/nova")).unwrap();
+    let made = create_branch_worktree(&repo, "nova", "nova", &root, true, None, &worktrees).unwrap();
+    assert!(std::path::Path::new(&made.path) == worktrees.join("repo/nova-2") && made.branch_created);
     undo_worktree(&repo, &made, "nova").unwrap();
     assert!(!local("nova"));
 }

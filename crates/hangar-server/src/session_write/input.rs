@@ -194,6 +194,8 @@ pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>
 /// O `/compact` do Codex é controle do motor (`thread/compact/start`), não texto, com e sem terminal.
 pub fn is_codex_compact(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
 
+pub fn is_codex_clear(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/clear") }
+
 /// Emoji cortado no ditado ou na colagem chega como `\ud83d` solto, que o serde recusa: vira U+FFFD e a
 /// mensagem sai, como no Python. Par completo e `\\u` literal ficam como estão.
 pub(crate) fn scrub_lone_surrogates(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
@@ -274,14 +276,16 @@ async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer
     input_answer(&sent, steered)
 }
 
-/// `/clear` é texto como os outros: o ator do terminal levanta a barreira e vigia a conversa nova, e
-/// `reconcile_claude` esvazia a fila e reabre nela; nada passa pelo Python.
+/// No Claude, o ator terminal conduz o `/clear`; no Codex, ele é controle de conversa nova.
 pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Input).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
     let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    if is_codex_clear(&ctx.target.provider, &text) {
+        return answer(&ctx, super::codex::clear(&ctx.target, &text, Some(ctx.st.term.clone())).await);
+    }
     if is_codex_compact(&ctx.target.provider, &text) {
         let result = super::codex::compact(&ctx.target, &text).await;
         return answer(&ctx, result);
@@ -316,6 +320,11 @@ pub async fn write_input(st: &AppState, name: &str, text: &str, steer: bool) -> 
         None => Write::Python,
     };
     match route {
+        Write::Rust(held, target) if is_codex_clear(&target.provider, text) => {
+            let result = super::codex::clear(&target, text, Some(st.term.clone())).await;
+            drop(held);
+            result
+        }
         // O /compact do Codex é do motor, como no handler.
         Write::Rust(held, target) if is_codex_compact(&target.provider, text) => {
             let result = super::codex::compact(&target, text).await;

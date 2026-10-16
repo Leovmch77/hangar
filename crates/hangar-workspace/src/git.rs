@@ -370,7 +370,21 @@ pub fn create_worktree(
     new_branch: bool,
     base: Option<&str>,
 ) -> Result<Value> {
-    let made = create_worktree_at(cwd, branch, name, root, new_branch, base)?;
+    create_worktree_at(cwd, branch, name, root, new_branch, base, &default_location()?)
+}
+
+/// A pasta das worktrees novas, pela configuração do usuário deste processo.
+fn default_location() -> Result<PathBuf> {
+    let home = crate::home().ok_or_else(|| error(503, "pasta pessoal indisponível"))?;
+    crate::worktree_settings::load_default()?.location_path(&home)
+}
+
+/// A localização é recebida pela API para manter o estado e os testes isolados por servidor.
+pub fn create_worktree_at(
+    cwd: &Path, branch: &str, name: &str, root: &Path,
+    new_branch: bool, base: Option<&str>, location: &Path,
+) -> Result<Value> {
+    let made = create_worktree_in(cwd, branch, name, root, new_branch, base, location)?;
     Ok(json!([made.path, made.created]))
 }
 /// O que a criação fez: a pasta, se a worktree nasceu agora e se a branch local também (nova, ou
@@ -383,13 +397,9 @@ pub struct Worktree {
 }
 /// Texto que separa "pasta ocupada" das outras recusas 409 (o Python compara o mesmo).
 pub const TARGET_TAKEN: &str = "destino da worktree já existe";
-fn create_worktree_at(
-    cwd: &Path,
-    branch: &str,
-    name: &str,
-    root: &Path,
-    new_branch: bool,
-    base: Option<&str>,
+fn create_worktree_in(
+    cwd: &Path, branch: &str, name: &str, root: &Path,
+    new_branch: bool, base: Option<&str>, location: &Path,
 ) -> Result<Worktree> {
     if !new_branch {
         option_like(branch)?;
@@ -437,16 +447,13 @@ fn create_worktree_at(
             return Ok(Worktree { path: cwd.to_string_lossy().into_owned(), created: false, branch_created: false });
         }
     }
-    if name.contains(['/', '\\', '\0']) || name == ".." {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) || matches!(name, "." | "..") {
         return Err(error(400, "nome inválido"));
     }
-    let target = repo.parent().unwrap_or(&repo).join(format!(
-        "{}-{name}",
-        repo.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    if !target.starts_with(&root) {
-        return Err(error(400, "worktree fora da raiz autorizada"));
-    }
+    let main = main_root(cwd, &repo, &root);
+    let parent = location.join(main.file_name().unwrap_or_default());
+    std::fs::create_dir_all(&parent).map_err(|_| error(500, "não consegui criar a pasta de worktrees"))?;
+    let target = parent.join(name);
     if target.symlink_metadata().is_ok() {
         return Err(error(409, TARGET_TAKEN));
     }
@@ -498,10 +505,11 @@ pub fn create_branch_worktree(
     root: &Path,
     new_branch: bool,
     base: Option<&str>,
+    location: &Path,
 ) -> Result<Worktree> {
     for n in 1..100 {
         let name = if n == 1 { stem.to_owned() } else { format!("{stem}-{n}") };
-        match create_worktree_at(cwd, branch, &name, root, new_branch, base) {
+        match create_worktree_in(cwd, branch, &name, root, new_branch, base, location) {
             Err(e) if e.detail == TARGET_TAKEN => continue,
             other => return other,
         }

@@ -33,11 +33,16 @@ vi.mock('react-native-webview', () => ({
   )),
 }));
 vi.mock('../../chat/tools/EditDiff', () => ({ EditDiff: () => null }));
+const openPdf = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../attachments/mediaCache', () => ({ canShareFile: false, shareFile: vi.fn(), openPdfFile: openPdf }));
+vi.mock('../../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
+vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../paraglide/messages', () => ({
   arquivo_carregar_erro: () => 'Erro ao carregar o arquivo',
   sessao_expirada: () => 'Sessão expirada',
   comum_carregando: () => 'Carregando…',
   arq_pdf_sem_leitor: () => 'Este aparelho não tem leitor de PDF',
+  native_pdf_open: () => 'native_pdf_open',
 }));
 
 import { FileViewer } from './FileViewer';
@@ -97,10 +102,10 @@ describe('FileViewer — erros de documento', () => {
     root.unmount();
   });
 
-  it('PDF sem texto (binário) abre o leitor com o token do servidor da sessão', async () => {
-    // O leitor de PDF no WebView é do iOS; o Android mostra o aviso de sem leitor.
+  it.each(['ios', 'android'])('PDF sem texto usa o leitor de %s com o token do servidor da sessão', async (platform) => {
     const os = Platform.OS;
-    Platform.OS = 'ios';
+    Platform.OS = platform as typeof Platform.OS;
+    openPdf.mockClear();
     onTestFinished(() => { Platform.OS = os; });
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -122,13 +127,24 @@ describe('FileViewer — erros de documento', () => {
         }),
       );
     });
-    expect(container.querySelector('[data-testid="webview-error"]')).not.toBeNull();
     expect(container.textContent).not.toContain('Sessão expirada');
-    const source = (globalThis as any).__webviewSource;
-    expect(source.uri.startsWith('http://b:8765/api/sessions/fixture-files/file?')).toBe(true);
-    expect(source.uri).not.toContain('token');
-    expect(source.headers).toEqual({ Authorization: 'Bearer token-b' });
-    root.unmount();
+    if (platform === 'ios') {
+      expect(container.querySelector('[data-testid="webview-error"]')).not.toBeNull();
+      const source = (globalThis as any).__webviewSource;
+      expect(source.uri.startsWith('http://b:8765/api/sessions/fixture-files/file?')).toBe(true);
+      expect(source.uri).not.toContain('token');
+      expect(source.headers).toEqual({ Authorization: 'Bearer token-b' });
+      expect(openPdf).not.toHaveBeenCalled();
+    } else {
+      const open = container.querySelector<HTMLButtonElement>('button[aria-label="native_pdf_open"]');
+      expect(open).not.toBeNull();
+      await act(async () => open!.click());
+      expect(openPdf).toHaveBeenCalledExactlyOnceWith(
+        'http://b:8765/api/sessions/fixture-files/file?path=docs%2Fmanual.pdf',
+        { Authorization: 'Bearer token-b' }, 'manual.pdf', expect.any(Function),
+      );
+    }
+    act(() => root.unmount());
   });
 
   it('usa mensagem de arquivo quando onHttpError 401 não informa descrição', async () => {

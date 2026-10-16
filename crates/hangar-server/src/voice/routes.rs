@@ -7,7 +7,7 @@ use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use super::hub::{Attached, Hello};
 use super::protocol::{ClientMsg, ServerMsg};
-use super::settings::{self, SettingsDto, VOICES, VoiceSettings};
+use super::settings::{self, SettingsDto, VoiceSettings};
 
 const HELLO_WITHIN: Duration = Duration::from_secs(10);
 
@@ -170,7 +170,10 @@ fn refusal_kind(why: &super::memory::Refusal) -> &str { if let super::memory::Re
 
 fn refuse(status: StatusCode, code: &str) -> Response { json_response(status, json!({"error_code": code})) }
 
-async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: PathBuf) -> Response {
+/// Quanto o `GET` das configurações espera pela lista de vozes do Codex.
+const VOICE_LIST_IN_GET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+async fn settings_reply(st: &Arc<AppState>, req: Request, home: PathBuf, claude_dir: PathBuf) -> Response {
     match *req.method() {
         Method::GET => {
             let env_key = st.voice.env_jev_key();
@@ -181,13 +184,28 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
             // A voz aparece com o Codex instalado e ao menos uma conta Codex; o microfone só abre quando a pessoa liga a chamada.
             // Catálogo ilegível não esconde a voz como "sem conta": a abertura da chamada mostra o erro de verdade.
             let enabled = codex && st.voice.account_ids(&st.accounts).await.is_none_or(|ids| !ids.is_empty());
+            // O botão da voz depende desta resposta, e o aparelho espera pouco: a lista do Codex tem prazo curto e, sem
+            // ela, vai a fixa. A leitura segue numa tarefa própria e guarda o resultado para o próximo pedido; cortá-la no
+            // prazo a recomeçaria do zero a cada vez.
+            let fixed = || settings::VOICES.map(str::to_owned).to_vec();
+            let voices = if !enabled { fixed() } else {
+                let read = { let (st, account) = (st.clone(), current.codex_account.clone()); tokio::spawn(async move { st.voice.voices(&st, &account).await }) };
+                match tokio::time::timeout(VOICE_LIST_IN_GET, read).await {
+                    Ok(Ok((list, _))) => list,
+                    _ => { super::log("voice list slow in settings read: fixed list"); fixed() }
+                }
+            };
             json_response(StatusCode::OK, json!({"enabled": enabled, "codex": codex, "jev": gate.jev.is_some(),
-                "voices": VOICES, "settings": SettingsDto::from(&current), "call": {"active": active, "client": client}}))
+                "voices": voices, "settings": SettingsDto::from(&current), "call": {"active": active, "client": client}}))
         }
         Method::PUT => {
             let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
             let Ok(dto) = serde_json::from_slice::<SettingsDto>(&bytes) else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
-            if dto.voice.as_deref().is_some_and(|v| !VOICES.contains(&v)) { return refuse(StatusCode::BAD_REQUEST, "invalid_voice"); }
+            if let Some(voice) = dto.voice.as_deref()
+                && let (list, read) = st.voice.voices(st, &dto.codex_account).await
+                && settings::voice_refused(read.then_some(list.as_slice()), voice) {
+                return refuse(StatusCode::BAD_REQUEST, "invalid_voice");
+            }
             if !st.voice.account_ids(&st.accounts).await.unwrap_or_default().contains(&dto.codex_account) { return refuse(StatusCode::BAD_REQUEST, "unknown_account"); }
             let chosen: VoiceSettings = dto.into();
             let saved = tokio::task::spawn_blocking({ let chosen = chosen.clone(); move || settings::write_settings(&home, &chosen) }).await;

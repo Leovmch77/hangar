@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { configureApi, _resetApiEnvForTests } from './apiEnv';
 import { hmacSha256Hex } from './hmac';
-import { baseOf, decidirRota, esquecerRota, _resetRotasForTests } from './rota';
+import { baseOf, decidirRota, esquecerRota, verifyServerIdentity, _resetRotasForTests } from './rota';
 import type { LanInfo, Server } from './servers';
 
 const TS = 'https://maq.tail.ts.net';
@@ -46,6 +46,63 @@ const maqLocal = { ...maq, atraso: 0 };
 
 beforeEach(() => { _resetRotasForTests(); _resetApiEnvForTests(); });
 afterEach(() => { vi.unstubAllGlobals(); });
+
+describe('verifyServerIdentity', () => {
+  it('aceita a prova HMAC do destino exato sem transmitir o token', async () => {
+    env(null);
+    const chamadas = rede({ [LAN]: maqLocal });
+    const signal = new AbortController().signal;
+
+    expect(await verifyServerIdentity(srv({ url: 'http://cached.test', id: 'cached' }), { url: LAN, id: 'maq' }, signal)).toBe(true);
+
+    expect(chamadas).toHaveLength(1);
+    const url = new URL(chamadas[0].url);
+    expect(url.origin).toBe(LAN);
+    expect(url.pathname).toBe('/api/peers/prova');
+    expect([...url.searchParams.keys()]).toEqual(['desafio']);
+    expect(url.searchParams.get('desafio')).toMatch(/^[a-f0-9]{32}$/);
+    expect(chamadas[0].auth).toBeNull();
+    const init = vi.mocked(fetch).mock.calls[0][1];
+    expect(init?.signal).toBe(signal);
+    expect(init?.credentials).toBe('omit');
+    expect(init?.body).toBeUndefined();
+  });
+
+  it.each([
+    { name: 'identificador-diferente', identificador: 'other', token: 't' },
+    { name: 'mesmo-identificador-hmac-falso', identificador: 'maq', token: 'wrong' },
+  ])('recusa $name sem tentar autenticação', async ({ identificador, token }) => {
+    env(null);
+    const chamadas = rede({ [LAN]: { identificador, token } });
+
+    expect(await verifyServerIdentity(srv(), { url: LAN, id: 'maq' })).toBe(false);
+    expect(chamadas).toHaveLength(1);
+    expect(chamadas.every((call) => call.auth === null)).toBe(true);
+  });
+
+  it.each(['rede', 'http', 'json'])('recusa falha de %s sem alternativa autenticada', async (failure) => {
+    env(null);
+    const fetch = vi.fn(async () => {
+      if (failure === 'rede') throw new TypeError('offline');
+      return failure === 'http' ? new Response('{}', { status: 503 }) : new Response('invalid-json');
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    expect(await verifyServerIdentity(srv(), { url: LAN, id: 'maq' })).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(new Headers(vi.mocked(globalThis.fetch).mock.calls[0][1]?.headers).has('Authorization')).toBe(false);
+  });
+
+  it('mantém o prazo LAN padrão quando não recebe sinal', async () => {
+    env(null);
+    rede({ [LAN]: maqLocal });
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      expect(await verifyServerIdentity(srv(), { url: LAN, id: 'maq' })).toBe(true);
+      expect(timeout).toHaveBeenCalledWith(800);
+    } finally { timeout.mockRestore(); }
+  });
+});
 
 describe('rota até o servidor', () => {
   it('primeira vez: aprende o endereço local pelo principal e já nasce nele', async () => {

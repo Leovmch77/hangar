@@ -557,6 +557,7 @@ fn read_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
 fn parse_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
     let mut acc = Acc::default();
     let mut failed = false;
+    let mut model = None;
     for r in objects(f)? {
         let r = r?;
         if let Some(ts) = s(&r, "timestamp") {
@@ -567,6 +568,10 @@ fn parse_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
         if kind == Some("assistant") {
             // Erro de API gravado como última resposta (529, 429); resposta normal depois desfaz.
             failed = r.get("isApiErrorMessage") == Some(&Value::Bool(true));
+            // Erro de API vem com modelo `<synthetic>`: não é quem respondeu.
+            if let Some(m) = r.get("message").and_then(Value::as_object).and_then(|m| s(m, "model")).filter(|m| !m.is_empty() && *m != "<synthetic>") {
+                model = Some(m.to_owned());
+            }
         }
         if kind == Some("user") && acc.prompt.is_none() {
             let mut t = text_of(content);
@@ -598,6 +603,7 @@ fn parse_agent_claude(f: &Path, tail: usize) -> Option<Map<String, Value>> {
     let mut m = acc.into_map(&claude_id(f), mtime(f), tail);
     // Só a falha: quem diz que terminou é o tool_result no transcript do pai.
     m.insert("failed".into(), Value::Bool(failed));
+    if let Some(model) = model { m.insert("model".into(), Value::String(model)); }
     Some(m)
 }
 
@@ -945,6 +951,22 @@ mod tests {
         drop(file);
         assert_eq!(list_subagents("claude", &own)[0]["toolCalls"], 4);
         assert_eq!(list_subagents("claude", &own)[0]["recent"].as_array().unwrap().last().unwrap()["name"], "Grep");
+    }
+
+    /// O modelo que respondeu, não o apelido do Agent do pai: num motor "opus" vira o modelo do motor.
+    #[test]
+    fn claude_item_carries_the_model_that_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("c.jsonl");
+        write(&dir.path().join("c/subagents/agent-a1.jsonl"), &[
+            json!({"type": "user", "message": {"content": "faz X"}}),
+            json!({"type": "assistant", "message": {"model": "gpt-6.1-sol", "content": [{"type": "text", "text": "ok"}]}}),
+            json!({"type": "assistant", "isApiErrorMessage": true, "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "529"}]}}),
+        ]);
+        assert_eq!(list_subagents("claude", &own)[0]["model"], "gpt-6.1-sol");
+        claude_agent(dir.path(), "c", "a2", "sem resposta com modelo");
+        let a2 = list_subagents("claude", &own).into_iter().find(|a| a["agentId"] == "a2").unwrap();
+        assert!(!a2.contains_key("model"));
     }
 
     #[test]

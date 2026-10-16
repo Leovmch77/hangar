@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getConfigForServer, type Server } from '@hangar/core';
@@ -8,11 +8,12 @@ import { PageHeader, Pill } from '../../src/features/config/PageHeader';
 import { SectionCard } from '../../src/features/config/SectionCard';
 import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { InfoNotice } from '../../src/features/config/InfoNotice';
-import { StateDot } from '../../src/ui/StateDot';
-import { toast } from '../../src/ui/Toast';
 import { ownServers, useServers } from '../../src/stores/servers';
 import { useSessions } from '../../src/stores/sessions';
 import { PairAcceptSheet, type PairAcceptTarget } from '../../src/features/pair/PairAcceptSheet';
+import { MachineSettingsSheet, useForgetMachine } from '../../src/features/machines/MachineSettingsSheet';
+import { AddMachineSheet } from '../../src/features/machines/AddMachineSheet';
+import { ConnectionDot, Notice, useMachineAction } from '../../src/features/machines/parts';
 import * as m from '../../src/paraglide/messages';
 
 export default function Maquinas() {
@@ -21,30 +22,20 @@ export default function Maquinas() {
   // A entrada do par de fora não é máquina desta pessoa.
   const servers = useMemo(() => ownServers(todos), [todos]);
   const activeId = useServers((s) => s.activeId);
+  const ready = useServers((s) => s.ready);
   const [aceite, setAceite] = useState<PairAcceptTarget | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [adding, setAdding] = useState<{ owner: Server | null } | null>(null);
+  const editing = servers.find((s) => s.id === editingId) ?? null;
   const rows = useSessions((s) => s.rows);
   const byServer = useSessions((s) => s.byServer);
-  // A folha escolhe entre as sessões vivas da máquina: a lista precisa estar aberta enquanto ela está.
-  useEffect(() => (aceite ? useSessions.getState().retain() : undefined), [aceite]);
+  // A mesma lista alimenta os pontos de conexão e a escolha de sessão no par externo.
+  useEffect(() => useSessions.getState().retain(), []);
+  useEffect(() => { setEditingId(null); }, [activeId]);
+  const remover = useForgetMachine(() => setEditingId(null));
   const alvo = aceite ? { ...aceite, sessions: rows.filter((r) => r.serverId === aceite.server.id) } : null;
-
-  const parear = () => {
-    const server = servers.find((s) => s.id === activeId) ?? servers[0];
-    if (server) setAceite({ server, name: null, sessions: [] });
-  };
-
-  const testar = (s: Server) => {
-    getConfigForServer(s)
-      .then(() => toast.ok(m.config_maquinas_conexao_ok()))
-      .catch((e: unknown) => toast.erro(e instanceof Error ? e.message : m.erro_desconhecido()));
-  };
-
-  // Remover é sempre com confirmação: a lista pode ter uma máquina só, e sem ela o app volta pro login.
-  const remover = (s: Server) =>
-    Alert.alert(m.config_servidores_remover({ nome: s.label }), s.baseUrl, [
-      { text: m.comum_cancelar(), style: 'cancel' },
-      { text: m.lista_remover(), style: 'destructive', onPress: () => useServers.getState().remove(s.id) },
-    ]);
+  const active = servers.find((s) => s.id === activeId) ?? servers[0] ?? null;
+  const parear = () => { if (active) setAceite({ server: active, name: null, sessions: [] }); };
 
   return (
     <Pagina>
@@ -52,15 +43,16 @@ export default function Maquinas() {
         title={m.maquinas_titulo()}
         subtitle={m.maquinas_intro()}
         actions={[
-          { icon: 'Plus', label: m.sessao_adicionar_servidor(), onPress: () => router.push('/login' as never) },
+          { icon: 'Plus', label: m.sessao_adicionar_servidor(), onPress: () => setAdding({ owner: active }) },
           ...(servers.length ? [{ icon: 'Link' as const, label: m.native_par_menu(), onPress: parear }] : []),
         ]}
       />
-      {servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
+      {!ready ? <InfoNotice text={m.native_server_loading()} /> : servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
       {servers.length > 0 ? (
         <SectionCard icon="Server" title={m.native_machines_others()}>
           {servers.map((s) => {
-            const error = byServer.find((bucket) => bucket.server.id === s.id)?.error;
+            const bucket = byServer.find((entry) => entry.server.id === s.id);
+            const error = bucket?.error;
             return <SettingsRow
               key={s.id}
               icon="Monitor"
@@ -68,25 +60,35 @@ export default function Maquinas() {
               description={s.baseUrl}
               onPress={() => useServers.getState().setActive(s.id)}
               onLongPress={() => remover(s)}
-              // Ponto só na ativa: as outras não estão erradas, estão paradas — um ponto
-              // vermelho ali leria como máquina fora do ar, que ninguém mediu.
-              right={s.id === activeId ? <StateDot state="idle" /> : null}
+              right={<ConnectionDot label={s.label} loaded={bucket?.loaded ?? false} error={error} />}
             >
               <View accessibilityRole="alert" accessibilityLiveRegion="polite">
-                {error && error !== 'offline' ? <InfoNotice text={error} /> : null}
+                {error ? <InfoNotice text={error === 'offline' ? m.mobile_machines_offline() : error} /> : null}
               </View>
               <View style={styles.pills}>
-                <Pill icon="Plug" label={m.config_maquinas_testar()} onPress={() => testar(s)} />
+                <Pill icon="Settings" label={m.mobile_machines_configure()} onPress={() => setEditingId(s.id)} />
+                <TestConnection key={`${s.id}:${s.baseUrl}:${s.token}`} server={s} />
               </View>
             </SettingsRow>;
           })}
         </SectionCard>
       ) : null}
+      {editing ? <MachineSettingsSheet key={`${editing.id}:${editing.baseUrl}:${editing.token}`} server={editing} onClose={() => setEditingId(null)} /> : null}
+      {adding ? <AddMachineSheet owner={adding.owner} onClose={() => setAdding(null)} onQr={() => { setAdding(null); router.push('/login' as never); }} /> : null}
       <PairAcceptSheet target={alvo} onClose={() => setAceite(null)} />
     </Pagina>
   );
 }
 
+function TestConnection({ server }: { server: Server }) {
+  const action = useMachineAction();
+  return <View>
+    <Pill icon="Plug" label={action.busy ? m.mobile_machines_busy() : m.config_maquinas_testar()} disabled={action.busy}
+      onPress={() => action.run(() => getConfigForServer(server, 15_000), () => {}, m.config_maquinas_conexao_ok())} />
+    <Notice text={action.error} error /><Notice text={action.message} />
+  </View>;
+}
+
 const styles = StyleSheet.create({
-  pills: { flexDirection: 'row' },
+  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
 });

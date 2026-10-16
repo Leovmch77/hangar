@@ -232,6 +232,12 @@ impl ClaudeEngine {
             "subagents":self.subagents})
     }
 
+    pub(super) fn input_frame(operation_id:&str,payload:&Value) -> Value {
+        let content=payload.get("content").cloned().unwrap_or_else(||json!([{"type":"text","text":payload["text"]}]));
+        json!({"type":"user","uuid":echo_uuid(operation_id),"session_id":"","parent_tool_use_id":null,
+            "message":{"role":"user","content":content}})
+    }
+
     fn public_state(&self) -> StateEvent {
         let mut state = self.state.clone();
         state.claude_permission_mode = self.permission_mode.clone();
@@ -307,6 +313,12 @@ impl ClaudeEngine {
     pub fn forget_policy(&mut self,request_id:&RequestId) {
         // Pedido de status que falhou não pode barrar o próximo igual.
         if self.policies.remove(request_id).as_deref() == Some("format_status") { self.format_gate.reset(); }
+    }
+
+    pub(super) fn queue_problem(&mut self,detail:Option<String>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if super::queue::queue_problem(&mut self.state,detail) { self.changed(&mut effects,false); }
+        effects
     }
 
     fn policy(&mut self, kind:&str,payload:Value,effects:&mut Vec<Effect>) {
@@ -507,9 +519,9 @@ impl ClaudeEngine {
                     self.active_input = Some(operation_id.clone());
                     self.start_turn();
                 }
-                let uuid = self.expect_echo(&operation_id);
-                effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"type":"user","uuid":uuid,"session_id":"","parent_tool_use_id":null,"message":{
-                    "role":"user","content":payload.get("content").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}}) });
+                self.expect_echo(&operation_id);
+                let frame=Self::input_frame(&operation_id,&payload);
+                effects.push(Effect::Write { operation_id:Some(operation_id),frame });
             }
             OperationKind::Interrupt => {
                 // Sem turno não há o que interromper: dizer isso, e não fingir um Parar que aconteceu.

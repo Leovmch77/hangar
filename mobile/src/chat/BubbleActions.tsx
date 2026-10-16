@@ -7,6 +7,7 @@ import { sintetizarTts, ttsAudioUrl } from '@hangar/core';
 import { Icon } from '../ui/Icon';
 import { toast } from '../ui/Toast';
 import { useServers } from '../stores/servers';
+import { useVoiceAudioState } from '../features/voice/audioSession';
 import * as m from '../paraglide/messages';
 
 function hora(ts?: number | null) {
@@ -16,6 +17,7 @@ function hora(ts?: number | null) {
 // UM tocador por vez, no módulo: o AudioPlayer é objeto nativo que só some com `remove()`, e o
 // "Ouvir" de outra bolha tem que interromper o anterior em vez de sobrepor as duas vozes.
 let tocando: AudioPlayer | null = null;
+let audioGeneration = 0;
 function pararTocando() {
   tocando?.remove();
   tocando = null;
@@ -25,6 +27,14 @@ function pararTocando() {
 export function pararTts() {
   pararTocando();
 }
+
+// O tocador sobrevive à bolha virtualizada; a chamada também invalida sínteses ainda em voo.
+useVoiceAudioState.subscribe((state, previous) => {
+  if (state.voiceActive && !previous.voiceActive) {
+    audioGeneration++;
+    pararTts();
+  }
+});
 
 // O `addListener` vem do EventEmitter que o AudioPlayer herda, mas o expo-modules-core está
 // aninhado em expo/node_modules e o TS não resolve a classe base daqui — só a assinatura que
@@ -48,6 +58,7 @@ export function BubbleActions({ text, ts, serverId, ouvir = true, defaultOpen = 
   const { theme } = useUnistyles();
   const c = theme.tokens.text.muted;
   const [aberto, setAberto] = useState(defaultOpen);
+  const voiceActive = useVoiceAudioState((state) => state.voiceActive);
   // A lista é virtualizada: a bolha pode sair da tela antes de o /api/tts responder.
   const vivo = useRef(true);
   useEffect(() => () => { vivo.current = false; }, []);
@@ -69,11 +80,13 @@ export function BubbleActions({ text, ts, serverId, ouvir = true, defaultOpen = 
     }
   };
   const falar = async () => {
+    if (useVoiceAudioState.getState().voiceActive) return;
+    const generation = audioGeneration;
     const server = useServers.getState().servers.find((s) => s.id === serverId);
     if (!server) { toast.erro(m.chat_servidor_removido()); return; }
     try {
       const r = await sintetizarTts({ text }, server);
-      if (!vivo.current) return;
+      if (!vivo.current || generation !== audioGeneration || useVoiceAudioState.getState().voiceActive) return;
       pararTocando();
       const p = createAudioPlayer(ttsAudioUrl(r.url, server));
       tocando = p;
@@ -108,7 +121,8 @@ export function BubbleActions({ text, ts, serverId, ouvir = true, defaultOpen = 
             <Icon name="Share2" size={14} color={c} />
           </Pressable>
           {ouvir ? (
-            <Pressable onPress={() => void falar()} style={styles.btn} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}>
+            <Pressable onPress={() => void falar()} style={styles.btn} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}
+              disabled={voiceActive} accessibilityState={{ disabled: voiceActive }}>
               <Icon name="Volume2" size={14} color={c} />
             </Pressable>
           ) : null}

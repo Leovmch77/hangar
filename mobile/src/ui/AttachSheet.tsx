@@ -13,6 +13,8 @@ type Props = {
   /** Mesmo destino de antes: quem chama só adota o anexo escolhido. */
   onPick: (picked: PickedAttachment) => void;
   onError: (message: string) => void;
+  /** Cola texto ou imagem da área de transferência; ausente, o item não aparece. */
+  onPaste?: () => void;
   /** Só na conversa com anexos já enviados; ausente, o item não aparece. */
   onSessionAttachments?: () => void;
   /**
@@ -30,7 +32,7 @@ type Props = {
 
 const TILE = 112;
 
-export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
+export function AttachSheet({ open, onClose, onPick, onError, onPaste, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
   const c = useSettingsColors();
   // A ação roda depois que a folha some: o iOS recusa abrir câmera/galeria por cima de uma folha
   // ainda em animação de saída.
@@ -54,6 +56,7 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
   // Comandos e estilo do ditado também abrem outra folha: só depois que esta sumir.
   // `checked` presente = item liga/desliga: o leitor de tela anuncia o estado, e o ✓ é só visual.
   const rows: { icon: IconName; label: string; value?: string; checked?: boolean; onPress: () => void }[] = [
+    ...(onPaste ? [{ icon: 'ClipboardPaste' as IconName, label: m.composer_colar(), onPress: () => choose(onPaste) }] : []),
     { icon: 'File', label: m.composer_adicionar_arquivos(), onPress: run(pickFile) },
     ...(onSessionAttachments
       ? [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos_da_sessao(), onPress: () => choose(onSessionAttachments) }]

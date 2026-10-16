@@ -135,6 +135,14 @@ impl RuntimeEngine {
         Ok(next)
     }
     fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
+    fn queue_problem(&mut self,detail:Option<String>) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.queue_problem(detail),Core::Claude(core)=>core.queue_problem(detail) }
+    }
+    fn batch_validator(&self) -> super::queue::BatchValidator {
+        let template=match &self.core {Core::Claude(_)=>ClaudeEngine::input_frame("batch",&json!({"text":""})),Core::Codex(core)=>core.input_frame_template()};
+        let provider=match self.core {Core::Claude(_)=>"claude",Core::Codex(_)=>"codex"};
+        local_policy::batch_validator(provider.into(),template)
+    }
     fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
         match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
     }
@@ -316,6 +324,9 @@ impl RuntimeEngine {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível; operação conservada no diário") }
 fn io_failure(error:std::io::Error) -> RuntimeError {
+    if super::queue::refusal(&error) == Some(super::queue::BATCH_SIZE_MESSAGE) {
+        return RuntimeError::new(super::queue::BATCH_TOO_LARGE,"O lote é grande demais. Edite ou remova mensagens da fila para enviar.");
+    }
     // Recusa da fila tem frase fixa e vai inteira (log e diário do Python); de resto só o tipo, porque
     // a mensagem do io::Error ou do serde pode trazer caminho ou texto.
     let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
@@ -513,6 +524,8 @@ impl crate::mods::state::SurfaceLink for RuntimeHandle {
 }
 
 struct Pending {
+    from_queue:bool,
+    defer_for_batch:bool,
     command:RuntimeCommand,
     original:Value,
     responses:Vec<Response>,
@@ -528,7 +541,7 @@ struct Pending {
 
 impl Pending {
     fn stored(command:RuntimeCommand,reply:RuntimeReply) -> Self {
-        Self { original:serde_json::to_value(&command).unwrap(),command,responses:Vec::new(),result:Some(reply),preparing:false,
+        Self { from_queue:false,defer_for_batch:false,original:serde_json::to_value(&command).unwrap(),command,responses:Vec::new(),result:Some(reply),preparing:false,
             cancelled:false,error:None,deadline:0.0,timed_out:false,ready_to_run:false,arrival:0 }
     }
 }
@@ -755,6 +768,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut error:Option<RuntimeError> = None;
     let mut io_open = true;
     let mut drain_requested = true;
+    let mut drain_claim:Option<String> = None;
     let mut drain_active = false;
     let mut drain_waiters = Vec::new();
     let mut mods_waiters:ModsWaiters = BTreeMap::new();
@@ -862,7 +876,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 continue;
             }
             // Mesma resposta do motor sem `deliverable`: a entrada fica na fila e o drain a leva depois.
-            if turn_hold.is_some() && matches!(pending.command.kind,OperationKind::Input | OperationKind::DispatchAsyncAnswer) {
+            if pending.defer_for_batch || turn_hold.is_some() && matches!(pending.command.kind,OperationKind::Input | OperationKind::DispatchAsyncAnswer) {
+                if pending.defer_for_batch {drain_requested=true;}
                 effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Deferred,payload:json!({}) });
                 continue;
             }
@@ -1195,13 +1210,18 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
         let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some()) && !limit_held()} else {engine.view()["deliverable"]==true};
         let reserved = if target.metadata["lifecycle_pending"]==true { None } else { engine.ready_async_answer_entry() };
         if drain_requested && !drain_active && turn_hold.is_none() && !closed.load(Ordering::Acquire) && (deliverable || reserved.is_some())
-            && !roots.values().any(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
+            && !roots.values().any(|root|(root.preparing || root.defer_for_batch && root.result.is_none() && root.error.is_none()) && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
             drain_requested = false; drain_active = true;
+            let validate=reserved.is_none().then(||engine.batch_validator());
+            let claim_id=format!("claim:{}",unique());drain_claim=Some(format!("call::{claim_id}"));
             let queue = queue.clone(); let target = target.clone(); let sample = clock(start);
             jobs.spawn(async move {
                 let result = async {
-                    let claimed = queue.exec(target.generation,&format!("claim:{}",unique()),sample,
-                        Action::Claim { min_ts:target.created,limit:Some(1),entry_id:reserved.clone() }).await.map_err(io_failure)?;
+                    let action=match reserved.clone() {
+                        Some(entry_id)=>Action::Claim {min_ts:target.created,limit:Some(1),entry_id:Some(entry_id)},
+                        None=>Action::ClaimBatch {min_ts:target.created},
+                    };
+                    let claimed = queue.exec_validated(target.generation,&claim_id,sample,action,false,validate).await.map_err(io_failure)?;
                     let state = queue.snapshot().await.map_err(io_failure)?;
                     let mut claimed = claimed.as_array().ok_or_else(||failure("queue_shape"))?.clone();
                     // Reivindicada numa vida que parou antes de despachar: operação preparada e sem tentativa
@@ -1272,7 +1292,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         }
                         arrival += 1;
                         let ticket = arrival;
-                        roots.insert(id.clone(),Pending { original:serde_json::to_value(&command).unwrap(),command:command.clone(),responses:vec![response],
+                        let claimed=drain_active && drain_claim.as_ref().and_then(|id|authoritative.operations.get(id))
+                            .and_then(|op|op.result.as_array()).is_some_and(|rows|!rows.is_empty());
+                        let waiting=super::queue::waiting_ids(&authoritative,target.created).iter().any(|id|id!=&command.operation_id);
+                        let defer_for_batch=(claimed || waiting) && !from_queue && command.kind==OperationKind::Input && !rowless(&target.provider,&command);
+                        roots.insert(id.clone(),Pending { from_queue,defer_for_batch,original:serde_json::to_value(&command).unwrap(),command:command.clone(),responses:vec![response],
                             result:None,preparing:true,cancelled:false,error:None,deadline:clock(start).monotonic_s+30.0,timed_out:false,ready_to_run:false,arrival });
                         let queue = queue.clone(); let target = target.clone(); let sample = clock(start);
                         let preparation = preparation.clone();
@@ -1313,12 +1337,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     Message::Queue { call_id,action,response,generation } => {
                         if generation!=target.generation {let _=response.send(Err(failure("runtime_generation")));continue;}
                         // A reserva nasce só da resposta conferida pelo motor, nunca de fora.
-                        if matches!(action,Action::ReserveAsyncAnswer { .. }) {
+                        if matches!(action,Action::ReserveAsyncAnswer { .. } | Action::ClaimBatch { .. }) {
                             let _ = response.send(Err(RuntimeError::new("operation_internal","operação interna do runtime")));
                             continue;
                         }
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
-                        let wake = matches!(&action,Action::Append { delivered:false,.. });
+                        let wake = matches!(&action,Action::Append { delivered:false,.. } | Action::Edit { .. } | Action::Cancel { .. } | Action::Remove { .. });
                         jobs.spawn(async move {
                             let result = queue.exec(generation,&call_id,sample,action).await.map_err(io_failure);
                             let saved = result.as_ref().map(|_|()).map_err(Clone::clone);
@@ -1611,9 +1635,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         }
                         if matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer) {
                             let target = target.clone(); let command = pending.command.clone();
+                            let queue=queue.clone();let from_queue=pending.from_queue;
                             jobs.spawn(async move {
-                                // Cálculo puro (texto → blocos): sem efeito, não entra no diário e pode repetir.
-                                let result = run_local("prepare_prompt".into(),command.payload,&target,None).await;
+                                let result=async {
+                                    if from_queue {
+                                        let state=queue.snapshot().await.map_err(io_failure)?;
+                                        if let Some(prepared)=state.rows.iter().find(|row|row["id"]==command.operation_id)
+                                            .map(|row|&row["batch_prompt"]).filter(|prepared|prepared.is_object()) {return Ok(prepared.clone());}
+                                    }
+                                    run_local("prepare_prompt".into(),command.payload,&target,None).await
+                                }.await;
                                 Job::PreparedInput { id,result }
                             });
                         } else {
@@ -1750,7 +1781,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Job::Queued { wake,result } => {
                         match result {
-                            Ok(()) if wake=>drain_requested = true,
+                            Ok(()) if wake=>{effects.extend(engine.queue_problem(None));drain_requested = true;},
                             Ok(())=>{},
                             Err(failure)=>enter_error(&mut error,&target,failure),
                         }
@@ -1896,7 +1927,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Err(failure)=>{
                                 drain_active = false;
                                 for waiter in drain_waiters.drain(..) { let _ = waiter.send(Err(failure.clone())); }
-                                enter_error(&mut error,&target,failure);
+                                if failure.code == super::queue::BATCH_TOO_LARGE { effects.extend(engine.queue_problem(Some(failure.message))); }
+                                else { enter_error(&mut error,&target,failure); }
                             },
                         }
                     }

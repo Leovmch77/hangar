@@ -5,6 +5,10 @@ import { Sheet } from '../ui/Sheet';
 import { Icon, type IconName } from '../ui/Icon';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
+import { isEmptyBand } from '@hangar/core';
+import { chatStore } from '../stores/chat';
+import { useMods } from '../stores/mods';
+import { useServers } from '../stores/servers';
 
 interface Props {
   open: boolean;
@@ -35,8 +39,19 @@ type Item = {
 export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, provider, semTerminal, temPergunta }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const canShare = useServers(s => s.servers.some(server => server.id === serverId && !server.invite && !server.removed));
+  const chat = chatStore(serverId, name);
+  const surface = chat.use(s => s.pluginUi);
+  const dead = chat.use(s => s.stateEvent?.state === 'dead');
+  const visible = useMods(s => s.visible);
+  const panes = surface?.panes.length ?? 0;
+  const hasMods = !dead && !!surface && (!isEmptyBand(surface.above) || panes > 0);
+  const modsLabel = visible ? m.mods_celular_ocultar() : panes === 1 ? m.mods_celular_mostrar_um()
+    : panes > 1 ? m.mods_celular_mostrar_paineis({ n: String(panes) }) : m.mods_celular_mostrar();
 
   const items: Item[] = [
+    ...(hasMods ? [{ icon: 'PanelsTopLeft' as IconName, label: modsLabel, sub: m.mods_celular_sub(), route: 'mods',
+      onPress: () => useMods.getState().setVisible(!visible) }] : []),
     ...(recarregar ? [{
       icon: 'RefreshCw' as IconName,
       label: m.recarregar_sessao(),
@@ -48,6 +63,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
     ...(orq || !temPergunta ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
     { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
     ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
+    ...(!orq && canShare ? [{ icon: 'Share2' as IconName, label: m.compartilhar_menu(), route: 'share' }] : []),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },
     ...(orq || semTerminal ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
     ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),

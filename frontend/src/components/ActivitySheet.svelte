@@ -486,7 +486,7 @@
                       <span class="agent-head">
                         <span class="agent-desc">{a.description}</span>
                         {#if a.subagentType}<span class="agent-tag">{a.subagentType}</span>{/if}
-                        {#if a.model}<span class="agent-tag muted">{a.model}</span>{/if}
+                        {#if sub ? sub.model : a.model}<span class="agent-tag muted">{sub ? sub.model : a.model}</span>{/if}
                       </span>
                       {#if sub}
                         <!-- O que ele esta tocando AGORA (ultima tool do transcript dele). O prompt

@@ -2,7 +2,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AggSession, SessionInfo } from '@hangar/core';
+import type { AggSession, Server, SessionInfo } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -20,15 +20,19 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   deleteSession: calls.deleteSession,
   rotaDecidida: () => true,
-  probeServerResponse: async () => ({ ok: true, status: 200, json: async () => calls.sessions }),
+  probeServerResponse: async (server: Server) => ({ ok: true, status: 200,
+    json: async () => server.invite ? calls.sessions.map((s) => ({ ...s, jsonl: '/tmp/guest.jsonl' })) : calls.sessions }),
   openSessionsStream: () => calls.stream,
   listExternalPairs: async () => [],
 }));
 vi.mock('../../stores/servers', async () => {
   const { create } = await import('zustand');
   return {
-    ownServers: (servers: unknown[]) => servers,
-    useServers: create(() => ({ servers: [], ready: true, activeId: 'srv1', ensureActive: vi.fn(() => true) })),
+    ownServers: (servers: Server[]) => servers.filter((s) => !s.invite),
+    useServers: create<{ servers: Server[]; ready: boolean; activeId: string; ensureActive: ReturnType<typeof vi.fn>; remove: (id: string) => void }>((set) => ({
+      servers: [], ready: true, activeId: 'srv1', ensureActive: vi.fn(() => true),
+      remove: (id) => set((s) => ({ servers: s.servers.filter((server) => server.id !== id) })),
+    })),
   };
 });
 vi.mock('../../stores/aparencia', () => ({
@@ -45,6 +49,7 @@ vi.mock('./SessionRow', () => ({
     React.createElement('button', { 'data-row': `${session.serverId}::${session.name}`, onClick: () => onExcluir(session) }, session.name),
 }));
 vi.mock('../pair/PairInviteSheet', () => ({ PairInviteSheet: () => null }));
+vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
 vi.mock('../pair/PairAcceptSheet', () => ({ PairAcceptSheet: () => null }));
 vi.mock('../pair/leaveExternal', () => ({ leaveExternal: vi.fn() }));
 vi.mock('./ConversationList', () => ({ ConversationList: () => null }));
@@ -237,6 +242,22 @@ describe('SessionList', () => {
     await act(async () => { container.querySelector<HTMLButtonElement>('[data-row="srv1::fixture"]')!.click(); });
     await act(async () => { confirm(1)(); });
     expect(calls.deleteSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('parar de acompanhar remove só o convite, sem DELETE nem troca da máquina ativa', async () => {
+    calls.deleteSession.mockResolvedValueOnce({ ok: true, warning: null });
+    useServers.setState({ servers: [server, { ...server, id: 'guest', baseUrl: 'https://guest.test', invite: true }] });
+    await mount();
+    const row = container.querySelector<HTMLButtonElement>('[data-row="guest::fixture"]');
+    expect(row).not.toBeNull();
+    await act(async () => row!.click());
+    // Também denuncia a tentativa antiga, que abria a confirmação de exclusão.
+    if (calls.alert.mock.calls.length) await act(async () => confirm()());
+    expect(calls.deleteSession).not.toHaveBeenCalled();
+    expect(useServers.getState().ensureActive).not.toHaveBeenCalled();
+    expect(useServers.getState().activeId).toBe('srv1');
+    expect(useServers.getState().servers.map((s) => s.id)).toEqual(['srv1']);
+    expect(container.querySelector('[data-row="guest::fixture"]')).toBeNull();
   });
 
   it('filtro sem resultados mostra o aviso existente', async () => {

@@ -52,20 +52,17 @@ fn note(border: Hsla, tint: Option<Hsla>, icon: Option<(IconName, Hsla)>, body: 
         .child(div().flex_1().min_w_0().child(body))
 }
 
-/// O painel inteiro. `tabs`: a fileira de abas quando há outros painéis; com ela, o `✕` é o dela.
+/// O painel inteiro. Com abas, a ação de minimizar fica no cabeçalho compartilhado.
 pub fn panel(pane: &Value, view: &View, max_h: f32, tabs: Option<AnyElement>) -> Option<AnyElement> {
     let data = &pane["data"];
     let entries = data["entries"].as_array()?;
     let with_tabs = tabs.is_some();
-    let close = (!with_tabs).then(|| view.close.clone()).flatten().map(|close| -> Click {
-        Rc::new(move |window: &mut Window, cx: &mut App| close(SITE, window, cx))
-    });
     let badge = div().flex().items_center().gap_1p5().text_color(theme::accent()).font_weight(FontWeight::SEMIBOLD).text_xs()
         .child(Icon::new(IconName::MessageCircleQuestionMark).size(px(14.))).child(tr("btw_title"));
     let current = data["current"].as_u64().map(|c| c as usize).filter(|c| *c < entries.len());
     let Some(index) = current else {
         let head = div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(theme::border()).child(badge)
-            .child(div().flex_1()).when_some(close, |el, f| el.child(icon_button("close", IconName::Close, tr("btw_close"), Some(f))));
+            .child(div().flex_1()).children((!with_tabs).then(|| super::minimize_control(SITE, view)).flatten());
         return Some(shell(max_h).children(tabs).child(head)
             .child(div().px_4().py_3().text_sm().text_color(theme::muted()).child(tr("btw_empty"))).into_any_element());
     };
@@ -80,7 +77,7 @@ pub fn panel(pane: &Value, view: &View, max_h: f32, tabs: Option<AnyElement>) ->
         .child(icon_button("prev", IconName::ChevronLeft, tr("btw_prev"), (index > 0).then(|| press(view, "anterior")).flatten()))
         .child(icon_button("next", IconName::ChevronRight, tr("btw_next"), (index + 1 < entries.len()).then(|| press(view, "proxima")).flatten()))
         .child(icon_button("clear", IconName::Trash, tr("btw_clear"), press(view, "limpar")))
-        .when_some(close, |el, f| el.child(icon_button("close", IconName::Close, tr("btw_close"), Some(f))));
+        .children((!with_tabs).then(|| super::minimize_control(SITE, view)).flatten());
 
     let question = div().flex().items_start().gap_2()
         .child(div().flex_shrink_0().mt(px(1.)).px(px(7.)).rounded_full().border_1().border_color(theme::border())
@@ -105,6 +102,7 @@ pub fn panel(pane: &Value, view: &View, max_h: f32, tabs: Option<AnyElement>) ->
         _ => None,
     };
     let body = div().id("btw-body").flex().flex_col().gap_2p5().px_4().py_3().flex_1().min_h_0().overflow_y_scroll()
+        .when_some(view.body_scrolls.and_then(|scrolls| scrolls.get(SITE)), |el, scroll| el.track_scroll(scroll))
         .child(question).child(main).children(fork_note);
 
     let busy = status == "pending" || fork == "running";
@@ -135,7 +133,7 @@ pub fn panel(pane: &Value, view: &View, max_h: f32, tabs: Option<AnyElement>) ->
 }
 
 fn shell(max_h: f32) -> Div {
-    div().flex().flex_col().w_full().min_h_0().max_h(px(max_h)).overflow_hidden().rounded(px(10.)).border_1()
+    div().flex().flex_col().w_full().min_h_0().h(px(max_h)).flex_shrink_0().overflow_hidden().rounded(px(10.)).border_1()
         .border_color(theme::border()).bg(theme::inset()).text_color(theme::text())
 }
 

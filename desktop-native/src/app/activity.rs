@@ -57,6 +57,8 @@ pub(super) struct SubRun {
     message_blocked: Option<String>,
     /// O servidor não conseguiu ler o estado (`problema`): `state` nulo aqui é desconhecido, não "sem sinal".
     problem: Option<String>,
+    /// O modelo que respondeu; num motor o apelido pedido no Agent ("opus") não é o que roda.
+    model: Option<String>,
 }
 
 /// Sem `state` nem Agent do pai, um registro parado há tanto tempo fica "sem notícia": não é prova de fim.
@@ -75,6 +77,7 @@ fn parse_sub(item: &Value) -> Option<SubRun> {
         can_message: item.get("canMessage").and_then(Value::as_bool).unwrap_or(false),
         message_blocked: text(item, "messageBlocked").filter(|s| !s.is_empty()),
         problem: text(item, "problema").filter(|s| !s.is_empty()),
+        model: text(item, "model").filter(|s| !s.is_empty()),
         agent_id: text(item, "agentId")?,
         agent_type: text(item, "agentType").filter(|t| !t.is_empty()),
         prompt: text(item, "prompt"),
@@ -143,6 +146,15 @@ fn norm(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join
 
 /// O subagente do disco de um Agent: prompt normalizado inteiro, senão os 400 primeiros caracteres (o mais recente
 /// vence, e a lista já vem do mais recém-escrito).
+fn agent_model(subs: &[SubRun], agent_id: Option<&str>, prompt: Option<&str>, asked: Option<String>) -> Option<String> {
+    let sub = match agent_id {
+        Some(id) => subs.iter().find(|s| s.agent_id == id),
+        None => match_sub(subs, prompt),
+    };
+    // Na lista sem modelo (só erro de API, ilegível): o apelido seria afirmar o que não rodou.
+    match sub { Some(s) => s.model.clone(), None => asked }
+}
+
 fn match_sub<'a>(subs: &'a [SubRun], prompt: Option<&str>) -> Option<&'a SubRun> {
     let full = norm(prompt?);
     subs.iter().find(|s| s.prompt.as_deref().is_some_and(|p| norm(p) == full)).or_else(|| {
@@ -317,7 +329,7 @@ impl ActivityPanel {
             let sub = match_sub(&self.subs, a.prompt.as_deref());
             let mut tags = Vec::new();
             if let Some(t) = &a.subagent_type { tags.push((t.clone(), false)); }
-            if let Some(m) = &a.model { tags.push((m.clone(), true)); }
+            if let Some(m) = agent_model(&self.subs, a.agent_id.as_deref(), a.prompt.as_deref(), a.model.clone()) { tags.push((m, true)); }
             AgentLine { key: a.id.clone(), description: a.description.clone(), tags, now: sub.map(calls_line), sub: sub.map(|s| s.agent_id.clone()) }
         }).collect();
         // Quem já está na linha de um Agent rodando não se repete entre os subagentes rodando.
@@ -1005,9 +1017,9 @@ impl Hangar {
                 };
                 let before = self.has_activity();
                 self.act.count = subs.len();
-                // Redesenha só quando muda quem falhou: a batida de 5 s não refaz a conversa a cada chamada contada.
-                let failed_ids = |subs: &[SubRun]| subs.iter().filter(|s| s.failed).map(|s| s.agent_id.clone()).collect::<Vec<_>>();
-                let changed = failed_ids(&subs) != failed_ids(&self.act.subs);
+                // Redesenha só quando muda quem falhou ou o modelo de alguém: a batida de 5 s não refaz a conversa a cada chamada contada.
+                let shown = |subs: &[SubRun]| subs.iter().map(|s| (s.agent_id.clone(), s.failed, s.model.clone())).collect::<Vec<_>>();
+                let changed = shown(&subs) != shown(&self.act.subs);
                 self.act.subs = subs;
                 if let Some(request) = self.act.pending_tab.take() { self.resolve_agent_tab(request, cx); }
                 if changed { cx.notify(); }
@@ -1045,6 +1057,12 @@ impl Hangar {
     }
 
     /// O Agent desta chamada lançou um subagente que falhou: casado pelo `agentId` do resultado ou pelo prompt.
+    /// O modelo do card do Agent: o que respondeu, quando o subagente já está na lista; antes, o apelido pedido.
+    pub(super) fn agent_card_model(&self, call: usize, asked: Option<String>) -> Option<String> {
+        let Some(agent) = self.conversation.activity.agents.iter().find(|a| a.call == call) else { return asked };
+        agent_model(&self.act.subs, agent.agent_id.as_deref(), agent.prompt.as_deref(), asked)
+    }
+
     pub(super) fn agent_failed(&self, call: usize) -> bool {
         self.act.subs.iter().any(|s| s.failed) && agent_failed(&self.conversation.activity.agents, &self.act.subs, call)
     }
@@ -1297,7 +1315,7 @@ mod tests {
 
     fn parent(id: &str, prompt: &str, agent_id: Option<&str>, running: bool) -> AgentRun {
         AgentRun { call: 0, id: id.into(), description: String::new(), subagent_type: None, model: None, prompt: Some(prompt.into()),
-            running, agent_id: agent_id.map(Into::into) }
+            running, agent_id: agent_id.map(Into::into), started_at: None, finished_at: None }
     }
 
     #[test]
@@ -1339,7 +1357,7 @@ mod tests {
 
     fn sub(id: &str, prompt: &str) -> SubRun {
         SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false, started: None,
-            state: None, ended: None, updated: None, can_message: false, message_blocked: None, problem: None }
+            state: None, ended: None, updated: None, can_message: false, message_blocked: None, problem: None, model: None }
     }
 
     #[test]
@@ -1389,6 +1407,18 @@ mod tests {
             crate::i18n::tr_web("erro_subagente_mensagem_sem_terminal", &Default::default()).unwrap());
         assert_eq!(blocked_text(None), crate::i18n::tr("subagent_message_unavailable"));
         assert_eq!(blocked_text(Some("codigo_novo")), crate::i18n::tr("subagent_message_unavailable"));
+    }
+
+    #[test]
+    fn the_model_shown_is_the_one_that_answered_and_the_alias_only_until_it_is_known() {
+        use super::{agent_model, parse_sub};
+        let answered = parse_sub(&serde_json::json!({"agentId": "a", "prompt": "faz X", "model": "gpt-6.1-sol"})).unwrap();
+        let subs = vec![answered, sub("b", "faz Y")];
+        assert_eq!(agent_model(&subs, None, Some("faz X"), Some("opus".into())).as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(agent_model(&subs, Some("a"), Some("outro prompt"), Some("opus".into())).as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(agent_model(&subs, None, Some("faz Y"), Some("opus".into())), None);
+        assert_eq!(agent_model(&subs, None, Some("ainda não listado"), Some("opus".into())).as_deref(), Some("opus"));
+        assert_eq!(agent_model(&[], None, Some("faz X"), None), None);
     }
 
     #[test]

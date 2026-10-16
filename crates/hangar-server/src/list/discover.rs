@@ -277,6 +277,15 @@ fn config_base_of(procs: &dyn ProcessView, pid: i64, default: &Path) -> PathBuf 
     config_dir(procs, pid).unwrap_or_else(|| default.parent().unwrap_or(default).to_path_buf())
 }
 
+/// A pasta que o Claude grava no registro dele: o projeto do transcript sai dela. No psmux a do pane é a
+/// do Bash que o agente deixou vivo.
+fn claude_cwd(procs: &dyn ProcessView, pid: i64, projects_dir: &Path) -> Option<String> {
+    let raw = std::fs::read(config_base_of(procs, pid, projects_dir).join("sessions").join(format!("{pid}.json"))).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if value.get("pid")?.as_i64()? != pid { return None; }
+    value.get("cwd")?.as_str().filter(|c| !c.is_empty()).map(str::to_owned)
+}
+
 /// Marcador do hook pelo `--session-id` do cmdline (`_active_marker_jsonl`): no resume o arquivo
 /// do sid nunca nasce, e o marcador diz o transcript ativo.
 fn active_marker(config_base: &Path, sid: &str, exclude: &HashSet<String>) -> Option<String> {
@@ -441,9 +450,12 @@ impl Resolver {
             // 2. --session-id: vale antes de o arquivo existir. Com irmã no mesmo cwd, o mais novo de
             //    uma contaminaria a outra; sozinha, segue o mais novo para pegar o pós-/clear.
             if let Some((p, sid)) = tree.repl().find_map(|(p, c)| session_id(c).map(|s| (p, s))) {
-                let projdir = projects_of(procs, p, projects_dir).join(sanitize_cwd(cwd));
+                let own = claude_cwd(procs, p, projects_dir);
+                let moved = own.as_deref().is_some_and(|own| own != cwd);
+                let projdir = projects_of(procs, p, projects_dir).join(sanitize_cwd(own.as_deref().unwrap_or(cwd)));
                 let sid_jsonl = projdir.join(format!("{sid}.jsonl")).to_string_lossy().into_owned();
-                let j = if has_siblings { sid_jsonl } else { self.newest_after_clear(&projdir, sid_jsonl, &aux_open) };
+                // Com o pane noutra pasta as irmãs da pasta do Claude não foram contadas: o mais novo seria de outra.
+                let j = if has_siblings || moved { sid_jsonl } else { self.newest_after_clear(&projdir, sid_jsonl, &aux_open) };
                 self.jsonl.insert(name.into(), j.clone());
                 return tracked(j);
             }
@@ -460,7 +472,8 @@ impl Resolver {
         }
         // 4. O mais novo do cwd: ambíguo com várias sessões sem id no mesmo cwd, por isso não confiável.
         let projects = pane.map_or_else(|| projects_dir.to_path_buf(), |(p, _)| projects_of(procs, p, projects_dir));
-        Transcript { jsonl: newest(&projects.join(sanitize_cwd(cwd))), tracked: false }
+        let own = pane.and_then(|(_, tree)| tree.repl().find_map(|(p, _)| claude_cwd(procs, p, projects_dir)));
+        Transcript { jsonl: newest(&projects.join(sanitize_cwd(own.as_deref().unwrap_or(cwd)))), tracked: false }
     }
 }
 
@@ -813,6 +826,72 @@ mod tests {
         let all = p.into_vec();
         assert_eq!(all.len(), PROBLEMS_CAP + 1);
         assert_eq!(all.last().map(|p| p.code), Some("list_problems_truncated"));
+    }
+
+    /// Pane 10 → Claude 11, com a conta em `config`; o pane informa a pasta do Bash que o agente deixou viva.
+    struct BashMoved { config: PathBuf, sid: Option<&'static str> }
+    impl ProcessView for BashMoved {
+        fn children(&self, _: Duration) -> io::Result<Arc<ChildrenMap>> { unreachable!() }
+        fn argv(&self, pid: i64) -> Vec<String> {
+            match (pid, self.sid) {
+                (11, Some(sid)) => vec!["claude".into(), "--session-id".into(), sid.into()],
+                (11, None) => vec!["claude".into()],
+                _ => vec!["bash".into()],
+            }
+        }
+        fn cwd(&self, _: i64) -> Option<PathBuf> { None }
+        fn env_var(&self, _: i64, name: &str) -> io::Result<Option<OsString>> {
+            Ok((name == "CLAUDE_CONFIG_DIR").then(|| self.config.clone().into_os_string()))
+        }
+        fn start_time(&self, _: i64) -> Option<f64> { None }
+        fn fds(&self, _: i64) -> Vec<PathBuf> { Vec::new() }
+    }
+
+    #[test]
+    fn transcript_follows_the_claude_cwd_not_the_bash_the_pane_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("conta");
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::write(config.join("sessions").join("11.json"),
+            r#"{"pid":11,"sessionId":"28d69f41-7dfb-4267-aec4-67a0f0b1c572","cwd":"/real"}"#).unwrap();
+        let children: ChildrenMap = [(10, vec![11])].into_iter().collect();
+        let mut pane = pane("s", "/bash");
+        pane.pid = Some(10);
+        let run = |procs: &BashMoved| resolve_one(std::slice::from_ref(&pane), procs, &children, &dir.path().join("projects"),
+            &mut Resolver::default(), "s", "/bash", Some(10));
+        let by_sid = run(&BashMoved { config: config.clone(), sid: Some("28d69f41-7dfb-4267-aec4-67a0f0b1c572") });
+        let expected = config.join("projects").join("-real").join("28d69f41-7dfb-4267-aec4-67a0f0b1c572.jsonl");
+        assert_eq!(by_sid, Transcript { jsonl: Some(expected.to_string_lossy().into()), tracked: true });
+        let newest = config.join("projects").join("-real").join("00000000-0000-4000-8000-000000000001.jsonl");
+        std::fs::create_dir_all(newest.parent().unwrap()).unwrap();
+        std::fs::write(&newest, "{}\n").unwrap();
+        age(&newest, 30);
+        assert_eq!(run(&BashMoved { config, sid: None }), Transcript { jsonl: Some(newest.to_string_lossy().into()), tracked: false },
+            "o mais novo também é o da pasta do Claude");
+    }
+
+    #[test]
+    fn moved_bash_never_takes_the_newer_transcript_of_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("conta");
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::write(config.join("sessions").join("11.json"),
+            r#"{"pid":11,"sessionId":"28d69f41-7dfb-4267-aec4-67a0f0b1c572","cwd":"/real"}"#).unwrap();
+        let project = config.join("projects").join("-real");
+        std::fs::create_dir_all(&project).unwrap();
+        let own = project.join("28d69f41-7dfb-4267-aec4-67a0f0b1c572.jsonl");
+        std::fs::write(&own, "{}\n").unwrap();
+        age(&own, 60);
+        // A irmã na mesma pasta não conta como irmã: o pane desta informa outra pasta.
+        let sibling = project.join("00000000-0000-4000-8000-000000000002.jsonl");
+        std::fs::write(&sibling, "{}\n").unwrap();
+        age(&sibling, 30);
+        let children: ChildrenMap = [(10, vec![11])].into_iter().collect();
+        let mut pane = pane("s", "/bash");
+        pane.pid = Some(10);
+        let found = resolve_one(std::slice::from_ref(&pane), &BashMoved { config, sid: Some("28d69f41-7dfb-4267-aec4-67a0f0b1c572") },
+            &children, &dir.path().join("projects"), &mut Resolver::default(), "s", "/bash", Some(10));
+        assert_eq!(found, Transcript { jsonl: Some(own.to_string_lossy().into()), tracked: true });
     }
 
     #[test]

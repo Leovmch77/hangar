@@ -8,11 +8,13 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { configureCore } from '../src/net/configureCore';
 import { useServers } from '../src/stores/servers';
+import { discoverSavedMachines } from '../src/features/machines/importMachines';
 import { setChatsForeground } from '../src/stores/chat';
 import { useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
+import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
 import * as m from '../src/paraglide/messages';
 
 configureCore();
@@ -28,7 +30,7 @@ export default function Layout() {
   const limparAviso = useServers((s) => s.limparAviso);
 
   useEffect(() => {
-    void useServers.getState().load();
+    void useServers.getState().load().then(() => discoverSavedMachines());
   }, []);
 
   // Único dono do primeiro plano: os stores conservam transcript, pergunta e rascunho ao sair
@@ -42,7 +44,7 @@ export default function Layout() {
       foreground = active;
       setChatsForeground(active);
       useSessions.getState().setForeground(active);
-      if (resumed && !useServers.getState().vaultReadable) void useServers.getState().load();
+      if (resumed) void discoverSavedMachines();
     };
     apply(initial);
     const subscription = AppState.addEventListener('change', apply);
@@ -51,8 +53,8 @@ export default function Layout() {
 
   useEffect(() => {
     if (!ready) return;
-    const onLogin = segments[0] === 'login';
-    if (servers.length === 0 && !onLogin) {
+    const withoutServer = segments[0] === 'login' || segments[0] === 'convite' || segments[0] === 'importar';
+    if (servers.length === 0 && !withoutServer) {
       router.replace('/login');
     }
   }, [ready, servers.length, segments]);
@@ -101,6 +103,7 @@ export default function Layout() {
           <Stack.Screen name="s/[server]/[name]/codex-limits" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/bastao" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
         </Stack>
+        <LiveVoiceRoot />
         <Toaster position="top-center" />
       </GestureHandlerRootView>
     </KeyboardProvider>

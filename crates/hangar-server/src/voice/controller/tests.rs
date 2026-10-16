@@ -1311,3 +1311,28 @@ async fn computer_failure_and_call_end_clear_the_step() {
     let state = rig.state("encerrada sem etapa", |s| s["progress"].is_null()).await;
     assert_ne!(state["activity"], "working", "{state}");
 }
+
+/// O sim ao plano vira envio só depois do silêncio do microfone, como o envio direto, e "entregue" só depois da entrega real.
+#[tokio::test]
+async fn confirmed_plan_waits_for_silence_and_is_announced_only_after_delivery() {
+    let mut rig = rig(&[], None).await;
+    push_speech(&rig.push, "turn-1", "modo planejar");
+    push_tool(&rig.push, "m1", "set_mode", json!({"mode": "planejar"}), "turn-1");
+    assert_eq!(rig.reply("m1").await["success"], true);
+    push_speech(&rig.push, "turn-2", "anota o plano");
+    push_tool(&rig.push, "p1", "update_plan", json!({"markdown": "# Plano\n- passo único"}), "turn-2");
+    assert_eq!(rig.reply("p1").await["success"], true);
+    push_speech(&rig.push, "turn-3", "terminei, manda executar");
+    push_tool(&rig.push, "f1", "finish_plan", json!({"action": "executar"}), "turn-3");
+    rig.reply("f1").await;
+    rig.api.lock().unwrap().input_delay = Duration::from_millis(800);
+    push_speech(&rig.push, "turn-4", "isso, pode mandar");
+    push_tool(&rig.push, "f2", "finish_plan", json!({"action": "executar"}), "turn-4");
+    rig.push.send(json!({"method": "thread/realtime/transcript/delta", "params": {"threadId": "t1", "role": "user", "delta": "e"}})).unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(rig.api.lock().unwrap().started, 0, "ele ainda falava: nada saiu");
+    let reply = rig.reply("f2").await;
+    assert_eq!(reply["success"], true, "{reply}");
+    assert_eq!(rig.api.lock().unwrap().inputs.len(), 1, "a resposta só veio depois da entrega");
+    assert!(text(&reply).contains("entregue"), "{reply}");
+}

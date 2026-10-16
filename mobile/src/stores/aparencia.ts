@@ -268,7 +268,7 @@ export const useAparencia = create<Aparencia>((set, get) => {
     fundo: lerFundo(),
     // Passa pelo tema: com a Leitura Automática, imagem atrás liga o contraste do Texto.
     setFundo: (v) => material({ fundo: v }, () => prefs.set(K_FUNDO, v)),
-    imagemUri: prefs.getString(K_IMAGEM) ?? null,
+    imagemUri: papelNaPastaAtual(prefs.getString(K_IMAGEM) ?? null),
     setImagemUri: async (uri) => {
       if (!uri) {
         material({ imagemUri: null, fundo: 'flat' }, () => { prefs.remove(K_IMAGEM); prefs.set(K_FUNDO, 'flat'); });
@@ -360,6 +360,22 @@ export const useAparencia = create<Aparencia>((set, get) => {
     },
   };
 });
+
+// O iOS troca a pasta do app ao reinstalar: o caminho salvo aponta pra uma pasta que não existe mais.
+export function papelNaPastaAtual(salvo: string | null, pasta?: string | null): string | null {
+  const nome = salvo?.match(/\/(wallpaper-\d+\.jpg)$/)?.[1];
+  if (!nome) return salvo;
+  let atual = pasta;
+  // ponytail: require síncrono só no app; no teste de node o módulo nativo não carrega e o caminho fica como está.
+  if (atual === undefined) {
+    try { atual = (require('expo-file-system/legacy') as { documentDirectory: string | null }).documentDirectory; }
+    catch (err) {
+      if (typeof __DEV__ !== 'undefined') console.warn('wallpaper-folder-unavailable', err);
+      atual = null;
+    }
+  }
+  return atual ? `${atual}${nome}` : salvo;
+}
 
 // Nome novo a cada troca: o expo-image cacheia por uri, e regravar o mesmo caminho mostraria a foto antiga.
 async function copiarPapelDeParede(uri: string, anterior: string | null): Promise<string> {

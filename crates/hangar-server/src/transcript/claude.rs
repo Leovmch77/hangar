@@ -19,6 +19,25 @@ static INTERRUPTED: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A\[Request inter
 // transcript.py:76, 89, 95, 102-103
 static META_BLOCK: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)<system-reminder>.*?</system-reminder>"));
 static TASK_NOTIF: LazyLock<Regex> = LazyLock::new(|| py_re(r"<task-id>([^<]+)</task-id>"));
+// Parada pelo usuário: o Claude Code avisa só com as descrições dos agentes, sem task-id.
+static STOPPED_ONE: LazyLock<Regex> = LazyLock::new(|| py_re(r#"(?s)\ABackground agent "(.*)" was stopped by the user\.\z"#));
+static STOPPED_MANY: LazyLock<Regex> = LazyLock::new(|| py_re(r#"(?s)\A\d+ background agents were stopped by the user: "(.*)"\.\z"#));
+
+/// `_stopped_agents` (transcript.py): um fim de tarefa por descrição parada.
+fn stopped_agents(text: &str, id: &str, at: Option<f64>) -> Option<Vec<ChatEvent>> {
+    let text = strip(text);
+    let names: Vec<&str> = if let Some(m) = STOPPED_ONE.captures(text) {
+        vec![m.get(1)?.as_str()]
+    } else {
+        STOPPED_MANY.captures(text)?.get(1)?.as_str().split("\", \"").collect()
+    };
+    Some(names.into_iter().enumerate().map(|(k, name)| ChatEvent {
+        tool_use_id: Some(format!("task:stopped:{name}")),
+        result: Some("task-notification".into()),
+        ts: at,
+        ..event(ChatKind::ToolResult, format!("{id}:{k}"))
+    }).collect())
+}
 static AGENT_MSG: LazyLock<Regex> =
     LazyLock::new(|| py_re(r#"(?s)\A<agent-message from="([^"]+)"[^>]*>(.*)</agent-message>\z"#));
 static TEAMMATE_START: LazyLock<Regex> =
@@ -352,6 +371,9 @@ fn queue_operation(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatE
     if let Some(c) = teammate_events(queued, &format!("queued-teammate:{h}")) {
         return c;
     }
+    if let Some(stopped) = stopped_agents(q, &format!("queued-stopped:{h}"), None) {
+        return stopped;
+    }
     if lstrip(q).starts_with("<task-notification>") {
         return match TASK_NOTIF.captures(q) {
             Some(m) => {
@@ -406,6 +428,10 @@ fn attachment(obj: &Map<String, Value>, uid: &str) -> Vec<ChatEvent> {
             _ => Vec::new(),
         };
         let joined = parts.join("\n");
+        let prompt = att.get("prompt").and_then(Value::as_str).unwrap_or(&joined);
+        if let Some(stopped) = stopped_agents(prompt, uid, ts(obj)) {
+            return stopped;
+        }
         let text = strip(&joined);
         if text.is_empty() || is_command_meta(text) {
             return Vec::new();
@@ -715,6 +741,26 @@ mod tests {
             .into_iter().map(|e| e.id).collect::<Vec<_>>();
         assert_eq!(ids(att), vec!["delivery:d-1".to_string()]);
         assert_eq!(ids(rem), vec!["delivery:d-1".to_string()]);
+    }
+
+    #[test]
+    fn stop_by_the_user_ends_each_agent_by_its_description() {
+        let feed = |line: Value| LineParser::new(Provider::Claude).feed(line.to_string().as_bytes(), 0);
+        let many = feed(json!({"type": "attachment", "uuid": "u-stop", "timestamp": "2026-10-16T10:31:21.479Z",
+            "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                "prompt": "2 background agents were stopped by the user: \"Revisar a Task 4\", \"Validar a tela\"."}}));
+        let got: Vec<_> = many.iter().map(|e| (e.id.as_str(), e.tool_use_id.as_deref(), e.result.as_deref(), e.ts.is_some())).collect();
+        assert_eq!(got, vec![("u-stop:0", Some("task:stopped:Revisar a Task 4"), Some("task-notification"), true),
+            ("u-stop:1", Some("task:stopped:Validar a tela"), Some("task-notification"), true)]);
+        let one = feed(json!({"type": "queue-operation", "operation": "enqueue",
+            "content": "Background agent \"Validar a tela\" was stopped by the user."}));
+        assert_eq!(one.iter().map(|e| e.tool_use_id.as_deref()).collect::<Vec<_>>(), vec![Some("task:stopped:Validar a tela")]);
+        assert!(one[0].id.starts_with("queued-stopped:") && one[0].id.ends_with(":0"));
+        let blocks = feed(json!({"type": "attachment", "uuid": "u-b", "timestamp": "2026-10-16T10:31:21.479Z",
+            "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                "prompt": [{"type": "text", "text": "Background agent \"Validar a tela\" was stopped by the user."}]}}));
+        assert_eq!(blocks.iter().map(|e| (e.id.as_str(), e.tool_use_id.as_deref())).collect::<Vec<_>>(),
+            vec![("u-b:0", Some("task:stopped:Validar a tela"))]);
     }
 
     #[test]
