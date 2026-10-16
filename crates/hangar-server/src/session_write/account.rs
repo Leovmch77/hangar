@@ -164,9 +164,7 @@ pub(crate) fn account_refusal(failure:&ReopenFailure,refused:&str) -> (StatusCod
 /// sessão não é do Rust.
 pub(crate) async fn reopen_in(st:&Arc<AppState>,runtime:&Arc<crate::runtime::gateway::RuntimeRegistry>,name:&str,spec:&SessionSpec,
     destination:&str,leave_engine:bool,reason:ChangeReason) -> Option<Result<crate::runtime::claude_reopen::Reopened,ReopenFailure>> {
-    // Read-only estacionada à espera do terminal protegido: a troca a reabre no terminal, nunca parada.
-    let parked=spec.read_only && spec.surface==crate::session_open::Surface::Headless;
-    let surface=parked.then_some(crate::session_open::Surface::Terminal);
+    let surface=spec.parked().then_some(crate::session_open::Surface::Terminal);
     let change=SessionChange { reason,surface,account:Some(Account::Claude { config_dir:destination.to_owned() }),
         permission_mode:None,model:None,effort:None,service_tier:None };
     let mover=MoveConversation { env:runtime.codex_environment(),windows:cfg!(windows),leave_engine };
@@ -241,8 +239,7 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
         _=>false,
     };
     let same=|a:&Path,b:&Path|a==b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a,b)|a==b);
-    let parked=spec.read_only && spec.surface==crate::session_open::Surface::Headless;
-    if !leave_engine && !parked && same(&account_dir(&env,&spec),Path::new(&destination)) {
+    if !leave_engine && !spec.parked() && same(&account_dir(&env,&spec),Path::new(&destination)) {
         return reply(Some(&parts.headers),StatusCode::OK,json!({"ok":true,"config_dir":destination}));
     }
     let outcome=reopen_in(&st,&runtime,&name,&spec,&destination,leave_engine,ChangeReason::AccountSwitch).await;

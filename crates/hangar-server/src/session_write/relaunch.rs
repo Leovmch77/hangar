@@ -75,13 +75,9 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         return forward_whole(&st, parts, bytes, &fwd).await;
     };
     let panels = Some(st.term.clone());
-    let home = st.list.env().dirs.as_ref().map(|dirs| dirs.home.clone());
     let st2 = st.clone();
     let outcome = detached_relaunch(async move {
         if let Some(codex) = during_life_change(&st2, &name, runtime.relaunch_codex(&name, terminal, panels)).await { return Some(Relaunched::Codex(codex)); }
-        if home.as_deref().is_some_and(|home| crate::runtime::codex_relaunch::transfer_open(home, &name, None, None)) {
-            return Some(Relaunched::Codex(Err(RuntimeError::new("session_transfer_busy", "a sessão está trocando de agente"))));
-        }
         let surface = if terminal { Surface::Terminal } else { Surface::Headless };
         let change = SessionChange { reason: ChangeReason::ModeSwitch, surface: Some(surface), account: None, permission_mode: None,
             model: None, effort: None, service_tier: None };

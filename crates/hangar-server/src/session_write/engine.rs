@@ -47,7 +47,7 @@ pub(crate) async fn switch(st:&Arc<AppState>,runtime:&Arc<RuntimeRegistry>,name:
     if (wanted.model.is_some() || wanted.effort.is_some()) && current.as_deref()!=Some(account.as_str()) {
         return (StatusCode::CONFLICT,detail_body("erro_cliproxy_conta","a conta da sessão mudou; atualize a lista de modelos",json!({})));
     }
-    let parked=spec.read_only && spec.surface==crate::session_open::Surface::Headless;
+    let parked=spec.parked();
     let same=current.as_deref()==Some(account.as_str()) && wanted.model.is_none() && wanted.effort.is_none() && wanted.tier.is_none();
     if same && !parked {return (StatusCode::OK,json!({"ok":true,"engine_account":account}));}
     // O modelo com o prefixo da conta, conferido no catálogo de agora: o cache não sustenta a recusa aqui.

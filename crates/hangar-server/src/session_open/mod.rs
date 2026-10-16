@@ -344,6 +344,9 @@ impl SessionSpec {
         }
     }
 
+    /// Read-only estacionada à espera do terminal protegido: trocar de conta a reabre no terminal.
+    pub fn parked(&self) -> bool { self.read_only && self.surface == Surface::Headless }
+
     /// Reabrir = spec gravado ⊕ mudança.
     pub fn with(&self, change: &SessionChange) -> SessionSpec {
         let mut next = self.clone();
