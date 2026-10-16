@@ -100,6 +100,18 @@ pub fn claim_guest(claude_base: &Path, session: &str, guest: &str, life: Option<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
 }
 
+/// O convidado do envelope da ponte: `guest` ausente ou nulo é o dono; o id, o convidado dele.
+pub fn bridge_guest(envelope: &Value, claude_base: &Path) -> Result<Option<LoginGuest>, OpenError> {
+    let malformed = || OpenError::new(400, "erro_corpo_invalido", "guest é o id do convidado ou null");
+    if envelope.get("guest_root").is_some() { return Err(malformed()); }
+    match &envelope["guest"] {
+        Value::Null => Ok(None),
+        Value::String(id) if !id.is_empty() => guest_by_id(claude_base, id).map(Some)
+            .ok_or_else(|| OpenError::new(403, "erro_criacao_sessao", "convidado inexistente")),
+        _ => Err(malformed()),
+    }
+}
+
 /// O convidado `id` do `guests.json`, para a ponte do Connect, que chega com o id já autenticado lá.
 pub fn guest_by_id(claude_base: &Path, id: &str) -> Option<LoginGuest> {
     let raw: Value = serde_json::from_slice(&std::fs::read(claude_base.join("guests.json")).ok()?).ok()?;
@@ -435,12 +447,9 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let Ok(request) = SessionOpenRequest::parse(envelope["request"].to_string().as_bytes()) else {
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     };
-    let guest = match envelope["guest"].as_str() {
-        Some(id) => match guest_by_id(&AccountEnvironment::capture().claude_base, id) {
-            Some(guest) => Some(guest),
-            None => return reply(&OpenError::new(403, "erro_criacao_sessao", "convidado inexistente")),
-        },
-        None => None,
+    let guest = match bridge_guest(&envelope, &AccountEnvironment::capture().claude_base) {
+        Ok(guest) => guest,
+        Err(error) => return reply(&error),
     };
     let caller = guest.as_ref().map_or(OpenCaller::Owner, |g| OpenCaller::Guest { root: g.root.clone() });
     match decide_detached(&st, request, caller, guest).await {

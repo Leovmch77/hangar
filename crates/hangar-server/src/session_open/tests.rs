@@ -1208,6 +1208,23 @@ fn the_guest_claim_writes_guests_json_under_the_shared_lock() {
     assert_eq!(written["sessions"]["s4"], json!({"guest": "g1", "life": null}));
 }
 
+/// A ponte só aceita o id de um convidado que existe, ou nada (o dono); qualquer outra forma,
+/// inclusive o `guest_root` antigo, é recusada em vez de virar o dono.
+#[test]
+fn the_bridge_refuses_a_guest_field_that_is_not_an_id() {
+    let base = tempfile::tempdir().unwrap();
+    std::fs::write(base.path().join("guests.json"), json!({"guests": [{"id": "g1", "name": "Ana", "token_hash": "h", "root": "/casa/ana",
+        "sees_owner": false, "owner_sees": true}], "sessions": {}}).to_string()).unwrap();
+    let guest = |envelope: Value| server::bridge_guest(&envelope, base.path());
+    assert_eq!(guest(json!({"request": {}})).ok(), Some(None));
+    assert_eq!(guest(json!({"guest": null})).ok(), Some(None));
+    assert_eq!(guest(json!({"guest": "g1"})).ok().flatten().map(|g| g.root), Some(PathBuf::from("/casa/ana")));
+    assert_eq!(guest(json!({"guest": "nada"})).err().map(|e| e.status), Some(403));
+    for bad in [json!({"guest": 1}), json!({"guest": {"id": "g1"}}), json!({"guest": ""}), json!({"guest_root": "/casa/ana"})] {
+        assert_eq!(guest(bad.clone()).err().map(|e| e.status), Some(400), "{bad}");
+    }
+}
+
 /// A fila que a sessão morta deixou no nome sai antes do pane novo (o histórico do Rust a mostraria
 /// como mensagens dela); a de outro nome fica.
 #[test]
