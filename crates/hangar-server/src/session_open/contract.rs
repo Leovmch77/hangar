@@ -63,7 +63,9 @@ pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()
 #[derive(Default)]
 struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, runtime_requests: Vec<Value>, diary: Vec<Value>,
     /// Os nomes que a abertura limpou (grupo antigo, fila, `then`): só o restore mostra, porque o Python não grava.
-    cleaned: Vec<String> }
+    cleaned: Vec<String>,
+    /// O passo da criação visto pelo aquecimento do Codex; só aparece com a criação acompanhada.
+    progress_seen: Vec<Value> }
 
 /// O tmux em memória do harness: o estado inicial do cenário, os `new-session` gravados e as consultas
 /// respondidas pelo estado.
@@ -250,7 +252,10 @@ impl OpenHost for Host {
             // A primeira mensagem só existe no Rust (o Python a recusava sem terminal): vai junto quando há.
             let mut request = json!({"op": "codex.aquecer_sem_terminal", "name": name});
             if let Some(text) = initial_prompt { request["initial_prompt"] = json!(text); }
-            self.record.lock().unwrap().runtime_requests.push(request);
+            let step = super::open::progress(name)["step"].clone();
+            let mut record = self.record.lock().unwrap();
+            if !step.is_null() { record.progress_seen.push(step); }
+            record.runtime_requests.push(request);
             Vec::new()
         })
     }
@@ -370,5 +375,6 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     let mut out = json!({"steps": steps, "subprocesses": record.subprocesses, "probes": record.probes, "rust_bridge": record.rust_bridge,
         "runtime_requests": record.runtime_requests, "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary});
     if restored { out["cleaned"] = json!(record.cleaned); }
+    if !record.progress_seen.is_empty() { out["progress_seen"] = json!(record.progress_seen); }
     out
 }
