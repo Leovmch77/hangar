@@ -107,9 +107,8 @@ from app import runner
 from app import project_shortcuts
 from app import projects
 from app import archive_providers
-from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
-                         list_conversations, list_folders, list_recent, move_conversation,
-                         tail_events)
+from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl,
+                         list_conversations, list_folders, list_recent, tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
 from app import pair
@@ -599,6 +598,8 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
 _PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$")
 _PLANOS_ESCRITA = re.compile(r"^/api/sessions/[^/]+/plan-(pin|step|archive)$")
 _CATALOGO = "/api/claude/customizations"
+# Retomar (Arquivo e sessão viva): a abertura e a reabertura são do Rust.
+_RETOMAR = re.compile(r"^/api/(archive/[^/]+/[^/]+|sessions/[^/]+)/resume$")
 
 
 @app.middleware("http")
@@ -610,6 +611,9 @@ async def _planos_pelo_rust(request: Request, call_next):
         if guest_of(request) is not None or guest_users.current.get() is not None:
             return JSONResponse({"detail": erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono")}, status_code=403)
         return await _repasse_ao_rust(request, erro("claude_customizations_unavailable", "a seleção de plugins e skills precisa do servidor Rust"),
+                                      "/__hangar_server/forwarded")
+    if metodo == "POST" and _RETOMAR.match(path):
+        return await _repasse_ao_rust(request, erro(registry_mod.SessionOpenNeedsRust.code, "abrir e reabrir sessão precisam do servidor Rust, que não está rodando"),
                                       "/__hangar_server/forwarded")
     padrao = _PLANOS_ESCRITA if metodo == "POST" else _PLANOS_LEITURA if metodo == "GET" else None
     if padrao is None or not padrao.match(path):
@@ -2782,36 +2786,6 @@ def loop_resolve(name: str, body: LoopResolve):
         loop_mod._reprompt(link, cur, "conclusão rejeitada pelo usuário", None,
                            ctx.deliver, ctx.enqueue)
     return {"loop": link.get()}
-
-
-class ResumeBody(_StrictBody):
-    # None = "escolha por mim" (caso seguro) ou pede confirmacao (caso ambiguo). uuid = o candidato que o
-    # usuario escolheu no sheet de confirmacao.
-    session_id: str | None = None
-
-
-@app.post("/api/sessions/{name}/resume", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-def resume_session(name: str, body: ResumeBody):
-    # Relança uma sessao "sem id" com `claude --resume <uuid>` pra passar a rastrea-la (chat volta a abrir,
-    # continuando a conversa). Sem session_id: se so ha esta sessao no cwd, retoma o transcript mais
-    # recente direto; se ha outras (ambiguo), devolve os candidatos pro app confirmar antes.
-    sid = body.session_id
-    if sid is None:
-        try:
-            _, ambiguous, candidates = registry.resume_candidates(name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        if not candidates:
-            raise HTTPException(404, detail=erro("erro_transcript_ausente", "nenhum transcript pra retomar neste diretorio"))
-        if ambiguous and len(candidates) > 1:
-            return {"ambiguous": True, "candidates": candidates}
-        sid = candidates[0]["session_id"]
-    try:
-        return registry.resume(name, sid)
-    except ValueError as e:
-        raise HTTPException(409, str(e))
-    finally:
-        _invalidate_lists()
 
 
 @app.get("/api/sessions/{name}/history", dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
@@ -7763,194 +7737,6 @@ def archive_image(project: str, session_id: str, uuid: str, idx: int,
         raise HTTPException(404, detail=erro("erro_imagem_nao_encontrada", "image not found"))
     raw, media = got
     return Response(content=raw, media_type=media, headers={"Cache-Control": "max-age=31536000, immutable"})
-
-
-class ResumeArchivedBody(_StrictBody):
-    # Motor de modelo pro resume do Arquivo. O pane que rodava a sessao original ja morreu -> nao ha
-    # /proc pra descobrir o motor de entao (ver registry._engine_of); quem retoma escolhe de novo.
-    # Sem escolha, volta na conta Anthropic (comportamento de hoje).
-    engine: str | None = None
-    engine_account: str | None = None
-    model: str | None = None
-    # A CONTA em que a conversa continua. Omitida, e a dona do transcript (descoberta no disco). Outra
-    # conta: o transcript MUDA de conta antes do `--resume`, porque rodado na conta errada ele morre
-    # na hora com "No conversation found with session ID".
-    config_dir: str | None = None
-    # Agente dono da conversa. Pi e Kimi retomam com o comando DELES (`pi --session-id`,
-    # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
-    provider: str = "claude"
-    codex_account: str | None = None
-    # Nome com que a sessão volta (o que ela tinha ao fechar); ocupado ganha -2, -3. Omitido: o da pasta.
-    name: str | None = None
-
-
-def _sessao_com_transcript(jsonl: Path) -> str | None:
-    """Nome da sessao viva que escreve neste transcript, ou None."""
-    alvo = os.path.realpath(str(jsonl))
-    for s in registry.list():
-        if s.jsonl and os.path.realpath(s.jsonl) == alvo:
-            return s.name
-    return None
-
-
-@app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
-          response_model=SessionInfo)
-def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = ResumeArchivedBody()):
-    from app.conversation_history import archive_transfer, source_rows, verify_boundary, HistoryError
-    # "Retomar conversa" do Arquivo: sobe uma sessao tmux NOVA no cwd original com `claude --resume
-    # <uuid>` -- reusa registry.create (nome/config_dir/spawn tmux ja tratados), so troca o comando pro
-    # uuid EXISTENTE (nao um novo transcript). Nome derivado do basename do cwd, igual ao
-    # CreateSessionSheet do front; colisao suffixa -2/-3... (mesmo esquema, do lado do backend pq aqui
-    # nao ha form pro usuario escolher nome).
-    if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    if body.provider != "claude" and body.provider not in archive_providers.PROVIDERS:
-        raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
-    if body.codex_account is not None and body.provider != "codex":
-        raise HTTPException(400, detail=erro("codex_account_so_codex",
-                                             "codex_account só vale para provider codex"))
-    # O id da conversa Codex e o uuid do FIM do nome do rollout, e e ele que o `codex resume` recebe.
-    # Um nome fora desse padrao nao tem id pra retomar — e dizer "caminho invalido" (o que o
-    # ValueError generico daqui a pouco daria) manda procurar defeito no lugar errado.
-    if body.provider == "codex" and not archive_providers.UUID_RE.match(session_id):
-        raise HTTPException(400, detail=erro("erro_rollout_sem_id",
-                                             "nome de rollout sem id de conversa"))
-    # Conta omitida (link antigo, chamador que nao sabe): descobre no disco. Deixar None aqui subia
-    # o pane na conta do backend e o `--resume` morria com "No conversation found with session ID".
-    # Conversa que nao existe nao vira erro AQUI: o archive_cwd logo abaixo faz a mesma busca e e
-    # ele quem devolve o 400/404 -- duplicar a recusa so daria duas mensagens pro mesmo caso.
-    # So o Claude tem conta: Pi e Kimi guardam transcript fora do config dir.
-    cfg = body.config_dir
-    # Conta pedida diferente da dona: a conversa MUDA de conta, mas so no fim, depois de toda
-    # recusa possivel -- mover e depois negar deixaria a conversa fora do lugar por um 409.
-    # `mover` guarda a conta de origem (o "None" da conta do processo tambem e origem valida).
-    mover: tuple[str | None] | None = None
-    if body.provider == "claude":
-        try:
-            dona = conta_de(project, session_id)
-            if cfg is None:
-                cfg = dona
-            elif dona != cfg:
-                # Conversa ABERTA nao muda de conta: o processo dela ainda escreve no arquivo, e o
-                # rename deixaria ele gravando num inode que a lista nao acha mais.
-                viva = _sessao_com_transcript(archive_jsonl(project, session_id, dona))
-                if viva:
-                    raise HTTPException(409, detail=erro("erro_conversa_viva",
-                                                         "conversa aberta nao muda de conta",
-                                                         sessao=viva))
-                mover = (dona,)
-        except (ValueError, FileNotFoundError):
-            pass
-    origem_codex_account = body.codex_account
-    try:
-        if body.provider == "codex":
-            origem_path = archive_jsonl(project, session_id, cfg, body.provider,
-                                        body.codex_account)
-            owner = codex_accounts.account_for_rollout(origem_path)
-            if owner is None:
-                raise FileNotFoundError(session_id)
-            if origem_codex_account is not None and owner.id != origem_codex_account:
-                raise codex_accounts.AccountError(
-                    409, "codex_account_archive_mismatch",
-                    {"account_id": origem_codex_account, "origin_account": owner.id},
-                )
-            origem_codex_account = owner.id
-            transfer = archive_transfer(origem_path)
-            if transfer:
-                source_rows(transfer.source)
-                verify_boundary(transfer, origem_path)
-            cwd = archive_cwd(project, session_id, cfg, body.provider, origem_codex_account)
-        else:
-            cwd = archive_cwd(project, session_id, mover[0] if mover else cfg, body.provider)
-    except codex_accounts.AccountError as e:
-        raise _erro_conta_codex(e) from None
-    except HistoryError as exc:
-        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
-    except ValueError:
-        raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
-    except FileNotFoundError:
-        raise HTTPException(404, detail=erro("erro_transcript_nao_encontrado", "transcript not found"))
-    if not cwd:
-        raise HTTPException(422, detail=erro("erro_cwd_ausente", "cwd not found in transcript"))
-    # Mesmo transcript ja aberto numa sessao: um segundo `--resume` poria dois processos gravando
-    # no mesmo arquivo. Antes do move e de qualquer spawn.
-    try:
-        viva = _sessao_com_transcript(archive_jsonl(
-            project, session_id, mover[0] if mover else cfg, body.provider,
-            origem_codex_account if body.provider == "codex" else None))
-    except (ValueError, FileNotFoundError):
-        viva = None
-    if viva:
-        raise HTTPException(409, detail=erro("erro_conversa_viva", "conversa já está aberta",
-                                             sessao=viva))
-    if body.engine is not None and body.engine not in engines.listar():
-        raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
-    fixed_model = body.model
-    if body.engine_account is not None:
-        if body.provider != "claude" or not body.engine:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
-        account = _fixed_engine_account(body.engine, body.engine_account)
-        cfg_engine = engines.listar()[body.engine]
-        from app.cliproxy_accounts import base_model
-        try:
-            fixed_model = base_model(body.model or cfg_engine["model"], account["prefix"])
-            account_models = engine_probe.listar_modelos(cfg_engine["base_url"], cfg_engine["api_key"])
-            models = cliproxy.validate_models(cfg_engine, fixed_model, account, account_models)
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-        except RuntimeError:
-            raise HTTPException(502, detail=erro("erro_cliproxy_conta", "catálogo do CLIProxyAPI indisponível")) from None
-        catalog_id = engines.catalog_model(fixed_model)
-        if not any(m["id"] == catalog_id for m in models):
-            raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", "modelo indisponível nesta conta ChatGPT"))
-    elif body.model is not None:
-        try:
-            model_args.validar(body.provider, body.model, None)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from None
-    base = sanitize_session_name(body.name or Path(cwd).name) or "sessao"
-    name, i = base, 2
-    # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
-    # ja usado por uma sessao Codex ou sem terminal passava por aqui e o conflito estourava la
-    # dentro, como um 409 com a mensagem de outro assunto.
-    while _nome_ocupado(name):
-        name = f"{base}-{i}"
-        i += 1
-    if mover:
-        try:
-            move_conversation(project, session_id, cfg)
-        except FileExistsError:
-            raise HTTPException(409, detail=erro("erro_conversa_ja_na_conta",
-                                                 "a conta destino ja tem esta conversa"))
-        except OSError as e:
-            _log.exception("mover conversa %s para %s falhou", session_id, cfg)
-            raise HTTPException(500, detail=erro("erro_mover_conversa",
-                                                 f"nao consegui mover a conversa de conta: {e}",
-                                                 erro=str(e)))
-    try:
-        extras = {"codex_account": origem_codex_account} \
-            if body.provider == "codex" and origem_codex_account is not None else {}
-        if body.engine_account is not None:
-            extras["engine_account"] = body.engine_account
-            extras["engine_models"] = account_models
-        if fixed_model is not None:
-            extras["model"] = fixed_model
-        if body.provider == "codex" and transfer:
-            extras.update(transfer_id=transfer.id, transfer_rollout_path=str(origem_path),
-                          tool_output_token_limit=transfer.destination_meta["tool_output_token_limit"])
-        info = registry.create(name, cwd, config_dir=cfg, provider=body.provider,
-                               resume_session_id=session_id, engine=body.engine, **extras)
-        _invalidate_lists()
-        return info
-    except ValueError as e:
-        if mover:
-            # Sessao nao nasceu: a conversa volta pra conta de origem. Falha aqui nao pode
-            # esconder o 409 original, mas tambem nao pode passar calada.
-            try:
-                move_conversation(project, session_id, mover[0])
-            except OSError:
-                _log.exception("conversa %s ficou em %s: rollback do move falhou", session_id, cfg)
-        raise HTTPException(409, str(e))
 
 
 # ── MCP hangar-computer-control: liga/desliga e configura nos .claude.json de todas as contas ──

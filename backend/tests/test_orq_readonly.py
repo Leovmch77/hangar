@@ -111,24 +111,6 @@ def test_runtime_inside_code_is_refused(monkeypatch, tmp_path):
     assert run.call_count == 1
 
 
-@pytest.mark.parametrize("method", ["resume", "resume_candidates"])
-def test_live_resume_refuses_before_killing_protected_pane(monkeypatch, tmp_path, method):
-    from app import registry
-
-    reg = registry.SessionRegistry(projects_dir=tmp_path)
-    monkeypatch.setattr(reg, "_pane_of", lambda _: {"pid": 123, "cwd": str(tmp_path)})
-    monkeypatch.setattr(registry, "_descendant_pids", lambda _: [123])
-    monkeypatch.setattr(registry, "_cmdline", lambda _: "bwrap --setenv HANGAR_ORQ_READ_ONLY 1")
-    kill = Mock()
-    monkeypatch.setattr(registry.tmux, "kill_session", kill)
-    args = ["protected"]
-    if method == "resume":
-        args += ["12345678-1234-1234-1234-123456789abc"]
-    with pytest.raises(ValueError, match="recrie com --read-only"):
-        getattr(reg, method)(*args)
-    kill.assert_not_called()
-
-
 _SID = "33333333-3333-3333-3333-333333333333"
 _PREFIX = ["/usr/bin/bwrap", "--bind", "/", "/", "--setenv", "HANGAR_ORQ_READ_ONLY", "1", "--"]
 

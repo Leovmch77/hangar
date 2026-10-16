@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import subprocess
@@ -494,20 +493,6 @@ def test_claude_json_de_segue_o_mesmo_e_config_dir(monkeypatch, tmp_path):
         assert tmux.claude_json_de(None) == tmp_path / ".claude.json"
         assert tmux.claude_json_de(str(padrao)) == tmp_path / ".claude.json"
         assert tmux.claude_json_de(conta) == Path(conta) / ".claude.json"
-
-
-def test_pretrust_escreve_no_json_que_a_sessao_vai_ler(monkeypatch, tmp_path):
-    """O pre-trust do create() e o `-e` da criacao tem que apontar pro MESMO arquivo."""
-    from app import registry
-
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    padrao = _casa_home(monkeypatch, tmp_path)
-    padrao.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
-    registry._pretrust_cwd("/tmp/pasta-nova", None)
-    lido = json.loads((tmp_path / ".claude.json").read_text(encoding="utf-8"))
-    assert lido["projects"]["/tmp/pasta-nova"]["hasTrustDialogAccepted"] is True
-    assert not (padrao / ".claude.json").exists()
 
 
 def test_new_hidden_shell_segue_a_mesma_regra_do_config_dir(monkeypatch, tmp_path):

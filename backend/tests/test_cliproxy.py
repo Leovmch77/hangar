@@ -106,13 +106,9 @@ def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize("field", ["_engine_catalog", "engine_account_home", "engine_account_base_url"])
 def test_internal_account_binding_cannot_be_supplied_in_creation_body(cli, monkeypatch, field):
-    from app import api
-    create = MagicMock()
-    monkeypatch.setattr(api.registry, "create", create)
     response = cli.post("/api/sessions", headers=AUTH, json={
         "name": "fixed", "cwd": "/tmp", "engine": "proxy", "engine_account": "default", field: "arbitrary"})
     assert response.status_code == 422, response.text
-    create.assert_not_called()
 
 
 def test_selected_models_and_routes_never_fall_back(tmp_path, monkeypatch):
@@ -266,27 +262,6 @@ def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "erro_fast_indisponivel"
     apply.assert_not_called()
-
-
-@pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.5[1m]"])
-def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, monkeypatch, model):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    sid = "11111111-1111-1111-1111-111111111111"
-    monkeypatch.setattr(api, "archive_cwd", lambda *a: str(tmp_path))
-    monkeypatch.setattr(api, "conta_de", lambda *a: None)
-    monkeypatch.setattr(api, "archive_jsonl", lambda *a: tmp_path / f"{sid}.jsonl")
-    monkeypatch.setattr(api, "_sessao_com_transcript", lambda *a: None)
-    monkeypatch.setattr(api, "_nome_ocupado", lambda *a: False)
-    create = MagicMock(return_value=SessionInfo(name="archived", provider="claude"))
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post(f"/api/archive/project/{sid}/resume", headers=AUTH, json={
-        "engine": "proxy", "engine_account": "default", "model": model})
-    assert response.status_code == 200, response.text
-    assert create.call_args.kwargs["engine_account"] == "default"
-    assert create.call_args.kwargs["model"] == model
-    assert create.call_args.kwargs["resume_session_id"] == sid
 
 
 def test_baton_forwards_account_to_shared_creation(tmp_path, monkeypatch):

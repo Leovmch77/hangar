@@ -153,9 +153,6 @@ def test_varre_todas_as_contas(tmp_path, monkeypatch):
         (SID, None, ""),
         (OUTRO_SID, str(cdir), "Trabalho"),
     }
-    # Retomar precisa da conta certa, e ela e descoberta no disco quando ninguem a informa.
-    assert archive.conta_de("-home-u-proj", OUTRO_SID) == str(cdir)
-    assert archive.conta_de("-home-u-proj", SID) is None
     # Link direto (so projeto + uuid) continua abrindo conversa de outra conta.
     assert archive.archive_jsonl("-home-u-proj", OUTRO_SID).parent.parent.parent == cdir
 
@@ -256,42 +253,3 @@ def test_archive_por_cwd_filtra_provider_antes_do_limite(tmp_path, monkeypatch):
                                          provider="codex")
     assert [entry.session_id for entry in entries] == [sid]
 
-
-def test_move_conversation_leva_jsonl_e_pasta_irma(tmp_path, monkeypatch):
-    # Retomar numa conta que nao e a dona: a conversa muda de conta inteira (jsonl + <uuid>/) e
-    # some da origem -- copia deixaria a mesma conversa listada duas vezes.
-    cdir = _conta(tmp_path, monkeypatch, "conta-b", "Trabalho")
-    _write_transcript(tmp_path / "-home-u-proj")
-    (tmp_path / "-home-u-proj" / SID / "tool-results").mkdir(parents=True)
-
-    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is True
-    assert (cdir / "projects" / "-home-u-proj" / f"{SID}.jsonl").is_file()
-    assert (cdir / "projects" / "-home-u-proj" / SID / "tool-results").is_dir()
-    assert not (tmp_path / "-home-u-proj" / f"{SID}.jsonl").exists()
-    assert not (tmp_path / "-home-u-proj" / SID).exists()
-    assert archive.conta_de("-home-u-proj", SID) == str(cdir)
-    # Ja esta na conta pedida: nada a fazer.
-    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is False
-    # Destino ja tem o uuid: recusa em vez de sobrescrever.
-    _write_transcript(tmp_path / "-home-u-proj", text="homonima")
-    with pytest.raises(FileExistsError):
-        archive.move_conversation("-home-u-proj", SID, None)
-
-
-def test_move_conversation_nao_deixa_metade_em_cada_conta(tmp_path, monkeypatch):
-    # A pasta irma nao move (ex.: EXDEV): o jsonl volta pra origem e o erro sobe.
-    cdir = _conta(tmp_path, monkeypatch, "conta-b", "Trabalho")
-    _write_transcript(tmp_path / "-home-u-proj")
-    (tmp_path / "-home-u-proj" / SID / "tool-results").mkdir(parents=True)
-    real = os.replace
-
-    def _falha_na_pasta(src, dst):
-        if str(src).endswith(SID):
-            raise OSError(18, "Invalid cross-device link")
-        return real(src, dst)
-    monkeypatch.setattr(archive.os, "replace", _falha_na_pasta)
-    with pytest.raises(OSError):
-        archive.move_conversation("-home-u-proj", SID, str(cdir))
-    assert (tmp_path / "-home-u-proj" / f"{SID}.jsonl").is_file()
-    assert (tmp_path / "-home-u-proj" / SID / "tool-results").is_dir()
-    assert not (cdir / "projects" / "-home-u-proj" / f"{SID}.jsonl").exists()

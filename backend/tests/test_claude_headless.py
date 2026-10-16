@@ -813,38 +813,6 @@ def test_sessao_parada_fica_ociosa_sem_subir_processo(sidecar, monkeypatch):
     _run(fluxo())
 
 
-def test_registry_cria_lista_e_mata_sem_tmux(tmp_path, monkeypatch):
-    from app import registry as R
-    monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
-    monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
-    monkeypatch.setattr(R.tmux, "list_panes_all", lambda: {})
-    monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
-    reg = R.SessionRegistry(str(tmp_path / "projects"))
-    info = reg.create("hl", str(tmp_path), provider="claude", headless=True, model="haiku", permission_mode="manual")
-    assert info.headless and info.provider == "claude" and info.jsonl.endswith(".jsonl")
-    assert S.load("hl")["cwd"] == str(tmp_path)
-    with pytest.raises(ValueError):
-        reg.create("hl", str(tmp_path), provider="pi")              # nome ocupado pelo sidecar
-    with pytest.raises(ValueError):
-        reg.create("x", str(tmp_path), provider="pi", headless=True)  # só claude
-    listadas = [i for i in reg.list() if i.name == "hl"]
-    assert len(listadas) == 1 and listadas[0].headless and listadas[0].tracked
-    reg.kill("hl")
-    assert not S.exists("hl")
-
-
-def test_criar_sem_terminal_pelo_python_pede_o_rust(tmp_path, monkeypatch):
-    """Abrir o Claude sem terminal é do Rust: o Python recusa e não grava sidecar."""
-    from app import registry as R
-    monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
-    monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
-    monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
-    reg = R.SessionRegistry(str(tmp_path / "projects"))
-    with pytest.raises(R.SessionOpenNeedsRust):
-        reg.create("hl", str(tmp_path), provider="claude", headless=True)
-    assert not S.exists("hl")
-
-
 def test_turno_com_erro_vira_problema_e_sucesso_limpa(adapter):
     sess = adapter._sessions["s1"]
 
@@ -993,7 +961,6 @@ def test_registry_renomeia_sem_tmux(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
     monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
     monkeypatch.setattr(R.tmux, "list_panes_all", lambda: {})
-    monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
     reg = R.SessionRegistry(str(tmp_path / "projects"))
     S.save("hl", str(tmp_path), "22222222-2222-2222-2222-222222222222")   # quem cria é o Rust
     reg.rename("hl", "hl2")

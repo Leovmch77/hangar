@@ -6,7 +6,6 @@ import json
 import os
 import threading
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -75,30 +74,6 @@ def test_resolve_tracked_uses_bridge_in_rust_mode(rust, monkeypatch):
     assert reg.resolve_tracked("alfa", "/p", pid=42) == ("/x/a.jsonl", True)
     assert reg.resolve("alfa", "/p") == "/x/a.jsonl"
     assert seen == [("alfa", "/p", 42), ("alfa", "/p", None)]
-
-
-def test_create_seeds_rust_cache(rust, tmp_path, monkeypatch):
-    seeded, forgotten, renamed = [], [], []
-    monkeypatch.setattr(list_bridge, "seed", lambda name, jsonl: seeded.append((name, jsonl)))
-    monkeypatch.setattr(list_bridge, "forget", forgotten.append)
-    monkeypatch.setattr(list_bridge, "rename", lambda old, new: renamed.append((old, new)))
-    monkeypatch.setattr(registry, "_retire_waiting_runtime", lambda _name: None)
-    reg = SessionRegistry(projects_dir=tmp_path)
-    # Retomada do Arquivo: Claude com terminal novo nasce no Rust, que semeia o próprio cache.
-    sid = "12345678-1234-1234-1234-123456789abc"
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True):
-        info = reg.create("cc", "/home/u/p", resume_session_id=sid)
-    # Nome reusado não herda nada da morta, e o transcript novo vale antes de o claude escrevê-lo.
-    assert forgotten == ["cc"]
-    assert seeded == [("cc", info.jsonl)]
-    # Esquecer que falha segura a criação: o nome reusado leria a conversa da morta.
-    monkeypatch.setattr(list_bridge, "forget", _down)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_session, \
-         pytest.raises(list_bridge.ListBridgeError):
-        reg.create("dd", "/home/u/p", resume_session_id=sid)
-    new_session.assert_not_called()
 
 
 def test_registry_waits_pending_then_fails_with_code(monkeypatch):

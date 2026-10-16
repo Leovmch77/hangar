@@ -466,9 +466,8 @@ pub async fn creation_progress(State(st): State<Arc<AppState>>, ConnectInfo(peer
     response
 }
 
-/// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e, com a
-/// sucessora com terminal (Claude, Pi, omp, Kimi), devolve o pedido de abertura em vez de abrir; o Rust
-/// abre com o kick-off como primeira mensagem. A sucessora Codex ou sem terminal o Python cria.
+/// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e devolve o
+/// pedido de abertura da sucessora em vez de abrir; o Rust a abre com o kick-off como primeira mensagem.
 pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
     let (mut parts, body) = req.into_parts();
