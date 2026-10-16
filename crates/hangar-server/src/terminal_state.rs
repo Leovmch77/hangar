@@ -92,7 +92,7 @@ struct Patterns {
     cursor: Regex, pi_cursor: Regex, omp_cursor: Regex, embedded: Regex,
     rule: Regex, box_bottom: Regex, frame: Regex, footer: Regex,
     login: Regex, composer: Regex, limit: Regex, codex_option: Regex,
-    unnumbered: Regex, user: Regex, banner: Regex, warning: Regex,
+    unnumbered: Regex, user: Regex, banner: Regex, warning: Regex, effort: Regex,
     tool: Regex, finished: Regex, activity: Regex, mcp: Regex,
     pi_box: Regex, overlay_rule: Regex, todo: Regex, ascii_spinner: Regex,
     subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex, agent_cursor: Regex,
@@ -132,6 +132,8 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         user: r(r"^\s*❯"),
         banner: r(r"^[\s▐▛█▝▜▀]*Claude Code v\d"),
         warning: r(r"^[a-z][\w.-]*: hooks\.json: [a-z]"),
+        // Aviso temporário do nível de esforço, à direita acima da caixa de digitar; o ícone de `high` é ●.
+        effort: r(r"^[○◐●◉◈◎] \S+(?: · ultracode)? · /effort\s*$"),
         tool: r(r"^([A-Z][\w-]*\(|(Running|Reading|Writing|Editing|Searching|Listing|Fetching|Updating|Creating|Deleting|Crawling|Downloading|Globbing|Grepping|Waiting|Loading|Compiling|Building|Installing|Ran|Making))"),
         finished: r(r#"^Agent "[^"]*" finished"#),
         activity: r(r"ran \d+ shell commands?\s*$"),
@@ -375,6 +377,7 @@ fn preview(lines: &[&str], anchor: Option<&str>) -> String {
         let body = left(s.chars().next().map_or("", |c| &s[c.len_utf8()..]));
         if !s.starts_with('●') { continue; }
         if P.warning.is_match(body) { start = None; continue; }
+        if P.effort.is_match(s) { continue; }
         let subagent = P.subagent.is_match(body) && lines[i + 1..].iter().find(|l| !trim(l).is_empty())
             .is_some_and(|l| P.subagent_body.is_match(l));
         if !tool(body) && !mcp(body) && !end_word(&P.finished, body)
@@ -386,7 +389,7 @@ fn preview(lines: &[&str], anchor: Option<&str>) -> String {
     for (j, line) in lines.iter().enumerate().skip(start + 1) {
         let s = left(line);
         if P.rule.is_match(line) || boundary(line) || P.user.is_match(line) || tool(s)
-            || mcp(s) || P.todo.is_match(line) || P.ascii_spinner.is_match(s)
+            || mcp(s) || P.todo.is_match(line) || P.ascii_spinner.is_match(s) || P.effort.is_match(s)
             // Só no começo de parágrafo: as linhas do mesmo parágrafo dão a mesma resposta.
             || activity(s) || (!trim(s).is_empty() && trim(lines[j - 1]).is_empty() && tool_header(lines, j - 1)) { break; }
         out.push(right(line));

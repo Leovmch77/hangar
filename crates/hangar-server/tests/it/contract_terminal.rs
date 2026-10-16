@@ -1,5 +1,20 @@
 use hangar_server::terminal_state::{analyze, reduce, ReducerFacts, ReducerMemory, STALE_LIMIT, IDLE_DEBOUNCE};
 
+/// O aviso de esforço que o Claude Code pinta à direita, acima da caixa de digitar, começa com ●.
+#[test]
+fn effort_notice_above_the_composer_is_not_assistant_text() {
+    let rule = "─".repeat(80);
+    let notice = format!("{}● high · /effort", " ".repeat(60));
+    let pane = format!("❯ abre a pagina\n\n● Abrindo agora.\n\n{notice}\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on");
+    assert_eq!(analyze(&pane).preview, "Abrindo agora.");
+    let alone = format!("❯ abre a pagina\n\n{notice}\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on");
+    assert_eq!(analyze(&alone).preview, "");
+    let ultra = format!("❯ oi\n\n{}● high · ultracode · /effort\n{rule}\n❯ \n{rule}", " ".repeat(40));
+    assert_eq!(analyze(&ultra).preview, "");
+    let medium = format!("❯ oi\n\n● Abrindo agora.\n\n{}◐ medium · /effort\n{rule}\n❯ \n{rule}", " ".repeat(60));
+    assert_eq!(analyze(&medium).preview, "Abrindo agora.");
+}
+
 #[test]
 fn terminal_debounce_limits_match_python_state_monitor() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/app/state.py");
