@@ -352,6 +352,8 @@ export interface SubagentRun {
   // O subagente existe mas o transcript dele nao deu pra ler agora (permissao, disco). Os outros
   // campos vem zerados: `toolCalls: 0` aqui NAO quer dizer "nao chamou nada", quer dizer "nao sei".
   ilegivel?: boolean;
+  // Modelo que respondeu (Claude). Num motor o apelido pedido no Agent ("opus") não é o que roda.
+  model?: string;
   // Transcript do subagente nos MESMOS ChatEvent do chat (so com ?events=N).
   events?: ChatEvent[];
 }

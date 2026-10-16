@@ -274,7 +274,7 @@ impl Hangar {
             .map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
         let name = input("subagent_type").unwrap_or_else(|| conversation::tool_display_name("Agent"));
         let description = request.1.clone();
-        let model = input("model");
+        let model = self.agent_card_model(tool.call, input("model"));
         let failed = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
         let run = self.conversation.activity.agents.iter().find(|agent| agent.call == tool.call);
         let running = !failed && run.is_some_and(|agent| agent.running);
