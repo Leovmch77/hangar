@@ -151,7 +151,9 @@ impl Incremental {
                 continue;
             }
             flush_run(&mut run, &mut items);
-            items.push((i, if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) }));
+            if !super::hidden_message(event) {
+                items.push((i, if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) }));
+            }
         }
         flush_run(&mut run, &mut items);
         flush_thinking(&mut thinking, &mut items);

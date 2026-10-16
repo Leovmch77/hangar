@@ -41,6 +41,17 @@ impl Item {
 
 const GROUP_MIN: usize = 3;
 
+fn hidden_message(event: &ChatEvent) -> bool {
+    let text = event.text.as_deref().or(event.result.as_deref()).unwrap_or("");
+    match event.kind.as_str() {
+        "assistant_msg" => text.trim().is_empty() && event.tool_input.is_none() && event.orq.is_none()
+            && event.image_count.unwrap_or(0) == 0 && event.is_error != Some(true),
+        "user_msg" => crate::cards::peer_message(text).is_some_and(|peer|
+            peer.scope == crate::cards::PeerScope::Panel && peer.from.eq_ignore_ascii_case("revisão do PR")),
+        _ => false,
+    }
+}
+
 fn tool_key(event: &ChatEvent) -> Option<&str> {
     event.tool_use_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
 }
@@ -142,7 +153,9 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
             continue;
         }
         flush_run(&mut run, &mut items);
-        items.push(if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) });
+        if !hidden_message(event) {
+            items.push(if event.kind == "tool_result" { Item::Orphan(i) } else { Item::Event(i) });
+        }
     }
     flush_run(&mut run, &mut items);
     flush_thinking(&mut thinking, &mut items);
@@ -644,7 +657,7 @@ mod tests {
     use core::prelude::v1::test;
     use serde_json::json;
 
-    fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), ..Default::default() } }
+    fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), text: Some(id.into()), ..Default::default() } }
 
     #[test]
     fn thought_summary_drops_markdown_marks() {
