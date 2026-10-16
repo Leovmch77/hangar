@@ -167,7 +167,7 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Fila com mensagem ainda não entregue. Ilegível conta como pendente: abrir é o que mostra a recusa dela.
-fn pending(state_path:&std::path::Path) -> bool {
+pub(super) fn pending(state_path:&std::path::Path) -> bool {
     match super::queue::read_replaced(state_path) {
         Err(error) if error.kind()==std::io::ErrorKind::NotFound=>false,
         Err(_)=>true,

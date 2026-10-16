@@ -160,6 +160,9 @@ pub async fn serve_until_with_guest(
                 // Os Claude com terminal que já tinham fila aqui: o Rust os adota, sem esperar o Python.
                 { let (watcher,registry)=(watcher.clone(),registry.clone());
                   tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; }); }
+                // E os Codex sem terminal com cano vivo ou mensagem esperando.
+                { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  tokio::spawn(async move { watcher.register_codex_headless(&registry).await; }); }
                 Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
             }
             _ => None,

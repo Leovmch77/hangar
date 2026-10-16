@@ -1347,3 +1347,33 @@ async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
     let lives:Vec<Option<String>> = share.store.all().into_iter().filter(|s|s.session=="cx-h").map(|s|s.life).collect();
     assert_eq!(lives,vec![Some("k:k-new".into())],"o convite foi para a vida nova");
 }
+
+/// T-014 (D-014): na subida o Rust abre sozinho o Codex sem terminal que é dele e tem o que fazer (fila
+/// pendente ou cano vivo), como o `register_codex_sessions` que o Python pedia; o parado sem pendência
+/// fica fechado e o próximo envio o abre. Nada fica sem dono depois de o Rust voltar.
+#[tokio::test]
+async fn the_rust_boot_opens_its_codex_headless_with_pending_input() {
+    use hangar_server::runtime::queue::{State,Store};
+    crate::use_cano_bin();
+    let fx = fixture();
+    let registry = relaunch_registry(&fx).await;
+    let bin = fx.root.join("bin");
+    fake_headless_codex(&bin,&fx.root.join("codex-methods.jsonl"));
+    let rollout = fx.root.join("rollout.jsonl");
+    std::fs::write(&rollout,"{}\n").unwrap();
+    for (name,key) in [("cx-h","k-pending"),("cx-idle","k-idle")] {
+        fx.put_sidecar(name,json!({"name":name,"provider":"codex","headless":true,"key":key,"thread_id":"thread-1",
+            "rollout_path":rollout,"cwd":fx.root,"codex_home":fx.home.join(".codex"),"permission_mode":"Full Access","model":"gpt-test"}));
+    }
+    std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+    let mut store = Store::open(&fx.queue_state("k-pending"),&fx.queue,State::new("k-pending",1,"cx-h",vec![])).unwrap();
+    store.exec(1,"append:e1",CLOCK,Action::Append { text:"oi".into(),delivered:false,ts:Some(1.0),pre_transcript:false,entry_id:Some("e1".into()) }).unwrap();
+    drop(store);
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.register_codex_headless(&registry).await;
+    assert!(registry.owns_codex_headless("cx-h").await,"com mensagem esperando: aberto no Rust");
+    assert!(!registry.owns_codex_headless("cx-idle").await,"parado sem pendência fica fechado");
+    let generation = fx.queue_json("k-pending")["generation"].as_u64().unwrap();
+    registry.close_with_kill("k-pending",generation).await.unwrap();
+}

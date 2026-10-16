@@ -301,6 +301,29 @@ impl Watcher {
         }).await.map_err(|_|job())?.map_err(terminal::io_failure)
     }
 
+    /// Na subida: abre cada Codex sem terminal com cano vivo da chave ou com mensagem esperando na fila.
+    /// O parado sem pendência fica fechado; o próximo envio o abre (`open_parked`).
+    pub async fn register_codex_headless(&self,registry:&RuntimeRegistry) {
+        let (dir,queue)=(codex_sidecar::dir(&self.cfg.home),self.cfg.queue_dir.clone());
+        let listed=tokio::task::spawn_blocking(move||{
+            let mut problems=crate::list::discover::Problems::default();
+            crate::list::discover_other::sidecars(&dir,"sidecar Codex ilegível ou torto",&mut problems).iter().filter_map(|(_,meta)|{
+                if !meta.get("headless").is_some_and(truthy) {return None;}
+                let (name,key)=(terminal::text(&meta,"name")?.to_owned(),terminal::text(&meta,"key")?.to_owned());
+                let alive=meta.get("cano").and_then(|cano|cano["pid"].as_u64()).and_then(|pid|u32::try_from(pid).ok())
+                    .is_some_and(|pid|super::process::liveness(pid,&key)==super::process::Liveness::Ours);
+                (alive || super::gateway::pending(&terminal::queue_files(&queue,&key).0)).then_some(name)
+            }).collect::<Vec<_>>()
+        }).await.unwrap_or_default();
+        let opens=listed.into_iter().map(|name|async move {
+            if let Some(Err(error))=self.open_parked(registry,&name).await {
+                tracing::warn!(session=%name,code=%error.code,"Codex sem terminal não abriu na subida");
+                registry.report("runtime.registration_failed",&name,&error.code,"o Codex sem terminal não abriu na subida do Rust");
+            }
+        });
+        futures_util::future::join_all(opens).await;
+    }
+
     /// Codex sem terminal parado (sem ator aqui, cano morto ou vivo): o Rust é o dono e o abre na hora,
     /// subindo o processo se preciso, como o `ensure_running` do Python. `None`: não é sem terminal do
     /// Rust, ou há transferência a recuperar (o Python atende como hoje).
