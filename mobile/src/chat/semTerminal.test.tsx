@@ -70,7 +70,7 @@ const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false
 vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
-  useLocalSearchParams: () => route.params, useSegments: () => route.segments, useIsFocused: () => true,
+  useLocalSearchParams: () => route.params, useSegments: () => route.segments,
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
