@@ -193,6 +193,26 @@ impl ServerHost {
     }
 }
 
+impl ServerHost {
+    /// O terminal Codex que acabou de nascer usa a conta antes de o lançador gravar o sidecar: a
+    /// exclusão dela o vê pelo nascimento publicado (ainda sob a guarda compartilhada da abertura).
+    async fn publish_codex_birth(&self, name: &str, codex_home: &str) {
+        let instances = crate::accounts::usage::terminal_instances().await;
+        let Some(instance) = instances.as_ref().ok().and_then(|live| live.get(name)).cloned() else {
+            tracing::warn!(code = "codex_birth_unpublished", "terminal Codex sem identidade no multiplexador; a exclusão da conta não o vê até o sidecar");
+            return;
+        };
+        let (home, name, codex_home, live) = (self.env.home.clone(), name.to_owned(), codex_home.to_owned(), instances.unwrap_or_default());
+        let written = tokio::task::spawn_blocking(move || {
+            let key = crate::accounts::AccountKey::new(crate::accounts::Provider::Codex, Path::new(&codex_home))?;
+            crate::accounts::usage::publish_birth(&home, &name, &key, &instance, &live)
+        }).await;
+        if !matches!(written, Ok(Ok(()))) {
+            tracing::warn!(code = "codex_birth_unpublished", "nascimento do terminal Codex não gravado; a exclusão da conta não o vê até o sidecar");
+        }
+    }
+}
+
 /// Programa da abertura, pelo PATH do servidor e sem os segredos dele no ambiente.
 pub async fn run_program(env: &BTreeMap<String, String>, argv: Vec<String>, timeout: Duration) -> ProgramOutput {
     let failed = |stderr: String| ProgramOutput { code: None, stdout: String::new(), stderr };
@@ -273,6 +293,7 @@ impl OpenHost for ServerHost {
             }
             if let Some(jsonl) = &born.jsonl { self.st.list.seed(&born.name, jsonl); }
             self.st.list.invalidate();
+            if let Some(home) = &born.codex_terminal { self.publish_codex_birth(&born.name, home).await; }
             if !born.remember_provider { return Vec::new(); }
             let (base, provider) = (self.env.claude_base.clone(), born.provider.name());
             match tokio::task::spawn_blocking(move || remember_provider(&base, provider)).await {

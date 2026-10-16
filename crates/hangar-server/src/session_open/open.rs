@@ -20,7 +20,8 @@ pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr
 
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
-pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool }
+/// `codex_terminal`: a pasta da conta do terminal Codex que nasceu (o nascimento conta como uso dela).
+pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool, pub codex_terminal: Option<String> }
 
 pub trait OpenHost: Send + Sync {
     /// A pasta pessoal do dono (registros, `~/.claude.json`, `~/.hangar`).
@@ -488,7 +489,7 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
         let _ = super::record::remove(host.home(), &spec.key);
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None };
     let mut warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
@@ -577,7 +578,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         }));
     }
     diary.step("limpar_estado_anterior");
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned) };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));

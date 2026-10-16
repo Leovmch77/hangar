@@ -282,6 +282,24 @@ fn parse_instances(stdout: &str) -> Result<Instances, ()> {
     Ok(instances)
 }
 
+/// `publish_terminal_birth`: o terminal que acabou de nascer na conta conta como uso dela até o
+/// lançador gravar o sidecar. Publicar leva junto os nascimentos cuja instância não vive mais.
+/// Chamar sob a guarda compartilhada da conta.
+pub(crate) fn publish_birth(home: &Path, name: &str, key: &AccountKey, instance: &str, live: &Instances) -> io::Result<()> {
+    let directory = home.join(".hangar/account-locks/births");
+    std::fs::create_dir_all(&directory)?;
+    for entry in std::fs::read_dir(&directory)?.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") { continue; }
+        let gone = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+            .and_then(|row| row["instance"].as_str().map(|i| !live.values().any(|v| v == i)));
+        if gone == Some(true) { let _ = std::fs::remove_file(&path); }
+    }
+    let row = serde_json::json!({"name": name, "provider": key.provider, "canonical_home": key.canonical_home, "instance": instance});
+    let token = crate::mods::state::random_hex(16);
+    crate::runtime::queue::atomic_write(&directory.join(format!("{token}.json")), row.to_string().as_bytes())
+}
+
 /// Identidade das sessões vivas do multiplexador (tmux ou psmux).
 pub(crate) async fn terminal_instances() -> Result<Instances, ()> {
     let mut command = crate::terminal_input::child_command("tmux");
@@ -563,6 +581,25 @@ mod tests {
         assert!(!local_usage(&service, &key, &empty, &mut none).complete);
         std::fs::write(births.join("t.json"), "{").unwrap();
         assert!(!local_usage(&service, &key, &empty, &mut none).complete);
+    }
+
+    /// O terminal Codex criado aqui fica em uso pela conta até o sidecar existir; o nascimento de uma
+    /// instância que já morreu sai na publicação seguinte.
+    #[test]
+    fn a_published_birth_keeps_the_account_in_use_and_prunes_dead_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = service(tmp.path());
+        let account = tmp.path().join("account");
+        let key = AccountKey::new(Provider::Codex, &account).unwrap();
+        let births = tmp.path().join(".hangar/account-locks/births");
+        std::fs::create_dir_all(&births).unwrap();
+        std::fs::write(births.join("old.json"), serde_json::json!({"name": "morta", "provider": "codex", "canonical_home": account,
+            "instance": "1:$7:1"}).to_string()).unwrap();
+        let live = Instances::from([("cx".into(), "1:$2:3".into())]);
+        publish_birth(tmp.path(), "cx", &key, "1:$2:3", &live).unwrap();
+        assert!(!births.join("old.json").exists(), "a instância morta não fica");
+        let facts = local_usage(&service, &key, &Fake::default(), &mut || Ok(live.clone()));
+        assert_eq!((facts.complete, facts.sessions.as_slice()), (true, ["cx".to_owned()].as_slice()));
     }
 
     #[test]
