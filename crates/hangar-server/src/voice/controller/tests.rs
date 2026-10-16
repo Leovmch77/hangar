@@ -1096,7 +1096,7 @@ async fn interrupt_session_asks_then_interrupts() {
 }
 
 #[tokio::test]
-async fn open_session_passes_what_the_user_said_and_keeps_bypass_as_the_default() {
+async fn open_session_passes_what_the_user_said_and_leaves_the_mode_to_the_account() {
     let mut rig = rig(&[], None).await;
     push_speech(&rig.push, "turn-1", "abre uma sessão kimi na pasta x e outra claude em modo plano");
     push_tool(&rig.push, "n1", "open_session", json!({"folder": "/p/x", "name": "x-kimi", "provider": "kimi", "model": "k2"}), "turn-1");
@@ -1112,11 +1112,10 @@ async fn open_session_passes_what_the_user_said_and_keeps_bypass_as_the_default(
     assert!(created[0].get("permission_mode").is_none(), "{}", created[0]);
     assert_eq!((created[1]["permission_mode"].as_str(), created[1]["headless"].as_bool(), created[1]["config_dir"].as_str()),
         (Some("plan"), Some(true), Some("/h/.claude-b")));
-    assert_eq!(created[2]["permission_mode"], "bypassPermissions");
     // Sem escolha, o corpo é o da tela de criação sem toque: modelo e esforço nulos (vale o settings.json da conta),
-    // e execução e conta ausentes (o backend aplica `headless_default` e a conta com cota).
+    // e execução, conta e modo ausentes (o backend aplica `headless_default`, a conta com cota e o modo da conta, D-010).
     assert!(created[2]["model"].is_null() && created[2]["effort"].is_null(), "{}", created[2]);
-    for key in ["headless", "config_dir", "engine"] {
+    for key in ["headless", "config_dir", "engine", "permission_mode"] {
         assert!(created[2].get(key).is_none(), "{key}: {}", created[2]);
     }
 }

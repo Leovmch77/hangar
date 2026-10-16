@@ -692,7 +692,7 @@ pub(super) async fn folders(machines: &Machines, machine: &str) -> Result<(Vec<(
 }
 
 /// Cria a sessão; devolve o nome com que ela nasceu. O que o usuário não disse fica com o padrão do servidor, como a tela de
-/// criação sem toque; o Claude sem modo dito nasce em `bypassPermissions`, o padrão do app.
+/// criação sem toque, inclusive o modo de permissão (o da conta, D-010).
 pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
     let cwd = folder(machines, machine, &request.folder).await?;
     let name = match &request.name {
@@ -711,11 +711,7 @@ pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenReq
         (Some(account), _) => body["config_dir"] = json!(account),
         (None, _) => {}
     }
-    match (&request.permission, request.provider) {
-        (Some(mode), _) => body["permission_mode"] = json!(mode),
-        (None, "claude") => body["permission_mode"] = json!("bypassPermissions"),
-        (None, _) => {}
-    }
+    if let Some(mode) = &request.permission { body["permission_mode"] = json!(mode); }
     let created = machines.call(machine, reqwest::Method::POST, "/api/sessions", Some(body)).await?;
     Ok(created["name"].as_str().filter(|n| !n.is_empty()).map_or(name, str::to_owned))
 }
