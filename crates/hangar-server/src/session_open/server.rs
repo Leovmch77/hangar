@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, Request, State};
@@ -405,6 +405,23 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
     }
 }
 
+/// A linha `api.servidor` do middleware de acesso do Python, para o pedido que o Rust atendeu
+/// (o que segue ao Python ele mesmo registra).
+pub(crate) fn access_line(route: &str, status: u16, ms: u64, req: &str) -> Value {
+    let level = if status >= 500 { "erro" } else if status >= 400 { "aviso" } else { "ok" };
+    json!({"evento": "api.servidor", "nivel": level, "detalhe": route, "codigo": status.to_string(), "ms": ms, "etapa": "cabecalhos", "req": req})
+}
+
+fn access_diary(route: &str, response: &Response, started: Instant, req: &str) {
+    let line = access_line(route, response.status().as_u16(), started.elapsed().as_millis() as u64, req);
+    let Some(dir) = crate::diag::diary_dir() else { return };
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
+            tracing::warn!(kind = ?error.kind(), "linha de acesso do diário não gravada");
+        }
+    });
+}
+
 fn reply(error: &OpenError) -> Response {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     crate::session_write::json_response(status, error.body())
@@ -414,6 +431,7 @@ fn reply(error: &OpenError) -> Response {
 /// convidado na pasta dele, com o dono registrado no `guests.json`); o resto segue ao Python com o
 /// corpo intacto (corpo que não é pedido válido também: o 422 é o dele).
 pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (started, diag) = (Instant::now(), crate::routes::diag_req(&req));
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
     let (mut parts, body) = req.into_parts();
     // Só o Rust diz ao Python que já olhou.
@@ -439,11 +457,13 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Decision::Opened(opened) => {
             let mut response = crate::session_write::json_response(StatusCode::OK, opened.body);
             crate::routes::cors(&parts.headers, response.headers_mut());
+            access_diary("POST /api/sessions", &response, started, &diag);
             response
         }
         Decision::Refused(error) => {
             let mut response = reply(&error);
             crate::routes::cors(&parts.headers, response.headers_mut());
+            access_diary("POST /api/sessions", &response, started, &diag);
             response
         }
         Decision::NotOurs => {
@@ -558,6 +578,7 @@ pub async fn serve_archive_resume(st: &Arc<AppState>, project: &str, sid: &str, 
 /// A rota pública do Arquivo: só o dono; o resto segue ao Python, que recusa.
 pub async fn archive_resume(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
                             axum::extract::Path((project, sid)): axum::extract::Path<(String, String)>, req: Request) -> Response {
+    let (started, diag) = (Instant::now(), crate::routes::diag_req(&req));
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
     if !owner { return crate::routes::pass(&st, req, &fwd).await; }
     let headers = req.headers().clone();
@@ -566,5 +587,6 @@ pub async fn archive_resume(State(st): State<Arc<AppState>>, ConnectInfo(peer): 
     };
     let mut response = serve_archive_resume(&st, &project, &sid, &bytes).await;
     crate::routes::cors(&headers, response.headers_mut());
+    access_diary("POST /api/archive/{project}/{session_id}/resume", &response, started, &diag);
     response
 }

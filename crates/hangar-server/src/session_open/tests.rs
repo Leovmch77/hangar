@@ -442,6 +442,16 @@ fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
     assert_eq!(total, (43, 43, 29));
 }
 
+/// CRI-094: o POST que o Rust atende deixa a linha do middleware de acesso do Python.
+#[test]
+fn a_post_answered_in_rust_leaves_the_access_line() {
+    assert_eq!(server::access_line("POST /api/sessions", 409, 209, "r-1"),
+        json!({"evento": "api.servidor", "nivel": "aviso", "detalhe": "POST /api/sessions", "codigo": "409", "ms": 209,
+            "etapa": "cabecalhos", "req": "r-1"}));
+    assert_eq!(server::access_line("POST /api/sessions", 200, 3, "")["nivel"], "ok");
+    assert_eq!(server::access_line("POST /api/archive/{project}/{session_id}/resume", 503, 3, "")["nivel"], "erro");
+}
+
 /// CRI-030: criadora com terminal que ainda não falou (sem modo no transcript) passa o modo com que
 /// nasceu, o do registro gravado na abertura dela, e não o padrão da conta.
 #[cfg(target_os = "linux")]
