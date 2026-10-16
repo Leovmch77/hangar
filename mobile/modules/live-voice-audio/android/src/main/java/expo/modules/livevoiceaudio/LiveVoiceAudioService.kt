@@ -330,7 +330,7 @@ class LiveVoiceAudioService : Service() {
           context.stopService(Intent(context, LiveVoiceAudioService::class.java))
           settleStarts(error)
         }
-      }.also { main.postDelayed(it, 10_000) }
+      }.also { main.postDelayed(it, 4_000) }
       try {
         val intent = Intent(context, LiveVoiceAudioService::class.java).putExtra(EXTRA_GENERATION, token)
         if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
