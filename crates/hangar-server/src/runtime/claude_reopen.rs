@@ -185,6 +185,9 @@ impl RuntimeRegistry {
         Some(self.claude_current(name,false,false).await.map(|current|current.spec))
     }
 
+    /// O modo que o Rust confirmou por último na conversa (memória dele, sem leitura do rodapé).
+    pub fn observed_claude_mode(&self,conversation:&str) -> Option<String> { self.permission_view(conversation).map(|view|view.current) }
+
     /// A sessão Claude `name` está sem terminal (tem sidecar)? `None` com o sidecar ilegível.
     pub async fn claude_headless(&self,name:&str) -> Option<bool> { self.claude_sidecar(name).await.ok().map(|meta|meta.is_some()) }
 

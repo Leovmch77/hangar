@@ -35,8 +35,22 @@ pub struct Entry {
     pub name: String,
     pub provider: AgentProvider,
     pub conversation: Option<String>,
+    /// O modo de permissão que o Rust viu por último (o Claude troca de modo por teclas, sem regravar o spec).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_since: Option<f64>,
+}
+
+/// O spec com que a sessão volta: o gravado, com o modo da hora em que caiu (S-68, P-02). No Codex o modo
+/// é o que a TUI gravou no sidecar (`record::live`); no Claude, o que a fotografia viu.
+pub fn spec_for_restore(home: &Path, key: &str, entry: &Entry) -> Result<super::SessionSpec, &'static str> {
+    let read = if entry.provider == AgentProvider::Codex { super::record::live(home, &entry.name) } else { super::record::read(home, key) };
+    let mut spec = read.map_err(|_| "restore_spec_unreadable")?.filter(|s| s.key == key).ok_or("restore_no_spec")?;
+    if spec.provider == AgentProvider::Claude && let Some(mode) = entry.permission_mode.as_deref().and_then(super::PermissionMode::claude) {
+        spec.permission_mode = Some(mode);
+    }
+    Ok(spec)
 }
 
 /// A conversa que o transcript da lista prova: o id no nome do arquivo (Claude), depois do `_` (Pi, omp),
@@ -121,7 +135,11 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
         let Ok(Some(spec)) = super::record::read(home, &key) else { continue };
         if spec.surface != Surface::Terminal { continue; }
         let conversation = row.jsonl.as_deref().filter(|_| row.tracked).and_then(|j| conversation_of(provider, j));
-        out.insert(key, Entry { name: row.name.clone(), provider, conversation, missing_since: None });
+        let permission_mode = match (provider, &conversation, st.state.runtime.get()) {
+            (AgentProvider::Claude, Some(sid), Some(runtime)) => runtime.observed_claude_mode(sid),
+            _ => None,
+        };
+        out.insert(key, Entry { name: row.name.clone(), provider, conversation, permission_mode, missing_since: None });
     }
     Some(out)
 }
@@ -137,11 +155,8 @@ fn restore_conversation(home: &Path, entry: &Entry) -> Option<String> {
 async fn reopen(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
     let host = super::server::ServerHost::new(st.clone()).await;
     let home = super::open::OpenHost::home(&host).to_owned();
-    let mut spec = match super::record::read(&home, key) {
-        Ok(Some(spec)) if spec.surface == Surface::Terminal => spec,
-        Ok(_) => return Err("restore_no_spec".into()),
-        Err(_) => return Err("restore_spec_unreadable".into()),
-    };
+    let mut spec = spec_for_restore(&home, key, entry)?;
+    if spec.surface != Surface::Terminal { return Err("restore_no_spec".into()); }
     spec.name = entry.name.clone();
     let conversation = restore_conversation(&home, entry).ok_or("restore_no_conversation")?;
     if spec.provider == AgentProvider::Claude
@@ -214,7 +229,36 @@ mod tests {
     use super::*;
 
     fn entry(name: &str, conversation: Option<&str>) -> Entry {
-        Entry { name: name.into(), provider: AgentProvider::Claude, conversation: conversation.map(str::to_owned), missing_since: None }
+        Entry { name: name.into(), provider: AgentProvider::Claude, conversation: conversation.map(str::to_owned), permission_mode: None, missing_since: None }
+    }
+
+    fn recorded(home: &Path, key: &str, provider: AgentProvider, mode: super::super::PermissionMode) {
+        let spec = super::super::SessionSpec { version: super::super::SPEC_VERSION, key: key.into(), name: "s1".into(), cwd: "/w".into(), provider,
+            surface: Surface::Terminal, account: if provider == AgentProvider::Codex { super::super::Account::Codex { account_id: "default".into() } }
+            else { super::super::Account::Default }, account_source: super::super::AccountSource::Default, model: None, effort: None,
+            service_tier: None, permission_mode: Some(mode), subagent_model: None, customizations: None, jev: false, read_only: false,
+            worktree: None, creator: None, created_at: 1.0, conversation: Some("c1".into()) };
+        super::super::record::write(home, &spec).unwrap();
+    }
+
+    #[test]
+    fn the_restore_comes_back_in_the_mode_the_session_had_when_it_fell() {
+        use super::super::PermissionMode;
+        let dir = tempfile::tempdir().unwrap();
+        let key = "ab".repeat(16);
+        recorded(dir.path(), &key, AgentProvider::Claude, PermissionMode::BypassPermissions);
+        let lowered = Entry { permission_mode: Some("acceptEdits".into()), ..entry("s1", Some("c1")) };
+        assert_eq!(spec_for_restore(dir.path(), &key, &lowered).unwrap().permission_mode, Some(PermissionMode::AcceptEdits), "Claude baixado por teclas");
+        assert_eq!(spec_for_restore(dir.path(), &key, &entry("s1", Some("c1"))).unwrap().permission_mode, Some(PermissionMode::BypassPermissions),
+            "sem modo visto, o do spec");
+        let codex = "cd".repeat(16);
+        recorded(dir.path(), &codex, AgentProvider::Codex, PermissionMode::FullAccess);
+        let sidecars = crate::runtime::codex_sidecar::dir(dir.path());
+        std::fs::create_dir_all(&sidecars).unwrap();
+        std::fs::write(crate::runtime::codex_sidecar::path(&sidecars, "s1"), json!({"name": "s1", "provider": "codex", "key": codex, "cwd": "/w",
+            "thread_id": "t1", "permission_mode": "Ask for approval"}).to_string()).unwrap();
+        let entry = Entry { provider: AgentProvider::Codex, ..entry("s1", None) };
+        assert_eq!(spec_for_restore(dir.path(), &codex, &entry).unwrap().permission_mode, Some(PermissionMode::AskForApproval), "o modo que a TUI gravou");
     }
 
     #[test]
