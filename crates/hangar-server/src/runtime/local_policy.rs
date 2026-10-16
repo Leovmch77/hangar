@@ -99,8 +99,6 @@ pub(super) fn batch_validator(provider:String,mut template:Value) -> super::queu
             if let Some(receipt)=image_receipt(&visible,&prepared["content"]) {
                 row["batch_image_receipt"]=json!(receipt);
                 row["batch_image_source_receipt"]=json!(image_receipt(row["text"].as_str().unwrap_or(""),&prepared["content"]));
-                // A TUI pode deixar o path como texto, sem anexar a imagem: aí só o texto inteiro aparece.
-                if terminal {row["batch_text_proof"]=json!(true);}
             }
         }
         if terminal {template["text"]=row["text"].clone();}
@@ -197,6 +195,14 @@ mod batch_tests {
             std::fs::write(&path,format!("{record}\n")).unwrap();receipts.scan(&path).unwrap();
             assert_eq!(receipts.match_after(&path,&cursor,&rows[0],&Default::default()).unwrap().is_some(),expected,"cenário {index}");
         }
+        // A linha já desistida antes desta regra (só os recibos gravados) também se confirma pelo texto.
+        let old=json!({"id":"old","text":text,"batch_entries":[{"id":"a"}],"desistiu":true,
+            "batch_image_receipt":rows[0]["batch_image_receipt"],"batch_image_source_receipt":rows[0]["batch_image_source_receipt"]});
+        let path=dir.path().join("old.jsonl");std::fs::write(&path,"").unwrap();
+        let mut receipts=super::super::receipt::ReceiptIndex::new("claude","sid");let cursor=receipts.capture(&path).unwrap();
+        std::fs::write(&path,format!("{}\n",json!({"type":"user","sessionId":"sid","message":{"role":"user","content":text}}))).unwrap();
+        receipts.scan(&path).unwrap();
+        assert!(receipts.match_after(&path,&cursor,&old,&Default::default()).unwrap().is_some());
     }
 
     #[test]

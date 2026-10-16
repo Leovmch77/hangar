@@ -1163,7 +1163,9 @@ pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {
     let raw = row["text"].as_str().unwrap_or("").trim();
     let stripped = crate::transcript::history::strip_attach(raw);
     let mut lines: BTreeSet<_> = if row["batch_entries"].is_array() && row["batch_image_receipt"].is_string() {
-        let text = (row["batch_text_proof"] == true && !raw.is_empty()).then(|| raw.to_owned());
+        // Lote do terminal (nunca guarda `batch_prompt`): a TUI pode deixar o path como texto, sem anexar a imagem,
+        // e aí só o texto inteiro aparece. Sem terminal, a imagem enviada pelo próprio servidor tem de constar.
+        let text = (!row["batch_prompt"].is_object() && !raw.is_empty()).then(|| raw.to_owned());
         ["batch_image_receipt","batch_image_source_receipt"].into_iter()
             .filter_map(|key|row[key].as_str().map(str::to_owned)).chain(text).collect()
     } else if row["batch_entries"].is_array() {
