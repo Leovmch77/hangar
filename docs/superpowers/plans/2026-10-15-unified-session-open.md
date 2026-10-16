@@ -307,15 +307,15 @@ Status: ready-for-agent (depois da Task 10, que traz a Task 8)
 - [x] **Step 2: Troca automática** (c0b2217fc..a98e59d2d; Codex só detecção: o Rust não sugere entre contas Codex)
   `reopen_session` com `SessionChange{account, motivo: limit_switch}` na conta de mais folga +
   mensagem de continuar; sem rodar em círculo; sessão em motor fica de fora.
-- [ ] **Step 3: Verificação manual numa conta que bate o limite de verdade**
+- [ ] **Step 3: Verificação manual numa conta que bate o limite de verdade** (com o usuário)
   Se no fim só esta Task travar o merge, perguntar ao usuário se ela vai para o PR seguinte.
 
 ### Task 15: Portões de prova
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Conferência item a item (769 linhas) no `conferencia.md`**
-- [ ] **Step 2: Relatório do diferencial e revisão de falhas caladas do diff inteiro**
+- [x] **Step 1: Conferência item a item (769 linhas) no `conferencia.md`** (43 consertos; T-015..T-018)
+- [x] **Step 2: Relatório do diferencial e revisão de falhas caladas do diff inteiro** (diferencial 81 ok, 37 só fora do exemplo; revisão final + re-revisão + simplify)
 - [x] **Step 3: Caminho inteiro: `grep` nos dois lados, nenhum chamador de abrir/reabrir no Python** (conferencia.md; exceções T-007/T-013 e T-008)
 - [ ] **Step 4: Verificação manual em uso real: release de checkout limpo no Linux e na DELPHI-02, com sessão `cx-*` (Codex de verdade, psmux, processo real dos CLIs)**
 - [ ] **Step 5: Medição: p50/p95 de criar e reabrir, antes e depois, também na DELPHI-02**
