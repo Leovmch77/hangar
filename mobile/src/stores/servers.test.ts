@@ -546,6 +546,45 @@ describe('entradas de par externo', () => {
   });
 });
 
+describe('importação só acrescenta', () => {
+  const imported = { id: 'saved', label: 'fixture-imported', baseUrl: 'https://imported.test', token: 'imported-token' };
+
+  test('preserva credenciais, flags e ativa e deduplica duas importações', async () => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+    const first = useServers.getState().appendImported([{ ...SAVED_SERVER, token: 'overwrite', label: 'overwrite', disabled: true }, imported]);
+    const second = useServers.getState().appendImported([imported]);
+    await settle();
+    expect(first).toHaveLength(1);
+    expect(first[0].id).not.toBe(SAVED_SERVER.id);
+    expect(second).toEqual([]);
+    expect(useServers.getState().servers).toEqual([SAVED_SERVER, first[0]]);
+    expect(useServers.getState().activeId).toBe(SAVED_SERVER.id);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual({ servers: [SAVED_SERVER, first[0]], activeId: SAVED_SERVER.id });
+  });
+
+  test('reaplica importação durante hidratação contra a lista recuperada sem sobrescrevê-la', async () => {
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+    const loading = useServers.getState().load();
+    useServers.getState().appendImported([{ ...SAVED_SERVER, token: 'overwrite' }, imported]);
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+    read.resolve(JSON.stringify(SAVED));
+    await loading;
+    expect(useServers.getState().servers[0]).toEqual(SAVED_SERVER);
+    expect(useServers.getState().servers).toHaveLength(2);
+    expect(new Set(useServers.getState().servers.map((s) => s.id)).size).toBe(2);
+    expect(useServers.getState().activeId).toBe(SAVED_SERVER.id);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual({ servers: useServers.getState().servers, activeId: SAVED_SERVER.id });
+  });
+
+  test('primeira nova vira ativa quando não há ativa', async () => {
+    await useServers.getState().load();
+    useServers.getState().appendImported([imported]);
+    expect(useServers.getState().active()?.baseUrl).toBe(imported.baseUrl);
+  });
+});
+
 describe('update de máquina própria', () => {
   const { lan: _lan, ...serverWithoutLan } = SAVED_SERVER;
 

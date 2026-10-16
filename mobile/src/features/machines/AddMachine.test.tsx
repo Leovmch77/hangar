@@ -13,6 +13,7 @@ vi.mock('react-native', async (original) => ({ ...await original<typeof import('
 }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
+vi.mock('sonner-native', () => ({ toast: vi.fn(), Toaster: () => null }));
 import { AddMachineSheet } from './AddMachineSheet';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
@@ -42,9 +43,53 @@ beforeEach(async () => {
   el = document.createElement('div'); document.body.appendChild(el); root = createRoot(el);
 });
 afterEach(async () => { await act(async () => root.unmount()); el.remove(); vi.unstubAllGlobals(); });
-const render = (target = owner) => act(async () => root.render(<AddMachineSheet owner={target} onClose={() => {}} onQr={() => {}} />));
+const render = (target = owner, onClose = () => {}) => act(async () => root.render(<AddMachineSheet owner={target} onClose={onClose} onQr={() => {}} />));
 
 describe('adicionar máquina', () => {
+  it('fechar folha com registro opcional pendente não impede a descoberta do cadastro já salvo', async () => {
+    let postPending = false;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/peers') && init?.method === 'POST') {
+        postPending = true;
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('fixture-cancelled', 'AbortError')), { once: true });
+        });
+      }
+      if (url === 'https://remote.test/api/peers/app-list') return json({ rev: 'r1', servers: [
+        { id: 'found', label: 'fixture-found', address: 'https://found.test', token: 'found-token', disabled: false, invite: false },
+      ] });
+      if (url.endsWith('/api/peers/app-list')) return json({ rev: 'r1', servers: [] });
+      if (url.endsWith('/api/peers') || url.endsWith('/api/sessions')) return json([]);
+      if (url.endsWith('/identificador')) return json({ identificador: url.startsWith(owner.baseUrl) ? 'owner' : url.startsWith('https://found.test') ? 'found' : 'remote', lan_url: '' });
+      return json({ campos: {}, somente_leitura: {} });
+    });
+    await render(owner, () => root.render(null)); await type(m.mobile_machines_endpoint(), 'https://remote.test');
+    await type(m.mobile_machines_token(), 'remote-secret'); await click(m.mobile_machines_register_both());
+    await click(m.mobile_machines_save());
+    expect(postPending).toBe(true);
+    expect(useServers.getState().servers.some((s) => s.baseUrl === 'https://remote.test')).toBe(true);
+    await click(m.sessao_fechar());
+    await act(async () => { await new Promise<void>((r) => setImmediate(r)); });
+    expect(mocks.fetch.mock.calls.some(([url]) => url === 'https://remote.test/api/peers/app-list')).toBe(true);
+    expect(useServers.getState().servers.find((s) => s.baseUrl === 'https://found.test'))
+      .toMatchObject({ label: 'found', token: 'found-token' });
+  });
+  it('cadastro autenticado também descobre máquinas sem depender de novo login', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url === 'https://remote.test/api/peers/app-list') return json({ rev: 'r1', servers: [
+        { id: 'found', label: 'fixture-found', address: 'https://found.test', token: 'found-token', disabled: false, invite: false },
+      ] });
+      if (url.endsWith('/api/peers/app-list')) return json({ rev: 'r1', servers: [] });
+      if (url.endsWith('/api/peers') || url.endsWith('/api/sessions')) return json([]);
+      if (url.endsWith('/identificador')) return json({ identificador: url.startsWith('https://found.test') ? 'found-name' : 'remote', lan_url: '' });
+      return json({ campos: {}, somente_leitura: {} });
+    });
+    await render(); await type(m.mobile_machines_endpoint(), 'https://remote.test');
+    await type(m.mobile_machines_token(), 'remote-secret'); await click(m.mobile_machines_save());
+    await act(async () => { await new Promise<void>((r) => setImmediate(r)); });
+    expect(useServers.getState().servers.find((s) => s.baseUrl === 'https://found.test'))
+      .toMatchObject({ label: 'found-name', token: 'found-token' });
+  });
   it('só descobre Tailscale pelo botão e mantém o nome digitado ao selecionar uma URL', async () => {
     await render(); expect(mocks.fetch).not.toHaveBeenCalled();
     await type(m.mobile_machines_label(), 'fixture-custom'); await click(m.mobile_machines_discover());

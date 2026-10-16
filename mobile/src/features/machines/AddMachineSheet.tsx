@@ -9,6 +9,7 @@ import { Pill } from '../config/PageHeader';
 import { useSettingsColors } from '../config/colors';
 import { discover, ensureActive, normalizeUrl, readIdentifier, reason, registerBoth, type Directions, type Discovered } from './api';
 import { DirectionsNotice, Field, MachineSheet, Notice, styles, useMachineAction } from './parts';
+import { discoverSavedMachines } from './importMachines';
 import * as m from '../../paraglide/messages';
 
 type Added = { warnings: string[]; directions?: Directions; registered: boolean };
@@ -38,6 +39,7 @@ export function AddMachineSheet({ owner, onClose, onQr }: { owner: Server | null
     const typedLabel = label.trim();
     const saved = useServers.getState().add({ baseUrl, token: credential, label: typedLabel || identifier || new URL(baseUrl).hostname });
     if (typedLabel && saved.label !== typedLabel) useServers.getState().update(saved.id, { label: typedLabel });
+    void discoverSavedMachines();
     const result: Added = { warnings, registered: false };
     if (both && owner) {
       try {

@@ -12,7 +12,7 @@
   import { alcanceDoServidor, type AlcanceDoServidor, type TipoEndereco } from '../../lib/alcance';
   import { cachedSyncStatus } from '../../lib/sync';
   import { onDestroy } from 'svelte';
-  import { getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
+  import { createMachineImportLink, getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import ColarConvite from './ColarConvite.svelte';
   import PairAcceptSheet from '../PairAcceptSheet.svelte';
@@ -95,6 +95,21 @@
   // `App.applyRouteServer` chama `selectServer` a cada mudança de rota, síncrono, antes do chat
   // montar — abrir qualquer sessão o sobrescreve. Um botão nesta tela era um controle que mente.
   // O que se escolhe aqui é o ALVO das telas de config de servidor, e só.
+
+  let mobileView = $state(false);
+  let importError = $state('');
+  $effect(() => {
+    const media = window.matchMedia('(min-width: 820px)');
+    const update = () => { mobileView = !media.matches; };
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  });
+  function openHangarApp() {
+    importError = '';
+    try { window.location.assign(createMachineImportLink(listAllServers())); }
+    catch { importError = m.machine_import_invalid(); }
+  }
 
   let showAdd = $state(false);
   // Remoção com confirmação REAL (ConfirmDialog). O ÚLTIMO servidor é removível de propósito:
@@ -921,7 +936,9 @@
   <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
   <button type="button" class="sv-btn" onclick={() => (colarAberto = true)}>{m.convite_colar()}</button>
   <button type="button" class="sv-btn" onclick={() => (parExternoAberto = true)}>{m.native_par_menu()}</button>
+  {#if mobileView}<button type="button" class="sv-btn" onclick={openHangarApp}>{m.machine_import_open_app()}</button>{/if}
 </div>
+{#if importError}<p class="id-erro" role="alert">{importError}</p>{/if}
 {#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
 {#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
 

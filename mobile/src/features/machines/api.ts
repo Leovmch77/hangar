@@ -1,4 +1,4 @@
-import { comTeto, errorDetail, probeServerResponse, type Server } from '@hangar/core';
+import { comTeto, errorDetail, isLocalMachineUrl, normalizeMachineUrl, probeServerResponse, type Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 export type MachineId = { identificador: string; lan_url: string };
@@ -19,18 +19,11 @@ export function ensureActive(signal: AbortSignal) {
 }
 
 export function normalizeUrl(raw: string): string {
-  try {
-    const url = new URL(raw.trim());
-    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) throw new Error();
-    return url.toString().replace(/\/+$/, '');
-  } catch { throw new Error(m.mobile_machines_invalid_url()); }
+  try { return normalizeMachineUrl(raw); }
+  catch { throw new Error(m.mobile_machines_invalid_url()); }
 }
 
-export function isLoopback(raw: string): boolean {
-  const host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host === '::' || host === '0.0.0.0' || /^127\./.test(host)
-    || /^::ffff:(127\.|7f[0-9a-f]{2}:)/.test(host) || host === '::ffff:0:0';
-}
+export const isLoopback = isLocalMachineUrl;
 
 async function request(server: Server, path: string, signal: AbortSignal, method = 'GET', body?: unknown, timeout = 15_000): Promise<unknown> {
   ensureActive(signal);

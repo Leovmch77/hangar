@@ -8,6 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { configureCore } from '../src/net/configureCore';
 import { useServers } from '../src/stores/servers';
+import { discoverSavedMachines } from '../src/features/machines/importMachines';
 import { setChatsForeground } from '../src/stores/chat';
 import { useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
@@ -29,7 +30,7 @@ export default function Layout() {
   const limparAviso = useServers((s) => s.limparAviso);
 
   useEffect(() => {
-    void useServers.getState().load();
+    void useServers.getState().load().then(() => discoverSavedMachines());
   }, []);
 
   // Único dono do primeiro plano: os stores conservam transcript, pergunta e rascunho ao sair
@@ -43,7 +44,7 @@ export default function Layout() {
       foreground = active;
       setChatsForeground(active);
       useSessions.getState().setForeground(active);
-      if (resumed && !useServers.getState().vaultReadable) void useServers.getState().load();
+      if (resumed) void discoverSavedMachines();
     };
     apply(initial);
     const subscription = AppState.addEventListener('change', apply);
@@ -52,7 +53,7 @@ export default function Layout() {
 
   useEffect(() => {
     if (!ready) return;
-    const withoutServer = segments[0] === 'login' || segments[0] === 'convite';
+    const withoutServer = segments[0] === 'login' || segments[0] === 'convite' || segments[0] === 'importar';
     if (servers.length === 0 && !withoutServer) {
       router.replace('/login');
     }
