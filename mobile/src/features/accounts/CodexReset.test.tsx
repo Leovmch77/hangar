@@ -102,11 +102,12 @@ describe('redefinição da cota Codex', () => {
     expect(next.container.textContent).toContain('já foi usada');
   });
 
-  it('recusa 409 inicial mantém a causa e permite cancelar para escolher outra conta', async () => {
-    calls.consume.mockRejectedValueOnce(Object.assign(new Error('409: codex_reset_weekly_not_exhausted'), { status: 409 }));
+  it.each([409, 422])('recusa %s inicial mantém a causa e permite cancelar para escolher outra conta', async status => {
+    const message = `${status}: codex_reset_weekly_not_exhausted`;
+    calls.consume.mockRejectedValueOnce(Object.assign(new Error(message), { status }));
     const view = await show([credential(), credential('other')]);
     await click(view.container, 'Usar redefinição guardada'); await click(view.container, 'Confirmar redefinição');
-    expect(view.container.textContent).toContain('409: codex_reset_weekly_not_exhausted');
+    expect(view.container.textContent).toContain(message);
     expect(button(view.container, 'Cancelar')).toBeTruthy();
     expect(button(view.container, 'Repetir a mesma tentativa')).toBeUndefined();
     await click(view.container, 'Cancelar');
@@ -118,19 +119,32 @@ describe('redefinição da cota Codex', () => {
     expect(calls.consume).toHaveBeenLastCalledWith(server, 'other', 'credit1', expect.any(String));
   });
 
-  it('timeout seguido de 409 conserva pendência sem Cancelar e repete o mesmo UUID', async () => {
+  it.each([409, 422])('timeout seguido de %s conserva pendência sem Cancelar e repete o mesmo UUID', async status => {
+    const message = `${status}: codex_reset_weekly_not_exhausted`;
     calls.consume.mockRejectedValueOnce(new Error('request timeout'))
-      .mockRejectedValueOnce(Object.assign(new Error('409: codex_reset_weekly_not_exhausted'), { status: 409 }));
+      .mockRejectedValueOnce(Object.assign(new Error(message), { status }));
     const view = await show([credential(), credential('other')]);
     await click(view.container, 'Usar redefinição guardada'); await click(view.container, 'Confirmar redefinição');
     const uuid = calls.consume.mock.calls[0][3];
     await click(view.container, 'Repetir a mesma tentativa');
-    expect(view.container.textContent).toContain('409: codex_reset_weekly_not_exhausted');
+    expect(view.container.textContent).toContain(message);
     expect(button(view.container, 'Cancelar')).toBeUndefined();
     expect(button(view.container, 'Repetir a mesma tentativa')).toBeTruthy();
     expect(calls.consume).toHaveBeenLastCalledWith(server, 'work', 'credit1', uuid);
     expect(button(view.container, 'Usar redefinição guardada')?.disabled).toBe(true);
     calls.consume.mockResolvedValue({ outcome: 'alreadyRedeemed' });
+    await click(view.container, 'Repetir a mesma tentativa');
+    expect(calls.consume).toHaveBeenLastCalledWith(server, 'work', 'credit1', uuid);
+  });
+
+  it.each([408, 429, 401, 400])('HTTP %s mantém incerteza, mesma UUID e bloqueio das outras contas', async status => {
+    calls.consume.mockRejectedValue(Object.assign(new Error(`${status}: proxy refused`), { status }));
+    const view = await show([credential(), credential('other')]);
+    await click(view.container, 'Usar redefinição guardada'); await click(view.container, 'Confirmar redefinição');
+    const uuid = calls.consume.mock.calls[0][3];
+    expect(button(view.container, 'Cancelar')).toBeUndefined();
+    expect(button(view.container, 'Repetir a mesma tentativa')).toBeTruthy();
+    expect(button(view.container, 'Usar redefinição guardada')?.disabled).toBe(true);
     await click(view.container, 'Repetir a mesma tentativa');
     expect(calls.consume).toHaveBeenLastCalledWith(server, 'work', 'credit1', uuid);
   });

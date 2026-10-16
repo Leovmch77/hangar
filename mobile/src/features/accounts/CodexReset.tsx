@@ -45,7 +45,7 @@ async function consume(server: Server, key: string) {
     write(key, { attempt: null, outcome, needsRefresh: true });
   } catch (cause) {
     const status = (cause as { status?: unknown } | null)?.status;
-    const definitive = typeof status === 'number' && status >= 400 && status < 500;
+    const definitive = status === 409 || status === 422;
     write(key, { ...read(key), attempt: { ...attempt, busy: false, pending: attempt.pending || !definitive,
       error: cause instanceof Error ? cause.message : m.mobile_accounts_reset_unknown() } });
   }

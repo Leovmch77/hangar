@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { putEngineForServer, type Motor, type Server } from '@hangar/core';
+import { engineCliproxyForServer, putEngineForServer, type Motor, type Server } from '@hangar/core';
 import { Sheet } from '../../ui/Sheet';
 import { PageHeader, Pill } from '../config/PageHeader';
 import { SettingsRow } from '../config/SettingsRow';
@@ -31,12 +31,29 @@ export function EngineEditor({ server, name, engine, names, onSaved, onClose }: 
   const [vision, setVision] = useState<boolean | null>(engine?.vision ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [proxyUrl, setProxyUrl] = useState<string | null>(null);
+  const [proxyNotice, setProxyNotice] = useState('');
+  const [detecting, setDetecting] = useState(false);
+  const detectingNow = useRef(false);
   const saving = useRef(false);
+  const locked = busy || detecting;
   const alive = useRef(true);
   const identity = JSON.stringify([server.id, server.baseUrl, server.token]);
   const currentIdentity = useRef(identity);
+  const openingIdentity = useRef(identity);
+  const closed = useRef(false);
+  const closeNotified = useRef(false);
   currentIdentity.current = identity;
-  useEffect(() => () => { alive.current = false; }, []);
+  if (identity !== openingIdentity.current) closed.current = true;
+  function close() {
+    closed.current = true;
+    if (!closeNotified.current) { closeNotified.current = true; onClose(); }
+  }
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  useEffect(() => { if (closed.current) close(); }, [identity, onClose]);
 
   const labels: Record<TextField | Flag, string> = {
     name: m.mobile_accounts_engine_name(), label: m.mobile_accounts_engine_label(), base_url: m.mobile_accounts_engine_base_url(),
@@ -48,30 +65,57 @@ export function EngineEditor({ server, name, engine, names, onSaved, onClose }: 
     gateway_model_discovery: m.mobile_accounts_engine_gateway_model_discovery(), fine_grained_tool_streaming: m.mobile_accounts_engine_fine_grained_tool_streaming(),
     auth_via_api_key: m.mobile_accounts_engine_auth_via_api_key(),
   };
+  async function detectProxy() {
+    if (name || proxyUrl || detectingNow.current || saving.current || !alive.current || closed.current) return;
+    const target = server;
+    const requestIdentity = identity;
+    const valid = () => alive.current && !closed.current && currentIdentity.current === requestIdentity;
+    detectingNow.current = true; setDetecting(true); setError(''); setProxyNotice('');
+    try {
+      const result = await engineCliproxyForServer(target);
+      if (!valid()) return;
+      if (result.found && result.base_url && result.error === null) {
+        const url = result.base_url;
+        setProxyUrl(url);
+        setText(prev => ({ ...prev, base_url: url, api_key: '' }));
+        setEnabled(prev => ({ ...prev, experimental_betas: true }));
+        setProxyNotice(m.cliproxy_found({ url }));
+      } else if (result.error) {
+        setError(result.base_url ? m.cliproxy_error({ url: result.base_url, erro: result.error }) : result.error);
+      } else setProxyNotice(m.cliproxy_missing());
+    } catch (cause) {
+      if (valid()) setError(cause instanceof Error ? cause.message : m.erro_desconhecido());
+    } finally {
+      detectingNow.current = false;
+      if (valid()) setDetecting(false);
+    }
+  }
   async function save() {
-    if (saving.current || !alive.current) return;
+    if (saving.current || detectingNow.current || !alive.current || closed.current) return;
     const value = Object.fromEntries(Object.entries(text).map(([key, value]) => [key, value.trim()])) as Record<TextField, string>;
     const id = name ?? value.name;
-    if (!id || !value.label || !value.base_url || !value.model || (!engine?.api_key_definida && !value.api_key)) {
+    const baseUrl = proxyUrl ?? value.base_url;
+    if (!id || !value.label || !baseUrl || !value.model || (!proxyUrl && !engine?.api_key_definida && !value.api_key)) {
       setError(m.mobile_accounts_engine_required()); return;
     }
     if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) { setError(m.mobile_accounts_engine_bad_name()); return; }
     if (!name && names.includes(id)) { setError(m.mobile_accounts_engine_name_taken()); return; }
     try {
-      const url = new URL(value.base_url);
+      const url = new URL(baseUrl);
       if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error();
     } catch { setError(m.mobile_accounts_engine_bad_url()); return; }
     if (numbers.some(key => value[key] && (!/^\d+$/.test(value[key]) || !Number.isSafeInteger(Number(value[key])) || Number(value[key]) <= 0))) {
       setError(m.mobile_accounts_engine_bad_number()); return;
     }
-    const payload: Record<string, unknown> = { label: value.label, base_url: value.base_url, model: value.model,
+    const payload: Record<string, unknown> = { label: value.label, base_url: baseUrl, model: value.model,
       subagent_model: value.subagent_model, ...enabled };
     if (vision !== null) payload.vision = vision;
     for (const key of numbers) payload[key] = value[key] ? Number(value[key]) : '';
-    if (value.api_key) payload.api_key = value.api_key;
+    if (proxyUrl) payload.use_cliproxy_key = true;
+    else if (value.api_key) payload.api_key = value.api_key;
     const target = server;
     const requestIdentity = identity;
-    const valid = () => alive.current && currentIdentity.current === requestIdentity;
+    const valid = () => alive.current && !closed.current && currentIdentity.current === requestIdentity;
     saving.current = true; setBusy(true); setError('');
     try {
       await putEngineForServer(target, id, payload);
@@ -86,30 +130,40 @@ export function EngineEditor({ server, name, engine, names, onSaved, onClose }: 
   const field = (key: TextField) => (
     <SettingsRow key={key} title={labels[key]}
       description={key === 'api_key' && engine?.api_key_definida ? m.mobile_accounts_engine_key_saved() : undefined}>
-      <TextInput accessibilityLabel={labels[key]} value={text[key]} onChangeText={value => setText(prev => ({ ...prev, [key]: value }))}
-        editable={!busy && !(key === 'name' && !!name)} secureTextEntry={key === 'api_key'}
+      <TextInput accessibilityLabel={labels[key]} value={text[key]} onChangeText={value => {
+        if (proxyUrl && (key === 'base_url' || key === 'api_key')) return;
+        setText(prev => ({ ...prev, [key]: value }));
+      }}
+        editable={!locked && !(key === 'name' && !!name) && !(proxyUrl && (key === 'base_url' || key === 'api_key'))} secureTextEntry={key === 'api_key'}
         autoCapitalize="none" autoCorrect={false} keyboardType={numbers.includes(key as NumberField) ? 'number-pad' : key === 'base_url' ? 'url' : 'default'}
         placeholderTextColor={c.faint} style={[styles.input, { color: c.text, borderColor: c.borderStrong, backgroundColor: c.inset }]} />
     </SettingsRow>
   );
+  if (closed.current) return null;
   return (
-    <Sheet open sizes={['large']} scrollable dismissible={!busy} onDismiss={onClose}>
+    <Sheet open sizes={['large']} scrollable dismissible={!locked} onDismiss={close}>
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
         <PageHeader title={name ? m.mobile_accounts_engine_edit() : m.mobile_accounts_engine_new()} subtitle={server.label}
-          actions={[{ label: m.comum_cancelar(), disabled: busy, onPress: onClose }]} />
+          actions={[{ label: m.comum_cancelar(), disabled: locked, onPress: close }]} />
+        {!name ? <View style={styles.actions}>
+          <Pill label={m.browser_jev_aux_cliproxy_use()} disabled={locked || proxyUrl !== null} onPress={() => { void detectProxy(); }} />
+        </View> : null}
+        {detecting || proxyNotice ? <Text style={styles.muted}>{detecting ? m.cliproxy_detecting() : proxyNotice}</Text> : null}
         {(['name', 'label', 'base_url', 'api_key', 'model', 'subagent_model', ...numbers] as TextField[]).map(field)}
         <View style={styles.actions}>
           {([null, true, false] as const).filter(value => value !== null || engine?.vision == null).map(value => <Pill key={String(value)}
             label={value == null ? m.mobile_accounts_engine_vision_auto() : value ? m.mobile_accounts_engine_vision_yes() : m.mobile_accounts_engine_vision_no()}
-            disabled={busy || value === vision} onPress={() => setVision(value)} />)}
+            disabled={locked || value === vision} onPress={() => setVision(value)} />)}
         </View>
         {flags.map(flag => <SettingsRow key={flag} title={labels[flag]}>
-          <Switch accessibilityLabel={labels[flag]} value={enabled[flag]} disabled={busy}
+          <Switch accessibilityLabel={labels[flag]} value={enabled[flag]} disabled={locked}
             onValueChange={value => setEnabled(prev => ({ ...prev, [flag]: value }))} />
         </SettingsRow>)}
+        {name && engine?.api_key_definida && !text.api_key.trim() && text.base_url.trim() !== engine.base_url
+          ? <Text style={styles.muted}>{m.native_accounts_engine_url_moved()}</Text> : null}
         {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
         {busy ? <Text style={styles.muted}>{m.comum_carregando()}</Text> : null}
-        <View style={styles.actions}><Pill label={m.mobile_accounts_engine_save()} disabled={busy} onPress={() => { void save(); }} /></View>
+        <View style={styles.actions}><Pill label={m.mobile_accounts_engine_save()} disabled={locked} onPress={() => { void save(); }} /></View>
       </ScrollView>
     </Sheet>
   );
