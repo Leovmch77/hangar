@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import ClientDisconnect
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
@@ -1803,62 +1803,6 @@ class _StrictBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ClaudeCustomizationBody(_StrictBody):
-    plugins: dict[str, StrictBool] = Field(default_factory=dict)
-    skills: dict[str, StrictBool] = Field(default_factory=dict)
-    blocked_skills: list[str] = Field(default_factory=list)
-
-
-class CreateBody(_StrictBody):
-    name: str | None = Field(default=None, min_length=1)
-    cwd: str = Field(min_length=1)
-    branch: str | None = Field(default=None, min_length=1)
-    # Com `new_branch`, `branch` é o nome da branch NOVA e `base` a de partida (None = a atual).
-    new_branch: bool = Field(default=False, strict=True)
-    base: str | None = Field(default=None, min_length=1)
-    config_dir: str | None = None
-    # O campo omitido é resolvido pelo servidor antes de validar as opções do provedor.
-    provider: str = "claude"
-    # Somente a abertura humana muda o padrão; criação automatizada pode escolher outro provedor.
-    remember_provider: bool = Field(default=False, strict=True)
-    # Conta Codex escolhida pelo usuário. Ausente mantém a conta padrão para clientes antigos.
-    codex_account: str | None = None
-    # Wrapper interativo do Codex pode iniciar a TUI ja com um prompt. Nao e argv arbitrario:
-    # evita que um cliente remoto injete flags que afrouxem sandbox/aprovacoes do backend.
-    initial_prompt: str | None = None
-    # Motor de modelo (nome no engines.json). None = conta Anthropic, comportamento de hoje.
-    engine: str | None = None
-    engine_account: str | None = None
-    # Escolhidos na tela de abertura. None = padrão do binário (comportamento de hoje). Validado
-    # aqui, nunca no front: o valor entra num comando de shell.
-    model: str | None = None
-    effort: str | None = None
-    service_tier: Literal["default", "priority"] | None = None
-    # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
-    permission_mode: str | None = None
-    # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
-    subagent_model: str | None = None
-    claude_customizations: ClaudeCustomizationBody | None = None
-    # Jev (typesafe.ai) no `hangar-preview objetivo`. Escolha da ABERTURA: ligado, a sessão nasce
-    # com a chave no ambiente; desligado, só com o marcador, e o verbo recusa. É o que
-    # permite rodar a mesma tarefa com e sem, sem apagar a configuração.
-    # AUSENTE (None) ≠ `false`: quem não disse nada herda o `jev_padrao` do servidor, e é assim que
-    # a escolha feita uma vez vale pros três caminhos de criação. `false` explícito continua
-    # desligando aquela sessão mesmo com o padrão ligado.
-    jev: bool | None = Field(default=None, strict=True)
-    # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
-    # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
-    omp_profile: str | None = None
-
-    read_only: bool = Field(default=False, strict=True)
-    # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
-    # (painel de terminal, espelho) não existe.
-    headless: bool | None = Field(default=None, strict=True)
-    # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
-    # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
-    creator: str | None = Field(default=None, min_length=1)
-
-
 class TtsBody(_StrictBody):
     # max_length: sem teto, um corpo de 100 MB era parseado INTEIRO antes do 413 do preparo/teto
     # de caracteres poder recusar. 200_000 e bem acima do teto real (_TTS_TETO) — so evita o corpo
@@ -2154,19 +2098,18 @@ def _codex_as_claude_mode(name: str) -> str | None:
     return "acceptEdits" if sandbox == "workspace-write" else "manual"
 
 
-async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSessionInfo | None:
+async def _open_in_rust(raw: bytes, request: Request | None) -> CreatedSessionInfo | None:
     """Claude com terminal abre no Rust. O que entra pela 8765 ele decide antes de repassar; à ponte,
-    num sentido, só vai o que entrou direto aqui: o Connect (8768), inclusive o bastão por ela.
-    `None`: o pedido não é do Rust e segue aqui."""
+    num sentido, só vai o que entrou direto aqui: o Connect (8768), inclusive o bastão por ela. O
+    pedido vai cru: quem valida é o Rust. `None`: o pedido não é do Rust e segue aqui."""
     from app import runtime_coordinator
     port = (request.scope.get("server") or (None, None))[1] if request is not None else None
     if port != CONNECT_PORT or port == settings.port:
         return None
     guest = guest_users.current.get()
-    payload = json.dumps({"request": body.model_dump(mode="json", exclude_unset=True),
-                          "guest": guest.id if guest is not None else None}).encode()
-    # O prazo da criação, que prepara conta e worktree.
-    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, body.name or "_", "open", "POST", payload, 180)
+    payload = b'{"request":' + raw + b',"guest":' + json.dumps(guest.id if guest is not None else None).encode() + b"}"
+    # O prazo da criação, que prepara conta e worktree. O nome na rota é só rótulo: a ponte lê o pedido.
+    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, "_", "open", "POST", payload, 180)
     if answer is None:
         return None
     status, raw = answer
@@ -2178,8 +2121,8 @@ async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSes
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
-async def create_session(body: CreateBody, request: Request = None) -> CreatedSessionInfo:
-    opened = await _open_in_rust(body, request)
+async def create_session(request: Request) -> CreatedSessionInfo:
+    opened = await _open_in_rust(await request.body(), request)
     if opened is not None:
         return opened
     # Toda abertura é do Rust (`_open_in_rust` para o que entrou aqui pelo Connect): sem ele, recusa.
@@ -2952,11 +2895,9 @@ async def bastao_dossie(name: str):
 class BastaoBody(_StrictBody):
     """Sessão NOVA que vai continuar o trabalho de `{name}`.
 
-    Corpo próprio, e não `CreateBody`: aquele é `extra="forbid"` e tem `cwd` obrigatório — aqui o
-    padrão é o cwd da ORIGEM (a passagem continua o mesmo trabalho, na mesma árvore). Os campos
-    que sobrepõem o `CreateBody` são repassados pra ele tal e qual, então a validação de
-    provider/conta/motor/modelo/esforço/permissão continua num lugar só (`model_args` + o handler
-    de criação) — `provider` aqui é sempre o da SUCESSORA, nunca o da origem.
+    O padrão do `cwd` é o da ORIGEM (a passagem continua o mesmo trabalho, na mesma árvore). Os
+    campos do pedido de abertura vão ao Rust tal e qual, e é ele que valida
+    provider/conta/motor/modelo/esforço/permissão — `provider` aqui é sempre o da SUCESSORA.
     """
     name: str = Field(min_length=1)          # nome da sessão nova (o destino)
     cwd: str | None = None                   # None = o cwd da origem
@@ -3135,26 +3076,26 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         raise HTTPException(500, detail=erro("erro_bastao_gravar",
                                              f"não consegui gravar o dossiê: {e}",
                                              motivo=str(e))) from None
-    # Reusa o handler de criação inteiro (validação de provider/conta/motor/model_args, ciclo da
-    # conta, Codex): duplicar aquilo aqui seria uma segunda porta de criação pra manter em dia.
-    # HTTPException dele sobe tal e qual — o dossiê já gravado vira sidecar órfão, que o `prune`
+    # Reusa a abertura do Rust inteira (validação de provider/conta/motor/modelo, ciclo da conta,
+    # Codex): uma segunda porta de criação aqui seria mais uma pra manter em dia.
+    # A recusa dele sobe tal e qual — o dossiê já gravado vira sidecar órfão, que o `prune`
     # recolhe pelo nome (ver bastao_mod.caminho).
-    creation = CreateBody(
-        name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
-        remember_provider=body.remember_provider,
-        engine=body.engine, engine_account=body.engine_account, model=body.model, effort=body.effort,
-        permission_mode=body.permission_mode, omp_profile=body.omp_profile,
-        codex_account=sucessora_codex_account,
-        # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
-        # virar False, e não chegar como None num campo que só aceita bool.
-        headless=bool(body.headless))
     # A sucessora nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust já olhou o
     # pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
-    creation = creation.model_copy(update={"initial_prompt": kick})
+    creation = {k: v for k, v in {
+        "name": destino, "cwd": cwd, "config_dir": body.config_dir, "provider": body.provider,
+        "remember_provider": body.remember_provider,
+        "engine": body.engine, "engine_account": body.engine_account, "model": body.model, "effort": body.effort,
+        "permission_mode": body.permission_mode, "omp_profile": body.omp_profile,
+        "codex_account": sucessora_codex_account,
+        # Cliente antigo não manda `headless`: sem ele, com terminal.
+        "headless": bool(body.headless), "initial_prompt": kick}.items() if v is not None}
     if request.headers.get("x-hangar-open") == "rust":
-        return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
+        return JSONResponse({"open": creation, "dossie": str(alvo),
                              "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
-    novo = await create_session(creation, request)
+    novo = await _open_in_rust(json.dumps(creation).encode(), request)
+    if novo is None:
+        raise registry_mod.SessionOpenNeedsRust()
     # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
     # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
     return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,

@@ -821,9 +821,11 @@ export function uniqueSessionName(base: string, taken: Set<string>): string {
 // com a sessão nascendo e o reenvio duplicá-la.
 const SESSION_BIRTH_MS = 120_000;
 
-function withCreationWarnings<T extends { avisos?: string[] }>(result: T): T {
-  if (result?.avisos?.length) {
-    try { apiEnv().onSessionWarnings?.(result.avisos); }
+// Criação e reabertura (modo, recarregar, conta, motor, bypass) podem trazer `avisos` no sucesso.
+function withSessionWarnings<T extends object>(result: T): T {
+  const avisos = (result as { avisos?: string[] } | null)?.avisos;
+  if (avisos?.length) {
+    try { apiEnv().onSessionWarnings?.(avisos); }
     catch (error) { console.error('onSessionWarnings:', error); }
   }
   return result;
@@ -847,7 +849,7 @@ export function setClaudeDefaultsForServer(s: Server, body: ClaudeDefaultsBody):
 
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
   return apiFetchForServer<SessionInfo>(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS)
-    .then(withCreationWarnings);
+    .then(withSessionWarnings);
 }
 
 export function createSession(
@@ -881,7 +883,7 @@ export function createSession(
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
 }
 
 // ── Passagem de bastão ──────────────────────────────────────────────────────
@@ -956,11 +958,11 @@ export function passarBastao(
 ): Promise<BastaoResult> {
   if (server) return apiFetchForServer<BastaoResult>(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST', body: JSON.stringify(body),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST',
     body: JSON.stringify(body),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
 }
 
 // Modelo oferecido na tela de ABERTURA (GET /api/model-options). O backend devolve QUATRO formatos
@@ -3090,19 +3092,20 @@ export function setEngineModel(
   body: { model: string; effort?: string | null }, server?: Server | null,
 ): Promise<{ ok: boolean; model: string; result: string | null; effort_error?: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/engine/model`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
+  return sessionFetch<{ ok: boolean; model: string; result: string | null; effort_error?: string }>(server,
+    `/api/sessions/${encodeURIComponent(name)}/engine/model`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(withSessionWarnings);
 }
 
 // Fast da sessão viva (POST .../service-tier); `priority` liga, `default` volta ao padrão da conta.
 export function setServiceTier(name: string, tier: 'default' | 'priority', server?: Server | null): Promise<{ ok: boolean; service_tier: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/service-tier`, {
+  return sessionFetch<{ ok: boolean; service_tier: string }>(server, `/api/sessions/${encodeURIComponent(name)}/service-tier`, {
     method: 'POST',
     body: JSON.stringify({ service_tier: tier }),
-  });
+  }).then(withSessionWarnings);
 }
 
 /**
@@ -3128,7 +3131,7 @@ export async function setModelEffort(
   return sessionFetch<ModelEffortResposta>(server,
     `/api/sessions/${encodeURIComponent(name)}/model-effort`,
     { method: 'POST', body: JSON.stringify(body) },
-  );
+  ).then(withSessionWarnings);
 }
 
 // provider: quem RESPONDEU de fato (pode ter virado "local" pelo fallback do backend quando falta
@@ -3652,15 +3655,16 @@ export function getPermissionModes(name: string, sondar = false, server?: Server
 
 /** Troca a sessão Claude entre terminal e sem terminal, na mesma conversa. Só ociosa (409 com o motivo). */
 export function setModoExecucao(name: string, terminal: boolean, server?: Server | null): Promise<{ ok: boolean; terminal: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/modo-execucao`, {
+  return sessionFetch<{ ok: boolean; terminal: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/modo-execucao`, {
     method: 'POST',
     body: JSON.stringify({ terminal }),
-  });
+  }).then(withSessionWarnings);
 }
 
 /** Recicla o processo da sessão Claude sem terminal na mesma conversa (relê MCP/hooks/settings). Só ociosa (409 com o motivo). */
 export function recarregarSessao(name: string, server?: Server | null): Promise<{ ok: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' });
+  return sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' })
+    .then(withSessionWarnings);
 }
 
 /** Conta Claude para onde a conversa pode ir: `pct` é a janela de cota mais cheia (null = sem leitura);
@@ -3675,25 +3679,26 @@ export function listAccountTargets(name: string, server?: Server | null): Promis
 /** Continua a mesma conversa noutra conta Claude (`path` de `listAccountTargets`). Só ociosa (409 com o motivo). */
 // Sessão com motor GPT do proxy: troca a conta ChatGPT (o nativo, confirm_engine_account).
 export function setSessionEngineAccount(name: string, account: string, server?: Server | null): Promise<{ ok: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
+  return sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
     method: 'POST',
     body: JSON.stringify({ engine_account: account }),
-  });
+  }).then(withSessionWarnings);
 }
 
 export function setSessionAccount(name: string, configDir: string, server?: Server | null): Promise<{ ok: boolean; config_dir: string }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
+  return sessionFetch<{ ok: boolean; config_dir: string }>(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
     method: 'POST',
     body: JSON.stringify({ config_dir: configDir }),
-  });
+  }).then(withSessionWarnings);
 }
 
 export function setPermissionMode(name: string, mode: string, server?: Server | null): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
-    method: 'POST',
-    body: JSON.stringify({ mode }),
-  });
+  return sessionFetch<{ mode: string; current: string; previous_non_plan: string }>(server,
+    `/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }).then(withSessionWarnings);
 }
 
 // ── Loop runner (Task 9+): obter, criar, parar e resolver loops autonomos por sessao ───────────

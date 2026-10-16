@@ -189,9 +189,6 @@ class PythonReference(HttpTransport):
     def account_exists(self, provider: str, account_id: str) -> bool:
         return (self.root / f".{provider}-{account_id}").is_dir()
 
-    def cancel_birth(self):
-        return self.request("POST", "/__contract__/cancel-birth")
-
     def calls(self) -> list[dict]:
         return self.request("GET", "/__contract__/calls").json()
 
@@ -364,7 +361,7 @@ else send({id:m.id,error:{code:-32601,message:'método inesperado'}});
 def _worker() -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from unittest.mock import patch
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request as HttpRequest
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
     from app import api, codex_contas_login, credenciais, account_bridge, dictation_bridge
@@ -419,11 +416,8 @@ def _worker() -> None:
         if not await asyncio.to_thread(barrier[1].wait, 25):
             raise RuntimeError("barreira de preparo não foi liberada")
         return {"status": "ready", "trust_pending": False, "issues": []}
-    births = {}
-    published = threading.Event()
     children = []
     mux = {}
-    launcher_options = {}
     original_popen = subprocess.Popen
     from app import account_lifecycle
     def launcher_pids(key):
@@ -431,39 +425,9 @@ def _worker() -> None:
         return [child.pid for child in children if child.poll() is None and "--codex-home" in child.args
                 and AccountKey.new(key.provider, Path(child.args[child.args.index("--codex-home") + 1])) == key]
 
-    def create_at_barrier(name, cwd, config_dir, **kwargs):
-        from app.models import SessionInfo
-        from app.adapters.codex import sessions
-        barrier = barriers.get("session_before_registration")
-        if barrier:
-            barrier[0].set()
-            if not barrier[1].wait(25):
-                raise RuntimeError("barreira não foi liberada")
-        home = root / (".codex-" + kwargs.get("codex_account", "alpha"))
-        command = [sys.executable, "-c", "import sys; sys.stdin.readline()"]
-        if not launcher_options.get("opaque"):
-            command += ["--", kwargs["provider"], "--codex-home", str(home)]
-        child = original_popen(command,
-                               cwd=root, env=isolated_environment(root), stdin=subprocess.PIPE,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        children.append(child)
-        # Identidade no formato do `list-sessions` real: o leitor de uso do Rust valida.
-        mux[name] = f"{child.pid}:${child.pid}:200"
-        launcher = barriers.get("launcher_before_publication")
-        if launcher:
-            def publish():
-                launcher[0].set()
-                if launcher[1].wait(25) and child.poll() is None:
-                    current_name = next((key for key, value in mux.items() if value == f"{child.pid}:${child.pid}:200"), name)
-                    sessions.save(current_name, "thread-born", "", str(cwd), app_pid=child.pid,
-                                  endpoint="ws://127.0.0.1:1", codex_home=home,
-                                  codex_account=kwargs.get("codex_account", "alpha"))
-                    published.set()
-            threading.Thread(target=publish, daemon=True).start()
-        return SessionInfo(name=name, cwd=cwd, provider=kwargs["provider"])
-
     service = codex_contas_login.CodexContasLogin()
     app = FastAPI()
+    app.add_exception_handler(api.registry_mod.SessionOpenNeedsRust, api._abrir_precisa_do_rust)
     internal_api.set_secret("contract-internal")
     app.include_router(internal_api.router)
     app.state.codex_contas_login = service
@@ -536,16 +500,12 @@ def _worker() -> None:
         return account_bridge.request_claude("auth", path=path)
     app.include_router(credenciais.credenciais_router)
 
-    @app.post("/api/sessions")
-    async def birth(body: dict):
-        task = asyncio.current_task()
-        births["task"] = task
-        try:
-            return await api.create_session(api.CreateBody.model_validate(body))
-        except asyncio.CancelledError:
-            return JSONResponse({"cancelled": True}, status_code=499)
-        finally:
-            births.pop("task", None)
+    async def birth(request):
+        return await api.create_session(request)
+    # Com `from __future__ import annotations` a anotação viraria texto lido no módulo, onde
+    # `Request` é o do urllib: a classe vai direto.
+    birth.__annotations__ = {"request": HttpRequest}
+    app.post("/api/sessions")(birth)
 
     @app.post("/api/sessions/{name}/rename")
     async def rename(name: str, body: dict):
@@ -553,7 +513,6 @@ def _worker() -> None:
 
     @app.post("/__contract__/launcher-options")
     def options(body: dict):
-        launcher_options.update(body)
         if body.get("live_claude"):
             environment = isolated_environment(root)
             environment["CLAUDE_CONFIG_DIR"] = str(work)
@@ -563,11 +522,6 @@ def _worker() -> None:
             children.append(child)
             assert child.poll() is None
             return {"ok": True, "pid": child.pid}
-        return {"ok": True}
-
-    @app.post("/__contract__/reuse-name/{name}")
-    def reuse(name: str):
-        mux[name] = "1:$1:200"
         return {"ok": True}
 
     @app.get("/__contract__/mux")
@@ -589,7 +543,7 @@ def _worker() -> None:
 
     @app.post("/__contract__/barrier/{name}")
     def block(name: str):
-        assert name in {"session_before_registration", "launcher_before_publication", "birth_publication", "account_prepare"}
+        assert name == "account_prepare"
         barriers[name] = (threading.Event(), threading.Event())
         return {"ok": True}
 
@@ -601,13 +555,6 @@ def _worker() -> None:
     def release(name: str):
         barriers[name][1].set()
         return {"ok": True}
-
-    @app.post("/__contract__/cancel-birth")
-    async def cancel_birth():
-        task = births.get("task")
-        if task:
-            task.cancel()
-        return {"cancelled": task is not None}
 
     @app.get("/__contract__/usage")
     def usage():
@@ -625,11 +572,6 @@ def _worker() -> None:
         names |= {row["name"] for row in rows if row["name"] in instances}
         return {"complete": all(b["instance"] is not None for b in births),
                 "sessions": sorted(names), "pids": pids, "holders": []}
-
-    @app.get("/__contract__/published")
-    def publication():
-        assert published.wait(20)
-        return {"published": True}
 
     @app.post("/__contract__/stop-launcher")
     def stop_launcher():
@@ -743,7 +685,6 @@ def _worker() -> None:
                         kill=window_close, send_code=window_code), \
             patch.object(runtime_coordinator, "current", return_value=instance), \
             patch.object(api.app.state, "codex_contas_login", service, create=True), \
-            patch.object(api.registry, "create", side_effect=create_at_barrier), \
             patch.object(api, "_codex_require_idle_preparation"), \
             patch.object(api, "_invalidate_lists"), \
             patch.object(codex_contas_sync, "_prepare_account_guarded", side_effect=prepare_at_barrier), \

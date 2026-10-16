@@ -100,11 +100,24 @@ function claude {
             [Console]::Error.WriteLine("hangar: o argumento '$barrou' nao cabe no pedido do Hangar; abrindo o claude sem o Hangar")
         }
         if ($cobre) {
+            # O mesmo binario que o Supervisor sobe (backend/app/rust_bins.py): CP_RUST_SERVER_BIN
+            # vence e nao cai para outro; sem ela, o mais novo entre o build desta copia e o baixado
+            # (empate fica com a copia); o PATH so sem nenhum dos dois.
             $servidor = $null
-            foreach ($c in @($env:CP_RUST_SERVER_BIN, (Join-Path $HOME '.hangar\bin\hangar-server.exe'))) {
-                if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { $servidor = $c; break }
+            $melhor = $null
+            if ($env:CP_RUST_SERVER_BIN) {
+                if (Test-Path -LiteralPath $env:CP_RUST_SERVER_BIN -PathType Leaf) { $servidor = $env:CP_RUST_SERVER_BIN }
+            } else {
+                foreach ($c in @((Join-Path $PSScriptRoot '..\..\crates\target\release\hangar-server.exe'),
+                                 (Join-Path $HOME '.hangar\bin\hangar-server.exe'))) {
+                    if (Test-Path -LiteralPath $c -PathType Leaf) {
+                        $item = Get-Item -LiteralPath $c
+                        if (-not $melhor -or $item.LastWriteTimeUtc -gt $melhor.LastWriteTimeUtc) { $melhor = $item }
+                    }
+                }
+                if ($melhor) { $servidor = $melhor.FullName }
             }
-            if (-not $servidor) {
+            if (-not $servidor -and -not $env:CP_RUST_SERVER_BIN) {
                 $servidor = (Get-Command hangar-server -CommandType Application -ErrorAction SilentlyContinue |
                              Select-Object -First 1).Source
             }

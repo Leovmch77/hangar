@@ -13,7 +13,9 @@ import { getCredentialsForServer, listarCredenciais, getCodexAccountsForServer, 
   consumeCodexRateLimitResetForServer,
   createSessionForServer, createSession,
   modelOptionsForServer, modelOptions, getArchiveHistory, getArchivePorCwd, resumeArchivedConversation,
-  passarBastao, errorDetail, mergedTranscripts, accountDeletedNotice } from './api';
+  passarBastao, errorDetail, mergedTranscripts, accountDeletedNotice,
+  setEngineModel, setServiceTier, setModelEffort, setModoExecucao, recarregarSessao, setSessionEngineAccount,
+  setSessionAccount, setPermissionMode } from './api';
 import * as m from './paraglide/messages';
 
 const server = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
@@ -81,6 +83,26 @@ describe('contas e servidor explícito', () => {
       : source === 'server' ? await createSessionForServer(server, { name: 'created', provider: 'codex' })
         : await passarBastao('origin', { name: 'created' }, server);
     expect(result.name).toBe('created');
+    expect(notify).toHaveBeenCalledWith(warnings);
+  });
+
+  it.each([
+    ['modelo do motor', () => setEngineModel('s', { model: 'x' }, server)],
+    ['Fast', () => setServiceTier('s', 'priority', server)],
+    ['esforço', () => setModelEffort('s', { model: 'x', scope: 'session' }, server)],
+    ['terminal', () => setModoExecucao('s', true, server)],
+    ['recarregar', () => recarregarSessao('s', server)],
+    ['conta do motor', () => setSessionEngineAccount('s', 'c', server)],
+    ['conta', () => setSessionAccount('s', '/c', server)],
+    ['bypass', () => setPermissionMode('s', 'bypassPermissions', server)],
+  ])('mostra os avisos da reabertura (%s)', async (_rota, call) => {
+    const warnings = ['O motor x saiu do catálogo'];
+    const notify = vi.fn();
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a',
+      onUnauthorized: unauthorized, onSessionWarnings: notify, origin: null,
+      createEventSource: () => { throw new Error('unused'); } });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ok: true, avisos: warnings }));
+    await call();
     expect(notify).toHaveBeenCalledWith(warnings);
   });
 

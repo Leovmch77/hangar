@@ -4,6 +4,8 @@ terminal. Pede a sessão ao lançador do Hangar (`hangar-server open`, o mesmo d
 terminal a ela. Saída 100 = os argumentos não cabem no pedido, ou não há `hangar-server` que abra (ausente, antigo ou sem token): o wrapper
 roda o CLI cru. Qualquer outra saída diferente de 0 é erro já mostrado; não se abre uma segunda vez.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -61,11 +63,20 @@ def request(provider: str, args: list[str]) -> dict | None:
 
 
 def server_bin() -> str | None:
-    exe = "hangar-server.exe" if os.name == "nt" else "hangar-server"
-    for path in (os.environ.get("CP_RUST_SERVER_BIN"), str(Path.home() / ".hangar" / "bin" / exe), shutil.which("hangar-server")):
-        if path and os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-    return None
+    """O `hangar-server` que o Supervisor subiria (`rust_bins.find_bin` desta cópia); o PATH só sem
+    a cópia ou sem nenhum dos dois, e nunca contra um `CP_RUST_SERVER_BIN` explícito."""
+    # `~/.local/bin/hangar-open` é link: o resolve chega à cópia.
+    caminho = Path(__file__).resolve().parent.parent / "backend" / "app" / "rust_bins.py"
+    try:
+        loader = importlib.machinery.SourceFileLoader("hangar_rust_bins", str(caminho))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        found = mod.find_bin("hangar-server", "CP_RUST_SERVER_BIN")
+    except (ImportError, OSError):
+        found = None
+    if found:
+        return str(found)
+    return None if os.environ.get("CP_RUST_SERVER_BIN", "").strip() else shutil.which("hangar-server")
 
 
 def main() -> int:

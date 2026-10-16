@@ -123,3 +123,16 @@ describe('lista indisponível sem detalhe', () => {
     expect(formataErro({ code, params: { detalhe: 'timeout' }, msg: 'x' })).toContain('(timeout)');
   });
 });
+
+describe('recusas da abertura e da reabertura no Rust', () => {
+  it.each([
+    ['erro_conversa_viva', { sessao: 'web' }, 'web'],
+    ['erro_fast_indisponivel', {}, null],
+    ['erro_recarregar_sem_terminal', { erro: 'pane morreu' }, 'pane morreu'],
+    ['account_busy', {}, null],
+  ])('%s vira frase do app, não o texto do servidor', (code, params, contem) => {
+    const texto = formataErro({ code, params, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    if (contem) expect(texto).toContain(contem);
+  });
+});

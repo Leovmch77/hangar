@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Cria uma sessao Codex gerenciada pelo hangar e anexa o terminal ao tmux.
 
-Com o servidor de pé cria pelo `POST /api/sessions`; sem conexão, pelo `hangar-server open`, que
-abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois. Sem nenhum
-dos dois sai com 3, e o wrapper do shell abre o `codex` oficial; recusa sai com 1 e não abre nada.
-Cada chamada cria uma sessao nova.
+Abre pelo `hangar-server open`, o lançador do app: ele pede ao servidor e, com o servidor fora ou
+sem o Rust, abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois.
+Sem um `hangar-server` que abra sai com 3, e o wrapper do shell abre o `codex` oficial; recusa sai
+com 1 e não abre nada. Cada chamada cria uma sessao nova.
 """
 from __future__ import annotations
 
@@ -18,18 +18,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-
-class BackendTransportError(RuntimeError):
-    """O backend não pôde ser contactado; só esta falha permite o caminho local."""
-
-
-class BackendUncertainError(RuntimeError):
-    """O pedido pode ter chegado e a resposta não veio: só a lista diz se a sessão nasceu."""
-
-
-# O mesmo prazo de criação das telas: preparo de conta e worktree passam dos 30 s.
-PRAZO_CRIACAO = 120
 
 
 class BackendHttpError(RuntimeError):
@@ -85,8 +73,7 @@ def _api(method: str, path: str, body: dict | None = None):
     token = os.environ.get("CP_AUTH_TOKEN") or env.get("CP_AUTH_TOKEN")
     port = os.environ.get("CP_PORT") or env.get("CP_PORT") or "8765"
     if not token:
-        raise BackendTransportError(
-            f"hangar-codex: CP_AUTH_TOKEN ausente em {_repo() / 'backend' / '.env'}")
+        raise RuntimeError(f"hangar-codex: CP_AUTH_TOKEN ausente em {_repo() / 'backend' / '.env'}")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
@@ -98,8 +85,7 @@ def _api(method: str, path: str, body: dict | None = None):
         },
     )
     try:
-        prazo = PRAZO_CRIACAO if (method, path) == ("POST", "/api/sessions") else 30
-        with urllib.request.urlopen(req, timeout=prazo) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
@@ -111,50 +97,40 @@ def _api(method: str, path: str, body: dict | None = None):
             detail = detail["detail"]
         raise BackendHttpError(exc.code, detail) from exc
     except (OSError, TimeoutError, urllib.error.URLError) as exc:
-        texto = f"backend inacessivel em 127.0.0.1:{port}: {exc}"
-        motivo = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-        # Só a conexão recusada garante que o pedido não chegou; o resto, num pedido que escreve, é incerto.
-        if method != "GET" and not isinstance(motivo, ConnectionRefusedError):
-            raise BackendUncertainError(texto) from exc
-        raise BackendTransportError(texto) from exc
-
-
-def _base_name(cwd: str) -> str:
-    clean = "".join(c if c.isalnum() or c in "_-" else "-" for c in Path(cwd).name)
-    return clean.strip("-") or "codex"
-
-
-def _nomes_livres(cwd: str, ocupados: set[str]):
-    base = _base_name(cwd)
-    for index in range(1, 1000):
-        name = base if index == 1 else f"{base}-{index}"
-        if name not in ocupados:
-            yield name
+        raise RuntimeError(f"backend inacessivel em 127.0.0.1:{port}: {exc}") from exc
 
 
 class LancadorAusente(RuntimeError):
-    """Nem servidor nem `hangar-server` para abrir: o wrapper do shell abre o `codex` oficial."""
+    """Sem `hangar-server` que abra: o wrapper do shell abre o `codex` oficial."""
 
 
 def _hangar_server() -> str:
-    """O `hangar-server` desta máquina, o mesmo que o Hangar sobe (`CP_RUST_SERVER_BIN`, `~/.hangar/bin`,
-    o build desta cópia, o PATH)."""
-    exe = "hangar-server.exe" if os.name == "nt" else "hangar-server"
-    candidatos = [os.environ.get("CP_RUST_SERVER_BIN"), str(Path.home() / ".hangar" / "bin" / exe),
-                  str(_repo() / "crates" / "target" / "release" / exe), shutil.which("hangar-server")]
-    for candidato in filter(None, candidatos):
-        if Path(candidato).is_file() and os.access(candidato, os.X_OK):
-            return candidato
-    raise LancadorAusente("hangar-server não encontrado (CP_RUST_SERVER_BIN, ~/.hangar/bin, crates/target/release "
-                          "ou PATH) e o servidor não respondeu: nenhuma sessão foi aberta")
+    """O `hangar-server` que o Supervisor subiria, pela mesma regra do `hangar-open`."""
+    import importlib.machinery
+    import importlib.util
+
+    try:
+        loader = importlib.machinery.SourceFileLoader("hangar_open", str(_repo() / "scripts" / "hangar-open"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        exe = mod.server_bin()
+    except (ImportError, OSError):
+        exe = shutil.which("hangar-server")
+    if exe:
+        return exe
+    raise LancadorAusente("hangar-server não encontrado (CP_RUST_SERVER_BIN, crates/target/release, ~/.hangar/bin "
+                          "ou PATH): nenhuma sessão foi aberta")
 
 
-def _open_local(body: dict) -> dict:
-    """`hangar-server open`: sem conexão com o servidor, a sessão nasce aqui igual às do app."""
+def _open(body: dict) -> dict:
+    """`hangar-server open`: pede ao servidor e, sem ele, a sessão nasce aqui igual às do app."""
     r = subprocess.run([_hangar_server(), "open", json.dumps(body)], capture_output=True, text=True)
     if r.returncode == 0:
         return json.loads(r.stdout)
     texto = (r.stderr or r.stdout).strip()
+    # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado.
+    if r.returncode in (2, 4):
+        raise LancadorAusente(f"o hangar-server não abriu a sessão (saída {r.returncode}): {texto}")
     try:
         detail = json.loads(texto.splitlines()[-1])["detail"]
     except (ValueError, IndexError, KeyError, TypeError):
@@ -162,56 +138,32 @@ def _open_local(body: dict) -> dict:
     raise BackendHttpError(r.returncode, detail)
 
 
-def _open(body: dict) -> dict:
-    """Com o servidor respondendo, o `POST /api/sessions`; o comando local só sem conexão."""
-    try:
-        return _api("POST", "/api/sessions", body)
-    except BackendTransportError:
-        return _open_local(body)
-    except BackendUncertainError as exc:
-        # Repetir criaria uma segunda sessão (o nome em uso viraria `base-2`).
-        try:
-            vivas = _api("GET", "/api/sessions")
-        except RuntimeError:
-            vivas = []
-        if any(s.get("name") == body["name"] and s.get("cwd") == body["cwd"] for s in vivas):
-            return {"name": body["name"]}
-        raise RuntimeError(f"{exc}; a sessão {body['name']} pode estar nascendo: confira no app antes de abrir outra") from None
-
-
 def _conta_do_codex_home() -> str | None:
-    """`CODEX_HOME` herdado precisa ser uma conta gerenciada; a padrão não manda o campo."""
+    """`CODEX_HOME` herdado precisa ser uma conta gerenciada (`~/.codex-<id>`); a padrão não manda o
+    campo. Pelo caminho, sem perguntar ao servidor: com ele fora a sessão abre igual, e o lançador
+    confere a marca da conta."""
     home = os.environ.get("CODEX_HOME")
-    if not home or Path(home).expanduser().resolve(strict=False) == (Path.home() / ".codex").resolve(strict=False):
+    if not home:
         return None
     alvo = Path(home).expanduser().resolve(strict=False)
-    try:
-        contas = _api("GET", "/api/codex-contas")
-    except BackendTransportError as exc:
-        raise RuntimeError(f"CODEX_HOME personalizado: com o servidor fora não dá para achar a conta ({exc})") from None
-    for conta in contas:
-        try:
-            if Path(conta["home"]).expanduser().resolve(strict=False) == alvo:
-                return conta["id"]
-        except (KeyError, TypeError, ValueError):
-            continue
-    raise RuntimeError("CODEX_HOME personalizado não é uma conta Codex gerenciada neste servidor")
+    casa = Path.home().resolve(strict=False)
+    if alvo == casa / ".codex":
+        return None
+    if alvo.parent == casa and alvo.name.startswith(".codex-"):
+        return alvo.name.removeprefix(".codex-")
+    raise RuntimeError("CODEX_HOME personalizado não é uma conta Codex gerenciada pelo Hangar (~/.codex-<conta>)")
 
 
 def _create(cwd: str, prompt: str | None) -> str:
+    body = {"cwd": cwd, "provider": "codex", "headless": False, "initial_prompt": prompt}
     codex_account = _conta_do_codex_home()
-    for name in _nomes_livres(cwd, set()):
-        body = {"name": name, "cwd": cwd, "provider": "codex", "headless": False, "initial_prompt": prompt}
-        if codex_account is not None:
-            body["codex_account"] = codex_account
-        try:
-            return _open(body)["name"]
-        except BackendHttpError as exc:
-            if isinstance(exc.detail, dict) and exc.detail.get("code") == "erro_nome_em_uso":
-                continue
-            msg = exc.detail.get("msg") if isinstance(exc.detail, dict) else exc.detail
-            raise RuntimeError(msg or str(exc)) from None
-    raise RuntimeError("nao foi possivel escolher um nome de sessao livre")
+    if codex_account is not None:
+        body["codex_account"] = codex_account
+    try:
+        return _open(body)["name"]
+    except BackendHttpError as exc:
+        msg = exc.detail.get("msg") if isinstance(exc.detail, dict) else exc.detail
+        raise RuntimeError(msg or str(exc)) from None
 
 
 def _limpar_local(name: str, codex_sessions) -> None:

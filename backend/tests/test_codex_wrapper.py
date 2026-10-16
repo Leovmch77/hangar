@@ -184,128 +184,95 @@ def _main(w, monkeypatch, tmp_path, api, pane="fora"):
     return w.main(), chamadas
 
 
-def _fora(*_a, **_k):
-    raise RuntimeError("não devia chegar aqui")
+def _sem_post(method, path, body=None):
+    assert method == "DELETE", f"o wrapper não fala com a API para abrir: {method} {path}"
+    return {}
 
 
 @pytest.mark.parametrize("pane", ["fora", "vivo"])
-def test_com_o_servidor_de_pe_cria_pela_api(w, monkeypatch, tmp_path, pane):
-    pedidos = []
-
-    def api(method, path, body=None):
-        if method != "POST":
-            return {}      # o DELETE da limpeza quando a sessão terminou
-        pedidos.append((method, path, body))
-        return {"name": body["name"]}
-
-    lancador = _servidor_falso(tmp_path, monkeypatch, [])
-    codigo, chamadas = _main(w, monkeypatch, tmp_path, api, pane)
-    assert codigo == 0
-    assert pedidos == [("POST", "/api/sessions", {"name": tmp_path.name, "cwd": str(tmp_path), "provider": "codex",
-                                                  "headless": False, "initial_prompt": "revise"})]
-    assert lancador() == [], "com o servidor respondendo o comando local não roda"
-    assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas), "pane próprio fora do lançador único"
-    acao = "switch-client" if pane == "vivo" else "attach-session"
-    assert ["tmux", acao, "-t", f"={tmp_path.name}"] in chamadas
-
-
-def test_sem_conexao_abre_pelo_hangar_server_open(w, monkeypatch, tmp_path):
-    # S-26: com o backend fora o `hangar-server open` abre igual (spec, chave, escopo, nome livre).
-    def api(*_a, **_k):
-        raise w.BackendTransportError("fora")
-
-    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": tmp_path.name})]])
-    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
+def test_abre_sempre_pelo_hangar_server_open(w, monkeypatch, tmp_path, pane):
+    # O `hangar-server open` pergunta ao servidor e, fora do ar ou sem Rust, abre aqui: o wrapper
+    # não faz o POST ele mesmo, senão o 503 do Python sem Rust virava erro e nada abria.
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post, pane)
     assert codigo == 0
     (comando, pedido), = pedidos()
     assert comando == "open"
-    assert json.loads(pedido) == {"name": tmp_path.name, "cwd": str(tmp_path), "provider": "codex",
-                                  "headless": False, "initial_prompt": "revise"}
-    assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas)
+    assert json.loads(pedido) == {"cwd": str(tmp_path), "provider": "codex", "headless": False,
+                                  "initial_prompt": "revise"}
+    assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas), "pane próprio fora do lançador único"
+    acao = "switch-client" if pane == "vivo" else "attach-session"
+    assert ["tmux", acao, "-t", "=proj"] in chamadas
+
+
+def test_codex_home_de_conta_gerenciada_vai_no_pedido_sem_perguntar_ao_servidor(w, monkeypatch, tmp_path):
+    casa = tmp_path / "casa"
+    (casa / ".codex-trabalho").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(casa))
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    monkeypatch.setattr(w, "_api", _sem_post)
+    monkeypatch.setenv("CODEX_HOME", str(casa / ".codex-trabalho"))
+    assert w._create("/tmp/proj", None) == "proj"
+    (_, pedido), = pedidos()
+    assert json.loads(pedido)["codex_account"] == "trabalho"
+
+
+def test_codex_home_fora_das_contas_recusa_sem_abrir(w, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "outro"))
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    with pytest.raises(RuntimeError, match="CODEX_HOME"):
+        w._create("/tmp/proj", None)
+    assert pedidos() == []
 
 
 def test_sem_o_lancador_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, capsys):
-    # Sem `hangar-server` em lugar nenhum e sem servidor: nada abre, e o código 3 manda o wrapper do
-    # shell abrir o `codex` oficial.
-    def api(*_a, **_k):
-        raise w.BackendTransportError("fora")
-
+    # Sem `hangar-server` em lugar nenhum: nada abre, e o código 3 manda o wrapper do shell abrir o
+    # `codex` oficial.
     monkeypatch.setenv("CP_RUST_SERVER_BIN", str(tmp_path / "nao-existe"))
     monkeypatch.setenv("HOME", str(tmp_path / "casa"))
     monkeypatch.setattr(w, "_repo", lambda: tmp_path / "sem-copia")
     monkeypatch.setenv("PATH", str(tmp_path / "vazio"))
-    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
     assert codigo == 3
     assert "hangar-server" in capsys.readouterr().err
     assert chamadas == []
 
 
-def test_so_nome_ocupado_repete_no_proximo_nome(w, monkeypatch, tmp_path):
-    tentativas = []
-
-    def api(method, path, body=None):
-        tentativas.append(body["name"])
-        if len(tentativas) == 1:
-            raise w.BackendHttpError(409, {"code": "erro_nome_em_uso"})
-        return {"name": body["name"]}
-
-    monkeypatch.setattr(w, "_api", api)
-    assert w._create("/tmp/proj", None) == "proj-2"
-    assert tentativas == ["proj", "proj-2"]
-
-
-@pytest.mark.parametrize("codigo,saida", [
-    (1, json.dumps({"detail": {"code": "codex_account_preparing", "msg": "conta preparando", "params": {}}})),
-    (4, "hangar-server: sem CP_AUTH_TOKEN no .env do servidor"),
-])
-def test_recusa_local_nao_repete(w, monkeypatch, tmp_path, codigo, saida):
-    monkeypatch.setattr(w, "_api", lambda *a, **k: (_ for _ in ()).throw(w.BackendTransportError("fora")))
-    pedidos = _servidor_falso(tmp_path, monkeypatch, [[codigo, saida]])
-    with pytest.raises(RuntimeError):
-        w._create("/tmp/proj", None)
-    assert len(pedidos()) == 1
-
-
-def _urlopen_falso(w, monkeypatch, listadas):
-    """POST da criação estoura o prazo; GET devolve a lista com `listadas`. Grava (método, prazo)."""
-    chamadas = []
-
-    def urlopen(req, timeout):
-        chamadas.append((req.get_method(), timeout))
-        if req.get_method() == "POST":
-            raise TimeoutError("timed out")
-        return io.BytesIO(json.dumps([{"name": n, "cwd": "/tmp/proj"} for n in listadas]).encode())
-
-    monkeypatch.setattr(w, "_env", lambda: {"CP_AUTH_TOKEN": "token"})
-    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
-    return chamadas
-
-
-def test_prazo_estourado_nao_refaz_a_criacao_e_acha_a_que_nasceu(w, monkeypatch, tmp_path):
-    # S-29: o timeout não é "servidor fora"; refazer pelo `hangar-server open` criava `proj-2`.
-    chamadas = _urlopen_falso(w, monkeypatch, ["proj"])
-    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj-2"})]])
-    assert w._create("/tmp/proj", None) == "proj"
-    assert pedidos() == []
-    assert chamadas == [("POST", 120), ("GET", 30)], "o prazo de criação das telas, e uma criação só"
-
-
-def test_prazo_estourado_sem_a_sessao_na_lista_para_sem_criar_outra(w, monkeypatch, tmp_path):
-    chamadas = _urlopen_falso(w, monkeypatch, [])
-    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj-2"})]])
-    with pytest.raises(RuntimeError, match="proj"):
-        w._create("/tmp/proj", None)
-    assert pedidos() == []
-    assert [m for m, _ in chamadas].count("POST") == 1
-
-
-def test_recusa_do_servidor_mostra_a_frase_e_nao_abre_o_codex_oficial(w, monkeypatch, tmp_path, capsys):
-    # T-016 (CDX-124): só a falta de conexão cai no `codex` oficial (código 3).
-    def api(method, path, body=None):
-        raise w.BackendHttpError(400, {"code": "erro_cwd_inexistente", "msg": "a pasta não existe"})
-
-    lancador = _servidor_falso(tmp_path, monkeypatch, [])
-    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
-    assert codigo not in (0, 3)
+def test_recusa_nao_repete_e_nao_abre_o_codex_oficial(w, monkeypatch, tmp_path, capsys):
+    # T-016 (CDX-124): recusa (do servidor ou do lançador local) sai 1, nunca 3.
+    saida = json.dumps({"detail": {"code": "erro_cwd_inexistente", "msg": "a pasta não existe", "params": {}}})
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[1, saida]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 1
     assert "a pasta não existe" in capsys.readouterr().err
-    assert chamadas == [] and lancador() == []
+    assert len(pedidos()) == 1 and chamadas == []
+
+
+@pytest.mark.parametrize("saida", [2, 4])
+def test_lancador_antigo_ou_sem_token_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, saida):
+    # 2 = hangar-server sem `open`; 4 = sem token no .env. Nada foi enviado: o `codex` oficial abre.
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[saida, "hangar-server: não abriu"]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 3
+    assert len(pedidos()) == 1 and chamadas == []
+
+
+def test_acha_o_mesmo_hangar_server_que_o_supervisor(w, monkeypatch, tmp_path):
+    # Mesma regra do `hangar-open` (`rust_bins.find_bin`): o mais novo entre a cópia e o baixado.
+    import shutil
+    raiz = tmp_path / "copia"
+    (raiz / "scripts").mkdir(parents=True)
+    (raiz / "backend" / "app").mkdir(parents=True)
+    shutil.copy(_CAMINHO.parent / "hangar-open", raiz / "scripts" / "hangar-open")
+    shutil.copy(_CAMINHO.parents[1] / "backend" / "app" / "rust_bins.py", raiz / "backend" / "app" / "rust_bins.py")
+    monkeypatch.setattr(w, "_repo", lambda: raiz)
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.delenv("CP_RUST_SERVER_BIN", raising=False)
+    for caminho, mtime in ((tmp_path / "casa" / ".hangar" / "bin" / "hangar-server", 1000),
+                           (raiz / "crates" / "target" / "release" / "hangar-server", 2000)):
+        caminho.parent.mkdir(parents=True)
+        caminho.write_text("#!/bin/sh\n")
+        caminho.chmod(0o755)
+        os.utime(caminho, (mtime, mtime))
+    assert w._hangar_server() == str(raiz / "crates" / "target" / "release" / "hangar-server")

@@ -84,3 +84,11 @@ def test_incoherent_branch_or_bad_json_is_a_usage_error(backend, args):
     result = run("s1", "/tmp", *args)
     assert result.returncode == 2
     assert not requests
+
+
+def test_terminal_with_a_pane_provider_is_accepted(backend):
+    run, requests = backend
+    result = run("s1", "/tmp", "--terminal", "--provider", "pi")
+    assert result.returncode == 0, result.stderr
+    assert requests[-1]["provider"] == "pi"
+    assert requests[-1]["headless"] is False
