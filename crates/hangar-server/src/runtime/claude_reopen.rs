@@ -107,6 +107,44 @@ async fn wait_gone(lives:Vec<(i64,f64)>,limit:Duration) -> Result<(),RuntimeErro
     }
 }
 
+/// Quanto as sobras mortas à força têm para sumir.
+const FORCED_WAIT:Duration = Duration::from_secs(3);
+
+/// Espera a árvore sair; quem passa do prazo e ainda é o mesmo processo é morto à força (SIGKILL; no
+/// Windows um `taskkill /F` só, sem `/T`: pid reaproveitado levaria árvore alheia) e ganha mais 3 s.
+async fn stop_tree(lives:Vec<(i64,f64)>) -> Result<(),RuntimeError> {
+    // No Windows o `claude` não trata o pedido de saída: esperar o prazo inteiro só atrasa.
+    let wait=if cfg!(windows) {Duration::from_millis(1500)} else {EXIT_WAIT};
+    if wait_gone(lives.clone(),wait).await.is_ok() {return Ok(());}
+    let left=tokio::task::spawn_blocking(move||{
+        let procs=SystemProcs::default();
+        let left:Vec<(i64,f64)>=lives.into_iter().filter(|(pid,birth)|!super::lifecycle::process_absent(&procs,*pid,*birth).unwrap_or(false)).collect();
+        force_kill(&left);
+        left
+    }).await.map_err(|_|refused("reopen_process_alive","o processo antigo não pôde ser encerrado à força"))?;
+    tracing::warn!(pids=?left.iter().map(|(pid,_)|*pid).collect::<Vec<_>>(),"processo antigo não saiu no prazo; morto à força");
+    wait_gone(left,FORCED_WAIT).await
+}
+
+#[cfg(unix)]
+fn force_kill(left:&[(i64,f64)]) {
+    for (pid,_) in left {
+        // SAFETY: sinal a um pid conferido pela identidade logo antes.
+        if let Ok(pid)=i32::try_from(*pid) {unsafe {libc::kill(pid,libc::SIGKILL);}}
+    }
+}
+
+#[cfg(windows)]
+fn force_kill(left:&[(i64,f64)]) {
+    if left.is_empty() {return;}
+    let system=std::env::var_os("SystemRoot").map(|root|PathBuf::from(root).join("System32").join("taskkill.exe")).filter(|path|path.is_file());
+    let mut command=std::process::Command::new(system.unwrap_or_else(||PathBuf::from("taskkill")));
+    command.arg("/F");
+    for (pid,_) in left {command.args(["/PID",&pid.to_string()]);}
+    let ran=command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    if ran.is_err() {tracing::warn!(code="reopen_taskkill_missing","taskkill não rodou; as sobras do processo antigo ficaram");}
+}
+
 /// A política que a CLI aplica ao bypass (`permissions.disableBypassPermissionsMode`), lida antes de
 /// encerrar a vida antiga: a conta, o projeto, a gerenciada da máquina e as escolhas da sessão. Arquivo
 /// ilegível recusa (CRA-066).
@@ -598,7 +636,7 @@ impl RuntimeRegistry {
                 command.args(prefix).args(["kill-session","-t",&session]).stdin(std::process::Stdio::null()).kill_on_drop(true);
                 let killed=tokio::time::timeout(Duration::from_secs(5),command.output()).await.ok().and_then(Result::ok).is_some_and(|o|o.status.success());
                 if !killed {return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));}
-                wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
+                stop_tree(lives).await.map_err(Stop::Alive)?;
             },
             Life::Bare { pane_pid }=>{
                 let lives=tree(*pane_pid).map_err(before)?;
@@ -607,7 +645,7 @@ impl RuntimeRegistry {
                 if watcher.mux_text(&["kill-session","-t",&session]).await.is_none() {
                     return Err(Stop::Before(refused("reopen_kill_mux","o terminal não fechou; a sessão não reabriu")));
                 }
-                wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
+                stop_tree(lives).await.map_err(Stop::Alive)?;
             },
             Life::Headless { meta,open }=>{
                 let cano=meta.get("cano").filter(|c|c.is_object()).and_then(|c|serde_json::from_value::<super::process::Cano>(c.clone()).ok());
@@ -616,9 +654,9 @@ impl RuntimeRegistry {
                 if let Some(cano)=cano {
                     // `kill` que falha pode ter sinalizado o grupo: a árvore que sobrou decide.
                     if let Err(error)=super::process::kill(&cano,&key,&self.claude_sidecars()).await {
-                        wait_gone(lives,EXIT_WAIT).await.map_err(|_|Stop::Alive(RuntimeError::new(error.code(),"o processo antigo não foi encerrado")))?;
+                        stop_tree(lives).await.map_err(|_|Stop::Alive(RuntimeError::new(error.code(),"o processo antigo não foi encerrado")))?;
                     } else {
-                        wait_gone(lives,EXIT_WAIT).await.map_err(Stop::Alive)?;
+                        stop_tree(lives).await.map_err(Stop::Alive)?;
                     }
                 }
                 // O sidecar sai: nada sobe o processo sem terminal enquanto o pane nasce. Sem terminal de

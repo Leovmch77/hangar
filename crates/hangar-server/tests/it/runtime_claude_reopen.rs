@@ -41,7 +41,9 @@ case "$1" in
     x=$(grep -oE -- '--account [^ ]+' <<<"$last" | cut -d' ' -f2); [ -n "$x" ] && E+=("CP_ENGINE_ACCOUNT=$x")
     x=$(grep -oE -- '--service-tier [^ ]+' <<<"$last" | cut -d' ' -f2); [ -n "$x" ] && E+=("CP_ENGINE_SERVICE_TIER=$x")
     [ -f "$S.forge" ] && while IFS= read -r l; do E+=("$l"); done < "$S.forge"
-    env -u CLAUDE_CONFIG_DIR "${{E[@]}}" bash -c 'exec -a claude sleep 120' </dev/null >/dev/null 2>&1 &
+    # `$S.stubborn`: este `claude` ignora o SIGTERM (só esta subida).
+    pre=''; [ -f "$S.stubborn" ] && pre='trap "" TERM; ' && rm -f "$S.stubborn"
+    env -u CLAUDE_CONFIG_DIR "${{E[@]}}" bash -c "${{pre}}exec -a claude sleep 120" </dev/null >/dev/null 2>&1 &
     pid=$!; for i in $(seq 100); do tr '\0' ' ' < /proc/$pid/cmdline | grep -q '^claude ' && break; sleep 0.01; done
     echo "$4 $pid 1700000100" > "$S"
     sid=$(printf '%s\n' "$@" | grep -oE -- '--(resume|session-id) [0-9a-f-]{{36}}' | head -1 | cut -d' ' -f2); [ -n "$sid" ] || sid='{SID}'
@@ -521,5 +523,36 @@ async fn resuming_another_conversation_brings_its_stored_choices() {
     assert!(command.contains("guardado@loja") && !command.contains("do-processo@loja"),"{command}");
     let (key,_) = registry.terminal_view("s1").await.unwrap();
     registry.close(&key,2).await.unwrap();
+    fx.finish();
+}
+
+/// CRA-049: o `claude` antigo que não sai no prazo (ignora o SIGTERM) é morto à força, conferido pela
+/// identidade, e a reabertura segue; nunca dois Claude na mesma conversa.
+#[tokio::test]
+async fn an_old_claude_that_ignores_the_stop_is_killed_and_the_reopen_goes_on() {
+    let fx = fixture();
+    fx.transcript();
+    let key = "56".repeat(16);
+    std::fs::write(fx.state.with_extension("stubborn"),"").unwrap();
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd).arg("-e").arg(format!("CP_SESSION_KEY={key}")).status().unwrap();
+    let old_agent = fx.agent().unwrap();
+    let spec = json!({"version":1,"key":key,"name":"s1","cwd":fx.cwd,"provider":"claude","surface":"terminal","account":{"kind":"default"},
+        "account_source":"default","model":null,"effort":null,"service_tier":null,"permission_mode":"acceptEdits","subagent_model":null,
+        "customizations":null,"jev":false,"read_only":false,"worktree":null,"creator":null,"created_at":1.0});
+    std::fs::create_dir_all(fx.home.join(".hangar/session-specs")).unwrap();
+    std::fs::write(fx.home.join(format!(".hangar/session-specs/{key}.json")),spec.to_string()).unwrap();
+    let registry = crate::runtime_open::registry_with(|registry|registry
+        .with_codex_environment(AccountEnvironment::from_map([("HOME".to_owned(),fx.home.to_string_lossy().into_owned()),("PATH".to_owned(),std::env::var("PATH").unwrap())].into()))
+        .with_terms(Arc::new(hangar_server::term::Terms::default()))).await;
+    registry.bind_watcher(Arc::new(Watcher::new(WatchConfig { home:fx.home.clone(),queue_dir:fx.queue.clone(),
+        mux:Mux::with_program(&fx.tmux,Duration::from_secs(5)),mux_program:fx.tmux.clone().into_os_string() }).with_scope_probe(Vec::new)));
+    let change = SessionChange { reason:ChangeReason::Reload,surface:None,account:None,permission_mode:None,model:None,effort:None,service_tier:None };
+    let reopened = registry.reopen_claude_session("s1",change,None).await.expect("é sessão Claude daqui");
+    let outcome = reopened.map(|_|()).map_err(|f|(f.error.code,f.stopped));
+    let _ = std::process::Command::new("kill").args(["-9",&old_agent.to_string()]).status();
+    assert_eq!(outcome,Ok(()));
+    assert!(std::fs::read_to_string(format!("/proc/{old_agent}/cmdline")).unwrap_or_default().is_empty(),"o antigo saiu à força");
+    let (found,_) = registry.terminal_view("s1").await.unwrap();
+    registry.close(&found,2).await.unwrap();
     fx.finish();
 }
