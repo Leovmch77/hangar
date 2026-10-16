@@ -61,6 +61,22 @@ pub fn remember_provider(claude_base: &Path, provider: &str) -> std::io::Result<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&config)?)
 }
 
+/// O convidado com login (`guests.json`, que é do Python).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginGuest { pub id: String, pub name: String, pub root: PathBuf }
+
+/// `guest_users.lookup_token`, só lendo: o hash do token contra o `token_hash` de cada um. Ausente,
+/// ilegível ou com um convidado torto é "nenhum convidado", como no `_load` de lá.
+pub fn login_guest(claude_base: &Path, token: &[u8]) -> Option<LoginGuest> {
+    use subtle::ConstantTimeEq;
+    let raw: Value = serde_json::from_slice(&std::fs::read(claude_base.join("guests.json")).ok()?).ok()?;
+    let hash: String = ring::digest::digest(&ring::digest::SHA256, token).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let text = |guest: &Value, key: &str| guest[key].as_str().map(str::to_owned);
+    let guests: Option<Vec<(String, LoginGuest)>> = raw["guests"].as_array()?.iter().map(|g| Some((text(g, "token_hash")?,
+        LoginGuest { id: text(g, "id")?, name: text(g, "name")?, root: text(g, "root")?.into() }))).collect();
+    guests?.into_iter().find(|(stored, _)| bool::from(stored.as_bytes().ct_eq(hash.as_bytes()))).map(|(_, guest)| guest)
+}
+
 /// A fila que a sessão morta deixou no nome (a projeção `.hangar-queue/<nome>.jsonl`, que o Rust lê
 /// no histórico): a nova não a herda.
 pub fn forget_queue(claude_base: &Path, name: &str) -> std::io::Result<()> {
@@ -93,6 +109,25 @@ impl ServerHost {
             .map_err(|_| "corpo".to_owned())?.to_bytes();
         if !status.is_success() { return Err(format!("status {}", status.as_u16())); }
         serde_json::from_slice(&bytes).map_err(|_| "json".to_owned())
+    }
+
+    /// O dono da sessão que o convidado com login abriu vai ao `guests.json`, que é do Python, num
+    /// sentido. Falhou: a sessão sai com a worktree que ela criou, como no `_kill_unclaimed`.
+    async fn claim(&self, mut opened: super::open::Opened, guest: &LoginGuest) -> Result<super::open::Opened, OpenError> {
+        let name = opened.body["name"].as_str().unwrap_or_default().to_owned();
+        let Err(cause) = self.internal("/internal/guests/claim", json!({"session": name, "guest": guest.id})).await else {
+            opened.body["owner"] = json!(guest.name);
+            return Ok(opened);
+        };
+        tracing::warn!(cause, "o dono da sessão do convidado não foi registrado; a sessão sai");
+        self.mux.run(vec![self.terminal.program.clone(), "kill-session".into(), "-t".into(), format!("={name}")]).await;
+        if let Err(error) = super::record::remove(&self.env.home, &opened.key) {
+            tracing::warn!(kind = ?error.kind(), "registro da sessão do convidado ficou para trás");
+        }
+        self.st.list.forget(&name);
+        self.st.list.invalidate();
+        if let Some(undo) = opened.undo { undo.undo().await?; }
+        Err(OpenError::new(500, "erro_criacao_sessao", format!("o dono da sessão não foi registrado: {cause}")))
     }
 }
 
@@ -208,11 +243,19 @@ fn explicitly_other(request: &SessionOpenRequest) -> bool {
 pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
 
 /// `decide` numa tarefa própria: cliente que desconecta no meio não interrompe a criação (a worktree
-/// criada sem o pane ficaria para trás), como o `complete_on_cancel` do Python.
-async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
+/// criada sem o pane ficaria para trás) nem o registro do convidado (`claim`), como o
+/// `complete_on_cancel` do Python.
+async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller, claim: Option<LoginGuest>) -> Decision {
     let st = st.clone();
-    tokio::spawn(async move { decide(&st, request, caller).await }).await
-        .unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
+    tokio::spawn(async move {
+        match (decide(&st, request, caller).await, claim) {
+            (Decision::Opened(opened), Some(guest)) => match ServerHost::new(st.clone()).claim(opened, &guest).await {
+                Ok(opened) => Decision::Opened(opened),
+                Err(error) => Decision::Refused(error),
+            },
+            (decision, _) => decision,
+        }
+    }).await.unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
 }
 
 /// Resolve e, sendo Claude com terminal, abre. O resto (Codex, Pi, omp, Kimi, sem terminal) ainda é
@@ -246,7 +289,8 @@ fn reply(error: &OpenError) -> Response {
     crate::session_write::json_response(status, error.body())
 }
 
-/// `POST /api/sessions`: o dono abre Claude com terminal no Rust; o resto segue ao Python com o
+/// `POST /api/sessions`: o dono e o convidado com login abrem Claude com terminal no Rust (o do
+/// convidado na pasta dele, com o dono registrado no Python depois); o resto segue ao Python com o
 /// corpo intacto (corpo que não é pedido válido também: o 422 é o dele).
 pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
@@ -256,13 +300,18 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let Ok(bytes) = to_bytes(body, crate::session_write::BODY_LIMIT).await else {
         return crate::session_write::too_large(&parts.headers);
     };
+    let guest = if owner { None } else {
+        crate::auth::presented_token(&parts.headers, parts.uri.query(), &parts.method, fwd.https)
+            .and_then(|token| login_guest(&AccountEnvironment::capture().claude_base, &token))
+    };
     let pass = |parts: axum::http::request::Parts, bytes: axum::body::Bytes| {
         let st = st.clone();
         async move { crate::routes::pass(&st, Request::from_parts(parts, Body::from(bytes)), &fwd).await }
     };
-    if !owner { return pass(parts, bytes).await; }
+    if !owner && guest.is_none() { return pass(parts, bytes).await; }
     let Ok(request) = SessionOpenRequest::parse(&bytes) else { return pass(parts, bytes).await };
-    match decide_detached(&st, request, OpenCaller::Owner).await {
+    let caller = guest.as_ref().map_or(OpenCaller::Owner, |g| OpenCaller::Guest { root: g.root.clone() });
+    match decide_detached(&st, request, caller, guest).await {
         Decision::Opened(opened) => {
             let mut response = crate::session_write::json_response(StatusCode::OK, opened.body);
             crate::routes::cors(&parts.headers, response.headers_mut());
@@ -294,7 +343,7 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Some(root) => OpenCaller::Guest { root: PathBuf::from(root) },
         None => OpenCaller::Owner,
     };
-    match decide_detached(&st, request, caller).await {
+    match decide_detached(&st, request, caller, None).await {
         Decision::Opened(opened) => crate::session_write::json_response(StatusCode::OK, json!({"info": opened.body, "undo": opened.undo})),
         Decision::Refused(error) => reply(&error),
         Decision::NotOurs => StatusCode::MISDIRECTED_REQUEST.into_response(),

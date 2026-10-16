@@ -37,6 +37,16 @@ def test_release_touches_only_what_lives_here(monkeypatch):
     assert _post("/internal/sessions/s1/born", {}).status_code == 404, "o nascimento é todo do Rust"
 
 
+def test_the_guest_claim_of_a_rust_open_is_recorded_here(monkeypatch):
+    from app import guest_users
+    claimed = []
+    monkeypatch.setattr(guest_users, "claim", lambda session, gid: claimed.append((session, gid)))
+    assert _post("/internal/guests/claim", {"session": "s1", "guest": "g1"}).json() == {"ok": True}
+    assert claimed == [("s1", "g1")]
+    assert _post("/internal/guests/claim", {"session": "s1"}).status_code == 400
+    assert _post("/internal/guests/claim", {"session": "s1", "guest": ""}).status_code == 400
+
+
 def _body(**kw):
     return api_mod.CreateBody(name="s1", cwd="/p", **kw)
 

@@ -1134,6 +1134,24 @@ fn the_name_is_checked_again_in_tmux_before_any_effect() {
     assert!(!spawned, "nenhum new-session sem a conferência");
 }
 
+/// O convidado com login é achado pelo hash do token no `guests.json` (que é do Python), como no
+/// `lookup_token`; arquivo ausente, ilegível ou com um convidado torto não deixa ninguém entrar.
+#[test]
+fn a_login_guest_is_found_by_the_token_hash() {
+    let base = tempfile::tempdir().unwrap();
+    let hash = |t: &str| ring::digest::digest(&ring::digest::SHA256, t.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    assert_eq!(server::login_guest(base.path(), b"tok"), None);
+    let guests = json!({"guests": [{"id": "g1", "name": "Ana", "token_hash": hash("tok"), "root": "/casa/ana", "sees_owner": false,
+        "owner_sees": true}], "sessions": {}});
+    std::fs::write(base.path().join("guests.json"), guests.to_string()).unwrap();
+    assert_eq!(server::login_guest(base.path(), b"tok"), Some(server::LoginGuest { id: "g1".into(), name: "Ana".into(), root: "/casa/ana".into() }));
+    assert_eq!(server::login_guest(base.path(), b"outro"), None);
+    let mut broken = guests.clone();
+    broken["guests"].as_array_mut().unwrap().push(json!({"id": "g2"}));
+    std::fs::write(base.path().join("guests.json"), broken.to_string()).unwrap();
+    assert_eq!(server::login_guest(base.path(), b"tok"), None, "um torto deixa o arquivo ilegível, como no Python");
+}
+
 /// A fila que a sessão morta deixou no nome sai antes do pane novo (o histórico do Rust a mostraria
 /// como mensagens dela); a de outro nome fica.
 #[test]

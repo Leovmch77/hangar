@@ -257,7 +257,7 @@ impl WorktreeUndo {
 
 /// O que a abertura devolve: o corpo da resposta e a worktree criada (quem registra o convidado a
 /// desfaz se o registro falhar).
-pub struct Opened { pub body: Value, pub undo: Option<WorktreeUndo> }
+pub struct Opened { pub body: Value, pub undo: Option<WorktreeUndo>, pub key: String }
 
 /// Abre a sessão Claude com terminal do spec resolvido.
 pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
@@ -284,7 +284,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
     }
     match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, &runtime).await {
-        Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo }),
+        Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo, key: spec.key.clone() }),
         // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
         Err(error) => {
             if let Some(undo) = undo && error.code != Some(UNCERTAIN) { undo.undo().await?; }
