@@ -11264,6 +11264,13 @@ class _UIStatic(StaticFiles):
         return resp
 
 
+# O MCP `hangar` é do Rust; sem ele, o código próprio. Antes do estático em "/", que responderia 405.
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+@app.api_route("/mcp/", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+async def mcp_needs_rust():
+    raise HTTPException(503, detail=erro("mcp_needs_rust_server", "o MCP do Hangar precisa do servidor Rust"))
+
+
 _DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if _DIST.is_dir():
     app.mount("/", _UIStatic(directory=_DIST, html=True), name="ui")
