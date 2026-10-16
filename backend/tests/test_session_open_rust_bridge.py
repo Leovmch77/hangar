@@ -1,6 +1,5 @@
 """A abertura de Claude com terminal é do Rust: só o que entrou direto no Python (Connect, MCP) vai à
-ponte dele, e as rotas internas guardam aqui só o que é daqui (registro em espera, `then`, dono do
-convidado)."""
+ponte dele, e as rotas internas guardam aqui só o que é daqui (registro em espera, `then`); o dono da sessão do convidado o Rust grava."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -38,14 +37,8 @@ def test_release_touches_only_what_lives_here(monkeypatch):
     assert _post("/internal/sessions/s1/born", {}).status_code == 404, "o nascimento é todo do Rust"
 
 
-def test_the_guest_claim_of_a_rust_open_is_recorded_here(monkeypatch):
-    from app import guest_users
-    claimed = []
-    monkeypatch.setattr(guest_users, "claim", lambda session, gid: claimed.append((session, gid)))
-    assert _post("/internal/guests/claim", {"session": "s1", "guest": "g1"}).json() == {"ok": True}
-    assert claimed == [("s1", "g1")]
-    assert _post("/internal/guests/claim", {"session": "s1"}).status_code == 400
-    assert _post("/internal/guests/claim", {"session": "s1", "guest": ""}).status_code == 400
+def test_the_guest_claim_is_written_by_the_rust_not_here():
+    assert _post("/internal/guests/claim", {"session": "s1", "guest": "g1"}).status_code == 404
 
 
 def _body(**kw):
@@ -65,7 +58,7 @@ def test_only_what_entered_python_directly_goes_to_the_rust_open(monkeypatch):
     info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), None))
     assert (info.name, info.provider, info.owner) == ("s1", "claude", None)
     # Ausente continua ausente: o Rust decide o provedor padrão.
-    assert sent[0] == ("s1", "open", "POST", {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest_root": None})
+    assert sent[0] == ("s1", "open", "POST", {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest": None})
     assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), None)) is None
     connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
     assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect)) is not None
@@ -79,28 +72,17 @@ def test_only_what_entered_python_directly_goes_to_the_rust_open(monkeypatch):
     assert (refused.value.status_code, refused.value.detail["code"]) == (409, "erro_nome_em_uso")
 
 
-def test_a_failed_guest_claim_undoes_the_worktree_this_open_created(monkeypatch, tmp_path):
-    """S-66: o registro do convidado falhou depois de a sessão nascer: ela é encerrada e a worktree (e a
-    branch que esta abertura criou) sai junto, senão a nova tentativa daria 409 na branch."""
+def test_the_connect_guest_goes_to_the_rust_by_id_and_is_not_claimed_here(monkeypatch):
+    """O Rust grava o dono no `guests.json`: daqui só vai o id do convidado autenticado."""
     from app import guest_users, runtime_coordinator
-    undo = {"source": "/r/repo", "path": "/r/repo-feat-x", "branch": "feat/x", "branch_created": True}
-    monkeypatch.setattr(runtime_coordinator, "rust_claude",
-                        lambda *args: (200, json.dumps({"info": INFO, "undo": undo}).encode()))
-    killed, undone = [], []
-
-    async def kill(name):
-        killed.append(name)
-    monkeypatch.setattr(api_mod, "_kill_unclaimed", kill)
-    monkeypatch.setattr(api_mod, "_undo_worktree", undone.append)
-
-    def refuse(name, guest_id):
-        raise OSError("guests.json")
-    monkeypatch.setattr(guest_users, "claim", refuse)
-    marker = guest_users.current.set(SimpleNamespace(id="g1", name="ana", root=str(tmp_path)))
+    sent = []
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: (
+        sent.append(json.loads(args[3])), (200, json.dumps({"info": {**INFO, "owner": "ana"}}).encode()))[1])
+    monkeypatch.setattr(guest_users, "claim", lambda *a: pytest.fail("o dono é gravado pelo Rust"))
+    marker = guest_users.current.set(SimpleNamespace(id="g1", name="ana", root="/casa/ana"))
     try:
-        with pytest.raises(OSError):
-            asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+        info = asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
     finally:
         guest_users.current.reset(marker)
-    assert killed == ["s1"]
-    assert undone == [{"source": "/r/repo", "path": "/r/repo-feat-x", "new_branch": "feat/x"}]
+    assert sent[0]["guest"] == "g1" and "guest_root" not in sent[0]
+    assert info.owner == "ana"

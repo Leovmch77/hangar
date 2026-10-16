@@ -1171,6 +1171,43 @@ fn a_login_guest_is_found_by_the_token_hash() {
     assert_eq!(server::login_guest(base.path(), b"tok"), None, "um torto deixa o arquivo ilegível, como no Python");
 }
 
+/// O dono da sessão do convidado vai ao `guests.json` como o `claim` do Python grava: entrada
+/// `{"guest", "life"}`, o resto do arquivo intacto, 0600; ilegível não é sobrescrito; e espera a
+/// `guests.lock` que o Python segura.
+#[test]
+fn the_guest_claim_writes_guests_json_under_the_shared_lock() {
+    let base = tempfile::tempdir().unwrap();
+    let file = base.path().join("guests.json");
+    server::claim_guest(base.path(), "s1", "g1", None).unwrap();
+    let written: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written, json!({"guests": [], "sessions": {"s1": {"guest": "g1", "life": null}}}));
+    let ana = json!({"id": "g1", "name": "Ana", "token_hash": "h", "root": "/casa/ana", "sees_owner": false, "owner_sees": true});
+    std::fs::write(&file, json!({"guests": [ana], "sessions": {"velho": {"guest": "g1", "life": "t:1"}}}).to_string()).unwrap();
+    server::claim_guest(base.path(), "s2", "g1", Some("t:5")).unwrap();
+    let written: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written, json!({"guests": [ana], "sessions": {"velho": {"guest": "g1", "life": "t:1"}, "s2": {"guest": "g1", "life": "t:5"}}}));
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    std::fs::write(&file, b"{torto").unwrap();
+    assert!(server::claim_guest(base.path(), "s3", "g1", None).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), b"{torto", "ilegível fica como está");
+
+    std::fs::write(&file, b"{}").unwrap();
+    let lock = std::fs::OpenOptions::new().read(true).append(true).create(true).open(base.path().join("guests.lock")).unwrap();
+    lock.lock().unwrap();
+    let (done, wait) = std::sync::mpsc::channel();
+    let dir = base.path().to_path_buf();
+    let writer = std::thread::spawn(move || done.send(server::claim_guest(&dir, "s4", "g1", None).is_ok()).unwrap());
+    assert!(wait.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "gravou com a trava do Python presa");
+    drop(lock);
+    assert_eq!(wait.recv_timeout(std::time::Duration::from_secs(30)), Ok(true));
+    writer.join().unwrap();
+    let written: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written["sessions"]["s4"], json!({"guest": "g1", "life": null}));
+}
+
 /// A fila que a sessão morta deixou no nome sai antes do pane novo (o histórico do Rust a mostraria
 /// como mensagens dela); a de outro nome fica.
 #[test]

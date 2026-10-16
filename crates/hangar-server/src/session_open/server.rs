@@ -1,7 +1,7 @@
 //! A abertura no servidor: o `POST /api/sessions` do dono e do convidado com login, o bastão do dono,
 //! a ponte privada por onde o Python repassa o que entrou direto nele (Connect, MCP) e o `OpenHost`
 //! com os serviços do Rust e o que ainda mora no Python (o registro em espera e o `then` do nome
-//! reusado, o dono da sessão do convidado).
+//! reusado).
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub fn remember_provider(claude_base: &Path, provider: &str) -> std::io::Result<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&config)?)
 }
 
-/// O convidado com login (`guests.json`, que é do Python).
+/// O convidado com login (`guests.json`: o Python grava os convidados, os dois gravam o dono das sessões).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginGuest { pub id: String, pub name: String, pub root: PathBuf }
 
@@ -77,6 +77,34 @@ pub fn login_guest(claude_base: &Path, token: &[u8]) -> Option<LoginGuest> {
     let guests: Option<Vec<(String, LoginGuest)>> = raw["guests"].as_array()?.iter().map(|g| Some((text(g, "token_hash")?,
         LoginGuest { id: text(g, "id")?, name: text(g, "name")?, root: text(g, "root")?.into() }))).collect();
     guests?.into_iter().find(|(stored, _)| bool::from(stored.as_bytes().ct_eq(hash.as_bytes()))).map(|(_, guest)| guest)
+}
+
+/// `guest_users.claim`: o dono da sessão no `guests.json`, sob a `guests.lock` que o Python também
+/// pega (`atomico.locked`), relendo o arquivo dentro da trava. Ilegível não é sobrescrito.
+pub fn claim_guest(claude_base: &Path, session: &str, guest: &str, life: Option<&str>) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    std::fs::create_dir_all(claude_base)?;
+    let lock = std::fs::OpenOptions::new().read(true).append(true).create(true).open(claude_base.join("guests.lock"))?;
+    lock.lock()?;
+    let path = claude_base.join("guests.json");
+    let mut state = match crate::runtime::queue::read_replaced(&path) {
+        Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().filter(Value::is_object)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "guests.json ilegível"))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
+    };
+    if state.get("guests").is_none() { state["guests"] = json!([]); }
+    if state.get("sessions").is_none() { state["sessions"] = json!({}); }
+    let sessions = state["sessions"].as_object_mut().ok_or_else(|| Error::new(ErrorKind::InvalidData, "guests.json ilegível"))?;
+    sessions.insert(session.into(), json!({"guest": guest, "life": life}));
+    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&state)?)
+}
+
+/// O convidado `id` do `guests.json`, para a ponte do Connect, que chega com o id já autenticado lá.
+pub fn guest_by_id(claude_base: &Path, id: &str) -> Option<LoginGuest> {
+    let raw: Value = serde_json::from_slice(&std::fs::read(claude_base.join("guests.json")).ok()?).ok()?;
+    let guest = raw["guests"].as_array()?.iter().find(|g| g["id"] == id)?;
+    Some(LoginGuest { id: id.into(), name: guest["name"].as_str()?.into(), root: guest["root"].as_str()?.into() })
 }
 
 /// A fila que a sessão morta deixou no nome (a projeção `.hangar-queue/<nome>.jsonl`, que o Rust lê
@@ -113,13 +141,27 @@ impl ServerHost {
         serde_json::from_slice(&bytes).map_err(|_| "json".to_owned())
     }
 
-    /// O dono da sessão que o convidado com login abriu vai ao `guests.json`, que é do Python, num
-    /// sentido. Falhou: a sessão sai com a worktree que ela criou, como no `_kill_unclaimed`.
+    /// O dono da sessão que o convidado com login abriu vai ao `guests.json`. Falhou: a sessão sai
+    /// com a worktree que ela criou, como no `_kill_unclaimed`.
     async fn claim(&self, mut opened: super::open::Opened, guest: &LoginGuest) -> Result<super::open::Opened, OpenError> {
         let name = opened.body["name"].as_str().unwrap_or_default().to_owned();
-        let Err(cause) = self.internal("/internal/guests/claim", json!({"session": name, "guest": guest.id})).await else {
-            opened.body["owner"] = json!(guest.name);
-            return Ok(opened);
+        let lives = crate::share::life::Lives::new(Arc::new(crate::share::life::MuxProbe::new(self.terminal.program.clone(), self.env.home.clone())), Arc::default());
+        // Logo após criar, o multiplexador pode ainda não responder a vida (`claim` do Python).
+        let mut life = None;
+        for _ in 0..3 {
+            life = lives.life(&name, true).await;
+            if life.is_some() { break; }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let (base, session, id) = (self.env.claude_base.clone(), name.clone(), guest.id.clone());
+        let written = tokio::task::spawn_blocking(move || claim_guest(&base, &session, &id, life.as_deref())).await;
+        let cause = match written {
+            Ok(Ok(())) => {
+                opened.body["owner"] = json!(guest.name);
+                return Ok(opened);
+            }
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "a gravação não terminou".to_owned(),
         };
         tracing::warn!(cause, "o dono da sessão do convidado não foi registrado; a sessão sai");
         // No psmux o `=` não vale no `kill-session` e o nome cru já é exato.
@@ -293,7 +335,7 @@ fn reply(error: &OpenError) -> Response {
 }
 
 /// `POST /api/sessions`: o dono e o convidado com login abrem Claude com terminal no Rust (o do
-/// convidado na pasta dele, com o dono registrado no Python depois); o resto segue ao Python com o
+/// convidado na pasta dele, com o dono registrado no `guests.json`); o resto segue ao Python com o
 /// corpo intacto (corpo que não é pedido válido também: o 422 é o dele).
 pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
@@ -384,9 +426,8 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 }
 
 /// `/__hangar_server/claude/<nome>/open`: o que entrou direto no Python (Connect, com o convidado e a
-/// pasta dele; o MCP, que roda lá) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o
-/// que não é do Rust volta 421 e o Python segue. A worktree criada volta junto: o registro do
-/// convidado no Python a desfaz se falhar.
+/// pasta dele; o MCP, que roda lá) abre aqui pelo mesmo caminho. `{"request": …, "guest": <id>}`; o
+/// que não é do Rust volta 421 e o Python segue. O dono da sessão do convidado é gravado aqui.
 pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Ok(bytes) = to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
@@ -394,12 +435,16 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let Ok(request) = SessionOpenRequest::parse(envelope["request"].to_string().as_bytes()) else {
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     };
-    let caller = match envelope["guest_root"].as_str() {
-        Some(root) => OpenCaller::Guest { root: PathBuf::from(root) },
-        None => OpenCaller::Owner,
+    let guest = match envelope["guest"].as_str() {
+        Some(id) => match guest_by_id(&AccountEnvironment::capture().claude_base, id) {
+            Some(guest) => Some(guest),
+            None => return reply(&OpenError::new(403, "erro_criacao_sessao", "convidado inexistente")),
+        },
+        None => None,
     };
-    match decide_detached(&st, request, caller, None).await {
-        Decision::Opened(opened) => crate::session_write::json_response(StatusCode::OK, json!({"info": opened.body, "undo": opened.undo})),
+    let caller = guest.as_ref().map_or(OpenCaller::Owner, |g| OpenCaller::Guest { root: g.root.clone() });
+    match decide_detached(&st, request, caller, guest).await {
+        Decision::Opened(opened) => crate::session_write::json_response(StatusCode::OK, json!({"info": opened.body})),
         Decision::Refused(error) => reply(&error),
         Decision::NotOurs => StatusCode::MISDIRECTED_REQUEST.into_response(),
     }

@@ -154,3 +154,33 @@ def test_unreadable_file_is_never_overwritten(tmp_path):
         _guest(tmp_path)
     assert e.value.reason == "arquivo_ilegivel"
     assert f.read_text() == "{corrompido"
+
+
+def test_a_claim_written_by_the_rust_is_seen_and_kept(tmp_path):
+    """O `hangar-server` grava o dono da sessão que ele abriu direto no arquivo: a memória daqui
+    o enxerga, e a próxima gravação daqui não o apaga."""
+    import json
+    g, _ = _guest(tmp_path)
+    LIVES["rust"] = LIVES["py"] = "t:100"
+    path = tmp_path / "guests.json"
+    raw = json.loads(path.read_text())
+    raw["sessions"]["rust"] = {"guest": g.id, "life": "t:100"}
+    path.write_text(json.dumps(raw, indent=4))
+    assert guest_users.owner_name("rust") == "ana"
+    guest_users.claim("py", g.id)
+    assert set(json.loads(path.read_text())["sessions"]) == {"rust", "py"}
+
+
+def test_writing_waits_for_the_lock_the_rust_holds(tmp_path):
+    import threading
+    from app import atomico
+    g, _ = _guest(tmp_path)
+    LIVES["s1"] = "t:100"
+    done = threading.Event()
+    with atomico.locked(tmp_path / "guests.lock"):
+        writer = threading.Thread(target=lambda: (guest_users.claim("s1", g.id), done.set()))
+        writer.start()
+        assert not done.wait(0.2), "gravou com a trava do Rust presa"
+    assert done.wait(30)
+    writer.join()
+    assert guest_users.owner_name("s1") == "ana"

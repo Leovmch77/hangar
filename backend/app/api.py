@@ -2315,7 +2315,7 @@ async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSes
         return None
     guest = guest_users.current.get()
     payload = json.dumps({"request": body.model_dump(mode="json", exclude_unset=True),
-                          "guest_root": str(guest.root) if guest is not None else None}).encode()
+                          "guest": guest.id if guest is not None else None}).encode()
     # O prazo da criação, que prepara conta e worktree.
     answer = await asyncio.to_thread(runtime_coordinator.rust_claude, body.name, "open", "POST", payload, 180)
     if answer is None:
@@ -2324,23 +2324,8 @@ async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSes
     data = json.loads(raw)
     if status >= 400:
         raise HTTPException(status, detail=data["detail"])
-    info = CreatedSessionInfo(**data["info"])
-    if guest is not None:
-        try:
-            await asyncio.to_thread(guest_users.claim, info.name, guest.id)
-        except Exception:
-            # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
-            _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
-            await _kill_unclaimed(info.name)
-            # S-66: a worktree e a branch que esta abertura criou saem junto; senão a próxima
-            # tentativa com a mesma branch daria 409.
-            if undo := data.get("undo"):
-                await asyncio.shield(asyncio.to_thread(_undo_worktree, {
-                    "source": undo["source"], "path": undo["path"],
-                    "new_branch": undo["branch"] if undo["branch_created"] else None}))
-            raise
-        info = info.model_copy(update={"owner": guest.name})
-    return info
+    # O dono da sessão do convidado o Rust já gravou no `guests.json`.
+    return CreatedSessionInfo(**data["info"])
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)

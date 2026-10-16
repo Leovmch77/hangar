@@ -156,20 +156,6 @@ async def session_release(name: str) -> dict:
     return {"ok": True}
 
 
-@router.post("/guests/claim")
-async def guest_claim(request: Request) -> dict:
-    """A sessão que o Rust abriu para o convidado com login: o dono dela vai ao `guests.json`, que é daqui."""
-    from app import guest_users
-    try:
-        body = json.loads(await request.body())
-        if not isinstance(body, dict) or set(body) != {"session", "guest"} or not all(isinstance(v, str) and v for v in body.values()):
-            raise ValueError("pedido inválido")
-    except (ValueError, RecursionError):
-        raise HTTPException(400) from None
-    await internal_thread(guest_users.claim, body["session"], body["guest"])
-    return {"ok": True}
-
-
 @router.post("/list/facts")
 async def list_facts(request: Request) -> dict:
     """Fatos da lista para o Rust (`list/facts.rs`): ele manda as linhas que descobriu, a contagem
