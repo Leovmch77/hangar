@@ -80,10 +80,11 @@ pub fn login_guest(claude_base: &Path, token: &[u8]) -> Option<LoginGuest> {
 }
 
 /// A fila que a sessão morta deixou no nome (a projeção `.hangar-queue/<nome>.jsonl`, que o Rust lê
-/// no histórico): a nova não a herda.
+/// no histórico) e o vínculo `then` dela (`.hangar-chain/<nome>.json`): a nova não os herda.
 pub fn forget_queue(claude_base: &Path, name: &str) -> std::io::Result<()> {
     let projection = crate::locate::queue_path(claude_base, name);
-    for path in [projection.with_extension("jsonl.tmp"), projection] {
+    let chain = claude_base.join(".hangar-chain").join(projection.file_name().unwrap_or_default()).with_extension("json");
+    for path in [projection.with_extension("jsonl.tmp"), projection, chain.with_extension("json.tmp"), chain] {
         match std::fs::remove_file(path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -194,8 +195,8 @@ impl OpenHost for ServerHost {
                 return Err(OpenError::new(503, "erro_lista_indisponivel", format!("a fila da sessão antiga não foi apagada: {error}"))
                     .with_params(json!({"detalhe": "fila_antiga"})));
             }
-            // ponytail: o registro em espera do coordenador e o `then` ainda moram no Python (Task 5,
-            // passo 3, e a migração do `then`); só eles vão por esta chamada.
+            // ponytail: o registro em espera do coordenador ainda mora no Python e só ele vai por esta
+            // chamada; sai quando o registro de sessões passar ao Rust.
             let path = format!("/internal/sessions/{}/release", crate::groups::exit::segment(name));
             self.internal(&path, json!({})).await.map(|_| ()).map_err(|cause| {
                 tracing::warn!(cause, "registro em espera e `then` do nome reusado não limpos");
