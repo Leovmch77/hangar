@@ -5,6 +5,9 @@ import { Sheet } from '../ui/Sheet';
 import { Icon, type IconName } from '../ui/Icon';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
+import { isEmptyBand } from '@hangar/core';
+import { chatStore } from '../stores/chat';
+import { useMods } from '../stores/mods';
 
 interface Props {
   open: boolean;
@@ -35,8 +38,18 @@ type Item = {
 export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, provider, semTerminal, temPergunta }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const chat = chatStore(serverId, name);
+  const surface = chat.use(s => s.pluginUi);
+  const dead = chat.use(s => s.stateEvent?.state === 'dead');
+  const visible = useMods(s => s.visible);
+  const panes = surface?.panes.length ?? 0;
+  const hasMods = !dead && !!surface && (!isEmptyBand(surface.above) || panes > 0);
+  const modsLabel = visible ? m.mods_celular_ocultar() : panes === 1 ? m.mods_celular_mostrar_um()
+    : panes > 1 ? m.mods_celular_mostrar_paineis({ n: String(panes) }) : m.mods_celular_mostrar();
 
   const items: Item[] = [
+    ...(hasMods ? [{ icon: 'PanelsTopLeft' as IconName, label: modsLabel, sub: m.mods_celular_sub(), route: 'mods',
+      onPress: () => useMods.getState().setVisible(!visible) }] : []),
     ...(recarregar ? [{
       icon: 'RefreshCw' as IconName,
       label: m.recarregar_sessao(),

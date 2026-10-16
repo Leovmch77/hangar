@@ -3,12 +3,10 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Keyboard, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft } from '@hangar/core';
 import type { CommandInfo, MotivoFim, Provider, QueueEdit, QueuePanel as QueuePanelModel, Server } from '@hangar/core';
-import { Glass } from '../ui/Glass';
+import { ComposerActions, ComposerBox, ComposerInput } from './ComposerField';
 import { Icon } from '../ui/Icon';
-import { MultilineInput } from '../ui/MultilineInput';
-import { RecordingWave } from '../ui/RecordingWave';
 import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
 import { abandonUnknownAttempt, attachInsert, confirmFirstInput, firstInputMessage, readFirstInput, sendFirstInput, useNewConversation, withAttach } from '../stores/newConversation';
@@ -71,9 +69,6 @@ const soComando = (texto: string) => {
   const t = texto.trimEnd();
   return slashTokenAt(t, t.length)?.whole === true;
 };
-
-// Número do selo da fila: crescer com o texto ampliado o cortava dentro do botão; a dica acessível já diz a contagem.
-const GLYPH_MAX_SCALE = 1.4;
 
 // Chamado depois que o rascunho largou a cópia: falhar aqui deixa só um arquivo órfão na pasta do app.
 function dropCopy(uri: string): void {
@@ -1407,17 +1402,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     };
   }, []);
 
-  // Foco tinge a borda com o acento, como no PWA: o campo não tem cursor de contorno próprio.
-  const acento = hexParaRgb(theme.tokens.accent.base);
-  const bordaFoco = focado && acento ? { borderColor: `rgba(${acento.join(',')},0.45)` } : null;
-
   return (
     <>
     {/* Colado no topo da caixa: o que espera a vez no Hangar, com as ações por mensagem. */}
     <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
       onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
       onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
-    <Glass variant="chrome" style={[styles.glass, bordaFoco]}>
+    <ComposerBox focused={focado}>
         {/* Fila da TUI do Kimi esperando o turno: diz quantas e dá a saída de mandar agora. */}
         {showSteer ? (
           <Pressable
@@ -1498,8 +1489,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           error={slashQuery !== null ? commandsError : ''} onRetry={retryCommands} />
 
         {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
-        <View style={styles.inputWrap}>
-          <MultilineInput
+          <ComposerInput
             ref={inputRef}
             accessible
             accessibilityLabel={m.composer_mensagem()}
@@ -1517,78 +1507,25 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             onFocus={() => setFocado(true)}
             onBlur={() => setFocado(false)}
             onPaste={handlePaste}
-            style={gravando ? styles.inputEscondido : undefined}
-            editable={!gravando}
-            accessibilityElementsHidden={gravando}
-            importantForAccessibility={gravando ? 'no-hide-descendants' : 'auto'}
+            recording={gravando}
+            rms={rms}
+            onCancelRecording={() => {
+              // A parada pedida por Enviar ainda deve guardar o áudio.
+              if (!voiceSendRef.current) recordingTargetRef.current = null;
+              cancelVoiceSend();
+              void parar('botao');
+            }}
           />
-          {/* Gravando, a onda ocupa o lugar do campo (montado por baixo, com o texto intacto): a caixa
-              não cresce nem muda de forma por causa do ditado. */}
-          {gravando ? (
-            <View style={styles.ondaNoCampo}>
-              {/* Sem alvo, o fim da gravação não transcreve: é o Cancelar do PC, que joga o áudio fora. */}
-              <RecordingWave rms={rms} onCancel={() => {
-                // A parada pedida por Enviar ainda deve guardar o áudio.
-                if (!voiceSendRef.current) recordingTargetRef.current = null;
-                cancelVoiceSend();
-                void parar('botao');
-              }} />
-            </View>
-          ) : null}
-        </View>
 
         {/* Linha do app de PC: + e microfone sem moldura à esquerda; o chip da sessão e o Enviar
             fecham a linha. Com o Orientar, o chip encolhe o nome do modelo mas nada sai, como no PWA. */}
-        <View style={styles.row}>
-          <Pressable
-            onPress={() => setAttachMenuOpen(true)}
-            disabled={attachBlocked}
-            hitSlop={5}
-            accessibilityState={{ disabled: attachBlocked, busy: uploading }}
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, attachBlocked && styles.iconBtnDisabled]}
-            accessibilityLabel={m.composer_adicionar_ao_chat()}
-            accessibilityRole="button"
-          >
-            {uploading ? (
-              <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
-            ) : (
-              <Icon name="Plus" size={22} color={theme.tokens.text.secondary} />
-            )}
-          </Pressable>
-
-          <Pressable
-              onPress={handleMicPress}
-              disabled={micBlocked}
-              hitSlop={5}
-              accessibilityState={{ disabled: micBlocked, busy: busyVoice }}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                pressed && styles.iconBtnPressed,
-                micBlocked && styles.iconBtnDisabled,
-              ]}
-              accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
-              accessibilityRole="button"
-              // O estilo do ditado mora no + e no toque longo; o leitor de tela recebe a mesma ação
-              // nomeada, e a dica diz qual estilo vale antes de falar.
-              onLongPress={gravando ? undefined : () => setStyleMenuOpen(true)}
-              accessibilityHint={m.composer_mic_style_hint({ estilo: dictationStyle })}
-              accessibilityActions={gravando ? undefined : [{ name: 'longpress', label: m.ditado_estilo_titulo() }]}
-              onAccessibilityAction={(e) => {
-                if (e.nativeEvent.actionName === 'longpress' && !gravando) setStyleMenuOpen(true);
-              }}
-            >
-              {/* Gravando, o vermelho é o aviso: o quadrado diz "toque para parar". */}
-              {gravando
-                ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
-                : <Icon name="Mic" size={20} color={theme.tokens.text.secondary} />}
-          </Pressable>
-
-          <LiveVoiceChatButton serverId={serverId} name={name} />
-
-          <View style={styles.spacer} />
-
-          <SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest} />
-
+        <ComposerActions
+          attach={{ onPress: () => setAttachMenuOpen(true), disabled: attachBlocked, busy: uploading }}
+          mic={{ onPress: () => void handleMicPress(), disabled: micBlocked, busy: busyVoice, recording: gravando,
+            styleLabel: dictationStyle, onStyle: () => setStyleMenuOpen(true) }}
+          afterMic={<LiveVoiceChatButton serverId={serverId} name={name} />}
+          settings={<SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest} />}
+          afterSettings={<>
 
           {/* Parar: só o quadrado vermelho, sem círculo em volta, como no PC. */}
           {showStop ? (
@@ -1624,34 +1561,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             </Pressable>
           ) : null}
 
-          {/* Vazio, o círculo fica apagado em vez de sumir: o claro cheio só acende com o que mandar. */}
-          {showSend ? (
-            <Pressable
-              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(); }}
-              disabled={!canSubmit}
-              hitSlop={5}
-              accessibilityState={{ disabled: !canSubmit, busy: editing ? queueBusy : waitingVoiceSend || sending || uploading }}
-              style={({ pressed }) => [
-                styles.roundBtn,
-                { backgroundColor: canSubmit ? theme.tokens.text.primary : theme.tokens.border.default },
-                pressed && canSubmit && styles.sendBtnPressed,
-              ]}
-              accessibilityLabel={editing ? m.queue_panel_update_aria() : m.composer_enviar_mensagem()}
-              accessibilityHint={filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined}
-              accessibilityRole="button"
-            >
-              <Icon name={editing ? 'Check' : 'ArrowUp'} size={18} color={canSubmit ? theme.tokens.bg.base : theme.tokens.text.muted} />
-              {/* Fila (pending local + queued-* do SSE): selo no canto, dentro do botão para o Android não cortar. */}
-              {filaCount > 0 ? (
-                <View style={[styles.queueBadge, { backgroundColor: theme.tokens.status.warning }]} pointerEvents="none">
-                  <Text style={[styles.queueBadgeText, { color: theme.tokens.text.inverse }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>
-                    {filaCount > 9 ? '9+' : filaCount}
-                  </Text>
-                </View>
-              ) : null}
-            </Pressable>
-          ) : null}
-        </View>
+          </>}
+          send={{ visible: showSend, onPress: () => void handleSend(), disabled: !canSubmit,
+            busy: editing ? queueBusy : waitingVoiceSend || sending || uploading, editing, count: filaCount,
+            label: editing ? m.queue_panel_update_aria() : m.composer_enviar_mensagem(),
+            hint: filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined }}
+        />
 
         {bar && (barVersions || barPlayer) ? (
           <View style={styles.versionRow}>
@@ -1803,21 +1718,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             ? { label: m.composer_mandar_tambem({ n: pairPeers.join(', ') }), on: sendToPair, onPress: () => setSendToPair((c) => !c) }
             : undefined}
         />
-    </Glass>
+    </ComposerBox>
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  // Caixa flutuante do app de PC; a linha de status vem logo embaixo, por isso a margem curta.
-  glass: {
-    marginHorizontal: theme.base.space[2],
-    borderRadius: 22,
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: 8,
-    gap: theme.base.space[1],
-  },
   // Chips acima da caixa (fila, par): a mesma silhueta do chip da sessão; hitSlop leva a 44 pt.
   steerBtn: {
     alignSelf: 'flex-start',
@@ -1850,31 +1756,6 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
     fontWeight: '600',
   },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  spacer: {
-    flex: 1,
-    minWidth: 0,
-  },
-  // O campo é o próprio vidro, sem caixa dentro da caixa.
-  inputWrap: {
-    minHeight: 40,
-    justifyContent: 'center',
-    paddingHorizontal: theme.base.space[1],
-  },
-  inputEscondido: { opacity: 0 },
-  ondaNoCampo: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
-  // 34 pt + hitSlop 5 = 44 pt de toque; o ícone fica sem fundo, como no PC.
-  iconBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   iconBtnPressed: {
     backgroundColor: theme.tokens.bg.hover,
   },
@@ -1892,25 +1773,6 @@ const styles = StyleSheet.create((theme) => ({
     width: 13,
     height: 13,
     borderRadius: 3,
-  },
-  queueBadge: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    minWidth: 15,
-    height: 15,
-    paddingHorizontal: 3,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  queueBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    lineHeight: 13,
-  },
-  sendBtnPressed: {
-    opacity: 0.8,
   },
   autoChip: {
     minWidth: 44,

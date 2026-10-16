@@ -20,6 +20,7 @@ import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
 import { MoreSheet } from '../../../../src/chat/MoreSheet';
+import { PluginUi } from '../../../../src/chat/PluginUi';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { PendingPlan } from '../../../../src/chat/PendingPlan';
 import { SessionProblem } from '../../../../src/chat/SessionProblem';
@@ -48,8 +49,10 @@ export default function ChatScreen() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
-  // A conversa rola por baixo da caixa do composer: sem conteúdo atrás, o vidro vira caixa chapada.
+  // Sem mods, a conversa passa sob o vidro; com eles, a lista precisa parar antes da faixa.
   const [dockH, setDockH] = useState(0);
+  const [modsH, setModsH] = useState(0);
+  const overlayH = modsH > 0 ? 0 : dockH;
   const existe = useServers((s) => s.servers.some((x) => x.id === serverId));
   const ready = useServers((s) => s.ready);
   const retido = useRef(false); // só quem reteve solta; zera nos dois caminhos
@@ -469,7 +472,7 @@ export default function ChatScreen() {
           {!servidorSumiu && problem ? (
             <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
           ) : null}
-          <View style={[styles.inner, { marginBottom: -Math.max(0, dockH - BORDA_DOCK) }]}>
+          <View testID="chat-viewport" style={[styles.inner, { marginBottom: -Math.max(0, overlayH - BORDA_DOCK) }]}>
             {servidorSumiu ? (
               <View style={styles.erro}>
                 <Text style={styles.hint}>{m.chat_servidor_removido()}</Text>
@@ -538,7 +541,7 @@ export default function ChatScreen() {
                 optionsSlot={optionsSlot}
                 sessionName={name}
                 serverId={serverId}
-                bottomInset={dockH}
+                bottomInset={overlayH}
                 stateEvent={stateEvent}
                 turnSeen={turnSeen}
                 pensamento={pensamento}
@@ -550,7 +553,7 @@ export default function ChatScreen() {
               />
             )}
           </View>
-          <View onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
+          <View testID="chat-dock" onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
           {sseRecusado && !servidorSumiu && !codexPreThread ? (
             <View style={styles.sseRecusado} accessibilityRole="alert">
               <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
@@ -566,6 +569,10 @@ export default function ChatScreen() {
           ) : null}
           {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
           {!servidorSumiu && recarregavel && semTerminal ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
+          <View testID="mods-dock" onLayout={(e) => setModsH(e.nativeEvent.layout.height)}>
+            {!servidorSumiu && !codexPreThread && !dead && fetchedSession !== null
+              ? <PluginUi key={rota} serverId={serverId} name={name} readOnly={soLeitura} /> : null}
+          </View>
           {!servidorSumiu && !codexPreThread && fetchedSession !== null
             ? dead
               ? (
@@ -617,6 +624,7 @@ const styles = StyleSheet.create((theme) => ({
   carregando: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   inner: {
     flex: 1,
+    overflow: 'hidden',
   },
   hint: {
     fontSize: theme.base.text.sm,

@@ -1,27 +1,27 @@
-import { forwardRef, type ReactNode } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { MenuView, type MenuAction } from '@react-native-menu/menu';
+import { AnchoredPanel } from '../../ui/AnchoredPanel';
+import { SettingsList } from '../../ui/SettingsList';
+import * as m from '../../paraglide/messages';
 import { Icon, type IconName } from '../../ui/Icon';
 import { usePressScale } from '../../ui/pressScale';
+
+export type PillAction = { id: string; title: string; subtitle?: string; state?: 'on' | 'off'; attributes?: { disabled?: boolean } };
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 type Props = {
   icon?: IconName;
-  // Selo à esquerda no lugar do ícone (o logo do provider).
-  leading?: ReactNode;
   label: string;
   // Nome da escolha para o leitor de tela: "Máquina: Notebook".
   aria: string;
   disabled?: boolean;
-  // Com ações, o toque abre o menu nativo; sem, chama onPress.
-  actions?: MenuAction[];
+  actions?: PillAction[];
   menuTitle?: string;
   onAction?: (id: string) => void;
   onPress?: () => void;
-  strong?: boolean;
   // Estado que a pessoa precisa ver sem abrir o menu (conta sem cota, troca automática).
   tone?: 'warning' | 'accent';
 };
@@ -29,15 +29,18 @@ type Props = {
 // A pílula quieta do app de PC (quiet_pill): 26 de altura, texto 12.5 apagado, ícone 14 e a seta do
 // menu. O hitSlop leva o toque aos 44 pt sem engordar o desenho.
 export const QuietPill = forwardRef<View, Props>(function QuietPill(
-  { icon, leading, label, aria, disabled, actions, menuTitle, onAction, onPress, strong, tone }, ref,
+  { icon, label, aria, disabled, actions, menuTitle, onAction, onPress, tone }, ref,
 ) {
+  const anchor = useRef<View>(null);
+  useImperativeHandle(ref, () => anchor.current!, []);
+  const [open, setOpen] = useState(false);
   const { theme } = useUnistyles();
   const ink = tone === 'warning' ? theme.tokens.status.warning : tone === 'accent' ? theme.tokens.accent.base : theme.tokens.text.muted;
   const press = usePressScale();
   const body = (
     <AnimatedPressable
-      ref={ref}
-      onPress={actions ? undefined : onPress}
+      ref={anchor}
+      onPress={actions ? () => setOpen(true) : onPress}
       onPressIn={press.onPressIn}
       onPressOut={press.onPressOut}
       disabled={disabled}
@@ -47,18 +50,20 @@ export const QuietPill = forwardRef<View, Props>(function QuietPill(
       accessibilityState={{ disabled: !!disabled }}
       style={[styles.pill, press.style, disabled && styles.disabled]}
     >
-      {leading ?? (icon ? <Icon name={icon} size={14} color={ink} /> : null)}
-      <Text style={[styles.text, strong && styles.strong, tone && { color: ink }]} numberOfLines={1}>{label}</Text>
+      {icon ? <Icon name={icon} size={14} color={ink} /> : null}
+      <Text style={[styles.text, tone && { color: ink }]} numberOfLines={1}>{label}</Text>
       <Icon name="ChevronDown" size={12} color={theme.tokens.text.muted} />
     </AnimatedPressable>
   );
   return (
     <Animated.View entering={FadeIn.duration(220)} style={styles.shrink}>
-      {actions && !disabled ? (
-        <MenuView title={menuTitle} actions={actions} onPressAction={({ nativeEvent }) => onAction?.(nativeEvent.event)}>
-          {body}
-        </MenuView>
-      ) : body}
+      {body}
+      {actions ? <AnchoredPanel open={open && !disabled} anchor={anchor.current} onClose={() => setOpen(false)}
+        label={menuTitle ?? aria} closeLabel={m.native_close()} radius={12} padding={4}>
+        <SettingsList items={actions.map((it) => ({ id: it.id, label: it.title, hint: it.subtitle,
+          selected: it.state === 'on', disabled: it.attributes?.disabled }))}
+          onPick={(id) => { setOpen(false); onAction?.(id); }} />
+      </AnchoredPanel> : null}
     </Animated.View>
   );
 });
@@ -74,6 +79,5 @@ const styles = StyleSheet.create((theme) => ({
     gap: 6,
   },
   text: { flexShrink: 1, maxWidth: 220, fontSize: 13.5, color: theme.tokens.text.muted },
-  strong: { fontWeight: '600', color: theme.tokens.text.primary },
   disabled: { opacity: 0.5 },
 }));
