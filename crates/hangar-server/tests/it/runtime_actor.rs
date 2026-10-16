@@ -1845,13 +1845,16 @@ mod terminal_async {
     }
 
     async fn view_until(handle:&RuntimeHandle,what:&str,check:impl Fn(&Value) -> bool) -> Value {
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        let mut last = Value::Null;
+        // A assinatura inclui o diário durável: o prazo cobre a E/S do Windows antes de julgar o ator.
+        tokio::time::timeout(std::time::Duration::from_secs(30),async {
             loop {
                 let view = handle.view().await.unwrap();
                 if check(&view) { return view; }
+                last = view;
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-        }).await.unwrap_or_else(|_|panic!("{what}"))
+        }).await.unwrap_or_else(|_|panic!("{what}: último estado = {last}"))
     }
 
     fn question_open(view:&Value) -> bool { view["async_questions"].as_array().is_some_and(|q|q.iter().any(|pair|pair[0] == QUESTION)) }
