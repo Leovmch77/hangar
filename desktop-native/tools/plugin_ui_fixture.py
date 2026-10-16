@@ -134,8 +134,9 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["removed"] = True
                 elif action == "reset":
                     STATE.update(active="pm", question=False, fail=False, content="normal", removed=False)
-                STATE["version"] += 1
-                CHANGED.notify_all()
+                if action != "log":
+                    STATE["version"] += 1
+                    CHANGED.notify_all()
                 self.send_json(LOG if action == "log" else STATE)
             return
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
@@ -159,7 +160,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 0:
+                raise ValueError("Content-Length inválido")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("O corpo precisa ser um objeto JSON")
+        except (ValueError, UnicodeDecodeError):
+            self.send_json({"detail": "Corpo JSON ou Content-Length inválido."}, 400)
+            return
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             self.send_json({"detail": "unauthorized"}, 401)
             return

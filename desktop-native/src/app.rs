@@ -6450,6 +6450,7 @@ impl Hangar {
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.new_chat_screen() { self.plugin_question_seen = None; }
         if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
         self.sync_plugin_fields(window, cx);
@@ -6537,7 +6538,9 @@ impl Hangar {
         if changed {
             if question.is_some() { self.plugin_question_focus.focus(window, cx); }
             else if self.plugin_question_focus.contains_focused(window, cx) {
-                self.composer.update(cx, |input, cx| input.focus(window, cx));
+                if self.selected.as_ref().is_some_and(|session| session.takes_messages()) {
+                    self.composer.update(cx, |input, cx| input.focus(window, cx));
+                } else { self.root_focus.focus(window, cx); }
             }
         }
         if display != Display::Panel { self.keep_plugin_hovered_without(active.as_deref()); }
