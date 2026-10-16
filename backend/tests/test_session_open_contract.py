@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 CONTRACT = Path(__file__).parent / "fixtures" / "contract"
+# O harness é só POSIX: trava com flock e roda o lado Python com sh e tmux.
+pytest.importorskip("fcntl", reason="harness de contrato só POSIX (flock)")
 sys.path.insert(0, str(CONTRACT))
 import session_open_contract as c  # noqa: E402
 from session_open_scenarios import SCENARIOS  # noqa: E402

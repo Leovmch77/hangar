@@ -132,6 +132,8 @@ def test_api_desembrulha_detail_do_fastapi(w, monkeypatch):
 def _servidor_falso(tmp_path, monkeypatch, respostas):
     """`hangar-server` falso (o `open` do lançador): grava cada pedido e responde, em ordem, `(código, saída)`."""
     import sys as _sys
+    if os.name == "nt":
+        pytest.skip("o hangar-server falso é script com shebang, e o Windows só executa .exe")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (tmp_path / "respostas.json").write_text(json.dumps(respostas))
@@ -267,12 +269,15 @@ def test_acha_o_mesmo_hangar_server_que_o_supervisor(w, monkeypatch, tmp_path):
     shutil.copy(_CAMINHO.parent / "hangar-open", raiz / "scripts" / "hangar-open")
     shutil.copy(_CAMINHO.parents[1] / "backend" / "app" / "rust_bins.py", raiz / "backend" / "app" / "rust_bins.py")
     monkeypatch.setattr(w, "_repo", lambda: raiz)
+    # `Path.home()` lê o HOME no POSIX e o USERPROFILE no Windows, onde o binário tem `.exe`.
     monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "casa"))
     monkeypatch.delenv("CP_RUST_SERVER_BIN", raising=False)
-    for caminho, mtime in ((tmp_path / "casa" / ".hangar" / "bin" / "hangar-server", 1000),
-                           (raiz / "crates" / "target" / "release" / "hangar-server", 2000)):
+    servidor = "hangar-server" + (".exe" if os.name == "nt" else "")
+    for caminho, mtime in ((tmp_path / "casa" / ".hangar" / "bin" / servidor, 1000),
+                           (raiz / "crates" / "target" / "release" / servidor, 2000)):
         caminho.parent.mkdir(parents=True)
         caminho.write_text("#!/bin/sh\n")
         caminho.chmod(0o755)
         os.utime(caminho, (mtime, mtime))
-    assert w._hangar_server() == str(raiz / "crates" / "target" / "release" / "hangar-server")
+    assert w._hangar_server() == str(raiz / "crates" / "target" / "release" / servidor)

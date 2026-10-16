@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
+_SERVER = "hangar-server" + (".exe" if os.name == "nt" else "")
 
 
 @pytest.fixture
@@ -18,7 +19,9 @@ def copia(tmp_path, monkeypatch):
     (raiz / "backend" / "app").mkdir(parents=True)
     shutil.copy(_REPO / "scripts" / "hangar-open", raiz / "scripts" / "hangar-open")
     shutil.copy(_REPO / "backend" / "app" / "rust_bins.py", raiz / "backend" / "app" / "rust_bins.py")
+    # `Path.home()` lê o HOME no POSIX e o USERPROFILE no Windows.
     monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "casa"))
     monkeypatch.setenv("PATH", str(tmp_path / "vazio"))
     monkeypatch.delenv("CP_RUST_SERVER_BIN", raising=False)
     return raiz
@@ -41,21 +44,21 @@ def _binario(caminho: Path, mtime: int) -> Path:
 
 
 def test_build_so_na_copia_e_achado(copia):
-    build = _binario(copia / "crates" / "target" / "release" / "hangar-server", 1000)
+    build = _binario(copia / "crates" / "target" / "release" / _SERVER, 1000)
     assert _modulo(copia).server_bin() == str(build)
 
 
 def test_o_mais_novo_entre_a_copia_e_o_baixado_vence(copia, tmp_path):
-    _binario(copia / "crates" / "target" / "release" / "hangar-server", 1000)
-    baixado = _binario(tmp_path / "casa" / ".hangar" / "bin" / "hangar-server", 2000)
+    _binario(copia / "crates" / "target" / "release" / _SERVER, 1000)
+    baixado = _binario(tmp_path / "casa" / ".hangar" / "bin" / _SERVER, 2000)
     assert _modulo(copia).server_bin() == str(baixado)
-    build = _binario(copia / "crates" / "target" / "release" / "hangar-server", 3000)
+    build = _binario(copia / "crates" / "target" / "release" / _SERVER, 3000)
     assert _modulo(copia).server_bin() == str(build)
 
 
 def test_variavel_explicita_vence_e_nao_cai_para_outro(copia, monkeypatch, tmp_path):
-    _binario(copia / "crates" / "target" / "release" / "hangar-server", 1000)
-    escolhido = _binario(tmp_path / "meu" / "hangar-server", 10)
+    _binario(copia / "crates" / "target" / "release" / _SERVER, 1000)
+    escolhido = _binario(tmp_path / "meu" / _SERVER, 10)
     monkeypatch.setenv("CP_RUST_SERVER_BIN", str(escolhido))
     assert _modulo(copia).server_bin() == str(escolhido)
     monkeypatch.setenv("CP_RUST_SERVER_BIN", str(tmp_path / "nao-existe"))
