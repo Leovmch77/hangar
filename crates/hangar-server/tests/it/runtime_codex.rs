@@ -140,6 +140,19 @@ fn clear_does_not_release_input_if_restoring_plan_fails() {
 }
 
 #[test]
+fn clear_without_a_model_cannot_silently_drop_plan() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"initialized":true,"ready":true,
+        "mode":"plan","effort":"high"}),1,clock(10.0)).with_store();
+    let start = frames(&engine.command(command(OperationKind::Clear,json!({})),clock(11.0)).unwrap())[0].clone();
+    let opened = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"thread-2","turns":[]}}}),12.0);
+    assert!(frames(&opened).is_empty(),"não restaura só o esforço quando falta o modelo do Plan");
+    assert_eq!(engine.control_view()["deliverable"],false);
+    assert_eq!(engine.view()["problema"],"codex_clear_settings_failed");
+    assert_eq!(engine.control_view()["mode"],"default");
+    assert!(opened.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "op-1")));
+}
+
+#[test]
 fn clear_refuses_a_running_turn_and_an_open_question() {
     for waiting in [false,true] {
         let mut engine = engine();

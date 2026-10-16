@@ -1081,6 +1081,19 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    fn fail_clear(&mut self,parent:&str,opening:bool,message:Value,effects:&mut Vec<Effect>) {
+        self.ready = opening;
+        if !self.ready {
+            // A thread recém-aberta está no modo padrão; não guardar Plan como se a restauração tivesse ocorrido.
+            self.mode = Some("default".into());
+            self.policy("session.patch_meta",json!({"mode":self.mode,"effort":self.effort}),effects);
+            self.state.problema = Some("codex_clear_settings_failed".into());
+            self.state.problema_detalhe = Some("A conversa nova abriu, mas não consegui restaurar sua configuração. Recarregue e confira o modo e o esforço antes de enviar.".into());
+        }
+        effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Rejected,payload:json!({"error":message}) });
+        self.changed(effects,true);
+    }
+
     /// Modo para lançar/retomar sem terminal (sempre conhecido ali); desconhecido cai no mais restrito, nunca em Full Access.
     fn launch_mode(&self) -> &str { self.permission_mode.as_deref().unwrap_or("Ask for approval") }
 
@@ -1684,18 +1697,8 @@ impl Engine {
             if opened.is_some() { line } else { json!({"id":line["id"],"error":{"message":UNPROVEN_THREAD}}) }
         } else { line };
         if !line["error"].is_null() && !already_initialized {
-            if rpc.continuation.as_ref().is_some_and(|next|matches!(next["kind"].as_str(),Some("clear_thread" | "clear_ready"))) {
-                self.ready = rpc.continuation.as_ref().unwrap()["kind"] == "clear_thread";
-                if !self.ready {
-                    // A thread recém-aberta está no modo padrão; não guardar Plan como se a restauração tivesse ocorrido.
-                    self.mode = Some("default".into());
-                    self.policy("session.patch_meta",json!({"mode":self.mode,"effort":self.effort}),effects);
-                    self.state.problema = Some("codex_clear_settings_failed".into());
-                    self.state.problema_detalhe = Some("A conversa nova abriu, mas não consegui restaurar sua configuração. Recarregue e confira o modo e o esforço antes de enviar.".into());
-                }
-                effects.push(Effect::Reply { operation_id:rpc.continuation.as_ref().unwrap()["parent"].as_str().unwrap_or("").into(),
-                    disposition:Disposition::Rejected,payload:json!({"error":line["error"]["message"]}) });
-                self.changed(effects,true);
+            if let Some(next) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("clear_thread" | "clear_ready"))) {
+                self.fail_clear(next["parent"].as_str().unwrap_or(""),next["kind"] == "clear_thread",line["error"]["message"].clone(),effects);
                 return Ok(());
             }
             if rpc.method == "thread/backgroundTerminals/terminate" {
@@ -1835,11 +1838,15 @@ impl Engine {
             }
             match next["kind"].as_str() {
                 Some("clear_thread") => {
+                    let parent = next["parent"].as_str().unwrap_or("");
+                    if next["mode"] == "plan" && self.model.is_none() {
+                        self.fail_clear(parent,false,json!("Não consegui identificar o modelo para restaurar o modo Plan."),effects);
+                        return Ok(());
+                    }
                     let collaboration_mode = next["mode"].as_str().zip(self.model.clone()).map(|(mode,model)|wire::CollaborationMode {
                         mode:mode.into(),settings:wire::CollaborationSettings { model,reasoning_effort:string(&next["effort"]),developer_instructions:None } });
                     let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams {
                         thread_id:self.thread_id.clone(),effort:Some(string(&next["effort"])),collaboration_mode,..Default::default() });
-                    let parent = next["parent"].as_str().unwrap_or("");
                     self.send(format!("{parent}:settings"),request,Some(json!({"kind":"clear_ready","parent":parent})),effects);
                 }
                 Some("clear_ready") => {

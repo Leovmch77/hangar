@@ -1,5 +1,13 @@
 """Testes de git_diffstat/_parse_numstat: o "+N -M" do card (working tree vs HEAD)."""
 from app.git_ops import _parse_numstat, git_diffstat
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_workspace_bridge(monkeypatch):
+    # Estes testes exercitam o Git local; uma ponte deixada por outro arquivo desviaria a chamada.
+    from app import workspace_bridge
+    monkeypatch.setattr(workspace_bridge, "_config", None)
 
 
 def test_numstat_soma_added_removed():
