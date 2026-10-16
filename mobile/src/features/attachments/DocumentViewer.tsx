@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Platform, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { WebView } from 'react-native-webview';
@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as m from '../../paraglide/messages';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
-import { canShareFile, shareFile } from './mediaCache';
+import { canShareFile, openPdfFile, shareFile } from './mediaCache';
 
 export interface DocumentItem {
   uri: string;
@@ -68,7 +68,7 @@ export function DocumentViewer({ doc, onClose }: { doc: DocumentItem | null; onC
             </Pressable>
           </View>
           {semLeitor ? (
-            <Text style={[styles.msg, { color: theme.tokens.text.muted }]} accessibilityRole="alert">{m.arq_pdf_sem_leitor()}</Text>
+            <PdfReader key={doc.uri} uri={doc.uri} headers={doc.headers} name={doc.name} />
           ) : (
             <>
               {carregando && !erro ? (
@@ -98,7 +98,46 @@ export function DocumentViewer({ doc, onClose }: { doc: DocumentItem | null; onC
   );
 }
 
+export function PdfReader({ uri, headers, name }: Pick<DocumentItem, 'uri' | 'headers' | 'name'>) {
+  const { theme } = useUnistyles();
+  const busy = useRef(false);
+  const mounted = useRef(true);
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const open = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    setOpening(true);
+    setError('');
+    try {
+      await openPdfFile(uri, headers, name, () => mounted.current);
+    } catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy.current = false;
+      if (mounted.current) setOpening(false);
+    }
+  };
+  return (
+    <View style={styles.pdf}>
+      <Pressable onPress={() => void open()} disabled={opening} style={styles.pdfButton}
+        accessibilityRole="button" accessibilityLabel={m.native_pdf_open()} accessibilityState={{ busy: opening }}>
+        {opening ? <ActivityIndicator color={theme.tokens.accent.base} /> : null}
+        <Text style={styles.pdfButtonText}>{m.native_pdf_open()}</Text>
+      </Pressable>
+      {error ? <Text style={[styles.msg, { color: theme.tokens.status.error }]} accessibilityRole="alert">{error}</Text> : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create((theme) => ({
+  pdf: { padding: theme.base.space[3], gap: theme.base.space[2] },
+  pdfButton: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: theme.base.space[2], padding: theme.base.space[3], borderRadius: theme.base.radius.md, backgroundColor: theme.tokens.accent.dim },
+  pdfButtonText: { color: theme.tokens.accent.base, fontSize: theme.base.text.sm },
   root: { flex: 1 },
   bar: {
     flexDirection: 'row',

@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { WebView } from 'react-native-webview';
 import * as m from '../../../../src/paraglide/messages';
-import { fileUrlNative, fileAuthHeader, listUploads, uploadUrlNative } from '@hangar/core';
+import { fileAuthHeader, listUploads, uploadUrlNative } from '@hangar/core';
 import type { UploadFile } from '@hangar/core';
 import { AttachmentCard } from '../../../../src/features/attachments/AttachmentCard';
 import { Lightbox } from '../../../../src/features/attachments/Lightbox';
@@ -68,24 +68,14 @@ export default function AttachmentsSheet() {
         setLightbox(f);
         return;
       }
-      if (k === 'html' || k === 'pdf') {
-        try {
-          router.push(`/s/${serverId}/${sessionName}/files?path=${encodeURIComponent(f.filename)}` as never);
-          return;
-        } catch {
-          const url = fileUrlNative(sessionName, f.filename, target);
-          setDocUrl({ url, headers: fileAuthHeader(target), title: f.filename });
-          return;
-        }
-      }
-      if (k === 'video') {
-        setDoc({ uri: uploadUrlNative(sessionName, f.filename, target), headers: fileAuthHeader(target), name: f.filename, kind: 'video' });
+      if (k === 'html' || k === 'pdf' || k === 'video') {
+        setDoc({ uri: uploadUrlNative(sessionName, f.filename, target), headers: fileAuthHeader(target), name: f.filename, kind: k });
         return;
       }
       const url = uploadUrlNative(sessionName, f.filename, target);
       setDocUrl({ url, headers: fileAuthHeader(target), title: f.filename });
     },
-    [sessionName, serverId, target, router],
+    [sessionName, target],
   );
 
   // Volta para a conversa: o Composer mostra "transcrevendo" e recebe o texto ou o motivo da falha.

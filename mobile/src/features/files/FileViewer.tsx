@@ -6,6 +6,7 @@ import type { FileContent, PathDiff, Server } from '@hangar/core';
 import { fileKind, fileUrlNative, fileAuthHeader, mensagemDeErro } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { EditDiff } from '../../chat/tools/EditDiff';
+import { PdfReader } from '../attachments/DocumentViewer';
 
 interface Props {
   path: string;
@@ -42,17 +43,6 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
   // PDF/imagem chegam sem texto (o backend recusa binário no /files/read); HTML precisa da leitura ok.
   const documento = (kind === 'html' && !!doArquivo) || ((kind === 'pdf' || kind === 'image') && !doArquivo && !loading && !erro);
 
-  if (documento && kind === 'pdf' && Platform.OS === 'android') {
-    // O WebView do Android não desenha PDF: sem este aviso a área fica em branco.
-    return (
-      <View style={styles.root}>
-        <Text style={[styles.aviso, { color: theme.tokens.text.muted }]} accessibilityRole="alert">
-          {m.arq_pdf_sem_leitor()}
-        </Text>
-      </View>
-    );
-  }
-
   if (documento) {
     const uri = fileUrlNative(name, path, server);
     const headers = fileAuthHeader(server);
@@ -65,6 +55,9 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
           </Text>
         </View>
       );
+    }
+    if (kind === 'pdf' && Platform.OS === 'android') {
+      return <PdfReader key={uri} uri={uri} headers={headers} name={path.split(/[\\/]/).pop()!} />;
     }
     return (
       <View style={styles.root}>
