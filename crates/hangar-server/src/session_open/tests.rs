@@ -1200,7 +1200,7 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
-/// Com o servidor fora, `hangar-open` não tem como limpar o que o nome reusado deixou (grupo, `then`,
+/// Com o servidor fora, `hangar-server open` não tem como limpar o que o nome reusado deixou (grupo, `then`,
 /// fila): recusa, em vez de a sessão nova nascer com o grupo e a fila da antiga.
 #[test]
 fn the_terminal_command_refuses_a_name_with_leftovers() {

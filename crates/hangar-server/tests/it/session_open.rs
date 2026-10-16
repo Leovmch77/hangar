@@ -1,4 +1,4 @@
-//! Abertura de sessão: o despacho do `POST /api/sessions` e o comando `hangar-open`.
+//! Abertura de sessão: o despacho do `POST /api/sessions` e o comando `hangar-server open`.
 use std::path::Path;
 use std::process::Command;
 
@@ -106,13 +106,13 @@ fn materialize(fixture: &Value, root: &Path) {
     }
 }
 
-/// Instala o comando como numa cópia do Hangar: `<raiz>/inst/bin/hangar-open` ao lado de
+/// Instala o comando como numa cópia do Hangar: `<raiz>/inst/bin/hangar-server` ao lado de
 /// `<raiz>/inst/backend/.env`, de onde ele lê token, porta e as opções `CP_*` do servidor.
 fn install(root: &Path, env_file: &str) -> std::path::PathBuf {
-    let bin = root.join("inst/bin/hangar-open");
+    let bin = root.join("inst/bin/hangar-server");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::create_dir_all(root.join("inst/backend")).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_hangar-open"), &bin).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_hangar-server"), &bin).unwrap();
     std::fs::write(root.join("inst/backend/.env"), env_file).unwrap();
     bin
 }
@@ -193,6 +193,26 @@ async fn a_server_refusal_goes_to_stderr() {
     assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), refusal);
 }
 
+/// Instalado em `~/.hangar/bin` (sem `backend/` acima), o comando acha o `.env` pelo ponteiro que o
+/// servidor grava ao subir (`~/.hangar/backend-dir`).
+#[tokio::test]
+async fn the_installed_command_finds_the_env_file_through_the_pointer() {
+    let (fake, up) = spawn_fake().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let bin = home.join(".hangar/bin/hangar-server");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_hangar-server"), &bin).unwrap();
+    let backend = dir.path().join("checkout/backend");
+    std::fs::create_dir_all(&backend).unwrap();
+    std::fs::write(backend.join(".env"), format!("CP_AUTH_TOKEN=do-ponteiro\nCP_PORT={}\n", up.port())).unwrap();
+    hangar_server::session_open::cli::publish_backend_dir(&home, &backend).unwrap();
+    let body = r#"{"name":"s1","cwd":"/x","provider":"claude"}"#;
+    let (code, _, stderr) = hangar_open(&bin, dir.path(), &["open", body], &[]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(fake.last_hit().1["authorization"], "Bearer do-ponteiro");
+}
+
 /// Token e porta vêm do `backend/.env`, como no `hangar-send`; sem token nada é enviado.
 #[tokio::test]
 async fn the_env_file_gives_token_and_port_and_no_token_sends_nothing() {
@@ -214,7 +234,7 @@ async fn the_env_file_gives_token_and_port_and_no_token_sends_nothing() {
     assert_eq!(fake.last_body(), body.as_bytes());
 }
 
-/// D-013: com o servidor fora do ar, `hangar-open open` abre o Claude com terminal aqui mesmo, pela
+/// D-013: com o servidor fora do ar, `hangar-server open` abre o Claude com terminal aqui mesmo, pela
 /// mesma biblioteca (o tmux é um programa falso que grava o que recebe), e deixa o spec gravado para o
 /// servidor adotar a sessão quando voltar.
 #[tokio::test]
