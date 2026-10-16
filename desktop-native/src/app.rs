@@ -11,6 +11,7 @@ use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
 
 mod activity;
+mod session_tabs;
 mod backdrop;
 mod baton;
 mod links;
@@ -636,6 +637,8 @@ pub struct Hangar {
     // que traz a aba ativa para a vista quando a seleção muda.
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
+    pending_tab_reveal: Option<sidebar::Target>,
+    tab_reveal_scheduled: bool,
     appearance_note: Option<String>,
     // Por que o tema Desktop não está pintando com o papel de parede; `None` quando pinta ou não foi escolhido.
     desktop_note: Option<String>,
@@ -982,7 +985,7 @@ impl Hangar {
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
-            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
+            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_reveal_scheduled: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
@@ -1393,7 +1396,7 @@ impl Hangar {
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
         let target = sidebar::Target::new(&self.open_server(), &session.name);
-        if let Some(ix) = self.tab_targets().iter().position(|t| t == &target) { self.tabs_scroll.scroll_to_item(ix); }
+        self.scroll_target_tab(&target);
         self.selection += 1;
         self.revision += 1;
         if let Some(t) = self.session_task.take() { t.abort(); }
@@ -2000,7 +2003,7 @@ impl Hangar {
             match targets.len().checked_sub(1).map(|last| ix.min(last)) {
                 Some(next) => {
                     if let Some(focus) = self.row_focus(&targets[next]) { focus.focus(window, cx); }
-                    self.tabs_scroll.scroll_to_item(next);
+                    self.scroll_target_tab(&targets[next]);
                 }
                 None => self.root_focus.focus(window, cx),
             }
@@ -5383,65 +5386,14 @@ impl Hangar {
     /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.schedule_tab_reveal(window, cx);
         let floating = theme::is_floating();
         let host = self.server_label(cx);
-        let weak = cx.entity().downgrade();
-        let active = self.active_key();
-        let targets = self.tab_targets();
-        let empty = targets.is_empty();
-        let selected = self.selected_target();
-        let tabs = targets.into_iter().filter_map(|target| {
-            let session = self.target_session(&target)?;
-            let focus = self.row_focus(&target)?.clone();
-            let on = selected.as_ref() == Some(&target);
-            let remote = target.server != active;
-            let machine = self.server_entry(&target.server).map(|s| s.label.as_str()).unwrap_or(&host);
-            let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
-            // Nome, estado e perguntas por extenso: o ponto só diz o estado pela cor.
-            let mut label = format!("{} · {} · {}", session.name, machine, tr(&format!("chip_{state}")));
-            if session.pending_questions > 0 { label.push_str(&format!(" · ? {}", session.pending_questions)); }
-            // Trabalhando é a marca animada da lista (parada com movimento reduzido); os outros estados são um ponto na cor dele.
-            let mark = if session.state == "working" {
-                self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", target.id()), 14., theme::accent())
-            } else {
-                div().size(px(8.)).mx(px(2.)).flex_shrink_0().rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }).into_any_element()
-            };
-            let pick = target.clone();
-            let open = target.clone();
-            let menu_target = target.clone();
-            let label = self.session_number_label(&menu_target, label);
-            let number = self.session_number_badge(&menu_target);
-            Some(div().id(SharedString::from(format!("tab-{}", target.id()))).relative().track_focus(&focus).flex_shrink_0().max_w(px(240.)).h(px(32.)).px(px(8.))
-                .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
-                .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
-                    else { el.border_color(transparent_black()).text_color(theme::muted()).hover(|el| el.bg(theme::hover())) })
-                .when(focus.is_focused(window), |el| el.focus_ring_style(window, cx))
-                .role(Role::Tab).aria_selected(on).aria_label(label.clone())
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
-                .child(mark)
-                .children(number)
-                .child(chrome::provider_glyph(&session.provider, 14.))
-                .child(div().min_w_0().truncate().text_size(px(13.)).child(session.name.clone()))
-                .when(remote, |el| el.child(div().max_w(px(72.)).truncate().text_size(px(10.)).text_color(theme::faint()).child(machine.to_owned())))
-                .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
-                    .child(format!("? {}", session.pending_questions))))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_target(&pick, window, cx);
-                }))
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.select_target(&open, window, cx);
-                        cx.stop_propagation();
-                    }
-                }))
-                // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
-                .when(!self.invite_target(&target) && !session.read_only(), |el| self.group_row(el, session, remote.then_some(target.server.as_str()), 6., cx))
-                .context_menu(sidebar::session_menu(weak.clone(), target.server.clone(), session.clone())))
-        }).collect::<Vec<_>>();
+        let tabs = self.render_tab_groups(window, cx);
+        let empty = tabs.is_empty();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
         // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
-        let strip = div().id("tabs-strip").flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
+        let strip = div().id("tabs-strip").tab_group().flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
@@ -5449,14 +5401,14 @@ impl Hangar {
                 let Some(current) = targets.iter().position(|target| this.row_focus(target).is_some_and(|f| f.is_focused(window))) else { return };
                 let next = (current as isize + step).rem_euclid(targets.len() as isize) as usize;
                 if let Some(focus) = this.row_focus(&targets[next]) { focus.focus(window, cx); }
-                this.tabs_scroll.scroll_to_item(next);
+                this.scroll_target_tab(&targets[next]);
                 cx.stop_propagation();
                 cx.notify();
             }))
             .children(tabs)
             .when(empty && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
-        chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
+        chrome::glass_panel(div().id("session-tabs-bar").h(px(session_tabs::BAR_HEIGHT)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .bg(theme::chrome()).border_color(theme::border())
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
@@ -6768,7 +6720,7 @@ impl Render for Hangar {
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
         let nav = if page.is_some() || costs_page || worktrees_page || files_expanded { None }
-            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
+            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(session_tabs::BAR_HEIGHT)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };
