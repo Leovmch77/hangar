@@ -5797,6 +5797,7 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
+const PLUGIN_PANE_MAX_HEIGHT: f32 = 360.;
 
 /// O formulário da linha da lista, no mesmo formato do `ask_question` do stream.
 fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
@@ -6544,7 +6545,7 @@ impl Hangar {
             }
         }
         if display != Display::Panel { self.keep_plugin_hovered_without(active.as_deref()); }
-        let height = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
+        let height = (f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE).min(PLUGIN_PANE_MAX_HEIGHT);
         let space = match display {
             Display::Question => question.map(|question|
                 div().id("plugin-interaction-space").track_focus(&self.plugin_question_focus)

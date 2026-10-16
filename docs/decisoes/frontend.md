@@ -9,7 +9,8 @@ O painel nativo dos mods usava apenas um teto de altura: abas curtas encolhiam, 
 visível da conversa. Perguntas eram desenhadas junto do painel, empilhando duas áreas acima do
 compositor. O X fechava o painel no plugin, impedindo uma restauração puramente visual.
 
-O espaço expandido agora usa 45% da altura da janela, o orçamento que antes era apenas um teto.
+O espaço expandido usa uma altura única de até 360 px, limitada a 45% da altura da janela.
+O teto de 360 px reduz a reserva vazia abaixo de perguntas curtas em janelas maiores.
 O corpo rola por dentro e cada aba conserva seu `ScrollHandle`. Minimizar guarda uma escolha
 local por identidade da sessão, sem chamar `plugin/close`. A pergunta substitui o painel nesse
 mesmo espaço; resolução restaura o painel disponível, respeitando a minimização manual. Falha
@@ -17,11 +18,15 @@ de resposta conserva o cartão. O foco acompanha a identidade da pergunta visív
 sessão, e não cada redesenho; remover painéis não reinicia o foco da pergunta.
 
 Medição no aplicativo Linux real, com compositor isolado e servidor sintético: em 1440×1000,
-PM e Jenkins tinham corpos de 323 e 17 px na base. Depois da mudança ambos têm 391 px, dentro
-de um espaço de 437 px. Abas, pergunta e resolução mantiveram o campo de mensagem em y=845 px.
+PM e Jenkins tinham corpos de 323 e 17 px na base. A primeira versão estável reservava 437 px;
+após o ajuste de altura, ambas têm corpos de 314 px dentro do mesmo espaço de 360 px, inclusive
+durante a pergunta. Abas, pergunta e resolução mantiveram o campo de mensagem em y=845 px.
 Em 1024×768, PM e Jenkins mantiveram espaço de 333 px e campo em y=557 px. Uma aba com 80 linhas
 conservou deslocamento de 600 px após trocar de aba e após pergunta/resolução. A prova de envio
 incluiu falha 503 e nova tentativa com o `interaction_id` do cartão, sem fechamento do mod.
+
+No Windows, em 1600×1052, o teto reduziu a reserva de 473 para 360 px: 113 px voltaram para a
+conversa, sem mover o campo de mensagem de y=926 px entre PM, Jenkins e pergunta.
 
 O acabamento usa fonte de interface nos textos, abas e controles; `Code`, `Raster` e linhas
 que compartilham sua geometria continuam monoespaçados. Links ganham cor e sublinhado, e botões
