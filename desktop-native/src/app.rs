@@ -435,7 +435,7 @@ struct PluginFailure;
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
-struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<AnyInputState>, _changes: Vec<Subscription>, tab: usize, minimized: bool }
+struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<AnyInputState>, _changes: Vec<Subscription>, tab: usize, minimized: bool, body_scroll: ScrollHandle }
 
 impl AskForm {
     fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
@@ -3911,7 +3911,10 @@ impl Hangar {
                 }))
         });
         let scroll_key = format!("{fingerprint}#{tab}");
-        if self.ask_scroll.0 != scroll_key { self.ask_scroll = (scroll_key, ScrollHandle::new()); }
+        if self.ask_scroll.0 != scroll_key {
+            self.ask_scroll = (scroll_key, ScrollHandle::new());
+            self.ask_form.body_scroll = ScrollHandle::new();
+        }
         // A lista cede espaço para o campo e as ações quando a janela é baixa.
         let options_max = (f32::from(window.viewport_size().height) - 680.).clamp(64., 190.);
         let mut body = div().flex().flex_col().gap_3();
@@ -3989,6 +3992,7 @@ impl Hangar {
                         .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
                 })
                 .into_any_element(),
+            &self.ask_form.body_scroll, questions::body_height(f32::from(window.viewport_size().height)),
             cx.listener(|this, _, window, cx| {
                 this.ask_form.minimized = !this.ask_form.minimized;
                 // O campo sai da árvore ao recolher: o foco volta para um controle que continua visível.
