@@ -1663,6 +1663,21 @@ fn an_uncertain_terminal_keeps_the_worktree() {
     assert!(String::from_utf8_lossy(&branches.stdout).contains("feat/y"), "a branch criada fica");
 }
 
+/// CRI-004: o só leitura é conferido antes de qualquer efeito; recusado, a worktree nem chega a nascer.
+#[cfg(target_os = "linux")]
+#[test]
+fn read_only_is_refused_before_the_worktree() {
+    let (raw, _dir, root) = run_contract_with("create_worktree_new_branch", |s| s["steps"][0]["json"]["read_only"] = json!(true), |root| {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = root.join("home/pessoal/repo/.git/hooks/post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", root.join("checked-out").display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    });
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(400), json!("erro_criacao_sessao")), "{}", raw["steps"][0]["body"]);
+    assert!(!root.join("checked-out").exists(), "a worktree foi criada antes da recusa do só leitura");
+}
+
 // ── registro ─────────────────────────────────────────────────────────────────────────────────
 
 fn fixture_spec(name: &str) -> SessionSpec {

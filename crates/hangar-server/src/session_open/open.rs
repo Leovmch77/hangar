@@ -351,6 +351,12 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         Account::Codex { account_id } => Some(super::codex::home(host.env(), account_id)?),
         _ => None,
     };
+    // CRI-004: antes de qualquer efeito; a worktree troca a pasta e o envelope é refeito sobre ela.
+    let read_only_home = spec.account.config_dir().map(str::to_owned).or_else(|| codex_home.clone());
+    let mut read_only = match spec.read_only {
+        true => Some(read_only_prefix(host, &spec.cwd, read_only_home.as_deref()).await?),
+        false => None,
+    };
     let engine = matches!(spec.account, Account::Engine { .. });
     // CRI-025: modelo de motor deixado no `settings.json` faria a sessão Anthropic nascer nele.
     if !engine && spec.provider == AgentProvider::Claude { warnings.extend(claude::drop_foreign_model(host.home(), spec.account.config_dir())); }
@@ -369,8 +375,14 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         }
         spec.cwd = made.path.clone();
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
+        if read_only.is_some() {
+            match read_only_prefix(host, &spec.cwd, read_only_home.as_deref()).await {
+                Ok(prefix) => read_only = Some(prefix),
+                Err(error) => { if let Some(undo) = undo { undo.undo().await?; } return Err(error); }
+            }
+        }
     }
-    match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref(),
+    match launch(host, &mut spec, read_only, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref(),
                  resume.as_deref(), restore).await {
         Ok((jsonl, warnings, route)) => {
             // O Codex sem terminal já subiu dentro da abertura (`warm_codex`).
@@ -386,11 +398,10 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
+async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<Vec<String>>, warnings: Vec<String>, initial_prompt: Option<&str>,
                 remember_provider: bool, previous_non_plan: Option<PermissionMode>, runtime: &Value, codex_home: Option<&str>,
                 resume: Option<&str>, restore: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
-    let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref().or(codex_home)).await?) } else { None };
     // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
     // (exclusiva) espera a sessão que está subindo.
     let account_home = config_dir.clone().map(PathBuf::from).or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from))
