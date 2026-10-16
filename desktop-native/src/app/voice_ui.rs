@@ -268,6 +268,8 @@ pub(super) struct VoiceUi {
     pub(super) a11y_dump: bool,
     /// Altura livre embaixo do painel lateral, medida no último quadro: o cartão da voz só aparece quando cabe.
     pub(super) dock_room: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Leitura do botão mais nova: uma em espera para tentar de novo para quando outra começa.
+    pub(super) gate_round: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Teto do texto que o `read_screen` devolve ao organizador.
@@ -587,6 +589,8 @@ impl Hangar {
             return;
         };
         let (server, connection, tx) = (self.active_key(), self.connection, self.tx.clone());
+        let round = self.voice.gate_round.clone();
+        let mine = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         self.runtime.spawn(async move {
             // Leitura que falhou é `None` = sem mudança; só uma resposta válida liga ou desliga. Esta leitura é a única que
             // mostra o botão da voz (o painel não abre sem ele): falha tenta de novo, senão o botão some até reconectar.
@@ -595,6 +599,7 @@ impl Hangar {
                 let Err(error) = &gate else { break };
                 crate::voice::log(format!("gate read failed status={:?} retry_in={wait}s", error.status));
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                if round.load(std::sync::atomic::Ordering::SeqCst) != mine { return; }
                 gate = api.server_read(&["voice", "settings"], &[], 8).await;
             }
             if let Err(error) = &gate { crate::voice::log(format!("gate read failed status={:?} gave_up", error.status)); }
