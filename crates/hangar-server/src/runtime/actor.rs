@@ -172,6 +172,9 @@ impl RuntimeEngine {
     fn mods_call(&mut self,token:u64,call:ModsCall,left_s:f64,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
         match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,left_s,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
     }
+    fn park_idle(&self,now:f64) -> Option<f64> {
+        match &self.core { Core::Claude(core)=>core.park_idle(now),Core::Codex(_)=>None }
+    }
     fn view(&self) -> Value {
         match &self.core { Core::Claude(core)=>core.view(),Core::Codex(core)=> {
             let mut view = core.control_view(); view["public_state"] = core.view(); view["conversation"] = view["thread_id"].clone(); view
@@ -1316,6 +1319,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Message::View(response) => {
                         let mut view=engine.view();
+                        view["park_idle_s"]=json!(engine.park_idle(clock(start).monotonic_s));
                         if sid_transition || target.metadata["lifecycle_pending"]==true {view["deliverable"]=json!(false);view["lifecycle_pending"]=json!(true);}
                         let _=response.send(view);
                     }

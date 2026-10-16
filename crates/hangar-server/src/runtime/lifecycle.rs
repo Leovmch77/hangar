@@ -36,7 +36,10 @@ pub(super) struct HeadlessOperation {
 pub struct ClosedIngress {gates:super::ingress::IngressGates,name:String}
 impl ClosedIngress {
     pub async fn acquire(gates:&super::ingress::IngressGates,name:&str)->Result<Self,RuntimeError> {
-        gates.close(name,Duration::from_secs(60)).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
+        Self::acquire_within(gates,name,Duration::from_secs(60)).await
+    }
+    pub async fn acquire_within(gates:&super::ingress::IngressGates,name:&str,wait:Duration)->Result<Self,RuntimeError> {
+        gates.close(name,wait).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
         Ok(Self {gates:gates.clone(),name:name.into()})
     }
 }

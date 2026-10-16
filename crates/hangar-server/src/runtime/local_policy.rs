@@ -448,6 +448,17 @@ pub(crate) fn log_base() -> Option<std::path::PathBuf> {
     Some(std::env::home_dir()?.join(".hangar").join("logs"))
 }
 
+/// `log_base` pelo ambiente-base do registro (nos testes, a casa de teste, nunca o diário da máquina).
+pub(crate) fn log_base_in(env: &crate::accounts::environment::AccountEnvironment) -> Option<std::path::PathBuf> {
+    let home = Some(env.home.clone()).filter(|home| !home.as_os_str().is_empty());
+    if cfg!(windows) {
+        let root = env.base.get("LOCALAPPDATA").filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from)
+            .or_else(|| home.map(|home| home.join("AppData").join("Local")))?;
+        return Some(root.join("hangar").join("logs"));
+    }
+    Some(home?.join(".hangar").join("logs"))
+}
+
 /// Só a pasta folha é `0700` (como o `mkdir(mode=…, parents=True)` do Python); as de cima seguem o umask.
 fn private_dir(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }

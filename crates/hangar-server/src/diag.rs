@@ -66,6 +66,10 @@ const DIARY_HARD_CAP: u64 = 8 << 20;
 pub fn diary_dir() -> Option<std::path::PathBuf> {
     Some(crate::runtime::local_policy::log_base()?.join("diario").join("servidor-rust"))
 }
+/// `diary_dir` pelo ambiente-base do registro.
+pub fn diary_dir_in(env: &crate::accounts::environment::AccountEnvironment) -> Option<std::path::PathBuf> {
+    Some(crate::runtime::local_policy::log_base_in(env)?.join("diario").join("servidor-rust"))
+}
 
 /// As linhas que o próprio Rust grava no diário exportável, no formato do `diag.registrar`: texto
 /// cortado em 300, campo vazio fora, `origem` servidor. Bloqueante.

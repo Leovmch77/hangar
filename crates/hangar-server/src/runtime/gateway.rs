@@ -162,6 +162,16 @@ fn pending(state_path:&std::path::Path) -> bool {
     }
 }
 
+/// O cano gravado é desta vida (ou já saiu): só esse o Rust pode matar.
+fn cano_is_ours(procs:&dyn crate::list::procs::ProcessView,target:&RuntimeTarget,born:f64,key:&str) -> Result<bool,RuntimeError> {
+    super::lifecycle::process_absent(procs,i64::from(target.binding.pid),born).map(|absent|absent
+        || crate::terminal_facts::agent_birth(target.binding.pid)==Some(born) && process::liveness(target.binding.pid,key)==process::Liveness::Ours)
+}
+
+/// `_OCIOSA_S` do Python: acima da janela de 1 h do cache do prompt, religar não custa cota a mais.
+const PARK_AFTER:Duration = Duration::from_secs(65 * 60);
+const PARK_ROUND:Duration = Duration::from_secs(60);
+
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
 /// programa (pid reaproveitado, S-72) ou ausente, sobe outro com o ambiente calculado agora (nunca
 /// guardado): o Codex por `codex_launch`, o Claude pelo spec da sessão (`claude_launch`).
@@ -429,6 +439,63 @@ impl RuntimeRegistry {
             }
         });
         futures_util::future::join_all(opens).await;
+    }
+    /// Estaciona cada Claude sem terminal parado há `after` sem nada em aberto: o processo morre, o sidecar e a
+    /// fila ficam, e o próximo envio sobe outro pelo spec (`adopt_now`).
+    pub async fn park_idle_claude(&self,after:Duration) {
+        let candidates:Vec<(String,u64,String)> = self.entries.lock().await.iter()
+            .filter(|(_,entry)|entry.provider=="claude" && matches!(entry.handle,EntryHandle::Headless(_)) && entry.auto_respawn.is_some())
+            .map(|(key,entry)|(key.clone(),entry.generation,entry.name.clone())).collect();
+        for (key,generation,name) in candidates {
+            match self.park_claude(&key,generation,&name,after).await {
+                Ok(None)=>{},
+                Ok(Some(idle))=>{
+                    tracing::info!(session=%name,idle_s=idle as u64,"sessão sem terminal parada estacionada");
+                    let event=json!({"evento":"sessao.estacionada","nivel":"ok","sessao":name,"provider":"claude","parada_s":idle as u64});
+                    match crate::diag::diary_dir_in(&self.policy.codex_environment()) {
+                        Some(dir)=>{ tokio::task::spawn_blocking(move||if let Err(error)=crate::diag::write_diary(&dir,&[event],chrono::Local::now()) {
+                            tracing::warn!(kind=?error.kind(),"estacionamento não gravado no diário");
+                        }); },
+                        None=>tracing::warn!("diário sem pasta de logs; estacionamento não gravado"),
+                    }
+                },
+                Err(error)=>{
+                    tracing::warn!(session=%name,code=%error.code,"sessão parada não foi estacionada");
+                    self.diag.report("runtime.park_failed",&name,&error.code,"a sessão sem terminal parada não foi estacionada");
+                },
+            }
+        }
+    }
+    /// `_pode_estacionar`: o motor sem nada em aberto há `after`, nenhuma escrita nem operação de ciclo em curso e
+    /// a fila toda entregue, conferido de novo com a porta fechada. `Some(segundos parada)` = estacionou.
+    async fn park_claude(&self,key:&str,generation:u64,name:&str,after:Duration) -> Result<Option<f64>,RuntimeError> {
+        let idle=|view:&Value|view["park_idle_s"].as_f64().filter(|idle|*idle>=after.as_secs_f64() && view["lifecycle_pending"]!=true);
+        let Some(handle)=self.entries.lock().await.get(key).filter(|entry|entry.generation==generation).map(|entry|entry.handle.clone()) else {return Ok(None)};
+        if idle(&handle.view().await?).is_none() {return Ok(None);}
+        let Ok(_ingress)=super::lifecycle::ClosedIngress::acquire_within(&self.ingress,name,Duration::from_secs(1)).await else {return Ok(None)};
+        let barrier=self.barrier(key).await;
+        if barrier.operation.lock().map_err(|_|failure("lifecycle_operation"))?.is_some() {return Ok(None);}
+        let Ok(_guard)=barrier.try_lock() else {return Ok(None)};
+        let found=self.entries.lock().await.get(key).filter(|entry|entry.generation==generation && !entry.respawn_inflight)
+            .and_then(|entry|Some((entry.runtime_target.clone()?,entry.cano_birth?)));
+        let Some((target,born))=found else {return Ok(None)};
+        let Some(idle)=idle(&handle.view().await?) else {return Ok(None)};
+        let state_path=target.state_path.clone();
+        if tokio::task::spawn_blocking(move||pending(&state_path)).await.map_err(|_|failure("queue_job"))? {return Ok(None);}
+        let procs=self.processes.clone();
+        if !cano_is_ours(procs.as_ref(),&target,born,key)? {return Err(failure("lifecycle_process_changed"));}
+        self.close_locked_as(key,generation,true,true).await?;
+        Ok(Some(idle))
+    }
+    /// `_vigiar_ociosas`: uma rodada por minuto enquanto o registro existir.
+    pub async fn watch_idle_claude(self:Arc<Self>) {
+        let registry=Arc::downgrade(&self);
+        drop(self);
+        loop {
+            tokio::time::sleep(PARK_ROUND).await;
+            let Some(registry)=registry.upgrade() else {break};
+            registry.park_idle_claude(PARK_AFTER).await;
+        }
     }
     /// Claude sem terminal sem ator aqui: o Rust o abre pelo sidecar dele, adotando o cano vivo da chave
     /// ou, com `launch`, subindo um pelo spec. `None`: não há sessão Claude sem terminal com esse nome.
@@ -1204,6 +1271,10 @@ impl RuntimeRegistry {
         result
     }
     async fn close_locked(&self,key:&str,generation:u64,kill:bool) -> Result<Value,RuntimeError> {
+        self.close_locked_as(key,generation,kill,false).await
+    }
+    /// `park`: mata como o encerrar, mas a fila e o arquivo da sessão ficam para a próxima vida.
+    async fn close_locked_as(&self,key:&str,generation:u64,kill:bool,park:bool) -> Result<Value,RuntimeError> {
         let (handle,lease_path,name,life,runtime_target,cano_birth,recipe,_settings_owner) = match self.entries.lock().await.get(key) {
             None=>return Ok(if kill { json!({"closed":true,"killed":false}) } else { json!({"closed":true}) }),
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life,entry.runtime_target.clone(),entry.cano_birth,entry.relaunch.clone(),entry.settings_owner.clone()),
@@ -1227,8 +1298,7 @@ impl RuntimeRegistry {
                 let target=runtime_target.as_ref().unwrap();
                 let born=cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?;
                 let procs=self.processes.clone();
-                let ours=super::lifecycle::process_absent(procs.as_ref(),i64::from(target.binding.pid),born).map(|absent|absent
-                    || crate::terminal_facts::agent_birth(target.binding.pid)==Some(born) && process::liveness(target.binding.pid,key)==process::Liveness::Ours);
+                let ours=cano_is_ours(procs.as_ref(),target,born,key);
                 if !matches!(ours,Ok(true)) {
                     foreign = true;
                     if let Err(error) = handle.stop().await { tracing::warn!(key,code=%error.code,"ator parou com erro ao soltar processo alheio"); }
@@ -1303,7 +1373,7 @@ impl RuntimeRegistry {
             if let Some(store)=&self.interactions {store.forget_binding(&closed.binding).map_err(crate::interactions::runtime_error)?;}
             self.forget_claude_rate(&closed.binding)?;
             *self.barrier(key).await.closed.lock().map_err(|_|failure("lifecycle_closed_record"))?=Some(closed.clone());
-            if kill {
+            if kill && !park {
                 let lease=wait_lease(&closed.lease_path).await?;
                 let mut store=Store::open(&closed.state_path,&closed.projection,QueueState::new(key,generation,&closed.name,vec![])).map_err(|_|failure("queue_io"))?;
                 if store.state().owner_key!=key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
@@ -2990,5 +3060,133 @@ mod tests {
         }
         assert_eq!(receiver.recv().await.unwrap().key,"claude-key");
         assert_eq!(receiver.recv().await.unwrap().key,"codex-key");
+    }
+
+    /// Cano de verdade (um `sh` com o argv do cano da chave, em grupo próprio) e um `claude` de mentira filho
+    /// dele, que some junto com o cano: o bastante para o fechamento provar e matar a vida.
+    #[cfg(target_os="linux")]
+    struct ParkProcesses {canos:std::sync::Mutex<Vec<i64>>,dir:std::path::PathBuf}
+    #[cfg(target_os="linux")]
+    const FAKE_AGENT:i64=10_000_000;
+    #[cfg(target_os="linux")]
+    impl crate::list::procs::ProcessView for ParkProcesses {
+        fn children(&self,_:Duration)->std::io::Result<Arc<crate::list::procs::ChildrenMap>> {
+            Ok(Arc::new(self.canos.lock().unwrap().iter().filter(|pid|process::probe_alive(**pid as u32)).map(|pid|(*pid,vec![pid+FAKE_AGENT])).collect()))
+        }
+        fn argv(&self,_:i64)->Vec<String> {vec![]}
+        fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(self.dir.clone())}
+        fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+        fn start_time(&self,pid:i64)->Option<f64> {crate::list::procs::SystemProcs::default().start_time(pid)}
+        fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
+            let canos=self.canos.lock().unwrap().clone();
+            let cano=if canos.contains(&pid) {pid} else {pid-FAKE_AGENT};
+            if !canos.contains(&cano) || !process::probe_alive(cano as u32) {return Err(std::io::ErrorKind::NotFound.into());}
+            let (birth,argv,executable)=if pid==cano {(crate::terminal_facts::agent_birth(cano as u32).unwrap(),vec!["hangar-cano".into()],"/fixture/hangar-cano")}
+                else {(1000.0,vec!["claude".into(),"--session-id".into(),"a".into()],"/fixture/claude")};
+            Ok(crate::list::procs::ProcessRecipe {pid,birth,executable:executable.into(),cwd:self.dir.clone(),argv,environ:vec![format!("CLAUDE_CONFIG_DIR={}",self.dir.display()).into()],cgroup:None})
+        }
+    }
+    /// Processo do teste que nunca sobra: morto e colhido na limpeza, também quando o teste falha.
+    #[cfg(target_os="linux")]
+    struct Reaped(std::process::Child);
+    #[cfg(target_os="linux")]
+    impl Drop for Reaped {fn drop(&mut self) {let _=self.0.kill();let _=self.0.wait();}}
+    /// O processo que se passa pelo cano da chave e o cano falso que responde por ele e anota cada linha recebida.
+    #[cfg(target_os="linux")]
+    async fn park_cano(dir:&std::path::Path,key:&str) -> (Reaped,String,Arc<std::sync::Mutex<Vec<String>>>,tokio::task::JoinHandle<()>) {
+        use std::os::unix::process::CommandExt;
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let log=dir.join(format!("cano-{}.log",&key[..16]));
+        let child=Reaped(std::process::Command::new("python3").args(["-c","import time; time.sleep(300)","--escuta","fixture","--log"]).arg(&log).process_group(0).spawn().unwrap());
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        while process::liveness(child.0.id(),key)!=process::Liveness::Ours {
+            assert!(std::time::Instant::now()<deadline,"o processo do cano não chegou ao argv");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let lines=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen=lines.clone();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;} seen.lock().unwrap().push(line.clone());}
+        });
+        (child,format!("tcp:{address}"),lines,server)
+    }
+
+    /// D-006: o vigia estaciona só a sessão parada há o prazo e sem nada na fila; o processo morre e o arquivo
+    /// da sessão fica igual. A mensagem seguinte reabre a sessão pelo arquivo e é entregue uma vez.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn idle_claude_headless_is_parked_and_the_next_message_reopens_it() {
+        let home=tempfile::tempdir().unwrap();
+        let key="ab".repeat(16);
+        let (mut first,escuta,_,server)=park_cano(home.path(),&key).await;
+        let sidecar=json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
+            "cano":{"pid":first.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
+        let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cl.json"),sidecar.to_string()).unwrap();
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into()});
+        let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes.clone()).with_codex_environment(env));
+        registry.bind_lifecycle();
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        registry.open_claude_headless("cl",false).await.unwrap().unwrap();
+        let state_path=registry.claude_dirs().1.join("runtime").join(format!("{key}.json"));
+
+        registry.park_idle_claude(Duration::from_secs(65*60)).await;
+        assert!(registry.has_entry(Some(&key),"cl").await && process::probe_alive(first.0.id()),"parada há menos que o prazo fica aberta");
+
+        let kept=std::fs::read(&state_path).unwrap();
+        let mut waiting:Value=serde_json::from_slice(&kept).unwrap();
+        waiting["rows"].as_array_mut().unwrap().push(json!({"id":"x","text":"t","delivered":false}));
+        std::fs::write(&state_path,waiting.to_string()).unwrap();
+        registry.park_idle_claude(Duration::ZERO).await;
+        assert!(registry.has_entry(Some(&key),"cl").await && process::probe_alive(first.0.id()),"mensagem por entregar na fila segura a sessão");
+        std::fs::write(&state_path,&kept).unwrap();
+
+        let before=std::fs::read(dir.join("cl.json")).unwrap();
+        registry.park_idle_claude(Duration::ZERO).await;
+        assert!(!registry.has_entry(None,"cl").await,"estacionada sai do Rust");
+        first.0.wait().unwrap();
+        assert!(!process::probe_alive(first.0.id()),"o processo da sessão morreu");
+        assert_eq!(std::fs::read(dir.join("cl.json")).unwrap(),before,"o arquivo da sessão fica igual");
+        assert!(state_path.exists(),"a fila fica");
+        assert!(registry.runtime_lost("cl").await.is_none(),"estacionada não é sessão perdida");
+        assert_eq!(crate::state::parked::parked_state_at("cl",home.path()).map(|state|state.state),Some("idle".into()),"a lista mostra a parada");
+        let diary=home.path().join(".hangar/logs/diario/servidor-rust");
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        while !std::fs::read_dir(&diary).into_iter().flatten().flatten().any(|file|std::fs::read_to_string(file.path()).unwrap_or_default().contains("\"sessao.estacionada\"")) {
+            assert!(std::time::Instant::now()<deadline,"o estacionamento vai ao diário");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        server.abort();
+
+        // O lançamento pelo spec grava o cano novo no arquivo da sessão (`launch_if_needed`); aqui o cano
+        // novo já está de pé, para não subir `claude` nem `systemd-run` de verdade.
+        let (second,escuta,lines,server)=park_cano(home.path(),&key).await;
+        let mut relaunched=sidecar.clone();
+        relaunched["cano"]=json!({"pid":second.0.id(),"escuta":escuta,"token":"fixture","versao":2});
+        std::fs::write(dir.join("cl.json"),relaunched.to_string()).unwrap();
+        processes.canos.lock().unwrap().push(i64::from(second.0.id()));
+        let crate::session_write::Write::Rust(pass,target)=crate::session_write::route_write(&registry,"cl",crate::session_write::WriteRoute::Input,Duration::from_secs(5)).await
+            else {panic!("a mensagem seguinte reabre a sessão no Rust")};
+        // O cano falso não confirma a escrita: o envio fica esperando, e o que conta é a linha que chegou.
+        let send=tokio::spawn(async move {
+            let _pass=pass;
+            target.handle.command(RuntimeCommand {operation_id:"oi".into(),kind:OperationKind::Input,payload:json!({"text":"oi-depois-de-estacionar","pre_transcript":false})}).await
+        });
+        let delivered=||lines.lock().unwrap().iter().filter(|line|line.contains("oi-depois-de-estacionar")).count();
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        while delivered()==0 {
+            assert!(std::time::Instant::now()<deadline,"a mensagem chegou ao processo novo");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(delivered(),1,"entregue uma vez");
+        send.abort();
+        registry.close(&key,1).await.unwrap();
+        server.abort();
     }
 }
