@@ -22,13 +22,9 @@ vi.mock('../../ui/Sheet', () => ({
   Sheet: ({ open, children, onDismiss }: { open?: boolean; children: ReactNode; onDismiss: () => void }) => open
     ? createElement('section', null, children, createElement('button', { onClick: onDismiss, 'aria-label': 'native-dismiss' }, 'native-dismiss')) : null,
 }));
-vi.mock('@react-native-menu/menu', () => ({
-  MenuView: ({ title, actions, onPressAction, children }: {
-    title?: string; actions: { id: string; title: string; state?: string }[]; children: ReactNode;
-    onPressAction: (event: { nativeEvent: { event: string } }) => void;
-  }) => createElement('div', { 'data-menu-title': title }, children,
-    ...actions.map(action => createElement('button', { key: action.id, 'data-option': action.title,
-      'aria-selected': action.state === 'on', onClick: () => onPressAction({ nativeEvent: { event: action.id } }) }, action.title))),
+vi.mock('../../ui/AnchoredPanel', () => ({
+  AnchoredPanel: ({ open, children }: { open: boolean; children: ReactNode }) => open
+    ? createElement('div', null, children) : null,
 }));
 // Fronteira do renderizador nativo; não monta a árvore de bolhas do chat.
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }) }));
@@ -79,11 +75,14 @@ afterEach(async () => { await act(async () => root.unmount()); vi.useRealTimers(
 const render = (open = true) => act(async () => root.render(createElement(LiveVoiceSheet, { open, view, ...callbacks })));
 const button = (label: string) => [...container.querySelectorAll('button')].find(el => el.getAttribute('aria-label') === label)!;
 const click = (label: string) => act(async () => button(label).click());
-const menu = (title: string) => [...container.querySelectorAll<HTMLElement>('[data-menu-title]')]
-  .find(el => el.getAttribute('data-menu-title') === title)!;
-const choose = (title: string, option: string) => act(async () => {
-  [...menu(title).querySelectorAll<HTMLButtonElement>('button[data-option]')].find(el => el.getAttribute('data-option') === option)!.click();
-});
+const choose = async (title: string, option: string) => {
+  const triggers = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
+    .filter(el => el.getAttribute('aria-label')!.startsWith(`${title}: `));
+  expect(triggers).toHaveLength(1);
+  await act(async () => triggers[0].click());
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')]
+    .find(el => el.getAttribute('aria-label') === option)!.click());
+};
 
 describe('LiveVoiceSheet', () => {
   it('conserva o rótulo salvo no app antes e durante a chamada mesmo com outro nome no estado do servidor', async () => {
@@ -314,7 +313,9 @@ describe('LiveVoiceSheet', () => {
     view.settings.saving = true;
     await render();
     expect(button(`${m.live_voice_account()}: account-a`).disabled).toBe(true);
-    expect(menu(m.live_voice_account())).toBeUndefined();
+    await click(`${m.live_voice_account()}: account-a`);
+    expect(container.querySelectorAll('button[role="radio"]')).toHaveLength(0);
+    expect(callbacks.onSaveSettings).toHaveBeenCalledTimes(2);
     view.settings.saving = false;
     view.settings.saveError = 'save-failed';
     await render();
