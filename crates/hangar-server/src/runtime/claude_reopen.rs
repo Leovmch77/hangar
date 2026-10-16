@@ -68,6 +68,8 @@ impl ReopenFailure {
 /// O que uma troca faz entre encerrar a vida antiga e dar a partida na nova (mover a conversa de conta):
 /// `check` antes de qualquer efeito, `apply` com o processo antigo já fora, `undo` se a vida nova falhar.
 pub trait Between: Send + Sync {
+    /// O que a mudança tira do spec além do que ela mesma diz (sair do motor zera o modelo dele).
+    fn adjust(&self,_next:&mut SessionSpec) {}
     fn check<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> futures_util::future::BoxFuture<'a,Result<(),RuntimeError>>;
     fn apply<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> futures_util::future::BoxFuture<'a,Result<(),RuntimeError>>;
     fn undo<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> futures_util::future::BoxFuture<'a,Result<(),RuntimeError>>;
@@ -158,6 +160,17 @@ impl RuntimeRegistry {
         }
     }
 
+    /// O spec que a sessão Claude `name` roda agora (gravado ⊕ observado), sem conferir se está parada.
+    /// `None` = não é sessão Claude daqui.
+    pub async fn claude_spec(&self,name:&str) -> Option<Result<SessionSpec,RuntimeError>> {
+        match self.claude_sidecar(name).await {
+            Err(error)=>return Some(Err(error)),
+            Ok(Some(_))=>{},
+            Ok(None)=>if let Err(error)=self.watcher_ref()?.adopt_claude(self,name).await? {return Some(Err(error));},
+        }
+        Some(self.claude_current(name,false).await.map(|current|current.spec))
+    }
+
     /// A sessão Claude `name` está sem terminal (tem sidecar)? `None` com o sidecar ilegível.
     pub async fn claude_headless(&self,name:&str) -> Option<bool> { self.claude_sidecar(name).await.ok().map(|meta|meta.is_some()) }
 
@@ -182,8 +195,9 @@ impl RuntimeRegistry {
 
     async fn reopen_by_spec(&self,name:&str,change:SessionChange,between:Option<&dyn Between>) -> Result<Reopened,ReopenFailure> {
         let _ingress=super::lifecycle::ClosedIngress::acquire(self.ingress(),name).await.map_err(ReopenFailure::refused)?;
-        let current=self.claude_current(name).await.map_err(ReopenFailure::refused)?;
-        let next=current.spec.with(&change);
+        let current=self.claude_current(name,true).await.map_err(ReopenFailure::refused)?;
+        let mut next=current.spec.with(&change);
+        if let Some(between)=between {between.adjust(&mut next);}
         if let Some(between)=between {between.check(&current.spec,&next,&current.sid).await.map_err(ReopenFailure::refused)?;}
         let start=self.prepare_start(name,&next,&current).await.map_err(ReopenFailure::refused)?;
         if let Err(error)=self.stop_claude(name,&current,next.surface).await {
@@ -215,7 +229,7 @@ impl RuntimeRegistry {
     }
 
     /// A sessão, o spec dela e se ela está parada. Ocupada recusa com o motivo, antes de qualquer efeito.
-    async fn claude_current(&self,name:&str) -> Result<Current,RuntimeError> {
+    async fn claude_current(&self,name:&str,checks:bool) -> Result<Current,RuntimeError> {
         let env=self.codex_environment();
         if let Some(meta)=self.claude_sidecar(name).await? {
             let mut spec=crate::session_open::record::claude_live(&env.home,&meta,name).map_err(|e|refused("launch_meta",&format!("registro da sessão ilegível: {e}")))?;
@@ -226,9 +240,9 @@ impl RuntimeRegistry {
                 None=>(self.queue_generation(&spec.key).await?,None),
             };
             if let Some(view)=&view {
-                if view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
-                if !view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty()) {return Err(busy("erro_sessao_esperando_resposta"));}
-                if view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
+                if checks && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
+                if checks && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
+                if checks && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
                 // O modo e as escolhas que a CLI mudou sozinha valem (S-02); com motor, o do sidecar.
                 if let Some(mode)=view["permission_mode"].as_str().and_then(PermissionMode::claude) {spec.permission_mode=Some(mode);}
                 if !matches!(spec.account,Account::Engine{..}) {
@@ -236,7 +250,7 @@ impl RuntimeRegistry {
                     if let Some(effort)=view["effort"].as_str().filter(|e|EFFORTS.contains(e)) {spec.effort=Some(effort.into());}
                 }
             }
-            if self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
+            if checks && self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
             if spec.permission_mode.is_none() {
                 spec.permission_mode=Some(super::claude_launch::account_mode(&env,spec.account.config_dir())?);
             }
@@ -266,11 +280,11 @@ impl RuntimeRegistry {
         }
         let observed=self.permission_view(&target.binding.conversation);
         if let Some(mode)=observed.as_ref().and_then(|view|PermissionMode::claude(&view.current)) {spec.permission_mode=Some(mode);}
-        if spec.permission_mode.is_none() {
+        if checks && spec.permission_mode.is_none() {
             return Err(refused("permission_mode_unknown","o modo de permissão da sessão não é conhecido; nada foi reaberto"));
         }
         // Parada, sem pergunta, sem fila e sem entrega incerta: os motivos do `_motivo_ocupada`.
-        handle.control(format!("guard:reopen:{}",crate::mods::state::random_hex(8)),"lifecycle_guard".into(),json!({})).await?;
+        if checks {handle.control(format!("guard:reopen:{}",crate::mods::state::random_hex(8)),"lifecycle_guard".into(),json!({})).await?;}
         Ok(Current { sid:target.binding.conversation.clone(),generation:target.generation,previous_non_plan:observed.map(|v|v.previous_non_plan),
             settings,spec,life:Life::Terminal { target } })
     }
@@ -302,7 +316,9 @@ impl RuntimeRegistry {
                 let mut meta=crate::session_open::open::headless_sidecar(next,&current.sid,previous_non_plan,current.settings.as_ref(),route.as_ref());
                 if let Life::Headless { meta:old,.. }=&current.life {
                     // O que só o sidecar guarda (o `created`, o `problema` da conta) segue com a sessão.
-                    for field in ["created","problema"] { if let Some(value)=old.get(field) {meta[field]=value.clone();} }
+                    // O aviso da conta anterior (limite batido, sem login) não vale noutra conta.
+                    let fields:&[&str]=if next.account==current.spec.account {&["created","problema"]} else {&["created"]};
+                    for field in fields { if let Some(value)=old.get(*field) {meta[*field]=value.clone();} }
                 }
                 // Confere a subida inteira (conta, motor, modo, Fast) antes de encerrar a vida antiga.
                 let (bridge,owned,handle)=(self.policy_plugin_bridge(),name.to_owned(),tokio::runtime::Handle::current());
@@ -327,10 +343,11 @@ impl RuntimeRegistry {
                 let roots=crate::session_open::claude::plugin_roots(&env.home);
                 let bridge=self.policy_plugin_bridge();
                 let key=crate::mods::state::random_hex(16);
-                let transcript=super::claude_launch::transcript(&env,next,&current.sid);
+                // A troca de conta só leva a conversa depois de encerrar: a de agora diz se ela já existe.
+                let resume=super::claude_launch::transcript(&env,next,&current.sid).exists() || super::claude_launch::transcript(&env,&current.spec,&current.sid).exists();
                 let ctx=ClaudeContext { plugin_roots:&roots,bridge:bridge.as_ref(),bridge_key:&key,runtime_config:&runtime,server_env:&env.base,
                     settings:current.settings.as_ref(),read_only:read_only.as_deref(),windows:terminal.windows,initial_prompt:None,engine_route:route.as_ref(),
-                    resume:transcript.exists(),allow_bypass:previous_non_plan==Some(PermissionMode::BypassPermissions) };
+                    resume,allow_bypass:previous_non_plan==Some(PermissionMode::BypassPermissions) };
                 Ok(Start::Terminal(Box::new(crate::session_open::claude::pane(next,&current.sid,&ctx)),terminal))
             },
         }

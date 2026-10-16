@@ -7,10 +7,12 @@
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
+pub mod account;
 pub mod answer;
 pub mod bridge;
 pub mod codex;
 pub mod control;
+pub mod engine;
 pub mod input;
 pub mod permissions;
 pub mod relaunch;

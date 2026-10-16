@@ -177,3 +177,60 @@ async fn a_message_waiting_in_the_queue_holds_the_reload_with_the_python_code() 
     assert_eq!(body["detail"]["msg"],"há mensagens na fila esperando entrega");
     assert!(fx.sidecar_path("s1").exists(),"nada mudou");
 }
+
+/// O servidor com as contas desta casa de teste (nunca as do HOME de quem roda os testes).
+async fn serve_with_accounts(fx:&Fixture,registry:Arc<RuntimeRegistry>) -> std::net::SocketAddr {
+    let (_python, upstream) = crate::fake::spawn_fake().await;
+    let mut state = hangar_server::routes::AppState::new(crate::fake::config(upstream, "127.0.0.1"));
+    let map = [("HOME",fx.home.to_string_lossy().into_owned())].into_iter().map(|(k,v)|(k.to_owned(),v)).collect();
+    state.accounts = hangar_server::accounts::AccountService::new(AccountEnvironment::from_map(map));
+    assert!(state.state.runtime.set(registry).is_ok());
+    crate::fake::spawn_state(state).await
+}
+
+/// Conta B de verdade: login e `projects/`.
+fn account_b(fx:&Fixture) -> PathBuf {
+    let b = fx.home.join(".claude-b");
+    std::fs::create_dir_all(b.join("projects")).unwrap();
+    std::fs::write(b.join(".credentials.json"),"{\"claudeAiOauth\":{\"accessToken\":\"b\"}}").unwrap();
+    b
+}
+
+#[tokio::test]
+async fn the_account_route_moves_a_terminal_conversation_to_the_new_account_and_reopens_there() {
+    let fx = fixture();
+    let b = account_b(&fx);
+    std::fs::write(fx.home.join(".claude/.credentials.json"),"{\"claudeAiOauth\":{\"accessToken\":\"a\"}}").unwrap();
+    fx.transcript();
+    let key = "12".repeat(16);
+    // O terminal da sessão na conta padrão, aberto pelo Rust (com a chave e o registro do spec).
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd).arg("-e").arg(format!("CP_SESSION_KEY={key}")).status().unwrap();
+    let old_agent = fx.agent().unwrap();
+    let spec = json!({"version":1,"key":key,"name":"s1","cwd":fx.cwd,"provider":"claude","surface":"terminal","account":{"kind":"default"},
+        "account_source":"default","model":null,"effort":null,"service_tier":null,"permission_mode":"acceptEdits","subagent_model":null,
+        "customizations":null,"jev":false,"read_only":false,"worktree":null,"creator":null,"created_at":1.0});
+    std::fs::create_dir_all(fx.home.join(".hangar/session-specs")).unwrap();
+    std::fs::write(fx.home.join(format!(".hangar/session-specs/{key}.json")),spec.to_string()).unwrap();
+    let registry = crate::runtime_open::registry_with(|registry|registry
+        .with_codex_environment(AccountEnvironment::from_map([("HOME".to_owned(),fx.home.to_string_lossy().into_owned()),("PATH".to_owned(),std::env::var("PATH").unwrap())].into()))
+        .with_terms(Arc::new(hangar_server::term::Terms::default()))).await;
+    registry.bind_watcher(Arc::new(Watcher::new(WatchConfig { home:fx.home.clone(),queue_dir:fx.queue.clone(),
+        mux:Mux::with_program(&fx.tmux,Duration::from_secs(5)),mux_program:fx.tmux.clone().into_os_string() }).with_scope_probe(Vec::new)));
+    let server = serve_with_accounts(&fx,registry.clone()).await;
+    let (status,body) = post(server,"conta",json!({"config_dir":b})).await;
+    assert_eq!((status,&body),(200,&json!({"ok":true,"config_dir":b})),"{body}");
+    assert!(!std::path::Path::new(&format!("/proc/{old_agent}/cmdline")).exists() || std::fs::read_to_string(format!("/proc/{old_agent}/cmdline")).unwrap_or_default().is_empty(),"o Claude antigo saiu");
+    let project = hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy());
+    assert!(b.join(format!("projects/{project}/{SID}.jsonl")).exists(),"a conversa foi para a conta B");
+    assert!(!fx.home.join(format!(".claude/projects/{project}/{SID}.jsonl")).exists(),"nada ficou na conta de antes");
+    let args = fx.args();
+    assert!(args.windows(2).any(|w|w[0]=="-e" && w[1]==format!("CLAUDE_CONFIG_DIR={}",b.display())),"o terminal novo lê a conta B: {args:?}");
+    assert!(args.last().unwrap().contains(&format!("--resume {SID}")));
+    let written:Value = serde_json::from_slice(&std::fs::read(fx.home.join(format!(".hangar/session-specs/{key}.json"))).unwrap()).unwrap();
+    assert_eq!(written["account"],json!({"kind":"claude","config_dir":b}));
+    let trusted:Value = serde_json::from_slice(&std::fs::read(b.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(trusted["projects"][fx.cwd.to_string_lossy().as_ref()]["hasTrustDialogAccepted"],true,"a pasta confiada na conta nova");
+    let (found,_) = registry.terminal_view("s1").await.unwrap();
+    registry.close(&found,2).await.unwrap();
+    fx.finish();
+}
