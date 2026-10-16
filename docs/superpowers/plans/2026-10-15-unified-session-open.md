@@ -318,4 +318,5 @@ Status: ready-for-agent
 - [x] **Step 2: Relatório do diferencial e revisão de falhas caladas do diff inteiro** (diferencial 81 ok, 37 só fora do exemplo; revisão final + re-revisão + simplify)
 - [x] **Step 3: Caminho inteiro: `grep` nos dois lados, nenhum chamador de abrir/reabrir no Python** (conferencia.md; exceções T-007/T-013 e T-008)
 - [ ] **Step 4: Verificação manual em uso real: release de checkout limpo no Linux e na DELPHI-02, com sessão `cx-*` (Codex de verdade, psmux, processo real dos CLIs)**
+  DELPHI-02 feita (clone separado: wrappers .ps1, `hangar-server open` com o servidor fora, psmux, `display_env`; 4 consertos de Windows, restore pela T-019). Falta o uso real no Linux, com o usuário.
 - [ ] **Step 5: Medição: p50/p95 de criar e reabrir, antes e depois, também na DELPHI-02**
