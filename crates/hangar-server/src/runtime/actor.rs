@@ -1111,6 +1111,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
+                Effect::UsageLimit { .. } => {},
                 Effect::ReserveAsyncAnswer { operation_id,reservation,command } => {
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     jobs.spawn(async move {

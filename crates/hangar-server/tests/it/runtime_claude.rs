@@ -759,3 +759,47 @@ fn relaunch_helper_failure_says_its_kind_before_exiting() {
         assert!(String::from_utf8_lossy(&gone.stderr).contains("NotFound"), "{}", String::from_utf8_lossy(&gone.stderr));
     }
 }
+
+fn usage_limits(effects:&[Effect]) -> Vec<UsageLimit> {
+    effects.iter().filter_map(|e|match e { Effect::UsageLimit { limit }=>Some(limit.clone()),_=>None }).collect()
+}
+
+fn feed(engine:&mut ClaudeEngine,lines:&str,seconds:f64) -> Vec<Effect> {
+    lines.lines().flat_map(|l|line(engine,serde_json::from_str(l).unwrap(),seconds)).collect()
+}
+
+#[test]
+fn usage_limit_ends_the_turn_with_its_window_and_reset() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let effects = feed(&mut engine,include_str!("fixtures/usage_limit/claude_stream_five_hour.jsonl"),11.0);
+    assert_eq!(usage_limits(&effects),vec![UsageLimit { window:"five_hour".into(),resets_at:Some(1791577800.0) }]);
+}
+
+#[test]
+fn throttle_and_other_turn_errors_are_not_a_usage_limit() {
+    for lines in [
+        // `error:"rate_limit"` sem `usage_limit_reached` nem cota recusada: aperto temporário do servidor.
+        concat!(r#"{"type":"assistant","error":"rate_limit","is_api_error_message":true,"api_error_status":429,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: rate limited"}]}}"#,"\n",
+                r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"API Error: rate limited"}"#),
+        r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"limite"}"#,
+    ] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        let effects = feed(&mut engine,lines,11.0);
+        assert!(usage_limits(&effects).is_empty(),"{lines}");
+    }
+}
+
+#[test]
+fn old_cli_rate_limit_counts_only_with_a_current_rejected_quota() {
+    let reset = 1_800_000_000.0 + 3600.0;
+    for (reset,expected) in [(reset,true),(1_700_000_000.0,false)] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        let lines = format!("{}\n{}\n{}",
+            json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":reset,"rateLimitType":"seven_day"}}),
+            json!({"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your weekly limit"}]}}),
+            json!({"type":"result","subtype":"success","is_error":true,"result":"You've hit your weekly limit"}));
+        let found = usage_limits(&feed(&mut engine,&lines,11.0));
+        assert_eq!(found.len() == 1,expected,"reset={reset}: {found:?}");
+        if expected { assert_eq!(found[0],UsageLimit { window:"seven_day".into(),resets_at:Some(reset) }); }
+    }
+}

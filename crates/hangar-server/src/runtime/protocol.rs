@@ -119,6 +119,19 @@ pub enum Effect {
     /// Grava na fila, numa atualização só, a entrada e a operação `DispatchAsyncAnswer`; quem
     /// respondeu (`operation_id`) só recebe a resposta depois de gravada.
     ReserveAsyncAnswer { operation_id: String, reservation: ReservedAsyncAnswer, command: RuntimeCommand },
+    /// O turno parou no limite de uso da conta (não no aviso temporário): quem troca de conta decide.
+    UsageLimit { limit: UsageLimit },
+}
+
+/// Janela esgotada (`five_hour`, `seven_day`, …) e quando ela volta (epoch em segundos).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimit { pub window: String, pub resets_at: Option<f64> }
+
+impl UsageLimit {
+    /// O `rate_limit_info` do Claude (`rateLimitType`, `resetsAt`).
+    pub fn from_info(info: &Value) -> Self {
+        Self { window: info["rateLimitType"].as_str().unwrap_or("unknown").into(), resets_at: info["resetsAt"].as_f64() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

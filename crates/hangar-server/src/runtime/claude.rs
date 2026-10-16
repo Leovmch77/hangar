@@ -48,6 +48,8 @@ pub struct ClaudeEngine {
     format_gate: FormatGate,
     reload_deadline: f64,
     rate_limit_info: Value,
+    /// Limite do plano visto na mensagem sintética do turno; sai como efeito quando o turno termina.
+    turn_limit: Option<UsageLimit>,
     commands: Option<Value>,
     terminal_commands: Value,
     preview: LiveBuffer,
@@ -128,7 +130,7 @@ impl ClaudeEngine {
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
             waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reload_deadline:clock.monotonic_s+10.0,
-            rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
+            rate_limit_info:Value::Null,turn_limit:None,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
@@ -758,6 +760,7 @@ impl ClaudeEngine {
             "stream_event" => self.on_stream(&event["event"],effects),
             "command_lifecycle" if event["state"] == "started" => { if !self.in_progress { self.start_turn(); self.changed(effects,true); } }
             "assistant" => {
+                if let Some(limit) = usage_limit(&event,&self.rate_limit_info,self.clock.epoch_s) { self.turn_limit = Some(limit); }
                 if !event["local_command_source"].is_null() {
                     let text = text_blocks(&event["message"]["content"]);
                     // A CLI de hoje põe a saída no `local_command_source`, sem o comando: a resposta do `/effort` é
@@ -875,12 +878,16 @@ impl ClaudeEngine {
                     self.state.problema = Some(if event["result"].as_str().unwrap_or("").to_lowercase().contains("not logged in") {
                         "headless_sem_login" } else { "headless_turno_erro" }.into());
                     self.state.problema_detalhe = Some(format!("{subtype}: {}",event["result"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
+                    if let Some(limit) = self.turn_limit.take().or_else(||usage_limit(&event,&self.rate_limit_info,self.clock.epoch_s)) {
+                        effects.push(Effect::UsageLimit { limit });
+                    }
                 } else if subtype == "success" && !local {
                     self.state.problema = None; self.state.problema_detalhe = None;
                     if std::mem::take(&mut self.problem_persisted) {
                         effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":null}) });
                     }
                 }
+                self.turn_limit = None;
                 if local { effects.push(Effect::ConfirmLocalCommands); }
                 self.apply_usage(&event,effects);
                 self.clear_streams(effects); self.changed(effects,true);
@@ -1238,6 +1245,16 @@ fn turn_activity(kind:&str,event:&Value) -> bool {
         "user" => event["message"]["content"].as_array().is_some_and(|blocks|blocks.iter().any(|block|block["type"] == "tool_result")),
         _ => false,
     }
+}
+
+/// Limite do plano na mensagem sintética: `usage_limit_reached` (CLI de hoje) ou, no CLI antigo, `rate_limit`
+/// com a última cota recusada ainda valendo. O aperto temporário também é `rate_limit`, sem cota recusada.
+fn usage_limit(event:&Value,last:&Value,now:f64) -> Option<UsageLimit> {
+    let params = &event["api_error_params"]["rate_limit_info"];
+    let info = if event["api_error"] == "usage_limit_reached" { if params.is_object() { params } else { last } }
+        else if event["error"] == "rate_limit" && last["status"] == "rejected" && last["resetsAt"].as_f64().is_some_and(|reset|reset > now) { last }
+        else { return None };
+    Some(UsageLimit::from_info(info))
 }
 
 fn text_blocks(blocks:&Value) -> String {
