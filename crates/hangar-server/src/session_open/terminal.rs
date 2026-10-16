@@ -208,24 +208,56 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     born(mux, env, &pane.name).await
 }
 
-/// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada):
-/// sem `remain-on-exit` a sessão some com ele. Conferida a cada 100 ms durante a janela; sem
-/// resposta até o fim dela é incerto, nunca "morreu".
+/// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada).
+/// A janela é de relógio. Com o pid do pane (Linux), a saída do processo chega como sinal pelo
+/// `pidfd`; sem ele (psmux), o `has-session` é conferido a cada 100 ms até o prazo. Sem resposta até
+/// o fim é incerto, nunca "morreu".
 async fn born(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> Result<(), SpawnError> {
-    let step = Duration::from_millis(100);
-    let mut waited = Duration::ZERO;
+    let deadline = tokio::time::Instant::now() + env.birth;
+    let died = |stderr: String| SpawnError { code: "terminal_morreu_ao_nascer", stderr };
+    if let Some(pid) = pane_pid(mux, env, name).await && let Some(exited) = wait_exit(pid, deadline).await {
+        return if exited { Err(died("o comando do terminal saiu logo depois de abrir".into())) } else { Ok(()) };
+    }
     let mut unanswered = None;
-    while waited < env.birth {
-        tokio::time::sleep(step).await;
-        waited += step;
+    loop {
+        tokio::time::sleep_until((tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline)).await;
         match presence(mux, env, name).await {
-            (Presence::Absent, stderr) => return Err(SpawnError { code: "terminal_morreu_ao_nascer", stderr }),
+            (Presence::Absent, stderr) => return Err(died(stderr)),
             (Presence::Unknown, stderr) => unanswered = Some(stderr),
             (Presence::Present, _) => unanswered = None,
         }
+        if tokio::time::Instant::now() >= deadline { break; }
     }
     unanswered.map_or(Ok(()), |stderr| Err(SpawnError { code: UNCERTAIN, stderr }))
 }
+
+/// O pid do processo do pane; `None` fora do Linux (sem `pidfd` para esperar por ele) ou sem resposta.
+async fn pane_pid(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> Option<i32> {
+    if !cfg!(target_os = "linux") || env.windows { return None; }
+    let out = mux.run(vec![env.program.clone(), "display-message".into(), "-p".into(), "-t".into(), format!("={name}"), "#{pane_pid}".into()]).await;
+    out.ok().then(|| out.stdout.trim().parse().ok()).flatten().filter(|pid| *pid > 0)
+}
+
+/// Espera o processo sair até o prazo: `Some(true)` saiu, `Some(false)` vivo no prazo, `None` sem como esperar.
+#[cfg(target_os = "linux")]
+async fn wait_exit(pid: i32, deadline: tokio::time::Instant) -> Option<bool> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: syscall sem ponteiros; o descritor devolvido passa a ser só deste `OwnedFd`.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return (std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)).then_some(true);
+    }
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+    let fd = tokio::io::unix::AsyncFd::with_interest(fd, tokio::io::Interest::READABLE).ok()?;
+    match tokio::time::timeout_at(deadline, fd.readable()).await {
+        Ok(Ok(_)) => Some(true),
+        Ok(Err(_)) => None,
+        Err(_) => Some(false),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn wait_exit(_pid: i32, _deadline: tokio::time::Instant) -> Option<bool> { None }
 
 /// O alvo da sessão: `=nome` casa exato (sem ele o tmux cai em prefixo).
 fn target(env: &TerminalEnv, name: &str) -> String { if env.windows { name.into() } else { format!("={name}") } }
@@ -285,9 +317,9 @@ pub(crate) mod tests {
     use serde_json::Value;
     use std::sync::Mutex;
 
-    /// Multiplexador falso: responde na ordem as saídas dadas e guarda cada argv.
+    /// Multiplexador falso: responde na ordem as saídas dadas, cada uma depois de `delay`, e guarda cada argv.
     #[derive(Default)]
-    pub(crate) struct FakeMux { pub scope: Vec<String>, pub replies: Mutex<Vec<MuxOutput>>, pub seen: Mutex<Vec<Vec<String>>> }
+    pub(crate) struct FakeMux { pub scope: Vec<String>, pub replies: Mutex<Vec<MuxOutput>>, pub seen: Mutex<Vec<Vec<String>>>, pub delay: Duration }
 
     impl FakeMux {
         pub(crate) fn answering(replies: Vec<MuxOutput>) -> Self { Self { replies: Mutex::new(replies), ..Default::default() } }
@@ -302,7 +334,11 @@ pub(crate) mod tests {
             self.seen.lock().unwrap().push(argv);
             let mut replies = self.replies.lock().unwrap();
             let reply = if replies.is_empty() { ok() } else { replies.remove(0) };
-            Box::pin(async move { reply })
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                reply
+            })
         }
     }
 
@@ -475,6 +511,38 @@ pub(crate) mod tests {
         assert_eq!(polls, 5, "conferido a cada 100 ms durante a janela");
     }
 
+    /// A janela de nascimento é de relógio: um multiplexador lento não a estica pela soma das consultas.
+    #[tokio::test(start_paused = true)]
+    async fn the_birth_window_is_wall_clock_not_the_sum_of_sleeps() {
+        let slow = FakeMux { delay: Duration::from_millis(300), ..FakeMux::default() };
+        let start = tokio::time::Instant::now();
+        spawn(&slow, &machine(), &claude(Vec::new(), None)).await.unwrap();
+        assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
+    }
+
+    /// Com o pid do pane, a morte do comando é sinal: chega na hora, sem esperar a janela; vivo, a
+    /// janela termina no prazo.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_pane_process_exit_is_a_signal_not_a_poll() {
+        let pid_of = |child: &std::process::Child| MuxOutput { code: Some(0), stdout: format!("{}\n", child.id()), stderr: String::new() };
+        let long = TerminalEnv { birth: Duration::from_secs(5), ..machine() };
+        let mut dying = std::process::Command::new("sh").args(["-c", "sleep 0.1"]).spawn().unwrap();
+        let mux = FakeMux::answering(vec![ok(), pid_of(&dying)]);
+        let start = std::time::Instant::now();
+        let error = spawn(&mux, &long, &claude(Vec::new(), None)).await.unwrap_err();
+        assert_eq!(error.code, "terminal_morreu_ao_nascer");
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        dying.wait().unwrap();
+        let mut living = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let short = TerminalEnv { birth: Duration::from_millis(300), ..machine() };
+        let start = std::time::Instant::now();
+        spawn(&FakeMux::answering(vec![ok(), pid_of(&living)]), &short, &claude(Vec::new(), None)).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        living.kill().unwrap();
+        living.wait().unwrap();
+    }
+
     /// S-55: todo pane nasce com o provedor dele em `CP_PROVIDER` (o `/resume` do Python o deixava
     /// vazio); o tipo não tem o vazio, e o `-e` vem antes de qualquer outro da sessão.
     #[test]
@@ -493,9 +561,9 @@ pub(crate) mod tests {
         let silent = || MuxOutput { code: None, stdout: String::new(), stderr: "o multiplexador não respondeu no prazo".into() };
         let mux = FakeMux::answering(vec![silent(), silent()]);
         assert_eq!(spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, UNCERTAIN);
-        let mux = FakeMux::answering(vec![ok(), silent(), silent(), silent(), silent(), silent()]);
+        let mux = FakeMux::answering(std::iter::once(ok()).chain(std::iter::repeat_n(silent(), 7)).collect());
         assert_eq!(spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, UNCERTAIN, "a janela inteira sem resposta");
-        let mux = FakeMux::answering(vec![ok(), silent(), ok()]);
+        let mux = FakeMux::answering(vec![ok(), ok(), silent(), ok()]);
         spawn(&mux, &machine(), &claude(Vec::new(), None)).await.expect("uma resposta perdida com o pane de pé no fim é nascimento");
     }
 
