@@ -686,7 +686,8 @@ pub(crate) async fn pass_any(
             cors(&headers, response.headers_mut());
             return response;
         }
-        if !matches!(req.uri().path(),"/api/worktrees"|"/api/worktrees/detail") {
+        if matches!(&who,Some(Caller::Guest(_)))
+            && !matches!(req.uri().path(),"/api/worktrees"|"/api/worktrees/detail") {
             return crate::session_write::json_response(StatusCode::FORBIDDEN,serde_json::json!({"detail":"worktrees pertencem ao dono"}));
         }
     }

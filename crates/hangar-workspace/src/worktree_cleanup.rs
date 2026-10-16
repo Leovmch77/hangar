@@ -15,19 +15,15 @@ use std::{
 
 pub fn in_use(path: &str, sessions: &[Session]) -> bool {
     let root = real(Path::new(path));
-    sessions.iter().any(|s| {
-        [s.cwd.as_deref(), s.git_cwd.as_deref()]
-            .into_iter()
-            .flatten()
-            .filter(|c| !c.is_empty())
-            .any(|c| real(Path::new(c)).starts_with(&root))
-            || s.worktree_path
-                .as_deref()
-                .is_some_and(|p| real(Path::new(p)) == root)
-    })
+    sessions.iter().any(|s| worktrees::session_inside(s, &root))
 }
 
-fn registered(repo: &str, path: &str) -> Result<String> {
+enum Registration {
+    Ready(String),
+    Locked,
+}
+
+fn registration(repo: &str, path: &str) -> Result<Registration> {
     let out = git::checked(
         Path::new(repo),
         &["worktree", "list", "--porcelain", "-z"],
@@ -52,11 +48,18 @@ fn registered(repo: &str, path: &str) -> Result<String> {
             .iter()
             .any(|f| *f == "locked" || f.starts_with("locked "))
         {
-            return Err(error(409, "worktree bloqueada"));
+            return Ok(Registration::Locked);
         }
-        return Ok(p.into());
+        return Ok(Registration::Ready(p.into()));
     }
     Err(error(404, "não é uma worktree deste repositório"))
+}
+
+fn registered(repo: &str, path: &str) -> Result<String> {
+    match registration(repo, path)? {
+        Registration::Ready(path) => Ok(path),
+        Registration::Locked => Err(error(409, "worktree bloqueada")),
+    }
 }
 
 fn with_removed<T>(
@@ -421,12 +424,23 @@ pub fn candidate(
     if !settings.enabled() || !Path::new(path).is_dir() || in_use(path, sessions) {
         return Ok(None);
     }
+    let can_observe_inactivity = settings.inactive_days.is_some() && activity.is_some();
+    if !settings.delete_merged && !settings.delete_unchanged && !can_observe_inactivity {
+        return Ok(None);
+    }
     let st = worktrees::status_of(path, sessions, false, bases);
     let Some(repo) = st["repo"].as_str() else {
         return Ok(None);
     };
-    registered(repo, path)?;
+    if matches!(registration(repo, path)?, Registration::Locked) {
+        return Ok(None);
+    }
     if st["degraded"] != false || st["base"].as_str().is_none() || st["head"].as_str().is_none() {
+        return Ok(None);
+    }
+    let by_state = settings.delete_merged && st["merged"] == true
+        || settings.delete_unchanged && st["ahead"].as_u64() == Some(0);
+    if !by_state && !can_observe_inactivity {
         return Ok(None);
     }
     let (fingerprint, newest, protected) = fingerprint(path, &st, &settings.keep_when)?;
@@ -463,14 +477,14 @@ pub fn candidate(
         })?;
         inactive = now.saturating_sub(last_activity) >= u64::from(days) * 86400;
     }
-    let unchanged = st["ahead"].as_u64() == Some(0);
-    let eligible = inactive
-        || settings.delete_merged && st["merged"] == true
-        || settings.delete_unchanged && unchanged;
+    let eligible = inactive || by_state;
+    if !eligible {
+        return Ok(None);
+    }
     let base = st["base"].as_str().unwrap().to_owned();
     let base_head = reference_head(path, &base)?;
     let config = git_config(path)?;
-    Ok(eligible.then(|| Candidate {
+    Ok(Some(Candidate {
         path: path.into(),
         head: st["head"].as_str().unwrap().trim().into(),
         fingerprint,
@@ -599,6 +613,188 @@ mod tests {
         let o = crate::git::command(dir, args).unwrap();
         assert_eq!(o.code, 0, "{}", o.stderr);
     }
+    fn policy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let wt = dir.path().join("wt");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Teste",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Base",
+            ],
+        );
+        git(
+            &repo,
+            &["worktree", "add", "-b", "topic", wt.to_str().unwrap()],
+        );
+        (dir, repo, wt)
+    }
+
+    #[test]
+    fn locked_worktree_is_protected_without_a_read_error() {
+        let (dir, repo, wt) = policy_fixture();
+        git(&repo, &["worktree", "lock", wt.to_str().unwrap()]);
+        let settings = WorktreeSettings {
+            delete_unchanged: true,
+            ..WorktreeSettings::default()
+        };
+        assert!(
+            candidate(
+                wt.to_str().unwrap(),
+                &[],
+                &[],
+                dir.path(),
+                &settings,
+                0,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(wt.exists());
+        git(&repo, &["worktree", "unlock", wt.to_str().unwrap()]);
+        std::fs::write(repo.join(".git/worktrees/wt/gitdir"), [0xff]).unwrap();
+        assert!(
+            candidate(
+                wt.to_str().unwrap(),
+                &[],
+                &[],
+                dir.path(),
+                &settings,
+                0,
+                None
+            )
+            .is_err(),
+            "registro ilegível continua sendo falha de leitura"
+        );
+    }
+
+    #[test]
+    fn ineligible_worktree_without_activity_does_not_read_the_tree() {
+        let (dir, _repo, wt) = policy_fixture();
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.name=Teste",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Ainda não integrada",
+            ],
+        );
+        let poison = wt.join("local-artifact");
+        let file = std::fs::File::create(poison).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH - Duration::from_secs(1)))
+            .unwrap();
+        let path = wt.to_str().unwrap();
+        let mut settings = WorktreeSettings {
+            delete_merged: true,
+            ..WorktreeSettings::default()
+        };
+        assert!(
+            candidate(
+                path,
+                &[],
+                &["main".into()],
+                dir.path(),
+                &settings,
+                100_000,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+        settings.inactive_days = Some(1);
+        assert!(
+            candidate(
+                path,
+                &[],
+                &["main".into()],
+                dir.path(),
+                &settings,
+                100_000,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            candidate(
+                path,
+                &[],
+                &["main".into()],
+                dir.path(),
+                &settings,
+                100_000,
+                Some(99_999)
+            )
+            .is_err(),
+            "atividade recente ainda exige observação do disco"
+        );
+        assert!(
+            candidate(
+                path,
+                &[],
+                &["main".into()],
+                dir.path(),
+                &settings,
+                100_000,
+                Some(0)
+            )
+            .is_err(),
+            "candidata potencial ainda exige leitura segura"
+        );
+    }
+
+    #[test]
+    fn recent_activity_does_not_postpone_the_inactivity_deadline() {
+        let (dir, _repo, wt) = policy_fixture();
+        let settings = WorktreeSettings {
+            inactive_days: Some(1),
+            ..WorktreeSettings::default()
+        };
+        let observed_at = 4_000_000_000;
+        assert!(
+            candidate(
+                wt.to_str().unwrap(),
+                &[],
+                &[],
+                dir.path(),
+                &settings,
+                observed_at,
+                Some(observed_at)
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            candidate(
+                wt.to_str().unwrap(),
+                &[],
+                &[],
+                dir.path(),
+                &settings,
+                observed_at + 86_400,
+                Some(observed_at)
+            )
+            .unwrap()
+            .is_some(),
+            "o prazo conta da observação inicial, sem um segundo dia artificial"
+        );
+    }
+
     #[test]
     fn removal_protects_live_dirty_locked_and_preserves_branch_and_conversations() {
         let dir = tempfile::tempdir().unwrap();
@@ -676,6 +872,7 @@ mod tests {
             .is_err()
         );
         git(Path::new(repo), &["worktree", "unlock", path]);
+        let expected_wt = real(&wt);
         let out = remove(
             repo,
             path,
@@ -690,7 +887,7 @@ mod tests {
         )
         .unwrap();
         let removed_path = out["removed"].as_str().unwrap();
-        assert_eq!(Path::new(removed_path), wt.as_path());
+        assert_eq!(Path::new(removed_path), expected_wt.as_path());
         assert!(!wt.exists());
         git(
             Path::new(repo),
@@ -698,7 +895,10 @@ mod tests {
         );
         let map = worktrees::try_removed_at(&dir.path().join(".hangar/worktrees-removidas.json"))
             .unwrap();
-        assert_eq!(Path::new(map.get(removed_path).unwrap()), Path::new(repo));
+        assert_eq!(
+            real(Path::new(map.get(removed_path).unwrap())),
+            real(Path::new(repo))
+        );
         assert!(
             remove(
                 repo,
@@ -969,11 +1169,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path().join("wt");
         std::fs::create_dir(&wt).unwrap();
-        let sessions: Vec<Session> = serde_json::from_value(
-            json!([{"name":"live","cwd":dir.path(),"git_cwd":wt.join("subdir")}]),
-        )
-        .unwrap();
+        let missing = wt.join("subdir");
+        let missing = if cfg!(windows) {
+            missing.to_string_lossy().to_uppercase()
+        } else {
+            missing.to_string_lossy().into_owned()
+        };
+        let sessions: Vec<Session> =
+            serde_json::from_value(json!([{"name":"live","cwd":dir.path(),"git_cwd":missing}]))
+                .unwrap();
         assert!(in_use(wt.to_str().unwrap(), &sessions));
+        let outside = [Session {
+            git_cwd: Some(
+                wt.with_file_name("wt-other")
+                    .join("subdir")
+                    .to_string_lossy()
+                    .into(),
+            ),
+            ..Session::default()
+        }];
+        assert!(
+            !in_use(wt.to_str().unwrap(), &outside),
+            "prefixo textual não identifica um descendente"
+        );
     }
     #[test]
     fn refused_admission_or_invalid_map_never_cleans_local_files() {

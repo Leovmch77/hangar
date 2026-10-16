@@ -459,20 +459,17 @@ async fn mutation(st: Arc<AppState>, req: Request) -> Response {
     };
     let roots = ctx.roots.clone();
     let repo = b.repo.clone();
-    let repo =
-        match tokio::task::spawn_blocking(move || worktrees::allowed_repo(&repo, &roots)).await {
-            Ok(Ok(repo)) => repo,
-            Ok(Err(e)) => return result(Err(e)),
-            Err(_) => {
-                return result(Err(hangar_workspace::error(
-                    503,
-                    "repositório indisponível",
-                )));
-            }
-        };
-    let root = worktrees::repo_root_of(&repo).unwrap_or_else(|| repo.clone());
-    let main = worktrees::main_repo_of(&root);
-    let paths = worktrees::worktree_paths(&main);
+    let (main,paths)=match tokio::task::spawn_blocking(move || -> hangar_workspace::Result<_> {
+        let repo=worktrees::allowed_repo(&repo,&roots)?;
+        let root=worktrees::repo_root_of(&repo).unwrap_or_else(||repo.clone());
+        let main=worktrees::main_repo_of(&root);
+        let paths=worktrees::worktree_paths(&main);
+        Ok((main,paths))
+    }).await {
+        Ok(Ok(value))=>value,
+        Ok(Err(e))=>return result(Err(e)),
+        Err(_)=>return result(Err(hangar_workspace::error(503,"repositório indisponível"))),
+    };
     let mut removed = Vec::new();
     for path in paths {
         if b.paths.as_ref().is_some_and(|paths| {

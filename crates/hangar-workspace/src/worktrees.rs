@@ -531,10 +531,25 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Por realpath: home atrás de symlink dá dois textos para a mesma pasta.
-fn inside(s: &Session, real_path: &Path) -> bool {
+fn session_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return crate::simplify(canonical);
+    }
+    let path = real(path);
+    // A cauda pode ter sumido; o ancestral existente ainda resolve aliases 8.3 e junctions.
+    for ancestor in path.ancestors().skip(1) {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            return crate::simplify(canonical).join(path.strip_prefix(ancestor).unwrap());
+        }
+    }
+    path
+}
+
+/// A lista e a exclusão usam a mesma identidade física, inclusive com uma cauda inexistente.
+pub(crate) fn session_inside(s: &Session, real_path: &Path) -> bool {
+    let root = session_path(real_path);
     if let Some(wt) = s.worktree_path.as_deref().filter(|w| !w.is_empty())
-        && real(Path::new(wt)) == real_path
+        && same_path(&session_path(Path::new(wt)), &root)
     {
         return true;
     }
@@ -542,7 +557,11 @@ fn inside(s: &Session, real_path: &Path) -> bool {
         .into_iter()
         .flatten()
         .filter(|c| !c.is_empty())
-        .any(|c| real(Path::new(c)).starts_with(real_path))
+        .any(|c| {
+            session_path(Path::new(c))
+                .ancestors()
+                .any(|p| same_path(p, &root))
+        })
 }
 
 /// Como o `sanitize_cwd` do registry: o Claude indexa a pasta assim.
@@ -683,7 +702,7 @@ pub fn status(
     let real_path = real(Path::new(path));
     let inside = sessions
         .iter()
-        .filter(|s| inside(s, &real_path))
+        .filter(|s| session_inside(s, &real_path))
         .collect::<Vec<_>>();
     let mut names = inside.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
     names.sort();
@@ -1253,7 +1272,10 @@ mod tests {
             1,
             "Checkout principal deve ficar fora das worktrees"
         );
-        assert_eq!(worktrees[0]["path"], text(&linked));
+        assert_eq!(
+            std::fs::canonicalize(worktrees[0]["path"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&linked).unwrap()
+        );
         let head = worktrees[0]["head"]
             .as_str()
             .expect("SHA completo para revalidar a exclusão");

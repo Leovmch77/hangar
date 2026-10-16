@@ -391,15 +391,13 @@ impl Worktrees {
             Err(error) => self.take_list(seq, Err(error)),
             Ok(mut snapshot) => {
                 self.discovery_incomplete = snapshot.warning.as_deref() == Some("worktree_discovery_incomplete");
-                // Uma busca parcial não confirma que os repositórios ou worktrees ausentes desapareceram.
+                // A descoberta parcial pode omitir repositórios; não desfaz uma remoção confirmada pelo cliente.
                 if self.discovery_incomplete {
                     if let Some(previous) = self.repos.ok() {
                         for repo in previous {
-                            if let Some(current) = snapshot.repos.iter_mut().find(|current| current.repo == repo.repo) {
-                                for worktree in &repo.worktrees {
-                                    if !current.worktrees.iter().any(|current| current.path == worktree.path) { current.worktrees.push(worktree.clone()); }
-                                }
-                            } else { snapshot.repos.push(repo.clone()); }
+                            if snapshot.repos.iter().any(|current| current.repo == repo.repo) { continue; }
+                            let kept: Vec<_> = repo.worktrees.iter().filter(|w| self.cache.contains_key(&w.path)).cloned().collect();
+                            if !kept.is_empty() { snapshot.repos.push(WorktreeRepo { repo: repo.repo.clone(), worktrees: kept }); }
                         }
                     }
                 }
@@ -1499,13 +1497,35 @@ mod tests {
         ], "warning": "worktree_discovery_incomplete"})).unwrap())));
         let mut paths: Vec<_> = wt.repos.ok().unwrap()[0].worktrees.iter().map(|w| w.path.as_str()).collect();
         paths.sort();
-        assert_eq!(paths, ["/r/a", "/r/b"]);
+        assert_eq!(paths, ["/r/b"]);
         let full = wt.repos.start();
         assert!(wt.take_snapshot(full, Ok(serde_json::from_value(json!({"repos": []})).unwrap())));
         assert!(!wt.discovery_incomplete);
         assert!(wt.repos.ok().unwrap().is_empty());
         assert!(!wt.take_snapshot(partial, Ok(serde_json::from_value(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap())));
         assert!(!wt.discovery_incomplete);
+    }
+    #[test]
+    fn worktree_settings_partial_discovery_does_not_restore_deleted_worktrees() {
+        let mut wt = Worktrees::default();
+        let complete = wt.repos.start();
+        wt.take_list(complete, Ok(vec![
+            WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/deleted")), st(base("/r/kept"))] },
+            WorktreeRepo { repo: "/last".into(), worktrees: vec![st(base("/last/deleted"))] },
+        ]));
+        wt.cache.remove("/r/deleted");
+        wt.cache.remove("/last/deleted");
+        let partial = wt.repos.start();
+        assert!(wt.take_snapshot(partial, Ok(serde_json::from_value(json!({
+            "repos": [], "warning": "worktree_discovery_incomplete"
+        })).unwrap())));
+        let repos = wt.repos.ok().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repo, "/r");
+        assert_eq!(repos[0].worktrees.len(), 1);
+        assert_eq!(repos[0].worktrees[0].path, "/r/kept");
+        assert!(!wt.cache.contains_key("/r/deleted"));
+        assert!(!wt.cache.contains_key("/last/deleted"));
     }
     #[test]
     fn worktree_settings_pr_lookup_failure_is_visible_without_changing_git_state() {

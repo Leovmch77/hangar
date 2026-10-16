@@ -265,8 +265,9 @@ async fn configured_location_is_used_by_public_creation_and_manual_delete_stays_
         .unwrap();
     assert_eq!(r.status(), 200);
     let created: Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
-    let path = home.path().join("chosen/repo/future");
-    assert_eq!(created["path"], path.to_string_lossy().as_ref());
+    let path = home.path().join("chosen").join("repo").join("future");
+    let actual=std::path::Path::new(created["path"].as_str().unwrap());
+    assert_eq!(std::fs::canonicalize(actual).unwrap(),std::fs::canonicalize(&path).unwrap());
     assert!(path.join(".git").is_file());
     let remove = serde_json::json!({"repo":root.join("repo"),"path":path,"keep_branch":true});
     let r = c
@@ -342,6 +343,7 @@ async fn merged_batch_accepts_a_repository_subdirectory() {
     std::fs::create_dir(repo.join("subdir")).unwrap();
     let home = tempfile::tempdir().unwrap();
     let f = workspace_fixture::fixture_with_home(&root, true, Some(home.path())).await;
+    let expected=std::fs::canonicalize(&wt).unwrap();
     let body = serde_json::json!({"repo":repo.join("subdir"),"paths":[wt]});
     let r = client()
         .post(format!("http://{}/api/worktrees/delete-merged", f.addr))
@@ -353,6 +355,51 @@ async fn merged_batch_accepts_a_repository_subdirectory() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
-    assert_eq!(body["removed"], serde_json::json!([wt]));
+    let removed=body["removed"].as_array().unwrap();
+    assert_eq!(removed.len(),1);
+    let removed=std::path::Path::new(removed[0].as_str().unwrap());
+    let actual=removed.parent().unwrap().canonicalize().unwrap().join(removed.file_name().unwrap());
+    assert_eq!(actual,expected);
     assert!(!wt.exists());
+}
+
+#[tokio::test]
+async fn anonymous_worktree_requests_reach_auth_and_record_failures() {
+    use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+    use axum::{Router,http::StatusCode};
+    let hits=Arc::new(AtomicUsize::new(0)); let seen=hits.clone();
+    let upstream=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=upstream.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(upstream,Router::new().fallback(move |uri: axum::http::Uri| {let seen=seen.clone();async move {
+        if uri.path().starts_with("/api/worktrees") { seen.fetch_add(1,Ordering::SeqCst); }
+        StatusCode::UNAUTHORIZED
+    }})).await.unwrap(); });
+    let home=tempfile::tempdir().unwrap();
+    let mut state=hangar_server::routes::AppState::new(fake::config(address,"127.0.0.1")); state.origins_home=home.path().into();
+    let state=Arc::new(state); let app=hangar_server::routes::router(state.clone());
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr=listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener,app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap(); });
+    let methods=[(reqwest::Method::GET,"settings"),(reqwest::Method::PUT,"settings"),(reqwest::Method::POST,"delete"),(reqwest::Method::POST,"delete-merged"),(reqwest::Method::POST,"create")];
+    let ip="198.51.100.76";
+    for n in 0..8 {
+        let (method,tail)=&methods[n%methods.len()];
+        let mut req=client().request(method.clone(),format!("http://{addr}/api/worktrees/{tail}")).header("x-forwarded-for",ip);
+        if n%2==1 {req=req.bearer_auth("token-errado");}
+        assert_eq!(req.send().await.unwrap().status(),401);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst),8);
+    assert!(!state.auth.is_owner(ip,Some(OWNER.as_bytes())),"as recusas entram no bloqueio de autenticação");
+}
+
+#[tokio::test]
+async fn manual_delete_refuses_unknown_terminal_inventory() {
+    let dir=scene(); let root=hangar_workspace::real(dir.path()); let home=tempfile::tempdir().unwrap();
+    let missing=home.path().join("no-multiplexer-installed");
+    let f=workspace_fixture::fixture_with_mux(&root,true,Some(home.path()),Some(&missing)).await;
+    let path=root.join("repo-wt");
+    let body=serde_json::json!({"repo":root.join("repo"),"path":path,"confirm":true});
+    let r=client().post(format!("http://{}/api/worktrees/delete",f.addr)).bearer_auth(OWNER).header("content-type","application/json").body(body.to_string()).send().await.unwrap();
+    assert_eq!(r.status(),503);
+    let body:Value=serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(body["detail"],"terminais de worktrees indisponíveis");
+    assert!(path.exists());
 }
