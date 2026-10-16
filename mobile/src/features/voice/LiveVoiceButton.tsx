@@ -1,4 +1,6 @@
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Text, View } from 'react-native';
+// Mora nas barras do topo, na faixa de arrasto da gaveta: o Pressable comum perde o toque rápido no Android.
+import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon } from '../../ui/Icon';
 import type { LiveVoiceView } from './LiveVoiceSheet';

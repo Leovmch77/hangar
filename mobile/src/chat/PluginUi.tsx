@@ -91,7 +91,7 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
         alignSelf: ['auto', 'flex-start', 'flex-end', 'center', 'stretch', 'baseline'].includes(str(p.alignSelf)) ? p.alignSelf as ViewStyle['alignSelf'] : undefined,
         justifyContent: ['flex-start', 'flex-end', 'center', 'space-between', 'space-around', 'space-evenly'].includes(str(p.justifyContent)) ? p.justifyContent as ViewStyle['justifyContent'] : undefined,
         width: width !== undefined ? '100%' : percent(p.width),
-        maxWidth: width !== undefined && !(place && width >= place) ? width * cell : undefined,
+        maxWidth: width !== undefined && !(place && width >= place) ? width * cell : '100%',
         minWidth: 0,
         columnGap: h('columnGap', 'gap'), rowGap: v('rowGap', 'gap'),
         paddingTop: v('paddingTop', 'paddingY', 'padding'), paddingBottom: v('paddingBottom', 'paddingY', 'padding'),
@@ -125,7 +125,7 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
       const width = finite(p.width);
       const height = finite(p.height) ?? line * 2;
       const sizing: ViewStyle = width !== undefined && width > 0 && height > 0 ? { aspectRatio: width / height } : { height };
-      return <View style={[styles.svg, { width: width ?? '100%' }, sizing]} accessibilityRole="image" accessibilityLabel={str(p.alt)}>
+      return <View style={[styles.svg, { width: '100%', maxWidth: width ?? '100%' }, sizing]} accessibilityRole="image" accessibilityLabel={str(p.alt)}>
         <SvgXml xml={str(p.source)} width="100%" height="100%" onError={() => toast.erro(m.plugin_svg_falhou())} />
       </View>;
     }
