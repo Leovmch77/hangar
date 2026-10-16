@@ -593,6 +593,38 @@ async fn queued_batch_terminal_oversized_batch_stays_editable() {
 }
 
 #[tokio::test]
+async fn queued_batch_terminal_size_block_rechecks_after_internal_queue_changes() {
+    for steer in [false,true] {
+        let f=Fixture::new().await;f.start_plugin();
+        let large="\"".repeat((hangar_server::runtime::protocol::MAX_FRAME-100)/4);
+        let small="\"".repeat(100);
+        let rows=vec![json!({"id":"small","text":small,"ts":2.0,"delivered":false}),
+            json!({"id":"b","text":large,"ts":2.0,"delivered":false}),json!({"id":"c","text":large,"ts":2.0,"delivered":false})];
+        let lease=crate::lease_when_free(&f.target.lease_path);
+        let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",rows)).unwrap();
+        let options=TerminalOptions {io:f.io.clone(),plugin:Some(f.plugin.clone()),interactions:Some(f.plugin.interactions().clone()),
+            tick:Duration::from_secs(600),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},turn_start_wait:Duration::ZERO,..TerminalOptions::default()};
+        let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+        h.drain().await.unwrap();
+        assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"queue_batch_too_large");
+        if steer {
+            let result=h.control("steer-small".into(),"steer_entry".into(),json!({"entry_id":"small"})).await.unwrap();
+            assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+            let remaining=format!("{large}\n{large}");
+            assert!(json!({"modo":"fill","text":remaining}).to_string().len()<hangar_server::runtime::protocol::MAX_FRAME);
+            // Para na leitura seguinte: prova a retentativa sem renderizar megabytes no dublê do pane.
+            f.io.capture_error.store(true,std::sync::atomic::Ordering::Release);
+            assert_eq!(h.drain().await.unwrap_err().code,"terminal_facts","o bloqueio antigo não impede reavaliar a entrega");
+            assert_eq!(f.sent_prompts(),vec![small.clone()]);
+        }else{
+            assert_eq!(h.command(f.command("new","nova mensagem")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+            assert!(h.snapshot().await.unwrap()["view"]["input_stalled"].is_null(),"a escrita interna invalida a avaliação anterior");
+        }
+        h.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn terminal_runtime_idle_timer_drains_without_sse_as_one_batch() {
     let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("queued1","Um")).await.unwrap(); h.command(f.command("queued2","Dois")).await.unwrap();

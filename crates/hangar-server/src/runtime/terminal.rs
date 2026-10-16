@@ -987,6 +987,7 @@ impl Executor {
             if !state.rows.iter().any(|r|r["id"]==*row) {
                 // Segurada: em idle a linha só aparece já entregue, sem piscar "Na fila"; o adiamento a publica no `Finish`.
                 self.services("maintenance","maintenance","").action_held("queue",Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())},true).await?;
+                self.batch_blocked=false;
                 fresh=true;
             }
         }
@@ -1349,6 +1350,7 @@ impl Executor {
             if !driver.composer_free().await {return Ok(json!({"drained":0,"stalled":true}));}
             if let Some(stall)=self.stall.as_mut() {stall.wait=Duration::ZERO;}
         }
+        let directed=entry.is_some();
         let claim=match entry {
             Some(entry)=>Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:Some(entry)},
             None=>Action::ClaimBatch {min_ts:self.target.created},
@@ -1366,6 +1368,7 @@ impl Executor {
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
         let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id),steer).await?;
+        if directed && self.batch_blocked {self.batch_blocked=false;self.publish().await?;}
         Ok(json!({"drained":1,"reply":outcome}))
     }
     /// "Orientar" de uma entrada do painel. Parado: ela vai para a frente e sai na entrega comum. Trabalhando: é
