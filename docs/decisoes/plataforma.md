@@ -1431,6 +1431,17 @@ dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem
 `protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
 `hangar_server.caiu`.
 
+**O Rust volta sozinho (D-014, 15/10/2026).** Com a abertura de sessão migrando para o Rust, a
+reserva até o próximo restart deixaria abrir e reabrir sem dono. Depois da desistência o Python
+atende a porta e, a cada espera de `RETRY_DELAYS` (30 s, 1, 2, 5 e 10 min, a última repetida;
+zera quando o Rust volta), solta a porta, solta as sessões (`leave_python`: clientes de cano
+Claude e Codex fechados, trava e fila de cada registro Python devolvidas, modo `pending`) e só
+então sobe o filho. Subiu: `hangar_server.voltou`, e o `_enter_rust` reabre as sessões como depois
+de uma queda. Não subiu (mesmas regras: calado, outro protocolo, 3 quedas): nova desistência,
+`enter_python` as retoma e o gancho do modo Python roda de novo. Cada tentativa vai ao diário como
+`hangar_server.religar` (com `tentativa`); falha ao soltar as sessões, `hangar_server.religar_falhou`.
+A janela entre soltar e o filho responder deixa a porta sem dono por até `START_TIMEOUT`.
+
 **Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
 `pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
 ou 2 e a volta do Rust; `rust` quando a partida confirma; `python` sem binário, com

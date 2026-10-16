@@ -394,6 +394,24 @@ class RuntimeCoordinator:
             _mode_bypass.reset(token)
             self._set_mode("python")
 
+    async def leave_python(self):
+        """Religar o Rust: o Python solta clientes, travas e filas; as sessões ficam como numa queda."""
+        self._set_mode("pending")
+        self._hooks_ran.discard("python")       # nova desistência religa os clientes de novo
+        if (claude := self.legacy.adapters.get("claude")) is not None:
+            claude.desligar_todas()
+            claude._sessions.clear()
+        for name in list(getattr(codex := self.legacy.adapters.get("codex"), "_sessions", ())):
+            await codex.release_client(name)
+        for slot in tuple(self.slots.values()):
+            if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Python:
+                async with self._barrier(slot):
+                    await self._wait_active(slot)
+                    if slot.lease is not None:
+                        slot.lease.close()
+                    slot.lease, slot.store, slot.phase, slot.cache_valid = None, None, Phase.Rust, False
+                self._signal(slot)
+
     async def _close_ingress_of_incomplete_transfers(self):
         """O Rust novo nasce com as portas abertas: troca interrompida precisa delas fechadas até terminar."""
         from app import conversation_transfer

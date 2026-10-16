@@ -50,6 +50,9 @@ def parent_gone():
 
 threading.Thread(target=parent_gone, daemon=True).start()
 mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "cai_ate":       # cai nas FAKE_CRASHES primeiras subidas e depois fica
+    with open(os.environ["FAKE_LOG"]) as f:
+        mode = "cai" if sum(1 for _ in f) <= int(os.environ["FAKE_CRASHES"]) else "ok"
 if mode == "mudo":
     time.sleep(60)
     sys.exit(0)
@@ -300,6 +303,32 @@ def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
     assert [e for e in events if e[0] == "hangar_server.caiu"]
     assert ("hangar_server.reserva", "erro", {"codigo": "quedas"}) in events
     assert relog                                    # o diário voltou a ouvir o uvicorn
+
+
+def test_rust_back_after_give_up_takes_the_public_port_again(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_MODE", "cai_ate")
+    monkeypatch.setenv("FAKE_CRASHES", str(rust_server.MAX_CRASHES))
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.5,))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _wait_get(port, "/", lambda b: b == b"python")
+        await _wait_get(port, "/", lambda b: b.startswith(b"{"))     # o Rust voltou à porta
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    spawns = _spawns(tmp_path)
+    assert len(spawns) == rust_server.MAX_CRASHES + 1
+    assert all(_dead(s["pid"]) for s in spawns)
+    assert app.startups == 1
+    names = [e[0] for e in events]
+    assert ("hangar_server.religar", "aviso", {"tentativa": 1}) in events
+    assert names.index("hangar_server.reserva") < names.index("hangar_server.voltou")
 
 
 def test_rust_up_marks_costs_served_and_takeover_warms_python(fake_bin, tmp_path, events, monkeypatch):
