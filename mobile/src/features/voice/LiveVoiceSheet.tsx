@@ -64,6 +64,8 @@ const ERRORS: Record<string, () => string> = {
   foreground_required: m.native_live_voice_error_foreground_required,
   dictation_active: m.native_live_voice_error_dictation_active,
   audio_levels_unavailable: m.native_live_voice_error_audio_levels_unavailable,
+  audio_restore: m.native_live_voice_error_audio_restore,
+  opening_timeout: m.native_live_voice_error_opening_timeout,
   timeout: m.live_voice_error_timeout,
   taken: m.live_voice_taken,
 };
@@ -194,7 +196,7 @@ export function LiveVoiceSheet({ open, view, onDismiss, onStart, onStop, onToggl
                 onPress={onToggleMute} selected={muted} disabled={!!view.dictating} />
               <Action title={m.live_voice_stop()} onPress={onStop} danger />
             </View>
-            {state ? <Segmented label={m.native_live_voice_mode()} value={state.mode}
+            {state && state.mode !== null ? <Segmented label={m.native_live_voice_mode()} value={state.mode}
               options={MODES.map(mode => ({ v: mode, label: modeLabel(mode) }))}
               onChange={mode => onMode(mode === 'direct' ? 'direto' : 'planejar')} /> : null}
           </>

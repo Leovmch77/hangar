@@ -12,6 +12,8 @@ const PING_MS = 10_000;
 const TIMEOUT_MS = 30_000;
 const METER_MS = 100;
 const METER_TIMEOUT_MS = 10_000;
+const OPENING_MS = 60_000;
+const DISCONNECT_GRACE_MS = 5_000;
 
 type Attempt = {
   closed: boolean;
@@ -35,6 +37,10 @@ type Attempt = {
   audioRevision: number;
   samples: Map<string, LiveVoiceAudioSample>;
   cleanup?: Promise<void>;
+  openingDeadline: number;
+  openingTimer?: ReturnType<typeof setTimeout>;
+  cancelStart(): void;
+  disconnectedAt?: number;
 };
 
 // O áudio nativo é do aparelho: o stop antigo precisa acabar antes do start novo, até entre instâncias.
@@ -47,9 +53,9 @@ function serializeAudio(operation: () => Promise<void>): Promise<void> {
   return result;
 }
 function detail(error: unknown): string | undefined {
-  if (error instanceof Error) return error.message || undefined;
-  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') return error.message;
-  return typeof error === 'string' ? error : undefined;
+  const message = typeof error === 'object' && error !== null && 'message' in error ? error.message : error;
+  if (typeof message !== 'string' || !message) return undefined;
+  return /token(?:=|%3d)/i.test(message) ? 'token=[redacted]' : message;
 }
 function releaseMedia(media: MediaStream): void {
   for (const track of media.getTracks()) { track.onended = null; track.stop(); }
@@ -64,21 +70,37 @@ export class LiveVoiceCall {
 
   constructor(private handlers: LiveVoiceHandlers) {}
 
-  private current(call: Attempt): boolean { return this.attempt === call && !call.closed; }
+  private current(call: Attempt): boolean {
+    if (this.attempt !== call || call.closed) return false;
+    if (!call.live && Date.now() >= call.openingDeadline) {
+      this.fail(call, 'opening_timeout', undefined, true);
+      return false;
+    }
+    return true;
+  }
 
-  async start(server: Server, screen: LiveVoiceScreen): Promise<void> {
+  async start(server: Server, screen: LiveVoiceScreen, openingDeadline = Date.now() + OPENING_MS): Promise<void> {
     const previous = this.attempt;
     const cleanup = previous ? this.cleanup(previous) : Promise.resolve();
+    let cancelStart!: () => void;
+    const cancelled = new Promise<void>(resolve => { cancelStart = resolve; });
     const call: Attempt = {
       closed: false, attached: false, live: false, answered: false, reading: false, restoring: false,
       createdAt: 0, lastPong: 0, lastPing: 0, lastMeter: 0, lastInput: 0, audioRevision: 0, samples: new Map(),
+      openingDeadline, cancelStart,
     };
     this.attempt = call;
     this.screen = screen;
     this.handlers.phase('connecting');
+    call.openingTimer = setTimeout(() => { this.current(call); }, Math.max(0, openingDeadline - Date.now()));
+    await Promise.race([this.open(call, server, cleanup), cancelled]);
+  }
+
+  private async open(call: Attempt, server: Server, cleanup: Promise<void>): Promise<void> {
     let failure = 'failed';
     try {
-      await cleanup;
+      // A falha anterior já foi publicada; ela não pertence à tentativa nova.
+      await cleanup.catch(() => {});
       if (!this.current(call)) return;
       if (typeof __DEV__ !== 'undefined' && !__DEV__) {
         // A entrada principal do WebRTC não exporta o controle dos logs.
@@ -87,9 +109,12 @@ export class LiveVoiceCall {
       }
       if (server.invite || server.removed) { this.fail(call, 'owner_only'); return; }
       // A origem vazia é deliberada no nativo: nunca usar a máquina ATIVA como reserva para A.
-      const url = liveVoiceUrlForServer(server, '');
-      const parsed = new URL(url);
-      if ((parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') || !parsed.hostname) throw new Error('invalid_server_url');
+      let url: string;
+      try {
+        url = liveVoiceUrlForServer(server, '');
+        const parsed = new URL(url);
+        if ((parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') || !parsed.hostname) throw new Error();
+      } catch { this.fail(call, 'failed', 'invalid_server_url'); return; }
       failure = 'notifications_permission';
       if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
         const permission = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
@@ -114,7 +139,7 @@ export class LiveVoiceCall {
       failure = 'failed';
       call.listener = LiveVoiceAudio.addListener('interruption', event => {
         if (!this.current(call)) return;
-        if (event.reason === 'stop') void this.stop();
+        if (event.reason === 'stop') void this.stop().catch(() => {});
         else this.fail(call, 'audio_interrupted', event.reason, true);
       });
       // O relógio nativo continua no fundo; timers JS do RN param quando a Activity pausa.
@@ -127,13 +152,17 @@ export class LiveVoiceCall {
       pc.onconnectionstatechange = () => {
         if (!this.current(call)) return;
         if (pc.connectionState === 'connected') {
+          call.disconnectedAt = undefined;
           this.updateTracks(call);
           if (call.live) return;
-          call.live = true;
-          call.lastInput = call.lastMeter = Date.now();
           if (!this.send(call, { type: 'live' })) return;
+          call.live = true;
+          clearTimeout(call.openingTimer);
+          call.lastInput = call.lastMeter = Date.now();
           this.handlers.phase('live');
-        } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+        } else if (pc.connectionState === 'disconnected') {
+          call.disconnectedAt ??= Date.now();
+        } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
           this.fail(call, 'connection_lost');
         }
       };
@@ -144,7 +173,9 @@ export class LiveVoiceCall {
       if (!offer.sdp?.trim()) throw new Error('empty_offer');
       await pc.setLocalDescription(offer);
       if (!this.current(call)) return;
-      const ws = call.ws = new WebSocket(url);
+      let ws: WebSocket;
+      try { ws = call.ws = new WebSocket(url); }
+      catch { this.fail(call, 'failed', 'websocket_start_failed', true); return; }
       call.createdAt = call.lastPong = call.lastPing = Date.now();
       ws.onopen = () => {
         if (!this.current(call)) return;
@@ -270,7 +301,8 @@ export class LiveVoiceCall {
   }
 
   private updateTracks(call: Attempt): void {
-    const enabled = this.current(call) && !this.muted && !call.restoring && call.pc?.connectionState === 'connected';
+    const enabled = this.current(call) && !this.muted && !call.restoring
+      && (call.pc?.connectionState === 'connected' || call.live && call.pc?.connectionState === 'disconnected');
     for (const track of call.media?.getAudioTracks() ?? []) track.enabled = enabled;
   }
 
@@ -294,7 +326,7 @@ export class LiveVoiceCall {
 
   /** Rede/troca de dono deixam a conversa do organizador viva pelos 120 s do servidor. */
   private fail(call: Attempt, code: string, message?: string, fatalMedia = false): void {
-    if (!this.current(call)) return;
+    if (this.attempt !== call || call.closed) return;
     call.terminal = 'failed';
     if (fatalMedia && call.attached && call.ws?.readyState === WebSocket.OPEN) {
       // Não passar por send: uma falha no stop não pode substituir a causa original.
@@ -302,12 +334,16 @@ export class LiveVoiceCall {
       catch { registrarDiag({ evento: 'voice.stop_failed', nivel: 'erro', codigo: 'connection_lost' }); }
     }
     void this.cleanup(call);
-    this.handlers.failed(code, message);
+    this.handlers.failed(code, detail(message));
   }
 
   private tick(call: Attempt): void {
     if (!this.current(call)) return;
     const now = Date.now();
+    if (call.disconnectedAt !== undefined && now - call.disconnectedAt >= DISCONNECT_GRACE_MS) {
+      this.fail(call, 'connection_lost');
+      return;
+    }
     if (call.ws) {
       if (now - call.lastPong >= TIMEOUT_MS || !call.live && now - call.createdAt >= TIMEOUT_MS) {
         this.fail(call, 'connection_lost');
@@ -326,7 +362,7 @@ export class LiveVoiceCall {
 
   // O nível segura envios no servidor mesmo com a folha fechada; não é só animação.
   private meter(call: Attempt): void {
-    if (!this.current(call) || call.pc?.connectionState !== 'connected') return;
+    if (!this.current(call) || call.pc?.connectionState !== 'connected' && call.pc?.connectionState !== 'disconnected') return;
     const now = Date.now();
     const silent = this.muted || call.restoring || !call.media?.getAudioTracks().some(track => track.enabled);
     // Um getStats pendurado não pode prender o último nível positivo depois de silenciar.
@@ -346,7 +382,7 @@ export class LiveVoiceCall {
 
   private async readLevels(call: Attempt): Promise<void> {
     const reports = await call.pc!.getStats();
-    if (!this.current(call) || call.pc?.connectionState !== 'connected') return;
+    if (!this.current(call) || call.pc?.connectionState !== 'connected' && call.pc?.connectionState !== 'disconnected') return;
     let input: number | null = null, output: number | null = null;
     let inputRank = 0, outputRank = 0;
     const samples = new Map<string, LiveVoiceAudioSample>();
@@ -380,6 +416,8 @@ export class LiveVoiceCall {
   private cleanup(call: Attempt): Promise<void> {
     if (call.cleanup) return call.cleanup;
     call.closed = true;
+    clearTimeout(call.openingTimer);
+    call.cancelStart();
     const errors: unknown[] = [];
     const release = (operation: () => void) => { try { operation(); } catch (error) { errors.push(error); } };
     if (call.ws) {
@@ -402,8 +440,12 @@ export class LiveVoiceCall {
       await LiveVoiceAudio.stop();
     }).catch(error => { errors.push(error); }).then(() => {
       if (!errors.length) return;
-      registrarDiag({ evento: 'voice.cleanup_failed', nivel: 'erro', codigo: 'audio_cleanup_failed' });
-      if (this.attempt === call && call.terminal !== 'failed' && call.terminal !== 'taken') this.handlers.failed('failed', detail(errors[0]));
+      throw Object.assign(new Error('audio_restore'), { code: 'audio_restore' });
+    });
+    // O resultado continua rejeitado para quem aguarda stop; fechamentos internos também têm dono para o erro.
+    void call.cleanup.catch(() => {
+      registrarDiag({ evento: 'voice.cleanup_failed', nivel: 'erro', codigo: 'audio_restore' });
+      if (this.attempt === call && call.terminal !== 'failed' && call.terminal !== 'taken') this.handlers.failed('audio_restore', undefined);
     });
     return call.cleanup;
   }

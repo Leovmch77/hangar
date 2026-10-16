@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { LiveVoiceHandlers, LiveVoiceSettingsReply, LiveVoiceState, Server, VoiceMemory } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 const api = vi.hoisted(() => ({ settings: vi.fn(), save: vi.fn(), memory: vi.fn(), forget: vi.fn(), accounts: vi.fn(), models: vi.fn(), peers: vi.fn(), diag: vi.fn() }));
-vi.mock('@hangar/core', () => ({
+vi.mock('@hangar/core', async importOriginal => ({
+  ...await importOriginal<typeof import('@hangar/core')>(),
   baseOf: (server: Server) => server.baseUrl,
   loadLiveVoiceSettings: api.settings, saveLiveVoiceSettings: api.save,
   listVoiceMemory: api.memory, forgetVoiceMemory: api.forget,
@@ -13,6 +14,50 @@ vi.mock('../../stores/servers', async () => {
   const { create } = await import('zustand');
   return { useServers: create(() => ({ servers: [] as Server[], activeId: null as string | null })) };
 });
+
+const native = vi.hoisted(() => {
+  class Stream {
+    track = { enabled: true, onended: null, stop: vi.fn() };
+    getTracks = () => [this.track];
+    getAudioTracks = () => [this.track];
+    release = vi.fn();
+  }
+  class Peer {
+    static all: Peer[] = [];
+    connectionState = 'new';
+    onconnectionstatechange: (() => void) | null = null;
+    addTrack = vi.fn();
+    createDataChannel = () => ({ close: vi.fn() });
+    createOffer = async () => ({ type: 'offer', sdp: 'offer' });
+    setLocalDescription = async () => {};
+    close = vi.fn();
+    constructor() { Peer.all.push(this); }
+    connect() { this.connectionState = 'connected'; this.onconnectionstatechange?.(); }
+  }
+  return { Peer, Stream, start: vi.fn(), stop: vi.fn(), media: vi.fn(), listeners: new Set<(event: { reason: string }) => void>() };
+});
+vi.mock('react-native', () => ({ Platform: { OS: 'ios', Version: 18 }, PermissionsAndroid: {} }));
+vi.mock('react-native-webrtc', () => ({ RTCPeerConnection: native.Peer, mediaDevices: { getUserMedia: native.media } }));
+vi.mock('../../../modules/live-voice-audio', () => ({ default: {
+  start: native.start, stop: native.stop,
+  addListener: (name: string, listener: (event: { reason: string }) => void) => {
+    if (name === 'interruption') native.listeners.add(listener);
+    return { remove: () => { native.listeners.delete(listener); } };
+  },
+} }));
+class NativeSocket {
+  static OPEN = 1;
+  static all: NativeSocket[] = [];
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  messages: Record<string, unknown>[] = [];
+  send = (text: string) => { this.messages.push(JSON.parse(text)); };
+  close = vi.fn();
+  constructor() { NativeSocket.all.push(this); }
+  open() { this.readyState = 1; this.onopen?.(); }
+  receive(message: object) { this.onmessage?.({ data: JSON.stringify(message) }); }
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -36,6 +81,7 @@ let audio: typeof import('./audioSession');
 let calls: Instance[];
 let importGate: Promise<void>;
 let startGate: Promise<void>;
+let realCall = false;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -48,10 +94,16 @@ beforeEach(async () => {
   api.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [] });
   api.peers.mockImplementation(async () => ({ ok: true, json: async () => [{ id: 'peer-b-on-a', base_url: b.baseUrl, web_url: b.lan!.url, token: 'masked' }] }));
   calls = [];
+  realCall = false;
+  native.start.mockReset().mockResolvedValue(undefined);
+  native.stop.mockReset().mockResolvedValue(undefined);
+  native.media.mockReset().mockImplementation(async () => new native.Stream());
+  native.listeners.clear(); native.Peer.all = []; NativeSocket.all = [];
   importGate = Promise.resolve();
   startGate = Promise.resolve();
   vi.doMock('./liveVoice', async () => {
     await importGate;
+    if (realCall) return vi.importActual<typeof import('./liveVoice')>('./liveVoice');
     return { LiveVoiceCall: class {
       handlers: LiveVoiceHandlers;
       start = vi.fn(async () => { await startGate; });
@@ -77,7 +129,7 @@ async function startA() { openA(); await useLiveVoice.getState().start(); return
 describe('uma chamada capturada, sem depender do servidor ativo', () => {
   test('captura A com B ativo; abrir pela conversa B e fechar folha conserva a chamada A', async () => {
     const instance = await startA();
-    expect(instance.start).toHaveBeenCalledWith(a, { server: '', name: 'session-a' });
+    expect(instance.start).toHaveBeenCalledWith(a, { server: '', name: 'session-a' }, expect.any(Number));
     expect(api.settings).toHaveBeenCalledWith(a);
     expect(api.peers).toHaveBeenCalledWith(a, '/api/peers');
     useLiveVoice.getState().dismiss();
@@ -191,6 +243,90 @@ describe('uma chamada capturada, sem depender do servidor ativo', () => {
     useLiveVoice.getState().openFor(b.id, 'guest-session');
     await useLiveVoice.getState().start();
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('restauração com o transporte real e prazo desde o store', () => {
+  beforeEach(() => {
+    realCall = true;
+    vi.useFakeTimers(); vi.setSystemTime(0); vi.stubGlobal('WebSocket', NativeSocket);
+  });
+  afterEach(async () => {
+    await useLiveVoice.getState().stop();
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  });
+  async function live() {
+    openA(); await useLiveVoice.getState().start();
+    const socket = NativeSocket.all.at(-1)!; socket.open(); native.Peer.all.at(-1)!.connect();
+    expect(useLiveVoice.getState().view.phase).toBe('live');
+    return socket;
+  }
+
+  test.each(['sheet', 'notification'] as const)('Encerrar por %s publica audio_restore do Native.stop real sem stop duplicado', async source => {
+    const socket = await live();
+    native.stop.mockRejectedValueOnce(new Error('private-restore-failure'));
+    if (source === 'sheet') await useLiveVoice.getState().stop();
+    else {
+      for (const listener of native.listeners) listener({ reason: 'stop' });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'closed', error: { code: 'audio_restore' } });
+    expect(audio.useVoiceAudioState.getState().voiceActive).toBe(false);
+    expect(native.stop).toHaveBeenCalledOnce();
+    expect(socket.messages.filter(message => message.type === 'stop')).toHaveLength(1);
+    expect(api.diag).toHaveBeenCalledWith({ evento: 'voice.cleanup_failed', nivel: 'erro', codigo: 'audio_restore' });
+    expect(JSON.stringify(api.diag.mock.calls)).not.toContain('private-restore-failure');
+  });
+
+  test.each(['taken', 'fatal'] as const)('restauração que falha preserva %s e não manda stop remoto', async terminal => {
+    const socket = await live();
+    native.stop.mockRejectedValueOnce(new Error('restore-failure'));
+    socket.receive(terminal === 'taken' ? { type: 'taken' } : { type: 'error', code: 'account_missing', detail: 'chosen' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useLiveVoice.getState().view.error).toEqual(terminal === 'taken' ? { code: 'taken' } : { code: 'account_missing', detail: 'chosen' });
+    expect(socket.messages.some(message => message.type === 'stop')).toBe(false);
+    expect(api.diag).toHaveBeenCalledWith({ evento: 'voice.cleanup_failed', nivel: 'erro', codigo: 'audio_restore' });
+  });
+
+  test('rejeição de limpeza e callback antigos não fecham a nova tentativa', async () => {
+    const old = await live();
+    const cleanup = deferred<void>(), entered = deferred<void>();
+    const oldMessage = old.onmessage!;
+    native.stop.mockImplementationOnce(() => { entered.resolve(); return cleanup.promise; });
+    const stopping = useLiveVoice.getState().stop(); await entered.promise;
+    const starting = useLiveVoice.getState().start();
+    cleanup.reject(new Error('old-restore'));
+    await Promise.all([stopping, starting]);
+    const current = NativeSocket.all.at(-1)!; current.open(); native.Peer.all.at(-1)!.connect();
+    oldMessage({ data: JSON.stringify({ type: 'error', code: 'audio_restore' }) });
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'live', error: null });
+    expect(current.close).not.toHaveBeenCalled();
+    expect(audio.useVoiceAudioState.getState().voiceActive).toBe(true);
+  });
+
+  test('limpeza anterior pendente vence em 60s desde start do store sem esperar stop', async () => {
+    await live();
+    const cleanup = deferred<void>(), entered = deferred<void>();
+    native.stop.mockImplementationOnce(() => { entered.resolve(); return cleanup.promise; });
+    const stopping = useLiveVoice.getState().stop(); await entered.promise;
+    const starting = useLiveVoice.getState().start();
+    await vi.advanceTimersByTimeAsync(60000); await starting;
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'closed', error: { code: 'opening_timeout' } });
+    expect(audio.useVoiceAudioState.getState().voiceActive).toBe(false);
+    expect(native.media).toHaveBeenCalledOnce();
+    cleanup.resolve(); await stopping;
+    expect(native.media).toHaveBeenCalledOnce();
+    expect(NativeSocket.all).toHaveLength(1);
+  });
+
+  test('importação pendente expira e retorno tardio não abre transporte', async () => {
+    const gate = deferred<void>(); importGate = gate.promise;
+    openA(); const starting = useLiveVoice.getState().start();
+    await vi.advanceTimersByTimeAsync(60000); await starting;
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'closed', error: { code: 'opening_timeout' } });
+    gate.resolve(); await vi.advanceTimersByTimeAsync(0);
+    expect(native.media).not.toHaveBeenCalled();
+    expect(NativeSocket.all).toHaveLength(0);
   });
 });
 

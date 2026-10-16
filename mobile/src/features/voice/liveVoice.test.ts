@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, type LiveVoiceHandlers, type Server } from '@hangar/core';
+import { configureApi, registrarDiag, type LiveVoiceHandlers, type Server } from '@hangar/core';
 import { LiveVoiceCall } from './liveVoice';
+
+vi.mock('@hangar/core', async importOriginal => ({
+  ...await importOriginal<typeof import('@hangar/core')>(), registrarDiag: vi.fn(),
+}));
 
 const RuntimeLogger = (require('react-native-webrtc/lib/commonjs/Logger') as typeof import('react-native-webrtc/lib/typescript/Logger')).default;
 
 const rtc = vi.hoisted(() => {
+  const offer = vi.fn<() => Promise<{ type: string; sdp: string }>>();
   class Track {
     kind = 'audio'; enabled = true; readyState = 'live';
     onended: (() => void) | null = null;
@@ -23,7 +28,7 @@ const rtc = vi.hoisted(() => {
     channel = { close: vi.fn() };
     addTrack = vi.fn();
     createDataChannel = vi.fn(() => this.channel);
-    createOffer = vi.fn(async () => ({ type: 'offer', sdp: 'offer-sdp' }));
+    createOffer = vi.fn(() => offer());
     setLocalDescription = vi.fn(async (_sdp: unknown) => {});
     setRemoteDescription = vi.fn(async (_sdp: unknown) => {});
     getStats = vi.fn(async () => new Map<string, unknown>([
@@ -35,7 +40,7 @@ const rtc = vi.hoisted(() => {
     connect() { this.connectionState = 'connected'; this.onconnectionstatechange?.(); }
   }
   return {
-    Peer, Stream, getUserMedia: vi.fn<() => Promise<Stream>>(),
+    Peer, Stream, offer, getUserMedia: vi.fn<() => Promise<Stream>>(),
     nativeStart: vi.fn<() => Promise<void>>(), nativeStop: vi.fn<() => Promise<void>>(),
     platform: { OS: 'ios', Version: 18 }, requestPermission: vi.fn<(permission: string) => Promise<string>>(),
     clock: undefined as ReturnType<typeof setInterval> | undefined,
@@ -83,6 +88,7 @@ function deferred<T>() {
 }
 const server: Server = { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' };
 const calls: LiveVoiceCall[] = [];
+const cleanupFailures = new Set<LiveVoiceCall>();
 function makeCall() {
   const handlers: LiveVoiceHandlers = {
     phase: vi.fn(), state: vi.fn(), failed: vi.fn(), taken: vi.fn(), levels: vi.fn(),
@@ -103,9 +109,11 @@ async function openCall() {
 }
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.mocked(registrarDiag).mockClear();
   vi.setSystemTime(0);
   vi.stubGlobal('WebSocket', Socket);
   rtc.Peer.all = []; Socket.all = [];
+  rtc.offer.mockReset().mockResolvedValue({ type: 'offer', sdp: 'offer-sdp' });
   rtc.getUserMedia.mockReset().mockImplementation(async () => new rtc.Stream());
   rtc.platform.OS = 'ios'; rtc.platform.Version = 18;
   rtc.requestPermission.mockReset().mockResolvedValue('granted');
@@ -118,7 +126,10 @@ beforeEach(() => {
     onUnauthorized: vi.fn(), createEventSource: () => { throw new Error('unexpected_stream'); } });
 });
 afterEach(async () => {
-  for (const call of calls.splice(0)) await call.stop();
+  for (const call of calls.splice(0)) {
+    if (cleanupFailures.delete(call)) await expect(call.stop()).rejects.toMatchObject({ code: 'audio_restore' });
+    else await call.stop();
+  }
   clearInterval(rtc.clock); rtc.clock = undefined;
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
@@ -167,6 +178,180 @@ describe('logs WebRTC pela abertura pública da chamada', () => {
 });
 
 describe('LiveVoiceCall público', () => {
+  it.each(['URL', 'WebSocket'] as const)('falha do construtor %s não publica segredo cru nem codificado', async constructor => {
+    const secret = 'private/value?&= á';
+    const error = new Error(`wss://a.test/api/voice?token=${secret}; token=${encodeURIComponent(secret)}`);
+    if (constructor === 'URL') vi.stubGlobal('URL', class { constructor() { throw error; } });
+    else vi.stubGlobal('WebSocket', class { constructor() { throw error; } });
+    const { call, handlers } = makeCall();
+    await call.start({ ...server, token: secret }, null);
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('failed', constructor === 'URL' ? 'invalid_server_url' : 'websocket_start_failed');
+    await call.stop();
+    const published = JSON.stringify({ errors: vi.mocked(handlers.failed).mock.calls, diagnostics: vi.mocked(registrarDiag).mock.calls });
+    expect(published).not.toContain(secret);
+    expect(published).not.toContain(encodeURIComponent(secret));
+  });
+
+  it('conversor central não repassa token em erro de envio ou do servidor', async () => {
+    const { call, socket, handlers } = await openCall();
+    socket.send.mockImplementationOnce(() => { throw new Error('send token=private%2Fvalue&other=value'); });
+    call.setMode('direto');
+    expect(handlers.failed).toHaveBeenCalledWith('connection_lost', 'token=[redacted]');
+    await call.start(server, null);
+    Socket.all.at(-1)!.receive({ type: 'error', code: 'failed', detail: 'request token=another-secret' });
+    expect(handlers.failed).toHaveBeenLastCalledWith('failed', 'token=[redacted]');
+  });
+
+  it('stop devolve a falha da restauração nativa e não a repete como falha genérica', async () => {
+    const { call, socket, handlers } = await openCall();
+    cleanupFailures.add(call);
+    rtc.nativeStop.mockRejectedValueOnce(new Error('private-native-restore'));
+    await expect(call.stop()).rejects.toMatchObject({ code: 'audio_restore' });
+    expect(handlers.phase).toHaveBeenLastCalledWith('closed');
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('audio_restore', undefined);
+    expect(socket.messages.filter(message => message.type === 'stop')).toHaveLength(1);
+  });
+
+  it.each(['taken', 'error'] as const)('limpeza rejeitada após %s é tratada sem substituir a causa original', async terminal => {
+    const { call, socket, handlers } = await openCall();
+    cleanupFailures.add(call);
+    rtc.nativeStop.mockRejectedValueOnce(new Error('restore-failed'));
+    socket.receive(terminal === 'taken' ? { type: 'taken' } : { type: 'error', code: 'account_missing', detail: 'chosen-account' });
+    await expect(call.stop()).rejects.toMatchObject({ code: 'audio_restore' });
+    if (terminal === 'taken') {
+      expect(handlers.taken).toHaveBeenCalledOnce();
+      expect(handlers.failed).not.toHaveBeenCalled();
+    } else expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('account_missing', 'chosen-account');
+    expect(socket.messages.some(message => message.type === 'stop')).toBe(false);
+  });
+
+  it('disconnected tolera 5s, mede microfone e reconecta sem repetir live', async () => {
+    const { pc, socket, handlers } = await openCall(); pc.connect();
+    pc.connectionState = 'disconnected'; pc.onconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(4900);
+    expect(pc.close).not.toHaveBeenCalled();
+    expect(socket.messages).toContainEqual({ type: 'level', input: 0.03 });
+    expect(handlers.failed).not.toHaveBeenCalled();
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(pc.close).not.toHaveBeenCalled();
+    expect(socket.messages.filter(message => message.type === 'live')).toHaveLength(1);
+    expect(vi.mocked(handlers.phase).mock.calls.filter(([phase]) => phase === 'live')).toHaveLength(1);
+  });
+
+  it('disconnected repetido não reinicia tolerância; tick nativo decide mesmo sem timer JS', async () => {
+    const { pc, handlers } = await openCall(); pc.connect();
+    pc.connectionState = 'disconnected'; pc.onconnectionstatechange?.();
+    vi.setSystemTime(4000); pc.onconnectionstatechange?.();
+    vi.setSystemTime(5000);
+    for (const tick of rtc.ticks) tick();
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('connection_lost', undefined);
+    expect(pc.close).toHaveBeenCalledOnce();
+  });
+
+  it.each(['failed', 'closed'])('RTC %s encerra imediatamente, sem tolerância', async state => {
+    const { pc, handlers } = await openCall(); pc.connect();
+    pc.connectionState = state; pc.onconnectionstatechange?.();
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('connection_lost', undefined);
+    expect(pc.close).toHaveBeenCalledOnce();
+  });
+
+  it('callback e tolerância da desconexão antiga não encerram tentativa nova', async () => {
+    const { call, pc, handlers } = await openCall(); pc.connect();
+    const oldChange = pc.onconnectionstatechange!;
+    pc.connectionState = 'disconnected'; oldChange();
+    await call.start(server, null);
+    const current = rtc.Peer.all.at(-1)!; Socket.all.at(-1)!.open(); current.connect();
+    oldChange();
+    await vi.advanceTimersByTimeAsync(5100);
+    expect(current.close).not.toHaveBeenCalled();
+    expect(handlers.failed).not.toHaveBeenCalled();
+  });
+
+  it('captura que nunca resolve expira em 60s e start conclui sem esperar a captura', async () => {
+    const entered = deferred<void>(), pending = deferred<InstanceType<typeof rtc.Stream>>();
+    rtc.getUserMedia.mockImplementationOnce(() => { entered.resolve(); return pending.promise; });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null);
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(60000);
+    await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    expect(Socket.all).toHaveLength(0);
+    expect(rtc.nativeStart).not.toHaveBeenCalled();
+    const media = new rtc.Stream(), released = deferred<void>();
+    media.release.mockImplementationOnce(() => { released.resolve(); });
+    pending.resolve(media); await released.promise;
+    expect(media.track.stop).toHaveBeenCalledOnce();
+    expect(rtc.nativeStart).not.toHaveBeenCalled();
+    expect(Socket.all).toHaveLength(0);
+  });
+
+  it('oferta pendente conta no prazo absoluto e é liberada sem abrir socket tardio', async () => {
+    const entered = deferred<void>(), offer = deferred<{ type: string; sdp: string }>();
+    rtc.offer.mockImplementationOnce(() => { entered.resolve(); return offer.promise; });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null); await entered.promise;
+    await vi.advanceTimersByTimeAsync(60000); await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    const pc = rtc.Peer.all[0];
+    expect(pc.close).toHaveBeenCalledOnce();
+    expect(rtc.nativeStop).toHaveBeenCalledOnce();
+    offer.resolve({ type: 'offer', sdp: 'late-offer' }); await offer.promise;
+    expect(pc.setLocalDescription).not.toHaveBeenCalled();
+    expect(Socket.all).toHaveLength(0);
+  });
+
+  it('prazo inclui limpeza anterior pendente e não fica esperando Native.stop', async () => {
+    const { call, handlers } = await openCall();
+    const entered = deferred<void>(), cleanup = deferred<void>();
+    rtc.nativeStop.mockImplementationOnce(() => { entered.resolve(); return cleanup.promise; });
+    const starting = call.start(server, null); await entered.promise;
+    await vi.advanceTimersByTimeAsync(60000); await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    expect(rtc.getUserMedia).toHaveBeenCalledTimes(1);
+    cleanup.resolve(); await call.stop();
+    expect(Socket.all).toHaveLength(1);
+  });
+
+  it('Native.start tardio é restaurado depois do timeout sem iniciar RTC', async () => {
+    const entered = deferred<void>(), native = deferred<void>(), stopped = deferred<void>();
+    rtc.nativeStart.mockImplementationOnce(() => { entered.resolve(); return native.promise; });
+    rtc.nativeStop.mockImplementationOnce(async () => { stopped.resolve(); });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null); await entered.promise;
+    vi.setSystemTime(60000);
+    for (const tick of rtc.ticks) tick();
+    await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    expect(rtc.Peer.all).toHaveLength(0);
+    native.resolve(); await stopped.promise;
+    expect(rtc.nativeStop).toHaveBeenCalledOnce();
+    expect(Socket.all).toHaveLength(0);
+  });
+
+  it('retorno tardio confere deadline mesmo quando timer JS não teve oportunidade de rodar', async () => {
+    const entered = deferred<void>(), media = deferred<InstanceType<typeof rtc.Stream>>();
+    rtc.getUserMedia.mockImplementationOnce(() => { entered.resolve(); return media.promise; });
+    const { call, handlers } = makeCall();
+    const starting = call.start(server, null); await entered.promise;
+    vi.setSystemTime(60000);
+    const stream = new rtc.Stream(), released = deferred<void>();
+    stream.release.mockImplementationOnce(() => { released.resolve(); });
+    media.resolve(stream); await released.promise; await starting;
+    expect(handlers.failed).toHaveBeenCalledExactlyOnceWith('opening_timeout', undefined);
+    expect(rtc.nativeStart).not.toHaveBeenCalled();
+  });
+
+  it('chamada live não expira aos 60s da abertura', async () => {
+    const { pc, socket, handlers } = await openCall(); pc.connect();
+    for (let period = 0; period < 4; period++) {
+      await vi.advanceTimersByTimeAsync(20000); socket.receive({ type: 'pong' });
+    }
+    expect(handlers.failed).not.toHaveBeenCalled();
+    expect(pc.close).not.toHaveBeenCalled();
+  });
+
   it('liga A com B ativo, captura só áudio e anuncia apenas as ferramentas atendidas', async () => {
     const { socket, pc, call } = await openCall();
     expect(socket.url).toBe('wss://a.test/api/voice?token=token-a');
@@ -247,8 +432,9 @@ describe('LiveVoiceCall público', () => {
     const starting = call.start(server, null);
     await entered.promise;
     await call.stop();
-    pending.resolve('granted');
     await starting;
+    pending.resolve('granted');
+    await pending.promise;
     expect(rtc.getUserMedia).not.toHaveBeenCalled();
     expect(rtc.nativeStart).not.toHaveBeenCalled();
     expect(handlers.failed).not.toHaveBeenCalled();
@@ -275,8 +461,11 @@ describe('LiveVoiceCall público', () => {
     const starting = call.start(server, null);
     await entered.promise;
     await call.stop();
-    const stream = new rtc.Stream(); pending.resolve(stream);
     await starting;
+    const stream = new rtc.Stream(), released = deferred<void>();
+    stream.release.mockImplementationOnce(() => { released.resolve(); });
+    pending.resolve(stream);
+    await released.promise;
     expect(stream.track.stop).toHaveBeenCalledTimes(1);
     expect(stream.release).toHaveBeenCalledTimes(1);
     expect(Socket.all).toHaveLength(0);

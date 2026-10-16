@@ -117,6 +117,8 @@
   "native_live_voice_error_foreground_required": "Open Hangar and keep the app in the foreground to start the conversation.",
   "native_live_voice_error_dictation_active": "Finish dictation before starting a voice conversation.",
   "native_live_voice_error_audio_levels_unavailable": "Audio levels are unavailable on this device.",
+  "native_live_voice_error_audio_restore": "Could not restore the device audio after ending the call.",
+  "native_live_voice_error_opening_timeout": "Starting the call took too long. Try again.",
   "native_live_voice_error_short": "Error",
   "native_live_voice_notification_body": "Voice call in progress.",
   "native_live_voice_close": "Close live voice without ending the call",

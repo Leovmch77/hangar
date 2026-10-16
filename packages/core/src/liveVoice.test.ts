@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi } from './apiEnv';
 import {
-  forgetVoiceMemory, listVoiceMemory, liveVoiceBarLevel, liveVoiceRms,
+  forgetVoiceMemory, isLiveVoiceState, listVoiceMemory, liveVoiceBarLevel, liveVoiceRms, liveVoiceStatus,
   loadLiveVoiceSettings, parseLiveVoiceMessage, saveLiveVoiceSettings,
   type LiveVoiceSettings, type LiveVoiceState,
 } from './liveVoice';
@@ -72,6 +72,75 @@ describe('configuração da voz no servidor escolhido', () => {
 });
 
 describe('protocolo público e níveis puros', () => {
+  const fullState: LiveVoiceState = {
+    ...state, draft: 'draft-fixture', plan: { path: '/plan-fixture.md', markdown: '# plan-fixture' },
+    backstage: [{ kind: 'heard', text: 'heard-fixture' }, { kind: 'result', text: 'result-fixture' }, { kind: 'answer', text: 'answer-fixture' }],
+    action: { kind: 'tool', text: 'action-fixture' }, thought: 'thought-fixture', progress: 'progress-fixture',
+    followed: [{ server: 'peer-fixture', name: 'session-fixture' }],
+  };
+
+  it.each([
+    { field: 'mode', patch: { mode: 'future-mode' }, normalized: { mode: null } },
+    { field: 'activity', patch: { activity: 'future-activity' }, normalized: { activity: null } },
+    { field: 'backstage.kind', patch: { backstage: [{ kind: 'future-backstage', text: 'backstage-fixture' }] },
+      normalized: { backstage: [{ kind: null, text: 'backstage-fixture' }] } },
+    { field: 'action.kind', patch: { action: { kind: 'future-action', text: 'action-fixture' } },
+      normalized: { action: { kind: null, text: 'action-fixture' } } },
+    { field: 'combined', patch: { mode: 'future-mode', activity: 'future-activity',
+      backstage: [{ kind: 'heard', text: 'heard-fixture' }, { kind: 'future-backstage', text: 'backstage-fixture' }],
+      action: { kind: 'future-action', text: 'action-fixture' } },
+      normalized: { mode: null, activity: null,
+        backstage: [{ kind: 'heard', text: 'heard-fixture' }, { kind: null, text: 'backstage-fixture' }],
+        action: { kind: null, text: 'action-fixture' } } },
+  ])('normaliza somente o enum futuro ($field), preservando o retrato completo', ({ patch, normalized }) => {
+    const incoming = { ...fullState, ...patch };
+    expect(isLiveVoiceState(incoming)).toBe(false);
+    const message = parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: incoming }));
+    expect(message).toEqual({ type: 'state', state: { ...fullState, ...normalized } });
+    if (message?.type !== 'state') throw new Error('missing-state');
+    expect(isLiveVoiceState(message.state)).toBe(true);
+  });
+
+  it.each([
+    { mode: 'direct', activity: 'idle', kind: 'tool' },
+    { mode: 'plan', activity: 'thinking', kind: 'search' },
+    { mode: 'direct', activity: 'searching', kind: 'command' },
+    { mode: 'plan', activity: 'working', kind: 'tool' },
+  ])('preserva enums reconhecidos ($mode/$activity/$kind)', ({ mode, activity, kind }) => {
+    const known = { ...fullState, mode, activity, action: { kind, text: 'action-fixture' } };
+    expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: known }))).toEqual({ type: 'state', state: known });
+  });
+
+  it('aceita o retrato neutro e mantém a chamada ouvindo sem inventar atividade', () => {
+    const neutral: LiveVoiceState = { ...fullState, mode: null, activity: null,
+      backstage: [{ kind: null, text: 'backstage-fixture' }], action: { kind: null, text: 'action-fixture' } };
+    expect(isLiveVoiceState(neutral)).toBe(true);
+    expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: neutral }))).toEqual({ type: 'state', state: neutral });
+    expect(liveVoiceStatus(true, 'idle', false, neutral.activity)).toBe('listening');
+  });
+
+  it.each([
+    { field: 'missing-mode', patch: { mode: undefined } },
+    { field: 'mode', patch: { mode: 42 } },
+    { field: 'activity', patch: { activity: false } },
+    { field: 'backstage', patch: { backstage: {} } },
+    { field: 'backstage-item', patch: { backstage: [null] } },
+    { field: 'backstage.kind', patch: { backstage: [{ kind: {}, text: 'backstage-fixture' }] } },
+    { field: 'backstage.text', patch: { backstage: [{ kind: 'future-backstage', text: 42 }] } },
+    { field: 'action', patch: { action: [] } },
+    { field: 'action.kind', patch: { action: { text: 'action-fixture' } } },
+    { field: 'action.text', patch: { action: { kind: 'future-action', text: false } } },
+    { field: 'draft', patch: { draft: {} } },
+    { field: 'error', patch: { error: { code: 'error-fixture', text: 42 } } },
+    { field: 'plan', patch: { plan: { path: '/plan-fixture.md', markdown: null } } },
+    { field: 'limits', patch: { limits: { five_hour: { used_percent: '25', resets_at: null }, seven_day: null } } },
+    { field: 'context', patch: { context: { used: '12', window: null } } },
+    { field: 'followed', patch: { followed: [{ server: 'peer-fixture' }] } },
+    { field: 'server', patch: { server: null } },
+  ])('continua recusando estrutura malformada ($field) mesmo com enum futuro', ({ patch }) => {
+    expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: { ...fullState, mode: 'future-mode', ...patch } }))).toBeNull();
+  });
+
   it('aceita o retrato completo e não aceita started público ou state incompleto', () => {
     expect(parseLiveVoiceMessage(JSON.stringify({ type: 'state', state }))).toEqual({ type: 'state', state });
     expect(parseLiveVoiceMessage('{')).toBeNull();

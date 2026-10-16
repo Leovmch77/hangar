@@ -2,7 +2,7 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Credencial, LiveVoiceState, LiveVoiceSettingsReply } from '@hangar/core';
+import { parseLiveVoiceMessage, type Credencial, type LiveVoiceState, type LiveVoiceSettingsReply } from '@hangar/core';
 import { LiveVoiceSheet, type LiveVoiceSheetProps, type LiveVoiceView } from './LiveVoiceSheet';
 import { LiveVoiceButton } from './LiveVoiceButton';
 import * as m from '../../paraglide/messages';
@@ -151,6 +151,27 @@ describe('LiveVoiceSheet', () => {
     expect(callbacks.onRetry).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { code: 'audio_restore', message: () => m.native_live_voice_error_audio_restore() },
+    { code: 'opening_timeout', message: () => m.native_live_voice_error_opening_timeout() },
+  ])('apresenta a mensagem traduzida de $code sem mostrar o código cru', async ({ code, message }) => {
+    view.phase = 'closed';
+    view.error = { code };
+    await render();
+    expect(container.textContent).toContain(message());
+    expect(container.textContent).not.toContain(code);
+    await click(m.sync_retry());
+    expect(callbacks.onRetry).toHaveBeenCalledOnce();
+  });
+
+  it('não exibe token recebido como código de erro desconhecido', async () => {
+    view.phase = 'closed';
+    view.error = { code: 'token-fixture' };
+    await render();
+    expect(container.textContent).toContain(m.live_voice_error_failed());
+    expect(container.textContent).not.toContain('token-fixture');
+  });
+
   it('mantém mudo e encerrar acessíveis enquanto conecta e fecha a folha sem parar a chamada', async () => {
     view.phase = 'connecting';
     await render();
@@ -197,6 +218,47 @@ describe('LiveVoiceSheet', () => {
     view.state = { ...view.state, mode: 'plan' };
     await render();
     expect(button(m.live_voice_mode_plan()).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('não inventa modo nem atividade em enums futuros e conserva a chamada e seus controles', async () => {
+    const message = parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: { ...liveState(),
+      mode: 'future-mode', activity: 'future-activity', draft: 'draft-fixture',
+      backstage: [{ kind: 'future-backstage', text: 'backstage-fixture' }],
+      action: { kind: 'future-action', text: 'action-fixture' }, progress: 'progress-fixture', thought: 'thought-fixture' } }));
+    if (message?.type !== 'state') throw new Error('missing-state');
+    view.phase = 'live';
+    view.state = message.state;
+    await render();
+    expect(button(m.live_voice_mode_direct())).toBeUndefined();
+    expect(button(m.live_voice_mode_plan())).toBeUndefined();
+    expect(container.textContent).toContain(m.codex_voice_listening());
+    for (const text of ['draft-fixture', 'backstage-fixture', 'effective-model', '25%']) expect(container.textContent).toContain(text);
+    for (const text of ['action-fixture', 'progress-fixture', 'thought-fixture', 'future-mode', 'future-activity'])
+      expect(container.textContent).not.toContain(text);
+    expect(button(m.live_voice_mute()).disabled).toBe(false);
+    expect(button(m.live_voice_stop()).disabled).toBe(false);
+    await click(m.live_voice_mute());
+    expect(callbacks.onToggleMute).toHaveBeenCalledOnce();
+    await click(m.live_voice_stop());
+    expect(callbacks.onStop).toHaveBeenCalledOnce();
+    expect(callbacks.onMode).not.toHaveBeenCalled();
+    view.state = { ...message.state, mode: 'plan' };
+    await render();
+    expect(button(m.live_voice_mode_plan()).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('conserva os textos de ação e bastidores sem exigir categoria reconhecida', async () => {
+    const message = parseLiveVoiceMessage(JSON.stringify({ type: 'state', state: { ...liveState(), activity: 'working',
+      backstage: [{ kind: 'future-backstage', text: 'backstage-fixture' }], action: { kind: 'future-action', text: 'action-fixture' } } }));
+    if (message?.type !== 'state') throw new Error('missing-state');
+    view.phase = 'live';
+    view.state = message.state;
+    await render();
+    expect(container.textContent).toContain(m.live_voice_status_working());
+    expect(container.textContent).toContain('backstage-fixture');
+    expect(container.textContent).toContain('action-fixture');
+    expect(container.textContent).not.toContain('future-backstage');
+    expect(container.textContent).not.toContain('future-action');
   });
 
   it('entrega plano ao renderizador Markdown e mostra pedido, atividade, seguidas e escolhas efetivas', async () => {

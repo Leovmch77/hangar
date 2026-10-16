@@ -81,6 +81,7 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
   let generation = 0;
   let call: LiveVoiceCall | null = null;
   let stopping: Promise<void> = Promise.resolve();
+  let opening: { token: number; deadline: number; timer: ReturnType<typeof setTimeout>; cancel(): void } | null = null;
   let userMuted = false;
   let settingsOpen = false;
   let navigator: { navigate: Navigation } | null = null;
@@ -155,12 +156,19 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
     const token = generation;
     // O transporte cancela a tentativa antes do primeiro await do stop.
     stopping = Promise.all([stopping, instance.stop()]).then(() => {}).catch(() => {
-      if (generation === token) updateView({ error: get().view.error ?? { code: 'playback' } });
+      if (generation === token) updateView({ error: get().view.error ?? { code: 'audio_restore' } });
     });
     return stopping;
   }
+  function cancelOpening(): void {
+    if (!opening) return;
+    clearTimeout(opening.timer);
+    opening.cancel();
+    opening = null;
+  }
   function end(error: LiveVoiceView['error'], stopRemote = true): Promise<void> {
     generation++;
+    cancelOpening();
     const instance = call;
     call = null;
     setLiveVoiceAudioActive(false);
@@ -207,7 +215,8 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
     return {
       phase(phase) {
         if (!valid()) return;
-        if (phase === 'closed') { void end(null, false); return; }
+        if (phase === 'closed') { void end(null); return; }
+        if (phase === 'live') cancelOpening();
         updateView({ phase, ...(phase === 'live' ? { liveSince: Date.now() } : {}) });
       },
       state(state) {
@@ -295,27 +304,43 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
       if (!server) { updateView({ error: { code: 'server_removed', detail: m.chat_servidor_removido() } }); return; }
       if (!get().foreground) { updateView({ error: { code: 'foreground_required' } }); return; }
       if (useVoiceAudioState.getState().dictations > 0) { updateView({ error: { code: 'dictation_active' } }); return; }
+      const deadline = Date.now() + 60_000;
       const token = ++generation;
+      cancelOpening();
+      let cancel!: () => void;
+      const cancelled = new Promise<void>(resolve => { cancel = resolve; });
+      const valid = () => {
+        if (generation !== token) return false;
+        if (Date.now() < deadline) return true;
+        void end({ code: 'opening_timeout' });
+        return false;
+      };
+      opening = { token, deadline, cancel, timer: setTimeout(valid, Math.max(0, deadline - Date.now())) };
       userMuted = false;
       // A trava vem antes de qualquer import, permissão ou leitura de rede.
       updateView({ phase: 'connecting', error: null, state: null, liveSince: null, muted: false, dictating: false });
       setLiveVoiceAudioActive(true);
       void loadPeers(server);
-      try {
-        await stopping;
-        if (generation !== token) return;
-        const { LiveVoiceCall } = await import('./liveVoice');
-        if (generation !== token) return;
-        if (!currentServer()) { await end({ code: 'server_removed', detail: m.chat_servidor_removido() }); return; }
-        const instance = new LiveVoiceCall(handlers(token));
-        call = instance;
-        instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
-        await instance.start(server, screen());
-        if (generation !== token) return;
-        instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
-      } catch (error) {
-        if (generation === token) await end({ code: errorCode(error) });
-      }
+      const start = async () => {
+        try {
+          await stopping;
+          if (!valid()) return;
+          const { LiveVoiceCall } = await import('./liveVoice');
+          if (!valid()) return;
+          if (!currentServer()) { void end({ code: 'server_removed', detail: m.chat_servidor_removido() }); return; }
+          const instance = new LiveVoiceCall(handlers(token));
+          call = instance;
+          instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
+          // A partir daqui o transporte confere o mesmo prazo também pelo tick nativo.
+          if (opening?.token === token) clearTimeout(opening.timer);
+          await instance.start(server, screen(), deadline);
+          if (generation !== token) return;
+          instance.setMuted(userMuted || useVoiceAudioState.getState().dictations > 0);
+        } catch (error) {
+          if (generation === token) void end({ code: errorCode(error) });
+        }
+      };
+      await Promise.race([start(), cancelled]);
     },
     async stop() {
       updateView({ error: null });
@@ -426,7 +451,12 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
       return () => { if (chat === registration) { chat = null; set({ chatControls: null }); } };
     },
     setRoute(route) { set({ route }); publishScreen(); },
-    setForeground(foreground) { set({ foreground }); publishScreen(); },
+    setForeground(foreground) {
+      set({ foreground });
+      if (foreground && opening && get().view.phase === 'connecting' && Date.now() >= opening.deadline)
+        void end({ code: 'opening_timeout' });
+      publishScreen();
+    },
     reconcileServers() {
       if (!get().server || currentServer()) return;
       if (inCall(get().view)) void end({ code: 'server_removed', detail: m.chat_servidor_removido() });

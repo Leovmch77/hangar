@@ -117,6 +117,8 @@
   "native_live_voice_error_foreground_required": "Abra o Hangar e mantenha o app em primeiro plano para começar a conversa.",
   "native_live_voice_error_dictation_active": "Termine o ditado antes de começar a conversa por voz.",
   "native_live_voice_error_audio_levels_unavailable": "Os níveis de áudio não estão disponíveis neste aparelho.",
+  "native_live_voice_error_audio_restore": "Não foi possível restaurar o áudio do aparelho após encerrar a chamada.",
+  "native_live_voice_error_opening_timeout": "A abertura da chamada demorou demais. Tente novamente.",
   "native_live_voice_error_short": "Falha",
   "native_live_voice_notification_body": "Chamada de voz em andamento.",
   "native_live_voice_close": "Fechar voz ao vivo sem encerrar a chamada",

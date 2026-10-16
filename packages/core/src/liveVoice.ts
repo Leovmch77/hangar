@@ -30,17 +30,17 @@ export interface VoiceMemory {
 }
 export interface LiveVoiceState {
   phase: string;
-  mode: 'direct' | 'plan';
-  activity: LiveVoiceActivity;
+  mode: 'direct' | 'plan' | null;
+  activity: LiveVoiceActivity | null;
   draft: string | null;
   error: { code: string; text: string } | null;
   plan: { path: string; markdown: string } | null;
   effective: { model: string | null; effort: string | null; tier: string | null } | null;
   context: { used: number; window: number | null } | null;
   limits: { five_hour: LiveVoiceRateWindow; seven_day: LiveVoiceRateWindow };
-  backstage: { kind: 'heard' | 'result' | 'answer'; text: string }[];
+  backstage: { kind: 'heard' | 'result' | 'answer' | null; text: string }[];
   thought: string;
-  action: { kind: 'tool' | 'search' | 'command'; text: string } | null;
+  action: { kind: 'tool' | 'search' | 'command' | null; text: string } | null;
   progress?: string | null;
   followed: { server: string; name: string }[];
   server: string;
@@ -106,31 +106,51 @@ function screen(value: unknown): boolean {
 }
 export function isLiveVoiceState(value: unknown): value is LiveVoiceState {
   if (!object(value)) return false;
-  return typeof value.phase === 'string' && (value.mode === 'direct' || value.mode === 'plan')
-    && (value.activity === 'idle' || value.activity === 'thinking' || value.activity === 'searching' || value.activity === 'working')
+  return typeof value.phase === 'string' && (value.mode === null || value.mode === 'direct' || value.mode === 'plan')
+    && (value.activity === null || value.activity === 'idle' || value.activity === 'thinking' || value.activity === 'searching' || value.activity === 'working')
     && nullableString(value.draft)
     && (value.error === null || object(value.error) && typeof value.error.code === 'string' && typeof value.error.text === 'string')
     && (value.plan === null || object(value.plan) && typeof value.plan.path === 'string' && typeof value.plan.markdown === 'string')
     && (value.effective === null || object(value.effective) && nullableString(value.effective.model) && nullableString(value.effective.effort) && nullableString(value.effective.tier))
     && (value.context === null || object(value.context) && finite(value.context.used) && nullableNumber(value.context.window))
     && object(value.limits) && rateWindow(value.limits.five_hour) && rateWindow(value.limits.seven_day)
-    && Array.isArray(value.backstage) && value.backstage.every(v => object(v) && typeof v.text === 'string' && (v.kind === 'heard' || v.kind === 'result' || v.kind === 'answer'))
+    && Array.isArray(value.backstage) && value.backstage.every(v => object(v) && typeof v.text === 'string' && (v.kind === null || v.kind === 'heard' || v.kind === 'result' || v.kind === 'answer'))
     && typeof value.thought === 'string'
-    && (value.action === null || object(value.action) && typeof value.action.text === 'string' && (value.action.kind === 'tool' || value.action.kind === 'search' || value.action.kind === 'command'))
+    && (value.action === null || object(value.action) && typeof value.action.text === 'string' && (value.action.kind === null || value.action.kind === 'tool' || value.action.kind === 'search' || value.action.kind === 'command'))
     && (value.progress === undefined || nullableString(value.progress))
     && Array.isArray(value.followed) && value.followed.every(screen)
     && typeof value.server === 'string' && typeof value.client === 'string'
     && (value.memory === undefined || finite(value.memory));
 }
 
-/** Corpo desconhecido nunca vira um retrato parcial aceito pelo cliente. */
+function neutralEnum(value: unknown, known: readonly string[]): unknown {
+  return typeof value === 'string' && !known.includes(value) ? null : value;
+}
+function parseLiveVoiceState(value: unknown): LiveVoiceState | null {
+  if (!object(value)) return null;
+  // Enum futuro perde só a categoria, não os dados úteis da chamada.
+  const state = {
+    ...value,
+    mode: neutralEnum(value.mode, ['direct', 'plan']),
+    activity: neutralEnum(value.activity, ['idle', 'thinking', 'searching', 'working']),
+    backstage: Array.isArray(value.backstage) ? value.backstage.map(item => object(item)
+      ? { ...item, kind: neutralEnum(item.kind, ['heard', 'result', 'answer']) } : item) : value.backstage,
+    action: object(value.action) ? { ...value.action, kind: neutralEnum(value.action.kind, ['tool', 'search', 'command']) } : value.action,
+  };
+  return isLiveVoiceState(state) ? state : null;
+}
+
+/** Corpo malformado nunca vira um retrato parcial aceito pelo cliente. */
 export function parseLiveVoiceMessage(raw: string): LiveVoiceServerMessage | null {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return null; }
   if (!object(value)) return null;
   switch (value.type) {
     case 'answer': return typeof value.sdp === 'string' && value.sdp.trim() ? { type: 'answer', sdp: value.sdp } : null;
-    case 'state': return isLiveVoiceState(value.state) ? { type: 'state', state: value.state } : null;
+    case 'state': {
+      const state = parseLiveVoiceState(value.state);
+      return state ? { type: 'state', state } : null;
+    }
     case 'tool': return Number.isSafeInteger(value.call) && finite(value.call) && value.call >= 0 && typeof value.name === 'string'
       ? { type: 'tool', call: value.call, name: value.name, args: value.args } : null;
     case 'error': return typeof value.code === 'string' && value.code && (value.detail == null || typeof value.detail === 'string')
@@ -212,7 +232,7 @@ export function settledLiveVoiceSpeaker(shown: LiveVoiceSpeaker, since: number, 
   if (raw === shown) return [shown, now];
   return now - since >= LIVE_VOICE_SPEAKER_HOLD_MS ? [raw, now] : [shown, since];
 }
-export function liveVoiceStatus(live: boolean, who: LiveVoiceSpeaker, muted: boolean, activity: LiveVoiceActivity | undefined): LiveVoiceStatus {
+export function liveVoiceStatus(live: boolean, who: LiveVoiceSpeaker, muted: boolean, activity: LiveVoiceActivity | null | undefined): LiveVoiceStatus {
   if (!live) return 'connecting';
   if (who === 'voice') return 'voice';
   if (muted) return 'muted';

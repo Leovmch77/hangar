@@ -48,8 +48,7 @@ class LiveVoiceAudioService : Service() {
 
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     if (change == AudioManager.AUDIOFOCUS_LOSS ||
-      change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-      change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
+      change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
     ) interrupt("focus_lost")
   }
 
