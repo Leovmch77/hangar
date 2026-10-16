@@ -212,6 +212,29 @@ async fn reopen(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> 
     super::open::open_session(&host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
 }
 
+/// Tentativas de uma sessão que falhou por um motivo passageiro (conta ocupada, multiplexador calado).
+const TRIES: u32 = 3;
+
+/// O que acontece depois de uma passada: a sessão que falhou por um motivo passageiro tenta de novo até
+/// `TRIES`; a que nasceu, a que falhou de vez e a que esgotou as tentativas saem (`done`). `true` = nada
+/// mais a tentar, e o servidor novo pode virar o da fotografia.
+fn settle(results: &[(String, Result<(), String>)], attempts: &mut std::collections::HashMap<String, u32>, done: &mut HashSet<String>) -> bool {
+    let passing = |code: &str| matches!(code, "account_busy" | "erro_mux_indisponivel" | "erro_lista_indisponivel" | "restore_spec_job"
+        | "erro_grupo_limpeza_falhou");
+    let mut left = false;
+    for (key, result) in results {
+        match result {
+            Err(code) if passing(code) => {
+                let tried = attempts.entry(key.clone()).or_insert(0);
+                *tried += 1;
+                if *tried < TRIES { left = true; } else { done.insert(key.clone()); }
+            }
+            _ => { done.insert(key.clone()); }
+        }
+    }
+    !left
+}
+
 /// Reabre uma sessão e grava o resultado no diário.
 async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry) -> Result<(), String> {
     let result = reopen(st, key, entry).await;
@@ -232,6 +255,7 @@ async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry
 /// tmux que caiu com o Rust de pé), reabre o que ele perdeu; com o mesmo, fotografa.
 pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::ffi::OsString) {
     let mut snap = read(&home);
+    let (mut attempts, mut done) = (std::collections::HashMap::new(), HashSet::new());
     loop {
         let current = mux_start(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
@@ -251,11 +275,17 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
             // Sem a lista ou sem o multiplexador não se sabe o que existe: nada é reaberto por cima.
             (false, None) => tracing::warn!(code = "session_restore_undecided", "sem a lista ou o multiplexador; o restore espera"),
             (false, Some(pending)) => {
+                let pending: Vec<(String, Entry)> = pending.into_iter().filter(|(key, _)| !done.contains(key)).collect();
                 if !pending.is_empty() { tracing::info!(count = pending.len(), "restaurando as sessões com terminal que o multiplexador perdeu"); }
-                for (key, entry) in &pending { let _ = restore_one(&st, key, entry).await; }
-                // O servidor de agora (o restore pode tê-lo subido) passa a ser o da fotografia: um reinício só do
-                // Rust não reabre nada.
-                if let MuxStart::Started(at) = mux_start(&program).await { snap.mux_started = Some(at); }
+                let mut results = Vec::new();
+                for (key, entry) in &pending { results.push((key.clone(), restore_one(&st, key, entry).await)); }
+                // Só com nada mais a tentar o servidor de agora (o restore pode tê-lo subido) passa a ser o da
+                // fotografia; antes disso as entradas ficam, e um reinício só do Rust não reabre nada.
+                if settle(&results, &mut attempts, &mut done) && let MuxStart::Started(at) = mux_start(&program).await {
+                    snap.mux_started = Some(at);
+                    attempts.clear();
+                    done.clear();
+                }
             }
         }
         tokio::time::sleep(EVERY).await;
@@ -331,6 +361,17 @@ mod tests {
         assert_eq!(keys(to_restore(&snap, MuxStart::Started(5000), &live)), Some(vec!["k2".to_owned()]), "outro servidor (reboot, kill-server)");
         assert_eq!(keys(to_restore(&snap, MuxStart::NoServer, &HashSet::new())), Some(vec!["k1".to_owned(), "k2".to_owned()]), "nenhum servidor");
         assert_eq!(keys(to_restore(&snap, MuxStart::Unknown, &HashSet::new())), None, "multiplexador calado: decide depois");
+    }
+
+    #[test]
+    fn a_passing_failure_is_tried_again_and_the_new_server_waits_for_it() {
+        let (mut attempts, mut done) = (std::collections::HashMap::new(), HashSet::new());
+        let results = |code: &str| vec![("ok".to_owned(), Ok(())), ("bad".to_owned(), Err("restore_no_spec".to_owned())), ("busy".to_owned(), Err(code.to_owned()))];
+        assert!(!settle(&results("account_busy"), &mut attempts, &mut done), "a conta ocupada tenta de novo");
+        assert!(done.contains("ok") && done.contains("bad") && !done.contains("busy"), "{done:?}");
+        assert!(!settle(&[("busy".to_owned(), Err("erro_mux_indisponivel".to_owned()))], &mut attempts, &mut done));
+        assert!(settle(&[("busy".to_owned(), Err("account_busy".to_owned()))], &mut attempts, &mut done), "esgotou: o servidor novo é adotado");
+        assert!(done.contains("busy"));
     }
 
     #[test]
