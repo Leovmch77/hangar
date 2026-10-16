@@ -16,6 +16,7 @@ use serde_json::{Value,json};
 
 use super::{BODY_LIMIT,busy_refusal,detail_body,forward_whole,session_name,too_large};
 use crate::mods::http::reply;
+use crate::list::discover::real;
 use crate::routes::{AppState,gate,pass};
 use crate::runtime::claude_reopen::{Between,ReopenFailure};
 use crate::runtime::protocol::RuntimeError;
@@ -28,7 +29,7 @@ pub const FULL_PCT:f64 = 99.0;
 /// `_account_targets`: as contas Claude, sem a atual, a de mais folga primeiro, sem leitura depois e as
 /// cheias no fim. `pct` é a janela mais cheia (`None` sem leitura).
 pub fn targets(catalog:&Value,quotas:&[Value],current:Option<&str>) -> Vec<Value> {
-    let same=|a:&str,b:&str|a==b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a,b)|a==b);
+    let same=|a:&str,b:&str|a==b || real(a)==real(b);
     let mut out:Vec<Value>=catalog.as_array().into_iter().flatten().filter_map(|row| {
         let path=row["path"].as_str()?;
         if current.is_some_and(|current|same(current,path)) {return None;}
@@ -238,8 +239,7 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
         Account::Engine{..}=>true,
         _=>false,
     };
-    let same=|a:&Path,b:&Path|a==b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a,b)|a==b);
-    if !leave_engine && !spec.parked() && same(&account_dir(&env,&spec),Path::new(&destination)) {
+    if !leave_engine && !spec.parked() && real(&account_dir(&env,&spec).to_string_lossy())==real(&destination) {
         return reply(Some(&parts.headers),StatusCode::OK,json!({"ok":true,"config_dir":destination}));
     }
     let outcome=reopen_in(&st,&runtime,&name,&spec,&destination,leave_engine,ChangeReason::AccountSwitch).await;

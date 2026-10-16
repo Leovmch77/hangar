@@ -82,14 +82,7 @@ pub(crate) fn account_mode(env: &AccountEnvironment, config_dir: Option<&str>) -
 /// `pensamento.ler()`: `showThinkingSummaries` do `settings.json` compartilhado (o `~/.claude` real).
 fn thinking_summaries(home: &Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(home.join(".claude").join("settings.json")) else { return false };
-    serde_json::from_str::<Value>(raw.trim()).ok().is_some_and(|data| match &data["showThinkingSummaries"] {
-        Value::Bool(on) => *on,
-        Value::Null => false,
-        Value::String(s) => !s.is_empty(),
-        Value::Number(n) => n.as_f64() != Some(0.0),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    })
+    serde_json::from_str::<Value>(raw.trim()).ok().is_some_and(|data| crate::list::discover_other::truthy(&data["showThinkingSummaries"]))
 }
 
 /// O comando e o ambiente do `claude -p` desta subida. `meta` é o sidecar (conversa, escolhas de plugins

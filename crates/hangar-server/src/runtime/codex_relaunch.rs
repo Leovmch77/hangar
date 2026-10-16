@@ -502,11 +502,10 @@ impl Watcher {
         let base = registry.codex_environment();
         let refused = |error:crate::session_open::OpenError|refuse(&error.msg);
         // `_exigir_lancador_codex`: o pane morreria na hora com o `new-session` devolvendo sucesso.
-        let path:Vec<(String,String)> = base.base.iter().map(|(k,v)|(k.clone(),v.clone())).collect();
-        if super::process::resolve_program(codex::LAUNCHER,&path).is_none() {
+        if super::process::resolve_program(codex::LAUNCHER,&base.base).is_none() {
             return Err(RuntimeError::new("codex_launcher_missing","hangar-codex-tui não está no PATH deste servidor; instale o lançador"));
         }
-        if super::process::resolve_program("codex",&path).is_none() {
+        if super::process::resolve_program("codex",&base.base).is_none() {
             return Err(RuntimeError::new("codex_cli_missing","codex não está no PATH deste servidor"));
         }
         let text = |field:&str|terminal::text(meta,field).map(str::to_owned);

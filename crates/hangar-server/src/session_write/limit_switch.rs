@@ -29,21 +29,17 @@ impl Spent {
     }
 }
 
-fn canonical(dir:&str) -> String {
-    std::fs::canonicalize(dir).map_or_else(|_|dir.to_owned(),|path|path.to_string_lossy().into_owned())
-}
-
 impl Spent {
     pub fn mark(&self,dir:&str,until:f64) {
         let Ok(mut spent) = self.spent.lock() else { return };
-        spent.insert(canonical(dir),until);
+        spent.insert(crate::list::discover::real(dir),until);
         let Some(file) = &self.file else { return };
         let saved = file.parent().map_or(Ok(()),std::fs::create_dir_all)
-            .and_then(|()|crate::pages::store::write_atomic(file,&serde_json::to_vec(&*spent).unwrap_or_default()));
+            .and_then(|()|crate::runtime::queue::atomic_write(file,&serde_json::to_vec(&*spent).unwrap_or_default()));
         if let Err(error) = saved { tracing::warn!(code="limit_spent_write_failed",kind=?error.kind(),"conta gasta não gravada; vale até o reinício"); }
     }
     pub fn is_spent(&self,dir:&str,now:f64) -> bool {
-        self.spent.lock().is_ok_and(|spent|spent.get(&canonical(dir)).is_some_and(|until|*until > now))
+        self.spent.lock().is_ok_and(|spent|spent.get(&crate::list::discover::real(dir)).is_some_and(|until|*until > now))
     }
 }
 
@@ -79,10 +75,10 @@ pub fn file_limit(path:&std::path::Path,now:f64) -> Option<UsageLimit> {
 pub fn decide(spec:&SessionSpec,current:&str,catalog:&Value,quotas:&[Value],spent:&Spent,now:f64) -> Decision {
     if spec.provider != AgentProvider::Claude { return Decision::Stay("limit_switch_not_claude"); }
     if matches!(spec.account,Account::Engine{..}) { return Decision::Stay("limit_switch_engine"); }
-    let known:Vec<String> = catalog.as_array().into_iter().flatten().filter_map(|row|row["path"].as_str().map(canonical)).collect();
-    let current = canonical(current);
+    let known:Vec<String> = catalog.as_array().into_iter().flatten().filter_map(|row|row["path"].as_str().map(crate::list::discover::real)).collect();
+    let current = crate::list::discover::real(current);
     let rows:Vec<Value> = quotas.iter().filter(|row|row["id"].as_str().and_then(|id|id.strip_prefix("claude:")).is_some_and(|path| {
-        let path = canonical(path);
+        let path = crate::list::discover::real(path);
         path != current && known.contains(&path) && !spent.is_spent(&path,now)
     })).cloned().collect();
     match crate::accounts::quotas::suggestion(&rows) {
@@ -165,7 +161,7 @@ impl Switcher {
         let now = host.now();
         let current = host.account_dir(spec.account.config_dir());
         // Aviso de uma vida que já trocou de conta (o `/conta` passou na frente): a conta de agora não bateu nada.
-        if canonical(&host.account_dir(hit.account.as_deref())) != canonical(&current) { return Outcome::Stayed("limit_switch_stale"); }
+        if crate::list::discover::real(&host.account_dir(hit.account.as_deref())) != crate::list::discover::real(&current) { return Outcome::Stayed("limit_switch_stale"); }
         self.spent.mark(&current,hit.limit.resets_at.filter(|reset|*reset > now).unwrap_or(now + UNKNOWN_RESET_S));
         let catalog = match host.catalog() { Ok(catalog)=>catalog, Err(code)=>return Outcome::Failed(code) };
         let quotas = match host.quotas().await { Ok(quotas)=>quotas, Err(code)=>return Outcome::Failed(code) };
@@ -192,7 +188,7 @@ impl Switcher {
                     match host.spec(&hit.name).await {
                         None=>break Outcome::Stayed("limit_switch_not_rust"),
                         Some(Err(code))=>break Outcome::Failed(code),
-                        Some(Ok(now)) if canonical(&host.account_dir(now.account.config_dir())) != canonical(&current)=>break Outcome::Stayed("limit_switch_stale"),
+                        Some(Ok(now)) if crate::list::discover::real(&host.account_dir(now.account.config_dir())) != crate::list::discover::real(&current)=>break Outcome::Stayed("limit_switch_stale"),
                         Some(Ok(_))=>{},
                     }
                 },

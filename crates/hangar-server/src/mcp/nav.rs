@@ -15,7 +15,7 @@ const NOT_OPEN: &str = "o app desktop não está aberto nesta máquina";
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unavailable(pub String);
 
-fn nav_dir(home: &Path) -> std::path::PathBuf { home.join(".hangar").join("nav") }
+pub(super) fn nav_dir(home: &Path) -> std::path::PathBuf { home.join(".hangar").join("nav") }
 
 /// O sidecar do navegador da sessão (chave `<servidor>::<sessão>` ou só o nome). O do app nativo não
 /// tem alvo CDP; aqui só a chave, a URL e o `ts` importam.

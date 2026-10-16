@@ -101,10 +101,9 @@ fn by_key(home: &Path, key: &str) -> Option<String> {
         .and_then(|m| m["name"].as_str().map(str::to_owned))
 }
 
-/// `~/.hangar/session-specs/<chave>.json`, que o Rust grava ao abrir (32 hex minúsculos).
+/// `~/.hangar/session-specs/<chave>.json`, que o Rust grava ao abrir (32 hex).
 fn record_exists(home: &Path, key: &str) -> bool {
-    key.len() == 32 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && crate::session_open::record::dir(home).join(format!("{key}.json")).is_file()
+    crate::session_open::record::path(home, key).is_ok_and(|path| path.is_file())
 }
 
 fn sidecar_exists(home: &Path, name: &str) -> bool {

@@ -14,6 +14,7 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::{BODY_LIMIT, detail_body, session_name, too_large};
+use crate::list::discover::real;
 use crate::mods::http::reply;
 use crate::routes::{AppState, gate, pass};
 
@@ -53,7 +54,6 @@ fn preview(path: &Path) -> String {
     String::new()
 }
 
-fn real(path: &str) -> PathBuf { std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)) }
 
 /// As conversas `<uuid>.jsonl` da pasta, da mais recente; a cópia `<uuid>.from-<conta>.jsonl` não é conversa.
 fn conversations(project: &Path) -> Vec<(PathBuf, f64)> {

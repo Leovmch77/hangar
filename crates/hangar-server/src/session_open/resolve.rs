@@ -352,10 +352,7 @@ fn quota_switch(config_dir: Option<&str>, rows: &[Value]) -> Option<(String, Str
 }
 
 /// `Path(a).resolve() == Path(b).resolve()`, sem exigir que existam.
-fn same_dir(a: &str, b: &str) -> bool {
-    let resolve = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-    a == b || resolve(a) == resolve(b)
-}
+fn same_dir(a: &str, b: &str) -> bool { a == b || crate::list::discover::real(a) == crate::list::discover::real(b) }
 
 /// Validação na ordem do `_create_session_owned` (o primeiro erro vence), tudo antes de qualquer
 /// efeito. Devolve o modelo efetivo (a conta ChatGPT fixa tira o prefixo dela).

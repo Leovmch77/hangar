@@ -244,10 +244,10 @@ pub(crate) fn scope_prefix() -> &'static [std::ffi::OsString] {
 }
 
 /// O executável pelo PATH do ambiente da sessão (PATHEXT no Windows: o `hangar-engine` é `.CMD`).
-pub(crate) fn resolve_program(name: &str, env: &[(String, String)]) -> Option<PathBuf> {
+pub(crate) fn resolve_program<'a>(name: &str, env: impl IntoIterator<Item = (&'a String, &'a String)> + Clone) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 { return path.is_file().then(|| path.to_path_buf()); }
-    let var = |k: &str| env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
+    let var = |k: &str| env.clone().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
     // No Windows o nome cru só vale se já termina numa extensão do PATHEXT, como o `shutil.which`:
     // `codex` sem extensão é o shim de shell do npm, que o CreateProcess não roda.
     let exts: Vec<String> = if cfg!(windows) {
@@ -291,7 +291,7 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
 
 fn prepared(spec: &LaunchSpec, bin: PathBuf, prefix: Vec<std::ffi::OsString>, extra: Map<String, Value>) -> Result<PreparedRecipe, ProcessError> {
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
-    let exe = resolve_program(program, &spec.env)
+    let exe = resolve_program(program, spec.env.iter().map(|(k, v)| (k, v)))
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
     let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();

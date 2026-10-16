@@ -91,8 +91,6 @@ pub trait Between: Send + Sync {
     fn undo<'a>(&'a self,from:&'a SessionSpec,to:&'a SessionSpec,sid:&'a str) -> futures_util::future::BoxFuture<'a,Result<(),RuntimeError>>;
 }
 
-fn valid_spec_key(key:&str) -> bool { key.len()==32 && key.bytes().all(|b|b.is_ascii_hexdigit()) }
-
 /// Árvore do processo com o nascimento de cada um: some quando todos saíram (ou foram reaproveitados).
 fn tree(root:i64) -> Result<Vec<(i64,f64)>,RuntimeError> {
     let procs=SystemProcs::default();
@@ -541,7 +539,7 @@ impl RuntimeRegistry {
         }
         match self.start_claude(name,&next,start,&sid).await {
             Ok(())=>{
-                if valid_spec_key(&next.key) && let Err(error)=crate::session_open::record::write(&self.codex_environment().home,&next) {
+                if crate::session_open::record::path(&self.codex_environment().home,&next.key).is_ok() && let Err(error)=crate::session_open::record::write(&self.codex_environment().home,&next) {
                     // A sessão nova está de pé, mas o restore e a próxima troca leriam o registro velho.
                     tracing::warn!(session=%name,kind=?error.kind(),"spec da reabertura não gravado");
                     self.diag.report("runtime.reopen_spec_unwritten",name,"reopen_spec_unwritten","a sessão reabriu e o registro dela não foi gravado");
@@ -602,7 +600,7 @@ impl RuntimeRegistry {
             return Err(refused("runtime_binding","a sessão não está aberta aqui"));
         };
         let cwd={let procs=SystemProcs::default();procs.cwd(i64::from(target.metadata.agent_pid)).map(|p|p.to_string_lossy().into_owned())};
-        let recorded=if valid_spec_key(&target.key) {
+        let recorded=if crate::session_open::record::path(&env.home,&target.key).is_ok() {
             crate::session_open::record::read(&env.home,&target.key).map_err(|e|refused("session_spec_read",&format!("registro da sessão ilegível: {e}")))?
         } else {None};
         let (mut spec,settings)=match recorded {
@@ -638,7 +636,7 @@ impl RuntimeRegistry {
         let env=self.codex_environment();
         let watcher=self.watcher_ref().ok_or_else(||refused("runtime_binding","sem a vigia do terminal"))?;
         let bare=watcher.bare_claude(name).await?.ok_or_else(||refused("runtime_binding","a sessão não roda um Claude"))?;
-        let recorded=if valid_spec_key(&bare.key) {
+        let recorded=if crate::session_open::record::path(&env.home,&bare.key).is_ok() {
             crate::session_open::record::read(&env.home,&bare.key).map_err(|e|refused("session_spec_read",&format!("registro da sessão ilegível: {e}")))?
         } else {None};
         let settings_of=|pid:i64|SystemProcs::default().env_var(pid,"HANGAR_CLAUDE_SETTINGS").ok().flatten()
@@ -680,8 +678,7 @@ impl RuntimeRegistry {
             _=>None,
         };
         if matches!(next.account,Account::Engine{..}) {
-            let path:Vec<(String,String)>=env.base.iter().map(|(k,v)|(k.clone(),v.clone())).collect();
-            if super::process::resolve_program("hangar-engine",&path).is_none() {
+            if super::process::resolve_program("hangar-engine",&env.base).is_none() {
                 return Err(refused("launch_engine_missing","hangar-engine não está no PATH deste servidor; sem ele a sessão com motor morre ao nascer"));
             }
         }

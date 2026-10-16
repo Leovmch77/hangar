@@ -237,8 +237,7 @@ pub(crate) async fn read_only_envelope<'a>(env: &BTreeMap<String, String>, home:
     run: &'a (dyn Fn(Vec<String>, Duration) -> BoxFuture<'a, MuxOutput> + Sync)) -> Result<Vec<String>, OpenError> {
     let refuse = |msg: String| OpenError::new(400, "erro_criacao_sessao", msg);
     if !cfg!(target_os = "linux") { return Err(refuse("read-only exige Linux com bubblewrap (bwrap)".into())); }
-    let path: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let bwrap = crate::runtime::process::resolve_program("bwrap", &path)
+    let bwrap = crate::runtime::process::resolve_program("bwrap", env)
         .ok_or_else(|| refuse("read-only exige bubblewrap: instale bwrap antes de criar a sessão".into()))?;
     let root = Path::new(cwd).canonicalize().map_err(|e| refuse(format!("read-only não pôde preparar a proteção: {e}")))?;
     let mut paths = vec![root.clone()];
@@ -456,8 +455,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<V
 /// a mesma rota que a abertura conferiu, relida agora.
 fn engine_route(host: &dyn OpenHost, spec: &SessionSpec) -> Result<Option<claude::EngineRoute>, OpenError> {
     if let Account::Engine { .. } = spec.account {
-        let path: Vec<(String, String)> = host.env().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        if crate::runtime::process::resolve_program("hangar-engine", &path).is_none() {
+        if crate::runtime::process::resolve_program("hangar-engine", host.env()).is_none() {
             return Err(creation("hangar-engine nao esta no PATH deste servidor — sem ele a sessao com motor nasce e morre na \
                 hora, sem erro. Instale o lancador: no Linux, scripts/install-claude-wrapper.sh; no Windows, install.ps1."));
         }

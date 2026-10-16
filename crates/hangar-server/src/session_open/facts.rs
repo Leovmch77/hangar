@@ -13,6 +13,7 @@ use super::{AgentProvider, OpenError, ServiceTier};
 use crate::accounts::catalog::AccountError;
 use crate::accounts::environment::AccountEnvironment;
 use crate::accounts::{AccountService, Provider};
+use crate::list::bridge::expand_home;
 use crate::list::procs::{ProcessView, SystemProcs};
 
 /// `engines._NOME_OK`: o nome entra num `$SHELL -c`.
@@ -283,18 +284,6 @@ fn read_json(path: &Path) -> Result<Option<Value>, String> {
 
 fn text(value: &Value) -> Option<String> { value.as_str().filter(|s| !s.is_empty()).map(str::to_owned) }
 
-/// `bool(x)` do Python sobre um valor do `runtime-config.json`.
-fn truthy(value: &Value) -> Option<bool> {
-    match value {
-        Value::Null => None,
-        Value::Bool(b) => Some(*b),
-        Value::Number(n) => Some(n.as_f64() != Some(0.0)),
-        Value::String(s) => Some(!s.is_empty()),
-        Value::Array(a) => Some(!a.is_empty()),
-        Value::Object(o) => Some(!o.is_empty()),
-    }
-}
-
 /// Booleano do pydantic-settings (`CP_HEADLESS_DEFAULT`, `CP_JEV_PADRAO`).
 fn env_bool(env: &BTreeMap<String, String>, name: &str) -> Option<bool> {
     match env.get(name)?.trim().to_ascii_lowercase().as_str() {
@@ -304,13 +293,6 @@ fn env_bool(env: &BTreeMap<String, String>, name: &str) -> Option<bool> {
     }
 }
 
-fn expand_home(path: &str, home: &Path) -> PathBuf {
-    match path.strip_prefix('~') {
-        Some("") => home.to_owned(),
-        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => home.join(&rest[1..]),
-        _ => PathBuf::from(path),
-    }
-}
 
 fn codex_error(error: AccountError) -> OpenError {
     OpenError::new(error.status, error.code, "conta Codex inválida").with_params(error.params)
@@ -447,7 +429,7 @@ impl OpenFacts for LocalFacts {
 
     fn defaults(&self) -> ServerDefaults {
         let runtime = crate::runtime::codex_launch::runtime_config(self.env());
-        let field = |name: &str, env: &str, default: bool| truthy(&runtime[name]).or_else(|| env_bool(&self.env().base, env)).unwrap_or(default);
+        let field = |name: &str, env: &str, default: bool| Some(&runtime[name]).filter(|v| !v.is_null()).map(crate::list::discover_other::truthy).or_else(|| env_bool(&self.env().base, env)).unwrap_or(default);
         ServerDefaults { headless: field("headless_default", "CP_HEADLESS_DEFAULT", true), jev: field("jev_padrao", "CP_JEV_PADRAO", false) }
     }
 

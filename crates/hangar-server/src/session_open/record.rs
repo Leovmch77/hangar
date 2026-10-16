@@ -18,17 +18,18 @@ use super::{Account, AccountSource, AgentProvider, PermissionMode, SPEC_VERSION,
 pub fn dir(home: &Path) -> PathBuf { home.join(".hangar").join("session-specs") }
 
 /// A `key` vira nome de arquivo: só o formato que o Hangar gera (hex de 32).
-fn path(home: &Path, key: &str) -> io::Result<PathBuf> {
+pub(crate) fn path(home: &Path, key: &str) -> io::Result<PathBuf> {
     if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "chave de sessão fora do formato"));
     }
     Ok(dir(home).join(format!("{key}.json")))
 }
 
-pub fn write(home: &Path, spec: &SessionSpec) -> io::Result<()> {
-    let path = path(home, &spec.key)?;
+pub fn write(home: &Path, spec: &SessionSpec) -> io::Result<()> { write_at(home, &path(home, &spec.key)?, spec) }
+
+fn write_at(home: &Path, path: &Path, spec: &SessionSpec) -> io::Result<()> {
     std::fs::create_dir_all(dir(home))?;
-    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(spec)?)
+    crate::runtime::queue::atomic_write(path, &serde_json::to_vec_pretty(spec)?)
 }
 
 /// A troca de conta em curso: o spec de destino, gravado antes de a conversa mudar de conta e apagado quando
@@ -38,11 +39,7 @@ pub fn switching_path(home: &Path, key: &str) -> io::Result<PathBuf> {
     path(home, key).map(|p| p.with_extension("switching"))
 }
 
-pub fn write_switching(home: &Path, spec: &SessionSpec) -> io::Result<()> {
-    let path = switching_path(home, &spec.key)?;
-    std::fs::create_dir_all(dir(home))?;
-    crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(spec)?)
-}
+pub fn write_switching(home: &Path, spec: &SessionSpec) -> io::Result<()> { write_at(home, &switching_path(home, &spec.key)?, spec) }
 
 /// A abertura que não nasceu tira o registro que gravou.
 pub fn remove(home: &Path, key: &str) -> io::Result<()> {

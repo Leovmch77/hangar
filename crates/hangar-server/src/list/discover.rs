@@ -187,7 +187,7 @@ pub(crate) fn is_aux(cmd: &str) -> bool { cmd.contains("daemon") || cmd.contains
 fn split(cmd: &str) -> Vec<String> { cmd.split_whitespace().map(String::from).collect() }
 
 /// `realpath` quando o arquivo existe; senão o próprio caminho.
-fn real(path: &str) -> String {
+pub(crate) fn real(path: &str) -> String {
     std::fs::canonicalize(path).map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned())
 }
 

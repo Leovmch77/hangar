@@ -221,8 +221,7 @@ impl ServerHost {
 pub async fn run_program(env: &BTreeMap<String, String>, argv: Vec<String>, timeout: Duration) -> MuxOutput {
     let failed = |stderr: String| MuxOutput { code: None, stdout: String::new(), stderr };
     let Some((program, args)) = argv.split_first() else { return failed("comando vazio".into()) };
-    let path: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let Some(exe) = crate::runtime::process::resolve_program(program, &path) else { return failed(format!("{program} não está no PATH")) };
+    let Some(exe) = crate::runtime::process::resolve_program(program, env) else { return failed(format!("{program} não está no PATH")) };
     let mut command = tokio::process::Command::new(exe);
     command.args(args).env_clear().stdin(std::process::Stdio::null()).kill_on_drop(true)
         .envs(env.iter().filter(|(k, _)| !matches!(k.as_str(), "CP_AUTH_TOKEN" | "HANGAR_INTERNAL_SECRET" | "HANGAR_RUNTIME_INSTANCE")));

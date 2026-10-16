@@ -383,7 +383,7 @@ impl Tools {
         if verb == "shot" {
             // Caminho nosso e estável, que o app do celular consegue servir.
             let safe = regex::Regex::new(r"\W+").map_err(|e| e.to_string())?.replace_all(name, "-").into_owned();
-            let dir = home.join(".hangar").join("nav").join("shots").join(safe);
+            let dir = nav::nav_dir(&home).join("shots").join(safe);
             std::fs::create_dir_all(&dir).map_err(|e| format!("pasta dos prints: {e}"))?;
             args = vec![dir.join(format!("{}.png", now_ms())).to_string_lossy().into_owned()];
         }
@@ -445,7 +445,7 @@ impl Tools {
             .collect();
         env.extend(crate::session_open::claude::jev_pairs(true, &runtime));
         if !env.iter().any(|(k, v)| k == "TYPESAFE_API_KEY" && !v.is_empty()) { return Err(JEV_UNCONFIGURED.into()); }
-        let node = crate::runtime::process::resolve_program("node", &env)
+        let node = crate::runtime::process::resolve_program("node", env.iter().map(|(k, v)| (k, v)))
             .ok_or("node não encontrado no PATH do backend: o objetivo roda pelo hangar-preview")?;
         // ponytail: o repositório é o pai da pasta de trabalho (`backend/`), herdada do Python como o `.env`.
         let script = std::env::current_dir().unwrap_or_default().join("..").join("scripts").join("hangar-preview");

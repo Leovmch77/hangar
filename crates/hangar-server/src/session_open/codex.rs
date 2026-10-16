@@ -95,8 +95,7 @@ pub fn pane(name: &str, key: &str, launch: &Launch, jev: bool, runtime_config: &
 /// `_exigir_lancador_codex`: sem o lançador ou o `codex` no PATH o pane morre ao nascer e o
 /// `new-session` devolve sucesso. Recusa antes de criar nada.
 pub fn require_launcher(server_env: &BTreeMap<String, String>) -> Result<(), OpenError> {
-    let path: Vec<(String, String)> = server_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let missing = |program: &str| crate::runtime::process::resolve_program(program, &path).is_none();
+    let missing = |program: &str| crate::runtime::process::resolve_program(program, server_env).is_none();
     if missing(LAUNCHER) {
         return Err(OpenError::new(409, "erro_criacao_sessao", format!("{LAUNCHER} nao esta no PATH deste servidor — sem ele a sessao \
             Codex nasce e morre na hora, sem erro. Instale o lancador: no Linux, scripts/install-claude-wrapper.sh; no Windows, install.ps1.")));

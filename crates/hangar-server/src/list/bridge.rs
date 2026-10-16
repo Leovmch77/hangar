@@ -817,7 +817,7 @@ impl Caches {
     }
 }
 
-fn expand_home(path: &str, home: &Path) -> PathBuf {
+pub(crate) fn expand_home(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         Some(rest) => home.join(rest),
         None if path == "~" => home.to_owned(),
