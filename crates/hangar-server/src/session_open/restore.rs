@@ -222,6 +222,9 @@ async fn session_key(program: &std::ffi::OsStr, name: &str) -> Option<String> {
     (key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit())).then(|| key.to_owned())
 }
 
+/// Chaves cujo spec ilegível já foi ao diário.
+static UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 /// As sessões do Hangar com terminal abertas agora: a chave, o nome, o agente e a conversa que a lista prova.
 async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::OsStr) -> Option<BTreeMap<String, Entry>> {
     let rows = st.list.discover(None).await.ok()?;
@@ -230,7 +233,12 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
         let Some(provider) = AgentProvider::parse(&row.provider) else { continue };
         let Some(key) = session_key(program, &row.name).await else { continue };
         let (spec, unreadable) = recorded(home, &key, &row.name);
-        if let Some(line) = unreadable && let Some(dir) = crate::diag::diary_dir() {
+        // Uma linha por spec ilegível, não uma a cada fotografia; volta a avisar depois de lido de novo.
+        let first = {
+            let mut reported = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if unreadable.is_some() { reported.insert(key.clone()) } else { reported.remove(&key); false }
+        };
+        if first && let Some(line) = unreadable && let Some(dir) = crate::diag::diary_dir() {
             tracing::warn!(session = %row.name, "spec ilegível; a sessão fica fora da fotografia");
             if let Err(error) = crate::diag::write_diary(&dir, &[line], chrono::Local::now()) {
                 tracing::warn!(kind = ?error.kind(), "spec ilegível não gravado no diário");
