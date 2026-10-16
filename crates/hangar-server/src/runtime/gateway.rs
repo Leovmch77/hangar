@@ -93,8 +93,9 @@ pub struct RuntimeRegistry {
     watcher:std::sync::OnceLock<Arc<super::codex_terminal::Watcher>>,
     /// Acorda a vigia quando um ator adotado perde o app-server.
     codex_wake:Arc<tokio::sync::Notify>,
-    /// Destino do pedido de reabertura ao coordenador do Python (porta e segredo internos).
-    reopen_to:(SocketAddr,String,crate::proxy::HttpClient,crate::diag::DiagClient),
+    diag:crate::diag::DiagClient,
+    /// Sessões com uma reabertura em erro em voo: o pedido seguinte da mesma sessão não abre outra.
+    reopening:std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// Problema do último retrato de cada ator com terminal (chave → geração, código), para a lista
     /// quando o `Monitor` não está vivo.
     terminal_problems:std::sync::Mutex<BTreeMap<String,(u64,String)>>,
@@ -152,9 +153,18 @@ fn healthy(terminal:bool,view:&Value)->bool {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Fila com mensagem ainda não entregue. Ilegível conta como pendente: abrir é o que mostra a recusa dela.
+fn pending(state_path:&std::path::Path) -> bool {
+    match super::queue::read_replaced(state_path) {
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>false,
+        Err(_)=>true,
+        Ok(raw)=>serde_json::from_slice::<Value>(&raw).map_or(true,|state|state["rows"].as_array().is_some_and(|rows|rows.iter().any(|row|row["delivered"]!=true))),
+    }
+}
+
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado, `codex_launch`). Só o
-/// Codex sobe por aqui.
+/// programa (pid reaproveitado, S-72) ou ausente, sobe outro com o ambiente calculado agora (nunca
+/// guardado): o Codex por `codex_launch`, o Claude pelo spec da sessão (`claude_launch`).
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
     if recorded != 0 {
@@ -162,17 +172,22 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
         let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
         if state == process::Liveness::Ours { return Ok(None); }
     }
-    // O processo do Claude nasce da receita em memória (`claude_relaunch`), nunca por aqui.
-    if target.provider != "codex" {
-        return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));
-    }
     let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
     if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
-    let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
+    let (claude,bridge,name,runtime) = (target.provider == "claude",policy.plugin_bridge(),target.name.clone(),tokio::runtime::Handle::current());
+    let (program,env,stamp) = tokio::task::spawn_blocking(move||if claude {
+        let launch = super::claude_launch::prepare(&base,bridge.as_ref(),&meta,&name,runtime)?;
+        // Marca da configuração que o `claude -p` leu ao nascer: o botão Recarregar compara com ela.
+        let stamp = super::local_policy::config_stamp(meta["config_dir"].as_str().filter(|d|!d.is_empty()))
+            .inspect_err(|error|tracing::warn!(code=%error.code,"configuração da conta ilegível; sem marca de recarga")).ok();
+        Ok((launch.program,launch.env,stamp))
+    } else {
+        super::codex_launch::launch_env(&base,&dir,&meta).map(|launch|(launch.program,launch.env,None))
+    }).await.map_err(|_|failure("launch_job"))??;
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
-        key:target.key.clone(),cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
-    let cano = match process::spawn(&spec).await {
+        key:target.key.clone(),cwd:cwd.into(),program,env:env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
+    let mut cano = match process::spawn(&spec).await {
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
@@ -181,6 +196,7 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
+    if let Some(stamp) = stamp { cano.extra.insert("config_marca".into(),json!(stamp)); }
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
     if let Err(error) = cano_recorded(launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await) {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
@@ -261,24 +277,72 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
-        let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
-        Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+        Self { diag:crate::diag::DiagClient::new(upstream,secret.clone()),reopening:Default::default(),terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default() }
     }
-    /// Escrita para sessão doente: o coordenador do Python a reabre, como fazia antes de entregar.
-    /// Responde na hora; quem escreveu recebe o 503 e tenta de novo.
+    /// Escrita para sessão doente, ou a conversa aberta: a sessão em erro é reaberta aqui, em segundo plano
+    /// e uma por vez; a saudável só refaz a projeção da fila. Responde na hora; quem escreveu recebe o 503
+    /// e tenta de novo. Falha vai ao diário.
     pub fn request_reopen(&self,name:&str) {
-        let (upstream,secret,http,diag)=&self.reopen_to;
-        crate::locate::request_reopen(http,*upstream,secret,diag,name);
+        let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
+        if !self.reopening.lock().unwrap_or_else(|e|e.into_inner()).insert(name.to_owned()) { return; }
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let result = registry.reopen_if_failed(&name).await;
+            registry.reopening.lock().unwrap_or_else(|e|e.into_inner()).remove(&name);
+            match result {
+                Ok(true)=>{
+                    tracing::warn!(session=%name,"sessão em erro reaberta");
+                    registry.diag.report("runtime.reopened",&name,"reopened","sessão em erro reaberta no Rust");
+                },
+                Ok(false)=>{},
+                Err(error)=>{
+                    tracing::warn!(session=%name,code=%error.code,"sessão em erro não reabriu");
+                    registry.diag.report("runtime.reopen_failed",&name,&error.code,"a sessão em erro não reabriu no Rust");
+                },
+            }
+        });
+    }
+    /// `true` quando reabriu. Uma tentativa por pedido; a de outra operação no meio (fechar, trocar de
+    /// modo) vence, pela barreira da chave.
+    async fn reopen_if_failed(&self,name:&str) -> Result<bool,RuntimeError> {
+        let found = self.entries.lock().await.iter().find(|(_,entry)|entry.name == name)
+            .map(|(key,entry)|(key.clone(),entry.generation,entry.handle.clone(),entry.provider.clone()));
+        let Some((key,generation,handle,provider)) = found else {
+            // A vida que fechou aqui (ou não abriu) com o processo de pé: o Claude sem terminal volta pelo sidecar.
+            if self.runtime_lost(name).await.is_none() { return Ok(false); }
+            return self.open_claude_headless(name,true).await.transpose().map(|opened|opened.is_some());
+        };
+        let terminal = matches!(handle,EntryHandle::Terminal {..});
+        if handle.snapshot().await.is_ok_and(|snapshot|healthy(terminal,&snapshot)) {
+            handle.ensure_projection().await?;
+            return Ok(false);
+        }
+        {
+            let barrier = self.barrier(&key).await;
+            let _guard = barrier.lock().await;
+            self.close_locked(&key,generation,false).await?;
+        }
+        let watcher = || self.watcher.get().cloned().ok_or_else(||failure("runtime_binding"));
+        let reopened = match handle {
+            EntryHandle::Terminal {target,..}=>Some(self.open_terminal(target).await.map(|_|())),
+            EntryHandle::CodexTerminal {..}=>watcher()?.adopt_now(self,name).await,
+            EntryHandle::Headless(_) if provider == "codex"=>watcher()?.open_parked(self,name).await,
+            EntryHandle::Headless(_)=>self.open_claude_headless(name,true).await,
+        };
+        reopened.ok_or_else(||failure("runtime_binding"))??;
+        Ok(true)
     }
     /// Liga a vigia do Codex com terminal: escrita sem ator adota na hora e encerrar passa por ela.
     pub fn bind_watcher(&self,watcher:Arc<super::codex_terminal::Watcher>) { let _ = self.watcher.set(watcher); }
     pub fn codex_wake(&self) -> Arc<tokio::sync::Notify> { self.codex_wake.clone() }
-    /// Escrita para uma sessão sem ator: com a vigia ligada, o Codex com terminal é adotado agora.
-    /// `None` = não é Codex com terminal do Rust.
+    /// Escrita para uma sessão sem ator: o Claude sem terminal abre aqui (subindo o processo parado, como o
+    /// `ensure_running` do Python antes de toda operação) e, com a vigia ligada, o Codex é adotado agora.
+    /// `None` = não é sessão sem ator do Rust.
     pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        if let Some(opened) = self.open_claude_headless(name,true).await { return Some(opened); }
         let watcher = self.watcher.get()?.clone();
         watcher.adopt_now(self,name).await
     }
@@ -312,6 +376,112 @@ impl RuntimeRegistry {
     }
     /// A ponte do Codex atende também o sem terminal do Rust: escrita do convidado não passa pelo slot Python.
     pub async fn owns_codex_headless(&self,name:&str) -> bool { self.codex_headless(name).await.is_some() }
+    /// Pasta dos sidecars do Claude sem terminal e da fila, pelo ambiente-base (o de teste, se injetado).
+    fn claude_dirs(&self) -> (std::path::PathBuf,std::path::PathBuf) {
+        let env = self.policy.codex_environment();
+        (env.home.join(".hangar").join("claude-headless"),env.claude_base.join(".hangar-queue"))
+    }
+    /// Na subida: abre aqui cada Claude sem terminal com cano vivo da chave (adota) ou com mensagem
+    /// ainda não entregue na fila (sobe o processo); a parada sem pendência fica fechada e o próximo envio
+    /// a sobe. Falha de uma não impede as outras e vai ao diário.
+    pub async fn register_claude_headless(self:Arc<Self>) {
+        let (dir,queue_dir) = self.claude_dirs();
+        let listed = tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<(String,bool,bool)>,Vec<String>)> {
+            let (mut out,mut unreadable) = (Vec::new(),Vec::new());
+            let entries = match std::fs::read_dir(&dir) { Ok(entries)=>entries,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok((out,unreadable)),Err(error)=>return Err(error) };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext|ext != "json") { continue; }
+                let meta = match super::codex_sidecar::read(&path) {
+                    Ok(Some(meta))=>meta,
+                    Ok(None)=>continue,
+                    Err(_)=>{ unreadable.push(path.file_stem().map(|stem|stem.to_string_lossy().into_owned()).unwrap_or_default()); continue; },
+                };
+                let (Some(name),Some(key)) = (meta.get("name").and_then(Value::as_str),meta.get("key").and_then(Value::as_str).filter(|k|!k.is_empty())) else { continue };
+                let alive = meta.get("cano").and_then(|cano|cano["pid"].as_u64()).and_then(|pid|u32::try_from(pid).ok())
+                    .is_some_and(|pid|process::liveness(pid,key)==process::Liveness::Ours);
+                out.push((name.to_owned(),alive,pending(&super::codex_terminal::queue_files(&queue_dir,key).0)));
+            }
+            Ok((out,unreadable))
+        }).await;
+        let listed = match listed {
+            Ok(Ok((listed,unreadable)))=>{
+                for name in unreadable {
+                    tracing::warn!(session=%name,"sidecar do Claude sem terminal ilegível na subida");
+                    self.diag.report("runtime.registration_failed",&name,"claude_sidecar_read","o sidecar da sessão sem terminal existe e não foi lido na subida");
+                }
+                listed
+            },
+            Ok(Err(error))=>{
+                tracing::warn!(kind=?error.kind(),"sidecars do Claude sem terminal ilegíveis na subida");
+                self.diag.report("runtime.registration_failed","*","sidecar_dir","a pasta dos sidecars do Claude sem terminal não foi lida");
+                return;
+            },
+            Err(_)=>return,
+        };
+        let opens = listed.into_iter().filter(|(_,alive,pending)|*alive || *pending).map(|(name,_,pending)| {
+            let registry = self.clone();
+            async move {
+                if let Some(Err(error)) = registry.open_claude_headless(&name,pending).await {
+                    tracing::warn!(session=%name,code=%error.code,"sessão sem terminal não abriu na subida");
+                    registry.diag.report("runtime.registration_failed",&name,&error.code,"a sessão sem terminal não abriu na subida do Rust");
+                }
+            }
+        });
+        futures_util::future::join_all(opens).await;
+    }
+    /// Claude sem terminal sem ator aqui: o Rust o abre pelo sidecar dele, adotando o cano vivo da chave
+    /// ou, com `launch`, subindo um pelo spec. `None`: não há sessão Claude sem terminal com esse nome.
+    pub async fn open_claude_headless(&self,name:&str,launch:bool) -> Option<Result<(),RuntimeError>> {
+        let (dir,queue_dir) = self.claude_dirs();
+        let path = super::codex_sidecar::path(&dir,name);
+        let meta = match tokio::task::spawn_blocking(move||super::codex_sidecar::read(&path)).await {
+            Ok(Ok(meta))=>meta?,
+            failed=>{
+                if let Ok(Err(error)) = &failed { tracing::warn!(session=%name,kind=?error.kind(),"sidecar do Claude sem terminal ilegível"); }
+                self.diag.report("runtime.open_failed",name,"claude_sidecar_read","o sidecar da sessão sem terminal existe e não foi lido");
+                return Some(Err(RuntimeError::new("claude_sidecar_read","o arquivo da sessão sem terminal não pôde ser lido")));
+            },
+        };
+        let key = meta.get("key").and_then(Value::as_str).filter(|key|!key.is_empty())?.to_owned();
+        if self.entries.lock().await.get(&key).is_some_and(|entry|entry.name == name) { return Some(Ok(())); }
+        if self.has_entry(Some(&key),name).await {
+            return Some(Err(RuntimeError::new("claude_headless_entry_conflict","já há outra sessão aberta aqui com este nome ou chave")));
+        }
+        let (state_path,lease_path) = super::codex_terminal::queue_files(&queue_dir,&key);
+        // Sem a trava da fila: outra abertura desta sessão pode estar em curso (e o ator a segura a vida
+        // toda); quem decide entre as duas é a barreira do `open_attempt`, que acha a sessão já aberta.
+        let generation = {
+            let state_path = state_path.clone();
+            let read = tokio::task::spawn_blocking(move || match super::queue::read_replaced(&state_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(1),
+                Err(error) => Err(error),
+                Ok(raw) => serde_json::from_slice::<Value>(&raw).ok().and_then(|state|state["generation"].as_u64())
+                    .ok_or_else(||std::io::Error::from(std::io::ErrorKind::InvalidData)),
+            }).await;
+            match read {
+                Ok(Ok(generation))=>generation,
+                failed=>{
+                    let error = match failed { Ok(Err(error))=>RuntimeError::new("queue_io",&format!("fila da sessão inacessível: {:?}",error.kind())),_=>failure("queue_job") };
+                    super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);
+                    return Some(Err(error));
+                },
+            }
+        };
+        let mut metadata = Value::Object(meta.clone());
+        metadata["key"] = json!(key);
+        let env = self.policy.codex_environment();
+        let transcript = crate::session_open::record::claude_from_meta(&metadata,name,0.0).ok()
+            .zip(metadata["session_id"].as_str()).map(|(spec,sid)|super::claude_launch::transcript(&env,&spec,sid)).unwrap_or_default();
+        let cano = meta.get("cano").filter(|cano|cano.is_object());
+        let field = |name:&str|cano.and_then(|cano|cano[name].as_str()).unwrap_or_default().to_owned();
+        // Cano vivo da sessão sem `versao` gravada já fala a 2.
+        let binding = CanoBinding { pid:cano.and_then(|cano|cano["pid"].as_u64()).and_then(|pid|u32::try_from(pid).ok()).unwrap_or(0),
+            escuta:field("escuta"),token:field("token"),versao:cano.and_then(|cano|cano["versao"].as_u64()).and_then(|v|u32::try_from(v).ok()).unwrap_or(2) };
+        let target = RuntimeTarget { key,generation,name:name.into(),provider:"claude".into(),binding,transcript,
+            created:meta.get("created").and_then(Value::as_f64).unwrap_or(0.0),metadata,lease_path,state_path,projection_dir:queue_dir };
+        Some(if launch { self.open_with_launch(target,dir).await } else { self.open_managed(target,dir).await }.map(|_|()))
+    }
     /// Ambiente-base do Codex (o de teste, se injetado), para a troca de modo montar lançador e conta.
     pub(crate) fn codex_environment(&self) -> crate::accounts::environment::AccountEnvironment { self.policy.codex_environment() }
     /// Alvos dos atores do Codex com terminal abertos aqui, para a vigia.
@@ -477,7 +647,8 @@ impl RuntimeRegistry {
                         super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);
                         tracing::warn!(key,session=name,attempt,code=%error.code,"reabertura automática não confirmada");
                         if matches!(error.code.as_str(),"lifecycle_cancelled"|"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
-                        gave_up=attempt==2;
+                        gave_up=attempt==2 || super::claude_launch::permanent(&error.code);
+                        if gave_up {break;}
                     },
                 }
             }
@@ -552,6 +723,8 @@ impl RuntimeRegistry {
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     /// A linha de status do ator lê a cota direto do módulo de contas.
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.policy = self.policy.with_accounts(accounts); self }
+    /// A ponte do plugin que o Claude sem terminal subido aqui recebe no ambiente.
+    pub fn with_plugin_bridge(mut self,bridge:crate::session_open::claude::PluginBridge) -> Self { self.policy = self.policy.with_plugin_bridge(bridge); self }
     pub fn with_plugin(mut self, plugin:Arc<crate::plugin::Store>) -> Self { self.plugin = Some(plugin); self }
     pub fn with_terminal_states(mut self, states:Arc<crate::state::published::Published>) -> Self { self.terminal_states=Some(states);self }
     pub fn with_terms(mut self, terms:Arc<crate::term::Terms>) -> Self {self.terms=Some(terms);self}
@@ -783,10 +956,6 @@ impl RuntimeRegistry {
             if fields.get("conversation").is_some_and(|conversation|conversation == &metadata[if target.provider == "claude" { "session_id" } else { "thread_id" }]) {
                 for (key,value) in fields { if key != "public_state" { metadata[key] = value.clone(); } }
             }
-        }
-        if target.provider=="claude" && spawn && target.binding.pid==0
-            && (!store.state().runtime_state["claude_lifecycle_intent"].is_null() || store.state().runtime_state["view"].is_object()) {
-            return Err(RuntimeError::new("relaunch_recipe_missing","a conversa já teve uma vida e está sem receita comprovada em memória; não reconstruí o processo pelo Python"));
         }
         let queue = QueueActor::start(store,lease);
         // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
@@ -1312,7 +1481,7 @@ impl RuntimeRegistry {
             if attempts.get(&key).is_some_and(|at|now.duration_since(*at)<HEAL_BACKOFF) {return Err(failure("heal_backoff"));}
             attempts.insert(key.clone(),now);
         }
-        let diag=self.reopen_to.3.clone();
+        let diag=self.diag.clone();
         tracing::warn!(key,session=%name,code="terminal_heal_started","sessão sem entrega segura: o Claude é reaberto na mesma conversa e modo");
         diag.report("rust.terminal_heal",&name,"started","sessão sem entrega segura: reabertura na mesma conversa e modo");
         let id=format!("heal:{key}:{generation}:{}",crate::mods::state::random_hex(8));
@@ -1531,13 +1700,23 @@ impl RuntimeRegistry {
             recipe.preserve_settings(target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?)?;
             Arc::new(recipe)
         };
-        let mut launch=recipe.launch(&binding.conversation,&selected)?;
-        recipe.apply_choices(&mut launch,view["model"].as_str(),view["effort"].as_str())?;
         let sidecar_dir=super::lifecycle::claude_sidecar_dir()?;
-        let extra=target.metadata["cano"].as_object().map(|meta|meta.iter().filter(|(k,_)|!matches!(k.as_str(),"pid"|"escuta"|"token"|"ts"|"versao")).map(|(k,v)|(k.clone(),v.clone())).collect()).unwrap_or_default();
-        let prepared={let (key,dir)=(key.to_owned(),sidecar_dir.clone());
-            tokio::task::spawn_blocking(move||process::prepare_recipe(&launch,&key,&dir,extra)).await.map_err(|_|failure("relaunch_recipe"))?}
-            .map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
+        // A vida nova sai do spec da sessão com a configuração de agora, nunca da receita do processo que
+        // morre: a mesma conversa, o modo pedido e o modelo e o esforço que ela usava.
+        let prepared={
+            let (env,bridge,key,dir,name,runtime)=(self.policy.codex_environment(),self.policy.plugin_bridge(),key.to_owned(),sidecar_dir.clone(),name.to_owned(),tokio::runtime::Handle::current());
+            let (sid,mode,model,effort)=(binding.conversation.clone(),selected.clone(),view["model"].clone(),view["effort"].clone());
+            let cwd=target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?.to_owned();
+            tokio::task::spawn_blocking(move||{
+                let sidecar=Value::Object(super::codex_sidecar::load(&super::codex_sidecar::path(&dir,&name)).ok_or_else(||failure("lifecycle_sidecar_read"))?);
+                let meta=super::claude_launch::relaunch_meta(sidecar,&sid,&mode,&model,&effort);
+                let launch=super::claude_launch::prepare(&env,bridge.as_ref(),&meta,&name,runtime)?;
+                let mut extra=serde_json::Map::new();
+                if let Ok(stamp)=super::local_policy::config_stamp(meta["config_dir"].as_str().filter(|dir|!dir.is_empty())) {extra.insert("config_marca".into(),json!(stamp));}
+                let spec=process::LaunchSpec {provider:process::Provider::Claude,key,cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:dir};
+                process::prepare_launch(&spec,extra).map_err(|e|RuntimeError::new(e.code(),"não preparei o lançamento; origem conservada"))
+            }).await.map_err(|_|failure("relaunch_recipe"))??
+        };
         if !from_exit {recipe.verify(&procs)?;}
         let latest=match &context {Some(ctx)=>ctx.view.clone(),None=>handle.as_ref().ok_or_else(||failure("runtime_binding"))?.view().await?};
         if (!from_exit && latest["alive"]!=true) || latest["in_progress"]==true || !latest["question"].is_null() || latest["pending"].as_array().is_none_or(|v|!v.is_empty())
@@ -2131,6 +2310,112 @@ mod tests {
             Ok(crate::list::procs::ProcessRecipe {pid,birth:1000.0,executable:if pid==42 {"/fixture/hangar-cano".into()} else {"/fixture/claude".into()},cwd:self.dir.clone(),argv,environ:vec![format!("CLAUDE_CONFIG_DIR={}",self.dir.display()).into()],cgroup:None})
         }
     }
+    /// Cano Claude falso que responde o retrato e fica ouvindo.
+    async fn fake_cano() -> (String,tokio::task::JoinHandle<()>) { fake_cano_gated(None).await }
+
+    /// Com `gate`: avisa ao receber a conexão e só manda o retrato quando liberado.
+    async fn fake_cano_gated(gate:Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>) -> (String,tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            if let Some((accepted,release))=&gate {accepted.notify_one();release.notified().await;}
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}}
+        });
+        (format!("tcp:{address}"),server)
+    }
+
+    /// Casa de teste com os sidecars dados em `.hangar/claude-headless/`; nada do HOME real é lido.
+    fn claude_registry(home:&std::path::Path,sidecars:&[Value]) -> (Arc<RuntimeRegistry>,crate::side::Hubs) {
+        let dir=home.join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
+        for meta in sidecars { std::fs::write(dir.join(format!("{}.json",meta["name"].as_str().unwrap())),meta.to_string()).unwrap(); }
+        let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.to_string_lossy().into_owned())].into());
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into())
+            .with_processes(Arc::new(SidRecipeProcesses {dir:home.into()})).with_codex_environment(env));
+        registry.bind_lifecycle();
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        (registry,hubs)
+    }
+
+    /// A escrita (ou a subida) acha a sessão parada pelo sidecar: o Rust a abre sozinho, administrada, sem
+    /// o Python registrar antes; aberta, não abre de novo, e sem sidecar não é dela.
+    #[tokio::test]
+    async fn parked_claude_headless_opens_from_its_sidecar() {
+        let home=tempfile::tempdir().unwrap();
+        let (escuta,server)=fake_cano().await;
+        let key="ab".repeat(16);
+        let (registry,_hubs)=claude_registry(home.path(),&[json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":escuta,"token":"fixture","versao":2}})]);
+        assert!(registry.open_claude_headless("outra",false).await.is_none(),"sem sidecar, não é sessão Claude sem terminal");
+        registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
+        assert!(registry.entries.lock().await.get(&key).unwrap().auto_respawn.is_some(),"o processo que cai é religado aqui");
+        assert!(matches!(registry.open_claude_headless("cl",false).await,Some(Ok(()))),"aberta não abre de novo");
+        registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// Sidecar que existe e não se lê é erro visível, nunca "não é sessão Claude sem terminal".
+    #[tokio::test]
+    async fn an_unreadable_claude_sidecar_is_an_error_not_an_absent_session() {
+        let home=tempfile::tempdir().unwrap();
+        let (registry,_hubs)=claude_registry(home.path(),&[]);
+        std::fs::write(home.path().join(".hangar/claude-headless/cl.json"),b"{torto").unwrap();
+        let error=registry.open_claude_headless("cl",true).await.expect("o arquivo existe").expect_err("ilegível");
+        assert_eq!(error.code,"claude_sidecar_read");
+    }
+
+    /// A 1ª mensagem chega enquanto a sessão recém-criada ainda sobe: a segunda abertura espera a primeira
+    /// e acha a sessão aberta, sem disputar a trava da fila (que o ator segura a vida toda) nem marcar erro.
+    #[tokio::test]
+    async fn a_second_open_during_the_first_finds_the_session_open() {
+        let home=tempfile::tempdir().unwrap();
+        let (accepted,release)=(Arc::new(tokio::sync::Notify::new()),Arc::new(tokio::sync::Notify::new()));
+        let (escuta,server)=fake_cano_gated(Some((accepted.clone(),release.clone()))).await;
+        let key="ef".repeat(16);
+        let (registry,_hubs)=claude_registry(home.path(),&[json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":escuta,"token":"fixture","versao":2}})]);
+        let first={let registry=registry.clone();tokio::spawn(async move {registry.open_claude_headless("cl",false).await})};
+        accepted.notified().await;
+        let second={let registry=registry.clone();tokio::spawn(async move {registry.open_claude_headless("cl",false).await})};
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        assert!(matches!(first.await.unwrap(),Some(Ok(()))));
+        let second=tokio::time::timeout(Duration::from_secs(10),second).await.unwrap().unwrap();
+        assert!(matches!(second,Some(Ok(()))),"a segunda abertura achou a sessão aberta: {:?}",second.map(|r|r.err().map(|e|e.code)));
+        assert!(registry.runtime_lost("cl").await.is_none(),"sessão saudável sem erro marcado");
+        registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// `_has_pending`: só a linha não entregue conta; fila ilegível também (abrir mostra a recusa dela).
+    #[test]
+    fn pending_counts_undelivered_rows_and_unreadable_queues() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("k.json");
+        assert!(!pending(&path),"sem fila");
+        std::fs::write(&path,json!({"rows":[{"id":"1","delivered":true}]}).to_string()).unwrap();
+        assert!(!pending(&path));
+        std::fs::write(&path,json!({"rows":[{"id":"1","delivered":true},{"id":"2","delivered":false}]}).to_string()).unwrap();
+        assert!(pending(&path));
+        std::fs::write(&path,"{").unwrap();
+        assert!(pending(&path));
+    }
+
+    /// Na subida, a sessão parada sem nada a entregar fica fechada; a que tem mensagem na fila é subida
+    /// (aqui falha: a casa de teste não tem `claude`, e a falha fica no canal dela).
+    #[tokio::test]
+    async fn boot_opens_only_live_or_pending_claude_headless_sessions() {
+        let home=tempfile::tempdir().unwrap();
+        let (parked,waiting)=("ab".repeat(16),"cd".repeat(16));
+        let queue=home.path().join(".claude/.hangar-queue");std::fs::create_dir_all(queue.join("runtime")).unwrap();
+        let row=json!({"id":"1","text":"oi","ts":1.0,"delivered":false});
+        Store::open(&queue.join(format!("runtime/{waiting}.json")),&queue,QueueState::new(&waiting,1,"pendente",vec![row])).unwrap();
+        let sidecar=|name:&str,key:&str|json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"permission_mode":"manual",
+            "cano":{"pid":u32::MAX-7,"escuta":"tcp:127.0.0.1:1","token":"t","versao":2}});
+        let (registry,_hubs)=claude_registry(home.path(),&[sidecar("parada",&parked),sidecar("pendente",&waiting)]);
+        registry.clone().register_claude_headless().await;
+        assert!(registry.runtime_lost("pendente").await.is_some(),"a pendente foi subida (e a falha aparece)");
+        assert!(registry.runtime_lost("parada").await.is_none() && !registry.has_entry(None,"parada").await,"a parada fica fechada");
+    }
     struct OwnSidecar(std::path::PathBuf);
     impl Drop for OwnSidecar {fn drop(&mut self) {let _=std::fs::remove_file(&self.0);}}
     /// Parity A3: Claude sem terminal aberto pelo Python com a pasta do sidecar fica administrado: o processo
@@ -2597,8 +2882,18 @@ mod tests {
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
-        let mut claude = claude;
-        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("o Claude nunca sobe por aqui").code,"relaunch_recipe_missing");
+        // O Claude sobe pelo spec da sessão: sem o cano no PATH injetado, falha no processo.
+        let mut claude = RuntimeTarget { metadata:json!({"name":"cl","key":"k","headless":true,"cwd":dir.path(),
+            "session_id":"0c657c79-1745-406b-a97f-bbbf5402ff19","permission_mode":"manual"}),..claude };
+        let failed = launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("a subida sem cano precisa falhar");
+        assert!(!failed.code.starts_with("policy_") && failed.code != "relaunch_recipe_missing","{}",failed.code);
+        // S-72: pid gravado vivo mas de outro programa (reaproveitado depois do boot) não é o cano da
+        // sessão: sobe outro em vez de dar a sessão por de pé.
+        claude.binding.pid = std::process::id();
+        assert!(launch_if_needed(&policy,&mut claude,dir.path()).await.is_err(),"pid alheio não vale como cano vivo");
+        // Sem terminal não há bwrap: só leitura nunca sobe aqui.
+        claude.metadata["read_only"] = json!(true);
+        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().unwrap().code,"headless_read_only");
     }
 
     #[test]

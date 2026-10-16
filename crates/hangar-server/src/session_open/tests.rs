@@ -796,6 +796,23 @@ fn an_unknown_engine_window_is_read_again_on_reopen() {
     }
 }
 
+/// T-004 no Claude sem terminal: a subida relê a janela que ficou desconhecida na criação e a grava no
+/// sidecar, para a sessão de motor não subir sem `--context` para sempre.
+#[test]
+fn a_headless_launch_reads_the_unknown_engine_window_and_records_it() {
+    let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key = "d".repeat(32);
+    std::fs::write(dir.path().join("s1.json"), json!({"name": "s1", "key": key, "context_window": null}).to_string()).unwrap();
+    let mut spec = SessionSpec { key: key.clone(), name: "s1".into(), model: Some("k3".into()), account: Account::Engine { name: "e".into(),
+        account: None, config_dir: None, context_window: None, context_window_unknown: true }, ..fixture_spec("create_claude_terminal_default") };
+    let facts = FixtureFacts { window: Ok(Some(262144)), ..FixtureFacts::of(&fixture) };
+    crate::runtime::claude_launch::refresh_window(&mut spec, &facts, dir.path(), "s1");
+    assert!(matches!(spec.account, Account::Engine { context_window: Some(262144), context_window_unknown: false, .. }));
+    let meta: Value = serde_json::from_slice(&std::fs::read(dir.path().join("s1.json")).unwrap()).unwrap();
+    assert_eq!(meta["context_window"], 262144);
+}
+
 /// Herdar a conta Codex padrão desconectada é como não pedir conta: a conectada entra no lugar.
 #[test]
 fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
@@ -1602,6 +1619,25 @@ fn a_live_codex_session_keeps_the_mode_its_terminal_last_wrote() {
     let home = written("Tudo");
     record::write(home.path(), &born).unwrap();
     assert_eq!(record::live(home.path(), "mae-codex").unwrap().unwrap().permission_mode, Some(PermissionMode::AskForApproval), "valor inválido não vence");
+}
+
+/// S-02: a sessão nasceu em plano e a CLI saiu dele sozinha; o Rust gravou o modo novo no sidecar. Quem
+/// relança usa o observado, nunca o da criação; o que só o registro tem (as escolhas de plugins) fica.
+#[test]
+fn a_live_claude_headless_relaunches_in_the_mode_the_cli_moved_to() {
+    let home = tempfile::tempdir().unwrap();
+    let born = SessionSpec { key: "c".repeat(32), name: "s1".into(), permission_mode: Some(PermissionMode::Plan),
+        customizations: Some(ClaudeCustomizations { plugins: [("a@l".to_owned(), false)].into_iter().collect(), ..Default::default() }),
+        ..fixture_spec("create_claude_headless_then_launch") };
+    record::write(home.path(), &born).unwrap();
+    let meta = json!({"name": "s1", "key": "c".repeat(32), "cwd": born.cwd, "session_id": "0c657c79-1745-406b-a97f-bbbf5402ff19",
+        "config_dir": born.account.config_dir(), "permission_mode": "acceptEdits", "model": "sonnet", "effort": "low"});
+    let spec = record::claude_live(home.path(), &meta, "s1").unwrap();
+    assert_eq!((spec.permission_mode, spec.model.as_deref(), spec.effort.as_deref()), (Some(PermissionMode::AcceptEdits), Some("sonnet"), Some("low")));
+    assert_eq!(spec.customizations, born.customizations);
+    // Modo fora da lista no sidecar fica ausente: o lançamento recusa em vez de inventar um.
+    let spec = record::claude_live(home.path(), &json!({"key": "c".repeat(32), "cwd": "/x", "session_id": "s", "permission_mode": "Tudo"}), "s1").unwrap();
+    assert_eq!(spec.permission_mode, None);
 }
 
 /// Sidecar quebrado não é "sessão sem sidecar": quem reabre ou herda precisa saber que não leu.

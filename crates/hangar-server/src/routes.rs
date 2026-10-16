@@ -184,9 +184,9 @@ impl AppState {
         found
     }
 
-    /// Abrir a conversa reabre a sessão em erro; quem reabre é o coordenador do Python.
+    /// Abrir a conversa reabre a sessão em erro, aqui no registro do runtime.
     pub(crate) fn request_reopen(&self, name: &str) {
-        crate::locate::request_reopen(&self.http, self.cfg.upstream, &self.cfg.internal_secret, &self.diag, name);
+        if let Some(runtime) = self.state.runtime.get() { runtime.request_reopen(name); }
     }
 }
 

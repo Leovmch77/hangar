@@ -1,11 +1,6 @@
 """Regressões da escolha e da memória do provedor na abertura."""
-import asyncio
-from unittest.mock import AsyncMock
-
 import pytest
 
-from app import api, runtime_config
-from app.registry import SessionInfo
 from app.session_defaults import choose_provider
 
 
@@ -21,58 +16,3 @@ def test_provider_choice(remembered, connected, disconnected, expected):
     probes = {provider: {"disponivel": provider != "kimi"}
               for provider in ("claude", "codex", "pi", "kimi")}
     assert choose_provider(probes, remembered, connected, disconnected) == expected
-
-
-@pytest.fixture
-def creation(monkeypatch, tmp_path):
-    monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
-    create = AsyncMock(return_value=SessionInfo(name="default-provider", cwd="/repo", provider="claude"))
-    monkeypatch.setattr(api, "_criar_sessao", create)
-    monkeypatch.setattr(api, "_session_provider_catalog", AsyncMock(return_value={
-        "claude": {"disponivel": True, "default": True},
-        "codex": {"disponivel": True, "default": False},
-    }))
-    return create
-
-
-def test_omitted_provider_uses_server_choice_and_remembers_success(creation):
-    result = asyncio.run(api.create_session(api.CreateBody(
-        name="default-provider", cwd="/repo", headless=True, remember_provider=True)))
-    assert creation.call_args.args[0].provider == "claude"
-    assert result.provider == "claude"
-    assert runtime_config.get("last_session_provider") == "claude"
-
-
-def test_failed_creation_preserves_preference(creation):
-    runtime_config.aplicar({"last_session_provider": "pi"})
-    creation.side_effect = ValueError("creation failed")
-    with pytest.raises(ValueError, match="creation failed"):
-        asyncio.run(api.create_session(api.CreateBody(
-            name="default-provider", cwd="/repo", provider="claude", headless=True, remember_provider=True)))
-    assert runtime_config.get("last_session_provider") == "pi"
-
-
-def test_automated_creation_preserves_preference(creation):
-    runtime_config.aplicar({"last_session_provider": "pi"})
-    asyncio.run(api.create_session(api.CreateBody(name="default-provider", cwd="/repo", provider="claude", headless=True)))
-    assert runtime_config.get("last_session_provider") == "pi"
-
-
-def test_explicit_provider_wins(creation):
-    # Claude sem terminal: o único que ainda abre aqui.
-    creation.return_value = SessionInfo(name="default-provider", cwd="/repo", provider="claude")
-    asyncio.run(api.create_session(api.CreateBody(name="default-provider", cwd="/repo", provider="claude", headless=True)))
-    assert creation.call_args.args[0].provider == "claude"
-
-
-def test_preference_write_failure_does_not_hide_created_session(creation, monkeypatch):
-    def fail(_changes):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(runtime_config, "aplicar", fail)
-    result = asyncio.run(api.create_session(api.CreateBody(
-        name="default-provider", cwd="/repo", provider="claude", headless=True, remember_provider=True)))
-    assert result.name == "default-provider"
-    assert "disk full" in result.avisos[0]
-
-

@@ -4,9 +4,7 @@ stream-json medido contra a CLI (docs/research/claude-sem-terminal-monocode.md).
 import asyncio
 import base64
 import json
-import sys
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -56,16 +54,6 @@ def adapter(sidecar):
     return ad
 
 
-@pytest.fixture(autouse=True)
-def _plugin_do_hangar_fora(monkeypatch):
-    """O `_argv` e o `_spawn` perguntam ao `plugin_bridge` se o plugin do Hangar entra no `claude -p`
-    (S7). A resposta real depende do CLI e da config da máquina; aqui é sempre "não entra", e só os
-    testes do plugin trocam."""
-    from app import plugin_bridge
-    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
-    monkeypatch.setattr(plugin_bridge, "env_da_sessao", lambda name, key: {})
-
-
 def _run(coro):
     return asyncio.run(coro)
 
@@ -89,32 +77,13 @@ def test_initialize_event_is_not_positive_control_proof(adapter, monkeypatch):
     _run(run())
 
 
-def test_initialize_control_refusal_is_recorded_not_ready(adapter, monkeypatch):
-    from unittest.mock import AsyncMock
-    sess = adapter._sessions["s1"]
-    monkeypatch.setattr(adapter, "_ctrl", AsyncMock(side_effect=RuntimeError("initialize refused")))
-    monkeypatch.setattr(adapter, "_notify", AsyncMock())
-    monkeypatch.setattr(adapter, "_agendar_cota", lambda *a: None)
-    drain = AsyncMock()
-    monkeypatch.setattr(adapter, "_drenar_fim_de_turno", drain)
-    _run(adapter._esperar_initialize(sess))
-    assert sess.initialize_done.is_set() and sess.initialize_ok is not True
-    assert sess.initialize_error == "initialize refused"
-    drain.assert_not_awaited()
-
-
 def test_valid_initialize_control_proves_ready_and_dead_process_does_not(adapter, monkeypatch):
     from unittest.mock import AsyncMock
     sess = adapter._sessions["s1"]
     monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
-    monkeypatch.setattr(adapter, "_ctrl", AsyncMock(return_value={"commands": []}))
-    monkeypatch.setattr(adapter, "_notify", AsyncMock())
-    monkeypatch.setattr(adapter, "_agendar_cota", lambda *a: None)
-    monkeypatch.setattr(adapter, "_drenar_fim_de_turno", AsyncMock())
     monkeypatch.setattr(adapter, "_ligar", AsyncMock(return_value=sess))
 
     async def run():
-        await adapter._esperar_initialize(sess)
         assert await adapter.ensure_running("s1", require_initialize=True) is sess
         sess.proc.returncode = 1
         with pytest.raises(RuntimeError):
@@ -406,166 +375,6 @@ def test_context_ganha_tabela_de_limites_da_conta(adapter):
     assert A._tabela_limites([]) == ""
 
 
-def test_estaciona_so_sessao_parada_sem_nada_em_aberto(adapter, monkeypatch):
-    relogio = [5000.0]
-    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
-    sess = adapter._sessions["s1"]
-    sess.ativa_em = relogio[0]
-    pode = lambda: _run(adapter._pode_estacionar(sess))   # noqa: E731
-
-    assert not pode()                       # acabou de trabalhar
-    relogio[0] += A._OCIOSA_S + 1
-    assert pode()
-    sess.pending["r1"] = {"tool_name": "Bash"}
-    sess.state = "awaiting_input"
-    assert not pode()                       # permissão em aberto
-    sess.pending.clear()
-    sess.state = "idle"
-    fila = [{"id": "q1", "delivered": False}]
-
-    class _Fila:
-        def __init__(self, name):
-            pass
-
-        def load(self):
-            return fila
-    monkeypatch.setattr(A, "PromptQueue", _Fila)
-    assert not pode()                       # fila por entregar
-    fila[0]["delivered"] = True
-    assert pode()
-    sess.in_progress = True
-    assert not pode()
-
-
-def test_prompt_que_chega_durante_a_leitura_da_fila_segura_o_estacionar(adapter, monkeypatch):
-    relogio = [5000.0]
-    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
-    sess = adapter._sessions["s1"]
-    sess.ativa_em = relogio[0] - A._OCIOSA_S - 1
-
-    class _Fila:
-        def __init__(self, name):
-            pass
-
-        def load(self):
-            sess.ativa_em = relogio[0]   # send_prompt marcou atividade no meio da leitura
-            return []
-    monkeypatch.setattr(A, "PromptQueue", _Fila)
-    assert _run(adapter._pode_estacionar(sess)) is False
-
-
-def test_vigia_encerra_o_cano_da_ociosa(adapter, monkeypatch):
-    sess = adapter._sessions["s1"]
-    mortos = []
-    monkeypatch.setattr(A, "_VIGIA_S", 0)
-    monkeypatch.setattr(ClaudeHeadlessAdapter, "_matar", staticmethod(lambda s, meta=None: mortos.append(s.name)))
-
-    async def sempre(s):
-        return True
-    adapter._pode_estacionar = sempre  # type: ignore[method-assign]
-    _run(asyncio.wait_for(adapter._vigiar_ociosas(), 2))
-    # Fora da memória: sem isto a sessão seguia "viva" e o próximo prompt não subia outro processo.
-    assert mortos == ["s1"] and "s1" not in adapter._sessions and sess.name == "s1"
-
-
-def test_prompt_waits_for_idle_shutdown_and_uses_new_process(adapter, monkeypatch):
-    old = adapter._sessions["s1"]
-    old.ativa_em -= A._OCIOSA_S + 1
-    old.meta["cano"] = {"pid": 4242}
-    release = threading.Event()
-    delivered_to = []
-    monkeypatch.setattr(A, "_VIGIA_S", 0)
-    monkeypatch.setattr(adapter, "_garantir_vigia", lambda: None)
-
-    async def spawn(sess, **kwargs):
-        sess.proc = _Proc()
-        sess.initialize_ok = True
-        sess.initialize_done.set()
-        return True
-
-    async def write(sess, obj):
-        delivered_to.append(sess)
-
-    monkeypatch.setattr(adapter, "_spawn", spawn)
-    monkeypatch.setattr(adapter, "_write", write)
-
-    async def flow():
-        stopping = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        def stop(*args):
-            loop.call_soon_threadsafe(stopping.set)
-            assert release.wait(5)
-
-        monkeypatch.setattr(A, "_matar_grupo", stop)
-
-        async def send():
-            async with adapter.delivery_lock("s1"):
-                return await adapter.send_prompt("s1", "mensagem durante o encerramento")
-
-        watcher = asyncio.create_task(adapter._vigiar_ociosas())
-        prompt = None
-        try:
-            await asyncio.wait_for(stopping.wait(), 2)
-            prompt = asyncio.create_task(send())
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(prompt), 0.05)
-            assert not delivered_to
-            release.set()
-            assert await asyncio.wait_for(prompt, 2) == "sent"
-            assert delivered_to == [adapter._sessions["s1"]]
-            assert delivered_to[0] is not old
-        finally:
-            release.set()
-            tasks = [watcher] + ([prompt] if prompt is not None else [])
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    _run(flow())
-
-
-def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
-    from app import pensamento
-    monkeypatch.setattr(pensamento, "ler", lambda: True)
-    argv = adapter._argv("sid", resume=True)
-    assert argv[argv.index("--thinking-display") + 1] == "summarized"
-    monkeypatch.setattr(pensamento, "ler", lambda: False)
-    assert "--thinking-display" not in adapter._argv("sid", resume=False)
-
-
-def test_mensagem_do_stdin_volta_como_eco_para_provar_a_entrega(adapter):
-    """O eco (`isReplay`, mesmo `uuid`) é a prova de entrega que o Rust usa; prompt barrado por hook não ecoa."""
-    for resume in (True, False):
-        assert "--replay-user-messages" in adapter._argv("sid", resume=resume)
-
-
-def test_plano_com_base_bypass_sobe_podendo_voltar_ao_bypass(adapter):
-    """Sem a flag, a CLI que nasceu no plano recusa `set_permission_mode bypassPermissions` pelo
-    resto do processo: aprovar o plano ficava pedindo cada edição."""
-    flag = "--allow-dangerously-skip-permissions"
-    argv = adapter._argv("sid", resume=False, permission_mode="plan", permitir_bypass=True)
-    assert flag in argv and argv[argv.index("--permission-mode") + 1] == "plan"
-    # Já em bypass a própria --permission-mode basta; base que não é bypass não ganha a flag.
-    assert flag not in adapter._argv("sid", resume=False, permission_mode="bypassPermissions", permitir_bypass=True)
-    assert flag not in adapter._argv("sid", resume=False, permission_mode="plan")
-
-
-def test_sem_terminal_carrega_o_plugin_do_hangar(adapter, monkeypatch):
-    """S7: sem terminal o Hangar é a superfície `desktop` dos mods, e o plugin dele entra para levar ao
-    aparelho de quem clicou a URL que um mod abriria na máquina do servidor. Mods desligados
-    (`raizes_dos_plugins` vazia): o argv fica como era."""
-    from app import plugin_bridge
-    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins",
-                        lambda: ["/repo/plugins/hangar", "/repo/plugins/outro"])
-    argv = adapter._argv("sid", resume=False)
-    i = argv.index("--plugin-dir")
-    # Na ordem da lista: o do Hangar primeiro é o que o deixa por fora na cadeia de hooks.
-    assert argv[i:i + 4] == ["--plugin-dir", "/repo/plugins/hangar", "--plugin-dir", "/repo/plugins/outro"]
-    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
-    assert "--plugin-dir" not in adapter._argv("sid", resume=False)
-
-
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
     # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
     ad = ClaudeHeadlessAdapter()
@@ -612,108 +421,6 @@ def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, mo
         if stop_fails:
             assert S.load("s1") == saved
         await gen.aclose()
-    _run(fluxo())
-
-
-def test_sessao_que_nao_sobe_tenta_poucas_vezes_e_marca_a_fila(sidecar, monkeypatch):
-    # Processo que morre antes do initialize, com prompt na fila: o drain do fim da subida
-    # religava na hora e virava laço (179 quedas por minuto com motor inexistente).
-    from app import pqueue
-    q = pqueue.PromptQueue("s1"); q.clear()
-    entrada = q.append("oi", delivered=False)
-    ad = ClaudeHeadlessAdapter()
-    monkeypatch.setattr(A, "_ESPERA_SUBIDA_S", 0.001)
-    monkeypatch.setattr(ad, "_agendar_cota", lambda s: None)
-    subidas = []
-
-    class _Morto:
-        returncode = 1
-        pid = None
-
-    async def subir_e_morrer(sess):
-        subidas.append(sess.name)
-        sess.proc = _Morto()
-        sess.iniciando = True
-        t = asyncio.create_task(ad._esperar_initialize(sess))
-        ad._tarefas.add(t)
-        t.add_done_callback(ad._tarefas.discard)
-    monkeypatch.setattr(ad, "_subir_cano", subir_e_morrer)
-
-    async def esperar_quieto():
-        while ad._tarefas:
-            await asyncio.gather(*list(ad._tarefas))
-
-    async def fluxo():
-        # Subida da criação que já morreu: o envio não pode tentar o stdin nem herdar a contagem.
-        morta = _Sessao("s1", sidecar)
-        morta.proc = _Morto()
-        ad._sessions["s1"] = morta
-        ad._subidas["s1"] = 1
-        assert await ad.deliverable("s1") is False
-        ad.acordar("s1")
-        await esperar_quieto()
-        assert len(subidas) == A._TETO_SUBIDAS
-        [linha] = [r for r in q.load() if r["id"] == entrada["id"]]
-        assert linha["delivered"] is True and linha["desistiu"] is True
-        # Nada mais sobe sozinho; um envio novo do usuário abre outra rodada.
-        await ad.drain("s1", "")
-        assert len(subidas) == A._TETO_SUBIDAS
-        q.append("de novo", delivered=False)
-        ad.acordar("s1")
-        await esperar_quieto()
-        assert len(subidas) == 2 * A._TETO_SUBIDAS
-    _run(fluxo())
-
-
-def test_acordar_durante_a_espera_entre_subidas_nao_perde_o_zero(sidecar, monkeypatch):
-    ad = ClaudeHeadlessAdapter()
-    monkeypatch.setattr(A, "_ESPERA_SUBIDA_S", 0.05)
-
-    async def subir(sess):
-        pass
-    monkeypatch.setattr(ad, "_subir_cano", subir)
-
-    async def fluxo():
-        ad._subidas["s1"] = 2
-        tarefa = asyncio.create_task(ad._spawn(_Sessao("s1", sidecar)))
-        await asyncio.sleep(0.01)          # dormindo sob a trava
-        ad._subidas.pop("s1")              # o que o `acordar` faz
-        await tarefa
-        assert ad._subidas["s1"] == 1
-    _run(fluxo())
-
-
-def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapter, monkeypatch):
-    sess = adapter._sessions["s1"]
-    monkeypatch.setattr(A, "_AVISO_INIT_S", 0.01)
-    liberar = asyncio.Event
-    drenou = []
-
-    async def fluxo():
-        solta = liberar()
-
-        async def ctrl_lento(s, subtype, **kw):
-            await solta.wait()
-            return {}
-        monkeypatch.setattr(adapter, "_ctrl", ctrl_lento)
-        monkeypatch.setattr(adapter, "_agendar_cota", lambda s: None)
-
-        async def drenar(s):
-            drenou.append(s.name)
-        monkeypatch.setattr(adapter, "_drenar_fim_de_turno", drenar)
-        sess.iniciando = True
-        sess.iniciar_turno()
-        tarefa = asyncio.create_task(adapter._esperar_initialize(sess))
-        await asyncio.sleep(0)
-        ev = adapter._evento(sess)
-        assert ev.state == "working" and ev.label.startswith("Iniciando sessão… (") and ev.headless
-        assert await adapter.deliverable("s1") is False       # prompt vai pra fila, não pro stdin
-        await asyncio.sleep(0.05)
-        assert sess.problema == "headless_sem_resposta"        # passou do aviso: fica à vista
-        solta.set()
-        await tarefa
-        assert not sess.iniciando and sess.initialized.is_set() and sess.problema is None
-        assert adapter._evento(sess).state == "idle" and drenou == ["s1"]
     _run(fluxo())
 
 
@@ -1126,25 +833,16 @@ def test_registry_cria_lista_e_mata_sem_tmux(tmp_path, monkeypatch):
     assert not S.exists("hl")
 
 
-def test_criar_resolve_o_modo_da_conta_em_vez_de_deixar_nulo(tmp_path, monkeypatch):
-    """Modo nulo virava a flag ausente: a sessão nascia no que a MÁQUINA tivesse no settings.json."""
+def test_criar_sem_terminal_pelo_python_pede_o_rust(tmp_path, monkeypatch):
+    """Abrir o Claude sem terminal é do Rust: o Python recusa e não grava sidecar."""
     from app import registry as R
-    conta = tmp_path / "conta"
-    conta.mkdir()
-    (conta / "settings.json").write_text('{"permissions": {"defaultMode": "acceptEdits"}}', encoding="utf-8")
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
     monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
     monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
     reg = R.SessionRegistry(str(tmp_path / "projects"))
-
-    reg.create("sem-escolha", str(tmp_path), config_dir=str(conta), provider="claude", headless=True)
-    assert S.load("sem-escolha")["permission_mode"] == "acceptEdits"
-
-    # Nascendo no plano, o modo de base fica gravado — é o que o plano usa pra não perguntar.
-    reg.create("no-plano", str(tmp_path), config_dir=str(conta), provider="claude", headless=True,
-               permission_mode="plan")
-    meta = S.load("no-plano")
-    assert meta["permission_mode"] == "plan" and meta["previous_non_plan"] == "acceptEdits"
+    with pytest.raises(R.SessionOpenNeedsRust):
+        reg.create("hl", str(tmp_path), provider="claude", headless=True)
+    assert not S.exists("hl")
 
 
 def test_turno_com_erro_vira_problema_e_sucesso_limpa(adapter):
@@ -1265,8 +963,7 @@ def test_cano_mudo_e_vivo_nao_e_morto(sidecar, monkeypatch):
         return None
     monkeypatch.setattr(ad, "_conectar", sem_snapshot)
     monkeypatch.setattr(A, "_matar_grupo", lambda pid, name: pytest.fail("matou cano vivo"))
-    monkeypatch.setattr(ad, "_subir_cano", lambda sess: pytest.fail("subiu segundo claude"))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(A._CanoOcupado):
         _run(ad.ensure_running("s1", esperar_pronta=False))
     assert S.load("s1")["cano"]["pid"] == 777
     assert ad.problema_de("s1") is None      # passageiro: não fica na lista
@@ -1298,7 +995,7 @@ def test_registry_renomeia_sem_tmux(tmp_path, monkeypatch):
     monkeypatch.setattr(R.tmux, "list_panes_all", lambda: {})
     monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
     reg = R.SessionRegistry(str(tmp_path / "projects"))
-    reg.create("hl", str(tmp_path), provider="claude", headless=True)
+    S.save("hl", str(tmp_path), "22222222-2222-2222-2222-222222222222")   # quem cria é o Rust
     reg.rename("hl", "hl2")
     assert not S.exists("hl") and S.load("hl2")["name"] == "hl2"
     reg.kill("hl2")
@@ -1375,8 +1072,6 @@ def test_modo_de_permissao_sobrevive_ao_resume_e_ao_nome_da_cli(adapter):
     _run(adapter._on_event(sess, {"type": "system", "subtype": "init", "session_id": sess.sid,
                                   "permissionMode": "default", "model": "haiku"}))
     assert sess.permission_mode == "manual"
-    argv = adapter._argv(sess.sid, resume=True, permission_mode=sess.permission_mode)
-    assert "--resume" in argv and argv[argv.index("--permission-mode") + 1] == "manual"
 
 
 def test_modo_plan_lembra_o_modo_anterior_para_o_botao_implementar(adapter):
@@ -1536,215 +1231,6 @@ def test_esforco_vai_como_comando_local_e_espera_o_turno(adapter):
     assert S.load("s1")["effort"] == "low"
 
 
-_CANO_RUST_FALSO = Path("/opt/hangar/bin/hangar-cano")
-
-
-@pytest.fixture(params=["cano.py", "hangar-cano"])
-def lancador_cano(request, monkeypatch) -> list[str]:
-    """O backend sobe o hangar-cano quando acha o binário e o cano.py quando não acha; o resto
-    do comando é o mesmo nos dois."""
-    if request.param == "cano.py":
-        monkeypatch.setattr(A, "_usable_cano_bin", lambda: None)
-        return [sys.executable, str(A._CANO_PY)]
-    monkeypatch.setattr(A, "_usable_cano_bin", lambda: _CANO_RUST_FALSO)
-    return [str(_CANO_RUST_FALSO)]
-
-
-def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lancador_cano):
-    from app import plugin_bridge
-    monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
-    monkeypatch.setattr(plugin_bridge, "env_da_sessao",
-                        lambda name, key: {"HANGAR_PLUGIN_URL": "http://127.0.0.1:1/api/plugin", "HANGAR_PLUGIN_TOKEN": f"tok-{name}"})
-    monkeypatch.setenv("TMUX_PANE", "%9")
-    monkeypatch.setenv("TMUX", "/tmp/x")
-    visto = {}
-
-    async def exec_falso(*argv, env, **kw):
-        visto["env"] = env
-        visto["argv"] = argv
-
-        class _P:
-            pid = 1
-            returncode = None
-
-            async def wait(self):
-                return 0
-        return _P()
-
-    async def conectar_falso(cano, **kw):
-        visto["cano"] = cano
-        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
-                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
-    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
-    ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.update("s1", subagent_model="claude-opus-5"))
-
-    async def ctrl(s, sub, **kw):
-        return {}
-    ad._conectar = conectar_falso                 # type: ignore[method-assign]
-    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
-    ad._ctrl = ctrl                               # type: ignore[method-assign]
-    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
-    _run(ad._spawn(sess))
-    env = visto["env"]
-    assert "TMUX" not in env and "TMUX_PANE" not in env
-    assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]
-    assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
-    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
-    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
-    # S7: a ponte do plugin do Hangar desta sessão, para o clique do app pela superfície `desktop`.
-    assert (env["HANGAR_PLUGIN_URL"], env["HANGAR_PLUGIN_TOKEN"]) == ("http://127.0.0.1:1/api/plugin", "tok-s1")
-    # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
-    # onde ele escuta, pra o próximo backend religar.
-    argv = list(visto["argv"])
-    ultimo = len(argv) - 1 - argv[::-1].index("--")   # o escopo do systemd também tem um `--`
-    assert argv[ultimo + 1] == "/usr/bin/claude"       # caminho resolvido
-    inicio = argv.index(lancador_cano[-1]) - (len(lancador_cano) - 1)
-    assert argv[inicio:inicio + len(lancador_cano)] == lancador_cano
-    # A chave no cmdline é o que o registry.cwd_atual confere em /proc/<pid>/cmdline.
-    assert S.load("s1")["key"][:16] in " ".join(argv)
-    assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
-    assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
-    # O `--plugin-dir` vai no comando do claude, depois do `--` do cano.
-    assert argv[argv.index("--plugin-dir", ultimo) + 1] == "/repo/plugins/hangar"
-    # O token da ponte vai só no ambiente, nunca no comando (o cmdline é legível por outros processos).
-    assert "tok-s1" not in " ".join(argv)
-
-
-def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancador_cano):
-    """Backend subido de dentro de uma sessão do Hangar tem a ponte DELA no ambiente. Com os mods
-    desligados (`env_da_sessao` vazio, fixture), o filho sai sem ponte nenhuma: nem a herdada, nem a
-    desta sessão; e sem `--plugin-dir`, como era."""
-    monkeypatch.setenv("HANGAR_PLUGIN_URL", "http://127.0.0.1:9/api/plugin")
-    monkeypatch.setenv("HANGAR_PLUGIN_TOKEN", "tok-de-outra")
-    visto = {}
-
-    async def exec_falso(*argv, env, **kw):
-        visto["env"] = env
-        visto["argv"] = argv
-
-        class _P:
-            pid = 1
-            returncode = None
-
-            async def wait(self):
-                return 0
-        return _P()
-
-    async def conectar_falso(cano, **kw):
-        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
-                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
-    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
-    ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.load("s1"))
-
-    async def ctrl(s, sub, **kw):
-        return {}
-    ad._conectar = conectar_falso                 # type: ignore[method-assign]
-    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
-    ad._ctrl = ctrl                               # type: ignore[method-assign]
-    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
-    _run(ad._spawn(sess))
-    assert "HANGAR_PLUGIN_URL" not in visto["env"] and "HANGAR_PLUGIN_TOKEN" not in visto["env"]
-    assert "--plugin-dir" not in visto["argv"] and "tok-de-outra" not in " ".join(visto["argv"])
-
-
-@pytest.mark.parametrize("var", ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS",
-                                 "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_API_KEY",
-                                 "JEV_AUX_API_KEY"])
-def test_processo_nao_herda_do_backend_variavel_da_sessao(sidecar, monkeypatch, lancador_cano, var):
-    """Sessão sem subagente, sem Jev e com o portão de hooks desligado: o valor que o backend herdou
-    de outra sessão não chega ao filho."""
-    monkeypatch.setenv(var, "de-outra-sessao")
-    monkeypatch.setattr(A.runtime_config, "get", lambda campo: None)
-    visto = {}
-
-    async def exec_falso(*argv, env, **kw):
-        visto["env"] = env
-
-        class _P:
-            pid = 1
-            returncode = None
-
-            async def wait(self):
-                return 0
-        return _P()
-
-    async def conectar_falso(cano, **kw):
-        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
-                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
-    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
-    ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.load("s1"))
-
-    async def ctrl(s, sub, **kw):
-        return {}
-    ad._conectar = conectar_falso                 # type: ignore[method-assign]
-    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
-    ad._ctrl = ctrl                               # type: ignore[method-assign]
-    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
-    _run(ad._spawn(sess))
-    assert var not in visto["env"]
-
-
-@pytest.mark.parametrize("tier,supported", [(None, False), ("default", True), ("priority", True), ("default", False)])
-def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch, lancador_cano, tier, supported):
-    # No Windows o `hangar-engine` é `.CMD`: o CreateProcess do cano não acha o nome sem extensão.
-    from app import cliproxy
-    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: supported)
-    monkeypatch.setenv("CP_ENGINE_SERVICE_TIER", "inherited")
-    visto = {}
-
-    async def exec_falso(*argv, env, **kw):
-        visto["argv"] = argv
-        visto["env"] = env
-
-        class _P:
-            pid = 1
-
-            async def wait(self):
-                return 0
-        return _P()
-
-    async def conectar_falso(cano, **kw):
-        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
-                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
-    exe = r"C:\Users\x\.local\bin\hangar-engine.CMD"
-    monkeypatch.setattr(A.shutil, "which", lambda b: exe if b == "hangar-engine" else None)
-    ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier=tier))
-    ad._conectar = conectar_falso                 # type: ignore[method-assign]
-    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
-    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
-    ad._esperar_initialize = lambda s: asyncio.sleep(0)   # type: ignore[method-assign]
-    _run(ad._spawn(sess))
-    argv = list(visto["argv"])
-    depois_do_cano = argv[argv.index("--", argv.index(lancador_cano[-1])) + 1:]
-    assert depois_do_cano[:3] == [exe, "--exec", "kimi"]
-    assert depois_do_cano[depois_do_cano.index("--") + 1] == "claude"
-    if tier is not None and supported:
-        assert depois_do_cano[depois_do_cano.index("--service-tier") + 1] == tier
-    else:
-        assert "--service-tier" not in depois_do_cano
-    assert "CP_ENGINE_SERVICE_TIER" not in visto["env"]
-
-
-def test_headless_priority_incompatible_refuses_before_spawn(sidecar, monkeypatch):
-    from unittest.mock import MagicMock
-    from app import cliproxy
-    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
-    spawn = MagicMock()
-    monkeypatch.setattr(A, "subir_cano_processo", spawn)
-    sess = _Sessao("s1", S.update("s1", engine="kimi", service_tier="priority"))
-    with pytest.raises(ValueError, match="service_tier"):
-        _run(ClaudeHeadlessAdapter()._lancar_cano(sess))
-    spawn.assert_not_called()
-
-
 def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch):
     # Backend novo, cano de antes ainda vivo com turno aberto e permissão sem resposta: o
     # snapshot reconstrói tudo sem subir processo.
@@ -1762,21 +1248,21 @@ def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch)
         return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 9,
                                   "init": init, "aberto": True, "pendentes": [pendente],
                                   "ultimo_result": result, "stderr_tail": ["x"], "saiu": None}
-    subiu = []
     ad = ClaudeHeadlessAdapter()
     ad._conectar = conectar_falso                 # type: ignore[method-assign]
-    ad._subir_cano = lambda s: subiu.append(s)    # type: ignore[method-assign]
     ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
     ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
 
     async def fluxo():
         sess = await ad.ensure_running("s1", so_reconectar=True)
-        assert sess is not None and not subiu
+        assert sess is not None
         assert sess.initialized.is_set() and sess.permission_mode == "manual"
         assert sess.in_progress and sess.state == "awaiting_input"
         assert list(sess.pending) == ["perm-1"] and sess.cost == 0.02 and sess.context_window == 200000
         ev = ad._evento(sess)
         assert ev.question == "Permitir Bash? ls" and "39k" not in (ev.status_line or "")
+        # O Python não sobe a sessão de volta: religada no modo python, ela nunca é estacionada.
+        assert not any("_vigiar_ociosas" in repr(t.get_coro()) for t in asyncio.all_tasks())
     _run(fluxo())
 
 

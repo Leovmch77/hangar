@@ -249,6 +249,9 @@ impl OpenHost for Host {
     fn diary(&self, events: Vec<Value>) { self.record.lock().unwrap().diary.extend(events); }
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
+    fn wake(&self, name: &str) {
+        self.record.lock().unwrap().runtime_requests.push(json!({"op": "claude_headless.acordar", "name": name}));
+    }
 }
 
 /// Roda os passos do cenário (só `POST /api/sessions`) pela abertura do Rust. `{"not_ours": true}`
@@ -271,9 +274,6 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     for step in substituted["steps"].as_array().into_iter().flatten() {
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
         let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
-        if request.headless == Some(true) && !matches!(request.provider.as_deref(), Some("pi" | "omp" | "kimi" | "codex")) {
-            return json!({"not_ours": true});
-        }
         let runtime = tokio::runtime::Handle::current();
         let (facts_env, facts_root, facts_record, quotas) = (env.clone(), root.to_owned(), record.clone(),
             fakes["quotas"].as_array().cloned().unwrap_or_default());
@@ -286,7 +286,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
         }).await.unwrap();
         let (status, body) = match resolved {
             Ok(resolved) if !super::open::opens_here(&resolved.spec) => return json!({"not_ours": true}),
-            Ok(resolved) => match super::open::open_terminal(&host, resolved, &OpenCaller::Owner).await {
+            Ok(resolved) => match super::open::open_session(&host, resolved, &OpenCaller::Owner).await {
                 Ok(opened) => (200, opened.body),
                 Err(error) => (error.status, error.body()),
             },

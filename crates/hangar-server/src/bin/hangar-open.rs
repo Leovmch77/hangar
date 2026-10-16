@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::session_open::claude::PluginBridge;
 use hangar_server::session_open::local::{LocalHost, dotenv};
-use hangar_server::session_open::open::{open_terminal, opens_here};
+use hangar_server::session_open::open::{open_session, opens_here};
 use hangar_server::session_open::{OpenCaller, OpenError, SessionOpenRequest, facts::LocalFacts, resolve_open};
 
 fn main() -> ExitCode {
@@ -85,13 +85,14 @@ fn main() -> ExitCode {
         Ok(resolved) => resolved,
         Err(error) => return refused(&error),
     };
-    if command == "open" && opens_here(&resolved.spec) {
+    // Sem terminal o processo é do servidor: com ele fora, o comando só resolve.
+    if command == "open" && opens_here(&resolved.spec) && resolved.spec.surface == hangar_server::session_open::Surface::Terminal {
         // A mesma abertura do servidor (D-013): token e porta do `.env` dele, para a ponte do plugin
         // valer quando ele voltar.
         let bridge = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty())
             .map(|token| PluginBridge { port: server.get("CP_PORT").and_then(|p| p.parse().ok()).unwrap_or(8765), secret: token.clone() });
         let host = LocalHost::new(server_env(std::env::vars(), &server), bridge);
-        return match runtime.block_on(open_terminal(&host, resolved, &OpenCaller::Owner)) {
+        return match runtime.block_on(open_session(&host, resolved, &OpenCaller::Owner)) {
             Ok(opened) => {
                 println!("{}", opened.body);
                 ExitCode::SUCCESS

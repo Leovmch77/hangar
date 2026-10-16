@@ -7,6 +7,7 @@ pub mod codex_sidecar;
 pub mod claude_sidecar;
 pub mod native_message;
 pub mod codex_launch;
+pub mod claude_launch;
 pub mod codex_pane;
 pub mod codex_relaunch;
 pub mod queue;

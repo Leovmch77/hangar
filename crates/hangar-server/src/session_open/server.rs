@@ -338,16 +338,21 @@ impl OpenHost for ServerHost {
 
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
-}
 
-/// Pedido que a decisão do Rust nem olha: provedor ou modo explícitos que não são do Rust ainda.
-fn explicitly_other(request: &SessionOpenRequest) -> bool {
-    match request.provider.as_deref() {
-        // Pi, omp e Kimi sem terminal: a recusa é da resolução. O Codex abre aqui nos dois modos.
-        Some("pi" | "omp" | "kimi" | "codex") => false,
-        // Sem provedor o padrão pode ser o Codex: a resolução decide, e o Claude sem terminal segue ao Python.
-        None => false,
-        _ => request.headless == Some(true),
+    fn wake(&self, name: &str) {
+        let Some(runtime) = self.st.state.runtime.get().cloned() else {
+            tracing::warn!(session = %name, "sem o registro do runtime: a sessão sem terminal sobe no primeiro envio");
+            return;
+        };
+        let name = name.to_owned();
+        // A falha fica no canal da sessão (`open_inner`); a fila espera a próxima subida.
+        tokio::spawn(async move {
+            match runtime.open_claude_headless(&name, true).await {
+                Some(Ok(())) => {}
+                Some(Err(error)) => tracing::warn!(session = %name, code = %error.code, "a sessão sem terminal criada não subiu"),
+                None => tracing::warn!(session = %name, "a sessão sem terminal criada sumiu antes de subir"),
+            }
+        });
     }
 }
 
@@ -369,11 +374,9 @@ async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller
     }).await.unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
 }
 
-/// Resolve e abre o que é do Rust (com terminal de todo provedor, o Codex também sem terminal); o
-/// Claude sem terminal ainda é do Python. Recusa da resolução é do Rust: as dele são as do Python
-/// mais os consertos.
+/// Resolve e abre o que é do Rust: com terminal de todo provedor, e o Claude e o Codex sem terminal.
+/// Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
 pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
-    if explicitly_other(&request) { return Decision::NotOurs; }
     let host = ServerHost::new(st.clone()).await;
     let facts_env = host.env.clone();
     let runtime = tokio::runtime::Handle::current();
@@ -390,7 +393,7 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
         }
     };
     if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
-    match super::open::open_terminal(&host, resolved, &caller).await {
+    match super::open::open_session(&host, resolved, &caller).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
     }

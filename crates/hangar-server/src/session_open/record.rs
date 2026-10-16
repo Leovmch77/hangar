@@ -68,6 +68,52 @@ pub fn live(home: &Path, name: &str) -> io::Result<Option<SessionSpec>> {
 
 fn text(meta: &Value, key: &str) -> Option<String> { meta[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned) }
 
+/// O spec que relança o Claude sem terminal: o sidecar manda no que ele guarda (o modo, o modelo e o
+/// esforço que a CLI mudou sozinha, S-02; a conta trocada), e o registro da `key` traz o que só ele tem
+/// (escolhas de plugins e skills, worktree, criadora, de onde veio a conta).
+pub fn claude_live(home: &Path, meta: &Value, name: &str) -> io::Result<SessionSpec> {
+    let mut spec = claude_from_meta(meta, name, 0.0)?;
+    // Chave de outro formato (`terminal_<hash>`, herdada da troca de modo) nunca teve registro.
+    let recorded = match read(home, &spec.key) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => None,
+        other => other?,
+    };
+    let Some(recorded) = recorded else { return Ok(spec) };
+    if let (Account::Engine { name, context_window_unknown, .. }, Account::Engine { name: was, context_window_unknown: unknown, .. })
+        = (&mut spec.account, &recorded.account) && name == was && meta["context_window"].is_null() {
+        *context_window_unknown = *unknown;
+    }
+    spec.customizations = recorded.customizations;
+    spec.worktree = recorded.worktree;
+    spec.creator = recorded.creator;
+    spec.account_source = recorded.account_source;
+    spec.created_at = recorded.created_at;
+    Ok(spec)
+}
+
+/// Spec de uma sessão Claude sem terminal montado do sidecar dela; o sidecar sem `key` ou sem `cwd` é erro.
+pub fn claude_from_meta(meta: &Value, name: &str, created_at: f64) -> io::Result<SessionSpec> {
+    let missing = |field: &str| io::Error::new(io::ErrorKind::InvalidData, format!("sidecar de {name} sem {field}"));
+    let cwd = text(meta, "cwd").ok_or_else(|| missing("cwd"))?;
+    let key = text(meta, "key").ok_or_else(|| missing("key"))?;
+    let config_dir = text(meta, "config_dir");
+    let account = match text(meta, "engine") {
+        Some(name) => Account::Engine { name, account: text(meta, "engine_account"), config_dir,
+            context_window: meta["context_window"].as_u64(), context_window_unknown: false },
+        None => config_dir.map_or(Account::Default, |config_dir| Account::Claude { config_dir }),
+    };
+    let tier = meta["service_tier"].as_str().and_then(|t| serde_json::from_value::<ServiceTier>(Value::from(t)).ok());
+    Ok(SessionSpec {
+        version: SPEC_VERSION, key, name: text(meta, "name").unwrap_or_else(|| name.into()),
+        cwd, provider: AgentProvider::Claude, surface: Surface::Headless, account,
+        account_source: AccountSource::Explicit, model: text(meta, "model"), effort: text(meta, "effort"), service_tier: tier,
+        permission_mode: text(meta, "permission_mode").as_deref().and_then(PermissionMode::claude),
+        // A seleção de plugins e skills mora no registro de customizações do Rust, pelo id da conversa.
+        subagent_model: text(meta, "subagent_model"), customizations: None, jev: meta["jev"] == true,
+        read_only: meta["read_only"] == true, worktree: None, creator: None, created_at,
+    })
+}
+
 /// Spec de uma sessão viva que nasceu antes do registro, montado do sidecar dela. A conta gravada
 /// vale como escolhida (reabrir nunca a troca pela cota). Claude com terminal, Pi, omp, Kimi e o
 /// sidecar sem `key` (Codex com terminal, CDX-9) não dão spec: `None`.
@@ -82,23 +128,9 @@ pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>>
     let tier = |meta: &Value| meta["service_tier"].as_str().and_then(|t| serde_json::from_value::<ServiceTier>(Value::from(t)).ok());
     let claude_path = hangar.join("claude-headless").join(format!("{safe}.json"));
     if let Some(meta) = read(&claude_path)? {
-        let cwd = cwd(&meta)?;
-        let Some(key) = text(&meta, "key") else { return Ok(None) };
-        let config_dir = text(&meta, "config_dir");
-        let account = match text(&meta, "engine") {
-            Some(name) => Account::Engine { name, account: text(&meta, "engine_account"), config_dir,
-                context_window: meta["context_window"].as_u64(), context_window_unknown: false },
-            None => config_dir.map_or(Account::Default, |config_dir| Account::Claude { config_dir }),
-        };
-        return Ok(Some(SessionSpec {
-            version: SPEC_VERSION, key, name: text(&meta, "name").unwrap_or_else(|| name.into()),
-            cwd, provider: AgentProvider::Claude, surface: Surface::Headless, account,
-            account_source: AccountSource::Explicit, model: text(&meta, "model"), effort: text(&meta, "effort"), service_tier: tier(&meta),
-            permission_mode: text(&meta, "permission_mode").as_deref().and_then(PermissionMode::claude),
-            // A seleção de plugins e skills mora no registro de customizações do Rust, pelo id da conversa.
-            subagent_model: text(&meta, "subagent_model"), customizations: None, jev: meta["jev"] == true,
-            read_only: meta["read_only"] == true, worktree: None, creator: None, created_at: created(&claude_path),
-        }));
+        cwd(&meta)?;
+        if text(&meta, "key").is_none() { return Ok(None) }
+        return claude_from_meta(&meta, name, created(&claude_path)).map(Some);
     }
     let codex_path = crate::runtime::codex_sidecar::path(&crate::runtime::codex_sidecar::dir(home), name);
     let Some(meta) = read(&codex_path)? else { return Ok(None) };

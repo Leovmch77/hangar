@@ -312,6 +312,7 @@ class Reopenable(Gateway):
     def __init__(self, broken=None, reopen_fails=False):
         super().__init__()
         self.kinds, self.broken, self.reopen_fails, self.revision = [], broken, reopen_fails, 6
+        self.launches = []
 
     async def op(self, target, command, operation_id, clock):
         from app.rust_server import RustOpError
@@ -319,6 +320,8 @@ class Reopenable(Gateway):
         if kind == "ingress":
             return {"closed": command["closed"]}
         self.kinds.append(kind)
+        if kind == "open" and command.get("launch"):
+            self.launches.append(target["name"])
         if kind == "snapshot":
             if self.broken == "gone":
                 raise RustOpError("IPC recusou a operação (503: runtime_binding)", 503, "runtime_binding")
@@ -346,16 +349,7 @@ class ReopenLegacy(Legacy):
     def __init__(self, target):
         super().__init__()
         self.target = target
-        launches = self.launches = []
-        class Adapter:
-            async def launch_process(self, name, *, engine_models=None, launch=True):
-                launches.append(name)
-                return dict(target.meta["cano"]), False
-            def open_failed(self, name, detail):
-                pass
-            def open_succeeded(self, name):
-                pass
-        self.adapters = {"claude": Adapter()}
+        self.adapters = {}
 
     def binding(self, name, provider):
         return self.target
@@ -394,11 +388,12 @@ def test_headless_in_error_reopens_in_rust_once(tmp_path):
         gateway = Reopenable()
         coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
         await _open(coordinator)
-        legacy.launches.clear()
+        gateway.launches.clear()
         gateway.broken, slot.cache_valid = "cano_closed", False
         assert (await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1"))["disposition"] == "accepted"
         assert gateway.kinds[-4:] == ["snapshot", "close", "open", "submit"]
-        assert legacy.launches == ["session"] and sent == [] and slot.phase.name == "Rust"
+        assert gateway.launches == ["session"], "o Rust sobe o processo na reabertura"
+        assert sent == [] and slot.phase.name == "Rust"
         gateway.kinds.clear()
         gateway.broken, gateway.reopen_fails, slot.cache_valid = "cano_closed", True, False
         with pytest.raises(RustOpError):

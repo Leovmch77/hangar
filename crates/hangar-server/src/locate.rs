@@ -1,18 +1,15 @@
 // crates/hangar-server/src/locate.rs
 //! Qual conversa é a de cada sessão: a descoberta do próprio Rust (a da lista do dono), sem ir ao
-//! Python. A reabertura da sessão em erro continua com o coordenador do Python e só é pedida.
+//! Python.
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
 use hangar_api::session::SessionRow;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::list::bridge::ListBridge;
-use crate::proxy::HttpClient;
 use crate::transcript::InternalInfo;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -109,37 +106,6 @@ fn is_uuid(s: &str) -> bool {
 pub fn queue_path(claude: &Path, name: &str) -> PathBuf {
     let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') { c } else { '-' }).collect();
     claude.join(".hangar-queue").join(format!("{safe}.jsonl"))
-}
-
-/// Abrir a conversa reabre a sessão em erro (`runtime_coordinator`, no Python). Sem esperar:
-/// a leitura do histórico não depende dela. Falha vai ao log e ao diário.
-pub fn request_reopen(http: &HttpClient, upstream: std::net::SocketAddr, secret: &str, diag: &crate::diag::DiagClient, name: &str) {
-    const REASON: &str = "o pedido de reabertura da sessão não chegou ao backend";
-    let url = format!("http://{upstream}/internal/sessions/{}/reopen", utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let Ok(req) = axum::http::Request::post(url).header("x-hangar-internal", secret).body(Body::empty()) else {
-        tracing::warn!(session = %name, "pedido de reabertura inválido");
-        diag.report("rust.reopen_failed", name, "reopen_request_invalid", REASON);
-        return;
-    };
-    let (http, diag, name) = (http.clone(), diag.clone(), name.to_owned());
-    tokio::spawn(async move {
-        let code = match tokio::time::timeout(Duration::from_secs(10), http.request(req)).await {
-            Ok(Ok(r)) if r.status().is_success() => return,
-            Ok(Ok(r)) => {
-                tracing::warn!(session = %name, status = %r.status(), "pedido de reabertura recusado");
-                "reopen_refused"
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(session = %name, "pedido de reabertura falhou: {e}");
-                "reopen_unreachable"
-            }
-            Err(_) => {
-                tracing::warn!(session = %name, "pedido de reabertura sem resposta");
-                "reopen_timeout"
-            }
-        };
-        diag.report("rust.reopen_failed", &name, code, REASON);
-    });
 }
 
 #[cfg(test)]

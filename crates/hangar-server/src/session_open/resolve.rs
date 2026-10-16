@@ -104,6 +104,8 @@ pub struct Resolved {
     pub warnings: Vec<String>,
     pub initial_prompt: Option<String>,
     pub remember_provider: bool,
+    /// Claude sem terminal que nasce no plano: o modo da conta, para onde "Implementar o plano" volta.
+    pub previous_non_plan: Option<PermissionMode>,
 }
 
 /// `model_args.ID_OK`, com o `\Z` do Python: quebra de linha no fim é recusada.
@@ -257,8 +259,13 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         worktree: request.branch.clone().map(|branch| WorktreeSpec { branch, new_branch: request.new_branch, base: request.base.clone(), path: None }),
         creator: request.creator.clone(), created_at: facts.now(),
     };
+    // Nascer já no plano sem terminal deixaria a sessão sem modo de base. O ilegível vale bypass, como o
+    // `modo_da_conta` do Python: o modo pedido já está escolhido, só a volta do plano depende dele.
+    let previous_non_plan = (spec.surface == Surface::Headless && spec.permission_mode == Some(PermissionMode::Plan))
+        .then(|| account_mode(spec.account.config_dir(), facts).unwrap_or(PermissionMode::BypassPermissions));
     // Só a abertura do dono muda o provedor lembrado.
-    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest })
+    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest,
+        previous_non_plan })
 }
 
 /// `session_defaults.choose_provider`.

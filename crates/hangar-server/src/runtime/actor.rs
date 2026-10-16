@@ -27,12 +27,16 @@ pub struct PolicyClient {
     diag:crate::diag::DiagClient,
     /// Só testes: ambiente-base da subida do Codex por registro. `None` = o do processo, lido a cada subida.
     codex_env:Option<Arc<crate::accounts::environment::AccountEnvironment>>,
+    /// Ponte do plugin que o Claude subido aqui recebe no ambiente; sem ela, sobe sem a ponte.
+    plugin_bridge:Option<crate::session_open::claude::PluginBridge>,
 }
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String) -> Self {
-        Self { diag:crate::diag::DiagClient::new(upstream,secret),accounts:None,codex_env:None }
+        Self { diag:crate::diag::DiagClient::new(upstream,secret),accounts:None,codex_env:None,plugin_bridge:None }
     }
+    pub fn with_plugin_bridge(mut self,bridge:crate::session_open::claude::PluginBridge) -> Self { self.plugin_bridge = Some(bridge); self }
+    pub(super) fn plugin_bridge(&self) -> Option<crate::session_open::claude::PluginBridge> { self.plugin_bridge.clone() }
     pub(super) fn diag(&self) -> crate::diag::DiagClient { self.diag.clone() }
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
     #[doc(hidden)]

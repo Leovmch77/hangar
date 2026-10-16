@@ -87,20 +87,6 @@ class _FakeClient:
 # --- Teste 1: criar sessao Codex e o caminho NORMAL, com o lancador no pane ------------------
 
 
-# Codex, Pi, omp e Kimi abrem no Rust: aqui só o Claude sem terminal.
-@pytest.mark.parametrize("provider,tier", [("claude", "default")])
-def test_registry_rejects_invalid_tier_before_effects(tmp_path, provider, tier):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "new_session") as spawn, \
-         patch.object(registry, "_pretrust_cwd") as trust, \
-         patch.object(codex_sessions, "save") as save:
-        # Claude sem terminal: com terminal a abertura é do Rust.
-        with pytest.raises(ValueError, match="service_tier"):
-            reg.create("cx", "/tmp/proj", provider=provider, service_tier=tier,
-                       headless=provider == "claude")
-    spawn.assert_not_called()
-    trust.assert_not_called()
-    save.assert_not_called()
 
 
 def test_create_codex_com_resume_abre_a_conversa_existente(tmp_path):

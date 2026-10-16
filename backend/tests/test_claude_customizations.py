@@ -94,17 +94,15 @@ def test_headless_metadata_retains_choices_without_copying_them_to_new_sessions(
     assert fresh is not None and "claude_settings" not in fresh
 
 
-def test_terminal_and_headless_resume_apply_the_same_session_settings(monkeypatch, tmp_path):
+def test_terminal_resume_applies_the_session_settings(monkeypatch, tmp_path):
+    # O lado sem terminal é lançado pelo Rust (claude_launch.rs) e testado lá.
     from app import pensamento, plugin_bridge
 
     monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
     monkeypatch.setattr(pensamento, "ler", lambda: False)
     terminal = ClaudeAdapter().spawn_command(str(tmp_path), SID, claude_settings=SETTINGS)
-    headless = ClaudeHeadlessAdapter()._argv(SID, resume=True, claude_settings=SETTINGS)
 
     assert json.loads(terminal[terminal.index("--settings") + 1]) == SETTINGS
-    assert json.loads(headless[headless.index("--settings") + 1]) == SETTINGS
-    assert headless[headless.index("--resume") + 1] == SID
 
 
 def test_terminal_binding_carries_choices_for_the_active_conversation(tmp_path, monkeypatch):

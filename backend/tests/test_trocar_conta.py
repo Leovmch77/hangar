@@ -279,7 +279,6 @@ def test_proxy_reopen_failure_restores_selection(contas, tmp_path):
            engine_account="default", permission_mode="acceptEdits")
     _conversa(a, str(tmp_path))
     hl = _hl([])
-    hl._subidas["hl"] = 3
     hl.ensure_running.side_effect = [RuntimeError("failed spawn"), MagicMock()]
     info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
                        engine_account="default")
@@ -299,7 +298,6 @@ def test_proxy_reopen_failure_restores_selection(contas, tmp_path):
     assert S.load("hl")["engine_account"] == "default"
     assert S.load("hl")["model"] == "old/gpt-5.5"
     assert hl.ensure_running.await_count == 2
-    assert "hl" not in hl._subidas
     assert all(call.kwargs["require_initialize"] for call in hl.ensure_running.await_args_list)
 
 

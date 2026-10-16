@@ -525,8 +525,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Qual conversa é a da sessão é o Rust que decide** (`locate.rs`, a descoberta da lista), e a
   troca de transcript só vale lida duas vezes seguidas; provider, modo do Codex ou outra vida da
   sessão trocam na hora. Com o chat ao vivo aberto, o `/history` segue o transcript que o hub
-  confirmou. A conexão interna recebe a conversa do Rust; a reabertura em erro continua no
-  coordenador do Python (`POST /internal/sessions/{name}/reopen`). Evidência em
+  confirmou. A conexão interna recebe a conversa do Rust; a reabertura em erro também é do Rust
+  (`RuntimeRegistry::request_reopen`), sem pedir ao Python. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#a-conversa-da-sessão-é-escolhida-pelo-rust-e-a-troca-espera-duas-leituras).
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o

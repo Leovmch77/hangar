@@ -86,4 +86,6 @@ impl OpenHost for LocalHost {
     fn diary(&self, _events: Vec<Value>) {}
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
+    // O comando local só abre sessão com terminal.
+    fn wake(&self, _name: &str) {}
 }

@@ -676,6 +676,52 @@ def _rule_codex_login_lock(expected: dict, raw: dict, scenario: dict) -> bool | 
     return True if locks else None
 
 
+def _headless_request(scenario: dict) -> dict | None:
+    body = next((st.get("json") for st in scenario["steps"] if "json" in st), None) or {}
+    return body if body.get("headless") is True and body.get("provider", "claude") == "claude" else None
+
+
+def _rule_s40_headless(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """S-40 sem terminal: o Python recusava o prompt inicial; o Rust cria a sessão com ele já na fila
+    durável (antes de responder) e a acorda. A recusa da fixture não tem o que comparar: a regra só
+    confere a criação, a fila e o acordar."""
+    body = _headless_request(scenario)
+    if not body or not body.get("initial_prompt") or body.get("read_only"):
+        return None
+    status = (raw.get("steps") or [{}])[0].get("status")
+    woke = any(r.get("op") == "claude_headless.acordar" for r in raw.get("runtime_requests", []))
+    queued = any("/.hangar-queue/runtime/" in path and body["initial_prompt"] in json.dumps(change, ensure_ascii=False)
+                 for path, change in (raw.get("files") or {}).items())
+    raw["_replaced"] = True
+    return status == 200 and woke and queued
+
+
+def _rule_d001_inherit(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """D-001: `inherit` é campo novo do pedido; o Python de 601bc62a0 recusava o corpo com 422. A recusa
+    da fixture não tem o que comparar: a regra só confere que o Rust abriu."""
+    body = next((st.get("json") for st in scenario["steps"] if "json" in st), None) or {}
+    if "inherit" not in body or (expected.get("steps") or [{}])[0].get("status") != 422:
+        return None
+    raw["_replaced"] = True
+    return (raw.get("steps") or [{}])[0].get("status") == 200
+
+
+def _rule_headless_read_only(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """Só leitura sem terminal é recusado na resolução, antes de provar o `bwrap` e de tocar a conta (o
+    Python provava e travava antes de recusar); a frase deixa de falar do prompt inicial (S-40)."""
+    body = _headless_request(scenario)
+    if not body or not body.get("read_only"):
+        return None
+    detail = (raw.get("steps") or [{}])[0].get("body", {}).get("detail")
+    if not isinstance(detail, dict) or detail.get("msg") != "sessao sem terminal nao aceita read_only":
+        return False
+    detail["msg"] = "sessao sem terminal nao aceita read_only nem prompt inicial"
+    expected["probes"] = [p for p in expected.get("probes", []) if p.get("prog") != "bwrap"]
+    for p in [p for p in expected.get("records", {}) if "/home/.hangar/account-locks/" in p]:
+        del expected["records"][p]
+    return not any(p.get("prog") == "bwrap" for p in raw.get("probes", []))
+
+
 def _created_agent(raw: dict) -> list[tuple[dict, str]]:
     """Os `new-session` de Pi, omp e Kimi, com o provedor."""
     out = []
@@ -733,6 +779,9 @@ RUST_DIFFERENCES = (
     ("S-40", _rule_s40),
     ("matriz item 17 (política explícita do Codex)", _rule_codex_policy),
     ("trava da conta Codex lida pelo Rust", _rule_codex_login_lock),
+    ("S-40 (sem terminal)", _rule_s40_headless),
+    ("D-001 (campo inherit)", _rule_d001_inherit),
+    ("só leitura sem terminal recusado antes da conta", _rule_headless_read_only),
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
     ("S-58/S-73 (CP_PI_SESSION e OMP_PROFILE por -e)", _rule_pi_session_env),
@@ -772,6 +821,8 @@ def diff(side: str, names: list[str] | None = None) -> dict[str, list[str]]:
         except RustSideNotImplemented as exc:
             return sc["name"], [f"$: {exc}"]
         expected, raw, missing = apply_rust_differences(fx["result"], raw, sc)
+        if raw.pop("_replaced", False):
+            return sc["name"], missing
         return sc["name"], missing + compare(expected, normalize(raw, sc))
     return dict(_parallel(one, chosen))
 
@@ -1335,17 +1386,11 @@ def child_main(scenario_path: str, out_path: str, backend: str) -> None:
 
 
 def _child_call(step: dict, rec: dict) -> dict:
-    """Chamada direta ao Python (o que o coordenador pede hoje): só `launch_headless`."""
-    import asyncio
-    from app.adapters import get_adapter, CLAUDE_HEADLESS
+    """Chamada direta ao Python: só `launch_headless`, que hoje é do Rust (`runtime/claude_launch.rs`,
+    conferido contra estas fixtures nos testes dele); o Python não lança mais."""
     if step["call"] != "launch_headless":
         raise SystemExit(f"chamada desconhecida {step['call']}")
-    try:
-        cano, launched = asyncio.run(get_adapter(CLAUDE_HEADLESS).launch_process(step["name"]))
-        return {"call": step["call"], "name": step["name"], "launched": launched,
-                "cano": {k: v for k, v in cano.items() if k in ("escuta", "versao")}}
-    except Exception as exc:   # noqa: BLE001
-        return {"call": step["call"], "name": step["name"], "exception": f"{type(exc).__name__}: {exc}"}
+    return {"call": step["call"], "name": step["name"], "exception": "o lançamento do Claude sem terminal é do Rust"}
 
 
 def _pane_argv(command: str) -> list[str]:

@@ -36,37 +36,6 @@ async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, defaul
     assert body.headless is requested
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["claude"])
-@pytest.mark.parametrize("requested", [None, False, True])
-async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_path, monkeypatch, provider, requested):
-    from app import orq_readonly
-
-    monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
-    monkeypatch.setattr(api.settings, "headless_default", True)
-    _sem_pino_do_conftest(monkeypatch)
-    prepare = Mock()
-    monkeypatch.setattr(orq_readonly, "prepare", prepare)
-    # Uma regressão na recusa nunca pode abrir processo real durante este teste.
-    for method in ("_create_headless",):
-        monkeypatch.setattr(api.registry, method, Mock(side_effect=AssertionError("unexpected session creation")))
-    create = Mock(wraps=api.registry.create) if requested is True else Mock(
-        return_value=SessionInfo(name="read-only-mode", cwd=str(tmp_path), provider=provider))
-    monkeypatch.setattr(api.registry, "create", create)
-    body = api.CreateBody(name="read-only-mode", cwd=str(tmp_path), provider=provider,
-                          read_only=True, headless=requested,
-                          permission_mode="bypassPermissions" if provider == "claude" else None)
-    if requested is True:
-        with pytest.raises(api.HTTPException) as rejected:
-            await api._criar_sessao(body, {})
-        assert rejected.value.status_code == 409
-        assert "read_only" in str(rejected.value.detail)
-    else:
-        await api._criar_sessao(body, {})
-    assert create.call_args.kwargs.get("headless", False) is (requested is True)
-    assert create.call_args.kwargs["read_only"] is True
-    prepare.assert_called()
-    assert runtime_config.get("headless_default") is True
 
 
 @pytest.mark.parametrize("flags, expected", [((), None), (("--headless",), True), (("--terminal",), False)])

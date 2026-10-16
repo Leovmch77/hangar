@@ -60,7 +60,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 75;
+pub const INTERNAL_PROTOCOL: u32 = 76;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -132,7 +132,8 @@ pub async fn serve_until_with_guest(
             cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone())
             .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
             .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
-            .with_permissions(state.state.permissions.clone()));
+            .with_permissions(state.state.permissions.clone())
+            .with_plugin_bridge(session_open::claude::PluginBridge { port: cfg.listen.port(), secret: cfg.auth_token.clone() }));
         registry.bind_lifecycle();
         state.state.lifecycle.set(registry.clone()).map_err(|_|std::io::Error::other("state_lifecycle_already_bound"))?;
         runtime_registry=Some(registry.clone());
@@ -160,6 +161,8 @@ pub async fn serve_until_with_guest(
             }
             _ => None,
         };
+        // As sessões Claude sem terminal que já existem: o Rust as reconhece sozinho, sem esperar o Python.
+        let _claude_boot = AbortOnDrop(tokio::spawn(registry.clone().register_claude_headless()));
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {

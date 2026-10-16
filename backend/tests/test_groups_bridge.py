@@ -168,18 +168,6 @@ def test_create_cleanup_logs_how_many_leave_warnings(monkeypatch, caplog):
     assert "1 aviso" in caplog.text and "srv inacessível" not in caplog.text
 
 
-def test_create_refuses_when_group_cleanup_fails(monkeypatch, tmp_path):
-    pair.PairLink("a").set(["b"], "", "g1", {})
-    calls = _rust(monkeypatch, error="groups_bridge_unavailable")
-    for mod in (registry.headless_sessions, registry.codex_sessions):
-        monkeypatch.setattr(mod, "exists", lambda name: False)
-    monkeypatch.setattr(registry.tmux, "has_session", lambda name: False)
-    monkeypatch.setattr("app.conversation_transfer.require_available", lambda name: None)
-    with pytest.raises(ValueError) as e:
-        registry.SessionRegistry.__new__(registry.SessionRegistry).create(
-            "a", str(tmp_path), headless=True, permission_mode="default")
-    assert getattr(e.value, "code", None) == "erro_grupo_limpeza_falhou"
-    assert calls == [("group.leave", {"name": "a"})]
 
 
 def test_create_cleanup_skips_live_name_and_tolerates_missing_sidecar(monkeypatch):
@@ -420,4 +408,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 75
+    assert rust_server.RUST_SERVER_PROTOCOL == 76
