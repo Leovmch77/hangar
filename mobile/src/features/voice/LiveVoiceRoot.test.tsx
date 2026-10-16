@@ -110,7 +110,7 @@ test('configurações de A com B ativo alinham destino explicitamente; servidor 
   expect(harness.push).not.toHaveBeenCalled();
 });
 
-test('AppState não encerra chamada; controle global continua alcançável sem Composer, inclusive em convite', async () => {
+test('AppState não encerra chamada; sem botão flutuante, o painel aberto pelo topo encerra, inclusive em convite', async () => {
   let onAppState: ((value: AppStateStatus) => void) | undefined;
   const remove = vi.fn();
   vi.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
@@ -126,12 +126,22 @@ test('AppState não encerra chamada; controle global continua alcançável sem C
   expect(harness.stop).not.toHaveBeenCalled();
   await act(async () => onAppState!('active'));
   expect(harness.foreground).toHaveBeenLastCalledWith(true);
-  await act(async () => button(container, 'open-call').click());
+  expect(button(container, 'open-call')).toBeNull();
+  act(() => useLiveVoice.setState({ open: true }));
   await act(async () => button(container, 'stop-call').click());
   expect(harness.stop).toHaveBeenCalledOnce();
   await act(async () => root.unmount());
   roots.delete(root);
   expect(remove).toHaveBeenCalledOnce();
+});
+
+test('fora das telas com botão no topo, a chamada aberta ganha o botão flutuante', async () => {
+  harness.segments = ['config'];
+  act(() => useLiveVoice.setState({ view: { ...idle(), phase: 'live', serverLabel: a.label } }));
+  const { container } = await mount(<LiveVoiceRoot />);
+  await act(async () => button(container, 'open-call').click());
+  expect(useLiveVoice.getState().open).toBe(true);
+  expect(button(container, 'open-call')).toBeNull();
 });
 
 test('botão da conversa usa A com B ativo; falha de settings continua visível e convite não liga', async () => {

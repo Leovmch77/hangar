@@ -11,10 +11,13 @@ import { SessionsDrawer } from '../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../src/features/sessions/ServerSheet';
 import { CreateSessionSheet } from '../src/features/create/CreateSessionSheet';
 import * as m from '../src/paraglide/messages';
+import { LiveVoiceChatButton } from '../src/features/voice/LiveVoiceChatButton';
+import { useServers } from '../src/stores/servers';
 
 // Como no app de PC: a tela inicial é a Nova conversa e as sessões moram numa gaveta lateral.
 export default function Index() {
   const router = useRouter();
+  const activeId = useServers((s) => s.activeId);
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const drawer = useRef<DrawerLayoutMethods>(null);
@@ -40,6 +43,7 @@ export default function Index() {
         <View style={styles.bar}>
           {topButton('PanelLeft', m.native_sessions(), openDrawer)}
           <View style={styles.spacer} />
+          {activeId ? <LiveVoiceChatButton serverId={activeId} /> : null}
           {topButton('Server', m.maquinas_este_aparelho(), () => setServersOpen(true))}
           {topButton('Settings', m.config_modal_titulo(), () => router.push('/config' as never))}
         </View>

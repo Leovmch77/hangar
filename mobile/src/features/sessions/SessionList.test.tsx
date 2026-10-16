@@ -49,6 +49,7 @@ vi.mock('./SessionRow', () => ({
     React.createElement('button', { 'data-row': `${session.serverId}::${session.name}`, onClick: () => onExcluir(session) }, session.name),
 }));
 vi.mock('../pair/PairInviteSheet', () => ({ PairInviteSheet: () => null }));
+vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
 vi.mock('../pair/PairAcceptSheet', () => ({ PairAcceptSheet: () => null }));
 vi.mock('../pair/leaveExternal', () => ({ leaveExternal: vi.fn() }));
 vi.mock('./ConversationList', () => ({ ConversationList: () => null }));
