@@ -239,9 +239,12 @@ impl OpenHost for Host {
         })
     }
 
-    fn warm_codex<'a>(&'a self, name: &'a str, _initial_prompt: Option<&'a str>) -> BoxFuture<'a, Vec<String>> {
+    fn warm_codex<'a>(&'a self, name: &'a str, initial_prompt: Option<&'a str>) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
-            self.record.lock().unwrap().runtime_requests.push(json!({"op": "codex.aquecer_sem_terminal", "name": name}));
+            // A primeira mensagem só existe no Rust (o Python a recusava sem terminal): vai junto quando há.
+            let mut request = json!({"op": "codex.aquecer_sem_terminal", "name": name});
+            if let Some(text) = initial_prompt { request["initial_prompt"] = json!(text); }
+            self.record.lock().unwrap().runtime_requests.push(request);
             Vec::new()
         })
     }

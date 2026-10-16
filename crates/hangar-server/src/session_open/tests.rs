@@ -1200,6 +1200,82 @@ fn the_claude_terminal_open_runs_in_the_python_order() {
     }
 }
 
+/// A abertura do Codex contra o que o Python fez nas mesmas fixtures: com terminal, o pane é o lançador
+/// do comando do Python (mais a política explícita e a chave do spec) e a pasta é confiada; sem terminal,
+/// o sidecar leva a chave do spec, a sessão é aquecida na criação e a primeira mensagem vai pela escrita.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_codex_open_follows_the_python_fixtures() {
+    let runtime = test_runtime();
+    let run = |name: &str, extra: Value| {
+        let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
+        for (key, value) in extra.as_object().unwrap() { fixture["scenario"]["steps"][0]["json"][key] = value.clone(); }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        materialize(&fixture, &root);
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
+        let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
+            .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
+        let raw = runtime.block_on(contract::run(&fixture["scenario"], &root, env));
+        let specs: Vec<Value> = std::fs::read_dir(root.join("home/.hangar/session-specs")).unwrap().flatten()
+            .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap()).collect();
+        (fixture, raw, specs, root, dir)
+    };
+    let placed = |root: &std::path::Path, text: &str| text.replace("<ROOT>", &root.to_string_lossy());
+    let events = |raw: &Value| -> Vec<String> { raw["diary"].as_array().unwrap().iter()
+        .map(|e| format!("{}:{}", e["evento"].as_str().unwrap(), e["etapa"].as_str().unwrap_or(""))).collect() };
+
+    for name in ["create_codex_terminal_default", "create_codex_terminal_initial_prompt"] {
+        let (fixture, raw, specs, root, _dir) = run(name, json!({}));
+        let place = |text: &str| placed(&root, text);
+        let expected = &fixture["result"];
+        assert_eq!(raw["steps"][0]["status"], 200, "{name}: {}", raw["steps"][0]["body"]);
+        let [spec] = specs.as_slice() else { panic!("{name}: um spec gravado") };
+        let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").unwrap();
+        let argv: Vec<&str> = created["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+        assert!(argv.windows(2).any(|w| w == ["-e", &format!("CP_SESSION_KEY={}", spec["key"].as_str().unwrap())]), "{name}: {argv:?}");
+        // O comando do Python com a política do modo padrão (Full Access) explícita.
+        let python = place(expected["subprocesses"][0]["argv"].as_array().unwrap().last().unwrap().as_str().unwrap());
+        let (launcher, prompt) = python.split_once(" --prompt ").map_or((python.as_str(), None), |(l, p)| (l, Some(p)));
+        let launcher = launcher.rsplit_once("hangar-codex-tui").unwrap().1;
+        let command = argv.last().unwrap();
+        let wanted = format!("hangar-codex-tui{launcher} --approval-policy never --sandbox danger-full-access{}",
+            prompt.map(|p| format!(" --prompt {p}")).unwrap_or_default());
+        assert!(command.ends_with(&wanted), "{name}: {command}\nesperado no fim: {wanted}");
+        let body = &raw["steps"][0]["body"];
+        for field in ["provider", "headless", "tracked", "conta", "jsonl"] {
+            assert_eq!(body[field], expected["steps"][0]["body"][field], "{name}: {field}");
+        }
+        assert_eq!(body["codex_home"].as_str().map(&place), expected["steps"][0]["body"]["codex_home"].as_str().map(&place));
+        assert_eq!(std::fs::read_to_string(root.join("home/.codex/config.toml")).unwrap(),
+            place(expected["files"]["<ROOT>/home/.codex/config.toml"]["created"]["text"].as_str().unwrap()), "{name}: pasta confiada");
+        let order = events(&raw);
+        let at = |e: &str| order.iter().position(|x| x == e).unwrap_or_else(|| panic!("{name}: {e} em {order:?}"));
+        assert!(at("sessao.criar_etapa:preparar_comando") < at("sessao.criar_etapa:confiar_pasta")
+            && at("sessao.criar_etapa:criar_terminal") < at("sessao.criada:terminal_criado"), "{name}: {order:?}");
+    }
+
+    let (fixture, raw, specs, root, _dir) = run("create_codex_headless_default", json!({"initial_prompt": "comece"}));
+    let place = |text: &str| placed(&root, text);
+    let expected = &fixture["result"];
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    let [spec] = specs.as_slice() else { panic!("um spec gravado") };
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root.join("home/.hangar/codex-sessions/cx.json")).unwrap()).unwrap();
+    let python = &expected["records"]["<ROOT>/home/.hangar/codex-sessions/cx.json"]["created"]["json"];
+    assert_eq!(sidecar["key"], spec["key"], "a chave do sidecar é a do spec");
+    for field in ["permission_mode", "headless", "thread_id", "jev", "cano"] { assert_eq!(sidecar[field], python[field], "{field}"); }
+    assert_eq!(sidecar["codex_home"].as_str().map(&place), python["codex_home"].as_str().map(&place));
+    let warmed = raw["runtime_requests"].as_array().unwrap();
+    assert_eq!(warmed.len(), 1);
+    assert_eq!((warmed[0]["op"].as_str(), warmed[0]["name"].as_str()), (Some("codex.aquecer_sem_terminal"), Some("cx")));
+    assert_eq!(warmed[0]["initial_prompt"], "comece", "a primeira mensagem vai pela escrita, depois de subir");
+    let body = &raw["steps"][0]["body"];
+    for field in ["provider", "headless", "tracked"] { assert_eq!(body[field], expected["steps"][0]["body"][field], "{field}"); }
+    assert_eq!(body["conta"].as_str().map(&place), expected["steps"][0]["body"]["conta"].as_str().map(&place));
+    assert!(events(&raw).contains(&"sessao.criada:sidecar_gravado".to_owned()));
+}
+
 /// Com o servidor fora, `hangar-server open` não tem como limpar o que o nome reusado deixou (grupo, `then`,
 /// fila): recusa, em vez de a sessão nova nascer com o grupo e a fila da antiga.
 #[test]
