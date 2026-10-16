@@ -7,13 +7,10 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
 from app import engines as eng
-from app import tmux
 from app.api import app
 from app.config import settings
-from app.models import SessionInfo
 
 TOKEN = "secret-de-teste"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -225,25 +222,6 @@ def test_modelos_recusa_key_salva_com_crlf_hand_editada(cli):
 
 
 _SID = "11111111-1111-1111-1111-111111111111"
-
-
-def test_resume_arquivo_com_motor_desconhecido_e_400(cli):
-    with patch("app.api.archive_cwd", return_value="/home/u/proj"):
-        r = cli.post(f"/api/archive/proj/{_SID}/resume", json={"engine": "fantasma"}, headers=AUTH)
-    assert r.status_code == 400
-    assert "motor" in r.json()["detail"]["msg"]
-
-
-def test_resume_arquivo_com_motor_valido_repassa(cli):
-    cli.put("/api/engines/kimi", json=_kimi(), headers=AUTH)
-    with patch("app.api.archive_cwd", return_value="/home/u/proj"), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.registry.create",
-              return_value=SessionInfo(name="proj", cwd="/home/u/proj", engine="kimi")) as cr:
-        r = cli.post(f"/api/archive/proj/{_SID}/resume", json={"engine": "kimi"}, headers=AUTH)
-    assert r.status_code == 200
-    cr.assert_called_once_with("proj", "/home/u/proj", config_dir=None, provider="claude",
-                               resume_session_id=_SID, engine="kimi")
 
 
 def test_put_com_string_vazia_LIMPA_o_campo(cli):

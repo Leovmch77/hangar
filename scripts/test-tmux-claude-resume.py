@@ -1,71 +1,64 @@
-"""Confere save/restore sem tocar em tmux ou sessões reais."""
-import json
+"""Confere o `save` do tmux-claude-resume.sh sem tocar em tmux nem em sessões reais: as sessões do
+Hangar (com `CP_SESSION_KEY`) saem da foto do resurrect; as outras ficam como estavam."""
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 import tempfile
 
 
 script = Path(__file__).with_name("tmux-claude-resume.sh").resolve()
+KEY = "ab" * 16
 with tempfile.TemporaryDirectory(prefix="hangar-resume-test-") as directory:
     root = Path(directory)
-    env = dict(os.environ, HOME=directory, TMUX_RESURRECT_DIR=str(root / "map"))
-    fake_agent = root / "hangar-codex-tui"
-    fake_agent.write_text("import time\ntime.sleep(30)\n")
-    agent = subprocess.Popen([sys.executable, str(fake_agent)], env=env)
-    try:
-        bin_dir = root / "bin"
-        bin_dir.mkdir()
-        tmux = bin_dir / "tmux"
-        tmux.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
-from pathlib import Path
-command = sys.argv[1]
-if command == 'list-sessions':
-    print('missing %1 ' + os.environ['FAKE_PID'])
-    print('valid %2 ' + os.environ['FAKE_PID'])
-elif command == 'display':
-    print('bash')
-elif command == 'send-keys':
-    with Path(os.environ['FAKE_OUTPUT']).open('a') as stream:
-        stream.write(json.dumps(sys.argv[2:]) + '\\n')
+    resurrect = root / "resurrect"
+    resurrect.mkdir()
+    env = dict(os.environ, HOME=directory, TMUX_RESURRECT_DIR=str(resurrect))
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    tmux = bin_dir / "tmux"
+    tmux.write_text(f"#!{sys.executable}\n" + f'''import sys
+args = sys.argv[1:]
+if args[0] == 'list-sessions':
+    print('hangar-a'); print('shell'); print('hangar b')
+elif args[0] == 'show-environment':
+    target = args[args.index('-t') + 1]
+    if target == '=hangar-a':
+        print('CP_SESSION_KEY={KEY}')
+    elif target == '=hangar b':
+        print('CP_SESSION_KEY={"cd" * 16}')
+    else:
+        sys.exit(1)
 ''')
-        tmux.chmod(0o755)
-        output = root / "commands.jsonl"
-        env.update(PATH=str(bin_dir) + os.pathsep + env["PATH"], FAKE_PID=str(agent.pid), FAKE_OUTPUT=str(output))
-        sidecars = root / ".hangar/codex-sessions"
-        sidecars.mkdir(parents=True)
-        expected = {"thread_id": "12345678-1234-1234-1234-123456789012",
-                    "cwd": '/home/exemplo/Área de trabalho/projeto "novo"',
-                    "codex_home": '/home/exemplo/conta-ação\\local', "codex_account": "secundaria"}
-        (sidecars / "valid.json").write_text(json.dumps(expected))
+    tmux.chmod(0o755)
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    # Só a sessão com spec gravado é do servidor (a adoção grava o do Claude cru); a `hangar b`, com a chave
+    # e sem spec (a gravação falhou), fica com o resurrect em vez de sumir no reboot.
+    (root / ".hangar/session-specs").mkdir(parents=True)
+    (root / f".hangar/session-specs/{KEY}.json").write_text("{}")
+    save = resurrect / "tmux_resurrect_20261016T000000.txt"
+    lines = [
+        "pane\thangar-a\t1\t:\t1\t:*\t0\t:/w\t1\tclaude\t:claude",
+        "window\thangar-a\t1\t:claude\t1\t:*\tlayout\t:",
+        "pane\tshell\t1\t:\t1\t:*\t0\t:/w\t1\tfish\t:",
+        "window\tshell\t1\t:fish\t1\t:*\tlayout\t:",
+        "pane\thangar b\t1\t:\t1\t:*\t0\t:/w\t1\tpi\t:pi",
+        "state\thangar-a\tshell",
+    ]
+    save.write_text("\n".join(lines) + "\n")
+    (resurrect / "last").symlink_to(save.name)
+    result = subprocess.run(["bash", str(script), "save"], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    kept = save.read_text().splitlines()
+    assert kept == [lines[2], lines[3], lines[4], lines[5]], kept
+    assert (resurrect / "last").is_symlink(), "o `last` continua apontando a foto"
+    assert "1 sessões do Hangar" in (root / ".hangar/logs/privado/claude-resume.log").read_text()
 
-        def run(mode):
-            result = subprocess.run(["bash", str(script), mode], env=env, capture_output=True, text=True, timeout=10)
-            assert result.returncode == 0, (mode, result.stderr)
-
-        run("save")
-        saved = root / "map/claude-sessions.tsv"
-        assert saved.read_text().startswith("valid\tcodex\t"), saved.read_text()
-        (sidecars / "missing.json").write_text("{invalid")
-        run("save")
-        assert saved.read_text().startswith("valid\tcodex\t"), saved.read_text()
-        for broken in (None, "{invalid"):
-            if broken is None:
-                (sidecars / "missing.json").unlink(missing_ok=True)
-            else:
-                (sidecars / "missing.json").write_text(broken)
-            saved.write_text("missing\tcodex\told-thread\t\t\nvalid\tcodex\t" + expected["thread_id"] + "\t\t\n")
-            output.unlink(missing_ok=True)
-            run("restore")
-            commands = [json.loads(line) for line in output.read_text().splitlines()]
-            assert len(commands) == 1 and commands[0][1] == "=valid:.", commands
-            args = shlex.split(commands[0][2])
-            for flag, key in (("--cwd", "cwd"), ("--codex-home", "codex_home"), ("--codex-account", "codex_account")):
-                assert args[args.index(flag) + 1] == expected[key], (flag, args)
-        assert "missing" in (root / ".hangar/logs/privado/claude-resume.log").read_text()
-        print("OK: sidecar ausente/inválido não interrompe outras sessões; caminhos JSON preservados")
-    finally:
-        agent.terminate()
-        agent.wait(timeout=5)
+    # Sem sessão do Hangar a foto fica intacta.
+    save.write_text("\n".join(lines[2:4]) + "\n")
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    tmux.write_text(f"#!{sys.executable}\nimport sys\nprint('shell') if sys.argv[1] == 'list-sessions' else sys.exit(1)\n")
+    result = subprocess.run(["bash", str(script), "save"], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert save.read_text().splitlines() == lines[2:4]
+print("ok")

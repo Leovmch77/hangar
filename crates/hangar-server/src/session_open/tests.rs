@@ -103,7 +103,7 @@ fn reopen_keeps_what_the_change_does_not_name() {
         surface: Surface::Terminal, account: Account::Default, account_source: AccountSource::Default,
         model: Some("opus".into()), effort: Some("high".into()), service_tier: None,
         permission_mode: Some(PermissionMode::Manual), subagent_model: None, customizations: None, jev: true,
-        read_only: false, worktree: None, creator: None, created_at: 1.0,
+        read_only: false, worktree: None, creator: None, created_at: 1.0, conversation: None,
     };
     let change = SessionChange { reason: ChangeReason::Bypass, surface: None, account: None,
         permission_mode: Some(PermissionMode::BypassPermissions), model: None, effort: None, service_tier: None };
@@ -967,7 +967,7 @@ fn the_claude_pane_is_the_one_python_launched() {
         let bridge = claude::PluginBridge { port: 8765, secret: "segredo".into() };
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: Some(&bridge), bridge_key: &"a".repeat(32),
             runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
-            read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None };
+            read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
         let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
         // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
         let inner = |words: Vec<String>| words.iter().enumerate()
@@ -1144,7 +1144,7 @@ fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
     for (prompt, tail) in [("olá", vec!["--permission-mode", "bypassPermissions", "olá"]),
                            ("-v e depois", vec!["--permission-mode", "bypassPermissions", "--", "-v e depois"])] {
         let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt), engine_route: None };
+            server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: Some(prompt), engine_route: None, resume: false, allow_bypass: false };
         let command = claude::pane(&resolved.spec, "sid", &ctx).command;
         assert_eq!(command[command.len() - tail.len()..], tail.iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]);
     }
@@ -1165,7 +1165,7 @@ fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
     let absolute = home.join("work/proj").to_string_lossy().into_owned();
     assert_eq!(spec.cwd, absolute);
     let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
     let argv = terminal::new_session_argv(&terminal::tests::machine_at(&home.join(".claude").to_string_lossy()), &claude::pane(&spec, "sid", &ctx));
     assert_eq!(argv[argv.iter().position(|a| a == "-c").unwrap() + 1], absolute);
     let transcript = claude::transcript(&spec, "sid", &home.join(".claude/projects"));
@@ -1211,7 +1211,7 @@ fn a_fixed_chatgpt_account_resolves_and_routes_the_engine() {
     let route = facts::fixed_account(&crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::from_map(
         [("HOME".to_owned(), home.to_string_lossy().into_owned())].into())), "gpt", "work").unwrap();
     let ctx = claude::ClaudeContext { plugin_roots: &[], bridge: None, bridge_key: "k", runtime_config: &Value::Null,
-        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None };
+        server_env: &Default::default(), settings: None, read_only: None, windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
     let command = claude::pane(&spec, "sid", &claude::ClaudeContext { engine_route: Some(&route), ..ctx }).command;
     let home_text = home.join(".codex-work").to_string_lossy().into_owned();
     assert_eq!(command[..12], ["hangar-engine", "--exec", "gpt", "--account", "work", "--account-home", &home_text,
@@ -1870,4 +1870,204 @@ proptest! {
         let object: serde_json::Map<String, Value> = fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         let _ = SessionOpenRequest::parse(&serde_json::to_vec(&object).unwrap());
     }
+}
+
+// ── retomar ──────────────────────────────────────────────────────────────────────────────────
+
+/// Uma fixture de retomada (grupo `d-resume`) rodada pela abertura do Rust, como o harness a roda.
+#[cfg(target_os = "linux")]
+fn run_resume_fixture(name: &str, before: impl FnOnce(&std::path::Path)) -> (Value, Value, tempfile::TempDir, PathBuf) {
+    run_resume_patched(name, |_| {}, before)
+}
+
+#[cfg(target_os = "linux")]
+fn run_resume_patched(name: &str, patch: impl FnOnce(&mut Value), before: impl FnOnce(&std::path::Path)) -> (Value, Value, tempfile::TempDir, PathBuf) {
+    let mut fixture: Value = serde_json::from_slice(&std::fs::read(fixture_dir().join(format!("{name}.json"))).unwrap()).unwrap();
+    patch(&mut fixture["scenario"]);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    materialize(&fixture, &root);
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
+    before(&root);
+    let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
+        .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
+    let raw = test_runtime().block_on(contract::run(&fixture["scenario"], &root, env));
+    (fixture, raw, dir, root)
+}
+
+/// Retomar do Arquivo abre pela criação do Rust com a conversa que já existe: o status, o nome (o da
+/// pasta, com `-2` se ocupado), o transcript e o `claude --resume` com os plugins são os do Python; a
+/// conversa aberta noutra sessão e os pedidos inválidos são recusados com o código dele. Diferenças
+/// nomeadas: o modo de permissão vai explícito também no `--resume` (matriz, item 17), e com terminal
+/// só quando o padrão do servidor é com terminal (matriz, itens 21 e 24; S-08).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_archived_conversation_resumes_like_python() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let terminal_default = |root: &std::path::Path| std::fs::write(root.join("home/.claude/runtime-config.json"), r#"{"headless_default": false}"#).unwrap();
+    for name in ["archive_resume_claude", "archive_resume_name_collision", "archive_resume_named_with_model",
+                 "archive_resume_conversation_open", "archive_resume_codex_bad_id", "archive_resume_invalid_config_dir",
+                 "archive_resume_missing_transcript"] {
+        let (fixture, raw, _dir, root) = run_resume_fixture(name, terminal_default);
+        assert_ne!(raw["not_ours"], true, "{name}: a rota é do Rust");
+        let place = |v: &Value| serde_json::from_str::<Value>(&contract::place(&v.to_string(), &root)).unwrap();
+        let (want, got) = (place(&fixture["result"]["steps"][0]), &raw["steps"][0]);
+        assert_eq!(got["status"], want["status"], "{name}: {}", got["body"]);
+        if want["status"] != 200 {
+            assert_eq!(got["body"]["detail"]["code"], want["body"]["detail"]["code"], "{name}");
+            assert_eq!(got["body"]["detail"]["params"], want["body"]["detail"]["params"], "{name}");
+            assert!(!raw["subprocesses"].as_array().unwrap().iter().any(|p| p["argv"][0] == "new-session"), "{name}: nenhum pane");
+            continue;
+        }
+        for field in ["name", "cwd", "jsonl", "provider", "headless", "tracked", "engine", "conta"] {
+            assert_eq!(got["body"][field], want["body"][field], "{name}: {field}");
+        }
+        assert!(got["body"].get("config_dir").is_none() && got["body"].get("account_source").is_none(), "{name}: a resposta é a SessionInfo");
+        let python = fixture["result"]["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").unwrap();
+        let python = contract::place(python["argv"].as_array().unwrap().last().unwrap().as_str().unwrap(), &root)
+            .replace("<REPO>", &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").to_string_lossy());
+        let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").unwrap();
+        let command = created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap();
+        let mode = Regex::new(r" --permission-mode \S+").unwrap();
+        assert!(mode.is_match(command), "{name}: o modo explícito no --resume: {command}");
+        let without_mode = mode.replace(command, "");
+        let tail = python.split_once("claude ").unwrap().1;
+        assert!(without_mode.ends_with(tail), "{name}: {without_mode}\nesperado no fim: {tail}");
+        let specs: Vec<Value> = std::fs::read_dir(root.join("home/.hangar/session-specs")).unwrap().flatten()
+            .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap()).collect();
+        assert_eq!(specs.len(), 1, "{name}");
+        assert_eq!(specs[0]["conversation"], SID, "{name}: o spec guarda a conversa retomada");
+    }
+}
+
+/// Com o padrão do servidor sem terminal, a conversa do Arquivo volta sem terminal (matriz, item 21): o
+/// sidecar leva a conversa retomada, nenhum pane nasce e a sessão é acordada.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_archived_conversation_follows_the_headless_default() {
+    let (_, raw, _dir, root) = run_resume_fixture("archive_resume_claude", |_| {});
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    assert_eq!(raw["steps"][0]["body"]["headless"], true);
+    assert!(!raw["subprocesses"].as_array().unwrap().iter().any(|p| p["argv"][0] == "new-session"), "sem pane");
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root.join("home/.hangar/claude-headless/proj.json")).unwrap()).unwrap();
+    assert_eq!(sidecar["session_id"], "11111111-1111-4111-8111-111111111111", "a subida retoma a conversa do Arquivo");
+    assert!(raw["runtime_requests"].as_array().unwrap().iter().any(|r| r["op"] == "claude_headless.acordar"));
+}
+
+/// Pi, omp, Kimi e Codex retomam do Arquivo com o verbo de cada um (RET-062 a RET-065): a conversa vem
+/// do armazenamento do agente e a pasta do cabeçalho dela. O rollout que veio de uma transferência
+/// Claude→Codex é recusado (a transferência fica no Python, T-008).
+#[cfg(target_os = "linux")]
+#[test]
+fn pi_omp_kimi_and_codex_resume_from_the_archive_with_their_own_verb() {
+    const ID: &str = "33333333-3333-4333-8333-333333333333";
+    let kimi = format!("session_{ID}");
+    let files = json!({
+        format!("<ROOT>/home/.pi/agent/sessions/--w--/2026-10-01T00-00-00-000Z_{ID}.jsonl"):
+            format!("{{\"type\":\"session\",\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}\n"),
+        format!("<ROOT>/home/.omp/agent/sessions/-/2026-10-01T00-00-00-000Z_{ID}.jsonl"):
+            format!("{{\"type\":\"session\",\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}\n"),
+        "<ROOT>/home/.kimi-code/session_index.jsonl":
+            format!("{{\"sessionId\":\"{kimi}\",\"sessionDir\":\"<ROOT>/home/.kimi-code/sessions/w/{kimi}\",\"workDir\":\"<ROOT>/work/proj\"}}\n"),
+        format!("<ROOT>/home/.kimi-code/sessions/w/{kimi}/agents/main/wire.jsonl"): "{}\n",
+        format!("<ROOT>/home/.codex/sessions/2026/10/01/rollout-2026-10-01T00-00-00-{ID}.jsonl"):
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{ID}\",\"cwd\":\"<ROOT>/work/proj\"}}}}\n"),
+    });
+    let run = |provider: &str, sid: &str, before: &dyn Fn(&std::path::Path)| run_resume_patched("archive_resume_claude", |s| {
+        for (k, v) in files.as_object().unwrap() { s["state"]["files"][k] = v.clone(); }
+        s["steps"][0]["path"] = json!(format!("/api/archive/x/{sid}/resume"));
+        s["steps"][0]["json"] = json!({"provider": provider});
+    }, before);
+    let terminal = |root: &std::path::Path| std::fs::write(root.join("home/.claude/runtime-config.json"), r#"{"headless_default": false}"#).unwrap();
+    for (provider, sid, verb) in [("pi", ID.to_owned(), format!("pi --session-id {ID}")), ("omp", ID.to_owned(), "omp -r ".to_owned()),
+                                  ("kimi", kimi.clone(), format!("kimi --session {kimi}"))] {
+        let (_, raw, _dir, root) = run(provider, &sid, &|_| {});
+        assert_eq!(raw["steps"][0]["status"], 200, "{provider}: {}", raw["steps"][0]["body"]);
+        assert_eq!(raw["steps"][0]["body"]["cwd"], json!(root.join("work/proj")), "{provider}: a pasta do cabeçalho");
+        let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+        let command = created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap();
+        assert!(command.contains(&verb), "{provider}: {command}");
+        if provider == "omp" { assert!(command.contains(&format!("_{ID}.jsonl")), "o omp retoma pelo caminho: {command}"); }
+    }
+    let (_, raw, _dir, root) = run("codex", ID, &terminal);
+    assert_eq!(raw["steps"][0]["status"], 200, "codex: {}", raw["steps"][0]["body"]);
+    let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+    assert!(created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap().contains(&format!("--resume {ID}")), "{created}");
+    let (_, raw, _dir, root2) = run("codex", ID, &|_| {});
+    assert_eq!(raw["steps"][0]["status"], 200, "codex sem terminal: {}", raw["steps"][0]["body"]);
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root2.join("home/.hangar/codex-sessions/proj.json")).unwrap()).unwrap();
+    assert_eq!(sidecar["thread_id"], ID, "a subida retoma a thread do Arquivo");
+    let _ = root;
+    // A transferência: o índice da thread na conta dona.
+    let transferred = |root: &std::path::Path| {
+        let home = root.join("home/.codex").canonicalize().unwrap().to_string_lossy().into_owned();
+        let key = format!("[{}, {}]", serde_json::to_string(&home).unwrap(), serde_json::to_string(ID).unwrap());
+        let digest: String = ring::digest::digest(&ring::digest::SHA256, key.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let index = root.join(format!("home/.hangar/conversation-transfers/indexes/thread-{digest}.json"));
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::write(index, r#"["44444444-4444-4444-8444-444444444444"]"#).unwrap();
+    };
+    let (_, raw, _dir, _root) = run("codex", ID, &transferred);
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(409), json!("session_transfer_resume_unsupported")));
+}
+
+/// O Arquivo com outra conta: a conversa muda para ela e a sessão nasce lá; a abertura recusada a devolve
+/// para a conta de antes; a incerta (o tmux calou, a sessão pode estar de pé) não a devolve, senão o
+/// transcript se partiria entre as duas contas.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_archive_moves_the_conversation_to_the_asked_account_and_back_only_on_a_clear_failure() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let terminal = |root: &std::path::Path| std::fs::write(root.join("home/.claude/runtime-config.json"), r#"{"headless_default": false}"#).unwrap();
+    let run = |fake: Value| run_resume_patched("archive_resume_claude", |s| {
+        s["steps"][0]["json"] = json!({"config_dir": "<ROOT>/home/.claude-b"});
+        s["fakes"]["tmux_new_session"] = fake;
+    }, terminal);
+    let at = |root: &std::path::Path, account: &str| {
+        let project = hangar_workspace::worktrees::sanitize_cwd(&root.join("work/proj").to_string_lossy());
+        root.join(format!("home/{account}/projects/{project}/{SID}.jsonl")).is_file()
+    };
+    let (_, raw, _dir, root) = run(Value::Null);
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "a conversa foi para a conta pedida");
+    let (_, raw, _dir, root) = run(json!({"rc": 1, "stderr": "boom"}));
+    assert_ne!(raw["steps"][0]["status"], 200);
+    assert!(at(&root, ".claude") && !at(&root, ".claude-b"), "recusada: a conversa voltou");
+    let (_, raw, _dir, root) = run(json!({"silent": true}));
+    assert_eq!(raw["steps"][0]["body"]["detail"]["code"], "session_open_uncertain", "{}", raw["steps"][0]["body"]);
+    assert!(at(&root, ".claude-b") && !at(&root, ".claude"), "incerta: a conversa fica com a sessão que pode ter nascido");
+}
+
+/// A sessão da fotografia volta pelo spec inteiro (modelo, modo da hora em que caiu, Jev, chave), na conversa
+/// em que estava e com o comando direto no `new-session`; o grupo e a fila do nome, que são dela, ficam.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_snapshot_entry_comes_back_with_its_whole_spec_keeping_its_group_and_queue() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let key = "ab".repeat(16);
+    let spec = json!({"version": 1, "key": key, "name": "velho", "cwd": "<ROOT>/work/proj", "provider": "claude", "surface": "terminal",
+        "account": {"kind": "default"}, "account_source": "default", "model": "opus", "effort": "high", "service_tier": null,
+        "permission_mode": "bypassPermissions", "subagent_model": null, "customizations": null, "jev": true, "read_only": false,
+        "worktree": null, "creator": null, "created_at": 1.0, "conversation": SID});
+    let (_, raw, _dir, root) = run_resume_patched("archive_resume_claude", |s| {
+        s["state"]["files"][format!("<ROOT>/home/.hangar/session-specs/{key}.json")] = spec.clone();
+        s["state"]["files"]["<ROOT>/home/.claude/.hangar-pair/proj.json"] = json!({"gid": "g1", "peers": ["outra"]});
+        s["state"]["files"]["<ROOT>/home/.claude/.hangar-queue/proj.jsonl"] = json!({"id": "q1", "text": "depois", "delivered": false});
+        s["steps"] = json!([{"call": "restore", "key": key,
+            "entry": {"name": "proj", "provider": "claude", "conversation": SID, "permission_mode": "acceptEdits"}}]);
+    }, |_| {});
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+    let argv: Vec<&str> = created["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    let command = argv.last().unwrap();
+    for part in [format!("claude --resume {SID}"), "--model opus".into(), "--effort high".into(), "--permission-mode acceptEdits".into()] {
+        assert!(command.contains(&part), "{part} em {command}");
+    }
+    for env in [format!("CP_SESSION_KEY={key}"), "CP_SESSION_NAME=proj".into(), "HANGAR_JEV=on".into()] {
+        assert!(argv.windows(2).any(|w| w == ["-e", env.as_str()]), "{env} em {argv:?}");
+    }
+    assert_eq!(raw["cleaned"], json!([]), "a mesma sessão voltando não limpa grupo, fila nem `then` do nome");
+    assert!(root.join("home/.claude/.hangar-pair/proj.json").is_file() && root.join("home/.claude/.hangar-queue/proj.jsonl").is_file());
 }

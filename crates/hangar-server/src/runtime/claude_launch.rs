@@ -63,7 +63,7 @@ pub fn transcript(env: &AccountEnvironment, spec: &SessionSpec, sid: &str) -> Pa
 
 /// `permissions.defaultMode` do `settings.json` da conta (a do servidor sem pasta própria), como a
 /// abertura decide: ausente ou fora da lista é bypass, `default` é manual; ilegível recusa (T-002).
-fn account_mode(env: &AccountEnvironment, config_dir: Option<&str>) -> Result<PermissionMode, RuntimeError> {
+pub(crate) fn account_mode(env: &AccountEnvironment, config_dir: Option<&str>) -> Result<PermissionMode, RuntimeError> {
     let dir = config_dir.map_or_else(|| env.claude_base.clone(), PathBuf::from);
     let mode = match std::fs::read(dir.join("settings.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

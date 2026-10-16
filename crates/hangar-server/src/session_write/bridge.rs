@@ -37,7 +37,7 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
     true
 }
 
-/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit` e
+/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit`, `input` e
 /// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
 /// mesma rota do dono. Outra rota, método ou sessão: 421.
@@ -51,12 +51,21 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     }
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {
-        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
+        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode" | "input"),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
     if !allowed { return not_ours(); }
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
+    // Texto que nasce no Python (grupo, par, MCP) para o Claude com terminal: o Rust o adota aqui, e a
+    // fila da sessão é uma só.
+    if rest == "input" && !runtime.has_entry(None, &name).await {
+        match runtime.adopt_now(&name).await {
+            None => return not_ours(),
+            Some(Err(error)) => return super::detail(StatusCode::SERVICE_UNAVAILABLE, &error.code, &error.message, json!({})),
+            Some(Ok(())) => {}
+        }
+    }
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
     if let Some(route) = queue { return control::queue_dispatch(route, st, peer, req).await; }
@@ -66,6 +75,7 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         "select" => control::select(s, c, req).await,
         "permission-mode" => permissions::set_mode(s, c, req).await,
         "permission-modes" => permissions::modes(s, c, req).await,
+        "input" => super::input::input(s, c, req).await,
         _ => control::select_submit(s, c, req).await,
     }
 }
@@ -115,6 +125,10 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     req.headers_mut().remove(CLOSED_TRANSCRIPT);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
+    // Fechada de propósito não volta no próximo reboot, de qualquer agente.
+    if let (true, Some(name), Some(dirs)) = (owner, name.as_deref(), st.list.env().dirs.as_ref()) {
+        crate::session_open::restore::forget(&dirs.home, name);
+    }
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
     match runtime.kill_codex_terminal(&name).await {

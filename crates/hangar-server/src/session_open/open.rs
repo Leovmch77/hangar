@@ -21,7 +21,9 @@ pub struct ProgramOutput { pub code: Option<i32>, pub stdout: String, pub stderr
 /// O que a sessão que acabou de nascer avisa a quem guarda estado do nome.
 #[derive(Clone, Debug)]
 /// `codex_terminal`: a pasta da conta do terminal Codex que nasceu (o nascimento conta como uso dela).
-pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool, pub codex_terminal: Option<String> }
+/// `restored`: a mesma sessão voltando depois do reboot; o par e o grupo do nome são dela.
+pub struct Born { pub name: String, pub provider: AgentProvider, pub jsonl: Option<String>, pub remember_provider: bool, pub codex_terminal: Option<String>,
+    pub restored: bool }
 
 pub trait OpenHost: Send + Sync {
     /// A pasta pessoal do dono (registros, `~/.claude.json`, `~/.hangar`).
@@ -52,6 +54,9 @@ pub trait OpenHost: Send + Sync {
     /// Id da conversa (`--session-id`) e chave da ponte do plugin, novos a cada vida.
     fn new_session_id(&self) -> String;
     fn new_bridge_key(&self) -> String;
+    /// As sessões vivas e o transcript de cada uma (nome, caminho): retomar uma conversa que já roda
+    /// poria dois processos no mesmo arquivo. Lista indisponível é erro, nunca "nenhuma".
+    fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>>;
     /// A sessão sem terminal recém-criada sobe em segundo plano (os hooks de SessionStart rodam enquanto
     /// a pessoa digita) e entrega o que está na fila. Não espera.
     fn wake(&self, name: &str);
@@ -339,7 +344,7 @@ pub fn opens_here(spec: &SessionSpec) -> bool {
 
 /// Abre a sessão do spec resolvido: com terminal de todo provedor, ou o Claude e o Codex sem terminal.
 pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
-    let Resolved { mut spec, mut warnings, initial_prompt, remember_provider, previous_non_plan } = resolved;
+    let Resolved { mut spec, mut warnings, initial_prompt, remember_provider, previous_non_plan, resume, restore } = resolved;
     let _claim = NameClaim::take(host.home(), &spec.name)?;
     let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let codex_home = match &spec.account {
@@ -365,7 +370,8 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         spec.cwd = made.path.clone();
         if let Some(w) = spec.worktree.as_mut() { w.path = Some(made.path); }
     }
-    match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref()).await {
+    match launch(host, &mut spec, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref(),
+                 resume.as_deref(), restore).await {
         Ok((jsonl, warnings, route)) => {
             // O Codex sem terminal já subiu dentro da abertura (`warm_codex`).
             if spec.surface == Surface::Headless && spec.provider == AgentProvider::Claude { host.wake(&spec.name); }
@@ -381,8 +387,8 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
 
 #[allow(clippy::too_many_arguments)]
 async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<String>, initial_prompt: Option<&str>,
-                remember_provider: bool, previous_non_plan: Option<PermissionMode>, runtime: &Value, codex_home: Option<&str>)
-                -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+                remember_provider: bool, previous_non_plan: Option<PermissionMode>, runtime: &Value, codex_home: Option<&str>,
+                resume: Option<&str>, restore: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     let config_dir = spec.account.config_dir().map(str::to_owned);
     let read_only = if spec.read_only { Some(read_only_prefix(host, &spec.cwd, config_dir.as_deref().or(codex_home)).await?) } else { None };
     // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
@@ -420,10 +426,10 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
     progress_step(&spec.name, "criando", json!({}));
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
     let result = match (spec.surface, codex_home) {
-        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home).await,
+        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home, resume, restore).await,
         (Surface::Headless, Some(home)) =>
-            codex_headless_life(host, spec, home, initial_prompt, &mut diary, remember_provider).await.map(|w| (None, w, None)),
-        (Surface::Headless, None) => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider).await,
+            codex_headless_life(host, spec, home, initial_prompt, &mut diary, remember_provider, resume).await.map(|w| (None, w, None)),
+        (Surface::Headless, None) => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider, resume).await,
     };
     let events = diary.end(result.as_ref().err());
     host.diary(events);
@@ -450,22 +456,26 @@ fn engine_route(host: &dyn OpenHost, spec: &SessionSpec) -> Result<Option<claude
 }
 
 /// O pane do Claude, o transcript da conversa nova e a rota da conta ChatGPT fixa do motor.
-async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_only: Option<&[String]>, initial_prompt: Option<&str>,
-                     runtime: &Value) -> Result<(PaneSpec, String, Option<claude::EngineRoute>), OpenError> {
-    let config_dir = spec.account.config_dir().map(str::to_owned);
-    let effective_dir = config_dir.clone().or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).cloned())
+/// As escolhas de plugins e skills da conversa: as pedidas e, na retomada, as que ela já tinha guardado.
+async fn conversation_settings(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, resume: bool) -> Result<Option<Value>, OpenError> {
+    if spec.customizations.is_none() && !resume { return Ok(None); }
+    let effective_dir = spec.account.config_dir().map(str::to_owned).or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).cloned())
         .unwrap_or_else(|| host.home().join(".claude").to_string_lossy().into_owned());
-    let settings = match &spec.customizations {
-        Some(selection) => Some(host.customizations(json!({"session_id": sid, "cwd": spec.cwd, "config_dir": effective_dir,
-            "selection": selection, "resume": false})).await?["settings"].clone()),
-        None => None,
-    };
+    let settings = host.customizations(json!({"session_id": sid, "cwd": spec.cwd, "config_dir": effective_dir,
+        "selection": spec.customizations, "resume": resume})).await?["settings"].clone();
+    Ok(Some(settings).filter(|s| s.as_object().is_some_and(|o| !o.is_empty()) || spec.customizations.is_some()))
+}
+
+async fn claude_plan(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, read_only: Option<&[String]>, initial_prompt: Option<&str>,
+                     runtime: &Value, resume: bool) -> Result<(PaneSpec, String, Option<claude::EngineRoute>), OpenError> {
+    let settings = conversation_settings(host, spec, sid, resume).await?;
     let route = engine_route(host, spec)?;
     let roots = claude::plugin_roots(host.home());
     let bridge = host.bridge();
     let key = host.new_bridge_key();
     let ctx = claude::ClaudeContext { plugin_roots: &roots, bridge: bridge.as_ref(), bridge_key: &key, runtime_config: runtime,
-        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref() };
+        server_env: host.env(), settings: settings.as_ref(), read_only, windows: host.terminal().windows, initial_prompt, engine_route: route.as_ref(),
+        resume, allow_bypass: false };
     let pane = claude::pane(spec, sid, &ctx);
     let jsonl = claude::transcript(spec, sid, &host.server_projects()).to_string_lossy().into_owned();
     Ok((pane, jsonl, route))
@@ -486,7 +496,7 @@ async fn sync_skills(host: &dyn OpenHost) {
 
 /// O sidecar do Claude sem terminal com os campos que o Python grava (`sessions.save`): os dois lados
 /// ainda o leem, e um revert não pode reabrir a sessão em modo errado.
-fn headless_sidecar(spec: &SessionSpec, sid: &str, previous_non_plan: Option<PermissionMode>, settings: Option<&Value>,
+pub(crate) fn headless_sidecar(spec: &SessionSpec, sid: &str, previous_non_plan: Option<PermissionMode>, settings: Option<&Value>,
                     route: Option<&claude::EngineRoute>) -> Value {
     let (engine, context_window) = match &spec.account {
         Account::Engine { name, context_window, .. } => (Some(name.clone()), *context_window),
@@ -524,8 +534,8 @@ fn enqueue_first(queue_dir: &Path, key: &str, name: &str, text: &str) -> std::io
 
 /// Do `validar` ao `sessao.criada` do Claude sem terminal: grava a primeira mensagem, o registro e o
 /// sidecar. O processo sobe depois (`OpenHost::wake`), pelo spec.
-async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_plan: Option<PermissionMode>, initial_prompt: Option<&str>,
-                       diary: &mut Diary, remember_provider: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non_plan: Option<PermissionMode>, initial_prompt: Option<&str>,
+                       diary: &mut Diary, remember_provider: bool, resume: Option<&str>) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let sidecars = host.home().join(".hangar");
     let taken = |kind: &str| crate::runtime::codex_sidecar::path(&sidecars.join(kind), &spec.name).exists();
@@ -537,16 +547,11 @@ async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_pla
         return Err(name_in_use());
     }
     host.leave_old_group(&spec.name).await?;
-    let sid = host.new_session_id();
-    let config_dir = spec.account.config_dir().map(str::to_owned);
-    let effective_dir = config_dir.clone().or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).cloned())
-        .unwrap_or_else(|| host.home().join(".claude").to_string_lossy().into_owned());
-    let settings = match &spec.customizations {
-        Some(selection) => Some(host.customizations(json!({"session_id": sid, "cwd": spec.cwd, "config_dir": effective_dir,
-            "selection": selection, "resume": false})).await?["settings"].clone()),
-        None => None,
-    };
+    // Retomada: o processo sobe com `--resume`, porque o transcript dessa conversa já existe.
+    let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
+    let settings = conversation_settings(host, spec, &sid, resume.is_some()).await?;
     let route = engine_route(host, spec)?;
+    spec.conversation = Some(sid.clone());
     diary.step("confiar_pasta");
     claude::pretrust(&claude::claude_json(host.terminal(), host.home(), spec.account.config_dir()), &spec.cwd, host.terminal().windows);
     // Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
@@ -576,7 +581,7 @@ async fn headless_life(host: &dyn OpenHost, spec: &SessionSpec, previous_non_pla
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None, restored: false };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
@@ -598,7 +603,8 @@ async fn name_still_free(host: &dyn OpenHost, spec: &SessionSpec, diary: &mut Di
 /// `_create_codex_headless`: o sidecar sem terminal (com a chave do spec) e o registro; o processo
 /// sobe logo depois pelo runtime (`warm_codex`), como o aquecimento da criação no Python.
 async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_home: &str, initial_prompt: Option<&str>, diary: &mut Diary,
-                             remember_provider: bool) -> Result<Vec<String>, OpenError> {
+                             remember_provider: bool, resume: Option<&str>) -> Result<Vec<String>, OpenError> {
+    spec.conversation = resume.map(str::to_owned);
     diary.step("validar");
     name_still_free(host, spec, diary).await?;
     host.leave_old_group(&spec.name).await?;
@@ -610,12 +616,15 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o registro da sessão não foi gravado: {error}")));
     }
     let dir = crate::runtime::codex_sidecar::dir(host.home());
-    if let Err(error) = crate::runtime::codex_sidecar::put(&dir, &spec.name, &super::codex::headless_sidecar(spec, codex_home)) {
+    let mut meta = super::codex::headless_sidecar(spec, codex_home);
+    // A thread que já existe: a subida a retoma (`thread/resume`) em vez de abrir outra.
+    if let Some(thread) = resume { meta.insert("thread_id".into(), json!(thread)); }
+    if let Err(error) = crate::runtime::codex_sidecar::put(&dir, &spec.name, &meta) {
         diary.refused("erro", "sidecar_nao_gravado", Some("confiar_pasta"), Some(&error.kind().to_string()));
         let _ = super::record::remove(host.home(), &spec.key);
         return Err(OpenError::new(500, "erro_criacao_sessao", format!("o arquivo da sessão não foi gravado: {error}")));
     }
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: None, remember_provider, codex_terminal: None, restored: false };
     let mut warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "sidecar_gravado", "operacao": diary.op}));
@@ -626,29 +635,37 @@ async fn codex_headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, codex_
 /// Do `validar` ao `sessao.criada`: o pane e o que muda em volta dele.
 #[allow(clippy::too_many_arguments)]
 async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<&[String]>, initial_prompt: Option<&str>, diary: &mut Diary,
-                       remember_provider: bool, runtime: &Value, codex_home: Option<&str>) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+                       remember_provider: bool, runtime: &Value, codex_home: Option<&str>, resume: Option<&str>, restore: bool)
+                       -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let claude = spec.provider == AgentProvider::Claude;
     if matches!(spec.provider, AgentProvider::Pi | AgentProvider::Omp | AgentProvider::Kimi) { sync_skills(host).await; }
     // A resolução conferiu o nome antes de conta e worktree: outro pane pode ter nascido desde então.
     name_still_free(host, spec, diary).await?;
-    host.leave_old_group(&spec.name).await?;
+    if !restore { host.leave_old_group(&spec.name).await?; }
     diary.step("preparar_comando");
-    let sid = host.new_session_id();
+    let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
     let (pane, jsonl, route) = if claude {
-        let (pane, jsonl, route) = claude_plan(host, spec, &sid, read_only, initial_prompt, runtime).await?;
+        let (pane, jsonl, route) = claude_plan(host, spec, &sid, read_only, initial_prompt, runtime, resume.is_some()).await?;
         (pane, Some(jsonl), route)
     } else if let Some(home) = codex_home {
         super::codex::require_launcher(host.env())?;
         // A TUI abre a thread: o prompt inicial vai no comando do pane.
-        let launch = super::codex::creation(spec, home, initial_prompt);
+        let mut launch = super::codex::creation(spec, home, initial_prompt);
+        launch.resume = resume.map(str::to_owned);
         // O rollout só nasce com a TUI, num caminho que não se deriva do cwd: nada a semear.
         (super::codex::pane(&spec.name, &spec.key, &launch, spec.jev, runtime, read_only, host.terminal().windows)?, None, None)
     } else {
         let ctx = agents::AgentContext { home: host.home(), server_env: host.env(), runtime_config: runtime, read_only,
             windows: host.terminal().windows };
+        let conversation = resume.map_or(Conversation::New(&sid), Conversation::Resume);
         // O transcript nasce no 1º turno, num layout próprio: nada a semear.
-        (agents::pane(spec, Conversation::New(&sid), &ctx)?, None, None)
+        (agents::pane(spec, conversation, &ctx)?, None, None)
+    };
+    // O Kimi novo e o Codex só sabem a conversa depois da TUI (bilhete, sidecar).
+    spec.conversation = match spec.provider {
+        AgentProvider::Kimi | AgentProvider::Codex => resume.map(str::to_owned),
+        _ => Some(sid.clone()),
     };
     diary.step("confiar_pasta");
     match spec.provider {
@@ -665,7 +682,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         _ => {}
     }
     diary.step("criar_terminal");
-    host.release_name(&spec.name).await?;
+    if !restore { host.release_name(&spec.name).await?; }
     // O registro antes do pane: sem ele a sessão não é reaberta nem reconhecida pela chave.
     if let Err(error) = super::record::write(host.home(), spec) {
         diary.refused("erro", "registro_nao_gravado", Some("criar_terminal"), Some(&error.kind().to_string()));
@@ -704,7 +721,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
         }));
     }
     diary.step("limpar_estado_anterior");
-    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned) };
+    let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: jsonl.clone(), remember_provider, codex_terminal: codex_home.map(str::to_owned), restored: restore };
     let warnings = host.born(&born).await;
     diary.events.push(json!({"evento": "sessao.criada", "nivel": "ok", "sessao": spec.name, "provider": spec.provider.name(),
         "etapa": "terminal_criado", "operacao": diary.op}));

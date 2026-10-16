@@ -111,6 +111,7 @@ pub fn claude_from_meta(meta: &Value, name: &str, created_at: f64) -> io::Result
         // A seleção de plugins e skills mora no registro de customizações do Rust, pelo id da conversa.
         subagent_model: text(meta, "subagent_model"), customizations: None, jev: meta["jev"] == true,
         read_only: meta["read_only"] == true, worktree: None, creator: None, created_at,
+        conversation: text(meta, "session_id"),
     })
 }
 
@@ -145,6 +146,6 @@ pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>>
         // Modo gravado fora da lista fica ausente: quem reabre recusa em vez de abrir em Full Access (S-05).
         permission_mode: text(&meta, "permission_mode").as_deref().and_then(PermissionMode::codex),
         subagent_model: None, customizations: None, jev: meta["jev"] == true, read_only: meta["read_only"] == true,
-        worktree: None, creator: None, created_at: created(&codex_path),
+        worktree: None, creator: None, created_at: created(&codex_path), conversation: text(&meta, "thread_id"),
     }))
 }

@@ -180,6 +180,10 @@ mod queue_v2_terminal;
 mod runtime_actor;
 mod runtime_cano;
 mod runtime_claude;
+#[cfg(target_os = "linux")]
+mod runtime_claude_terminal;
+#[cfg(target_os = "linux")]
+mod runtime_claude_reopen;
 mod runtime_codex;
 #[cfg(unix)]
 mod runtime_codex_watch;

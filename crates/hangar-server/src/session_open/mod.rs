@@ -2,6 +2,7 @@
 //! `inherit`) → `resolve_open()` → `SessionSpec` (tudo decidido, gravado por sessão). Reabrir é o
 //! spec gravado ⊕ `SessionChange`. Spec: `docs/superpowers/specs/2026-10-15-unified-session-open.md`.
 pub mod agents;
+pub mod archive;
 pub mod claude;
 pub mod cli;
 pub mod codex;
@@ -13,6 +14,7 @@ pub mod local;
 pub mod open;
 pub mod record;
 pub mod resolve;
+pub mod restore;
 pub mod server;
 pub mod terminal;
 #[cfg(test)]
@@ -302,6 +304,10 @@ pub struct SessionSpec {
     pub worktree: Option<WorktreeSpec>,
     pub creator: Option<String>,
     pub created_at: f64,
+    /// A conversa com que a vida de agora nasceu (`--session-id`/`--resume` do Claude, o id do Pi e do
+    /// omp, a do Kimi retomado): o restore depois do reboot volta nela (S-69).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

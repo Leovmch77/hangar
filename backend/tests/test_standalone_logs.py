@@ -64,7 +64,7 @@ def test_restore_vazio_grava_log_sem_tocar_tmux(tmp_path, ambiente, windows, loc
     root = tmp_path / "home" / ".hangar"
     if windows:
         root = (tmp_path / "local" if local else tmp_path / "home" / "AppData" / "Local") / "hangar"
-    assert "restore: start" in (root / "logs" / "privado" / "claude-resume.log").read_text()
+    assert "restore: as sessões do Hangar voltam pelo servidor" in (root / "logs" / "privado" / "claude-resume.log").read_text()
     assert not (resurrect / "claude-resume.log").exists()
     assert (resurrect / "claude-sessions.tsv").read_text() == ""
 

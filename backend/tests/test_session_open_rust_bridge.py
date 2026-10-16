@@ -29,11 +29,8 @@ def _post(path, body):
     return TestClient(api_mod.app, client=("127.0.0.1", 50000)).post(path, json=body, headers={"X-Hangar-Internal": SECRET})
 
 
-def test_release_touches_only_what_lives_here(monkeypatch):
-    released = []
-    monkeypatch.setattr(api_mod.registry, "release_name", released.append)
-    assert _post("/internal/sessions/s%201/release", {}).json() == {"ok": True}
-    assert released == ["s 1"]
+def test_release_and_birth_are_all_rust():
+    assert _post("/internal/sessions/s1/release", {}).status_code == 404, "soltar o nome é todo do Rust"
     assert _post("/internal/sessions/s1/born", {}).status_code == 404, "o nascimento é todo do Rust"
 
 

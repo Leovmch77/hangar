@@ -60,7 +60,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 76;
+pub const INTERNAL_PROTOCOL: u32 = 78;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -157,6 +157,9 @@ pub async fn serve_until_with_guest(
                     home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
                     mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
                 registry.bind_watcher(watcher.clone());
+                // Os Claude com terminal que já tinham fila aqui: o Rust os adota, sem esperar o Python.
+                { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; }); }
                 Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
             }
             _ => None,

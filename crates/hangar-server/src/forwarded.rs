@@ -29,6 +29,10 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Mermaid
     } else if crate::plans::routes::matches(method, &path) {
         Owned::Plans
+    } else if let Some((project, sid)) = archive_resume(method, &path) {
+        Owned::ArchiveResume(project, sid)
+    } else if let Some(name) = live_resume(method, &path) {
+        Owned::Resume(name)
     } else {
         return crate::session_write::json_response(StatusCode::NOT_FOUND, json!({"code": "forwarded_route_not_owned"}));
     };
@@ -44,8 +48,36 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
         Owned::Plans => crate::plans::routes::serve(&st, req).await,
+        Owned::ArchiveResume(project, sid) => {
+            let Ok(bytes) = axum::body::to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            };
+            crate::session_open::server::serve_archive_resume(&st, &project, &sid, &bytes).await
+        }
+        Owned::Resume(name) => {
+            let Ok(bytes) = axum::body::to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            };
+            let (status, body) = crate::session_write::resume::serve(&st, &name, &bytes).await;
+            crate::session_write::json_response(status, body)
+        }
     }
 }
 
+/// `/api/archive/<projeto>/<conversa>/resume`, com os dois segmentos já decodificados.
+fn archive_resume(method: &Method, path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/api/archive/")?.strip_suffix("/resume")?;
+    let (project, sid) = rest.split_once('/')?;
+    let decode = |s: &str| percent_encoding::percent_decode_str(s).decode_utf8().ok().map(|s| s.into_owned());
+    (method == Method::POST && !sid.contains('/')).then(|| Some((decode(project)?, decode(sid)?))).flatten()
+}
+
+/// `/api/sessions/<nome>/resume`, com o nome já decodificado.
+fn live_resume(method: &Method, path: &str) -> Option<String> {
+    let name = path.strip_prefix("/api/sessions/")?.strip_suffix("/resume")?;
+    (method == Method::POST && !name.is_empty() && !name.contains('/'))
+        .then(|| percent_encoding::percent_decode_str(name).decode_utf8().ok().map(|s| s.into_owned())).flatten()
+}
+
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Catalog, Mermaid, Plans }
+enum Owned { Catalog, Mermaid, Plans, ArchiveResume(String, String), Resume(String) }

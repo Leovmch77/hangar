@@ -106,6 +106,12 @@ pub struct Resolved {
     pub remember_provider: bool,
     /// Claude sem terminal que nasce no plano: o modo da conta, para onde "Implementar o plano" volta.
     pub previous_non_plan: Option<PermissionMode>,
+    /// A conversa que já existe e esta abertura retoma (Arquivo, `/resume`, restore); `None` = nova.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    /// A mesma sessão voltando depois do reboot: o grupo, a fila, o `then` e o par do nome são dela e ficam.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub restore: bool,
 }
 
 /// `model_args.ID_OK`, com o `\Z` do Python: quebra de linha no fim é recusada.
@@ -261,7 +267,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         permission_mode, subagent_model: request.subagent_model.clone(), customizations: request.claude_customizations.clone(),
         jev: request.jev.unwrap_or_else(|| facts.defaults().jev), read_only: request.read_only,
         worktree: request.branch.clone().map(|branch| WorktreeSpec { branch, new_branch: request.new_branch, base: request.base.clone(), path: None }),
-        creator: request.creator.clone(), created_at: facts.now(),
+        creator: request.creator.clone(), created_at: facts.now(), conversation: None,
     };
     // Nascer já no plano sem terminal deixaria a sessão sem modo de base. O ilegível vale bypass, como o
     // `modo_da_conta` do Python: o modo pedido já está escolhido, só a volta do plano depende dele.
@@ -269,7 +275,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         .then(|| account_mode(spec.account.config_dir(), facts).unwrap_or(PermissionMode::BypassPermissions));
     // Só a abertura do dono muda o provedor lembrado.
     Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest,
-        previous_non_plan })
+        previous_non_plan, resume: None, restore: false })
 }
 
 /// `session_defaults.choose_provider`.

@@ -22,6 +22,8 @@ pub mod terminal_status;
 pub mod local_policy;
 pub mod process;
 pub mod claude_relaunch;
+pub mod claude_terminal;
+pub mod claude_reopen;
 pub mod lifecycle;
 
 #[derive(Default)]

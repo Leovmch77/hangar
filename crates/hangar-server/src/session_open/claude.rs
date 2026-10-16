@@ -39,6 +39,10 @@ pub struct ClaudeContext<'a> {
     pub initial_prompt: Option<&'a str>,
     /// A conta ChatGPT fixa do motor, resolvida na abertura.
     pub engine_route: Option<&'a EngineRoute>,
+    /// Reabertura de uma conversa que já tem transcript: `--resume` em vez de `--session-id`.
+    pub resume: bool,
+    /// Plano sobre base bypass: sem a flag a CLI não volta ao bypass ao aprovar o plano (S-04).
+    pub allow_bypass: bool,
 }
 
 /// `runtime_config.get`: o `runtime-config.json` vence; senão a variável `CP_*`; senão o padrão.
@@ -113,8 +117,9 @@ pub(crate) fn settings_json(settings: &Value) -> String {
 
 /// O pane do Claude: argv do agente (com o motor e o só leitura em volta) e o `-e` da sessão.
 pub fn pane(spec: &SessionSpec, sid: &str, ctx: &ClaudeContext) -> PaneSpec {
-    let mut claude: Vec<String> = vec!["claude".into(), "--session-id".into(), sid.into()];
+    let mut claude: Vec<String> = vec!["claude".into(), (if ctx.resume { "--resume" } else { "--session-id" }).into(), sid.into()];
     for root in ctx.plugin_roots { claude.extend(["--plugin-dir".into(), root.clone()]); }
+    if ctx.allow_bypass { claude.push("--allow-dangerously-skip-permissions".into()); }
     if let Some(model) = &spec.model { claude.extend(["--model".into(), model.clone()]); }
     if let Some(effort) = &spec.effort { claude.extend(["--effort".into(), effort.clone()]); }
     if let Some(mode) = spec.permission_mode { claude.extend(["--permission-mode".into(), mode.name().into()]); }

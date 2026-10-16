@@ -584,9 +584,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   "negado por você".
 - **Perguntas, permissões e ciclo de vida da sessão aberta são do Rust; o Python fica com a
   abertura.** Rust: plugin do Claude (`/api/plugin/*`, `plugin::Store`), fatos e entrega, modos de
-  permissão (sondagem, troca, memória), Codex com terminal adotado, pane morto, fechamento,
-  `/clear`, troca de conversa e sidecar, reabertura do Claude para bypass e relançamento do Codex
-  aberto (terminal↔sem terminal, `/recarregar`). Python: criar e abrir, lançador, preparo de conta,
+  permissão (sondagem, troca, memória), Codex e Claude com terminal adotados (o Claude pela
+  `CP_SESSION_KEY` do pane, que o vínculo do Python também usa), pane morto, fechamento, `/clear`,
+  troca de conversa e sidecar, e toda reabertura pelo spec (`claude_reopen.rs`, `codex_relaunch`):
+  terminal↔sem terminal, `/recarregar`, `/conta` com a conta ChatGPT fixa, o modelo e o Fast dela, e
+  o bypass; o modo vem do spec e do observado, nunca do rodapé lido na hora. A transferência
+  Claude→Codex (`/conta` com `credential_id`) segue no Python. Python: criar e abrir, lançador, preparo de conta,
   autorização das portas dele com o repasse acima e, depois do `DELETE` de Codex com terminal
   concluído no Rust, só a limpeza externa (`share_store`/`sync_tunnel`, `ThenLink`, atalhos,
   caches), sem chamar o Rust de volta. Responsabilidade migrada nunca volta ao Python em

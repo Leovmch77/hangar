@@ -158,34 +158,6 @@ def test_kill_in_rust_mode_reports_bridge_failure(monkeypatch, caplog):
     assert "groups_bridge_unavailable" in caplog.text
 
 
-def test_create_cleanup_logs_how_many_leave_warnings(monkeypatch, caplog):
-    _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
-    monkeypatch.setattr(registry.tmux, "has_session", lambda name: False)
-    for mod in (registry.headless_sessions, registry.codex_sessions):
-        monkeypatch.setattr(mod, "exists", lambda name: False)
-    registry.SessionRegistry.__new__(registry.SessionRegistry)._leave_old_group("a")
-    # Só a contagem: o aviso pode trazer texto da outra máquina.
-    assert "1 aviso" in caplog.text and "srv inacessível" not in caplog.text
-
-
-
-
-def test_create_cleanup_skips_live_name_and_tolerates_missing_sidecar(monkeypatch):
-    calls = _rust(monkeypatch, error="groups_bridge_unavailable")
-    monkeypatch.setattr(registry.tmux, "has_session", lambda name: name == "viva")
-    for mod in (registry.headless_sessions, registry.codex_sessions):
-        monkeypatch.setattr(mod, "exists", lambda name: False)
-    reg = registry.SessionRegistry.__new__(registry.SessionRegistry)
-    reg._leave_old_group("viva")             # nome em uso: quem recusa é o ramo da criação
-    reg._leave_old_group("solta")            # sem sidecar: nada a herdar, a falha só vai ao log
-    assert calls == [("group.leave", {"name": "solta"})]
-
-
-def test_create_error_code_reaches_the_api():
-    e = registry.GroupCleanupFailed("a")
-    assert isinstance(e, ValueError) and e.code == "erro_grupo_limpeza_falhou"
-
-
 def test_pair_route_forwards_status_and_body(monkeypatch, client):
     calls = _rust(monkeypatch, reply={"status": 409, "body": {"detail": {"code": "erro_pareamento_tarefa_existente"}}})
     r = client.post("/api/sessions/a/pair", json={"peer": "b", "task": "y"}, headers=H)
@@ -408,4 +380,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 76
+    assert rust_server.RUST_SERVER_PROTOCOL == 78

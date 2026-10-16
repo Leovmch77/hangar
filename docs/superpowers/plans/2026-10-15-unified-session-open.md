@@ -198,14 +198,14 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Rotas no Rust**
+- [x] **Step 1: Rotas no Rust**
   `/modo-execucao`, `/recarregar`, `/conta` (com a transferência Claude→Codex) e
   `/permission-mode` em bypass, na ordem da `SessionChange`. Itens CRA.
-- [ ] **Step 2: Modo lido do spec, nunca do rodapé**
+- [x] **Step 2: Modo lido do spec, nunca do rodapé**
   Modo ilegível ou desconhecido é recusado (S-01, S-03, S-04).
-- [ ] **Step 3: Consertos desta parte**
+- [x] **Step 3: Consertos desta parte**
   S-01, S-03, S-04, S-07, S-12, S-18, S-20; lacunas S-13, S-21.
-- [ ] **Step 4: Apagar o Python substituído**
+- [x] **Step 4: Apagar o Python substituído**
   `_trocar_modo`, `_reload_terminal`, `_trocar_conta`, `_bypass_reopen`/`_reabrir_em_bypass`,
   `para_terminal`, `para_headless`, `restore_transfer_source`.
 
@@ -222,18 +222,18 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Rotas no Rust**
+- [x] **Step 1: Rotas no Rust**
   `/resume`, retomar do arquivo e bastão como `open_session`/`reopen_session`; o retomar do arquivo
   passa pelas guardas da criação (S-08). Itens RET.
-- [ ] **Step 2: Restore do reboot pelo Rust, na subida**
+- [x] **Step 2: Restore do reboot pelo Rust, na subida**
   O Rust reabre as sessões a partir dos specs gravados; o resurrect pula as sessões do Hangar
   (`tmux-claude-resume.sh:29-31,286`). Volta com tudo (S-68, S-69, S-70). O comando nunca é
   digitado no shell interativo do pane: com zsh e `CORRECT_ALL`, o `env CLAUDE_CONFIG_DIR=… claude
   --resume …` que o script digita (`:285`) para no "correct 'claude' to '.claude' [nyae]?" e a
   sessão não volta (relato do Júnior, 2026-10-15). O Rust lança o comando direto no `new-session`.
-- [ ] **Step 3: Consertos desta parte**
+- [x] **Step 3: Consertos desta parte**
   S-08, S-16, S-17, S-19, S-22, S-23, S-36, S-68, S-69, S-70.
-- [ ] **Step 4: Apagar o Python substituído**
+- [x] **Step 4: Apagar o Python substituído**
   `registry.resume`, `resume_archived`, o lançamento do `_passar_bastao` e a montagem de comando do
   script.
 
