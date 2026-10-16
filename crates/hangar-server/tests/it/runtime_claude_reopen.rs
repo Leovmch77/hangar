@@ -576,3 +576,37 @@ async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_park
     let meta:Value = serde_json::from_slice(&std::fs::read(fx.sidecar_path("s1")).expect("segue estacionada")).unwrap();
     assert_eq!((meta["read_only"].as_bool(),meta["session_id"].as_str()),(Some(true),Some(SID)));
 }
+
+/// CRA-010 (S-20): a mensagem entregue ao processo antigo e que nunca chegou ao transcript volta à fila
+/// como linha nova (a vida nova a responde) e a antiga é confirmada; a que já está no transcript só é
+/// confirmada, nunca reenviada.
+#[tokio::test]
+async fn an_unanswered_delivery_goes_back_to_the_queue_on_reopen() {
+    let fx = fixture();
+    let key = "78".repeat(16);
+    let dir = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{SID}.jsonl")),format!("{}\n",json!({"type":"user","message":{"role":"user","content":"já está aqui"}}))).unwrap();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    {
+        use hangar_server::runtime::{protocol::ClockSample,queue::{Action,State,Store}};
+        std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+        let mut store = Store::open(&fx.queue.join(format!("runtime/{key}.json")),&fx.queue,State::new(&key,1,"s1",vec![])).unwrap();
+        for (id,text,ts) in [("perdida","ninguém respondeu",1.0),("chegou","já está aqui",2.0)] {
+            store.exec(1,&format!("append:{id}"),ClockSample { monotonic_s:0.0,epoch_s:ts },
+                Action::Append { text:text.into(),delivered:true,ts:Some(ts),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
+        }
+    }
+    let registry = fx.registry().await;
+    registry.reopen_claude_session("s1",mode_switch(true),None).await.unwrap().map_err(|f|f.error.code).unwrap();
+    let state:Value = serde_json::from_slice(&std::fs::read(fx.queue.join(format!("runtime/{key}.json"))).unwrap()).unwrap();
+    let rows = state["rows"].as_array().unwrap();
+    let by_id = |id:&str|rows.iter().find(|r|r["id"]==id).cloned().unwrap_or(Value::Null);
+    assert_eq!((by_id("perdida")["confirmed"].as_bool(),by_id("chegou")["confirmed"].as_bool()),(Some(true),Some(true)),"{state}");
+    let again:Vec<&Value> = rows.iter().filter(|r|r["text"]=="ninguém respondeu" && r["id"]!="perdida").collect();
+    assert_eq!(again.len(),1,"volta como linha nova: {state}");
+    assert_eq!(rows.iter().filter(|r|r["text"]=="já está aqui").count(),1,"o que chegou não volta: {state}");
+    registry.close(&key,2).await.unwrap();
+    fx.finish();
+}

@@ -107,6 +107,29 @@ async fn wait_gone(lives:Vec<(i64,f64)>,limit:Duration) -> Result<(),RuntimeErro
     }
 }
 
+/// `committed_user_lines`: os textos que chegaram ao transcript (as linhas `user` e o `enqueue` da fila
+/// interna do Claude), com as variantes que a confirmação compara. Ausente ou ilegível é erro: nunca
+/// "nada chegou", que reenviaria tudo.
+fn committed_user_lines(path:&std::path::Path) -> std::io::Result<std::collections::BTreeSet<String>> {
+    let raw=std::fs::read(path)?;
+    let mut out=std::collections::BTreeSet::new();
+    for line in String::from_utf8_lossy(&raw).lines() {
+        if !line.contains("\"user\"") && !line.contains("\"enqueue\"") {continue;}
+        let Ok(value)=serde_json::from_str::<Value>(line) else {continue};
+        let text=match value["type"].as_str() {
+            Some("queue-operation") if value["operation"]=="enqueue"=>value["content"].as_str().map(str::to_owned),
+            Some("user")=>match &value["message"]["content"] {
+                Value::String(text)=>Some(text.clone()),
+                Value::Array(blocks)=>Some(blocks.iter().filter(|b|b["type"]=="text").filter_map(|b|b["text"].as_str()).collect::<Vec<_>>().join("\n")),
+                _=>None,
+            },
+            _=>None,
+        };
+        if let Some(text)=text {out.extend(crate::transcript::history::chaves_de_commit(&text));}
+    }
+    Ok(out)
+}
+
 /// Quanto as sobras mortas à força têm para sumir.
 const FORCED_WAIT:Duration = Duration::from_secs(3);
 
@@ -428,6 +451,13 @@ impl RuntimeRegistry {
                 return Err(ReopenFailure { error,stopped:true,landed:None });
             },
             Err(Stop::After(error))=>return Err(self.restore_claude(name,&current,error).await),
+        }
+        // Sem terminal, o processo antigo saiu sem gravar o que recebeu: a vida nova responde (S-20).
+        if resume.is_none() && matches!(current.life,Life::Headless{..}) {
+            let transcript=super::claude_launch::transcript(&self.codex_environment(),&current.spec,&current.sid);
+            if let Err(error)=self.requeue_unanswered(&current.spec.key,transcript).await {
+                tracing::warn!(session=%name,code=%error.code,"mensagens sem confirmação ficaram como estavam");
+            }
         }
         if let Some(between)=between && let Err(error)=between.apply(&current.spec,&next,&current.sid).await {
             return Err(self.restore_claude(name,&current,error).await);
@@ -817,6 +847,40 @@ impl RuntimeRegistry {
             store.exec(generation,&format!("claude-reopen:{}",crate::mods::state::random_hex(8)),clock,
                 super::queue::Action::AdvanceLifecycle {generation:generation+1,state:json!({})}).map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
             Ok(())
+        }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
+    }
+
+    /// `_requeue_unanswered`: a entrega que o processo antigo nunca gravou volta como linha nova (a antiga,
+    /// com a operação já aceita, devolveria a resposta guardada sem enviar) e a antiga é confirmada; o que já
+    /// está no transcript só é confirmado. Transcript ilegível não muda nada.
+    async fn requeue_unanswered(&self,key:&str,transcript:PathBuf) -> Result<usize,RuntimeError> {
+        let queue=self.codex_environment().claude_base.join(".hangar-queue");
+        let (state_path,lease_path)=super::codex_terminal::queue_files(&queue,key);
+        let key=key.to_owned();
+        tokio::task::spawn_blocking(move||{
+            let committed=committed_user_lines(&transcript).map_err(|_|refused("reopen_transcript_read","o transcript da conversa não pôde ser lido"))?;
+            let _lease=super::queue::acquire_lease_within(&lease_path,Duration::from_secs(3)).map_err(|_|refused("queue_lease","a fila da sessão está presa"))?;
+            let mut store=match super::queue::Store::open(&state_path,&queue,super::queue::State::new(&key,1,"",Vec::new())) {
+                Ok(store)=>store,
+                Err(_)=>return Err(refused("queue_io","fila da sessão inacessível")),
+            };
+            let generation=store.state().generation;
+            let rows:Vec<Value>=store.state().rows.iter().filter(|r|r["delivered"]==true && r["confirmed"]!=true && r["desistiu"]!=true && r["papel"]!="assistant").cloned().collect();
+            let clock=||super::protocol::ClockSample {monotonic_s:0.0,epoch_s:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
+            let mut requeued=0;
+            for row in rows {
+                let (text,id)=(row["text"].as_str().unwrap_or("").trim().to_owned(),row["id"].as_str().unwrap_or("").to_owned());
+                if !text.is_empty() && !committed.contains(&text) {
+                    let entry=crate::mods::state::random_hex(16);
+                    store.exec(generation,&format!("requeue:{entry}"),clock(),super::queue::Action::Append { text,delivered:false,ts:None,
+                        pre_transcript:row["pre_transcript"]==true,entry_id:Some(entry.clone()) }).map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
+                    requeued+=1;
+                }
+                store.exec(generation,&format!("requeue-confirm:{}",crate::mods::state::random_hex(8)),clock(),super::queue::Action::Confirm { entry_ids:vec![id] })
+                    .map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
+            }
+            if requeued>0 {tracing::info!(requeued,"mensagens sem confirmação voltaram à fila");}
+            Ok(requeued)
         }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
     }
 
