@@ -551,6 +551,28 @@ def _rule_session_key(expected: dict, raw: dict, scenario: dict) -> bool | None:
     return found if created else None
 
 
+def _rule_display_env(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """`display_env`: o pane nasce com todas as variáveis de tela, não só o `WAYLAND_DISPLAY` (o
+    Computer Use recusa sem `HYPRLAND_INSTANCE_SIGNATURE`); no harness aparece o `XDG_RUNTIME_DIR`."""
+    created = _new_sessions(raw)
+    found = False
+    for p in created:
+        argv, kept = p["argv"], []
+        i = 0
+        while i < len(argv):
+            if argv[i] == "-e" and i + 1 < len(argv) and argv[i + 1].split("=", 1)[0] in (
+                    "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "XDG_RUNTIME_DIR"):
+                found, i = True, i + 2
+                continue
+            kept.append(argv[i])
+            i += 1
+        p["argv"] = kept
+    for s in raw.get("tmux_sessions", {}).values():
+        for key in ("DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "XDG_RUNTIME_DIR"):
+            s.get("env", {}).pop(key, None)
+    return found if created else None
+
+
 def _rule_spec_record(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """Task 3 (D-012, item 3): a sessão nascida deixa o spec em `~/.hangar/session-specs/<key>.json`."""
     created = [p for p in _new_sessions(raw) if p.get("rc") == 0]
@@ -620,6 +642,7 @@ RUST_DIFFERENCES = (
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
     ("matriz item 2 (CP_SESSION_KEY)", _rule_session_key),
+    ("variáveis de tela (display_env)", _rule_display_env),
     ("registro do spec (Task 3)", _rule_spec_record),
     ("S-15/S-35 (diário do lançamento)", _rule_s15_diary),
     ("só do Python", _rule_only_python),

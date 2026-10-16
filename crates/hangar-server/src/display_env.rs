@@ -32,14 +32,33 @@ fn names(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
         .filter_map(|e| Some((e.file_name().into_string().ok()?, e.metadata().ok()?.modified().ok()?))).collect()
 }
 
+/// Todas as de `KEYS` para o que se lança: as de `current` e, as que faltam, as de `missing`.
+pub fn complete(current: impl Fn(&str) -> Option<String>, systemd: &str, runtime: Option<&Path>) -> Vec<(String, String)> {
+    let found = missing(&current, systemd, runtime);
+    KEYS.iter().filter_map(|key| current(key).or_else(|| found.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+        .map(|v| ((*key).to_owned(), v))).collect()
+}
+
+/// `complete` com o gerenciador do usuário lido agora, só no Linux e só se faltar alguma.
+pub fn for_launch(current: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    if !cfg!(target_os = "linux") || KEYS.iter().all(|key| current(key).is_some()) { return complete(current, "", None); }
+    let (systemd, runtime) = sources(&current);
+    complete(current, &systemd, runtime.as_deref())
+}
+
 /// `missing` com o ambiente deste processo; fora do Linux, nada.
 pub fn fill() -> Vec<(String, String)> {
     if !cfg!(target_os = "linux") { return Vec::new(); }
     let current = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+    let (systemd, runtime) = sources(&current);
+    missing(current, &systemd, runtime.as_deref())
+}
+
+fn sources(current: &impl Fn(&str) -> Option<String>) -> (String, Option<PathBuf>) {
     let systemd = systemd_environment().unwrap_or_default();
     let runtime = current("XDG_RUNTIME_DIR").map(PathBuf::from)
         .or_else(|| systemd.lines().find_map(|l| l.strip_prefix("XDG_RUNTIME_DIR=")).map(PathBuf::from));
-    missing(current, &systemd, runtime.as_deref())
+    (systemd, runtime)
 }
 
 /// Com prazo: barramento do usuário quebrado não pode prender quem lança.

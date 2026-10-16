@@ -43,8 +43,8 @@ pub struct TerminalEnv {
     pub windows: bool,
     /// O `tmux` (psmux no Windows).
     pub program: String,
-    /// `WAYLAND_DISPLAY` do servidor ou o primeiro socket `wayland-*` do `XDG_RUNTIME_DIR`.
-    pub wayland: Option<String>,
+    /// As variáveis de tela (`display_env::KEYS`): as do servidor e as que faltam nele, achadas.
+    pub display: Vec<(String, String)>,
     /// `CLAUDE_CONFIG_DIR` do servidor, quando ele tem um.
     pub server_config_dir: Option<String>,
     /// `~/.claude`: a conta padrão, que para o Claude Code é a ausência da variável.
@@ -57,18 +57,11 @@ impl TerminalEnv {
     /// A máquina de quem chama: o servidor ou o comando de terminal.
     pub fn local(home: &Path, env: &std::collections::BTreeMap<String, String>) -> Self {
         let var = |name: &str| env.get(name).filter(|v| !v.is_empty()).cloned();
-        let wayland = var("WAYLAND_DISPLAY").or_else(|| {
-            let dir = var("XDG_RUNTIME_DIR")?;
-            let mut sockets: Vec<String> = std::fs::read_dir(dir).ok()?.flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock")).collect();
-            sockets.sort();
-            sockets.into_iter().next()
-        });
+        let display = crate::display_env::for_launch(var);
         // ponytail: janela fixa; um CLI que cai depois dela passa como vivo. Prova por provedor (o
         // agente com o id da conversa no pane) quando a reabertura vier para cá.
         let birth = Duration::from_millis(if cfg!(windows) { 1500 } else { 500 });
-        Self { windows: cfg!(windows), program: "tmux".into(), wayland, server_config_dir: var("CLAUDE_CONFIG_DIR"),
+        Self { windows: cfg!(windows), program: "tmux".into(), display, server_config_dir: var("CLAUDE_CONFIG_DIR"),
             default_config_dir: home.join(".claude"), birth }
     }
 }
@@ -156,7 +149,7 @@ pub fn new_session_argv(env: &TerminalEnv, pane: &PaneSpec) -> Vec<String> {
     e("CP_SESSION_NAME", &pane.name);
     e("CP_PROVIDER", pane.provider.name());
     e("CP_SESSION_KEY", &pane.key);
-    if let Some(wayland) = &env.wayland { e("WAYLAND_DISPLAY", wayland); }
+    for (key, value) in &env.display { e(key, value); }
     for (key, value) in &pane.env { e(key, value); }
     let exported = exports_config_dir(env, pane.config_dir.as_deref());
     if let Some(dir) = &exported { e("CLAUDE_CONFIG_DIR", dir); }
@@ -366,7 +359,7 @@ pub(crate) mod tests {
     pub(crate) fn machine_at(default_config_dir: &str) -> TerminalEnv { TerminalEnv { default_config_dir: default_config_dir.into(), ..machine() } }
 
     pub(crate) fn machine() -> TerminalEnv {
-        TerminalEnv { windows: false, program: "tmux".into(), wayland: Some("wayland-1".into()), server_config_dir: None,
+        TerminalEnv { windows: false, program: "tmux".into(), display: vec![("WAYLAND_DISPLAY".into(), "wayland-1".into())], server_config_dir: None,
             default_config_dir: "/r/home/.claude".into(), birth: Duration::from_millis(500) }
     }
 
@@ -429,6 +422,24 @@ pub(crate) mod tests {
         out.strip_prefix("exec env ").filter(|rest| !rest.starts_with("-u ")).map_or(out.clone(), |rest| format!("exec {rest}"))
     }
 
+    /// O pane nasce com as variáveis de tela do servidor e as que faltam nele (o Computer Use recusa
+    /// sem `HYPRLAND_INSTANCE_SIGNATURE`).
+    #[test]
+    fn the_pane_is_born_with_every_display_variable_the_server_has_or_found() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::write(run.path().join("wayland-1"), "").unwrap();
+        std::fs::create_dir_all(run.path().join("hypr").join("inst_1")).unwrap();
+        let dir = run.path().to_string_lossy().into_owned();
+        let current = |key: &str| match key { "DISPLAY" => Some(":0".to_owned()), "XDG_RUNTIME_DIR" => Some(dir.clone()), _ => None };
+        let display = crate::display_env::complete(current, "HYPRLAND_INSTANCE_SIGNATURE=inst_1\n", Some(run.path()));
+        let pairs = [("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":0"), ("HYPRLAND_INSTANCE_SIGNATURE", "inst_1"), ("XDG_RUNTIME_DIR", dir.as_str())];
+        assert_eq!(display, pairs.map(|(k, v)| (k.to_owned(), v.to_owned())));
+        let argv = new_session_argv(&TerminalEnv { display, ..machine() }, &claude(Vec::new(), None));
+        for (key, value) in pairs {
+            assert!(argv.windows(2).any(|w| w[0] == "-e" && w[1] == format!("{key}={value}")), "{key}: {argv:?}");
+        }
+    }
+
     /// Servidor com `CLAUDE_CONFIG_DIR` próprio exporta sempre, até a padrão; no psmux a padrão é a
     /// ausência sem `env -u` (o pane herda de quem chama) e o comando vai sem `exec`, citado à moda dele.
     #[test]
@@ -438,7 +449,7 @@ pub(crate) mod tests {
         let argv = new_session_argv(&env, &claude(Vec::new(), None));
         assert!(argv.contains(&"CLAUDE_CONFIG_DIR=/r/home/.claude".to_owned()));
         assert!(undo_not_inherited(argv.last().unwrap()).starts_with("exec claude "), "{argv:?}");
-        let windows = TerminalEnv { windows: true, wayland: None, default_config_dir: "C:\\Users\\j\\.claude".into(), ..machine() };
+        let windows = TerminalEnv { windows: true, display: Vec::new(), default_config_dir: "C:\\Users\\j\\.claude".into(), ..machine() };
         let mut pane = claude(Vec::new(), Some("C:/Users/j/.claude/"));
         pane.command = vec!["claude".into(), "--settings".into(), "{\"a\":\"it's\"}".into()];
         let argv = new_session_argv(&windows, &pane);
