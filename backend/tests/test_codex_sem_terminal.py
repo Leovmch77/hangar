@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -109,7 +110,7 @@ def ambiente(tmp_path, monkeypatch):
 
 
 def _sidecar(nome: str, cwd: Path, **escolha) -> dict:
-    codex_sessions.save(nome, None, "", str(cwd), headless=True, key=sem_terminal.nova_chave(),
+    codex_sessions.save(nome, None, "", str(cwd), headless=True, key=uuid.uuid4().hex,
                         permission_mode="Ask for approval", **escolha)
     return codex_sessions.load(nome)
 

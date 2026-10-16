@@ -1,5 +1,4 @@
 import asyncio
-import os
 import pytest
 
 from app.adapters import get_adapter
@@ -12,22 +11,8 @@ def test_omp_e_registrado_e_herda_do_pi():
     assert isinstance(a, OmpAdapter) and isinstance(a, PiAdapter)
     assert a.provider == "omp"
     for m in ("transcript_stream", "state_monitor", "drain", "send_prompt",
-              "deliverable", "spawn_command", "transcript_path", "resume_command"):
+              "deliverable", "spawn_command", "transcript_path"):
         assert callable(getattr(a, m)), m
-
-
-def test_resume_usa_r_com_o_caminho_existente_e_o_mesmo_env(monkeypatch, tmp_path):
-    from app.adapters.pi import sessions as s
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
-    d = tmp_path / "sessions" / s.cwd_slug("/w")
-    d.mkdir(parents=True)
-    f = d / "2026-09-03T15-51-00-640Z_abc.jsonl"
-    f.write_text("")
-    cmd = OmpAdapter().resume_command("/w", "abc", None, None)
-    assert cmd[cmd.index("omp"):] == ["omp", "-r", str(f)]
-    assert ("CP_PI_SESSION=abc" in cmd) == (os.name != "nt")
-    with pytest.raises(ValueError):
-        OmpAdapter().resume_command("/w", "nao-existe", None, None)
 
 
 def test_drain_e_send_prompt_passam_o_provider_da_instancia(monkeypatch):

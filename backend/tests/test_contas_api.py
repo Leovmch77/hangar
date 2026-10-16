@@ -78,18 +78,3 @@ def test_codex_com_config_dir_nao_reconcilia(casa, monkeypatch):
         "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
         "provider": "codex"}, headers=AUTH)
     assert reconciliou == []
-
-
-def test_conta_de_quem_pede_sessao_nova_recusa_pane_sem_processo(monkeypatch):
-    """Pane sem processo: a conta de quem pede ficou desconhecida e criar recusa.
-
-    Confiar aqui criaria a sessão nova na conta padrão sem ninguém escolher — a cobrança errada e
-    calada que a tool `new_session` existe pra não repetir."""
-    from app import tmux
-
-    monkeypatch.setattr(api_mod.headless_sessions, "exists", lambda name: False)
-    monkeypatch.setattr(tmux, "pane_pid", lambda name: None)
-    assert api_mod._caller_config_dir("morta") == (None, False)
-
-    monkeypatch.setattr(tmux, "pane_pid", lambda name: (_ for _ in ()).throw(RuntimeError("tmux fora")))
-    assert api_mod._caller_config_dir("morta") == (None, False)

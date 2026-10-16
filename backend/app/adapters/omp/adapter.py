@@ -4,19 +4,7 @@ Subclasse, nao copia: parser, layout e entrega vem do Pi. O que difere e binario
 sessoes e o par spawn/resume — o omp nao tem `--session-id`, entao o app escolhe o CAMINHO do
 transcript (`-r`) e exporta CP_PI_SESSION pro fallback do bilhete. A sessão nova abre no Rust.
 """
-import os
-
-from app import model_args
-from app.adapters.pi import sessions as pi_sessions
 from app.adapters.pi.adapter import PiAdapter
-
-
-def _com_env(session_id: str, cmd: list[str]) -> list[str]:
-    # `env` porque o tmux nao repassa o ambiente do caller ao pane; ele faz exec, entao o argv0
-    # que o registry le continua sendo `omp`. No Windows nao ha `env` — fica so o bilhete.
-    if os.name == "nt":
-        return cmd
-    return ["env", f"CP_PI_SESSION={session_id}"] + cmd
 
 
 class OmpAdapter(PiAdapter):
@@ -25,10 +13,3 @@ class OmpAdapter(PiAdapter):
     def spawn_command(self, *args, **kwargs) -> list[str]:
         # Sessão nova abre no Rust; o `pi --session-id` herdado subiria o agente errado.
         raise NotImplementedError("sessão nova do omp abre no Rust")
-
-    def resume_command(self, cwd: str, session_id: str,
-                       model: str | None = None, effort: str | None = None) -> list[str]:
-        caminho = pi_sessions.transcript_path(cwd, session_id, "omp")
-        if not caminho:
-            raise ValueError("transcript do omp nao encontrado para retomar")
-        return _com_env(session_id, ["omp", "-r", caminho] + model_args.args_de("omp", model, effort))

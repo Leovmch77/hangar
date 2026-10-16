@@ -67,19 +67,6 @@ def test_invalid_existing_settings_fail_before_launch(tmp_path):
         customizations.apply_settings(["claude", "--settings", str(path)], SETTINGS)
 
 
-def test_resuming_another_conversation_uses_its_choices_not_the_current_process(tmp_path, monkeypatch):
-    monkeypatch.setattr(customizations.Path, "home", lambda: tmp_path)
-    directory = tmp_path / ".hangar" / "claude-customizations"
-    directory.mkdir(parents=True)
-    other = "22222222-2222-2222-2222-222222222222"
-    other_settings = {"enabledPlugins": {"ecc@ecc": False}}
-    (directory / f"{other}.json").write_text(json.dumps({"settings": other_settings}), encoding="utf-8")
-
-    assert customizations.resume_settings(other, SID, SETTINGS) == other_settings
-    assert customizations.resume_settings(SID, SID, SETTINGS) == SETTINGS
-    assert customizations.resume_settings("33333333-3333-3333-3333-333333333333", SID, SETTINGS) is None
-
-
 def test_headless_metadata_retains_choices_without_copying_them_to_new_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sessions")
     sessions.save("chosen", str(tmp_path), SID, claude_settings=SETTINGS)

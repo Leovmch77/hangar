@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import uuid
 from pathlib import Path
 
 from app import codex_contas, runtime_config
@@ -206,7 +205,3 @@ def matar(meta: dict | None) -> None:
                 arq.unlink()
             except OSError:
                 pass
-
-
-def nova_chave() -> str:
-    return uuid.uuid4().hex

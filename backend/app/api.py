@@ -8966,31 +8966,6 @@ def _session_config_dir(name: str) -> Path | None:
         return None
 
 
-def _caller_config_dir(name: str) -> tuple[Path | None, bool]:
-    """CLAUDE_CONFIG_DIR de quem PEDE uma sessão nova: (Path | None, confiável).
-
-    A irmã acima (fallback silencioso pro ~/.claude) é certa pra LEITURA; aqui, criar na conta
-    errada cobra a conta errada calado. Falha de resolução e pane sem processo devolvem
-    confiável=False e quem chama recusa. None + True = processo vivo SEM a var no ambiente: usa
-    a conta padrão. Sem terminal a conta vem do sidecar, mesmo com o processo estacionado (ele
-    volta com --resume na mesma conta).
-    """
-    from app import tmux
-    if headless_sessions.exists(name):
-        meta = headless_sessions.load(name)
-        if not isinstance(meta, dict):
-            return None, False
-        cfg = meta.get("config_dir")
-        return (Path(cfg) if cfg else None), True
-    try:
-        pid = tmux.pane_pid(name)
-    except Exception:
-        return None, False
-    if not pid:
-        return None, False
-    return procinfo._config_dir_of_strict(pid)
-
-
 async def _pi_catalog(name: str) -> tuple[dict, str]:
     info = await _cached_info(name)
     if not info or not info.jsonl:

@@ -114,12 +114,6 @@ def prepare(session_id: str, cwd: str, config_dir: str, selection: dict | None, 
     return _validated_settings(result.get("settings"))
 
 
-def resume_settings(session_id: str, current_session_id: str | None, process_settings: dict | None) -> dict | None:
-    if session_id == current_session_id and process_settings is not None:
-        return _validated_settings(process_settings)
-    return stored_settings(session_id)
-
-
 def hidden_commands(cwd: str | None, config_dir: str, settings: dict | None, commands: list[str],
                     plugins: list[str]) -> set[str]:
     """Nomes que a conta, o `.claude/settings*.json` do projeto e a escolha da sessão desligaram."""

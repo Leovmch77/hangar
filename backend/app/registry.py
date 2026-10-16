@@ -977,15 +977,6 @@ class SessionOpenNeedsRust(Exception):
         super().__init__("abrir e reabrir sessão precisam do servidor Rust, que não está rodando")
 
 
-def _retire_waiting_runtime(name: str) -> None:
-    """Vida antiga do mesmo nome, ainda esperando identidade no runtime, não segura o nome novo."""
-    from app import runtime_coordinator
-    from app.runtime_adapter import run_sync
-    owner = runtime_coordinator.current()
-    if owner is not None and owner.loop is not None and owner.managed_queue(name):
-        run_sync(lambda: owner.retire_waiting(name), owner.loop)
-
-
 class SessionRegistry:
     # Cache name -> ultimo jsonl resolvido por sinal CONFIAVEL (cmdline --session-id / fd). De classe
     # (compartilhado entre instancias: api.registry e sse._registry). Estabiliza a resolucao quando o

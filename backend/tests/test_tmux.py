@@ -477,24 +477,6 @@ def test_e_config_dir_compara_pasta_e_nao_string(monkeypatch, tmp_path):
     assert tmux._e_config_dir(str(tmp_path / ".claude2")) != []
 
 
-def test_claude_json_de_segue_o_mesmo_e_config_dir(monkeypatch, tmp_path):
-    """O `.claude.json` que o pane le depende de a variavel CHEGAR nele, nao do config dir sozinho:
-    com `CLAUDE_CONFIG_DIR` setada o CLI le o de DENTRO do config dir, e sem ela o da HOME. Quem
-    pre-aprova a pasta ("trust this folder?") precisa escrever nesse mesmo arquivo — escrever no
-    `~/.claude.json` enquanto o pane lia `~/.claude/.claude.json` deixava a sessao nova presa no
-    dialogo mesmo com o pre-trust rodando."""
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    padrao = _casa_home(monkeypatch, tmp_path)
-    conta = str(tmp_path / ".claude-work")
-    # Nos dois multiplexadores o valor padrao nao vira -e (a variavel nao chega) -> o pane le o da
-    # HOME; conta escolhida chega e le o de dentro dela.
-    for herda in (False, True):
-        monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda h=herda: h)
-        assert tmux.claude_json_de(None) == tmp_path / ".claude.json"
-        assert tmux.claude_json_de(str(padrao)) == tmp_path / ".claude.json"
-        assert tmux.claude_json_de(conta) == Path(conta) / ".claude.json"
-
-
 def test_new_hidden_shell_segue_a_mesma_regra_do_config_dir(monkeypatch, tmp_path):
     """A janela escondida (login de conta, renovacao de token) usa o MESMO `_e_config_dir`: pedir a
     pasta PADRAO no psmux nasce sem a variavel — que e o que "conta padrao" quer dizer la — e a

@@ -83,13 +83,6 @@ def _effort_da_thread(result: dict) -> str | None:
     return result.get("reasoningEffort") or result.get("effort")
 
 
-def _service_tier_of(result: dict, meta: dict) -> str | None:
-    # null do Codex é o padrão; sem o -c explícito a TUI cairia no service_tier global.
-    if "serviceTier" in result:
-        return result["serviceTier"] or "default"
-    return meta.get("service_tier")
-
-
 @dataclass
 class MappedState:
     """Resultado CRU e testavel de map_state — NAO e o StateEvent do app (StateEvent exige
@@ -699,13 +692,6 @@ class CodexAdapter:
             return None
 
     # ── sem terminal ───────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    async def _restore_imported_mode(client, meta: dict) -> None:
-        await client.request("thread/settings/update", {"threadId": meta["thread_id"],
-            "collaborationMode": {"mode": "plan" if meta.get("previous_non_plan") else "default",
-                                  "settings": {"model": meta["model"], "reasoning_effort": meta.get("effort"),
-                                               "developer_instructions": None}}})
 
     async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
