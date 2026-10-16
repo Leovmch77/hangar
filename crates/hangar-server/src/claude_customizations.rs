@@ -886,6 +886,11 @@ pub fn remember(session_id: &str, settings: &Value) -> std::result::Result<(), (
     if settings.is_null() || settings.as_object().is_some_and(|object| object.is_empty()) { return Ok(()); }
     save_settings(&store_root().map_err(|e| (e.code, e.detail))?, session_id, settings).map_err(|e| (e.code, e.detail))
 }
+/// As escolhas guardadas da conversa `session_id` (`stored_settings` do Python); `None` sem registro.
+pub fn stored(home: &Path, session_id: &str) -> std::result::Result<Option<Value>, (&'static str, &'static str)> {
+    let settings = load_settings(&home.join(".hangar/claude-customizations"), session_id).map_err(|e| (e.code, e.detail))?;
+    Ok(settings.as_object().is_some_and(|object| !object.is_empty()).then_some(settings))
+}
 fn store_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty()).ok_or_else(|| error(500, "claude_customizations_store_unavailable", "Diretório das escolhas da conversa indisponível."))?;

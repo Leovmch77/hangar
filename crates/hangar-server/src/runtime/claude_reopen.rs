@@ -364,7 +364,14 @@ impl RuntimeRegistry {
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
             return Ok(Reopened { spec:None,changed:false });
         }
-        let current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
+        let mut current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
+        // Outra conversa leva as escolhas de plugins e skills guardadas dela, não as do processo de agora.
+        if let Some(sid)=resume.filter(|sid|*sid!=current.sid) {
+            let (home,sid)=(self.codex_environment().home,sid.to_owned());
+            current.settings=tokio::task::spawn_blocking(move||crate::claude_customizations::stored(&home,&sid)).await
+                .map_err(|_|ReopenFailure::refused(refused("claude_customizations_read_failed","as escolhas da conversa não puderam ser lidas")))?
+                .map_err(|(code,detail)|ReopenFailure::refused(refused(code,detail)))?;
+        }
         let sid=resume.unwrap_or(&current.sid).to_owned();
         let mut next=current.spec.with(&change);
         next.conversation=Some(sid.clone());

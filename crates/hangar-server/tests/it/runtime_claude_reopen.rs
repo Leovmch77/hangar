@@ -495,3 +495,31 @@ async fn a_plan_without_a_remembered_base_takes_it_from_the_transcript_then_the_
         fx.finish();
     }
 }
+
+/// RET-025: retomar OUTRA conversa leva as escolhas de plugins e skills guardadas dela, não as do processo
+/// que roda agora.
+#[tokio::test]
+async fn resuming_another_conversation_brings_its_stored_choices() {
+    const OTHER:&str = "22222222-2222-4222-8222-222222222222";
+    let fx = fixture();
+    let project = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.cwd.to_string_lossy()));
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(format!("{OTHER}.jsonl")),"{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(fx.home.join(".claude/settings.json"),r#"{"permissions":{"defaultMode":"acceptEdits"}}"#).unwrap();
+    std::fs::create_dir_all(fx.home.join(".hangar/claude-customizations")).unwrap();
+    std::fs::write(fx.home.join(format!(".hangar/claude-customizations/{OTHER}.json")),
+        json!({"settings":{"enabledPlugins":{"guardado@loja":false}}}).to_string()).unwrap();
+    let own = json!({"enabledPlugins":{"do-processo@loja":false}}).to_string();
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd)
+        .arg("-e").arg(format!("HANGAR_CLAUDE_SETTINGS={own}")).status().unwrap();
+    let old_agent = fx.agent().unwrap();
+    std::fs::remove_file(fx.home.join(format!(".claude/sessions/{old_agent}.json"))).unwrap();
+    let registry = fx.registry().await;
+    let resumed = registry.resume_claude_session("s1",OTHER).await.expect("é sessão Claude daqui");
+    resumed.map_err(|f|(f.error.code,f.error.message)).unwrap();
+    let command = command(&fx.args());
+    assert!(command.contains("guardado@loja") && !command.contains("do-processo@loja"),"{command}");
+    let (key,_) = registry.terminal_view("s1").await.unwrap();
+    registry.close(&key,2).await.unwrap();
+    fx.finish();
+}
