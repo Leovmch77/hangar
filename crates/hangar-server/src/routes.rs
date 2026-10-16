@@ -475,6 +475,7 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
         // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
         .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
+        .route("/api/sessions/creation-progress", get(crate::session_open::server::creation_progress).fallback(pass_any))
         // Bastão do dono: o Python prepara o dossiê e a sucessora Claude com terminal nasce aqui.
         .route("/api/sessions/{name}/bastao", axum::routing::post(crate::session_open::server::bastao).fallback(pass_any))
         // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.

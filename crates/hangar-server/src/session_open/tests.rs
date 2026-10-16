@@ -1093,6 +1093,25 @@ fn the_terminal_command_refuses_a_name_with_leftovers() {
     }
 }
 
+/// O passo da criação, pelo nome sanitizado da sessão nova: só quem abriu o registro o apaga (o
+/// bastão acompanha a criação por dentro dele), e sem criação em curso não há passo.
+#[test]
+fn the_creation_progress_belongs_to_whoever_opened_it() {
+    let name = "progresso teste";
+    {
+        let _outer = open::Progress::track(name);
+        assert_eq!(open::progress("progresso-teste"), json!({"step": "preparando", "params": {}}));
+        {
+            let _inner = open::Progress::track(name);
+            open::progress_step(name, "conta", json!({"conta": "b"}));
+        }
+        assert_eq!(open::progress(name), json!({"step": "conta", "params": {"conta": "b"}}), "o de dentro não apaga");
+    }
+    assert_eq!(open::progress(name), json!({"step": null, "params": {}}));
+    open::progress_step(name, "criando", json!({}));
+    assert_eq!(open::progress(name)["step"], Value::Null, "passo sem criação em curso não fica");
+}
+
 /// Duas aberturas do mesmo nome não correm juntas: a segunda é "nome em uso" até a primeira acabar.
 #[test]
 fn a_name_being_opened_is_in_use_until_the_open_ends() {

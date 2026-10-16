@@ -32,6 +32,17 @@ async fn create_opens_claude_terminal_in_rust_and_forwards_the_rest() {
     assert_eq!(fake.hits_to("/api/sessions"), 3);
 }
 
+/// O passo da criação é do Rust (o Python também cria pelo repasse dele): a rota responde daqui.
+#[tokio::test]
+async fn the_creation_progress_is_answered_by_rust() {
+    let (fake, up) = spawn_fake().await;
+    let srv = spawn_server(config(up, "127.0.0.1")).await;
+    let resp = client().get(format!("http://{srv}/api/sessions/creation-progress?name=ningu%C3%A9m")).bearer_auth(OWNER).send().await.unwrap();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap_or(Value::Null);
+    assert_eq!(body, serde_json::json!({"step": null, "params": {}}));
+    assert_eq!(fake.hits_to("/api/sessions/creation-progress"), 0);
+}
+
 fn fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract/session-open").join(format!("{name}.json"));
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()

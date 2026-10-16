@@ -312,6 +312,9 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     };
     if !owner && guest.is_none() { return pass(parts, bytes).await; }
     let Ok(request) = SessionOpenRequest::parse(&bytes) else { return pass(parts, bytes).await };
+    // O passo vale também para a criação que segue ao Python: ele não tem mais o dele.
+    let _progress = super::open::Progress::track(&request.name);
+    let name = request.name.clone();
     let caller = guest.as_ref().map_or(OpenCaller::Owner, |g| OpenCaller::Guest { root: g.root.clone() });
     match decide_detached(&st, request, caller, guest).await {
         Decision::Opened(opened) => {
@@ -324,8 +327,24 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             crate::routes::cors(&parts.headers, response.headers_mut());
             response
         }
-        Decision::NotOurs => pass(parts, bytes).await,
+        Decision::NotOurs => {
+            super::open::progress_step(&name, "criando", json!({}));
+            pass(parts, bytes).await
+        }
     }
+}
+
+/// `GET /api/sessions/creation-progress?name=`: o passo da criação em curso, do dono e do convidado com
+/// login (as duas pontas que criam). O resto segue ao Python, que recusa.
+pub async fn creation_progress(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, owner) = crate::routes::gate(&st, peer, &req);
+    let guest = !owner && crate::auth::presented_token(req.headers(), req.uri().query(), req.method(), fwd.https)
+        .and_then(|token| login_guest(&AccountEnvironment::capture().claude_base, &token)).is_some();
+    if !owner && !guest { return crate::routes::pass(&st, req, &fwd).await; }
+    let name = form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()).find(|(k, _)| k == "name").map(|(_, v)| v.into_owned());
+    let mut response = crate::session_write::json_response(StatusCode::OK, super::open::progress(name.as_deref().unwrap_or("")));
+    crate::routes::cors(req.headers(), response.headers_mut());
+    response
 }
 
 /// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e, com a
@@ -340,6 +359,9 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     };
     let headers = parts.headers.clone();
     if owner { parts.headers.insert(DECLINED, axum::http::HeaderValue::from_static("rust")); }
+    let successor = serde_json::from_slice::<Value>(&bytes).ok().and_then(|b| b["name"].as_str().map(str::to_owned)).unwrap_or_default();
+    let _progress = super::open::Progress::track(&successor);
+    super::open::progress_step(&successor, "resumo", json!({}));
     let response = crate::routes::pass(&st, Request::from_parts(parts, Body::from(bytes)), &fwd).await;
     if !owner || response.headers().get(DECLINED).is_none_or(|v| v != "rust") { return response; }
     let prepared: Value = match to_bytes(response.into_body(), crate::session_write::BODY_LIMIT).await {

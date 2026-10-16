@@ -144,6 +144,42 @@ pub(crate) fn mux_unavailable(detail: &str) -> OpenError {
 /// O pane pode ter nascido sem o multiplexador confirmar: nada em volta dele é desfeito.
 const UNCERTAIN: &str = "session_open_uncertain";
 
+/// O passo de cada criação em curso, pelo nome sanitizado da sessão nova (`GET
+/// /api/sessions/creation-progress`): a tela de criar consulta enquanto espera e sabe que não travou.
+static PROGRESS: std::sync::Mutex<BTreeMap<String, Value>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn progress_map() -> std::sync::MutexGuard<'static, BTreeMap<String, Value>> {
+    PROGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// O registro do passo de uma criação: só quem o abriu o apaga (o bastão acompanha a criação por dentro dele).
+pub struct Progress(Option<String>);
+
+impl Progress {
+    pub fn track(name: &str) -> Self {
+        let key = crate::list::discover_other::sanitize_session_name(name);
+        let mut map = progress_map();
+        if key.is_empty() || map.contains_key(&key) { return Self(None); }
+        map.insert(key.clone(), json!({"step": "preparando", "params": {}}));
+        Self(Some(key))
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) { if let Some(key) = &self.0 { progress_map().remove(key); } }
+}
+
+/// O passo de agora, se há criação em curso com esse nome.
+pub fn progress_step(name: &str, step: &str, params: Value) {
+    if let Some(entry) = progress_map().get_mut(&crate::list::discover_other::sanitize_session_name(name)) {
+        *entry = json!({"step": step, "params": params});
+    }
+}
+
+pub fn progress(name: &str) -> Value {
+    progress_map().get(&crate::list::discover_other::sanitize_session_name(name)).cloned().unwrap_or_else(|| json!({"step": null, "params": {}}))
+}
+
 /// Nomes com abertura em curso neste processo, por casa (`home`).
 static OPENING: std::sync::Mutex<std::collections::BTreeSet<(PathBuf, String)>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
@@ -316,10 +352,12 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, warnings: Vec<Strin
         // Conferida de novo sob a guarda: a exclusão pode ter passado antes dela.
         let account = claude::hangar_account(Path::new(dir))
             .ok_or_else(|| OpenError::plain(404, format!("{dir} não é uma conta criada pelo hangar")))?;
+        progress_step(&spec.name, "conta", json!({"conta": account}));
         let out = host.run(claude::prep_argv(&account, &spec.cwd), Duration::from_secs(120)).await;
         avisos = claude::prep_result(&account, out.code, &out.stderr)?;
     }
     avisos.extend(warnings);
+    progress_step(&spec.name, "criando", json!({}));
     let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name);
     let result = terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime).await;
     let events = diary.end(result.as_ref().err());

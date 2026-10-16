@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -2211,35 +2211,6 @@ def uso_endpoint(period: str = "all", conta: list[str] = Query([]), projeto: lis
         return _aquecendo(e)
 
 
-# Passo em curso de cada criação, pelo nome da sessão nova: a tela de criar consulta enquanto
-# espera, e quem olha sabe que não travou.
-_criacao_passo: dict[str, dict] = {}
-
-
-def _passo(nome: str, passo: str, **params) -> None:
-    _criacao_passo[sanitize_session_name(nome)] = {"step": passo, "params": params}
-
-
-@contextmanager
-def _acompanhar_criacao(nome: str):
-    """Só quem abriu o registro o apaga: o bastão chama o create_session por dentro e ainda tem
-    passo depois dele."""
-    chave = sanitize_session_name(nome)
-    dono = chave not in _criacao_passo
-    if dono:
-        _criacao_passo[chave] = {"step": "preparando", "params": {}}
-    try:
-        yield
-    finally:
-        if dono:
-            _criacao_passo.pop(chave, None)
-
-
-@app.get("/api/sessions/creation-progress", dependencies=[Depends(require_auth)])
-async def creation_progress(name: str):
-    return _criacao_passo.get(sanitize_session_name(name)) or {"step": None, "params": {}}
-
-
 async def _kill_unclaimed(name: str) -> None:
     try:
         await asyncio.to_thread(registry.kill, name)
@@ -2403,47 +2374,46 @@ async def create_session(body: CreateBody, request: Request = None) -> CreatedSe
                                 "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
         avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
                          for f in falhas]
-    with _acompanhar_criacao(body.name):
-        worktree: dict = {}
-        try:
-            info = await _criar_sessao(body, worktree)
-            if body.branch is not None:
-                # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
-                cwd = worktree.get("cwd", body.cwd)
-                is_wt = Path(cwd, ".git").is_file()
-                info = info.model_copy(update={"cwd": cwd, "branch": body.branch, "worktree": is_wt,
-                                               "worktree_path": cwd if is_wt else None})
-            guest = guest_users.current.get()
-            if guest is not None:
-                try:
-                    await asyncio.to_thread(guest_users.claim, info.name, guest.id)
-                except Exception:
-                    # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
-                    _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
-                    await _kill_unclaimed(info.name)
-                    raise
-                info = info.model_copy(update={"owner": guest.name})
-            if avisos_extra:
-                info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
-            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
-                                      account_source=account_source)
-            if (guest is None and body.remember_provider
-                    and runtime_config.get("last_session_provider") != info.provider):
-                try:
-                    await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
-                except Exception as exc:  # noqa: BLE001 — a sessão já existe; falhar aqui faria o cliente recriá-la
-                    _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
-                    info = info.model_copy(update={"avisos": [*info.avisos,
-                        f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
-            return info
-        except BaseException:
-            if worktree.get("path") and not worktree.get("session_created"):
-                try:
-                    await asyncio.shield(asyncio.to_thread(_undo_worktree, worktree))
-                except GitError as exc:
-                    raise HTTPException(500, detail=erro("erro_criacao_sessao",
-                                                          f"falha ao desfazer a worktree: {exc.detail}")) from exc
-            raise
+    worktree: dict = {}
+    try:
+        info = await _criar_sessao(body, worktree)
+        if body.branch is not None:
+            # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
+            cwd = worktree.get("cwd", body.cwd)
+            is_wt = Path(cwd, ".git").is_file()
+            info = info.model_copy(update={"cwd": cwd, "branch": body.branch, "worktree": is_wt,
+                                           "worktree_path": cwd if is_wt else None})
+        guest = guest_users.current.get()
+        if guest is not None:
+            try:
+                await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+            except Exception:
+                # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
+                _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
+                await _kill_unclaimed(info.name)
+                raise
+            info = info.model_copy(update={"owner": guest.name})
+        if avisos_extra:
+            info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
+        info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
+                                  account_source=account_source)
+        if (guest is None and body.remember_provider
+                and runtime_config.get("last_session_provider") != info.provider):
+            try:
+                await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
+            except Exception as exc:  # noqa: BLE001 — a sessão já existe; falhar aqui faria o cliente recriá-la
+                _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
+                info = info.model_copy(update={"avisos": [*info.avisos,
+                    f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
+        return info
+    except BaseException:
+        if worktree.get("path") and not worktree.get("session_created"):
+            try:
+                await asyncio.shield(asyncio.to_thread(_undo_worktree, worktree))
+            except GitError as exc:
+                raise HTTPException(500, detail=erro("erro_criacao_sessao",
+                                                      f"falha ao desfazer a worktree: {exc.detail}")) from exc
+        raise
 
 
 def _undo_worktree(worktree: dict) -> None:
@@ -2749,7 +2719,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
         alvo = Path(body.config_dir)
         if contas.e_conta(alvo):
             nome_conta = alvo.name.removeprefix(".claude-")
-            _passo(body.name, "conta", conta=nome_conta)
             try:
                 # `ciclo_conta` numa thread: o `flock` do __enter__ bloqueia, e no event loop isso
                 # congelava o app inteiro quando duas operações de conta se cruzavam. flock pertence
@@ -2773,7 +2742,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
                     for aviso in avisos:
                         _log.warning("conta %s: %s", alvo.name, aviso)
                     try:
-                        _passo(body.name, "criando")
                         info = await _create_registry(_registry_kwargs())
                         if body.headless:
                             # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
@@ -2790,7 +2758,6 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
                 # Conta sumiu entre a validação e a trava (ex: DELETE concorrente).
                 raise HTTPException(e.status, e.detail) from None
     try:
-        _passo(body.name, "criando")
         info = await _create_registry(_registry_kwargs())
         if body.headless and body.provider == "codex":
             # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
@@ -4200,7 +4167,6 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
     se der certo. A reescrita nunca levanta: falhando, grava o de código e devolve o aviso, porque
     uma continuação sem a camada interpretada é muito melhor que continuação nenhuma.
     """
-    _passo(destino, "resumo")
     texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem, info.codex_home)
     aviso = None
     if por_modelo:
@@ -4220,7 +4186,6 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
         if cfg is None:
             aviso = "só dá pra usar o modelo quando a sessão de origem é Claude nesta máquina"
         else:
-            _passo(destino, "resumo_modelo")
             texto, aviso = bastao_mod.reescrever_com_modelo(texto, cfg)
     alvo = bastao_mod.gravar(destino, texto)
     conta, modelo = bastao_mod.origem_resumida(info.jsonl, info.provider, info.codex_home)
@@ -4232,8 +4197,7 @@ async def bastao_passar(name: str, body: BastaoBody, request: Request):
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
         body = body.model_copy(update={"provider": provider})
-    with _acompanhar_criacao(body.name):
-        return await _passar_bastao(name, body, request)
+    return await _passar_bastao(name, body, request)
 
 
 async def _passar_bastao(name: str, body: BastaoBody, request: Request):
@@ -4359,7 +4323,6 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
     creation._engine_catalog = account_models
     novo = await create_session(creation)
     if creation.initial_prompt is None:
-        _passo(destino, "recado")
         try:
             await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
                 kick, delivered=False, pre_transcript=True))

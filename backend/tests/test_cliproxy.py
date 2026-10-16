@@ -391,11 +391,10 @@ def test_baton_forwards_account_to_shared_creation(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_bastao_preparar", lambda *a: ("text", tmp_path / "target.md", "kick", None))
     create = AsyncMock(return_value=SessionInfo(name="target", provider="claude"))
     monkeypatch.setattr(api, "create_session", create)
-    monkeypatch.setattr(api, "_passo", lambda *a, **k: None)
     monkeypatch.setattr(api, "PromptQueue", lambda name: MagicMock())
     monkeypatch.setattr(api, "threading", SimpleNamespace(Thread=MagicMock()))
     asyncio.run(api._passar_bastao("origin", api.BastaoBody(
-        name="target", engine="proxy", engine_account="default", model="gpt-5.5")))
+        name="target", engine="proxy", engine_account="default", model="gpt-5.5"), SimpleNamespace(headers={})))
     body = create.call_args.args[0]
     assert body.engine_account == "default" and body.model == "gpt-5.5" and body.provider == "claude"
 
