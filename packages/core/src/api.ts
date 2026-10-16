@@ -3006,11 +3006,13 @@ export interface ModelOption {
   active?: boolean;
   context_length?: number | null;  // so no motor
   vision?: boolean | null;         // so no motor
+  supports_fast?: boolean;
 }
 
 export interface ModelOptionsResponse {
   kind: 'claude' | 'engine';
   engine: string | null;
+  supports_fast?: boolean;
   effort?: string | null;
   models: ModelOption[];
   // O que vale na sessão agora: o sufixo `[1m]` do model diz se a janela de 1M está ligada.
@@ -3075,8 +3077,9 @@ function _invalidarCatalogo(name: string): void {
   for (const k of _catCache.keys()) if (k.endsWith(`|${name}`)) _catCache.delete(k);
 }
 
-export function getModelOptions(name: string, server?: Server | null): Promise<ModelOptionsResponse> {
-  return _catalogo(`model|${server?.id ?? ''}|${name}`, () => sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/model/options`));
+export function getModelOptions(name: string, server?: Server | null, options?: { fresh?: boolean }): Promise<ModelOptionsResponse> {
+  const read = () => sessionFetch<ModelOptionsResponse>(server, `/api/sessions/${encodeURIComponent(name)}/model/options`);
+  return options?.fresh ? read() : _catalogo(`model|${server?.id ?? ''}|${name}`, read);
 }
 
 /**

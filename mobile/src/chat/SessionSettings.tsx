@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine } from '@hangar/core';
 import { chatStore } from '../stores/chat';
@@ -8,6 +8,7 @@ import { Icon, type IconName } from '../ui/Icon';
 import * as m from '../paraglide/messages';
 import { useModelControl } from '../features/pills/modelControl';
 import { useEffortControl } from '../features/pills/effortControl';
+import { useServiceTierControl } from '../features/pills/serviceTierControl';
 import { usePermissionControl } from '../features/pills/permissionControl';
 import { approvalShortLabel, useCodexApproval } from '../features/pills/codexApproval';
 import { permissionLabel } from '../features/pills/permissionLabel';
@@ -64,6 +65,7 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
   const approval = useCodexApproval({ serverId, name, headless, enabled: isCodex });
   const model = useModelControl({ serverId, name, provider, chosen, onChosen: setChosen, close });
   const effort = useEffortControl({ serverId, name, provider, chosen, onChosen: setChosen, close });
+  const fast = useServiceTierControl({ serverId, name, provider, open });
 
   // Haiku: `/effort` não tem o que mostrar, o pedido é descartado em vez de abrir o painel à toa.
   // O Raciocínio fica fora da rolagem, então `/effort` já o encontra à vista.
@@ -213,6 +215,33 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
                 </View>
               )}
               <Notice text={effort.notice} />
+            </>
+          )}
+
+          {fast.hidden ? null : (
+            <>
+              <Separator />
+              <Title text={m.native_ctl_fast()} />
+              {fast.loading ? <Skeleton rows={1} /> : fast.error ? (
+                <Failure text={fast.error} onRetry={() => void fast.load()} />
+              ) : (
+                <View style={styles.fastRow}>
+                  <Text style={[styles.note, styles.grow]}>{fast.available ? m.native_ctl_fast_hint() : m.native_ctl_fast_unavailable()}</Text>
+                  <Text style={styles.effortText}>{fast.on ? m.native_ctl_fast_on() : m.native_ctl_fast_off()}</Text>
+                  <Switch
+                    value={fast.on}
+                    onValueChange={() => void fast.toggle()}
+                    disabled={!fast.available || fast.applying}
+                    trackColor={{ true: theme.tokens.accent.base }}
+                    accessibilityLabel={m.native_ctl_fast()}
+                    accessibilityHint={m.native_ctl_fast_hint()}
+                    accessibilityValue={{ text: fast.on ? m.native_ctl_fast_on() : m.native_ctl_fast_off() }}
+                    accessibilityState={{ checked: fast.on, disabled: !fast.available || fast.applying, busy: fast.applying }}
+                  />
+                </View>
+              )}
+              {fast.applying ? <Skeleton rows={1} /> : null}
+              <Notice text={fast.notice} />
             </>
           )}
 
@@ -441,6 +470,7 @@ const styles = StyleSheet.create((theme) => ({
   effortText: { fontSize: 12, color: theme.tokens.text.secondary },
   effortOn: { color: theme.tokens.text.primary, fontWeight: '600' },
   busy: { opacity: 0.6 },
+  fastRow: { flexDirection: 'row', alignItems: 'center', paddingRight: 8 },
   skeleton: { gap: 6, paddingHorizontal: 8, paddingVertical: 4 },
   bone: { height: 22, borderRadius: 7, backgroundColor: theme.tokens.fillSubtle },
   empty: { paddingHorizontal: 8, paddingVertical: 16, fontSize: 12, textAlign: 'center', color: theme.tokens.text.muted },

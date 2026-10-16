@@ -949,6 +949,21 @@ describe('cache curto dos catálogos dos seletores', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('Fast pede leitura fresca sem alterar o cache usado pelos consumidores atuais', async () => {
+    let tier = 'default';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      kind: 'engine', engine: 'local-gpt', models: [], current: { model: 'gpt-current', service_tier: tier },
+    })));
+    const cached = await getModelOptions('session-fast-fresh', server);
+    tier = 'priority';
+    const fresh = await getModelOptions('session-fast-fresh', server, { fresh: true });
+    expect(fresh.current?.service_tier).toBe('priority');
+    expect(await getModelOptions('session-fast-fresh', server)).toBe(cached);
+    expect(cached.current?.service_tier).toBe('default');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([url]) => url === 'https://a.test/api/sessions/session-fast-fresh/model/options')).toBe(true);
+  });
+
   it('aplicar um modelo invalida o cache da sessão', async () => {
     // mockImplementation (uma Response NOVA por chamada): o body de uma Response reutilizada
     // só pode ser lido uma vez.
