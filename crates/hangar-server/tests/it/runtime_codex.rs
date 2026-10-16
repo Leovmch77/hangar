@@ -1992,7 +1992,7 @@ fn conversation_terminal_relaunch_controls_are_refused_with_a_code() {
         let refused = engine.command(op("op-1",kind,json!({"mode":"Full Access"})),clock(13.0)).err().unwrap();
         assert_eq!(refused.code,TERMINAL_RELAUNCH,"{kind:?}");
     }
-    for kind in [OperationKind::Commands,OperationKind::Cwd,OperationKind::Detach,OperationKind::SteerQueue] {
+    for kind in [OperationKind::Cwd,OperationKind::Detach,OperationKind::SteerQueue] {
         let refused = engine.command(op("op-1",kind,json!({})),clock(13.0)).err().unwrap();
         assert_eq!(refused.code,TERMINAL_UNSUPPORTED,"{kind:?}");
     }

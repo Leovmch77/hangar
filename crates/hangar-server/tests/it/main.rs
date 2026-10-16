@@ -6,6 +6,7 @@
 
 mod common;
 mod artifacts;
+mod commands;
 mod dictation_routes;
 mod dictation_catalog;
 mod dictation_harness;

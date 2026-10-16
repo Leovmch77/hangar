@@ -157,16 +157,13 @@ Python desse caminho em vez de portar os quatro serviços soltos.
   entre eles).
 - O empréstimo de teclado sai dos dois lados (`rt:427-473`, `terminal.rs:253-290`). Some junto o
   defeito provável do `/btw` estourando o prazo do empréstimo.
-- `GET /commands` do Claude (leitura). Já no Rust: o que a conta, o `.claude/settings*.json` do
-  projeto e a escolha da sessão desligaram (operação `hidden` da ponte de customizações,
-  contrato 64). Falta portar a montagem da lista, que segue no `commands.py`: a sonda da CLI
-  (`control_request initialize`, em fundo, com cache por binário e datas da conta), os embutidos
-  com descrição em português, as varreduras de skills, comandos e plugins pelo frontmatter, a lista
-  que a sessão sem terminal informou e os comandos só de TUI. O vínculo do terminal no Rust precisa
-  passar a ter o `cwd` e a escolha da sessão (`HANGAR_CLAUDE_SETTINGS` do agente), que hoje só o
-  Python lê. Limites até lá: no modo `python` a lista sai sem filtro nenhum; e o filtro decide
-  "plugin ligado" pelas camadas de `settings*.json`, sem as configurações gerenciadas nem os
-  plugins passados por flag, que o catálogo vê pelo `claude plugin list`.
+- `GET /commands` do Claude (leitura): implementado em `commands/`, com sonda compartilhada,
+  cache, embutidos, scans, lista da sessão sem terminal e filtro em processo. O contexto do
+  terminal vem da descoberta e do ambiente do agente no Rust. Saíram o compositor Python e a
+  operação `hidden` da ponte; o modo `python` responde 503. Contrato interno 72. A migração
+  conserva o limite anterior do filtro: ele decide "plugin ligado" pelas camadas de
+  `settings*.json`, sem as configurações gerenciadas nem os plugins passados por flag.
+  Contrato e provas em [catálogo de comandos e reload-plugins](../../decisoes/harnesses.md#catálogo-de-comandos-e-reload-plugins).
 
 ### C5 Ciclo de vida
 

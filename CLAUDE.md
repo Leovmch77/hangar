@@ -44,8 +44,10 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
   ticket (`~/.claude/.hangar-kimi/<pane>.json`) — the CLI has no caller-chosen session-id.
 - `sse.py` — merges the above into the SSE stream. `api.py` — FastAPI routes. `auth.py` — bearer token / `cp_token` cookie.
 - Also: `pqueue.py` (durable input queue), `preview.py` (live in-flight block), `askquestion.py`
-  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `commands.py`, `workflows.py`,
+  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `workflows.py`,
   `model_picker.py`, `config.py`, `fs.py`, `hook_installer.py`.
+- `crates/hangar-server/src/commands/` — catálogo de comandos do Claude, sonda compartilhada e
+  filtro em processo; o Python só autentica e repassa nas portas que atende.
 - `site/` — landing page de `hangar.dev.br` (HTML estático em PT/EN gerado por `site/build.py`,
   publicado no Cloudflare Pages); vídeos do app gravados por `site/tools/record/`. Ver `site/README.md`.
 

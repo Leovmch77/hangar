@@ -454,6 +454,12 @@ impl ListBridge {
         Ok(self.discovery(newer_than).await?.0)
     }
 
+    /// Contexto local da sessão, sem pedir os fatos de acesso/estado ao Python.
+    pub async fn discovered_session(&self, name: &str) -> Result<Option<(SessionRow, Option<u32>)>, ListError> {
+        let (rows, pids, _, _) = self.discovery(None).await?;
+        Ok(rows.iter().find(|row| row.name == name).cloned().map(|row| (row, pids.get(name).copied())))
+    }
+
     async fn discovery(&self, newer_than: Option<f64>)
         -> Result<(Arc<Vec<SessionRow>>, Arc<HashMap<String, u32>>, Arc<Vec<Pane>>, Arc<ChildrenMap>), ListError> {
         let mut slot = self.discovery.lock().await;

@@ -3051,6 +3051,7 @@
   "erro_arquivo_caminho_convidado": "quem acompanha como convidado só transcreve áudio da pasta desta sessão",
   "erro_sem_plano_ativo": "sem plano ativo",
   "erro_planos_precisa_rust": "os planos precisam do servidor Rust, que não está rodando",
+  "commands_need_rust_server": "os comandos precisam do servidor Rust, que não está rodando",
   "erro_plano_interno": "a operação de plano foi interrompida; tente de novo",
   "erro_sem_pasta_planos": "repo sem pasta de planos",
   "erro_nome_plano_invalido": "nome de plano inválido: {nome}",

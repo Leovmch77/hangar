@@ -52,7 +52,7 @@ pub enum WriteOutcome { Written, NotWritten, Unknown }
 pub enum OperationKind {
     Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort, SetServiceTier,
     SetPermissionMode, Compact, ListModels, ListSkills, ReadRateLimits, ReadSettings,
-    SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Commands, Cwd, Detach,
+    SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Cwd, Detach,
     /// Interna: só o ator a cria, a partir da entrada reservada que a fila devolveu.
     DispatchAsyncAnswer,
 }

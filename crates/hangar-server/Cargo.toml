@@ -12,6 +12,12 @@ path = "tests/fixtures/dictation_cli.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "hangar-commands-fixture"
+path = "tests/fixtures/commands_cli.rs"
+test = false
+bench = false
+
 [dependencies]
 # float_roundtrip: o float lido sai com o mesmo valor que o float() do Python, e o repr bate.
 # alloc (aqui, no serde e o signal do tokio): as features que o resto do workspace pede. Sem elas,
@@ -69,6 +75,7 @@ sysinfo = { version = "=0.39.6", default-features = false, features = ["system"]
 async-channel = "=2.5.0"
 # Miniatura de imagem (`thumbnail.rs`); mesma versão e features do nativo.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+num-bigint = "=0.5.1"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -77,6 +84,7 @@ libc.workspace = true
 windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+proptest = "=1.12.0"
 # Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.
 tokio = { workspace = true, features = ["test-util"] }
 
