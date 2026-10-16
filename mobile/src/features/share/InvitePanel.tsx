@@ -7,13 +7,13 @@ import { useServers } from '../../stores/servers';
 import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
 
-export function InvitePanel({ initialLink = '', onAccepted }: { initialLink?: string; onAccepted: (server: Server, session: string) => void }) {
+export function InvitePanel({ initialLink = '', initialError = '', onAccepted }: { initialLink?: string; initialError?: string; onAccepted: (server: Server, session: string) => void }) {
   const { theme } = useUnistyles();
   const ready = useServers((state) => state.ready);
   const vaultReadable = useServers((state) => state.vaultReadable);
   const [link, setLink] = useState(initialLink);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(initialError);
   const inFlight = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -52,10 +52,7 @@ export function InvitePanel({ initialLink = '', onAccepted }: { initialLink?: st
       const result = await redeemInvite(link.trim(), Constants.deviceName || Platform.OS, undefined, existing?.token);
       const saved = useServers.getState().addInvite(result, mounted.current);
       if (!mounted.current) return;
-      if (!saved) {
-        setError(useServers.getState().vaultReadable ? m.mobile_share_invite_own_server() : m.servers_warning_vault_unread());
-        return;
-      }
+      setError('');
       onAccepted(saved, result.session);
     } catch (cause) {
       if (mounted.current) setError(m.mobile_share_invite_failed({ error: cause instanceof Error ? cause.message : String(cause) }));

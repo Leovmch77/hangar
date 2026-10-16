@@ -19,7 +19,7 @@ export default function Invite() {
           <Text style={styles.backText}>{m.nav_voltar()}</Text>
         </Pressable>
         <Glass variant="modal" style={styles.card}>
-          <InvitePanel key={`${code}:${initialLink}`} initialLink={initialLink}
+          <InvitePanel key={`${code}:${initialLink}`} initialLink={initialLink} initialError={initialLink ? '' : m.mobile_share_invite_invalid()}
             onAccepted={(server, session) => router.replace(`/s/${encodeURIComponent(server.id)}/${encodeURIComponent(session)}`)} />
         </Glass>
       </ScrollView>

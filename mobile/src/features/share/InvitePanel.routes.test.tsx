@@ -87,9 +87,23 @@ describe('entrada de convite nas rotas', () => {
     boundary.params = { code: 'CODE', ...(link === undefined ? {} : { link }) };
     const el = await mount(Invite);
     expect(input(el)?.value).toBe('');
-    await click(el, m.mobile_share_invite_accept());
-    expect(el.textContent).toContain(m.mobile_share_invite_invalid());
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(m.mobile_share_invite_invalid());
     expect(boundary.redeem).not.toHaveBeenCalled();
+  });
+
+  it('link válido colado na rota incompleta elimina o erro ao confirmar', async () => {
+    boundary.params = { code: 'CODE' };
+    const el = await mount(Invite);
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(m.mobile_share_invite_invalid());
+    const field = input(el)!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, LINK);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click(el, m.mobile_share_invite_retry());
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(boundary.redeem).toHaveBeenCalledExactlyOnceWith(LINK, 'Test phone', undefined, undefined);
+    expect(boundary.replace).toHaveBeenCalledExactlyOnceWith(`/s/${useServers.getState().activeId}/shared`);
   });
 
   it('login oferece colar convite com o mesmo formulário', async () => {

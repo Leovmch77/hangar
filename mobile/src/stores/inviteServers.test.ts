@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InviteRedeemResult, Server } from '@hangar/core';
+import * as m from '../paraglide/messages';
 
-const vault = vi.hoisted(() => new Map<string, string>());
+const boundary = vi.hoisted(() => ({ vault: new Map<string, string>(), readFailure: false }));
+const vault = boundary.vault;
 vi.mock('expo-secure-store', () => ({
-  getItemAsync: vi.fn(async (key: string) => vault.get(key) ?? null),
+  getItemAsync: vi.fn(async (key: string) => { if (boundary.readFailure) throw new Error('vault_unread'); return vault.get(key) ?? null; }),
   setItemAsync: vi.fn(async (key: string, value: string) => { vault.set(key, value); }),
 }));
 let useServers: typeof import('./servers').useServers;
@@ -14,6 +16,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 beforeEach(async () => {
   vi.resetModules();
   vault.clear();
+  boundary.readFailure = false;
   ({ useServers } = await import('./servers'));
 });
 
@@ -57,13 +60,16 @@ describe('addInvite', () => {
     expect(JSON.parse(vault.get(KEY)!).servers).toEqual([saved]);
   });
 
-  it('não substitui nem duplica máquina própria no mesmo endereço normalizado', async () => {
-    const own: Server = { id: 'own', label: 'Minha', baseUrl: 'https://GUEST.ts.net:8443/', token: 'owner-token' };
+  // O código já foi consumido: a proteção de máquina própria pertence ao formulário, antes do resgate.
+  it('guarda convite já resgatado separado da máquina própria no mesmo endereço', async () => {
+    const own: Server = { id: 'own', label: 'own', baseUrl: 'https://GUEST.ts.net:8443/', token: 'owner-token' };
     await load([own]);
-    expect(useServers.getState().addInvite(result)).toBeNull();
-    expect(useServers.getState().servers).toEqual([own]);
+    const saved = useServers.getState().addInvite(result);
+    expect(saved).toMatchObject({ token: 'guest-token', invite: true });
+    expect(saved?.id).not.toBe(own.id);
+    expect(useServers.getState().servers).toEqual([own, saved]);
     await settle();
-    expect(JSON.parse(vault.get(KEY)!).servers).toEqual([own]);
+    expect(JSON.parse(vault.get(KEY)!).servers).toEqual([own, saved]);
   });
 
   it('salva sem ativar quando quem pediu saiu do formulário', async () => {
@@ -78,9 +84,44 @@ describe('addInvite', () => {
     expect(useServers.getState().activeId).toBe('own');
   });
 
-  it('antes da hidratação recusa aceitar e não grava por cima do cofre desconhecido', async () => {
-    expect(useServers.getState().addInvite(result)).toBeNull();
-    expect(useServers.getState().servers).toEqual([]);
-    expect(vault.size).toBe(0);
+  it('antes da hidratação enfileira o resultado consumido sem perder seu ID nem a máquina do cofre', async () => {
+    const own: Server = { id: 'own', label: 'own', baseUrl: 'https://guest.ts.net:8443', token: 'owner-token' };
+    vault.set(KEY, JSON.stringify({ servers: [own], activeId: own.id }));
+    const saved = useServers.getState().addInvite(result, false);
+    expect(saved).toMatchObject({ token: 'guest-token', invite: true });
+    expect(JSON.parse(vault.get(KEY)!).servers).toEqual([own]);
+    await settle();
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    expect(useServers.getState().activeId).toBe(own.id);
+    expect(JSON.parse(vault.get(KEY)!)).toEqual({ servers: [own, saved], activeId: own.id });
+  });
+
+  it('cofre ilegível mantém resultado e replay salva o mesmo ID sem trocar a própria ativa', async () => {
+    const own: Server = { id: 'own', label: 'own', baseUrl: 'https://guest.ts.net:8443', token: 'owner-token' };
+    await load([own]);
+    boundary.readFailure = true;
+    await useServers.getState().load();
+    const saved = useServers.getState().addInvite(result, false);
+    expect(saved).toMatchObject({ token: 'guest-token', invite: true });
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    await settle();
+    expect(useServers.getState().aviso).toEqual({ tipo: 'vault_unread' });
+    expect(JSON.parse(vault.get(KEY)!).servers).toEqual([own]);
+    boundary.readFailure = false;
+    await useServers.getState().load();
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    expect(useServers.getState().activeId).toBe(own.id);
+    expect(JSON.parse(vault.get(KEY)!)).toEqual({ servers: [own, saved], activeId: own.id });
+  });
+
+  it('novo convite atualiza rótulo e token juntos preservando ID e máquina própria', async () => {
+    const own: Server = { id: 'own', label: 'own', baseUrl: 'http://10.0.0.1:8765', token: 'owner-token' };
+    const previous: Server = { id: 'saved-invite', label: 'old-label', baseUrl: 'https://guest.ts.net:8443', token: 'old-token', invite: true };
+    await load([own, previous]);
+    const saved = useServers.getState().addInvite({ ...result, owner: 'Bia' });
+    expect(saved).toMatchObject({ id: 'saved-invite', token: 'guest-token', label: m.mobile_share_invite_label({ owner: 'Bia' }) });
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    await settle();
+    expect(JSON.parse(vault.get(KEY)!).servers).toEqual([own, saved]);
   });
 });

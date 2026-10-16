@@ -6,12 +6,12 @@ import type { InviteRedeemResult, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const boundary = vi.hoisted(() => ({ redeem: vi.fn(), device: { deviceName: 'Test phone' as string | null }, vault: new Map<string, string>(), readFailure: false }));
+const boundary = vi.hoisted(() => ({ redeem: vi.fn(), device: { deviceName: 'Test phone' as string | null }, vault: new Map<string, string>(), readFailure: false, writeFailure: false }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), redeemInvite: boundary.redeem }));
 vi.mock('expo-constants', () => ({ default: boundary.device }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: async (key: string) => { if (boundary.readFailure) throw new Error('vault unavailable'); return boundary.vault.get(key) ?? null; },
-  setItemAsync: async (key: string, value: string) => { boundary.vault.set(key, value); },
+  setItemAsync: async (key: string, value: string) => { if (boundary.writeFailure) throw new Error('vault_write_failed'); boundary.vault.set(key, value); },
 }));
 vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
@@ -59,6 +59,7 @@ beforeEach(async () => {
   boundary.redeem.mockReset();
   boundary.device.deviceName = 'Test phone';
   boundary.readFailure = false;
+  boundary.writeFailure = false;
   boundary.vault.clear();
   accepted.mockReset();
   await settle();
@@ -185,16 +186,72 @@ describe('InvitePanel', () => {
     expect(accepted).toHaveBeenCalledTimes(1);
   });
 
-  it('máquina própria adicionada durante o resgate não perde o token', async () => {
+  // Depois de consumir o código, recusar descartaria o único acesso recebido.
+  it.each([false, true])('própria surgindo durante resgate conserva ambos os tokens; desmontado=%s', async (unmounted) => {
     const pending = deferred();
     boundary.redeem.mockReturnValue(pending.promise);
-    const { el } = await mount(LINK);
+    const { el, root } = await mount(LINK);
     await click(el);
+    if (unmounted) {
+      await act(async () => { root.unmount(); });
+      roots.splice(roots.indexOf(root), 1);
+    }
     let own!: Server;
     await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
     await act(async () => { pending.resolve(RESULT); });
-    expect(el.textContent).toContain(m.mobile_share_invite_own_server());
-    expect(useServers.getState().servers).toEqual([own]);
+    const saved = useServers.getState().servers.find((server) => server.invite);
+    expect(saved).toMatchObject({ token: 'new-token', invite: true });
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    expect(useServers.getState().activeId).toBe(unmounted ? own.id : saved?.id);
+    if (unmounted) expect(accepted).not.toHaveBeenCalled();
+    else {
+      expect(accepted).toHaveBeenCalledExactlyOnceWith(saved, 'shared');
+      expect(el.querySelector('[role="alert"]')).toBeNull();
+    }
+    await settle();
+    expect(JSON.parse(boundary.vault.get('cp_servers_v1')!).servers).toEqual([own, saved]);
+  });
+
+  it('cofre fica ilegível durante resgate: resultado sobrevive à desmontagem e releitura com o mesmo ID', async () => {
+    const pending = deferred();
+    boundary.redeem.mockReturnValue(pending.promise);
+    const { el, root } = await mount(LINK);
+    await click(el);
+    let own!: Server;
+    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
+    boundary.readFailure = true;
+    await act(async () => { await useServers.getState().load(); root.unmount(); });
+    roots.splice(roots.indexOf(root), 1);
+    await act(async () => { pending.resolve(RESULT); });
+    const saved = useServers.getState().servers.find((server) => server.invite);
+    expect(saved).toMatchObject({ token: 'new-token', invite: true });
+    expect(useServers.getState().aviso).toEqual({ tipo: 'vault_unread' });
+    expect(useServers.getState().activeId).toBe(own.id);
+    expect(accepted).not.toHaveBeenCalled();
+    await settle();
+    boundary.readFailure = false;
+    await useServers.getState().load();
+    expect(useServers.getState().servers).toEqual([own, saved]);
+    expect(JSON.parse(boundary.vault.get('cp_servers_v1')!)).toEqual({ servers: [own, saved], activeId: own.id });
+  });
+
+  it('falha ao gravar resposta após desmontagem deixa aviso global e acesso em memória', async () => {
+    const pending = deferred();
+    boundary.redeem.mockReturnValue(pending.promise);
+    const { el, root } = await mount(LINK);
+    await click(el);
+    let own!: Server;
+    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
+    await settle();
+    await act(async () => { root.unmount(); });
+    roots.splice(roots.indexOf(root), 1);
+    boundary.writeFailure = true;
+    await act(async () => { pending.resolve(RESULT); });
+    await settle();
+    expect(useServers.getState().aviso).toEqual({ tipo: 'persistencia' });
+    expect(useServers.getState().servers).toEqual([own, expect.objectContaining({ token: 'new-token', invite: true })]);
+    expect(useServers.getState().activeId).toBe(own.id);
+    expect(JSON.parse(boundary.vault.get('cp_servers_v1')!).servers).toEqual([own]);
     expect(accepted).not.toHaveBeenCalled();
   });
 });
