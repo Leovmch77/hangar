@@ -160,6 +160,8 @@ pub async fn serve_until_with_guest(
             }
             _ => None,
         };
+        // As sessões Claude sem terminal que já existem: o Rust as reconhece sozinho, sem esperar o Python.
+        let _claude_boot = AbortOnDrop(tokio::spawn(registry.clone().register_claude_headless()));
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
