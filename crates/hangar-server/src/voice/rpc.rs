@@ -100,12 +100,18 @@ pub fn voices_from(listed: &Value) -> Option<Vec<String>> {
 }
 
 /// A lista do próprio Codex, com aperto de mão; `None` em qualquer falha.
-pub async fn fetch_voices(spawn: super::call::Spawn) -> Option<Vec<String>> {
-    let (rpc, _incoming) = spawn().await.ok()?;
-    handshake(&rpc).await.ok()?;
-    let listed = rpc.request_within("thread/realtime/listVoices", json!({}), Duration::from_secs(5)).await.ok()?;
-    voices_from(&listed["voices"])
+/// `limit` vale para tudo (subida, aperto de mão e lista): Codex travado não prende a tela de configurações.
+pub async fn fetch_voices(spawn: super::call::Spawn, limit: Duration) -> Option<Vec<String>> {
+    tokio::time::timeout(limit, async {
+        let (rpc, _incoming) = spawn().await.ok()?;
+        handshake(&rpc).await.ok()?;
+        let listed = rpc.request("thread/realtime/listVoices", json!({})).await.ok()?;
+        voices_from(&listed["voices"])
+    }).await.ok().flatten()
 }
+
+/// Sem a lista do Codex, a voz salva segue: quem a valida é o próprio Codex na abertura, com erro visível.
+pub fn voice_allowed(codex: Option<&[String]>, voice: &str) -> bool { codex.is_none_or(|list| list.iter().any(|v| v == voice)) }
 
 /// Modelos que a conta oferece (`id` e `model` de cada item, ocultos incluídos); `None` quando a lista não veio inteira.
 pub async fn account_models(rpc: &Rpc) -> Option<Vec<String>> {
@@ -182,9 +188,27 @@ mod voice_list_tests {
     }
 
     #[tokio::test]
+    async fn a_codex_that_never_answers_gives_up_within_the_limit() {
+        let (ours, _theirs) = tokio::io::duplex(1 << 10);
+        let (r, w) = tokio::io::split(ours);
+        let silent: super::super::call::Spawn = Box::new(move || Box::pin(async move { Ok(Rpc::over_lines(r, w)) }));
+        let started = std::time::Instant::now();
+        assert!(fetch_voices(silent, Duration::from_millis(200)).await.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_saved_voice_passes_unless_the_codex_list_says_otherwise() {
+        let list = vec!["sol".to_owned(), "aube".to_owned()];
+        assert!(voice_allowed(Some(&list), "aube"));
+        assert!(!voice_allowed(Some(&list), "verse"), "a lista do Codex manda");
+        assert!(voice_allowed(None, "aube"), "sem a lista, quem valida é o próprio Codex na abertura");
+    }
+
+    #[tokio::test]
     async fn the_list_comes_from_the_codex_itself() {
         let (spawn, _seen, _push) = crate::voice::test_support::fake_app_server();
-        let voices = fetch_voices(spawn).await.expect("o Codex respondeu");
+        let voices = fetch_voices(spawn, Duration::from_secs(5)).await.expect("o Codex respondeu");
         assert!(voices.contains(&"viola".to_owned()) && voices.contains(&"sol".to_owned()), "{voices:?}");
     }
 }

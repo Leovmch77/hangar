@@ -181,14 +181,15 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
             // A voz aparece com o Codex instalado e ao menos uma conta Codex; o microfone só abre quando a pessoa liga a chamada.
             // Catálogo ilegível não esconde a voz como "sem conta": a abertura da chamada mostra o erro de verdade.
             let enabled = codex && st.voice.account_ids(&st.accounts).await.is_none_or(|ids| !ids.is_empty());
-            let voices = if enabled { st.voice.voices(st, &current.codex_account).await } else { settings::VOICES.map(str::to_owned).to_vec() };
+            let voices = if enabled { st.voice.voices(st, &current.codex_account).await.0 } else { settings::VOICES.map(str::to_owned).to_vec() };
             json_response(StatusCode::OK, json!({"enabled": enabled, "codex": codex, "jev": gate.jev.is_some(),
                 "voices": voices, "settings": SettingsDto::from(&current), "call": {"active": active, "client": client}}))
         }
         Method::PUT => {
             let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
             let Ok(dto) = serde_json::from_slice::<SettingsDto>(&bytes) else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
-            if let Some(voice) = dto.voice.as_deref() && !st.voice.voices(st, &dto.codex_account).await.iter().any(|v| v == voice) {
+            if let Some(voice) = dto.voice.as_deref()
+                && let (list, true) = st.voice.voices(st, &dto.codex_account).await && !list.iter().any(|v| v == voice) {
                 return refuse(StatusCode::BAD_REQUEST, "invalid_voice");
             }
             if !st.voice.account_ids(&st.accounts).await.unwrap_or_default().contains(&dto.codex_account) { return refuse(StatusCode::BAD_REQUEST, "unknown_account"); }
