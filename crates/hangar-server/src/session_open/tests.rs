@@ -1134,6 +1134,20 @@ fn the_name_is_checked_again_in_tmux_before_any_effect() {
     assert!(!spawned, "nenhum new-session sem a conferência");
 }
 
+/// A fila que a sessão morta deixou no nome sai antes do pane novo (o histórico do Rust a mostraria
+/// como mensagens dela); a de outro nome fica.
+#[test]
+fn a_reused_name_does_not_inherit_the_dead_session_queue() {
+    let base = tempfile::tempdir().unwrap();
+    let queue = base.path().join(".hangar-queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    for file in ["par-externo.jsonl", "par-externo.jsonl.tmp", "outra.jsonl"] { std::fs::write(queue.join(file), "{}\n").unwrap(); }
+    server::forget_queue(base.path(), "par externo").unwrap();
+    let left: Vec<String> = std::fs::read_dir(&queue).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(left, ["outra.jsonl"]);
+    server::forget_queue(base.path(), "nenhuma").expect("sem fila é nada a apagar");
+}
+
 /// O provedor lembrado vai ao `runtime-config.json` sem mexer no resto dele; o mesmo valor não regrava
 /// e o arquivo ilegível fica como está, com a falha devolvida.
 #[test]

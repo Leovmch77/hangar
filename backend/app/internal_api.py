@@ -150,8 +150,7 @@ async def rust_diag(request: Request) -> dict:
 
 @router.post("/sessions/{name}/release")
 async def session_release(name: str) -> dict:
-    """Nome reusado por uma sessão que o Rust abre: a fila, o `then` e os caches daqui não passam à
-    nova. Sem pontes: a lista e o grupo o próprio Rust esquece."""
+    """Nome reusado por uma sessão que o Rust abre: o registro em espera e o `then` daqui não passam à nova."""
     from app.api import registry
     await internal_thread(registry.release_name, name)
     return {"ok": True}

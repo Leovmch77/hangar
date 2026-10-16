@@ -61,6 +61,19 @@ pub fn remember_provider(claude_base: &Path, provider: &str) -> std::io::Result<
     crate::runtime::queue::atomic_write(&path, &serde_json::to_vec_pretty(&config)?)
 }
 
+/// A fila que a sessão morta deixou no nome (a projeção `.hangar-queue/<nome>.jsonl`, que o Rust lê
+/// no histórico): a nova não a herda.
+pub fn forget_queue(claude_base: &Path, name: &str) -> std::io::Result<()> {
+    let projection = crate::locate::queue_path(claude_base, name);
+    for path in [projection.with_extension("jsonl.tmp"), projection] {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 impl ServerHost {
     pub fn new(st: Arc<AppState>) -> Self {
         let env = AccountEnvironment::from_map(server_env(std::env::vars().collect(), Path::new(".env")));
@@ -137,9 +150,17 @@ impl OpenHost for ServerHost {
     fn release_name<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> {
         Box::pin(async move {
             self.st.list.forget(name);
+            let (base, owned) = (self.env.claude_base.clone(), name.to_owned());
+            if let Err(error) = tokio::task::spawn_blocking(move || forget_queue(&base, &owned)).await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string()))) {
+                return Err(OpenError::new(503, "erro_lista_indisponivel", format!("a fila da sessão antiga não foi apagada: {error}"))
+                    .with_params(json!({"detalhe": "fila_antiga"})));
+            }
+            // ponytail: o registro em espera do coordenador e o `then` ainda moram no Python (Task 5,
+            // passo 3, e a migração do `then`); só eles vão por esta chamada.
             let path = format!("/internal/sessions/{}/release", crate::groups::exit::segment(name));
             self.internal(&path, json!({})).await.map(|_| ()).map_err(|cause| {
-                tracing::warn!(cause, "fila e `then` do nome reusado não limpos");
+                tracing::warn!(cause, "registro em espera e `then` do nome reusado não limpos");
                 OpenError::new(503, "erro_lista_indisponivel", "o estado do nome reusado não foi limpo; tente de novo")
                     .with_params(json!({"detalhe": "python_release"}))
             })

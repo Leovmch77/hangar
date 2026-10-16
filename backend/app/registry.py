@@ -1338,15 +1338,9 @@ class SessionRegistry:
         self._forget_local(name)
 
     def release_name(self, name: str) -> None:
-        """Nome reusado por uma sessão que o Rust abre: só o que mora aqui (fila, `then`, caches).
-        A lista e o grupo do nome o Rust esquece sozinho; perguntar a ele daqui fecharia o laço."""
+        """Nome reusado por uma sessão que o Rust abre: o registro em espera e o `then`, que ainda
+        moram aqui. Lista, fila e grupo o Rust esquece sozinho."""
         _retire_waiting_runtime(name)
-        self._jsonl_cache.pop(name, None)
-        self._fd_locked.discard(name)
-        for cache in (self._status_cache, self._context_cache, self._agent_pid, self._label_cache,
-                      self._limit_cache, self._reply_cache):
-            cache.pop(name, None)
-        PromptQueue(name).clear()
         ThenLink(name).clear()
 
     def _forget_local(self, name: str) -> None:
