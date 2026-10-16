@@ -319,9 +319,10 @@ me() {
             pastas=("$HOME/.hangar/claude-headless" "$HOME/.hangar/codex-sessions")
         fi
         for pasta in "${pastas[@]}"; do
-            sidecar=$(grep -ls "\"key\": \"$chave_headless\"" "$pasta"/*.json 2>/dev/null | head -1)
+            # O Rust grava o sidecar compacto (`"key":"…"`), o Python com espaço; pasta sem a chave segue.
+            sidecar=$(grep -lsE "\"key\": ?\"$chave_headless\"" "$pasta"/*.json 2>/dev/null | head -1) || sidecar=""
             if [[ -n "$sidecar" ]]; then
-                nome=$(sed -n 's/.*"name": "\([^"]*\)".*/\1/p' "$sidecar" | head -1)
+                nome=$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "$sidecar" | head -1)
                 if [[ -n "$nome" ]]; then echo "$nome"; return; fi
             fi
         done
