@@ -27,11 +27,15 @@ vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
 }));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../ui/Glass', () => ({ Glass: () => createElement('span', { 'data-testid': 'glass' }) }));
-vi.mock('./SessionList', () => ({ SessionList: () => createElement('span', { 'data-testid': 'list' }) }));
+vi.mock('./SessionList', async () => {
+  const { useContext } = await import('react');
+  const { WorkingMarkPaused } = await import('../../ui/WorkingMark');
+  return { SessionList: () => createElement('span', { 'data-testid': 'list', 'data-paused': String(useContext(WorkingMarkPaused)) }) };
+});
 
 import { SessionsDrawer } from './SessionsDrawer';
 
-it('vidro e lista da gaveta só existem depois que ela começa a abrir', async () => {
+it('vidro só com a gaveta aberta; a lista nasce na primeira abertura e fica, com as marcas paradas fechada', async () => {
   const container = document.createElement('div');
   const root = createRoot(container);
   await act(async () => root.render(createElement(SessionsDrawer, { onClose: () => {}, onOpenServers: () => {}, children: 'tela' })));
@@ -43,8 +47,11 @@ it('vidro e lista da gaveta só existem depois que ela começa a abrir', async (
   await act(async () => drawer.reactions.forEach((r) => r()));
   expect(glass()).not.toBeNull();
   expect(list()).not.toBeNull();
+  expect(list()!.getAttribute('data-paused')).toBe('false');
   drawer.progress.value = 0;
   await act(async () => drawer.reactions.forEach((r) => r()));
-  expect(list()).toBeNull();
+  expect(glass()).toBeNull();
+  expect(list()).not.toBeNull();
+  expect(list()!.getAttribute('data-paused')).toBe('true');
   act(() => root.unmount());
 });

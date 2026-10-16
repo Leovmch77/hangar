@@ -1,4 +1,4 @@
-import { useState, type ReactNode, type Ref } from 'react';
+import { useContext, useState, type ReactNode, type Ref } from 'react';
 import { useWindowDimensions, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import Animated, { interpolate, useAnimatedReaction, useAnimatedStyle, useReducedMotion, type SharedValue } from 'react-native-reanimated';
@@ -10,6 +10,7 @@ import ReanimatedDrawerLayout, {
   type DrawerLayoutMethods,
 } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Glass } from '../../ui/Glass';
+import { WorkingMarkPaused } from '../../ui/WorkingMark';
 import { SessionList } from './SessionList';
 
 // Gaveta de sessões da tela inicial e do chat. Ocupa a altura toda (passa por baixo da barra de
@@ -57,9 +58,13 @@ function DrawerContent({ progress, children }: { progress?: SharedValue<number>;
 }
 
 // A sombra acompanha a abertura: fixa, ela vazaria na borda esquerda com a gaveta fechada. Anima só
-// a opacidade de uma sombra pronta; o vidro e a lista só existem com a gaveta aberta.
+// a opacidade de uma sombra pronta; o vidro só existe com a gaveta aberta. A lista nasce na primeira
+// abertura e fica (guarda busca, seções recolhidas e rolagem), com as marcas paradas enquanto fechada.
 function DrawerPanel({ progress, children }: { progress: SharedValue<number>; children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const [opened, setOpened] = useState(false);
+  if (open && !opened) setOpened(true);
+  const paused = useContext(WorkingMarkPaused);
   useAnimatedReaction(() => progress.value > 0, (now, before) => {
     if (now !== before) scheduleOnRN(setOpen, now);
   });
@@ -69,7 +74,7 @@ function DrawerPanel({ progress, children }: { progress: SharedValue<number>; ch
       <Animated.View style={[StyleSheet.absoluteFill, styles.shadow, shadow]} pointerEvents="none" />
       <View style={styles.panel}>
         {open ? <Glass variant="panel" style={[StyleSheet.absoluteFill, styles.drawer]} pointerEvents="none" /> : null}
-        {open ? children : null}
+        {opened ? <WorkingMarkPaused.Provider value={paused || !open}>{children}</WorkingMarkPaused.Provider> : null}
       </View>
     </View>
   );
