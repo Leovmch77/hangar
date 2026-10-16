@@ -6,6 +6,7 @@ import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/co
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { HangarMark } from '../ui/HangarMark';
+import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
 import { WorkingMark } from '../ui/WorkingMark';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
@@ -90,6 +91,7 @@ export function ChatHeader({
             </Text>
           </View>
         ) : null}
+        {serverId ? <LiveVoiceChatButton serverId={serverId} name={name} /> : null}
         <Pressable
           onPress={onMore}
           hitSlop={8}

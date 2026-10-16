@@ -1,8 +1,7 @@
 import { useEffect } from 'react';
-import { AppState, View } from 'react-native';
+import { AppState } from 'react-native';
 import { useGlobalSearchParams, useRouter, useSegments } from 'expo-router';
 import { useServers } from '../../stores/servers';
-import { LiveVoiceButton } from './LiveVoiceButton';
 import { LiveVoiceSheet } from './LiveVoiceSheet';
 import { useLiveVoice, type LiveVoiceDestination } from './liveVoiceStore';
 
@@ -16,7 +15,6 @@ export function LiveVoiceRoot() {
   const servers = useServers(state => state.servers);
   const open = useLiveVoice(state => state.open);
   const view = useLiveVoice(state => state.view);
-  const chatControls = useLiveVoice(state => state.chatControls);
   const serverId = first(params.server);
   const name = first(params.name);
   const sessionRoute = segments[0] === 's' && !!serverId && !!name;
@@ -56,12 +54,7 @@ export function LiveVoiceRoot() {
   useEffect(() => { useLiveVoice.getState().reconcileServers(); }, [servers]);
 
   const store = useLiveVoice.getState();
-  const hasCall = view.phase === 'connecting' || view.phase === 'live' || !!view.error;
   return <>
-    {!(chatRoute && chatControls?.serverId === serverId && chatControls.name === name) && !open && hasCall ? <View pointerEvents="box-none" style={{ position: 'absolute', right: 16, bottom: 32 }}>
-      <LiveVoiceButton phase={view.phase} muted={view.muted} levels={view.levels} error={!!view.error} visible
-        onPress={() => useLiveVoice.setState({ open: true })} />
-    </View> : null}
     <LiveVoiceSheet open={open} view={view} onDismiss={store.dismiss}
       onStart={() => { void store.start(); }} onStop={() => { void store.stop(); }} onToggleMute={store.toggleMute}
       onMode={store.setMode} onRetry={() => { void store.retry(); }}
