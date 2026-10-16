@@ -23,6 +23,7 @@ def analysis():
 
 @pytest.fixture(autouse=True)
 def clean_frames(monkeypatch):
+    bridge().configure(None, None)
     blocked = []
     def deny(*args, **kwargs):
         blocked.append(args)

@@ -235,6 +235,37 @@ async fn codex_wait_drawn(sequence: &PermissionSequence<'_>) -> Result<Option<St
     }
 }
 
+/// Só envia o comando da TUI; quem chama confirma a troca de conversa pelo app-server.
+pub async fn codex_clear(driver: &TerminalDriver) -> Result<(), RuntimeError> {
+    let sequence = driver.permission_sequence().await;
+    codex_foreign_menu(&sequence.screen().await.map_err(codex_io)?)?;
+    if sequence.copy_mode().await.map_err(codex_io)? {
+        return Err(codex_refused("codex_clear_copy_mode", "O terminal está em modo de cópia."));
+    }
+    codex_composer_empty(&sequence.typed_screen().await.map_err(codex_io)?)
+        .map_err(|error|codex_refused(&error.code,"Deixe a caixa de digitar do Codex vazia antes de limpar a conversa."))?;
+    sequence.type_text("/clear").await.map_err(codex_io)?;
+    tokio::time::sleep(CODEX_SETTLE).await;
+    if !codex_clear_typed(&sequence.typed_screen().await.map_err(codex_io)?) {
+        return Err(codex_refused("codex_clear_unproved", "Não consegui confirmar o /clear na caixa de digitar."));
+    }
+    sequence.press("Enter").await.map_err(codex_io)?;
+    tokio::time::sleep(CODEX_OPEN_SETTLE).await;
+    // O autocomplete pode consumir o Enter; só o nosso comando ainda intacto autoriza outro.
+    if codex_clear_typed(&sequence.typed_screen().await.map_err(codex_io)?) {
+        codex_foreign_menu(&sequence.screen().await.map_err(codex_io)?)?;
+        sequence.press("Enter").await.map_err(codex_io)?;
+    }
+    Ok(())
+}
+
+fn codex_clear_typed(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(at) = lines.iter().rposition(|line|line.trim_start().starts_with('›')) else { return false };
+    lines[at].trim_start().trim_start_matches('›').trim() == "/clear"
+        && !lines[at + 1..].iter().take_while(|line|!line.trim().is_empty()).any(|line|line.starts_with(char::is_whitespace))
+}
+
 /// O pane com o seletor inteiro na tela. Sai sem nada aberto, ou com o seletor aberto por nós.
 async fn codex_open(sequence: &PermissionSequence<'_>) -> Result<String, RuntimeError> {
     let screen = sequence.screen().await.map_err(codex_io)?;
@@ -347,6 +378,14 @@ mod tests {
     use crate::terminal_input::*;
     use std::{collections::VecDeque, sync::{Arc, Mutex}};
     use tokio::time::Instant;
+
+    #[test]
+    fn clear_retries_enter_only_for_the_exact_command_in_the_composer() {
+        assert!(codex_clear_typed("histórico\n› /clear\n\n  dicas"));
+        for screen in ["› \n\n/clear", "› /clear outra\n", "› /clear\n  rascunho", "› /clear\n\n› novo texto", "/clear"] {
+            assert!(!codex_clear_typed(screen), "{screen}");
+        }
+    }
 
     fn binding(windows: bool) -> TerminalBinding {
         TerminalBinding { name: "test".into(), pane: if windows { "=test:0.0" } else { "%7" }.into(),
@@ -754,6 +793,10 @@ mod tests {
                     if let Some(screen) = tui.enter_shows.take() { tui.foreign = Some(screen); }
                     else if tui.enters_to_open != 0 && tui.enters >= tui.enters_to_open { tui.picker = true; tui.cursor = tui.mode; tui.typed.clear(); }
                 }
+                "Enter" if tui.typed == "/clear" => {
+                    tui.enters += 1;
+                    if tui.enters >= tui.enters_to_open { tui.typed.clear(); }
+                }
                 "Up" | "Down" | "Enter" => {}
                 text => tui.typed.push_str(text),
             }
@@ -792,6 +835,29 @@ mod tests {
     }
     async fn run_codex(io: &Arc<CodexIo>, action: PermissionAction) -> Result<Value, RuntimeError> {
         codex(&codex_driver(io.clone(), Arc::new(Services::new(io.windows))), action).await
+    }
+
+    #[tokio::test]
+    async fn clear_uses_the_tui_and_retries_only_the_untouched_command() {
+        for (windows,enters) in [(false,1),(false,2),(true,1),(true,2)] {
+            let io = Arc::new(CodexIo::new("Full Access", windows).with(|tui|tui.enters_to_open = enters));
+            let driver = codex_driver(io.clone(),Arc::new(Services::new(windows)));
+            codex_clear(&driver).await.unwrap();
+            assert_eq!(io.keys(),std::iter::once("/clear".to_owned()).chain(std::iter::repeat_n("Enter".into(),enters)).collect::<Vec<_>>());
+            assert!(io.tui.lock().unwrap().typed.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_preserves_the_terminal_draft_and_an_open_menu() {
+        for menu in [false,true] {
+            let io = Arc::new(CodexIo::new("Full Access",false).with(|tui| {
+                if menu { tui.picker = true; } else { tui.typed = "rascunho da pessoa".into(); }
+            }));
+            let driver = codex_driver(io.clone(),Arc::new(Services::new(false)));
+            assert!(codex_clear(&driver).await.is_err());
+            assert!(io.keys().is_empty());
+        }
     }
     fn set(mode: &str) -> PermissionAction { PermissionAction::Set { mode: mode.into() } }
 

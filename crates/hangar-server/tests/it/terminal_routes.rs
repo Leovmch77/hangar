@@ -133,8 +133,11 @@ for n, line in enumerate(sys.stdin, 2):
 
 #[tokio::test]
 async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both() {
-    // Loopback distinto da ponte privada, sem depender da habilitação de IPv6.
-    let public = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let public = match TcpListener::bind("[::1]:0").await {
+        // A porta pública continua num endereço específico quando o host não tem loopback IPv6.
+        Err(error) if error.kind()==std::io::ErrorKind::AddrNotAvailable=>TcpListener::bind("127.0.0.2:0").await.unwrap(),
+        result=>result.unwrap(),
+    };
     let public_addr = public.local_addr().unwrap();
     let cfg = Config { listen: public_addr, upstream: "127.0.0.1:1".parse().unwrap(),
         internal_secret: "internal".into(), auth_token: "owner".into(), log_path: None,
