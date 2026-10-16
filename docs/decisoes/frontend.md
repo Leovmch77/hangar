@@ -3,6 +3,32 @@
 Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
 a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 
+## Mods: altura estável e pergunta no mesmo espaço (16/10/2026)
+
+O painel nativo dos mods usava apenas um teto de altura: abas curtas encolhiam, mudando a área
+visível da conversa. Perguntas eram desenhadas junto do painel, empilhando duas áreas acima do
+compositor. O X fechava o painel no plugin, impedindo uma restauração puramente visual.
+
+O espaço expandido agora usa 45% da altura da janela, o orçamento que antes era apenas um teto.
+O corpo rola por dentro e cada aba conserva seu `ScrollHandle`. Minimizar guarda uma escolha
+local por identidade da sessão, sem chamar `plugin/close`. A pergunta substitui o painel nesse
+mesmo espaço; resolução restaura o painel disponível, respeitando a minimização manual. Falha
+de resposta conserva o cartão. O foco acompanha a identidade da pergunta visível, incluindo a
+sessão, e não cada redesenho; remover painéis não reinicia o foco da pergunta.
+
+Medição no aplicativo Linux real, com compositor isolado e servidor sintético: em 1440×1000,
+PM e Jenkins tinham corpos de 323 e 17 px na base. Depois da mudança ambos têm 391 px, dentro
+de um espaço de 437 px. Abas, pergunta e resolução mantiveram o campo de mensagem em y=845 px.
+Em 1024×768, PM e Jenkins mantiveram espaço de 333 px e campo em y=557 px. Uma aba com 80 linhas
+conservou deslocamento de 600 px após trocar de aba e após pergunta/resolução. A prova de envio
+incluiu falha 503 e nova tentativa com o `interaction_id` do cartão, sem fechamento do mod.
+
+O acabamento usa fonte de interface nos textos, abas e controles; `Code`, `Raster` e linhas
+que compartilham sua geometria continuam monoespaçados. Links ganham cor e sublinhado, e botões
+mantêm uma superfície reconhecível inclusive quando a árvore envia `plain`. O renderizador
+continua genérico: títulos, metadados e ações vêm da árvore do mod. O servidor sintético de
+prova fica em `desktop-native/tools/plugin_ui_fixture.py`; ele não abre agentes nem lê contas.
+
 ## Paraglide compila um módulo por idioma (11/10/2026)
 
 Regra: toda compilação do Paraglide (`i18n:compile` do core, do front e o `i18n:compile:core` do
