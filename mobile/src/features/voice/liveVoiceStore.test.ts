@@ -86,7 +86,7 @@ let audio: typeof import('./audioSession');
 let calls: Instance[];
 let importGate: Promise<void>;
 let startGate: Promise<void>;
-let realCall = false;
+let realTransport: typeof import('./liveVoice') | null = null;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -99,7 +99,7 @@ beforeEach(async () => {
   api.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [] });
   api.peers.mockImplementation(async () => ({ ok: true, json: async () => [{ id: 'peer-b-on-a', base_url: b.baseUrl, web_url: b.lan!.url, token: 'masked' }] }));
   calls = [];
-  realCall = false;
+  realTransport = null;
   native.start.mockReset().mockResolvedValue(undefined);
   native.stop.mockReset().mockResolvedValue(undefined);
   native.media.mockReset().mockImplementation(async () => new native.Stream());
@@ -111,7 +111,7 @@ beforeEach(async () => {
   startGate = Promise.resolve();
   vi.doMock('./liveVoice', async () => {
     await importGate;
-    if (realCall) return vi.importActual<typeof import('./liveVoice')>('./liveVoice');
+    if (realTransport) return realTransport;
     return { LiveVoiceCall: class {
       handlers: LiveVoiceHandlers;
       start = vi.fn(async () => { await startGate; });
@@ -255,8 +255,8 @@ describe('uma chamada capturada, sem depender do servidor ativo', () => {
 });
 
 describe('restauração com o transporte real e prazo desde o store', () => {
-  beforeEach(() => {
-    realCall = true;
+  beforeEach(async () => {
+    realTransport = await vi.importActual<typeof import('./liveVoice')>('./liveVoice');
     vi.useFakeTimers(); vi.setSystemTime(0); vi.stubGlobal('WebSocket', NativeSocket);
   });
   afterEach(async () => {
@@ -369,7 +369,7 @@ describe('restauração com o transporte real e prazo desde o store', () => {
     openA(); const starting = useLiveVoice.getState().start();
     await vi.advanceTimersByTimeAsync(60000); await starting;
     expect(useLiveVoice.getState().view).toMatchObject({ phase: 'closed', error: { code: 'opening_timeout' } });
-    gate.resolve(); await vi.advanceTimersByTimeAsync(0);
+    gate.resolve(); await vi.dynamicImportSettled();
     expect(native.media).not.toHaveBeenCalled();
     expect(NativeSocket.all).toHaveLength(0);
   });
