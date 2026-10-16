@@ -2392,8 +2392,12 @@ relato, porque esse caminho não deixava rastro.
 - **A conexão interna recebe a conversa do Rust** (`side-events?provider=…&jsonl=…`) e não procura
   nada; a troca religa essa conexão. O Python continua com a própria descoberta só no modo `python`,
   no convidado (8766) e no Connect (8768).
-- **A reabertura da sessão em erro continua no coordenador do Python**: abrir a conversa (dono ou
-  convidado) pede `POST /internal/sessions/{name}/reopen`, sem esperar resposta.
+- **A reabertura da sessão em erro é do Rust**: abrir a conversa (dono ou convidado) ou escrever
+  numa sessão doente pede ao registro do runtime (`RuntimeRegistry::request_reopen`), sem esperar
+  resposta; uma por sessão em voo. A saudável só refaz a projeção da fila; a doente fecha e reabre
+  pelo tipo dela (Claude sem terminal pelo spec, Codex pela vigia, Claude com terminal pelo alvo
+  aberto), e a falha vai ao diário (`runtime.reopen_failed`). O Claude com terminal que ficou sem
+  entrada aqui não é reaberto por esse caminho: a próxima escrita o abre pelo coordenador.
 
 ## Processos que usam uma conta: o Claude Desktop não é cliente
 
