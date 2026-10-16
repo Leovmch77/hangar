@@ -18,6 +18,8 @@
 // o mesmo defeito que o backend fechou em 18/08/2026 (parecer G2 rev2), vivo na metade que o
 // usuario ve. A regra mora AQUI, num lugar so, porque ela ja existia em dois (backend e front)
 // e os dois ja divergiram uma vez.
+import { contextRefsEnd } from './contextRefs';
+
 const PREFIXO_MIN = 8;
 
 // Especificidade da reivindicacao de `fila` sobre a linha `real`. -1 = nao cobre.
@@ -25,12 +27,13 @@ const EXATO = 3;
 const LEGENDA = 2;
 const PREFIXO = 1;
 
-// Legenda canonica: sem o marcador "📎 imagem:/arquivo: `path`" + o "—" que liga. Mesma
-// normalização do _cap do Chat.svelte — mantida em cópia porque o Chat usa a dele em mais
-// lugares e mexer neles não é o escopo desta correção.
-function _cap(text: string): string {
-  const i = text.search(/(?:\s*—\s*)?📎\s*(?:imagem|arquivo):/u);
-  return (i >= 0 ? text.slice(0, i) : text).trim();
+// Legenda canonica: sem o marcador "📎 imagem:/arquivo: `path`" + o "—" que liga. Também o dedup de
+// pendentes do Chat: o eco local carrega o marcador, o transcript grava so a legenda. O marcador so
+// conta depois do ultimo bloco `<hangar-ref>` (dentro dele e texto citado), como no parseImageMessage.
+export function attachmentCaption(text: string): string {
+  const tail = contextRefsEnd(text);
+  const i = text.slice(tail).search(/(?:\s*—\s*)?📎\s*(?:imagem|arquivo):/u);
+  return (i >= 0 ? text.slice(0, tail + i) : text).trim();
 }
 
 export function especificidade(real: string, fila: string): number {
@@ -39,7 +42,7 @@ export function especificidade(real: string, fila: string): number {
   if (at.split('\n').some((ln) => ln.trim() === bt)) return EXATO;
   // Msg com imagem: eco/fila carrega "📎 imagem: `path`", o transcript grava so a legenda ->
   // casa pela legenda canonica (senao a bolha com foto fica pendente eterna).
-  const ac = _cap(at), bc = _cap(bt);
+  const ac = attachmentCaption(at), bc = attachmentCaption(bt);
   if (!!bc && ac === bc) return LEGENDA;
   if (bt.length >= PREFIXO_MIN && at.split('\n').some((ln) => ln.trim().startsWith(bt))) return PREFIXO;
   return -1;

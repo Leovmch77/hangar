@@ -14,6 +14,31 @@ pub trait Page {
     fn panel_size(&self) -> Option<(u32, u32, f32)> { None }
     /// Layout pedido (`mobile`, `<l> <a>`) manda no tamanho: o painel para de aplicar o dele até voltar ao desktop.
     fn hold_size(&self, _held: bool) {}
+    /// Trabalho pesado de CPU (decodificar e recodificar imagem) fora da thread de quem espera; sem executor, ali mesmo.
+    fn background<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> impl Future<Output = T> { std::future::ready(work()) }
+}
+
+/// `fut`, ou `None` quando a página não responde em `ms`.
+pub async fn within<P: Page, T>(page: &P, ms: u64, fut: impl Future<Output = T>) -> Option<T> {
+    match select(std::pin::pin!(fut), std::pin::pin!(page.sleep(ms))).await { Either::Left((v, _)) => Some(v), Either::Right(_) => None }
+}
+
+/// A exceção que o script lançou (`exceptionDetails` de `Runtime.evaluate`/`callFunctionOn`), como o DevTools a descreve.
+pub fn exception(r: &Value) -> Option<String> {
+    let details = &r["exceptionDetails"];
+    details["exception"]["description"].as_str().or(details["text"].as_str()).map(str::to_owned)
+}
+
+/// O valor que o script devolveu (`returnByValue`), ou a exceção dele.
+pub fn returned(r: &Value) -> Result<&Value, String> {
+    if r.get("exceptionDetails").is_some() { return Err(exception(r).unwrap_or_else(|| "excecao na pagina".into())); }
+    Ok(&r["result"]["value"])
+}
+
+/// Os bytes do PNG de um `Page.captureScreenshot`.
+pub fn screenshot_bytes(r: &Value) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(r["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())
 }
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
@@ -60,6 +85,9 @@ const ACTING: [&str; 12] = ["click", "fill", "type", "press", "hover", "eval", "
 /// Com diálogo aberto a página não roda script: só estes respondem sem ele.
 const WITH_DIALOG: [&str; 3] = ["url", "estado", "console"];
 pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
+/// No modo "Escolher elemento" o Chromium toma o clique para a escolha: o do agente viraria um elemento na mensagem
+/// da pessoa. A pessoa está no controle, como na pausa.
+pub const PICKING: &str = "erro: o usuário está escolhendo um elemento no painel do navegador; espere ele terminar (ou cancelar com Esc) e tente de novo";
 /// Espera da primeira ação depois de a faixa do agente ter sumido: ela volta e encolhe a página, e o alvo tem de ser
 /// medido depois disso. Com a faixa já na tela, nenhuma espera.
 const SETTLE_MS: u64 = 150;
@@ -97,6 +125,8 @@ pub struct Controller<P: Page> {
     /// Último `hidden` pedido: quem pega o `turn` aplica este, não o seu, porque a fila do `turn` não garante ordem.
     wanted_hidden: Cell<bool>,
     paused: Cell<bool>,
+    /// A pessoa está escolhendo elemento no painel: os verbos de `ACTING` voltam com `PICKING`.
+    picking: Cell<bool>,
     on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
     on_layout: RefCell<Option<Box<dyn Fn(Option<(u32, u32)>)>>>,
     on_page_error: RefCell<Option<Box<dyn Fn(Option<String>)>>>,
@@ -133,7 +163,7 @@ fn without_query(url: &str) -> &str { url.split(['?', '#']).next().unwrap_or(url
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), strip_shown: Cell::new(false), settle: Cell::new(false), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), picking: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), strip_shown: Cell::new(false), settle: Cell::new(false), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), noise: HashSet::new(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
@@ -169,6 +199,14 @@ impl<P: Page> Controller<P> {
 
     /// Pausado pelo usuário: os verbos de `ACTING` voltam com `PAUSED` até ele retomar.
     pub fn set_paused(&self, paused: bool) { self.paused.set(paused); }
+
+    /// Modo "Escolher elemento" ligado no painel.
+    pub fn set_picking(&self, picking: bool) { self.picking.set(picking); }
+
+    /// Por que um verbo que mexe na página não pode seguir agora.
+    fn blocked(&self) -> Option<&'static str> {
+        if self.paused.get() { Some(PAUSED) } else if self.picking.get() { Some(PICKING) } else { None }
+    }
 
     pub fn on_activity(&self, f: impl Fn(Activity) + 'static) { *self.on_activity.borrow_mut() = Some(Box::new(f)); }
 
@@ -209,7 +247,7 @@ impl<P: Page> Controller<P> {
         let (done, result) = futures::channel::oneshot::channel();
         match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text, done), None => return "erro: dialog: o painel nao respondeu".into() }
         // O ok só depois de o motor confirmar: aceite que falhou vira recusa na página, e o agente precisa saber.
-        match self.within(5000, result).await {
+        match within(&self.page, 5000, result).await {
             Some(Ok(Ok(()))) => {
                 // Só com a resposta aceita o próximo verbo espera o fechamento; com erro o diálogo segue aberto.
                 self.dialog_answered.set(true);
@@ -318,11 +356,11 @@ impl<P: Page> Controller<P> {
     }
 
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
-        if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        if let Some(why) = self.blocked().filter(|_| ACTING.contains(&verb)) { return Reply::Text(why.into()); }
         // Antes da vez: o verbo que segura a vez pode estar parado justamente no diálogo.
         if verb == "dialog" { return Reply::Text(self.answer_dialog(args).await); }
         let _turn = self.turn.lock().await;
-        if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        if let Some(why) = self.blocked().filter(|_| ACTING.contains(&verb)) { return Reply::Text(why.into()); }
         for _ in 0..20 {
             if !(self.dialog_answered.get() && self.dialog_open.borrow().is_some()) { break; }
             self.page.sleep(50).await;
@@ -375,7 +413,7 @@ impl<P: Page> Controller<P> {
         let result = match select(std::pin::pin!(work), std::pin::pin!(opened)).await {
             Either::Left((result, _)) => result,
             Either::Right(_) => {
-                let _ = self.within(500, self.unmark()).await;
+                let _ = within(&self.page, 500, self.unmark()).await;
                 let (kind, message, _) = self.dialog_open.borrow().clone().unwrap_or_default();
                 Ok(Reply::Text(format!("ok: {verb} parou: a pagina abriu um dialogo {kind}: “{message}”. Responda com: {}", Self::dialog_hint(&kind))))
             }
@@ -405,12 +443,8 @@ impl<P: Page> Controller<P> {
         Ok(())
     }
 
-    async fn within<T>(&self, ms: u64, fut: impl Future<Output = T>) -> Option<T> {
-        match select(std::pin::pin!(fut), std::pin::pin!(self.page.sleep(ms))).await { Either::Left((v, _)) => Some(v), Either::Right(_) => None }
-    }
-
     async fn frame(&self) {
-        let _ = self.within(500, self.page.call("Runtime.evaluate", json!({"expression": FRAME, "awaitPromise": true}))).await;
+        let _ = within(&self.page, 500, self.page.call("Runtime.evaluate", json!({"expression": FRAME, "awaitPromise": true}))).await;
     }
 
     async fn value(&self, expression: &str) -> Result<Value, String> {
@@ -522,8 +556,10 @@ impl<P: Page> Controller<P> {
 
     async fn click_as(&self, verb: &str, r: &str) -> Result<String, String> {
         self.mark(verb, r).await;
-        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        if let Some(why) = self.blocked() { self.unmark().await; return Ok(why.into()); }
         let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        // A medida esperou a página: o modo de escolha pode ter ligado nesse meio-tempo.
+        if let Some(why) = self.blocked() { self.unmark().await; return Ok(why.into()); }
         let base = |t: &str| json!({"type": t, "x": x, "y": y, "button": "left", "clickCount": 1});
         let ok = self.arrived(&["pointerdown", "mousedown"], async || {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
@@ -542,7 +578,7 @@ impl<P: Page> Controller<P> {
         let clicked = self.click_as("fill", r).await?;
         if clicked.starts_with("erro:") { return Ok(clicked); }
         // Assumir durante o clique: a pessoa pode já estar digitando no campo.
-        if self.paused.get() { return Ok(PAUSED.into()); }
+        if let Some(why) = self.blocked() { return Ok(why.into()); }
         if let Some(focus) = self.not_editable().await? {
             return Ok(format!("erro: fill {r}: o clique nao deixou um campo de texto com foco (foco em {focus}) — a ref e mesmo um campo? rode snapshot"));
         }
@@ -579,7 +615,7 @@ impl<P: Page> Controller<P> {
 
     async fn hover(&self, r: &str) -> Result<String, String> {
         self.mark("hover", r).await;
-        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        if let Some(why) = self.blocked() { self.unmark().await; return Ok(why.into()); }
         let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await?;
         self.frame().await;
@@ -587,22 +623,21 @@ impl<P: Page> Controller<P> {
     }
 
     async fn eval(&self, js: &str) -> Result<String, String> {
-        let error = |r: &Value| r["exceptionDetails"]["exception"]["description"].as_str().or(r["exceptionDetails"]["text"].as_str()).map(str::to_owned);
         let wrapped = format!("(async()=>{{const v=({js});await {FRAME};return v}})()");
-        let run = |params: Value| self.within(WAIT_MS, self.page.call("Runtime.evaluate", params));
+        let run = |params: Value| within(&self.page, WAIT_MS, self.page.call("Runtime.evaluate", params));
         let Some(mut r) = run(json!({"expression": wrapped, "awaitPromise": true, "returnByValue": true})).await else {
             return Ok(format!("erro: eval nao respondeu em {WAIT_MS}ms"));
         };
         // Declaração não cabe entre parênteses: roda cru, como no console do DevTools.
-        if r.as_ref().ok().and_then(error).is_some_and(|e| e.starts_with("SyntaxError")) {
+        if r.as_ref().ok().and_then(exception).is_some_and(|e| e.starts_with("SyntaxError")) {
             let Some(raw) = run(json!({"expression": js, "awaitPromise": true, "returnByValue": true, "replMode": true})).await else {
                 return Ok(format!("erro: eval nao respondeu em {WAIT_MS}ms"));
             };
             r = raw;
-            if r.as_ref().is_ok_and(|v| error(v).is_none()) { self.frame().await; }
+            if r.as_ref().is_ok_and(|v| exception(v).is_none()) { self.frame().await; }
         }
         let r = r?;
-        if let Some(e) = error(&r) { return Ok(format!("erro: {e}")); }
+        if let Some(e) = exception(&r) { return Ok(format!("erro: {e}")); }
         Ok(match r["result"].get("value") { Some(v) => format!("ok: {v}"), None => "ok: undefined".into() })
     }
 
@@ -645,7 +680,7 @@ impl<P: Page> Controller<P> {
                 })
             };
             let t0 = Instant::now();
-            let Some(hit) = self.within(limit.saturating_sub(waited), check).await else { break };
+            let Some(hit) = within(&self.page, limit.saturating_sub(waited), check).await else { break };
             if hit? { return Ok(format!("ok: wait {joined}")); }
             let spent = t0.elapsed().as_millis() as u64;
             self.page.sleep(POLL_MS).await;
@@ -663,7 +698,7 @@ impl<P: Page> Controller<P> {
             // A navegação conta antes de perguntar: lido depois, o "complete" ainda podia ser do documento antigo.
             let moved = self.state.borrow().navs != before;
             // Contexto destruído no meio = o documento ainda está trocando; tenta de novo.
-            let ready = self.within(WAIT_MS - waited, self.value("document.readyState")).await;
+            let ready = within(&self.page, WAIT_MS - waited, self.value("document.readyState")).await;
             if moved && let Some(Ok(v)) = &ready && v.as_str() == Some("complete") {
                 let url = self.value("location.href").await?;
                 return Ok(format!("ok: {verb} {}", url.as_str().unwrap_or("")));
@@ -776,17 +811,16 @@ impl<P: Page> Controller<P> {
     }
 
     async fn shot(&self) -> Result<Reply, String> {
-        use base64::Engine as _;
         self.frame().await;
         let mut params = json!({"format": "png"});
         if let Layout::Custom(w, h) = self.state.borrow().layout {
             params = json!({"format": "png", "captureBeyondViewport": true, "clip": {"x": 0, "y": 0, "width": w, "height": h, "scale": 1}});
         }
-        let Some(r) = self.within(SHOT_MS, self.page.call("Page.captureScreenshot", params)).await else {
+        let Some(r) = within(&self.page, SHOT_MS, self.page.call("Page.captureScreenshot", params)).await else {
             return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into()));
         };
         let data = r.map_err(|e| format!("captureScreenshot falhou: {e}"))?;
-        let png = base64::engine::general_purpose::STANDARD.decode(data["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
+        let png = screenshot_bytes(&data)?;
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
         Ok(Reply::Png(png))
     }
@@ -854,6 +888,9 @@ impl Page for CdpPage {
     fn panel_size(&self) -> Option<(u32, u32, f32)> { self.cdp.viewport.panel.get() }
     #[cfg(target_os = "linux")]
     fn hold_size(&self, held: bool) { self.cdp.viewport.held.set(held) }
+    fn background<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> impl Future<Output = T> {
+        self.executor.spawn(async move { work() })
+    }
 }
 
 #[cfg(test)]
@@ -927,6 +964,21 @@ mod tests {
         assert_eq!(text(block_on(c.run("click", &s(&["@e1"])))), "erro: ref @e1 nao existe (rode snapshot de novo)");
         assert_eq!(text(block_on(c.run("click", &s(&["@e9"])))), "erro: ref @e9 nao existe (rode snapshot de novo)");
         assert!(!methods(&c).contains(&"Input.dispatchMouseEvent".to_string()));
+    }
+
+    #[test]
+    fn picking_refuses_acting_verbs_without_touching_the_page() {
+        let c = ctl(|m, _| Ok(if m == "Accessibility.getFullAXTree" { tree() } else { json!({}) }));
+        block_on(c.run("snapshot", &[]));
+        c.set_picking(true);
+        for verb in ["click", "fill", "hover", "goto"] {
+            assert_eq!(text(block_on(c.run(verb, &s(&["@e1", "x"])))), PICKING, "{verb}");
+        }
+        assert!(!methods(&c).contains(&"Input.dispatchMouseEvent".to_string()), "nada chega à página: viraria a escolha");
+        // Ler continua livre.
+        assert!(text(block_on(c.run("snapshot", &[]))).contains("@e1"));
+        c.set_picking(false);
+        assert_ne!(text(block_on(c.run("hover", &s(&["@e1"])))), PICKING);
     }
 
     #[test]

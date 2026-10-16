@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Haptics from 'expo-haptics';
-import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Keyboard, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { broadcast, formataErro, hexParaRgb, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft } from '@hangar/core';
@@ -31,6 +31,10 @@ import { QueuePanel } from './QueuePanel';
 import type { PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 import { AttachmentPreview } from '../ui/AttachmentPreview';
+import { ContextRefTray } from '../ui/ContextRefTray';
+import { CiteReplyModal } from './CiteReplyModal';
+import { composeWithContextRefs, refsForMessage, splitContextRefs } from '@hangar/core';
+import { contextRefsKey, contextRefsSnapshot, removeSentContextRefs, useContextRefsFor, type DraftContextRef } from '../stores/contextRefs';
 import type { PastedFile } from '@mattermost/react-native-paste-input';
 
 interface Props {
@@ -52,6 +56,14 @@ interface Props {
 }
 
 type PendingAttach = PickedAttachment;
+
+// Texto que o envio atual produziria (citações, digitado e anexo já enviado), para comparar com o
+// envio gravado no rascunho.
+function composeForSend(typed: string, refs: readonly DraftContextRef[], attach: PendingAttach | null): string {
+  const withRefs = composeWithContextRefs(refsForMessage(refs, typed), typed.trim());
+  return attach?.uploadedPath ? withAttach(withRefs, attachInsert(attach, attach.uploadedPath)) : withRefs;
+}
+
 // O campo é só um `/nome` sendo digitado (nem argumento nem outro texto): é ele que o comando
 // escolhido substitui por inteiro. Espaço no fim não conta: a lista abre com o cursor antes dele.
 const soComando = (texto: string) => {
@@ -187,6 +199,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const queueBusy = chat.use((s) => s.queueBusy) ?? false;
   const queueError = chat.use((s) => s.queueError) ?? null;
   const editing = queueEdit !== null;
+  // Citações da bandeja: entram na frente do texto só no envio, e comando de barra não as leva.
+  const refsKey = contextRefsKey(serverId, name);
+  const refs = useContextRefsFor(refsKey);
 
   const [sendToPair, setSendToPair] = useState(false);
   useEffect(() => {
@@ -296,8 +311,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       || (submission.status !== 'rejected' && submission.status !== 'unknown')) return;
     // O anexo continua no rascunho com o caminho enviado: devolver só o texto evita citar o arquivo duas vezes.
     const insert = pendingAttach?.uploadedPath ? attachInsert(pendingAttach, pendingAttach.uploadedPath) : null;
-    const sent = insert && submission.text.endsWith(insert)
+    const withoutAttachment = insert && submission.text.endsWith(insert)
       ? submission.text.slice(0, -insert.length).replace(/ — $/, '') : submission.text;
+    // As citações não voltam ao campo: continuam na bandeja, que só esvazia quando o envio dá certo.
+    const sent = splitContextRefs(withoutAttachment)?.typed ?? withoutAttachment;
     const next = textRef.current.trim() === sent.trim()
       ? textRef.current : joinDrafts(textRef.current, sent);
     try {
@@ -517,10 +534,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returned]);
   // Repetir um envio recusado com anexo já enviado gera o mesmo texto: o snapshot não bloqueia.
-  const composedText = pendingAttach?.uploadedPath
-    ? withAttach(text.trim(), attachInsert(pendingAttach, pendingAttach.uploadedPath)) : text.trim();
-  const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== composedText);
-  const hasContent = text.trim().length > 0 || pendingAttach !== null;
+  const submissionBlocksSend = !!submission
+    && (isSubmitting(serverId, name) || submission.text.trim() !== composeForSend(text, refs, pendingAttach));
+  const hasContent = text.trim().length > 0 || pendingAttach !== null || refs.length > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
   const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
@@ -569,17 +585,18 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     // Em edição o botão é o Atualizar: troca o texto da mensagem na fila, sem enviar nada.
     if (queueEdit) {
-      if (canUpdateQueueEdit(text)) await chat.submitQueueEdit(text);
+      if (canUpdateQueueEdit(text, queueEdit.refs)) await chat.submitQueueEdit(text);
       return;
     }
     if (!voiceReady && deferVoiceSendRef.current('send')) return;
     const trimmed = textRef.current.trim();
     const hasAttach = pendingAttach !== null;
-    if (!trimmed && !hasAttach) return;
+    const sentRefs = refsForMessage(refs, trimmed);
+    if (!trimmed && !hasAttach && !sentRefs.length) return;
     if (submissionBlocksSend) return;
     if (sendingRef.current || sending || uploading) return;
     // `/btw` não é mensagem nem entra na fila: abre a pergunta lateral. Só o Claude tem o comando.
-    const btw = !hasAttach && isClaude ? sideQuestionOf(trimmed) : null;
+    const btw = !hasAttach && !sentRefs.length && isClaude ? sideQuestionOf(trimmed) : null;
     if (btw !== null) {
       if (!persistText('')) return;
       textRef.current = '';
@@ -598,7 +615,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     };
-    let finalText = trimmed;
+    const body = composeWithContextRefs(sentRefs, trimmed);
+    let finalText = body;
     const attach = pendingAttach;
     if (attach) {
       const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
@@ -629,7 +647,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         }
         setPendingAttach(uploaded);
       }
-      finalText = withAttach(trimmed, attachInsert(attach, path));
+      finalText = withAttach(body, attachInsert(attach, path));
     }
     if (!finalText.trim()) {
       stop();
@@ -660,6 +678,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       } else {
         await sendText(finalText, sentRevision, true);
       }
+      removeSentContextRefs(refsKey, sentRefs);
       setBar(null);
       if (attach && persistDraft({ attachment: null })) {
         dropCopy(attach.uri);
@@ -677,7 +696,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -697,21 +716,28 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         const rest = autoAlvoRef.current - Date.now();
         if (rest <= 0) {
           cancelarAuto();
-          const toSend = autoTextoRef.current.trim();
-          if (!toSend) return;
+          const typed = autoTextoRef.current.trim();
+          // Mesmo caminho do botão Enviar: as citações da bandeja vão na frente e saem dela só se
+          // o envio der certo. Comando de barra não leva citação.
+          const sentRefs = refsForMessage(contextRefsSnapshot(refsKey), typed);
+          const toSend = composeWithContextRefs(sentRefs, typed);
+          if (!toSend || sendingRef.current) return;
+          sendingRef.current = true;
           limparUndo();
+          setSending(true);
           void sendText(toSend, revision)
-            .then(() => { setError(''); setBar(null); })
+            .then(() => { removeSentContextRefs(refsKey, sentRefs); setError(''); setBar(null); })
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
               setError(msg);
-            });
+            })
+            .finally(() => { sendingRef.current = false; setSending(false); });
           return;
         }
         setAutoN(Math.ceil(rest / 1000));
       }, 250);
     },
-    [cancelarAuto, sendText, limparUndo, setBar],
+    [cancelarAuto, sendText, limparUndo, setBar, refsKey],
   );
 
   const offerUndo = useCallback((before: string, raw: string, cleaned: string, revision: number) => {
@@ -1203,7 +1229,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const showStop = !!onStop && canInterrupt && !hasContent && !voiceActive && !editing;
   const showSend = editing || !showStop || hasContent || sending || uploading || filaCount > 0;
   // Em edição o botão é o Atualizar: só o texto conta, e uma ação da fila por vez.
-  const canSubmit = editing ? canUpdateQueueEdit(text) && !queueBusy : canSend;
+  const canSubmit = queueEdit ? canUpdateQueueEdit(text, queueEdit.refs) && !queueBusy : canSend;
   const queueFeedback = queueNotice ?? queueError;
   // A edição da fila troca só o texto: anexo e ditado esperam a volta do rascunho.
   const attachBlocked = uploading || sending || gravando || editing;
@@ -1449,6 +1475,17 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             </Text>
           </Pressable>
         ) : null}
+
+        {refs.length && !editing ? (
+          <ContextRefTray refs={refs} draftKey={refsKey} disabled={sending} />
+        ) : null}
+        {/* "Finalizar" leva ao campo depois que o modal sai da tela: focado antes, o iOS ignora. No
+            Android o teclado só abre quando a janela do modal já devolveu o foco; antes disso o campo
+            fica focado sem teclado, e o segundo pedido o abre. */}
+        <CiteReplyModal draftKey={refsKey} onFinish={() => {
+          setTimeout(() => inputRef.current?.focus(), 350);
+          setTimeout(() => { if (!Keyboard.isVisible()) inputRef.current?.focus(); }, 900);
+        }} />
 
         {/* A edição troca só o texto: o anexo do rascunho espera a volta dele. */}
         {pendingAttach && !editing ? (

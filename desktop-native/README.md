@@ -52,8 +52,13 @@ Em painéis muito estreitos, o modo Lado a lado empilha as vistas, mantendo leit
 Imagens dentro da raiz da sessão não precisam ser citadas individualmente na conversa. Fora da
 raiz, a política de arquivo citado continua valendo, inclusive para imagens de um documento externo.
 
-**Limites:** Mermaid e outros diagramas cercados aparecem como código legível, sem gerar um
-diagrama. Fórmulas permanecem como texto ou bloco de código, sem composição matemática. O kit
+**Mermaid:** numa resposta já assentada, o bloco ` ```mermaid ` vira o diagrama desenhado pelo servidor
+da sessão (`POST /api/mermaid`), na largura da coluna e no tema da aparência; clicar abre em tela cheia
+com zoom. Enquanto desenha, durante o streaming e na falha (com a mensagem do parser e, se a falha for
+do servidor, "Tentar de novo"), o bloco continua como código. Copiar e buscar acham a fonte.
+
+**Limites:** outros diagramas cercados aparecem como código legível, sem gerar um diagrama.
+Fórmulas permanecem como texto ou bloco de código, sem composição matemática. O kit
 aceita um subconjunto de HTML de formatação, não uma página com CSS ou scripts. HTML executável,
 componentes MDX/JSX, JavaScript e motores de extensões arbitrárias não são executados. A extensão
 `.mdx` permite consultar a fonte e o Markdown reconhecido, não executar componentes.

@@ -8,6 +8,8 @@ pub mod chrome_import;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod control;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
+pub mod pick;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod server;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod relay;
@@ -47,6 +49,9 @@ pub enum Event {
     /// Clique ou tecla da pessoa dentro da página nativa (Windows): a GPUI não os vê.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     UserInput,
+    /// Esc dentro da página nativa (Windows): cancela a escolha de elemento, que a GPUI não veria.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Escape,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

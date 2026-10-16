@@ -26,8 +26,9 @@ impl ArchiveEntry {
     pub(super) fn title(&self) -> String { Self::first_text([&self.ultima, &self.preview]) }
     /// Na barra, o assunto: a primeira mensagem, como a lista de conversas do app do Claude.
     fn heading(&self) -> String { Self::first_text([&self.preview, &self.ultima]) }
+    /// Com citação ou elemento, cada bloco vira o rótulo curto dele, como na fila e no trilho.
     fn first_text(texts: [&String; 2]) -> String {
-        texts.into_iter().find(|t| !t.trim().is_empty()).cloned().unwrap_or_else(|| tr("create_no_messages"))
+        texts.into_iter().find(|t| !t.trim().is_empty()).map(|t| super::quotes::summary(t)).unwrap_or_else(|| tr("create_no_messages"))
     }
     fn query(&self) -> Vec<(String, String)> {
         let mut q = Vec::new();
@@ -57,7 +58,7 @@ pub(super) fn preview_lines(result: Result<Value, Failure>, cx: &mut App) -> Res
     let events = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response")))?;
     Ok(events.into_iter().filter(|e| matches!(e.kind.as_str(), "user_msg" | "assistant_msg"))
         .filter_map(|e| e.text.filter(|t| !t.trim().is_empty()).map(|t| (e.kind == "user_msg", t)))
-        .map(|(mine, text)| PreviewLine { mine, view: cx.new(|cx| TextViewState::markdown(&safe_markdown(&text), cx)) }).collect())
+        .map(|(mine, text)| PreviewLine { mine, view: cx.new(|cx| TextViewState::markdown(&safe_markdown(&super::quotes::summary(&text)), cx)) }).collect())
 }
 
 /// Os balões somente leitura da prévia.

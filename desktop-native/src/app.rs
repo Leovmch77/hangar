@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
     conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::{tr, tr_shared}, theme,
-    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion};
+    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion, source_map};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
 
@@ -88,6 +88,8 @@ mod stats;
 mod search;
 mod topbar;
 mod voice_ui;
+mod quotes;
+mod mermaid;
 pub(crate) mod setup;
 /// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
 pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
@@ -221,7 +223,8 @@ enum Payload {
     Files(SessionKey, Option<SessionOwner>, u64, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
-    UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
+    /// A legenda e as referências do Enter vão com os uploads até a mensagem sair.
+    UploadsDone(SessionKey, String, Vec<crate::context_refs::ContextRef>, bool, HashSet<String>, Option<Vec<String>>),
     Commands(String, u64, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
@@ -296,6 +299,8 @@ enum Payload {
     VoiceModels(u64, Result<Vec<voice_ui::OrganizerModel>, String>),
     // "No PC" / "Fora" de uma máquina do dono: a chave dela, se foi a troca pedida no botão e a resposta.
     Presence(String, bool, Result<Value, Failure>),
+    // Diagrama pedido ao servidor da sessão; vale mesmo com a seleção trocada (o cache é por servidor).
+    Mermaid(mermaid::Job, api::MermaidReply),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -340,7 +345,8 @@ struct Envelope { connection: u64, selection: Option<u64>, payload: Payload }
 fn delivery_is_current(connection: u64, selection: Option<u64>, current_connection: u64, current_selection: u64) -> bool {
     connection == current_connection && selection.is_none_or(|selection| selection == current_selection)
 }
-struct RichText { source: String, view: Entity<TextViewState>, _observer: Subscription, touched: u64, row: String }
+/// `offset`: onde a fonte deste pedaço começa na fonte inteira da resposta desenhada em pedaços (`{id}#s0`…).
+struct RichText { source: String, view: Entity<TextViewState>, _observer: Subscription, touched: u64, row: String, offset: Option<usize> }
 enum ChatUpdate { Message(ChatEvent), Preview(Preview), State(SessionState), Question(Option<Ask>), Thinking(String), LiveTool(Option<LiveTool>), Reset }
 
 #[derive(Default)]
@@ -408,7 +414,9 @@ struct CiteCheck { owner: Option<SessionKey>, scanned: HashSet<String>, checked:
 #[derive(Clone)]
 enum Prepared {
     /// `card`: o cartão já lido, para o desenho não reler o texto a cada quadro.
-    Message { markdown: String, blank: bool, card: Option<cards::Card> },
+    /// `map`: onde cada trecho do desenhado está na fonte (`display_body`), para a citação levar a fonte.
+    /// `refs`: a mensagem do usuário com citação ou elemento, já em pedaços.
+    Message { markdown: String, blank: bool, card: Option<cards::Card>, map: std::rc::Rc<source_map::SourceMap>, refs: Option<std::rc::Rc<quotes::RefMessage>> },
     Lines(usize),
     Detail { fenced: String, total: usize, clipped: bool, full: SharedString },
 }
@@ -549,6 +557,10 @@ pub struct Hangar {
     preview_deadline: Option<Instant>,
     // Anexos e rascunho têm a mesma identidade (servidor + sessão + transcript): trocar de sessão não mistura.
     attachments: HashMap<SessionKey, Vec<Attachment>>,
+    /// Citar trecho e a bandeja de referências acima do campo de mensagem.
+    quotes: quotes::Quotes,
+    /// Diagramas Mermaid desenhados pelo servidor, divididos com o plugin do Markdown.
+    mermaid: mermaid::Shared,
     attach_seq: u64,
     uploading: HashMap<SessionKey, Vec<u64>>,
     commands: HashMap<String, Result<Vec<CommandInfo>, String>>,
@@ -949,7 +961,7 @@ impl Hangar {
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
-            attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(), commands_latest: HashMap::new(), commands_seq: 0,
+            attachments: HashMap::new(), quotes: Default::default(), mermaid: Default::default(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(), commands_latest: HashMap::new(), commands_seq: 0,
             suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
@@ -1539,6 +1551,7 @@ impl Hangar {
                 cx.notify();
                 return;
             }
+            Payload::Mermaid(job, reply) => { self.receive_mermaid(job, reply, window, cx); return; }
             // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
             Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
             Payload::VoiceGate(server, body, accounts) => { self.receive_voice_gate(server, body, accounts, window, cx); return; }
@@ -1546,9 +1559,9 @@ impl Hangar {
             Payload::VoiceModels(seq, result) => { self.receive_organizer_models(seq, result, window, cx); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
-            Payload::UploadsDone(key, draft, steer, known, group) => {
+            Payload::UploadsDone(key, draft, refs, steer, known, group) => {
                 let key = self.delivery.current(key);
-                self.finish_uploads(key, draft, steer, known, group, window, cx);
+                self.finish_uploads(key, draft, refs, steer, known, group, window, cx);
                 cx.notify();
                 return;
             }
@@ -1875,7 +1888,8 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..)
+                | Payload::Mermaid(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
@@ -1921,6 +1935,7 @@ impl Hangar {
                 if list.is_empty() { self.attachments.remove(&key); }
                 for image in gone { release_image(image, window, cx); }
             }
+            self.sent_context_refs(&key, &text);
             // Quem esperava este envio sai agora, na ordem em que foi mandado.
             if let Some((next, steer, group)) = self.delivery.next_held(&key) {
                 let known = if current { self.known_user_ids() } else { HashSet::new() };
@@ -1993,6 +2008,7 @@ impl Hangar {
         let (from, to) = (SessionKey::new(&server, old)?, SessionKey::new(&server, new)?);
         self.delivery.rekey(&from, &to);
         if let Some(list) = self.attachments.remove(&from) { self.attachments.insert(to.clone(), list); }
+        self.rekey_context_refs(&from, &to);
         if let Some(batch) = self.uploading.remove(&from) { self.uploading.insert(to.clone(), batch); }
         if let Some((on, _)) = self.sidebar.grouping.send_to_group.as_mut().filter(|(on, _)| *on == from) { *on = to.clone(); }
         self.drafts.remove(&from);
@@ -2469,10 +2485,20 @@ impl Hangar {
         let Some(key) = self.selected_key() else { return; };
         let text = self.composer.read(cx).value().to_string();
         let attached = self.attachments.get(&key).is_some_and(|list| !list.is_empty());
-        if text.trim().is_empty() && !attached { return; }
+        // Comando digitado (`/compact`, `/btw …`) vai sozinho: blocos na frente o desfariam, e a bandeja fica para a
+        // próxima mensagem.
+        let command = composer::typed_command(self.command_list(), &text).is_some() || composer::side_question(&text);
+        let referenced = !command && self.has_context_refs(&key);
+        if text.trim().is_empty() && !attached && !referenced { return; }
         let flying = self.delivery.pending(&key);
-        // Anexo sobe antes do envio e não entra na espera: aguarda o envio em voo, como o que já está subindo.
-        if self.uploading.contains_key(&key) || flying && attached { return; }
+        // Anexo e referência saem só depois do envio em voo: ficam no lugar até a resposta dele, como o que já está subindo.
+        if self.uploading.contains_key(&key) || flying && (attached || referenced) {
+            self.action_feedback.insert(key, (tr("refs_wait_sending"), true));
+            cx.notify();
+            return;
+        }
+        // As referências do Enter: a mensagem pode sair só depois dos anexos subirem, com a bandeja já mudada.
+        let refs = if referenced { self.context_refs_snapshot(&key) } else { Vec::new() };
         // Com anexo a legenda vai na frente do prompt: o comando do campo continua sendo o da mensagem.
         let provider = self.provider().0.to_owned();
         if let Some(command) = composer::typed_command(self.command_list(), &text).cloned() {
@@ -2511,11 +2537,13 @@ impl Hangar {
         // O campo esvazia no Enter, sem esperar o backend: o que for digitado depois é outra mensagem. Com anexo também;
         // a legenda viaja com os uploads e volta ao campo se o envio não sair.
         if attached {
-            self.start_uploads(key.clone(), text, steer, known, group, cx);
+            self.start_uploads(key.clone(), text, refs, steer, known, group, cx);
             if self.uploading.contains_key(&key) { self.clear_sent_field(&key, window, cx); }
             return;
         }
-        if self.deliver(key.clone(), text.clone(), text.clone(), steer, known, group, cx) {
+        // As referências da bandeja vão antes do digitado; o que volta ao campo numa falha é só o digitado.
+        let message = quotes::compose_refs(&refs, &text);
+        if self.deliver(key.clone(), message, text.clone(), steer, known, group, cx) {
             self.delivery.mark_typed(&key, text);
             self.clear_sent_field(&key, window, cx);
         }
@@ -2571,7 +2599,7 @@ impl Hangar {
     }
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
-    fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+    fn start_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
@@ -2591,7 +2619,7 @@ impl Hangar {
                 if tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, Some(result)) }).await.is_err() { return; }
                 if failed { break; }
             }
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, steer, known, group) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, refs, steer, known, group) }).await;
         });
         cx.notify();
     }
@@ -2607,7 +2635,7 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
         let uploads: Option<Vec<_>> = self.attachments.get(&key).and_then(|list| list.iter().filter(|a| batch.contains(&a.id))
             .map(|attachment| match &attachment.state {
@@ -2621,7 +2649,8 @@ impl Hangar {
             if !draft.is_empty() { self.return_to_field(&key, vec![draft], current, window, cx); }
             return;
         };
-        let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
+        let caption = quotes::compose_refs(&refs, &draft);
+        let message = composer::compose_prompt(&caption, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
         if self.deliver(key.clone(), message, draft.clone(), steer, known, group, cx) { self.delivery.mark_typed(&key, draft); }
         else if !draft.is_empty() { self.return_to_field(&key, vec![draft], current, window, cx); }
     }
@@ -3388,7 +3417,7 @@ impl Hangar {
             api::open_trace(|| format!("markdown parsed {owner}"));
             if let Some(i) = this.row_ids.iter().position(|id| id == &owner) { this.follow_content_changed(cx); this.list_state.remeasure_items(i..i+1); }
         });
-        self.rich.insert(key.to_owned(), RichText { source, view: view.clone(), _observer: observer, touched: self.render_tick, row: row.to_owned() });
+        self.rich.insert(key.to_owned(), RichText { source, view: view.clone(), _observer: observer, touched: self.render_tick, row: row.to_owned(), offset: None });
         view
     }
 
@@ -4356,11 +4385,13 @@ impl Hangar {
             (done, batch.len())
         });
         let attached = key.as_ref().is_some_and(|key| self.attachments.get(key).is_some_and(|list| !list.is_empty()));
+        let referenced = key.as_ref().is_some_and(|key| self.has_context_refs(key));
         let dictated = self.dictation_here(cx) && (self.dictation.recording() || self.dictation.processing());
-        let has_input = !text.trim().is_empty() || attached || dictated;
+        let has_input = !text.trim().is_empty() || attached || referenced || dictated;
         let suggestions = if readable { self.visible_suggestions(cx) } else { Vec::new() };
         if self.suggest_pick >= suggestions.len() { self.suggest_pick = 0; }
         let tray = key.as_ref().and_then(|key| self.render_attachments(key, cx));
+        let refs_tray = key.as_ref().and_then(|key| self.render_context_tray(key, cx));
         let confirm = self.render_confirm(cx);
         let (pills, mode) = self.render_ctl_pills(readable, cx);
         let pills = if new_chat { self.new_chat_pills(cx) } else { pills };
@@ -4482,7 +4513,8 @@ impl Hangar {
 
         let send_label = tr(if creating { "create_creating" } else if sending && attached || uploading.is_some() || resuming { "sending" } else { "send" });
         let action = if editing {
-            let enabled = crate::queue_panel::can_update(&text) && !busy && self.chat_online && self.history_installed;
+            let payload = key.as_ref().map(|key| self.compose_with_refs(key, &text)).unwrap_or_else(|| text.clone());
+            let enabled = crate::queue_panel::can_update(&payload) && !busy && self.chat_online && self.history_installed;
             self.queue_update_button(enabled, cx)
         } else if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
@@ -4521,6 +4553,7 @@ impl Hangar {
                 .children(mode)
                 .child(div().ml(px(6.)).child(action)));
         let card = composer_card(focused)
+            .children(refs_tray)
             .when_some(tray, |el, tray| el.child(tray))
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
                 .child(tr("attach_progress").replace("{done}", &done.to_string()).replace("{total}", &total.to_string()))))
@@ -4655,6 +4688,7 @@ impl Hangar {
         let id = id.to_owned();
         let mut discard = None;
         let mut baton = None;
+        let mut segments = None;
         // Sessão orq: linha do tempo do orquestrador já interpretada pelo backend, desenhada à parte.
         if let Some(&Item::Event(event_index)) = self.conversation.items.get(index).filter(|_| id != PREVIEW) {
             if self.chat.events.get(event_index).is_some_and(|event| event.orq.is_some()) { return self.render_orq_event(&id, event_index, cx); }
@@ -4670,7 +4704,8 @@ impl Hangar {
                 Some(message) => message,
                 None => { local = prepare_message(&self.chat.events[*event_index], &self.cites.dead); &local }
             };
-            let Prepared::Message { markdown, blank, card, .. } = message else { return div().into_any_element(); };
+            let Prepared::Message { markdown, blank, card, refs, .. } = message else { return div().into_any_element(); };
+            segments = refs.clone();
             match card.clone() {
                 Some(cards::Card::Codex(card)) => return self.render_codex_card(&id, *event_index, card, markdown.clone(), cx),
                 Some(cards::Card::Baton(card)) => baton = Some((*event_index, card)),
@@ -4745,16 +4780,19 @@ impl Hangar {
             Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).is_some_and(|e| e.skill.is_some()),
             _ => false,
         };
-        let long = skill || (user && long_message(&markdown));
+        let long = skill || (user && segments.as_ref().map_or_else(|| long_message(&markdown), |message| message.long));
         let open = self.expanded.contains(&more_key);
         let text: Vec<AnyElement> = match charted {
             None if skill && !open => Vec::new(),
+            _ if segments.is_some() => segments.map(|message| self.render_ref_segments(&id, &message, long && !open, cx)).unwrap_or_default(),
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
             None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
                 let runner = (plain && id != PREVIEW).then(|| cx.weak_entity());
+                // A resposta assentada desenha o Mermaid; a prévia e as outras linhas deixam o bloco como código.
+                let extensions = if runner.is_some() { self.answer_extensions(&id, cx) } else { citation_extensions(&id, cx.weak_entity()) };
                 let text = chat_text_runnable(&view, cx, runner.clone(), &id).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
-                    .markdown_extensions(citation_extensions(&id, cx.weak_entity()));
+                    .markdown_extensions(extensions);
                 vec![collapse(text, long, open).into_any_element()]
             }
             None => Vec::new(),
@@ -4796,13 +4834,16 @@ impl Hangar {
 // clique, não copiado a cada quadro.
 fn with_copy_menu(row: Stateful<Div>, id: String, view: WeakEntity<Hangar>) -> AnyElement {
     let copy_label = tr("copy_message");
-    row.context_menu(move |menu, _, _| {
+    row.context_menu(move |menu, window, cx| {
+        // Com a seleção dentro desta resposta, o menu também cita.
+        let cite = quotes::cite_menu_item(&view, &id, window, cx);
         let (view, id) = (view.clone(), id.clone());
         sidebar::menu_style(menu).item(PopupMenuItem::new(copy_label.clone()).icon(IconName::Copy)
             .on_click(move |_, _, cx| {
                 let text = view.upgrade().and_then(|view| view.read(cx).copy_text(&id));
                 if let Some(text) = text { cx.write_to_clipboard(ClipboardItem::new_string(text)); }
             }))
+            .when_some(cite, |menu, item| menu.item(item))
     }).into_any_element()
 }
 
@@ -4818,10 +4859,8 @@ fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::
         fn name(&self) -> &str { "file-citation" }
         fn parse(&self, node: &markdown_ast::Node, context: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
             let markdown_ast::Node::Link(link) = node else { return None; };
-            let url = url::Url::parse(&link.url).ok().filter(|url| url.scheme() == "hangar-file")?;
-            let path = url.query_pairs().find(|(key, _)| key == "path")?.1.into_owned();
-            let line = url.query_pairs().find(|(key, _)| key == "line").and_then(|(_, value)| value.parse::<u32>().ok()).filter(|n| *n > 0);
-            let text = format!("{path}{}", line.map(|n| format!(":{n}")).unwrap_or_default());
+            let (path, line) = composer::citation_target(&link.url)?;
+            let text = composer::citation_text(&path, line);
             Some(MarkdownNode::new(self.name(), (path, line)).text(text).markdown(context.node_source(node).unwrap_or_default().to_owned()))
         }
         fn render(&self, node: &MarkdownNode, _: &mut Window, _: &mut App) -> impl IntoElement {
@@ -5896,8 +5935,12 @@ fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {
     let body = display_body(event);
     // Recado de outra sessão também é escrito por agente: cita arquivo do mesmo jeito que a resposta.
     let cites = event.kind == "assistant_msg" || peer_of(event).is_some();
-    let source = if cites { composer::citation_markdown_with(&body, &|p| dead.contains(p)) } else { body.clone() };
-    Prepared::Message { markdown: safe_markdown(&source), blank: body.trim().is_empty(), card }
+    let mut map = source_map::SourceMap { source_len: body.len(), ..Default::default() };
+    let source = if cites { composer::citation_markdown_mapped(&body, &|p| dead.contains(p), &mut map.cite) } else { body.clone() };
+    let markdown = safe_markdown_mapped(&source, &mut map.safe);
+    // Mensagem do usuário com citação ou elemento: os blocos saem formatados, nunca crus.
+    let refs = (event.kind == "user_msg" && peer_of(event).is_none()).then(|| quotes::ref_message(&body)).flatten().map(std::rc::Rc::new);
+    Prepared::Message { markdown, blank: body.trim().is_empty(), card, map: std::rc::Rc::new(map), refs }
 }
 
 // Identidade do conteúdo de uma linha que não é mensagem: muda quando chega resultado ou o grupo cresce.
@@ -5949,12 +5992,18 @@ fn preview_source(preview: &Preview) -> String {
     output
 }
 
-fn safe_markdown(source: &str) -> String {
+fn safe_markdown(source: &str) -> String { safe_markdown_mapped(source, &mut source_map::Edits::default()) }
+
+/// Como `safe_markdown`, anotando em `edits` cada trecho trocado (escape, imagem).
+fn safe_markdown_mapped(source: &str, edits: &mut source_map::Edits) -> String {
     if !source.contains('<') && !source.contains("![") { return source.to_owned(); }
     let mut output = String::with_capacity(source.len());
     let mut fence = None;
     let mut inline = None;
+    let mut line_start = 0;
     for line in source.split_inclusive('\n') {
+        let line_at = line_start;
+        line_start += line.len();
         let trimmed = line.trim_start();
         let marker = if trimmed.starts_with("```") { Some('`') }
             else if trimmed.starts_with("~~~") { Some('~') } else { None };
@@ -5973,15 +6022,20 @@ fn safe_markdown(source: &str) -> String {
                 inline = match inline { Some(open) if open == run => None, None => Some(run), other => other };
                 for _ in 0..run { output.push('`'); }
             } else if inline.is_none() && ch == '<' && chars.peek().is_some_and(|&(_, next)| next.is_ascii_alphabetic() || matches!(next, '/' | '!')) {
+                let from = output.len();
                 output.push_str("&lt;");
+                edits.push(line_at + at..line_at + at + 1, from..output.len());
             } else if inline.is_none() && ch == '!' && chars.peek().is_some_and(|&(_, next)| next == '[') {
-                match image_markdown(&line[at + 1..]) {
+                let from = output.len();
+                let consumed = match image_markdown(&line[at + 1..]) {
                     Some((text, used)) => {
                         output.push_str(&text);
                         while chars.peek().is_some_and(|&(next, _)| next <= at + used) { chars.next(); }
+                        used + 1
                     }
-                    None => output.push_str("\\!"),
-                }
+                    None => { output.push_str("\\!"); 1 }
+                };
+                edits.push(line_at + at..line_at + at + consumed, from..output.len());
             } else { output.push(ch); }
         }
     }
@@ -6116,7 +6170,12 @@ impl Hangar {
                         .px(px(16.)).pt(px(4.)).pb(px(8.)).flex().justify_center()
                         .child(column_box(false).h_full().rounded(px(14.)).border_1().border_color(theme::border())
                             .bg(theme::sheet()).shadow(theme::sheet_shadow())));
+                    self.paint_quote_flash(cx);
+                    let cite_offer = self.render_cite_offer(window, cx);
                     content = content.child(div().relative().flex_1().min_h_0().flex().flex_col()
+                        // A seleção numa resposta oferece "Citar" ao soltar o mouse.
+                        .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| this.selection_released(event, window, cx)))
+                        .children(cite_offer)
                         .children(sheet)
                         .child(page_card::Paint::edge(&self.pages.paint, true))
                         .child(list(self.list_state.clone(), move |i, window, cx| {

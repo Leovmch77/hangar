@@ -1,6 +1,7 @@
 // Painel da fila: as mensagens que esperam a vez no Hangar, acima do composer. A lista vem do evento `queue` do
 // servidor (Claude e Codex, com ações); sem ele (Pi, omp, Kimi, modo python) sai das bolhas `queued-`, sem ações.
 import { waitsInQueue } from './history';
+import { composeWithContextRefs, type ContextRef } from './contextRefs';
 import type { ChatEvent } from './types';
 
 export interface QueuePanelEntry { id: string; text: string; ts: number | null }
@@ -53,9 +54,10 @@ export function beginQueueEdit(entry: QueuePanelEntry, draft: string, current: Q
   return { edit: { entryId: entry.id, original: entry.text, savedDraft: current ? current.savedDraft : draft }, composerText: entry.text };
 }
 
-/** O servidor recusa texto vazio e comando (422 `queue_text_invalid`): o botão Atualizar fica desativado antes. */
-export function canUpdateQueueEdit(text: string): boolean {
-  const trimmed = text.trim();
+/** O servidor recusa texto vazio e comando (422 `queue_text_invalid`): o botão Atualizar fica desativado antes.
+ *  `refs`: citações da mensagem em edição, que voltam na frente do texto; com elas o campo pode ficar vazio. */
+export function canUpdateQueueEdit(text: string, refs: readonly ContextRef[] = []): boolean {
+  const trimmed = composeWithContextRefs(refs, text);
   return trimmed.length > 0 && !trimmed.startsWith('/');
 }
 
