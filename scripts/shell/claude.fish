@@ -1,22 +1,14 @@
 # hangar — `claude` wrapper (fish). Installed by scripts/install-claude-wrapper.sh.
 #
-# Makes every interactive `claude` trackable by the hangar app:
-#  1. injects a unique --session-id  -> the backend binds the exact transcript (.jsonl), so two
-#     claudes in the SAME folder never leak into / overwrite each other.
-#  2. runs INSIDE tmux               -> the app only lists tmux sessions; a claude started outside
-#     tmux is invisible to the app.
+# Faz todo `claude` interativo aberto no terminal nascer como sessão do Hangar, igual às do app.
 #
-# Rules:
-#  - already passed --session-id/--resume/-c/--continue -> respected, untouched (the CLI rejects
-#     --session-id combined with --resume/--continue).
-#  - already in tmux ($TMUX) / -p / --print / stdin not a tty (pipe/script) -> only inject the id.
-#  - outside tmux + interactive            -> create a tmux session named after the folder BASENAME
-#     (suffix -2/-3 if it already exists) and run claude (with the id) inside it. Quitting claude
-#     ends the command, so the tmux session dies and disappears from the app.
-#
-# COLORTERM + CLAUDE_CODE_TMUX_TRUECOLOR keep Claude's theme 24-bit inside tmux (see
-# docs/tmux-truecolor-setup.md). The tmux server goes in its own systemd scope so closing the
-# terminal that spawned it doesn't kill every session (same fix as backend/app/tmux.py).
+# Regras (as mesmas do claude.posix.sh):
+#  - --session-id/--resume/-c/--continue -> CLI cru, sem id novo (o CLI recusa --session-id junto).
+#  - já no tmux ($TMUX) / -p / --print / stdin sem tty -> CLI cru com --session-id injetado.
+#  - fora do tmux + terminal -> `hangar-open claude …`: o lançador do Hangar (`hangar-server open`)
+#    abre a sessão (nome, conta, motor, plugin, hooks) e o terminal anexa nela. Argumento que o
+#    pedido não cobre, ou sem hangar-server -> CLI cru com o id. Recusa do Hangar -> erro, sem
+#    segunda abertura.
 #
 # Escape hatch: `command claude ...` runs the raw binary, bypassing this wrapper.
 function claude
@@ -75,85 +67,26 @@ function claude
         end
     end
 
-    if set -q TMUX; or contains -- -p $argv; or contains -- --print $argv; or not isatty stdin
-        # `command` só faz sentido quando o QUEM roda é este próprio shell: bypassa a função `claude`
-        # para não recursar nela mesma. Com $pre setado, quem executa é o hangar-engine (um processo
-        # separado, achado no PATH) — o execvpe dele nunca vê função de shell, então "command" viraria
-        # só uma string a mais no argv (e um alvo inexistente pro execvpe procurar).
-        if test (count $pre) -eq 0
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id $id $plug $argv
+    # Fora do tmux e em terminal: a sessão nasce pelo lançador do Hangar, igual às do app. Saída 100
+    # do hangar-open = argumento que o pedido não cobre ou sem hangar-server -> CLI cru abaixo.
+    if not set -q TMUX; and not contains -- -p $argv; and not contains -- --print $argv; and isatty stdin
+        if command -q hangar-open
+            hangar-open claude $argv
+            set -l rc $status
+            test $rc -eq 100; or return $rc
         else
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 $pre claude --session-id $id $plug $argv
+            echo "hangar: hangar-open não encontrado; abrindo o claude sem o Hangar" >&2
         end
-        return
     end
 
-    # Mesma regra do backend (app/names.py): acento -> ASCII equivalente ANTES do filtro, senao
-    # "Área de Trabalho" vira "-rea-de-Trabalho" (a 1a letra some e sobra traco na frente — nome de
-    # sessao tmux comecando com "-" e pedir encrenca). Sem iconv, segue com o nome cru.
-    set -l base (basename "$PWD")
-    if command -v iconv >/dev/null 2>&1
-        set -l ascii (printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null)
-        # Checar o STATUS, nao so "veio algo": num basename com byte UTF-8 invalido (pasta vinda de
-        # samba/zip com codepage errada) o iconv imprime o prefixo que ja converteu, falha no byte
-        # ruim e sai 1. So testar `-n` aceitava esse pedaco truncado e o nome perdia tudo depois do
-        # byte — "bad-<0xff>-name" virava "bad", calado. O posix ja acertava por encadear com &&.
-        test $status -eq 0; and test -n "$ascii"; and set base $ascii
-    end
-    set base (string replace -ra '[^A-Za-z0-9_-]' '-' -- $base)
-    set base (string replace -ra '^-+|-+$' '' -- $base)
-    test -n "$base"; or set base session
-    set -l name $base
-    set -l i 2
-    while tmux has-session -t "=$name" 2>/dev/null
-        set name "$base-$i"
-        set i (math $i + 1)
-    end
-
-    # Conta Claude (claude-conta setou CLAUDE_CONFIG_DIR): tmux NÃO herda o env de quem chama —
-    # sem repassar aqui, a sessão nasceria na conta padrão, calada. Aqui pode ir por `-e` (ao
-    # contrário da key do motor, que vai pelo `hangar-engine --exec` justamente pra não aparecer em
-    # /proc/<pid>/cmdline): isto é um caminho, não um segredo.
-    # Passado SEMPRE, não só quando o chamador tem a variável: o servidor tmux guarda o ambiente
-    # com que foi INICIADO, e omitir o `-e` numa sessão posterior não remove a variável — o pane
-    # nasceria na conta de uma sessão antiga. Chamador sem a variável -> `env -u` no início do
-    # comando do pane, nunca `=$HOME/.claude`: pro Claude Code a conta padrão é a AUSÊNCIA da
-    # variável; setada, mesmo no próprio ~/.claude, ele lê ~/.claude/.claude.json em vez de
-    # ~/.claude.json (e perde MCPs, pastas confiáveis e histórico).
-    set -l cfg
-    if set -q CLAUDE_CONFIG_DIR; and test -n "$CLAUDE_CONFIG_DIR"
-        set cfg -e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
+    # CLI cru com o id: já no tmux, -p, stdin sem tty, ou o Hangar não abriu acima.
+    # `command` só faz sentido quando o QUEM roda é este próprio shell: bypassa a função `claude`
+    # para não recursar nela mesma. Com $pre setado, quem executa é o hangar-engine (um processo
+    # separado, achado no PATH) — o execvpe dele nunca vê função de shell, então "command" viraria
+    # só uma string a mais no argv (e um alvo inexistente pro execvpe procurar).
+    if test (count $pre) -eq 0
+        COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id $id $plug $argv
     else
-        set cfg env -u CLAUDE_CONFIG_DIR
-    end
-
-    set -l run
-    # `command -q systemd-run` diz que o BINARIO existe, nao que ele FUNCIONA: o gerenciador systemd
-    # do usuario pode recusar criar scope transiente ("Failed to start transient scope unit"), e ai
-    # o `claude` simplesmente nao abre. Medido nesta maquina: 5/5 falhas com binario e gerenciador na
-    # mesma versao. O probe custa um fork e transforma "nao abre" em "abre sem scope proprio".
-    # As tres condicoes ficam na MESMA linha logica: em fish, um `and` em linha nova encerra a
-    # condicao do if e vira o primeiro comando do corpo — o probe seria ignorado, calado.
-    # NAO usar `$run tmux ...` com $run possivelmente vazio: em fish, variavel vazia na posicao
-    # de COMANDO e erro fatal ("O comando expandido estava vazio"), ao contrario de bash/zsh, onde
-    # ela some e o comando seguinte roda. Como o probe acima FALHA nesta maquina (5/5, e o
-    # comentario acima ja dizia isso), o caminho vazio e o NORMAL aqui, nao a excecao — o `claude`
-    # simplesmente parava de abrir. Por isso a chamada e duplicada nos dois ramos, igual ao
-    # claude.posix.sh, que documenta a mesma escolha.
-    # CP_SESSION_NAME: mesmo carimbo de identidade que o backend poe em new_session (app/tmux.py).
-    # Sem ele o hangar-send de dentro desta sessao cai no `tmux display-message -p '#S'`, que devolve a
-    # sessao do CLIENTE anexado e nao a de quem chama — o `--unpair` de uma sessao desfazia o vinculo
-    # da OUTRA. Sessao aberta no terminal e criada AQUI, nao pelo backend, entao o carimbo tem que
-    # sair daqui tambem, senao o bug fica vivo justamente no caminho mais usado.
-    if command -q systemd-run; and set -q XDG_RUNTIME_DIR; and systemd-run --user --scope --collect -q -- true >/dev/null 2>&1
-        systemd-run --user --scope --collect -q -- tmux new-session -s $name -c "$PWD" \
-            -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
-            -e "CP_SESSION_NAME=$name" \
-            $cfg $pre claude --session-id $id $plug $argv
-    else
-        tmux new-session -s $name -c "$PWD" \
-            -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
-            -e "CP_SESSION_NAME=$name" \
-            $cfg $pre claude --session-id $id $plug $argv
+        COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 $pre claude --session-id $id $plug $argv
     end
 end

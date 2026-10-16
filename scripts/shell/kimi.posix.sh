@@ -1,8 +1,7 @@
 # hangar — `kimi` wrapper (bash + zsh). Sourced from your rc by
 # scripts/install-claude-wrapper.sh. Fish has its own version: scripts/shell/kimi.fish
 #
-# Makes every interactive `kimi` trackable by the hangar app by running it INSIDE tmux (the app
-# only lists tmux sessions; a kimi started outside tmux is invisible to it).
+# Makes every interactive `kimi` opened in a terminal a Hangar session, same as the app opens.
 #
 # SIMPLER than the pi wrapper ON PURPOSE: the Kimi CLI has no `--session-id` flag (the session id
 # is born inside, at the first prompt), so there is no id to inject and no env var to export. The
@@ -15,13 +14,10 @@
 #    interactive launch with an initial prompt. Same rule as the pi/codex wrappers.
 #  - a flag that makes kimi print and exit anywhere in the args -> raw: -p/--prompt,
 #    --output-format, --help/-h, --version/-V. Wrapping these would open a TUI that never prints.
-#  - resume flags (-S/--session, -c/--continue) are NOT special here: there's nothing to inject,
-#    so they take the normal path — the tmux wrap keeps the resumed session visible in the app and
-#    the hook ticket carries the REAL session id regardless.
-#  - already in tmux ($TMUX) / stdin not a tty (pipe/script) -> raw: nothing to do.
-#  - outside tmux + interactive -> create a tmux session named after the folder BASENAME (suffix
-#    -2/-3 if it already exists) and run kimi inside it. Quitting kimi ends the command, so the
-#    tmux session dies and disappears from the app.
+#  - resume flags (-S/--session, -c/--continue) -> raw.
+#  - outside tmux + terminal -> `hangar-open kimi …`: the Hangar launcher opens the session and
+#    the terminal attaches to it. An argument the request doesn't cover, or no hangar-server -> raw.
+#  - already in tmux ($TMUX) / stdin not a tty (pipe/script) -> raw: the hook ticket links the pane.
 #
 # Escape hatch: `command kimi ...` runs the raw binary, bypassing this wrapper.
 kimi() {
@@ -48,54 +44,37 @@ kimi() {
     # já nesta abertura (antes dependia de reiniciar o backend). Silencioso e fail-soft.
     command -v hangar-skills-sync >/dev/null 2>&1 && hangar-skills-sync
 
+    # Retomada (-S/--session, -c/--continue): CLI cru.
+    for a in "$@"; do
+        case "$a" in
+            -S|--session|--session=*|-c|--continue)
+                command kimi "$@"
+                return
+                ;;
+        esac
+    done
+
     # TMUX herdado pode estar MORTO (mesmo caso do wrapper claude/pi: kitty single-instance cujo
     # mestre nasceu dentro de um pane que já fechou). Valida o pane; stale -> limpa e segue pro
-    # caminho "fora do tmux" (cria sessão nova).
+    # caminho "fora do tmux" (abre pelo Hangar).
     if [ -n "${TMUX:-}" ]; then
         if [ -z "${TMUX_PANE:-}" ] || ! tmux list-panes -t "$TMUX_PANE" >/dev/null 2>&1; then
             unset TMUX TMUX_PANE
         fi
     fi
 
-    # já dentro de tmux, ou stdin não é um tty (pipe/script): nada a fazer — o bilhete do hook
-    # liga o pane à sessão sem nenhuma variável nossa.
-    if [ -n "${TMUX:-}" ] || [ ! -t 0 ]; then
-        command kimi "$@"
-        return
+    # Fora do tmux e em terminal: a sessão nasce pelo lançador do Hangar (ver claude.posix.sh).
+    if [ -z "${TMUX:-}" ] && [ -t 0 ]; then
+        if command -v hangar-open >/dev/null 2>&1; then
+            local rc=0
+            hangar-open kimi "$@" || rc=$?
+            [ "$rc" = 100 ] || return "$rc"
+        else
+            echo "hangar: hangar-open não encontrado; abrindo o kimi sem o Hangar" >&2
+        fi
     fi
 
-    # outside tmux + interactive: tmux session named after the folder basename, unique.
-    local base name i ascii
-    base=$(basename "$PWD")
-    # Acento vira o ASCII equivalente ANTES do filtro — mesma regra do backend (app/names.py) e dos
-    # wrappers claude/pi.
-    if command -v iconv >/dev/null 2>&1; then
-        ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
-            && [ -n "$ascii" ] && base=$ascii
-    fi
-    base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
-    while [ "${base#-}" != "$base" ]; do base=${base#-}; done
-    while [ "${base%-}" != "$base" ]; do base=${base%-}; done
-    [ -n "$base" ] || base=session
-    name=$base; i=2
-    while tmux has-session -t "=$name" 2>/dev/null; do
-        name="$base-$i"; i=$((i + 1))
-    done
-
-    # `command -v systemd-run` diz que o BINARIO existe, nao que ele FUNCIONA (mesmo probe dos
-    # wrappers claude/pi: o gerenciador systemd do usuario pode recusar scope transiente).
-    local run=()
-    if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
-       && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
-        run=(systemd-run --user --scope --collect -q --)
-    fi
-    # `sh -c` + exec mantém a MESMA forma dos outros wrappers. CP_SESSION_NAME: carimbo de
-    # identidade pro hangar-send de dentro do pane (ver claude.posix.sh).
-    # KIMI_CODE_TUI_FULL_SCREEN=1: fullscreen TUI experimental do Kimi 0.36+ (scroll proprio,
-    # composer fixo). O -e do backend (app/tmux.py) cobre sessoes criadas pelo app; este cobre as
-    # abertas pelo terminal. Caminho "ja dentro de tmux -> raw" nao passa aqui: quem cobre e o
-    # export no rc do shell.
-    "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" \
-        -e "KIMI_CODE_TUI_FULL_SCREEN=1" \
-        sh -c 'exec kimi "$@"' _ "$@"
+    # já dentro de tmux, stdin sem tty, ou o Hangar não abriu acima: nada a injetar — o bilhete do
+    # hook liga o pane à sessão sem nenhuma variável nossa.
+    command kimi "$@"
 }

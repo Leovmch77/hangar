@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""`hangar-open <claude|pi|omp|kimi> [args do CLI]`: chamado pelos wrappers de shell fora do tmux e em
+terminal. Pede a sessão ao lançador do Hangar (`hangar-server open`, o mesmo do app) e anexa o
+terminal a ela. Saída 100 = os argumentos não cabem no pedido, ou não há `hangar-server`: o wrapper
+roda o CLI cru. Qualquer outra saída diferente de 0 é erro já mostrado; não se abre uma segunda vez.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+RAW = 100
+
+# Flag do CLI -> chave do pedido (`POST /api/sessions`). O que não estiver aqui vai cru.
+FLAGS = {
+    "claude": {"--model": "model", "--effort": "effort", "--permission-mode": "permission_mode"},
+    "pi": {"--model": "model", "--thinking": "effort"},
+    "omp": {"--model": "model", "--thinking": "effort", "--profile": "omp_profile"},
+    "kimi": {"--model": "model"},
+}
+
+
+def request(provider: str, args: list[str]) -> dict | None:
+    body: dict = {"provider": provider, "cwd": os.environ.get("PWD") or os.getcwd(), "headless": False}
+    env = {"claude": {"CLAUDE_CONFIG_DIR": "config_dir", "CP_ENGINE": "engine"},
+           "omp": {"OMP_PROFILE": "omp_profile"}}.get(provider, {})
+    body.update({key: os.environ[var] for var, key in env.items() if os.environ.get(var)})
+    flags = FLAGS[provider]
+    rest = iter(args)
+    for arg in rest:
+        flag, eq, value = arg.partition("=")
+        if flag in flags:
+            if not eq:
+                value = next(rest, None)
+                if value is None:
+                    return None
+            body[flags[flag]] = value
+        elif provider == "claude" and arg == "--dangerously-skip-permissions":
+            body["permission_mode"] = "bypassPermissions"
+        elif arg.startswith("-") or "initial_prompt" in body:
+            return None
+        else:
+            body["initial_prompt"] = arg
+    return body
+
+
+def server_bin() -> str | None:
+    exe = "hangar-server.exe" if os.name == "nt" else "hangar-server"
+    for path in (os.environ.get("CP_RUST_SERVER_BIN"), str(Path.home() / ".hangar" / "bin" / exe), shutil.which("hangar-server")):
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def main() -> int:
+    provider, args = sys.argv[1], sys.argv[2:]
+    body = request(provider, args)
+    if body is None:
+        return RAW
+    exe = server_bin()
+    if not exe:
+        print(f"hangar: hangar-server não encontrado; abrindo o {provider} sem o Hangar", file=sys.stderr)
+        return RAW
+    opened = subprocess.run([exe, "open", json.dumps(body)], stdout=subprocess.PIPE, text=True)
+    if opened.returncode != 0:
+        # Saída 3 (resolvido mas não aberto aqui) traz o spec no stdout.
+        if opened.stdout.strip():
+            print(opened.stdout.strip(), file=sys.stderr)
+        return opened.returncode if 0 < opened.returncode != RAW else 1
+    try:
+        name = json.loads(opened.stdout)["name"]
+    except (ValueError, KeyError, TypeError):
+        print(f"hangar: resposta do hangar-server sem o nome da sessão: {opened.stdout.strip()}", file=sys.stderr)
+        return 1
+    os.execvp("tmux", ["tmux", "attach-session", "-t", f"={name}"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

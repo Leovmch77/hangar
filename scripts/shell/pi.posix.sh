@@ -1,40 +1,18 @@
 # hangar — `pi` wrapper (bash + zsh). Sourced from your rc by
 # scripts/install-claude-wrapper.sh. Fish has its own version: scripts/shell/pi.fish
 #
-# Makes every interactive `pi` trackable by the hangar app:
-#  1. injects a unique --session-id  -> CP_PI_SESSION carries the SAME uuid, exported into pi's own
-#     environment. pi rewrites its own argv, so --session-id disappears from /proc/<pid>/cmdline —
-#     the backend reads CP_PI_SESSION from /proc/<pid>/environ instead (registry.py:_pi_sid_of).
-#  2. runs INSIDE tmux               -> the app only lists tmux sessions; a pi started outside tmux
-#     is invisible to the app.
+# Faz todo `pi` interativo aberto no terminal nascer como sessão do Hangar, igual às do app.
 #
-# Rules:
-#  - already passed a flag that manages its own session state -> no --session-id injection, but
-#    STILL wrapped in tmux when interactive+outside tmux. Per `pi --help`: --session-id,
-#    --resume/-r, --continue/-c, --session (path|id), --fork (path|id), --no-session. Injecting
-#    --session-id alongside any of these either errors or silently overrides what the user asked
-#    for (e.g. `pi -c` would start a FRESH random session instead of continuing the last one).
-#    The tmux wrap keeps resumed sessions visible in the app; state tracking still works because
-#    hangar-state.ts publishes the real session file from inside pi (it never depended on the id).
-#  - not an interactive session at all -> raw, exactly like the codex wrapper leaves its subcommands
-#    alone. Two shapes: (a) the FIRST argument is one of pi's subcommands (install/remove/uninstall/
-#    update/list/config) — matched on the first argument only, so `pi "remove the dead code"` stays an
-#    interactive launch with an initial prompt; (b) a flag that makes pi print and exit anywhere in the
-#    args (-p/--print, --mode, --list-models, --export, --help/-h, --version/-v). Wrapping these was
-#    the bug: `pi remove npm:foo` opened the TUI and never removed anything.
-#  - already in tmux ($TMUX) / stdin not a tty (pipe/script) -> only inject the id + export the var.
-#  - outside tmux + interactive -> create a tmux session named after the folder BASENAME (suffix
-#     -2/-3 if it already exists) and run pi (with the id) inside it. Quitting pi ends the command,
-#     so the tmux session dies and disappears from the app.
-#
-# CP_PI_SESSION is EXPORTED, never passed via `tmux -e`: a tmux server that is already running does
-# NOT hand its client's environment to a brand-new pane (measured — an `export` before `tmux
-# new-session` never reaches the pane when a server is already up), so the export has to happen
-# INSIDE the pane's own process. That's why the "create a new tmux session" branch below runs a tiny
-# `sh -c` that exports CP_PI_SESSION and only then execs pi, instead of relying on ambient
-# inheritance or on `-e` (same reasoning as CP_ENGINE in CLAUDE.md — keeps one shape for both
-# wrappers, and here `-e` would put the uuid in the tmux client's own /proc/<pid>/cmdline for no
-# reason since the export-then-exec shape is just as cheap).
+# Regras:
+#  - uso não interativo -> cru: (a) o PRIMEIRO argumento é subcomando do pi (install/remove/
+#    uninstall/update/list/config; `pi "remove the dead code"` continua prompt); (b) flag que imprime
+#    e sai em qualquer posição (-p/--print, --mode, --list-models, --export, --help/-h, --version/-v).
+#  - flag que gerencia a própria sessão (--session-id, --resume/-r, --continue/-c, --session,
+#    --fork, --no-session) -> cru.
+#  - fora do tmux + terminal -> `hangar-open pi …`: o lançador do Hangar abre a sessão e o terminal
+#    anexa nela. Argumento que o pedido não cobre, ou sem hangar-server -> cru com o id abaixo.
+#  - já no tmux / stdin sem tty -> cru com --session-id e CP_PI_SESSION (o mesmo uuid). O pi
+#    reescreve o próprio argv; o backend lê o id em /proc/<pid>/environ (registry.py:_pi_sid_of).
 #
 # Escape hatch: `command pi ...` runs the raw binary, bypassing this wrapper.
 pi() {
@@ -47,9 +25,7 @@ pi() {
             ;;
     esac
 
-    # usos não interativos primeiro: o pi imprime e sai, não tem TUI pra envolver em tmux.
-    # Ordem indiferente hoje: o loop de resume só marca a flag (não retorna) e este retorna
-    # sempre — `pi -c -p "x"` sai cru nas duas ordens (provado em review, 31/07).
+    # usos não interativos primeiro: o pi imprime e sai, não tem TUI pra abrir como sessão.
     for a in "$@"; do
         case "$a" in
             -p|--print|--mode|--mode=*|--list-models|--list-models=*|--export|--export=*|--help|-h|--version|-v)
@@ -63,76 +39,40 @@ pi() {
     # já nesta abertura (antes dependia de reiniciar o backend). Silencioso e fail-soft.
     command -v hangar-skills-sync >/dev/null 2>&1 && hangar-skills-sync
 
-    # Flags que gerenciam a própria sessão: NUNCA injetar --session-id (id novo por cima de `pi -c`
-    # abriria sessão FRESCA em vez de continuar). Mas o tmux continua valendo — antes essas flags
-    # passavam cruas e a sessão retomada ficava INVISÍVEL pro app. O rastreio não depende do id
-    # injetado: hangar-state.ts publica o arquivo real da sessão por dentro do pi.
-    local own_session=0
+    # Flags que gerenciam a própria sessão: CLI cru (um id novo por cima de `pi -c` abriria sessão
+    # FRESCA em vez de continuar).
     for a in "$@"; do
         case "$a" in
             --session-id|--session-id=*|--resume|--resume=*|-r|--continue|-c|--session|--session=*|--fork|--fork=*|--no-session)
-                own_session=1
-                break
+                command pi "$@"
+                return
                 ;;
         esac
     done
 
-    local id
-    id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
-
     # TMUX herdado pode estar MORTO (mesmo caso do wrapper claude: kitty single-instance cujo mestre
     # nasceu dentro de um pane que já fechou). Valida o pane; stale -> limpa e segue pro caminho
-    # "fora do tmux" (cria sessão nova).
+    # "fora do tmux" (abre pelo Hangar).
     if [ -n "${TMUX:-}" ]; then
         if [ -z "${TMUX_PANE:-}" ] || ! tmux list-panes -t "$TMUX_PANE" >/dev/null 2>&1; then
             unset TMUX TMUX_PANE
         fi
     fi
 
-    # só injeta o id (sem tmux novo) quando: já dentro de tmux, ou stdin não é um tty (pipe/script).
-    if [ -n "${TMUX:-}" ] || [ ! -t 0 ]; then
-        if [ "$own_session" = 1 ]; then
-            command pi "$@"
-            return
+    # Fora do tmux e em terminal: a sessão nasce pelo lançador do Hangar (ver claude.posix.sh).
+    if [ -z "${TMUX:-}" ] && [ -t 0 ]; then
+        if command -v hangar-open >/dev/null 2>&1; then
+            local rc=0
+            hangar-open pi "$@" || rc=$?
+            [ "$rc" = 100 ] || return "$rc"
+        else
+            echo "hangar: hangar-open não encontrado; abrindo o pi sem o Hangar" >&2
         fi
-        export CP_PI_SESSION="$id"
-        command pi --session-id "$id" "$@"
-        return
     fi
 
-    # outside tmux + interactive: tmux session named after the folder basename, unique.
-    local base name i ascii
-    base=$(basename "$PWD")
-    # Acento vira o ASCII equivalente ANTES do filtro — mesma regra do backend (app/names.py) e do
-    # wrapper claude.
-    if command -v iconv >/dev/null 2>&1; then
-        ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
-            && [ -n "$ascii" ] && base=$ascii
-    fi
-    base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
-    while [ "${base#-}" != "$base" ]; do base=${base#-}; done
-    while [ "${base%-}" != "$base" ]; do base=${base%-}; done
-    [ -n "$base" ] || base=session
-    name=$base; i=2
-    while tmux has-session -t "=$name" 2>/dev/null; do
-        name="$base-$i"; i=$((i + 1))
-    done
-
-    # `command -v systemd-run` diz que o BINARIO existe, nao que ele FUNCIONA (mesmo probe do
-    # wrapper claude: gerenciador systemd do usuario pode recusar scope transiente).
-    local run=()
-    if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
-       && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
-        run=(systemd-run --user --scope --collect -q --)
-    fi
-    # `sh -c` exporta CP_PI_SESSION DENTRO do próprio pane antes do exec pi — ver o comentário de
-    # cabeçalho pra o porquê. $0 vira "_" (placeholder), $1 o uuid, o resto ($@) os args originais.
-    # CP_SESSION_NAME: carimbo de identidade pro hangar-send de dentro do pane (ver claude.posix.sh).
-    if [ "$own_session" = 1 ]; then
-        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" \
-            sh -c 'exec pi "$@"' _ "$@"
-    else
-        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" \
-            sh -c 'export CP_PI_SESSION="$1"; shift; exec pi --session-id "$CP_PI_SESSION" "$@"' _ "$id" "$@"
-    fi
+    # CLI cru com o id: já no tmux, stdin sem tty, ou o Hangar não abriu acima.
+    local id
+    id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+    export CP_PI_SESSION="$id"
+    command pi --session-id "$id" "$@"
 }
