@@ -99,6 +99,8 @@ pub(super) fn batch_validator(provider:String,mut template:Value) -> super::queu
             if let Some(receipt)=image_receipt(&visible,&prepared["content"]) {
                 row["batch_image_receipt"]=json!(receipt);
                 row["batch_image_source_receipt"]=json!(image_receipt(row["text"].as_str().unwrap_or(""),&prepared["content"]));
+                // A TUI pode deixar o path como texto, sem anexar a imagem: aí só o texto inteiro aparece.
+                if terminal {row["batch_text_proof"]=json!(true);}
             }
         }
         if terminal {template["text"]=row["text"].clone();}
@@ -171,6 +173,26 @@ mod batch_tests {
             let path=dir.path().join(format!("{index}.jsonl"));std::fs::write(&path,"").unwrap();
             let mut receipts=super::super::receipt::ReceiptIndex::new("claude","sid");let cursor=receipts.capture(&path).unwrap();
             let record=json!({"type":"user","sessionId":"sid","message":{"role":"user","content":[{"type":"text","text":visible},image]}});
+            std::fs::write(&path,format!("{record}\n")).unwrap();receipts.scan(&path).unwrap();
+            assert_eq!(receipts.match_after(&path,&cursor,&rows[0],&Default::default()).unwrap().is_some(),expected,"cenário {index}");
+        }
+    }
+
+    #[test]
+    fn queued_batch_receipt_terminal_text_with_the_raw_path_also_proves_delivery() {
+        // A TUI pode receber o path como texto, sem anexar a imagem: o texto inteiro também prova.
+        let dir=tempfile::tempdir().unwrap();let image=dir.path().join("test.png");std::fs::write(&image,b"image-bytes").unwrap();
+        let text=format!("nossa mas era pra ser assim \u{2014} \u{1f4ce} imagem: {}",image.display());
+        let mut rows=json!([{"id":"batch","text":text,"batch_entries":[{"id":"a"}]}]);
+        batch_validator("claude-terminal".into(),json!({}))(&mut rows).unwrap();
+        assert!(rows[0]["batch_image_receipt"].is_string());
+        for (index,(content,expected)) in [
+            (json!(text),true),
+            (json!("nossa mas era pra ser assim"),false),
+        ].into_iter().enumerate() {
+            let path=dir.path().join(format!("t{index}.jsonl"));std::fs::write(&path,"").unwrap();
+            let mut receipts=super::super::receipt::ReceiptIndex::new("claude","sid");let cursor=receipts.capture(&path).unwrap();
+            let record=json!({"type":"user","sessionId":"sid","message":{"role":"user","content":content}});
             std::fs::write(&path,format!("{record}\n")).unwrap();receipts.scan(&path).unwrap();
             assert_eq!(receipts.match_after(&path,&cursor,&rows[0],&Default::default()).unwrap().is_some(),expected,"cenário {index}");
         }

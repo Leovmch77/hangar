@@ -1160,11 +1160,12 @@ pub(crate) fn legacy_rows(state: &State) -> Vec<Value> {
 }
 
 pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {
-    if row["batch_entries"].is_array() && row["batch_image_receipt"].is_string() {
-        return ["batch_image_receipt","batch_image_source_receipt"].into_iter()
-            .filter_map(|key|row[key].as_str().map(str::to_owned)).collect();
-    }
     let raw = row["text"].as_str().unwrap_or("").trim();
+    if row["batch_entries"].is_array() && row["batch_image_receipt"].is_string() {
+        let text = (row["batch_text_proof"] == true && !raw.is_empty()).then(|| raw.to_owned());
+        return ["batch_image_receipt","batch_image_source_receipt"].into_iter()
+            .filter_map(|key|row[key].as_str().map(str::to_owned)).chain(text).collect();
+    }
     let stripped = crate::transcript::history::strip_attach(raw);
     let mut lines: BTreeSet<_> = if row["batch_entries"].is_array() {
         // Só o pedido completo confirma o lote, mesmo se uma parte isolada já apareceu antes.
