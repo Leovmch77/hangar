@@ -3,6 +3,7 @@ import { StyleSheet } from 'react-native-unistyles';
 import { providerName, SESSION_PROVIDERS } from '@hangar/core';
 import type { Provider } from '@hangar/core';
 import { superficie } from '../../theme/superficie';
+import * as m from '../../paraglide/messages';
 
 const PROVIDERS = SESSION_PROVIDERS;
 
@@ -13,9 +14,10 @@ export function ProviderPicker({
 }: {
   value: Provider;
   onChange: (p: Provider) => void;
-  disabledMap?: Record<string, { disponivel: boolean }>;
+  disabledMap?: Record<string, { disponivel: boolean; motivo?: string | null }>;
 }) {
   return (
+    <View>
     <View style={styles.grid} accessibilityRole="radiogroup">
       {PROVIDERS.map((p) => {
         const dis = disabledMap?.[p] && !disabledMap[p].disponivel;
@@ -35,10 +37,18 @@ export function ProviderPicker({
         );
       })}
     </View>
+    {PROVIDERS.filter((p) => disabledMap?.[p]?.disponivel === false).map((p) => {
+      const reason = disabledMap?.[p]?.motivo;
+      return <Text key={p} style={styles.reason}>{reason == null || reason === 'nao_encontrado'
+        ? m.native_create_provider_missing({ p: providerName(p) })
+        : reason === 'sem_permissao' ? m.native_create_provider_execution_denied({ p: providerName(p) }) : reason}</Text>;
+    })}
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  reason: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, paddingHorizontal: 8, paddingVertical: 4 },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

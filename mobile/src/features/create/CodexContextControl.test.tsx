@@ -1,8 +1,15 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react';
+import { act, createElement, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
-import { CodexContextControl } from './CodexContextControl';
+import { CodexContextControl, useCodexContextControl } from './CodexContextControl';
+import type { Server } from '@hangar/core';
+
+function ContextHarness({ server, onBusy }: { server: Server; onBusy: (busy: boolean) => void }) {
+  const control = useCodexContextControl(server, true);
+  useEffect(() => onBusy(control.busy), [control.busy, onBusy]);
+  return createElement(CodexContextControl, { control });
+}
 
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
@@ -20,7 +27,7 @@ it('lê o padrão e confirma a gravação antes de liberar a criação', async (
     ? new Promise<Response>(resolve => { finish = resolve; })
     : new Response(JSON.stringify({ contexto_estendido: true })));
   try {
-    await act(async () => root.render(createElement(CodexContextControl, {
+    await act(async () => root.render(createElement(ContextHarness, {
       server: { id: 'a', label: 'A', baseUrl: 'http://a.local', token: 'teste' }, onBusy: busy,
     })));
     const toggle = container.querySelector<HTMLButtonElement>('[role="switch"]')!;

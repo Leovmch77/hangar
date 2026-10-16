@@ -1,21 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AccessibilityInfo, ActivityIndicator, AppState, Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
 import Animated, {
-  Easing, interpolateColor, useAnimatedStyle, useDerivedValue, useReducedMotion, useSharedValue, withDelay, withSpring, withTiming,
+  Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withSpring, withTiming,
 } from 'react-native-reanimated';
-import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import { MenuView } from '@react-native-menu/menu';
+import { SettingsList } from '../../ui/SettingsList';
+import { ComposerActions, ComposerBox, ComposerInput } from '../../chat/ComposerField';
 import type { Server } from '@hangar/core';
-import { MultilineInput } from '../../ui/MultilineInput';
-import { Sheet } from '../../ui/Sheet';
-import { Glass } from '../../ui/Glass';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
-import { Icon, type IconName } from '../../ui/Icon';
+import { Icon } from '../../ui/Icon';
 import { AttachmentPreview } from '../../ui/AttachmentPreview';
-import { RecordingWave } from '../../ui/RecordingWave';
 import type { PickedAttachment } from '../../ui/attachmentPicker';
 import { AttachSheet } from '../../ui/AttachSheet';
 import { usePressScale } from '../../ui/pressScale';
@@ -46,12 +42,10 @@ type Props = {
   topPills: (openFolder: (opener: View | null) => void) => ReactNode;
   // Conta e terminal, abaixo da caixa e à esquerda.
   bottomPills: ReactNode;
-  // Chip do provider na linha de baixo da caixa; "Mais opções" do menu abre a folha de sempre.
-  providerChip: (openOptions: () => void) => ReactNode;
+  providerChip: ReactNode;
   // Conversas antigas desta pasta que dá para continuar (hoje só o Codex lista).
   resume: { entries: { id: string; label: string }[]; busy: boolean; onPick: (id: string) => void } | null;
   notices: ReactNode;
-  options: ReactNode;
   // null enquanto falta destino ou conta; o texto continua editável.
   body: NewConversationInput['body'] | null;
   blocked: boolean;
@@ -71,9 +65,7 @@ function dropCopy(uri: string): void {
   try { removeDraftAttachment(uri); } catch { /* sem perda de dado */ }
 }
 
-function ToolButton({ icon, label, hint, onPress, disabled, busy, color, size = 20 }: {
-  icon: IconName; label: string; hint?: string; onPress?: () => void; disabled?: boolean; busy?: boolean; color?: string; size?: number;
-}) {
+function HistoryButton({ onPress, disabled, busy }: { onPress: () => void; disabled: boolean; busy: boolean }) {
   const { theme } = useUnistyles();
   const press = usePressScale();
   return (
@@ -84,54 +76,20 @@ function ToolButton({ icon, label, hint, onPress, disabled, busy, color, size = 
       disabled={disabled}
       hitSlop={5}
       accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityHint={hint}
+      accessibilityLabel={m.criar_retomar()}
       accessibilityState={{ disabled: !!disabled, busy: !!busy }}
       style={[styles.tool, press.style, disabled && styles.dim]}
     >
       {busy
         ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
-        : <Icon name={icon} size={size} color={color ?? theme.tokens.text.secondary} />}
-    </AnimatedPressable>
-  );
-}
-
-// Enviar acende quando há o que mandar: cor, opacidade e escala sobem juntas.
-function SendButton({ ready, busy, onPress }: { ready: boolean; busy: boolean; onPress: () => void }) {
-  const { theme } = useUnistyles();
-  const reduced = useReducedMotion();
-  const press = usePressScale();
-  const off = theme.tokens.border.default;
-  const lit = theme.tokens.text.primary;
-  const progress = useDerivedValue(() => withTiming(ready ? 1 : 0, { duration: reduced ? 0 : 180 }), [ready, reduced]);
-  const fill = useAnimatedStyle(() => ({
-    backgroundColor: interpolateColor(progress.value, [0, 1], [off, lit]),
-    opacity: 0.7 + 0.3 * progress.value,
-    transform: [{ scale: 0.9 + 0.1 * progress.value }],
-  }));
-  const ink = ready ? theme.tokens.bg.base : theme.tokens.text.muted;
-  return (
-    <AnimatedPressable
-      accessibilityRole="button"
-      accessibilityLabel={m.nova_conversa_enviar()}
-      accessibilityState={{ disabled: !ready, busy }}
-      onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onPress(); }}
-      onPressIn={press.onPressIn}
-      onPressOut={press.onPressOut}
-      disabled={!ready}
-      hitSlop={5}
-      style={press.style}
-    >
-      <Animated.View style={[styles.send, fill]}>
-        {busy ? <ActivityIndicator size="small" color={ink} /> : <Icon name="ArrowUp" size={18} color={ink} />}
-      </Animated.View>
+        : <Icon name="History" size={20} color={theme.tokens.text.secondary} />}
     </AnimatedPressable>
   );
 }
 
 export function NewConversation({
   server, destination, destinationPending, providerLabel, folderPanel,
-  topPills, bottomPills, providerChip, resume, notices, options, body, blocked, keyboardOffset,
+  topPills, bottomPills, providerChip, resume, notices, body, blocked, keyboardOffset,
 }: Props) {
   const router = useRouter();
   const { theme } = useUnistyles();
@@ -146,8 +104,8 @@ export function NewConversation({
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const dictationStyle = useDictationStyleLabel(server);
-  const [sheet, setSheet] = useState<'folder' | 'options' | null>(null);
-  const closeOptionsRef = useRef<View>(null);
+  const [sheet, setSheet] = useState<'folder' | 'resume' | null>(null);
+  const resumeAnchor = useRef<View>(null);
   const sheetOpener = useRef<View | null>(null);
   // Enviar só depois de ler a tentativa gravada: antes disso um toque poderia seguir a antiga.
   const [restored, setRestored] = useState(false);
@@ -302,7 +260,7 @@ export function NewConversation({
     if (held && !pending?.sessionName && held.uri !== attachment?.uri && !useNewConversation.getState().attempts[serverId]) dropCopy(held.uri);
   };
 
-  const openSheet = (kind: 'folder' | 'options', opener: View | null) => {
+  const openSheet = (kind: 'folder' | 'resume', opener: View | null) => {
     sheetOpener.current = opener;
     setSheet(kind);
   };
@@ -401,55 +359,19 @@ export function NewConversation({
 
       {/* A caixa do app de PC: campo em cima; anexo, conversas antigas, microfone e estilo do
           ditado à esquerda; o chip do provider e o Enviar à direita. */}
-      <Glass variant="chrome" style={[styles.box, focused && { borderColor: `${theme.tokens.accent.base}59` }]}>
+      <ComposerBox focused={focused}>
         {attachment ? <AttachmentPreview attachment={attachment} onRemove={removeAttachment} disabled={busy} /> : null}
-        <View style={styles.inputWrap}>
-          <MultilineInput
-            value={text}
-            onChangeText={setText}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            placeholder={m.composer_mensagem_para({ nome: providerLabel })}
-            accessibilityLabel={m.nova_conversa_placeholder()}
-            // Na tela inicial o teclado abrindo sozinho tapa tudo a cada abertura do app.
-            autoFocus={router.canGoBack?.() ?? true}
-            maxHeight={160}
-          />
-        </View>
-        {dictation.gravando ? <RecordingWave rms={dictation.rms} onCancel={dictation.cancel} /> : null}
-        {dictation.transcribing ? (
-          <Text style={styles.meta} accessibilityLiveRegion="polite">{m.composer_transcrevendo_audio()}</Text>
-        ) : null}
-        <View style={styles.row}>
-          <ToolButton
-            icon="Plus"
-            size={22}
-            label={m.composer_adicionar_ao_chat()}
-            onPress={() => setAttachMenuOpen(true)}
-            disabled={busy || dictation.gravando}
-          />
-          {resume ? (
-            <MenuView
-              title={m.criar_retomar()}
-              actions={resume.entries.map((entry) => ({ id: entry.id, title: entry.label }))}
-              onPressAction={({ nativeEvent }) => resume.onPick(nativeEvent.event)}
-            >
-              <ToolButton icon="History" label={m.criar_retomar()} busy={resume.busy} disabled={busy || resume.busy} />
-            </MenuView>
-          ) : null}
-          <ToolButton
-            icon={dictation.gravando ? 'Square' : 'Mic'}
-            color={dictation.gravando ? theme.tokens.status.error : undefined}
-            label={dictation.gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
-            hint={m.composer_mic_style_hint({ estilo: dictationStyle })}
-            onPress={() => void dictation.toggle()}
-            disabled={dictation.transcribing || busy}
-            busy={dictation.transcribing}
-          />
-          <View style={styles.spacer} />
-          {providerChip(() => openSheet('options', null))}
-          <SendButton ready={canSend} busy={busy} onPress={() => void handleSend()} />
-        </View>
+        <ComposerInput value={text} onChangeText={setText} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+          placeholder={m.composer_mensagem_para({ nome: providerLabel })} accessibilityLabel={m.nova_conversa_placeholder()}
+          autoFocus={router.canGoBack?.() ?? true} recording={dictation.gravando} rms={dictation.rms} onCancelRecording={dictation.cancel} />
+        {dictation.transcribing ? <Text style={styles.meta} accessibilityLiveRegion="polite">{m.composer_transcrevendo_audio()}</Text> : null}
+        <ComposerActions attach={{ onPress: () => setAttachMenuOpen(true), disabled: busy || dictation.gravando }}
+          mic={{ onPress: () => void dictation.toggle(), disabled: dictation.transcribing || busy, busy: dictation.transcribing, showBusy: true,
+            recording: dictation.gravando, styleLabel: dictationStyle, onStyle: () => setStyleMenuOpen(true) }}
+          settings={providerChip}
+          beforeMic={resume ? <View ref={resumeAnchor}><HistoryButton busy={resume.busy}
+            disabled={busy || resume.busy} onPress={() => openSheet('resume', resumeAnchor.current)} /></View> : null}
+          send={{ label: m.nova_conversa_enviar(), disabled: !canSend, busy, showBusy: true, onPress: () => void handleSend() }} />
         {dictation.error ? (
           <View style={styles.errorRow}>
             <Text style={[styles.error, styles.flex]} accessibilityRole="alert">{dictation.error}</Text>
@@ -461,22 +383,15 @@ export function NewConversation({
           </View>
         ) : null}
         {attachError ? <Text style={styles.error} accessibilityRole="alert">{attachError}</Text> : null}
-      </Glass>
+      </ComposerBox>
       <View style={styles.bottomPills}>{bottomPills}</View>
       </Animated.View>
       </KeyboardAvoidingView>
 
-      <Sheet open={sheet === 'options'} onDidPresent={() => {
-        if (mounted.current && closeOptionsRef.current) AccessibilityInfo.sendAccessibilityEvent(closeOptionsRef.current, 'focus');
-      }} onDismiss={onSheetDismiss} sizes={['medium', 'large']} scrollable>
-        <ScrollView accessibilityViewIsModal onAccessibilityEscape={closeSheet} contentContainerStyle={styles.sheetScroll} keyboardShouldPersistTaps="handled">
-          <Pressable ref={closeOptionsRef} accessible accessibilityRole="button" onPress={closeSheet} style={styles.ghost}>
-            <Text style={styles.ghostTxt}>{m.nova_conversa_opcoes_fechar()}</Text>
-          </Pressable>
-          {sheet === 'options' ? destination : null}
-          {sheet === 'options' ? options : null}
-        </ScrollView>
-      </Sheet>
+      <AnchoredPanel open={sheet === 'resume'} anchor={sheetOpener.current} onClose={closeSheet} onDismissed={onSheetDismiss}
+        label={m.criar_retomar()} closeLabel={m.native_close()} radius={12} padding={4}>
+        <SettingsList items={resume?.entries ?? []} onPick={(id) => { closeSheet(); resume?.onPick(id); }} />
+      </AnchoredPanel>
 
       {/* O menu de pasta do PC (render_compact_folders): painel preso à pílula, como os menus das outras pílulas. */}
       <AnchoredPanel
@@ -487,7 +402,7 @@ export function NewConversation({
         label={m.native_new_chat_folder()}
         closeLabel={m.native_close()}
       >
-        {folderPanel(closeSheet)}
+        {sheet === 'folder' ? folderPanel(closeSheet) : null}
       </AnchoredPanel>
 
       <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} server={server} />
@@ -509,7 +424,6 @@ const styles = StyleSheet.create((theme) => ({
   keyboard: { flex: 1 },
   states: { flex: 1, minHeight: 44 },
   scroll: { flexGrow: 1, padding: theme.base.space[4], gap: theme.base.space[4] },
-  sheetScroll: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: 32 },
   // Como no PC: o uso fica no alto, longe da caixa de mensagem.
   usage: { paddingTop: theme.base.space[2] },
   emptyHint: { flexGrow: 1, minHeight: 140, alignItems: 'center', justifyContent: 'center', paddingHorizontal: theme.base.space[5] },
@@ -521,24 +435,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
     paddingBottom: 6,
   },
-  // A mesma caixa do composer da conversa.
-  box: {
-    marginHorizontal: theme.base.space[2],
-    borderRadius: 22,
-    paddingTop: 12,
-    paddingRight: 12,
-    paddingBottom: 8,
-    paddingLeft: 12,
-    gap: theme.base.space[2],
-  },
-  // O campo é o próprio vidro, sem caixa dentro da caixa.
-  inputWrap: { minHeight: 40, justifyContent: 'center' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   // 34 pt + hitSlop 5 = 44 pt de toque; o ícone fica sem fundo, como no PC.
   tool: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   dim: { opacity: 0.5 },
-  spacer: { flex: 1, minWidth: 4 },
-  send: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
   bottomPills: {
     flexDirection: 'row',
     flexWrap: 'wrap',
