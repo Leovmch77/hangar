@@ -1112,7 +1112,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
                 Effect::UsageLimit { limit } => {
-                    if let Some(registry) = engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { registry.usage_limit(&target.name,&target.provider,limit); }
+                    if let Some(registry) = engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { 
+                        registry.usage_limit(super::gateway::LimitHit { name:target.name.clone(),provider:target.provider.clone(),
+                            account:target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(str::to_owned),limit });
+                    }
                 },
                 Effect::ReserveAsyncAnswer { operation_id,reservation,command } => {
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);

@@ -183,10 +183,6 @@ pub(crate) async fn reopen_in(st:&Arc<AppState>,runtime:&Arc<crate::runtime::gat
     outcome
 }
 
-pub(crate) fn current_dir(runtime:&crate::runtime::gateway::RuntimeRegistry,spec:&SessionSpec) -> String {
-    account_dir(&runtime.codex_environment(),spec).to_string_lossy().into_owned()
-}
-
 pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
     let (fwd,owner)=gate(&st,peer,&req);
     let runtime=st.state.runtime.get().cloned();

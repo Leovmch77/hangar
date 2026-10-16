@@ -90,7 +90,8 @@ pub enum Reopen { Done, NotRust, Failed(String) }
 /// O que a troca usa do servidor; nos testes, um falso que registra as chamadas.
 pub trait Host: Send + Sync {
     fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>>;
-    fn current_dir(&self,spec:&SessionSpec) -> String;
+    /// A pasta de conta Claude de verdade (`None` = a padrão do servidor).
+    fn account_dir(&self,config_dir:Option<&str>) -> String;
     fn catalog(&self) -> Result<Value,String>;
     fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>>;
     fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen>;
@@ -122,7 +123,9 @@ impl Switcher {
         };
         if matches!(spec.account,Account::Engine{..}) { return Outcome::Stayed("limit_switch_engine"); }
         let now = host.now();
-        let current = host.current_dir(&spec);
+        let current = host.account_dir(spec.account.config_dir());
+        // Aviso de uma vida que já trocou de conta (o `/conta` passou na frente): a conta de agora não bateu nada.
+        if canonical(&host.account_dir(hit.account.as_deref())) != canonical(&current) { return Outcome::Stayed("limit_switch_stale"); }
         self.spent.mark(&current,hit.limit.resets_at.filter(|reset|*reset > now).unwrap_or(now + UNKNOWN_RESET_S));
         let catalog = match host.catalog() { Ok(catalog)=>catalog, Err(code)=>return Outcome::Failed(code) };
         let quotas = match host.quotas().await { Ok(quotas)=>quotas, Err(code)=>return Outcome::Failed(code) };
@@ -186,7 +189,9 @@ impl Host for Native {
     fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
         Box::pin(async move { self.runtime.claude_spec(name).await.map(|spec|spec.map_err(|error|error.code)) })
     }
-    fn current_dir(&self,spec:&SessionSpec) -> String { super::account::current_dir(&self.runtime,spec) }
+    fn account_dir(&self,config_dir:Option<&str>) -> String {
+        config_dir.map_or_else(||self.runtime.codex_environment().claude_base.to_string_lossy().into_owned(),str::to_owned)
+    }
     fn catalog(&self) -> Result<Value,String> { self.st.accounts.claude_catalog().map_err(|error|error.code.into()) }
     fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>> {
         Box::pin(async move {
@@ -302,10 +307,11 @@ mod tests {
     async fn the_runtime_hands_the_stopped_session_to_the_switcher() {
         let runtime = crate::runtime::gateway::RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"s".into(),"i".into());
         let limit = UsageLimit { window:"seven_day".into(),resets_at:None };
-        runtime.usage_limit("lost","claude",limit.clone());
+        let make = |name:&str|LimitHit { name:name.into(),provider:"codex".into(),account:None,limit:limit.clone() };
+        runtime.usage_limit(make("lost"));
         let (sink,mut hits) = tokio::sync::mpsc::unbounded_channel();
         runtime.set_limit_sink(sink);
-        runtime.usage_limit("s1","codex",limit.clone());
+        runtime.usage_limit(make("s1"));
         let hit = hits.try_recv().unwrap();
         assert_eq!((hit.name.as_str(),hit.provider.as_str(),hit.limit),("s1","codex",limit));
         assert!(hits.try_recv().is_err());
@@ -334,7 +340,7 @@ mod tests {
         fn spec<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
             Box::pin(async move { Some(Ok(self.spec.lock().unwrap().clone())) })
         }
-        fn current_dir(&self,spec:&SessionSpec) -> String { spec.account.config_dir().unwrap_or("/default").to_owned() }
+        fn account_dir(&self,config_dir:Option<&str>) -> String { config_dir.unwrap_or("/default").to_owned() }
         fn catalog(&self) -> Result<Value,String> { Ok(self.catalog.clone()) }
         fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>> { Box::pin(async move { self.quotas.lock().unwrap().clone() }) }
         fn reopen<'a>(&'a self,_:&'a str,_:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen> {
@@ -353,14 +359,14 @@ mod tests {
         fn now(&self) -> f64 { 1000.0 }
     }
 
-    fn hit(reset:f64) -> LimitHit {
-        LimitHit { name:"s".into(),provider:"claude".into(),limit:UsageLimit { window:"five_hour".into(),resets_at:Some(reset) } }
+    fn hit(account:&str,reset:f64) -> LimitHit {
+        LimitHit { name:"s".into(),provider:"claude".into(),account:Some(account.into()),limit:UsageLimit { window:"five_hour".into(),resets_at:Some(reset) } }
     }
 
     #[tokio::test]
     async fn the_stopped_session_reopens_in_the_roomiest_account_and_is_told_to_continue() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
-        Switcher::default().handle(&fake,hit(2000.0)).await;
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}")]);
         assert_eq!(fake.diary(),vec!["switched"]);
     }
@@ -369,18 +375,28 @@ mod tests {
     async fn the_new_account_hitting_a_limit_with_the_same_reset_switches_again() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
         let switcher = Switcher::default();
-        switcher.handle(&fake,hit(2000.0)).await;
+        switcher.handle(&fake,hit("/a",2000.0)).await;
         // O reset é arredondado: a conta nova bate o limite dela com o mesmo `resetsAt`.
-        switcher.handle(&fake,hit(2000.0)).await;
+        switcher.handle(&fake,hit("/c",2000.0)).await;
         let reopens:Vec<String> = fake.log().into_iter().filter(|line|line.starts_with("reopen")).collect();
         assert_eq!(reopens,vec!["reopen /c","reopen /b"]);
+    }
+
+    #[tokio::test]
+    async fn a_late_limit_from_the_account_the_session_already_left_is_dropped() {
+        let fake = Fake::new("/b",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
+        let switcher = Switcher::default();
+        // O aviso veio da conta /a, mas a pessoa já trocou a sessão para /b pelo /conta.
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert!(fake.log().is_empty(),"{:?}",fake.log());
+        assert!(!switcher.spent.is_spent("/b",1000.0),"a conta atual não bateu limite nenhum");
     }
 
     #[tokio::test]
     async fn an_unreadable_quota_is_a_failure_with_its_code_not_no_room() {
         let fake = Fake::new("/a",Vec::new());
         *fake.quotas.lock().unwrap() = Err("quota_read_failed".into());
-        Switcher::default().handle(&fake,hit(2000.0)).await;
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert!(fake.log().is_empty());
         assert_eq!(fake.diary(),vec!["quota_read_failed"]);
     }

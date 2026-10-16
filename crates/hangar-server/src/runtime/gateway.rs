@@ -110,7 +110,12 @@ pub struct RuntimeRegistry {
 
 /// Sessão que parou no limite de uso da conta.
 #[derive(Debug)]
-pub struct LimitHit { pub name:String, pub provider:String, pub limit:UsageLimit }
+pub struct LimitHit {
+    pub name:String, pub provider:String,
+    /// A pasta de conta Claude da vida que bateu o limite (`None` = a padrão).
+    pub account:Option<String>,
+    pub limit:UsageLimit,
+}
 /// Intervalo mínimo entre duas reaberturas por entrega sem prova da mesma sessão: a que não resolveu
 /// não vira laço de processos mortos.
 pub(super) const HEAL_BACKOFF:Duration=Duration::from_secs(15*60);
@@ -303,8 +308,8 @@ impl RuntimeRegistry {
     /// e tenta de novo. Falha vai ao diário.
     /// Liga a troca de conta no limite; sem ela o aviso de limite só fica no estado da sessão.
     pub fn set_limit_sink(&self,sink:tokio::sync::mpsc::UnboundedSender<LimitHit>) { let _ = self.limits.set(sink); }
-    pub fn usage_limit(&self,name:&str,provider:&str,limit:UsageLimit) {
-        if let Some(sink) = self.limits.get() { let _ = sink.send(LimitHit { name:name.to_owned(),provider:provider.to_owned(),limit }); }
+    pub fn usage_limit(&self,hit:LimitHit) {
+        if let Some(sink) = self.limits.get() { let _ = sink.send(hit); }
     }
     pub fn request_reopen(&self,name:&str) {
         let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
