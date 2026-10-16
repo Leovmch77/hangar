@@ -207,6 +207,11 @@ impl NameClaim {
         }
         Ok(Self(key))
     }
+
+    /// Há abertura em curso com esse nome, em qualquer casa deste processo.
+    pub(crate) fn opening(name: &str) -> bool {
+        OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|(_, n)| n == name)
+    }
 }
 
 impl Drop for NameClaim {

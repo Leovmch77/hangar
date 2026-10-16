@@ -509,10 +509,12 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
 fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
     let folder = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let base = Some(crate::list::discover_other::sanitize_session_name(folder)).filter(|n| !n.is_empty()).unwrap_or_else(|| "sessao".into());
-    let mut name = base.clone();
+    // A base cede espaço ao sufixo para o nome caber no teto; quem está abrindo agora também ocupa.
+    let fit = |suffix: &str| format!("{}{suffix}", base[..base.len().min(NAME_MAX - suffix.len())].trim_end_matches('-'));
+    let mut name = fit("");
     for n in 2.. {
-        if !facts.name_in_use(&name)? { break; }
-        name = format!("{base}-{n}");
+        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) { break; }
+        name = fit(&format!("-{n}"));
     }
     Ok(name)
 }

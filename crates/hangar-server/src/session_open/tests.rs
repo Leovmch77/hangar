@@ -865,6 +865,33 @@ fn an_omitted_name_comes_from_the_folder_like_the_screens() {
     }
 }
 
+/// Pasta de nome comprido abre: a base é cortada para caber o sufixo no teto do nome.
+#[test]
+fn a_long_folder_name_is_cut_to_fit_with_its_suffix() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let cwd = format!("<ROOT>/work/{}", "a".repeat(80));
+    let step = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    step.remove("name");
+    step.insert("cwd".into(), json!(cwd));
+    fixture["scenario"]["state"]["dirs"] = json!([cwd]);
+    fixture["scenario"]["state"]["tmux_sessions"] = json!([{"name": "a".repeat(64)}]);
+    let expected = format!("{}-2", "a".repeat(62));
+    assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.name).ok(), Some(expected));
+}
+
+/// Duas aberturas na mesma pasta ao mesmo tempo: a segunda leva `-2`, não `erro_nome_em_uso`.
+#[test]
+fn a_name_being_opened_counts_as_taken() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let cwd = "<ROOT>/work/abrindo-agora";
+    let step = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    step.remove("name");
+    step.insert("cwd".into(), json!(cwd));
+    fixture["scenario"]["state"]["dirs"] = json!([cwd]);
+    let _claim = super::open::NameClaim::take(std::path::Path::new("/outra-casa"), "abrindo-agora").unwrap();
+    assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.name).ok().as_deref(), Some("abrindo-agora-2"));
+}
+
 /// S-53: o nome tem teto (o tmux e a reabertura do Rust recusam acima disso).
 #[test]
 fn names_longer_than_the_terminal_accepts_are_refused() {
