@@ -714,7 +714,11 @@ impl ClaudeEngine {
                             "initialize" => {
                                 self.initialized = true; self.initializing = false; self.init_warning = None;
                                 self.commands = result.get("commands").cloned();
-                                if self.state.problema.as_deref() == Some("headless_sem_resposta") { self.state.problema = None; self.state.problema_detalhe = None; }
+                                // A vida subiu: a queda da anterior (na tela e no arquivo da sessão) não vale mais.
+                                self.state.problema = None; self.state.problema_detalhe = None;
+                                if std::mem::take(&mut self.problem_persisted) {
+                                    effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":null}) });
+                                }
                                 if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(effects); }
                                 else { effects.push(Effect::WakeQueue); }
                                 // `ui_surface_v1`: o processo aceita o Hangar como superfície remota dos mods.

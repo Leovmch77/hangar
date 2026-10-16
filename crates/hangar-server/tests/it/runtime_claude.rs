@@ -810,3 +810,16 @@ fn old_cli_rate_limit_counts_only_with_a_current_rejected_quota() {
         json!({"type":"result","subtype":"success","is_error":true,"api_error":"overloaded","result":"overloaded"}));
     assert!(usage_limits(&feed(&mut engine,&lines,11.0)).is_empty());
 }
+
+/// CSH-095: a abertura que sobe e responde o `initialize` limpa a queda gravada da vida anterior, na tela e
+/// no arquivo da sessão, como o `open_succeeded` do Python; não espera o primeiro turno.
+#[test]
+fn a_good_open_clears_the_persisted_problem() {
+    let mut engine = ClaudeEngine::new(json!({"name":"session","session_id":"sid",
+        "problema":["headless_processo_caiu","Error: not logged in\nrc=3"]}),2,clock(20.0));
+    let effects = engine.start_initialize("init".into()).unwrap();
+    let request_id = writes(&effects)[0]["request_id"].clone();
+    let effects = line(&mut engine,json!({"type":"control_response","response":{"request_id":request_id,"subtype":"success","response":{"commands":[]}}}),21.0);
+    assert!(engine.view()["public_state"]["problema"].is_null(),"{}",engine.view()["public_state"]);
+    assert_eq!(persisted_problem(&effects),Some(Value::Null),"o arquivo da sessão perde a queda antiga");
+}
