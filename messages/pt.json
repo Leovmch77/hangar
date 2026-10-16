@@ -8576,5 +8576,9 @@
   "native_worktree_settings_protection": "A limpeza preserva branches e conversas. Sessões abertas protegem as worktrees em uso; o checkout principal e worktrees bloqueadas também são preservados.",
   "native_worktree_discovery_incomplete": "A busca não terminou. Alguns repositórios podem estar ausentes.",
   "native_worktree_merge_check_failed": "Não foi possível conferir a integração pelo PR.",
-  "native_worktree_merge_base_unconfirmed": "A integração ainda não foi confirmada na base. Atualize as referências."
+  "native_worktree_merge_base_unconfirmed": "A integração ainda não foi confirmada na base. Atualize as referências.",
+  "composer_colar": "Colar",
+  "composer_colar_vazio": "A área de transferência está vazia.",
+  "composer_colar_falhou": "Não foi possível ler a área de transferência.",
+  "machine_import_warning_short": "Busca automática de máquinas: sem resposta de {hosts}. As salvas continuam iguais."
 }

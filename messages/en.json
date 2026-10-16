@@ -8576,5 +8576,9 @@
   "native_worktree_settings_protection": "Cleanup preserves branches and conversations. Open sessions protect worktrees in use; the main checkout and locked worktrees are also preserved.",
   "native_worktree_discovery_incomplete": "The search did not finish. Some repositories may be missing.",
   "native_worktree_merge_check_failed": "Could not verify integration through the PR.",
-  "native_worktree_merge_base_unconfirmed": "Integration has not been confirmed in the base yet. Fetch the latest references."
+  "native_worktree_merge_base_unconfirmed": "Integration has not been confirmed in the base yet. Fetch the latest references.",
+  "composer_colar": "Paste",
+  "composer_colar_vazio": "The clipboard is empty.",
+  "composer_colar_falhou": "Could not read the clipboard.",
+  "machine_import_warning_short": "Automatic machine discovery: no answer from {hosts}. Saved machines are unchanged."
 }

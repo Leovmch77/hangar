@@ -1386,6 +1386,33 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     if (files.length > 1) setError(m.composer_colou_so_um());
   }, [handlePicked]);
 
+  // O menu de segurar do campo no iOS não oferece Colar: o "+" cola pela área de transferência.
+  const handleClipboardPaste = useCallback(async () => {
+    try {
+      const Clipboard = await import('expo-clipboard');
+      if (await Clipboard.hasImageAsync()) {
+        const image = await Clipboard.getImageAsync({ format: 'png' });
+        if (image?.data) {
+          const FileSystem = await import('expo-file-system/legacy');
+          const uri = `${FileSystem.cacheDirectory}colado-${Date.now()}.png`;
+          await FileSystem.writeAsStringAsync(uri, image.data.replace(/^data:[^,]*,/, ''), { encoding: FileSystem.EncodingType.Base64 });
+          handlePicked({ uri, name: 'colado.png', mime: 'image/png', kind: 'image' });
+          return;
+        }
+      }
+      const pasted = await Clipboard.getStringAsync();
+      if (!pasted) { setError(m.composer_colar_vazio()); return; }
+      const current = textRef.current;
+      const at = caret ?? { start: current.length, end: current.length };
+      const next = current.slice(0, at.start) + pasted + current.slice(at.end);
+      handleChangeText(next);
+      const end = at.start + pasted.length;
+      setSelection({ start: end, end });
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : m.composer_colar_falhou());
+    }
+  }, [handlePicked, handleChangeText, caret]);
+
   const router = useRouter();
 
   const handleRemoveAttach = useCallback(() => {
@@ -1709,6 +1736,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           onClose={() => setAttachMenuOpen(false)}
           onPick={handlePicked}
           onError={setError}
+          onPaste={() => { void handleClipboardPaste(); }}
           onSessionAttachments={() => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)}
           onCommands={() => setCommandSheetOpen(true)}
           dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
