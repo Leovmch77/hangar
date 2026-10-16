@@ -1540,6 +1540,7 @@ def test_commit_local_adiante_do_topo_nao_e_atras_do_topo(repo, rust):
 def test_branch_de_teste_nova_nasce_no_commit_escolhido_com_upstream(repo, rust, monkeypatch):
     obra = rust["obra"]
     _git(obra, "checkout", "-q", "-b", "teste")
+    _workflow_do_server(obra)
     _commit(obra, "t.txt", "teste\n")
     teste_36 = _rev(obra, "HEAD")
     _protocolo(obra, 37)
