@@ -23,13 +23,18 @@ if args[0] == 'list-sessions':
     print('hangar-a'); print('shell'); print('hangar b')
 elif args[0] == 'show-environment':
     target = args[args.index('-t') + 1]
-    if target in ('=hangar-a', '=hangar b'):
+    if target == '=hangar-a':
         print('CP_SESSION_KEY={KEY}')
+    elif target == '=hangar b':
+        print('CP_SESSION_KEY={"cd" * 16}')
     else:
         sys.exit(1)
 ''')
     tmux.chmod(0o755)
     env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    # Só a sessão com spec gravado é do servidor; a `hangar b` (aberta antes do registro) fica.
+    (root / ".hangar/session-specs").mkdir(parents=True)
+    (root / f".hangar/session-specs/{KEY}.json").write_text("{}")
     save = resurrect / "tmux_resurrect_20261016T000000.txt"
     lines = [
         "pane\thangar-a\t1\t:\t1\t:*\t0\t:/w\t1\tclaude\t:claude",
@@ -44,9 +49,9 @@ elif args[0] == 'show-environment':
     result = subprocess.run(["bash", str(script), "save"], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     kept = save.read_text().splitlines()
-    assert kept == [lines[2], lines[3], lines[5]], kept
+    assert kept == [lines[2], lines[3], lines[4], lines[5]], kept
     assert (resurrect / "last").is_symlink(), "o `last` continua apontando a foto"
-    assert "2 sessões do Hangar" in (root / ".hangar/logs/privado/claude-resume.log").read_text()
+    assert "1 sessões do Hangar" in (root / ".hangar/logs/privado/claude-resume.log").read_text()
 
     # Sem sessão do Hangar a foto fica intacta.
     save.write_text("\n".join(lines[2:4]) + "\n")

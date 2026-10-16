@@ -26,12 +26,15 @@ fi
   touch "$LOG"
 )
 
-# As sessões do Hangar vivas: a chave do spec no ambiente da sessão.
+# As sessões que o servidor restaura: a chave do spec no ambiente da sessão e o spec gravado. Sem o
+# spec (aberta antes do registro) o servidor não tem como reabri-la, e ela fica com o resurrect.
 _hangar_sessions() {
   local name key
   while IFS= read -r name; do
     key=$(tmux show-environment -t "=$name" CP_SESSION_KEY 2>/dev/null || true)
-    if [[ $key =~ ^CP_SESSION_KEY=[0-9a-fA-F]{32}$ ]]; then printf '%s\n' "$name"; fi
+    if [[ $key =~ ^CP_SESSION_KEY=([0-9a-fA-F]{32})$ ]] && [ -f "$HOME/.hangar/session-specs/${BASH_REMATCH[1]}.json" ]; then
+      printf '%s\n' "$name"
+    fi
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
 }
 
