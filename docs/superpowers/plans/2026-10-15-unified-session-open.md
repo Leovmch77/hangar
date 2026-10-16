@@ -284,12 +284,12 @@ Status: ready-for-agent
 
 Status: ready-for-agent
 
-- [ ] **Step 1: Vigia de 65 min no ator do Claude sem terminal**
+- [x] **Step 1: Vigia de 65 min no ator do Claude sem terminal** (24bd74555, 5595b975b; correções a71535886..217b67631)
   Mesmas condições do `_pode_estacionar` (sem turno, permissão, pergunta, subida, esforço pendente
   nem fila por entregar).
-- [ ] **Step 2: Próxima mensagem reabre pelo spec**
+- [x] **Step 2: Próxima mensagem reabre pelo spec** (também o texto que nasce no Python, pela porta privada)
   Como o `open_parked` do Codex; a lista mostra "estacionada".
-- [ ] **Step 3: Apagar o vigia Python**
+- [x] **Step 3: Apagar o vigia Python** (já saiu na Task 6, 632c4fbda)
 
 ### Task 14: Troca de conta quando a sessão bate o limite (R8, D-002)
 
