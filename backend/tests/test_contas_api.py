@@ -13,7 +13,6 @@ import app.api as api_mod
 from app import contas
 from app.api import app
 from app.config import list_config_dirs, settings
-from app.models import SessionInfo
 
 # Convenção da casa (ver test_engines_api.py): cada arquivo declara o próprio token.
 TOKEN = "t-contas"
@@ -66,15 +65,14 @@ def test_marcador_por_symlink_nao_entra_na_lista(casa):
 
 
 def test_codex_com_config_dir_nao_reconcilia(casa, monkeypatch):
-    """Provider codex não consome config dir (ele tem conta própria, do CLI do Codex): a
-    reconciliação — efeito no disco — não pode rodar num pedido que vai criar uma sessão codex."""
+    """A abertura é do Rust: no modo python o pedido é recusado com código, e a reconciliação
+    (efeito no disco) não roda antes da recusa."""
     contas.criar("conta2")
     reconciliou = []
     monkeypatch.setattr(contas._Ciclo, "reconciliar",
                         lambda self, projeto=None: reconciliou.append(1) or [])
-    monkeypatch.setattr(api_mod.registry, "create",
-                        lambda *a, **k: SessionInfo(name="s1", provider="codex"))
     r = TestClient(app).post("/api/sessions", json={
         "name": "s1", "cwd": str(casa), "config_dir": str(casa / ".claude-conta2"),
         "provider": "codex"}, headers=AUTH)
+    assert r.status_code == 503 and "session_open_needs_rust_server" in r.text
     assert reconciliou == []
