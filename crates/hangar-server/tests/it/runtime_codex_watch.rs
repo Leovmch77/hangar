@@ -1285,3 +1285,23 @@ async fn clear_of_a_codex_terminal_of_the_rust_stays_in_the_rust() {
     assert_eq!(python.hits_to("/api/sessions/cx-proof/input"), 0, "a fila do Codex com terminal é do Rust: o /clear nunca vai ao Python");
     finish(&mut [&mut app,&mut tui]);
 }
+
+/// CDX-064: sidecar que aponta para uma transferência cujo registro sumiu ou não se lê é erro com código
+/// próprio, como o `RuntimeError` do `list_all` do Python; nunca o "ainda não tem app-server" calado.
+#[tokio::test]
+async fn a_missing_or_corrupt_transfer_record_is_a_visible_error() {
+    let fx = fixture();
+    let id = "44444444-4444-4444-8444-444444444444";
+    fx.put_sidecar("cx-proof",json!({"name":"cx-proof","provider":"codex","key":"k-t","endpoint":"ws://127.0.0.1:1","app_pid":7,
+        "thread_id":"t","transfer_id":id}));
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    let code = |r:Option<Result<(),RuntimeError>>|r.map(|r|r.map_err(|e|e.code));
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_transfer_record_missing".into())));
+    let records = fx.home.join(".hangar/conversation-transfers");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(records.join(format!("{id}.json")),"{torto").unwrap();
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_transfer_record_unreadable".into())));
+    std::fs::write(records.join(format!("{id}.json")),r#"{"phase":"prepared"}"#).unwrap();
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_terminal_not_ready".into())),"em curso: espera");
+}
