@@ -710,15 +710,20 @@ def _ultimo_com_o_binario(publicado: str, topo: str) -> str:
     que o build do Rust lê. Sem ler a lista, para no próprio commit do binário."""
     caminhos = _caminhos_do_build(topo)
     if caminhos is None:
+        _log.warning("paths do %s ilegiveis em %s: o codigo para no commit do binario %s", _SERVER_WORKFLOW, topo, publicado[:8])
         return publicado
     p = _git_quiet("log", "--first-parent", "--reverse", "--format=%H", f"{publicado}..{topo}", "--",
                    *(f":(glob){c}" for c in caminhos))
     if p.returncode != 0:
+        _log.warning("git log dos commits depois do binario falhou (%s): %s", p.returncode, p.stderr.strip()[-300:])
         return publicado
     primeiro = p.stdout.split()[:1]
     if not primeiro:
         return topo
-    return _git_quiet("rev-parse", "--verify", "--quiet", f"{primeiro[0]}^1").stdout.strip() or publicado
+    anterior = _git_quiet("rev-parse", "--verify", "--quiet", f"{primeiro[0]}^1").stdout.strip()
+    if not anterior:
+        _log.warning("pai de %s ilegivel: o codigo para no commit do binario %s", primeiro[0][:8], publicado[:8])
+    return anterior or publicado
 
 
 def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
