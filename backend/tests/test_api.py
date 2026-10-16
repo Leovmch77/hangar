@@ -1058,10 +1058,11 @@ def test_clear_then_link_route(api_client, _tmp_chain_dir):
 
 
 
-@pytest.mark.parametrize("headless", [None, True])
-def test_create_claude_needs_rust(api_client, headless):
+@pytest.mark.parametrize("headless, named", [(None, True), (True, True), (None, False)])
+def test_create_claude_needs_rust(api_client, headless, named):
     # Claude, com e sem terminal, abre no Rust: sem ele a abertura recusa antes de qualquer efeito.
-    body = {"name": "x", "cwd": "/tmp", "provider": "claude"}
+    # Sem nome também: o comando de terminal lê este código para abrir na máquina.
+    body = {"cwd": "/tmp", "provider": "claude"} | ({"name": "x"} if named else {})
     if headless is not None:
         body["headless"] = headless
     with patch("app.api.registry.create") as cr:

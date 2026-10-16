@@ -143,13 +143,22 @@ async fn ask_server(base: &str, token: &str, body: &[u8]) -> Ask {
         Ok(response) => {
             let status = response.status().as_u16();
             match response.text().await {
-                Ok(text) => Ask::Answered(status, text),
+                Ok(text) => answer(status, text),
                 Err(error) => Ask::Uncertain(error.to_string()),
             }
         }
         Err(error) if error.is_connect() => Ask::Down(error.to_string()),
         Err(error) => Ask::Uncertain(error.to_string()),
     }
+}
+
+/// O Hangar sem o Rust (modo Python) responde mas não abre: conta como fora, e a sessão nasce aqui.
+fn answer(status: u16, text: String) -> Ask {
+    let code = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|body| body["detail"]["code"].as_str().map(str::to_owned));
+    if status == 421 || code.as_deref() == Some("session_open_needs_rust_server") {
+        return Ask::Down(format!("HTTP {status} sem o servidor Rust"));
+    }
+    Ask::Answered(status, text)
 }
 
 fn refused(error: &OpenError) -> ExitCode {
@@ -169,4 +178,19 @@ fn pointer(home: &std::path::Path) -> PathBuf { home.join(".hangar").join("backe
 pub fn publish_backend_dir(home: &std::path::Path, backend: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(home.join(".hangar"))?;
     crate::runtime::queue::atomic_write(&pointer(home), backend.to_string_lossy().as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Ask, answer};
+
+    /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora (D-013).
+    #[test]
+    fn a_server_without_rust_counts_as_down() {
+        let python = r#"{"detail":{"code":"session_open_needs_rust_server","params":{},"msg":"abrir e reabrir sessão precisam do servidor Rust, que não está rodando"}}"#;
+        assert!(matches!(answer(503, python.into()), Ask::Down(_)));
+        assert!(matches!(answer(421, String::new()), Ask::Down(_)));
+        assert!(matches!(answer(409, r#"{"detail":{"code":"erro_nome_em_uso"}}"#.into()), Ask::Answered(409, _)));
+        assert!(matches!(answer(503, r#"{"detail":{"code":"runtime_unhealthy"}}"#.into()), Ask::Answered(503, _)));
+    }
 }

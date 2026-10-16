@@ -1806,7 +1806,7 @@ class ClaudeCustomizationBody(_StrictBody):
 
 
 class CreateBody(_StrictBody):
-    name: str = Field(min_length=1)
+    name: str | None = Field(default=None, min_length=1)
     cwd: str = Field(min_length=1)
     branch: str | None = Field(default=None, min_length=1)
     # Com `new_branch`, `branch` é o nome da branch NOVA e `base` a de partida (None = a atual).
@@ -2162,7 +2162,7 @@ async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSes
     payload = json.dumps({"request": body.model_dump(mode="json", exclude_unset=True),
                           "guest": guest.id if guest is not None else None}).encode()
     # O prazo da criação, que prepara conta e worktree.
-    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, body.name, "open", "POST", payload, 180)
+    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, body.name or "_", "open", "POST", payload, 180)
     if answer is None:
         return None
     status, raw = answer
