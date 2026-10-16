@@ -375,6 +375,13 @@ impl RuntimeRegistry {
         let env = self.policy.codex_environment();
         (env.home.join(".hangar").join("claude-headless"),env.claude_base.join(".hangar-queue"))
     }
+    /// Uma mensagem na fila da sessão aberta aqui, como o `submit` da ponte privada.
+    pub async fn submit(&self,name:&str,text:&str) -> Result<RuntimeReply,RuntimeError> {
+        let handle = self.entries.lock().await.values().filter(|entry|entry.name == name).max_by_key(|entry|entry.generation)
+            .map(|entry|entry.handle.clone()).ok_or_else(||failure("runtime_binding"))?;
+        handle.command(RuntimeCommand { operation_id:crate::mods::state::random_hex(16),kind:OperationKind::Input,
+            payload:json!({"text":text,"pre_transcript":false}) }).await
+    }
     /// Na subida: abre aqui cada Claude sem terminal com cano vivo da chave (adota) ou com mensagem
     /// ainda não entregue na fila (sobe o processo); a parada sem pendência fica fechada e o próximo envio
     /// a sobe. Falha de uma não impede as outras e vai ao diário.

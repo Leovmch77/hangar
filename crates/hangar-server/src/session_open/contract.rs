@@ -61,7 +61,7 @@ pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()
 
 /// O que o harness grava, na forma do lado Python.
 #[derive(Default)]
-struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, diary: Vec<Value> }
+struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, diary: Vec<Value>, runtime_requests: Vec<Value> }
 
 /// O tmux em memória do harness: o estado inicial do cenário, os `new-session` gravados e as consultas
 /// respondidas pelo estado.
@@ -215,6 +215,11 @@ impl OpenHost for Host {
     fn diary(&self, events: Vec<Value>) { self.record.lock().unwrap().diary.extend(events); }
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
+    fn wake(&self, name: &str, initial_prompt: Option<String>) {
+        let mut request = json!({"op": "claude_headless.acordar", "name": name});
+        if let Some(prompt) = initial_prompt { request["initial_prompt"] = json!(prompt); }
+        self.record.lock().unwrap().runtime_requests.push(request);
+    }
 }
 
 /// Roda os passos do cenário (só `POST /api/sessions`) pela abertura do Rust. `{"not_ours": true}`
@@ -237,7 +242,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     for step in substituted["steps"].as_array().into_iter().flatten() {
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
         let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
-        if request.provider.as_deref() == Some("codex") || (request.headless == Some(true) && !matches!(request.provider.as_deref(), Some("pi" | "omp" | "kimi"))) {
+        if request.provider.as_deref() == Some("codex") {
             return json!({"not_ours": true});
         }
         let runtime = tokio::runtime::Handle::current();
@@ -252,7 +257,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
         }).await.unwrap();
         let (status, body) = match resolved {
             Ok(resolved) if !super::open::opens_here(&resolved.spec) => return json!({"not_ours": true}),
-            Ok(resolved) => match super::open::open_terminal(&host, resolved, &OpenCaller::Owner).await {
+            Ok(resolved) => match super::open::open_session(&host, resolved, &OpenCaller::Owner).await {
                 Ok(opened) => (200, opened.body),
                 Err(error) => (error.status, error.body()),
             },
@@ -266,5 +271,5 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     let record = std::mem::take(&mut *record.lock().unwrap());
     let tmux_sessions: Map<String, Value> = host.mux.sessions.lock().unwrap().clone().into_iter().collect();
     json!({"steps": steps, "subprocesses": record.subprocesses, "probes": record.probes, "rust_bridge": record.rust_bridge,
-        "runtime_requests": [], "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary})
+        "runtime_requests": record.runtime_requests, "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary})
 }

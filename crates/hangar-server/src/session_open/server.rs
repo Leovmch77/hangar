@@ -295,17 +295,34 @@ impl OpenHost for ServerHost {
 
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
-}
 
-/// Pedido que a decisão do Rust nem olha: provedor ou modo explícitos que não são do Rust ainda.
-fn explicitly_other(request: &SessionOpenRequest) -> bool {
-    match request.provider.as_deref() {
-        Some("codex") => true,
-        // Pi, omp e Kimi sem terminal: a recusa é da resolução.
-        Some("pi" | "omp" | "kimi") => false,
-        _ => request.headless == Some(true),
+    fn wake(&self, name: &str, initial_prompt: Option<String>) {
+        let Some(runtime) = self.st.state.runtime.get().cloned() else {
+            tracing::warn!(session = %name, "sem o registro do runtime: a sessão sem terminal sobe no primeiro envio");
+            return;
+        };
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            match runtime.open_claude_headless(&name, true).await {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    tracing::warn!(session = %name, code = %error.code, "a sessão sem terminal criada não subiu");
+                    return;
+                }
+                None => {
+                    tracing::warn!(session = %name, "a sessão sem terminal criada sumiu antes de subir");
+                    return;
+                }
+            }
+            if let Some(text) = initial_prompt && let Err(error) = runtime.submit(&name, &text).await {
+                tracing::warn!(session = %name, code = %error.code, "a primeira mensagem da sessão sem terminal não entrou na fila");
+            }
+        });
     }
 }
+
+/// Pedido que a decisão do Rust nem olha: o provedor explícito que não é do Rust ainda.
+fn explicitly_other(request: &SessionOpenRequest) -> bool { request.provider.as_deref() == Some("codex") }
 
 pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
 
@@ -345,7 +362,7 @@ pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: Ope
         }
     };
     if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
-    match super::open::open_terminal(&host, resolved, &caller).await {
+    match super::open::open_session(&host, resolved, &caller).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
     }
