@@ -611,7 +611,11 @@ impl ClaudeEngine {
         self.clock = clock;
         let mut effects = Vec::new();
         match input {
-            EngineInput::Line(event) => { self.active_at = clock.monotonic_s; self.on_line(event,&mut effects)? },
+            EngineInput::Line(event) => {
+                // Batimento e stderr do cano chegam com a sessão parada: não são atividade (o Python também os ignorava).
+                if !matches!(event["type"].as_str(),Some("keep_alive" | "cano_stderr")) { self.active_at = clock.monotonic_s; }
+                self.on_line(event,&mut effects)?
+            },
             EngineInput::WriteAck { operation_id,outcome } => self.on_ack(operation_id,outcome,&mut effects),
             EngineInput::Tick => self.on_tick(&mut effects),
             EngineInput::PolicyResult { request_id,payload } => {

@@ -199,6 +199,9 @@ fn park_idle_counts_from_the_last_activity_and_only_with_nothing_open() {
     assert_eq!(session.park_idle(300.0 + PARK - 1.0),Some(PARK - 1.0),"o fim do turno é atividade");
     line(&mut session,json!({"type":"rate_limit_event","rate_limit_info":{}}),400.0);
     assert_eq!(session.park_idle(400.0 + PARK),Some(PARK),"qualquer evento da CLI é atividade");
+    line(&mut session,json!({"type":"keep_alive"}),500.0);
+    line(&mut session,json!({"type":"cano_stderr","linha":"aviso"}),600.0);
+    assert_eq!(session.park_idle(400.0 + PARK),Some(PARK),"keep_alive e stderr do cano não são atividade");
 
     let mut permission = ready();
     line(&mut permission,json!({"type":"control_request","request_id":"p","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}),10.0);
