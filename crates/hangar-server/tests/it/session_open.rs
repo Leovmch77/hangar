@@ -242,6 +242,7 @@ async fn the_env_file_gives_token_and_port_and_no_token_sends_nothing() {
 /// D-013: com o servidor fora do ar, `hangar-server open` abre o Claude com terminal aqui mesmo, pela
 /// mesma biblioteca (o tmux é um programa falso que grava o que recebe), e deixa o spec gravado para o
 /// servidor adotar a sessão quando voltar.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_command_opens_claude_with_terminal_locally_with_the_server_down() {
     use std::os::unix::fs::PermissionsExt;
