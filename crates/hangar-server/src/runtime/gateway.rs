@@ -627,7 +627,8 @@ impl RuntimeRegistry {
                         super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);
                         tracing::warn!(key,session=name,attempt,code=%error.code,"reabertura automática não confirmada");
                         if matches!(error.code.as_str(),"lifecycle_cancelled"|"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
-                        gave_up=attempt==2;
+                        gave_up=attempt==2 || super::claude_launch::permanent(&error.code);
+                        if gave_up {break;}
                     },
                 }
             }
@@ -1679,13 +1680,23 @@ impl RuntimeRegistry {
             recipe.preserve_settings(target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?)?;
             Arc::new(recipe)
         };
-        let mut launch=recipe.launch(&binding.conversation,&selected)?;
-        recipe.apply_choices(&mut launch,view["model"].as_str(),view["effort"].as_str())?;
         let sidecar_dir=super::lifecycle::claude_sidecar_dir()?;
-        let extra=target.metadata["cano"].as_object().map(|meta|meta.iter().filter(|(k,_)|!matches!(k.as_str(),"pid"|"escuta"|"token"|"ts"|"versao")).map(|(k,v)|(k.clone(),v.clone())).collect()).unwrap_or_default();
-        let prepared={let (key,dir)=(key.to_owned(),sidecar_dir.clone());
-            tokio::task::spawn_blocking(move||process::prepare_recipe(&launch,&key,&dir,extra)).await.map_err(|_|failure("relaunch_recipe"))?}
-            .map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
+        // A vida nova sai do spec da sessão com a configuração de agora, nunca da receita do processo que
+        // morre: a mesma conversa, o modo pedido e o modelo e o esforço que ela usava.
+        let prepared={
+            let (env,bridge,key,dir,name,runtime)=(self.policy.codex_environment(),self.policy.plugin_bridge(),key.to_owned(),sidecar_dir.clone(),name.to_owned(),tokio::runtime::Handle::current());
+            let (sid,mode,model,effort)=(binding.conversation.clone(),selected.clone(),view["model"].clone(),view["effort"].clone());
+            let cwd=target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?.to_owned();
+            tokio::task::spawn_blocking(move||{
+                let sidecar=Value::Object(super::codex_sidecar::load(&super::codex_sidecar::path(&dir,&name)).ok_or_else(||failure("lifecycle_sidecar_read"))?);
+                let meta=super::claude_launch::relaunch_meta(sidecar,&sid,&mode,&model,&effort);
+                let launch=super::claude_launch::prepare(&env,bridge.as_ref(),&meta,&name,runtime)?;
+                let mut extra=serde_json::Map::new();
+                if let Ok(stamp)=super::local_policy::config_stamp(meta["config_dir"].as_str().filter(|dir|!dir.is_empty())) {extra.insert("config_marca".into(),json!(stamp));}
+                let spec=process::LaunchSpec {provider:process::Provider::Claude,key,cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:dir};
+                process::prepare_launch(&spec,extra).map_err(|e|RuntimeError::new(e.code(),"não preparei o lançamento; origem conservada"))
+            }).await.map_err(|_|failure("relaunch_recipe"))??
+        };
         if !from_exit {recipe.verify(&procs)?;}
         let latest=match &context {Some(ctx)=>ctx.view.clone(),None=>handle.as_ref().ok_or_else(||failure("runtime_binding"))?.view().await?};
         if (!from_exit && latest["alive"]!=true) || latest["in_progress"]==true || !latest["question"].is_null() || latest["pending"].as_array().is_none_or(|v|!v.is_empty())

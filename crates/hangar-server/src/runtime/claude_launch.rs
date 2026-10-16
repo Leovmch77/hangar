@@ -45,6 +45,10 @@ const SECRETS: [&str; 2] = ["HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE"]
 
 fn refused(code: &str, message: &str) -> RuntimeError { RuntimeError::new(code, message) }
 
+/// Falha que nenhuma nova tentativa resolve (motor, conta fixa, modo, Fast, só leitura, cano ausente):
+/// a religação para na hora e mostra o motivo, sem gastar as esperas (S-30).
+pub fn permanent(code: &str) -> bool { code.starts_with("launch_") || matches!(code, "headless_read_only" | "cano_ausente") }
+
 fn text<'a>(meta: &'a Value, key: &str) -> Option<&'a str> { meta[key].as_str().filter(|v| !v.is_empty()) }
 
 /// `transcript_path_de`: o `.jsonl` da conversa na conta da sessão, ou onde o `EnterWorktree` o pôs.
@@ -144,6 +148,17 @@ pub fn plan(spec: &SessionSpec, meta: &Value, ctx: &Context) -> Result<Launch, R
     Ok(Launch { program, env })
 }
 
+/// O sidecar da vida nova de um relançamento: a mesma conversa, o modo pedido e o modelo e o esforço
+/// que a vida viva usava (o `/model` e o `/effort` dela); o resto é o que o sidecar guarda.
+pub fn relaunch_meta(mut sidecar: Value, conversation: &str, mode: &str, model: &Value, effort: &Value) -> Value {
+    sidecar["session_id"] = Value::from(conversation);
+    sidecar["permission_mode"] = Value::from(mode);
+    for (field, value) in [("model", model), ("effort", effort)] {
+        if value.as_str().is_some_and(|v| !v.is_empty()) { sidecar[field] = value.clone(); }
+    }
+    sidecar
+}
+
 /// A subida de agora da sessão `name` (o sidecar é `meta`): o spec vivo, a configuração do servidor, a
 /// conta ChatGPT fixa do motor e o Fast, relidos aqui. Bloqueante: chamar fora do runtime.
 pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &Value, name: &str,
@@ -159,7 +174,7 @@ pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &V
     let route = match (engine, account) {
         (Some(engine), Some(account)) => Some(crate::session_open::facts::fixed_account(
             &crate::accounts::AccountService::new(env.clone()), engine, account)
-            .map_err(|error| refused(error.code.unwrap_or("launch_engine_account"), &error.msg))?),
+            .map_err(|error| refused("launch_engine_account", &error.msg))?),
         _ => None,
     };
     let fast = spec.service_tier.is_some() && {
@@ -271,6 +286,37 @@ mod tests {
         assert_eq!(program[at + 1], case.sid);
         assert!(!program.contains(&"--session-id".to_owned()));
         assert!(program.windows(2).any(|w| w == ["--permission-mode", "plan"]), "o modo também no --resume");
+    }
+
+    /// Relançar (queda, bypass, cura) parte do spec com a configuração de agora: o plugin e o portão de
+    /// hooks entram mesmo que a vida que morre não os tivesse, e o modo pedido vai explícito.
+    #[test]
+    fn relaunch_uses_the_spec_with_the_requested_mode_and_the_live_choices() {
+        let case = case("create_claude_headless_then_launch");
+        let meta = relaunch_meta(case.meta(), &case.sid, "bypassPermissions", &json!("sonnet"), &json!(null));
+        assert_eq!((meta["permission_mode"].as_str(), meta["model"].as_str(), meta["effort"].as_str()),
+            (Some("bypassPermissions"), Some("sonnet"), Some("xhigh")), "o esforço sem valor vivo fica o do sidecar");
+        let env = AccountEnvironment::from_map(case.server_env());
+        let roots = [case.repo.join("plugins/hangar").to_string_lossy().into_owned()];
+        let bridge = PluginBridge { port: 8765, secret: "hso-token".into() };
+        let ctx = Context { env: &env, runtime_config: &json!({}), plugin_roots: &roots, bridge: Some(&bridge), engine_route: None, fast: false };
+        let spec = crate::session_open::record::claude_live(&case.root.join("home"), &meta, "s1").unwrap();
+        let launch = plan(&spec, &meta, &ctx).unwrap();
+        assert!(launch.program.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"]));
+        assert!(launch.program.windows(2).any(|w| w == ["--model", "sonnet"]));
+        assert!(launch.program.contains(&"--plugin-dir".to_owned()) && launch.env.contains_key("HANGAR_PLUGIN_TOKEN"));
+        assert!(!launch.program.contains(&"--allow-dangerously-skip-permissions".to_owned()), "em bypass a flag de volta não entra");
+    }
+
+    #[test]
+    fn permanent_launch_failures_are_told_apart_from_passing_ones() {
+        let case = case("create_claude_headless_then_launch");
+        let env = AccountEnvironment::from_map(case.server_env());
+        let ctx = Context { env: &env, runtime_config: &json!({}), plugin_roots: &[], bridge: None, engine_route: None, fast: false };
+        let mut spec = case.spec();
+        spec.permission_mode = None;
+        assert!(permanent(&plan(&spec, &case.meta(), &ctx).unwrap_err().code));
+        for passing in ["cano_nao_escutou", "cano_nao_subiu", "relaunch_initialize", "lifecycle_busy"] { assert!(!permanent(passing), "{passing}"); }
     }
 
     #[test]

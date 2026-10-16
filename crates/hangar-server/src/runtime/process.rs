@@ -286,12 +286,22 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     });
     #[cfg(not(unix))]
     let prefix: &[std::ffi::OsString] = &[];
+    spawn_recipe(prepared(spec, bin, prefix.to_vec(), Map::new())?).await
+}
+
+fn prepared(spec: &LaunchSpec, bin: PathBuf, prefix: Vec<std::ffi::OsString>, extra: Map<String, Value>) -> Result<PreparedRecipe, ProcessError> {
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
     let exe = resolve_program(program, &spec.env)
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
     let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();
-    spawn_recipe(PreparedRecipe {bin,prefix:prefix.to_vec(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:Map::new()}).await
+    Ok(PreparedRecipe {bin,prefix,program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra})
+}
+
+/// O relançamento: tudo conferido antes de encerrar a vida antiga (cano, escopo do systemd sem reserva,
+/// executável no PATH da sessão), para a falha deixar a origem de pé. Bloqueante: chamar fora do runtime.
+pub fn prepare_launch(spec: &LaunchSpec, extra: Map<String, Value>) -> Result<PreparedRecipe, ProcessError> {
+    prepared(spec, cano_binary()?, scope_command()?, extra)
 }
 
 pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
@@ -302,28 +312,8 @@ pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
     Ok(prefix.to_vec())
 }
 
-/// Prévia privada de uma receita provada; ambiente só em memória, nunca no diário.
+/// Prévia privada de um lançamento; ambiente só em memória, nunca no diário.
 pub struct PreparedRecipe {bin:PathBuf,prefix:Vec<std::ffi::OsString>,program:Vec<std::ffi::OsString>,env:Vec<(std::ffi::OsString,std::ffi::OsString)>,cwd:PathBuf,key:String,sidecar_dir:PathBuf,extra:Map<String,Value>}
-/// Bloqueante (acha o cano e sonda o escopo): chamar fora do runtime.
-pub fn prepare_recipe(recipe:&crate::list::procs::ProcessRecipe,key:&str,sidecar_dir:&Path,extra:Map<String,Value>)->Result<PreparedRecipe,ProcessError> {
-    if recipe.argv.is_empty() || recipe.environ.is_empty() || !recipe.executable.is_file()
-        || recipe.argv.iter().any(|arg|arg.as_encoded_bytes().contains(&0)) {return Err(ProcessError::Spawn("receita incompleta".into()));}
-    let bin=cano_binary()?;
-    let prefix=scope_command()?;
-    let mut env=Vec::new();
-    for entry in &recipe.environ {
-        let bytes=entry.as_encoded_bytes();
-        if bytes.contains(&0) {return Err(ProcessError::Spawn("ambiente ilegível".into()));}
-        let at=bytes.iter().enumerate().find(|(i,b)|*i>0 && **b==b'=').map(|(i,_)|i).ok_or_else(||ProcessError::Spawn("ambiente ilegível".into()))?;
-        // SAFETY: o ambiente foi lido como OsString nativo; o corte é no `=` ASCII.
-        let key=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[..at])};
-        let value=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[at+1..])};
-        if ["HANGAR_INTERNAL_SECRET","HANGAR_RUNTIME_INSTANCE","CP_AUTH_TOKEN"].contains(&key.to_str().unwrap_or("")) {continue;}
-        env.push((key.to_owned(),value.to_owned()));
-    }
-    let program=std::iter::once(recipe.executable.as_os_str().to_owned()).chain(recipe.argv[1..].iter().cloned()).collect();
-    Ok(PreparedRecipe {bin,prefix,program,env,cwd:recipe.cwd.clone(),key:key.into(),sidecar_dir:sidecar_dir.to_owned(),extra})
-}
 /// Mantém settings privados vivos até a vida nova assumir; falha encerra só o cano lançado aqui.
 pub struct RelaunchGuard {cano:Cano,key:String,dir:PathBuf,settings:std::sync::Arc<super::claude_relaunch::Recipe>,armed:bool}
 impl RelaunchGuard {
