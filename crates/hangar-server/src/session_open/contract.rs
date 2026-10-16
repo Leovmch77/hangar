@@ -68,7 +68,7 @@ struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<V
 struct FakeTmux { sessions: Mutex<BTreeMap<String, Value>>, force: Value, record: std::sync::Arc<Mutex<Record>> }
 
 impl Mux for FakeTmux {
-    fn scope(&self) -> Vec<String> { SCOPE.map(str::to_owned).into() }
+    fn scope(&self) -> BoxFuture<'_, Vec<String>> { Box::pin(async { SCOPE.map(str::to_owned).into() }) }
 
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
         let scoped = argv.first().is_some_and(|a| a == "systemd-run");

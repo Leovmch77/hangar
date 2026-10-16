@@ -32,8 +32,8 @@ pub async fn presence(mux: &dyn Mux, env: &TerminalEnv, name: &str) -> (Presence
 
 /// Quem roda o multiplexador: o processo de verdade ou o falso dos testes e do harness.
 pub trait Mux: Send + Sync {
-    /// Prefixo do escopo transiente do systemd (`systemd-run … --`); vazio sem ele. Bloqueante.
-    fn scope(&self) -> Vec<String>;
+    /// Prefixo do escopo transiente do systemd (`systemd-run … --`); vazio sem ele.
+    fn scope(&self) -> BoxFuture<'_, Vec<String>>;
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput>;
 }
 
@@ -178,7 +178,7 @@ fn tail(stderr: &str) -> String {
 /// repete uma vez sem ele, como o `_scope_lost` do Python.
 pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<(), SpawnError> {
     let argv = new_session_argv(env, pane);
-    let scope = if env.windows { Vec::new() } else { mux.scope() };
+    let scope = if env.windows { Vec::new() } else { mux.scope().await };
     let mut scoped = scope.clone();
     scoped.extend(argv.iter().cloned());
     let mut output = mux.run(scoped.clone()).await;
@@ -284,16 +284,28 @@ pub fn client_command(program: &str) -> tokio::process::Command {
 
 /// O processo de verdade, sem os segredos do servidor no ambiente do cliente (que vira o do
 /// servidor tmux quando é ele quem o sobe).
-pub struct ProcessMux { pub timeout: Duration }
+/// `probe`: a sondagem do escopo (a do systemd; os testes trocam por uma falsa).
+pub struct ProcessMux { pub timeout: Duration, pub probe: fn() -> Vec<String> }
 
-impl Default for ProcessMux { fn default() -> Self { Self { timeout: Duration::from_secs(5) } } }
+impl Default for ProcessMux { fn default() -> Self { Self { timeout: Duration::from_secs(5), probe: systemd_scope } } }
+
+/// Bloqueante: a primeira chamada roda o `systemd-run` da sondagem.
+fn systemd_scope() -> Vec<String> {
+    #[cfg(unix)]
+    { crate::runtime::process::scope_prefix().iter().map(|a| a.to_string_lossy().into_owned()).collect() }
+    #[cfg(not(unix))]
+    { Vec::new() }
+}
 
 impl Mux for ProcessMux {
-    fn scope(&self) -> Vec<String> {
-        #[cfg(unix)]
-        { crate::runtime::process::scope_prefix().iter().map(|a| a.to_string_lossy().into_owned()).collect() }
-        #[cfg(not(unix))]
-        { Vec::new() }
+    fn scope(&self) -> BoxFuture<'_, Vec<String>> {
+        let probe = self.probe;
+        Box::pin(async move {
+            tokio::task::spawn_blocking(probe).await.unwrap_or_else(|error| {
+                tracing::warn!(%error, "sondagem do escopo systemd falhou; o terminal sobe sem o escopo");
+                Vec::new()
+            })
+        })
     }
 
     fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
@@ -329,7 +341,7 @@ pub(crate) mod tests {
     }
 
     impl Mux for FakeMux {
-        fn scope(&self) -> Vec<String> { self.scope.clone() }
+        fn scope(&self) -> BoxFuture<'_, Vec<String>> { Box::pin(async { self.scope.clone() }) }
         fn run(&self, argv: Vec<String>) -> BoxFuture<'_, MuxOutput> {
             self.seen.lock().unwrap().push(argv);
             let mut replies = self.replies.lock().unwrap();
@@ -565,6 +577,22 @@ pub(crate) mod tests {
         assert_eq!(spawn(&mux, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, UNCERTAIN, "a janela inteira sem resposta");
         let mux = FakeMux::answering(vec![ok(), ok(), silent(), ok()]);
         spawn(&mux, &machine(), &claude(Vec::new(), None)).await.expect("uma resposta perdida com o pane de pé no fim é nascimento");
+    }
+
+    /// A sondagem do escopo (o `systemd-run` e a espera dele) roda fora do runtime: as outras tarefas
+    /// seguem enquanto ela demora.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_scope_probe_does_not_hold_the_runtime() {
+        let mux = ProcessMux { probe: || { std::thread::sleep(Duration::from_millis(300)); Vec::new() }, ..ProcessMux::default() };
+        let env = TerminalEnv { program: "false".into(), ..machine() };
+        let start = std::time::Instant::now();
+        let ticker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            start.elapsed()
+        });
+        let _ = spawn(&mux, &env, &claude(Vec::new(), None)).await;
+        let ticked = ticker.await.unwrap();
+        assert!(ticked < Duration::from_millis(250), "a outra tarefa esperou a sondagem: {ticked:?}");
     }
 
     #[tokio::test]

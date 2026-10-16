@@ -217,10 +217,14 @@ fn created_body(spec: &SessionSpec, jsonl: &str, warnings: Vec<String>, route: O
 pub struct WorktreeUndo { pub source: String, pub path: String, pub branch: String, pub branch_created: bool }
 
 impl WorktreeUndo {
-    pub fn undo(&self) -> Result<(), OpenError> {
-        let made = hangar_workspace::git::Worktree { path: self.path.clone(), created: true, branch_created: self.branch_created };
-        hangar_workspace::git::undo_worktree(Path::new(&self.source), &made, &self.branch).map_err(|e| OpenError::new(500,
-            "erro_criacao_sessao", format!("falha ao desfazer a worktree: {}", e.detail.as_str().map_or_else(|| e.detail.to_string(), str::to_owned))))
+    /// O `git` roda fora do runtime.
+    pub async fn undo(self) -> Result<(), OpenError> {
+        let failed = |detail: String| OpenError::new(500, "erro_criacao_sessao", format!("falha ao desfazer a worktree: {detail}"));
+        tokio::task::spawn_blocking(move || {
+            let made = hangar_workspace::git::Worktree { path: self.path.clone(), created: true, branch_created: self.branch_created };
+            hangar_workspace::git::undo_worktree(Path::new(&self.source), &made, &self.branch)
+                .map_err(|e| e.detail.as_str().map_or_else(|| e.detail.to_string(), str::to_owned))
+        }).await.map_err(|e| failed(e.to_string()))?.map_err(failed)
     }
 }
 
@@ -255,7 +259,7 @@ pub async fn open_claude_terminal(host: &dyn OpenHost, resolved: Resolved, calle
         Ok((jsonl, warnings, route)) => Ok(Opened { body: created_body(&spec, &jsonl, warnings, route.as_ref()), undo }),
         // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
         Err(error) => {
-            if let Some(undo) = undo && error.code != Some(UNCERTAIN) { undo.undo()?; }
+            if let Some(undo) = undo && error.code != Some(UNCERTAIN) { undo.undo().await?; }
             Err(error)
         }
     }
