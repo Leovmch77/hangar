@@ -4305,9 +4305,10 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
         headless=bool(body.headless))
-    if creation.provider == "claude" and not creation.headless:
-        # Claude com terminal nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust
-        # já olhou o pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+    if creation.provider in ("claude", "pi", "omp", "kimi") and not creation.headless:
+        # Com terminal, Claude, Pi, omp e Kimi nascem no Rust com o kick-off como primeira mensagem
+        # (o Claude no comando, os outros na fila durável). Pela 8765 o Rust já olhou o pedido e abre
+        # ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
         creation = creation.model_copy(update={"initial_prompt": kick})
         if request.headers.get("x-hangar-open") == "rust":
             return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),

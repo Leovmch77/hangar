@@ -23,7 +23,7 @@ use super::{OpenCaller, OpenError, SessionOpenRequest};
 use crate::accounts::environment::AccountEnvironment;
 use crate::routes::AppState;
 
-/// Marca do bastão que o Rust repassa ao Python (`rust`): a sucessora Claude com terminal volta como
+/// Marca do bastão que o Rust repassa ao Python (`rust`): a sucessora com terminal (Claude, Pi, omp, Kimi) volta como
 /// pedido de abertura, com a mesma marca, e o Rust a abre. Vinda de fora, sai antes.
 pub const DECLINED: &str = "x-hangar-open";
 
@@ -413,8 +413,8 @@ pub async fn creation_progress(State(st): State<Arc<AppState>>, ConnectInfo(peer
 }
 
 /// `POST /api/sessions/{name}/bastao` do dono: o Python monta e grava o dossiê (é dele) e, com a
-/// sucessora Claude com terminal, devolve o pedido de abertura em vez de abrir; o Rust abre com o
-/// kick-off como primeira mensagem. Sucessora de outro provedor o Python cria como sempre.
+/// sucessora com terminal (Claude, Pi, omp, Kimi), devolve o pedido de abertura em vez de abrir; o Rust
+/// abre com o kick-off como primeira mensagem. A sucessora Codex ou sem terminal o Python cria.
 pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
     let (mut parts, body) = req.into_parts();
@@ -440,7 +440,7 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
                 "dossie": prepared["dossie"], "texto": prepared["texto"], "kickoff": prepared["kickoff"], "aviso": prepared["aviso"],
                 "avisos": opened.body["avisos"]})),
             Decision::Refused(error) => reply(&error),
-            Decision::NotOurs => reply(&OpenError::new(500, "erro_criacao_sessao", "a sucessora do bastão não é Claude com terminal")),
+            Decision::NotOurs => reply(&OpenError::new(500, "erro_criacao_sessao", "a sucessora do bastão não abre com terminal no Rust")),
         },
     };
     crate::routes::cors(&headers, response.headers_mut());

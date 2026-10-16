@@ -545,6 +545,19 @@ def test_claude_com_terminal_recebe_o_kickoff_como_primeira_mensagem(bastao_post
     assert len(criadas) == 1, "com a marca do Rust o Python não cria"
 
 
+@pytest.mark.parametrize("provider", ["pi", "omp", "kimi"])
+def test_pi_omp_e_kimi_com_terminal_tambem_voltam_ao_rust_com_o_kickoff(bastao_post, provider):
+    """Pi, omp e Kimi com terminal nascem no Rust: o pedido volta com o kick-off no `initial_prompt`
+    (o Rust o põe na fila durável), e o Python não cria nem enfileira nada."""
+    from app.pqueue import PromptQueue
+
+    post, criadas = bastao_post
+    r = post(headers={"x-hangar-open": "rust"}, name="cc3", provider=provider, headless=False)
+    assert r.status_code == 200 and r.headers.get("x-hangar-open") == "rust", r.text
+    assert r.json()["open"]["provider"] == provider and r.json()["open"]["initial_prompt"] == r.json()["kickoff"]
+    assert criadas == [] and PromptQueue("cc3").load() == []
+
+
 def test_post_nao_cria_sessao_quando_a_gravacao_do_dossie_falha(bastao_post, monkeypatch):
     from app import bastao as bastao_mod
 
