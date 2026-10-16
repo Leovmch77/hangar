@@ -425,14 +425,12 @@ async def _lifespan(app: FastAPI):
     )
     app.state.omp_plugin_sync = omp_sync
     await omp_sync.start()
-    from app import mcp_server
     # Em tarefa: o download dos binários na primeira vez não pode segurar a subida. Criada colada no
     # `try`: falha no meio da subida não pode deixar o frpc e o Caddy sem quem os pare.
     from app import connect as connect_mod
     connect_task = asyncio.create_task(connect_mod.start(), name="connect-start")
     try:
-        async with mcp_server.lifespan():
-            yield
+        yield
     finally:
         diag.registrar("backend.encerrando")
         await runtime.shutdown()
@@ -2306,12 +2304,11 @@ def _create_error_code(e: ValueError) -> str:
 
 async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSessionInfo | None:
     """Claude com terminal abre no Rust. O que entra pela 8765 ele decide antes de repassar; à ponte,
-    num sentido, só vai o que entrou direto aqui: o Connect (8768) e quem cria por dentro (o bastão
-    pelo Connect e o MCP, que roda aqui e faz a volta Rust → Python → Rust até ir ao Rust na Task 12).
+    num sentido, só vai o que entrou direto aqui: o Connect (8768), inclusive o bastão por ela.
     `None`: o pedido não é do Rust e segue aqui."""
     from app import runtime_coordinator
     port = (request.scope.get("server") or (None, None))[1] if request is not None else None
-    if request is not None and (port != CONNECT_PORT or port == settings.port):
+    if port != CONNECT_PORT or port == settings.port:
         return None
     guest = guest_users.current.get()
     payload = json.dumps({"request": body.model_dump(mode="json", exclude_unset=True),
@@ -4316,7 +4313,7 @@ async def _passar_bastao(name: str, body: BastaoBody, request: Request):
             return JSONResponse({"open": creation.model_dump(mode="json", exclude_unset=True, exclude_none=True), "dossie": str(alvo),
                                  "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
     creation._engine_catalog = account_models
-    novo = await create_session(creation)
+    novo = await create_session(creation, request)
     if creation.initial_prompt is None:
         try:
             await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
@@ -11248,9 +11245,12 @@ class _UIStatic(StaticFiles):
         return resp
 
 
-from app import mcp_server
-# Antes do estático em "/": mount é resolvido na ordem de registro.
-app.mount("/mcp", mcp_server.asgi, name="mcp")
+# O MCP `hangar` é do Rust; sem ele, o código próprio. Antes do estático em "/", que responderia 405.
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+@app.api_route("/mcp/", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+async def mcp_needs_rust():
+    raise HTTPException(503, detail=erro("mcp_needs_rust_server", "o MCP do Hangar precisa do servidor Rust"))
+
 
 _DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if _DIST.is_dir():

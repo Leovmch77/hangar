@@ -1,0 +1,134 @@
+//! Quem é a sessão que chama o MCP, pelo que ela manda no cabeçalho (`quem_chama.py`). Ordem:
+//!
+//! - `X-Hangar-Voice`: a assistente de voz, que não é sessão. Só com a assinatura que este servidor
+//!   faz a cada chamada (`<nonce>.<hmac>`); presente e inválida é erro, sem cair nos outros.
+//! - `X-Hangar-Key`: sessão sem terminal. Não muda no rename nem no `/clear`. Presente, vence o pane:
+//!   o filho pode ter herdado o `TMUX_PANE` de outra sessão.
+//! - `X-Hangar-Pane`: dono da sessão com terminal (o rename não troca o pane id). Id que aparece em
+//!   mais de uma sessão (o psmux numera por sessão) não resolve: nome errado é pior que nenhum.
+//! - `X-Hangar-Session`: o carimbo do nascimento, só se a sessão ainda se chama assim.
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use axum::http::HeaderMap;
+use serde_json::Value;
+use subtle::ConstantTimeEq;
+
+use crate::list::mux::Mux;
+
+pub const VOICE: &str = "voz";
+pub const HINT: &str = "nenhum cabeçalho de identidade resolveu uma sessão viva — mande X-Hangar-Key \
+(CP_SESSION_KEY), X-Hangar-Pane (TMUX_PANE) ou X-Hangar-Session (CP_SESSION_NAME)";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin { Voice, Key, Pane, Name }
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self { Origin::Voice => VOICE, Origin::Key => "chave", Origin::Pane => "pane", Origin::Name => "nome" }
+    }
+}
+
+/// Onde as sessões desta máquina estão: os sidecars em `home` e os panes do multiplexador.
+pub struct Local<'a> { pub home: &'a Path, pub mux: &'a Mux }
+
+fn header<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h [u8]> {
+    headers.get(name).map(|v| v.as_bytes().trim_ascii()).filter(|v| !v.is_empty())
+}
+
+/// `(nome, origem)`; o erro é a frase de por que nada resolveu. Nunca um chamador padrão.
+pub async fn resolve(headers: &HeaderMap, local: &Local<'_>, secret: &str) -> Result<(String, Origin), String> {
+    if let Some(value) = header(headers, "x-hangar-voice") {
+        if voice_signature_valid(value, secret) { return Ok((VOICE.to_owned(), Origin::Voice)); }
+        return Err("assinatura da voz inválida (o hangar-server reiniciou ou não é a voz)".into());
+    }
+    let text = |name| header(headers, name).map(|v| String::from_utf8_lossy(v).into_owned());
+    if let Some(key) = text("x-hangar-key") {
+        if let Some(name) = by_key(local.home, &key) { return Ok((name, Origin::Key)); }
+        // Sessão com terminal aberta pelo Rust: a chave mora no registro dela, sem sidecar, e quem
+        // diz o nome atual é o pane.
+        if !record_exists(local.home, &key) {
+            return Err("chave de sessão sem terminal não corresponde a nenhum sidecar".into());
+        }
+    }
+    let (pane, name) = (text("x-hangar-pane"), text("x-hangar-session"));
+    // ponytail: multiplexador que não responde vale como "nenhum pane", como o `list_panes_all`.
+    let panes = if pane.is_some() || name.is_some() { local.mux.list_panes().await.unwrap_or_default() } else { Vec::new() };
+    if let Some(pane) = pane {
+        let owners: BTreeSet<&str> = panes.iter().filter(|p| p.pane_id == pane).map(|p| p.session.as_str()).collect();
+        if let [owner] = owners.into_iter().collect::<Vec<_>>()[..] { return Ok((owner.to_owned(), Origin::Pane)); }
+    }
+    if let Some(name) = name && (panes.iter().any(|p| p.session == name) || sidecar_exists(local.home, &name)) {
+        return Ok((name, Origin::Name));
+    }
+    Err(HINT.into())
+}
+
+/// A sessão existe nesta máquina (`quem_chama._por_nome`): pane no multiplexador ou sidecar.
+pub async fn exists(local: &Local<'_>, name: &str) -> bool {
+    sidecar_exists(local.home, name) || local.mux.list_panes().await.unwrap_or_default().iter().any(|p| p.session == name)
+}
+
+/// `<nonce>.<hmac>` com HMAC-SHA256(segredo interno, "hangar-voice:" + nonce), a conta de
+/// `voice::machines::voice_signature`. Sem segredo nada vale.
+pub fn voice_signature_valid(value: &[u8], secret: &str) -> bool {
+    let Some(dot) = value.iter().position(|b| *b == b'.') else { return false };
+    let (nonce, signature) = (&value[..dot], &value[dot + 1..]);
+    if secret.is_empty() || nonce.is_empty() || signature.is_empty() { return false; }
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let mut message = b"hangar-voice:".to_vec();
+    message.extend_from_slice(nonce);
+    let expected: String = ring::hmac::sign(&key, &message).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    bool::from(expected.as_bytes().ct_eq(signature))
+}
+
+fn sidecars(dir: &Path) -> Vec<Value> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+    paths.sort();
+    paths.iter().filter_map(|p| serde_json::from_slice::<Value>(&std::fs::read(p).ok()?).ok()).filter(Value::is_object).collect()
+}
+
+/// A chave no sidecar do Claude sem terminal (com `name` e `session_id`, como o `list_all` de lá) ou
+/// no do Codex.
+// ponytail: o Codex em preparação de transferência também conta; ele não chama o MCP antes de nascer.
+fn by_key(home: &Path, key: &str) -> Option<String> {
+    let hangar = home.join(".hangar");
+    let claude = sidecars(&hangar.join("claude-headless")).into_iter().filter(|m| m["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+    claude.chain(sidecars(&hangar.join("codex-sessions")))
+        .find(|m| m["key"].as_str() == Some(key) && m["name"].as_str().is_some_and(|n| !n.is_empty()))
+        .and_then(|m| m["name"].as_str().map(str::to_owned))
+}
+
+/// `~/.hangar/session-specs/<chave>.json`, que o Rust grava ao abrir (32 hex minúsculos).
+fn record_exists(home: &Path, key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && crate::session_open::record::dir(home).join(format!("{key}.json")).is_file()
+}
+
+fn sidecar_exists(home: &Path, name: &str) -> bool {
+    let file = format!("{}.json", crate::list::discover_other::sanitize_session_name(name));
+    ["claude-headless", "codex-sessions"].iter().any(|dir| home.join(".hangar").join(dir).join(&file).exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sign(secret: &str, nonce: &str) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, format!("hangar-voice:{nonce}").as_bytes());
+        format!("{nonce}.{}", tag.as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>())
+    }
+
+    #[test]
+    fn voice_signature_matches_the_python_check() {
+        assert!(voice_signature_valid(sign("s3", "0a1b").as_bytes(), "s3"));
+        for bad in [sign("outro", "0a1b"), "sem-ponto".into(), "0a1b.".into(), ".abc".into(), format!("0a1b.é{}", "0".repeat(63))] {
+            assert!(!voice_signature_valid(bad.as_bytes(), "s3"), "{bad}");
+        }
+        assert!(!voice_signature_valid(sign("", "0a1b").as_bytes(), ""), "sem segredo nenhuma assinatura vale");
+        assert!(!voice_signature_valid(b"\xf1.\xff", "s3"));
+    }
+}

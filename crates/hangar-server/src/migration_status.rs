@@ -27,7 +27,7 @@ pub const AREAS: [&str; 22] = [
 ];
 
 /// Trabalho que o Python pede ao Rust por trás (porta privada e canal do runtime).
-pub const PRIVATE: [&str; 8] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "pages_bridge", "transcription_bridge", "dictation_bridge"];
+pub const PRIVATE: [&str; 7] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "transcription_bridge", "dictation_bridge"];
 
 const WINDOW_MINUTES: u64 = 10;
 const FACTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -264,7 +264,6 @@ pub async fn count_bridge(req: Request, next: Next) -> Response {
         "/__hangar_server/terminal" => "terminal_observe",
         "/__hangar_server/workspace" => "workspace_bridge",
         "/__hangar_server/list" => "list_bridge",
-        "/__hangar_server/pages" => "pages_bridge",
         path if path.starts_with("/__hangar_server/transcription/") => "transcription_bridge",
         path if path.starts_with("/__hangar_server/dictation/") => "dictation_bridge",
         _ => "",
@@ -419,12 +418,12 @@ mod tests {
     fn every_route_registered_in_the_router_is_known_to_the_table() {
         // O checkout do Windows pode trazer CRLF; o fim do roteador é procurado por "\n}\n".
         let source = include_str!("routes.rs").replace("\r\n", "\n");
-        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `router`.
+        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `public_routes`.
         let fn_body = |name: &str| {
             let body = &source[source.find(name).unwrap()..];
             body[..body.find("\n}\n").unwrap()].to_owned()
         };
-        let body = fn_body("fn router_with(") + "\n" + &fn_body("fn session_routes<");
+        let body = fn_body("fn public_routes(") + "\n" + &fn_body("fn session_routes<");
         let body = body.as_str();
         let (mut seen, mut api) = (0, 0);
         for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {

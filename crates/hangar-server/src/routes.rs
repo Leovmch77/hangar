@@ -435,7 +435,6 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/quotas", axum::routing::post(crate::accounts::quotas::private))
         .route("/__hangar_server/accounts/claude", axum::routing::post(crate::accounts::http::private_claude))
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))
-        .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
         .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
         .route("/__hangar_server/codex/{*rest}", axum::routing::any(crate::session_write::bridge::codex))
         .route("/__hangar_server/claude/{*rest}", axum::routing::any(crate::session_write::bridge::claude))
@@ -464,6 +463,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
+    let api = public_routes(state.clone(), pair);
+    // O MCP chama as tools pelas mesmas rotas que o `hangar-send` chama: o roteador público inteiro.
+    api.clone().merge(crate::mcp::router(state, api))
+}
+
+fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
     session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))

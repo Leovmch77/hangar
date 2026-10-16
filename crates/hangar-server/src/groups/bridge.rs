@@ -1,5 +1,5 @@
 //! Ponte privada dos grupos (`/__hangar_server/groups`): no modo `rust`/`pending` só o Rust grava
-//! `.hangar-pair`. Registry, MCP e as rotas que chegam pelas portas do Python pedem
+//! `.hangar-pair`. Registry e as rotas que chegam pelas portas do Python pedem
 //! aqui, com o envelope das outras pontes (`{op, args}` → `{ok, result}` | `{ok: false, error}`).
 use std::net::SocketAddr;
 use std::sync::Arc;

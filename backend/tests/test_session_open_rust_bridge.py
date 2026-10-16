@@ -55,33 +55,35 @@ def test_only_what_entered_python_directly_goes_to_the_rust_open(monkeypatch):
         payload = json.loads(body)
         return (200, json.dumps({"info": INFO, "undo": None}).encode()) if payload["request"].get("provider") == "claude" else None
     monkeypatch.setattr(runtime_coordinator, "rust_claude", bridge)
-    info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), None))
+    connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
+    info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), connect))
     assert (info.name, info.provider, info.owner) == ("s1", "claude", None)
     # Ausente continua ausente: o Rust decide o provedor padrão.
     assert sent[0] == ("s1", "open", "POST", {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest": None})
-    assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), None)) is None
-    connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
-    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect)) is not None
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), connect)) is None
     upstream = SimpleNamespace(scope={"server": ("127.0.0.1", 49152)})
     assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), upstream)) is None
-    assert len(sent) == 3, "o que entrou pela 8765 o Rust já decidiu: não volta a ele"
+    # Sem pedido HTTP ninguém cria por dentro do Python: o MCP abre no Rust.
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None)) is None
+    assert len(sent) == 2, "o que entrou pela 8765 o Rust já decidiu: não volta a ele"
     monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: (
         409, json.dumps({"detail": {"code": "erro_nome_em_uso", "params": {}, "msg": "ja existe uma sessao com esse nome"}}).encode()))
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+        asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect))
     assert (refused.value.status_code, refused.value.detail["code"]) == (409, "erro_nome_em_uso")
 
 
 def test_the_connect_guest_goes_to_the_rust_by_id_and_is_not_claimed_here(monkeypatch):
     """O Rust grava o dono no `guests.json`: daqui só vai o id do convidado autenticado."""
     from app import guest_users, runtime_coordinator
+    from app.connect_port import CONNECT_PORT
     sent = []
     monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: (
         sent.append(json.loads(args[3])), (200, json.dumps({"info": {**INFO, "owner": "ana"}}).encode()))[1])
     monkeypatch.setattr(guest_users, "claim", lambda *a: pytest.fail("o dono é gravado pelo Rust"))
     marker = guest_users.current.set(SimpleNamespace(id="g1", name="ana", root="/casa/ana"))
     try:
-        info = asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
+        info = asyncio.run(api_mod._open_in_rust(_body(provider="claude"), SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})))
     finally:
         guest_users.current.reset(marker)
     assert sent[0]["guest"] == "g1" and "guest_root" not in sent[0]
