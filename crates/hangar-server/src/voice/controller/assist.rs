@@ -372,7 +372,8 @@ async fn reopen(ctx: Ctx, call: CallId, name: Option<String>, id: Option<String>
         Ok(info) => {
             let name = info["name"].as_str().filter(|n| !n.is_empty()).map_or_else(|| closed.label().to_owned(), str::to_owned);
             log("reopen_conversation resumed");
-            if ctx.done.send(Done::Opened { call, machine, name, sent: None, reopened: true }).is_err() {
+            let notice = super::tools::warnings_notice(&info);
+            if ctx.done.send(Done::Opened { call, machine, name, sent: None, reopened: true, notice }).is_err() {
                 log("reopen_conversation resumed but the loop is gone");
             }
         }
