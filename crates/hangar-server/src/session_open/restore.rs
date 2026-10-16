@@ -99,6 +99,30 @@ pub fn to_restore(snap: &Snapshot, current: MuxStart, live: &HashSet<String>) ->
     Some(snap.sessions.iter().filter(|(_, e)| !live.contains(&e.name)).map(|(k, e)| (k.clone(), e.clone())).collect())
 }
 
+/// O servidor da fotografia acabou porque a única sessão dele terminou (o agente saiu, o tmux fecha a
+/// sessão e sai junto): fechamento, não queda, e a fotografia esvazia. `last_count`: as sessões dele na
+/// última volta desta execução. Com duas ou mais sumindo juntas, no desligamento do sistema ou sem a
+/// contagem, é queda (reboot, `kill-server`). ponytail: a última sessão derrubada sozinha por
+/// `kill-server` também conta como fechada; distinguir exige a ordem de saída de agente e servidor.
+pub fn ended_by_itself(snap: &mut Snapshot, last_count: Option<u64>, stopping: bool) -> bool {
+    if last_count != Some(1) || stopping { return false; }
+    snap.sessions.clear();
+    true
+}
+
+/// `systemctl is-system-running` (do sistema ou do usuário) em `stopping`: o desligamento derruba as
+/// sessões uma a uma, e isso é queda.
+async fn stopping() -> bool {
+    if !cfg!(target_os = "linux") { return false; }
+    for scope in [&[][..], &["--user"][..]] {
+        let mut command = tokio::process::Command::new("systemctl");
+        command.args(scope).arg("is-system-running").stdin(std::process::Stdio::null()).kill_on_drop(true);
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(2), command.output()).await
+            && String::from_utf8_lossy(&out.stdout).trim() == "stopping" { return true; }
+    }
+    false
+}
+
 /// Uma variável de formato do servidor (`display-message -p`); `Err` = sem servidor (`Ok(None)`) ou sem resposta.
 async fn mux_format(program: &std::ffi::OsStr, format: &str) -> Result<Option<String>, ()> {
     let mut command = crate::terminal_input::child_command(program);
@@ -296,6 +320,7 @@ async fn restore_one(st: &Arc<crate::routes::AppState>, key: &str, entry: &Entry
 pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::ffi::OsString) {
     let mut snap = read(&home);
     let (mut attempts, mut done) = (std::collections::HashMap::new(), HashSet::new());
+    let mut last_count: Option<u64> = None;
     loop {
         let current = mux_start(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
@@ -303,6 +328,7 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
         hold(&snap, same);
         match (same, live.and_then(|live| to_restore(&snap, current, &live))) {
             (true, _) => {
+                last_count = mux_format(&program, "#{server_sessions}").await.ok().flatten().and_then(|n| n.parse().ok());
                 if let Some(alive) = alive(&st, &home, &program).await {
                     let mut next = observe(&snap, &alive, now(), snap.mux_started);
                     let mut closed = CLOSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -317,6 +343,13 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
             }
             // Sem a lista ou sem o multiplexador não se sabe o que existe: nada é reaberto por cima.
             (false, None) => tracing::warn!(code = "session_restore_undecided", "sem a lista ou o multiplexador; o restore espera"),
+            (false, Some(_)) if ended_by_itself(&mut snap, last_count.take(), stopping().await) => {
+                tracing::info!("a última sessão do multiplexador terminou sozinha; nada a restaurar");
+                if let MuxStart::Started(at) = current { snap.mux_started = Some(at); }
+                if let Err(error) = write(&home, &snap) {
+                    tracing::warn!(code = "session_restore_unwritten", kind = ?error.kind(), "fotografia das sessões não gravada");
+                }
+            }
             (false, Some(pending)) => {
                 let pending: Vec<(String, Entry)> = pending.into_iter().filter(|(key, _)| !done.contains(key)).collect();
                 if !pending.is_empty() { tracing::info!(count = pending.len(), "restaurando as sessões com terminal que o multiplexador perdeu"); }
@@ -360,6 +393,18 @@ mod tests {
             service_tier: None, permission_mode: Some(mode), subagent_model: None, customizations: None, jev: false, read_only: false,
             worktree: None, creator: None, created_at: 1.0, conversation: Some("c1".into()) };
         super::super::record::write(home, &spec).unwrap();
+    }
+
+    /// RET-148: o servidor que saiu porque a única sessão dele terminou (o agente saiu) não traz nada de
+    /// volta; com mais sessões de uma vez, no desligamento ou sem a contagem vista nesta execução, é queda.
+    #[test]
+    fn a_server_that_ended_with_its_last_session_brings_nothing_back() {
+        let snap = Snapshot { mux_started: Some(10), sessions: BTreeMap::from([("k".repeat(32), entry("s1", Some("c1")))]) };
+        for (count, stopping, ended) in [(Some(1), false, true), (Some(2), false, false), (Some(1), true, false), (None, false, false)] {
+            let mut after = snap.clone();
+            assert_eq!(ended_by_itself(&mut after, count, stopping), ended, "{count:?} {stopping}");
+            assert_eq!(after.sessions.is_empty(), ended, "{count:?} {stopping}");
+        }
     }
 
     #[test]
