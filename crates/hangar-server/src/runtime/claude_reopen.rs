@@ -242,7 +242,14 @@ impl RuntimeRegistry {
     }
 
     async fn reopen_by_spec(&self,name:&str,change:SessionChange,between:Option<&dyn Between>,resume:Option<&str>) -> Result<Reopened,ReopenFailure> {
-        let _ingress=super::lifecycle::ClosedIngress::acquire(self.ingress(),name).await.map_err(ReopenFailure::refused)?;
+        let transfer=|| {
+            let open=super::codex_relaunch::transfer_open(&self.codex_environment().home,name,None,None);
+            if open {Err(ReopenFailure::refused(RuntimeError::new("session_transfer_busy","a sessão está trocando de agente")))} else {Ok(())}
+        };
+        transfer()?;
+        let _ingress=super::lifecycle::ClosedIngress::acquire_unless_transfer(self.ingress(),name).await.map_err(ReopenFailure::refused)?;
+        // A transferência que começou enquanto esta esperava a porta.
+        transfer()?;
         // Conferido de novo sob a porta: outra troca pode ter terminado enquanto esta esperava.
         let now=match self.claude_sidecar(name).await.map_err(ReopenFailure::refused)? {Some(_)=>Surface::Headless,None=>Surface::Terminal};
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {

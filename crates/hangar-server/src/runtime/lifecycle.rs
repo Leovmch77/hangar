@@ -46,6 +46,14 @@ impl ClosedIngress {
         gates.close(name,wait).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
         Ok(Self {gates:gates.clone(),name:name.into()})
     }
+    /// A porta retida pela troca de conversa recusa na hora, com o código da transferência.
+    pub async fn acquire_unless_transfer(gates:&super::ingress::IngressGates,name:&str)->Result<Self,RuntimeError> {
+        gates.close_unless_held(name,Duration::from_secs(60)).await.map_err(|refused|match refused {
+            super::ingress::CloseRefused::Held=>RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"),
+            super::ingress::CloseRefused::Busy=>failure("lifecycle_ingress_busy"),
+        })?;
+        Ok(Self {gates:gates.clone(),name:name.into()})
+    }
 }
 impl Drop for ClosedIngress {fn drop(&mut self) {self.gates.open(&self.name);}}
 

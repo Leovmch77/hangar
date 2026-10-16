@@ -284,3 +284,40 @@ async fn a_session_opened_without_an_id_resumes_the_chosen_conversation() {
     registry.close(&key,2).await.unwrap();
     fx.finish();
 }
+
+/// CRA-005/RET-001: a porta retida pela troca de conversa (a transferência Claude→Codex) recusa a
+/// reabertura na hora com o código da transferência, antes de qualquer efeito; nunca espera nem passa por cima.
+#[tokio::test]
+async fn a_port_held_by_the_transfer_refuses_the_reopen_with_the_transfer_code() {
+    let fx = fixture();
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    let registry = fx.registry().await;
+    registry.ingress().hold("s1",Duration::from_secs(1)).await.unwrap();
+    let refused = tokio::time::timeout(Duration::from_secs(5),registry.reopen_claude_session("s1",mode_switch(true),None)).await
+        .expect("recusa na hora, sem esperar a porta").expect("é sessão Claude daqui").unwrap_err();
+    assert_eq!((refused.error.code.as_str(),refused.stopped),("session_transfer_busy",false));
+    assert!(fx.args().is_empty(),"nenhum terminal pedido");
+    assert!(fx.sidecar_path("s1").exists(),"nada mudou");
+    registry.ingress().release("s1");
+}
+
+/// RET-001: o registro de uma transferência em curso também recusa a retomada, como o `_transfer_guard`.
+#[tokio::test]
+async fn an_open_transfer_record_refuses_the_resume() {
+    let fx = fixture();
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    let transfers = fx.home.join(".hangar/conversation-transfers");
+    std::fs::create_dir_all(transfers.join("indexes")).unwrap();
+    let id = "33333333-3333-4333-8333-333333333333";
+    std::fs::write(transfers.join(format!("{id}.json")),json!({"name":"s1","phase":"prepared"}).to_string()).unwrap();
+    let digest:String = ring::digest::digest(&ring::digest::SHA256,b"s1").as_ref().iter().map(|b|format!("{b:02x}")).collect();
+    std::fs::write(transfers.join(format!("indexes/session-{digest}.json")),json!([id]).to_string()).unwrap();
+    let registry = fx.registry().await;
+    let refused = registry.resume_claude_session("s1",SID).await.expect("é sessão Claude daqui").unwrap_err();
+    assert_eq!((refused.error.code.as_str(),refused.stopped),("session_transfer_busy",false));
+    assert!(fx.args().is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
+}

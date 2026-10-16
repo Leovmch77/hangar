@@ -17,6 +17,8 @@ struct Gate { closes: watch::Sender<usize>, holds: usize, passes: watch::Sender<
 pub struct GateClosed;
 #[derive(Debug)]
 pub struct IngressBusy;
+#[derive(Debug)]
+pub enum CloseRefused { Busy, Held }
 pub struct IngressPass { gates: IngressGates, name: String }
 
 /// Desfaz o fechamento de um `close` que desistiu ou foi cancelado no meio da espera.
@@ -53,18 +55,23 @@ impl IngressGates {
             tokio::time::timeout_at(deadline, closes.changed()).await.map_err(|_| GateClosed)?.map_err(|_| GateClosed)?;
         }
     }
-    pub async fn close(&self, name: &str, wait: Duration) -> Result<(), IngressBusy> { self.close_as(name, wait, false).await }
+    pub async fn close(&self, name: &str, wait: Duration) -> Result<(), IngressBusy> { self.close_as(name, wait, false, false).await.map_err(|_| IngressBusy) }
+    /// Fechamento que não passa por cima de um retido: com a troca de conversa em curso, `Held` na hora.
+    pub async fn close_unless_held(&self, name: &str, wait: Duration) -> Result<(), CloseRefused> { self.close_as(name, wait, false, true).await }
     /// Fechamento retido: enquanto durar, `enter` recusa sem esperar. Desfeito por `release`.
-    pub async fn hold(&self, name: &str, wait: Duration) -> Result<(), IngressBusy> { self.close_as(name, wait, true).await }
-    async fn close_as(&self, name: &str, wait: Duration, held: bool) -> Result<(), IngressBusy> {
+    pub async fn hold(&self, name: &str, wait: Duration) -> Result<(), IngressBusy> { self.close_as(name, wait, true, false).await.map_err(|_| IngressBusy) }
+    async fn close_as(&self, name: &str, wait: Duration, held: bool, refuse_held: bool) -> Result<(), CloseRefused> {
         // Declarado antes de `passes`: o receptor cai primeiro e a porta desistida pode sair do mapa.
-        let mut guard = CloseGuard { gates: self, name, held, armed: true };
-        let mut passes = self.with_gate(name, |g| {
+        let mut guard = CloseGuard { gates: self, name, held, armed: false };
+        // Conferido sob a mesma trava que conta o fechamento: uma retenção não passa entre os dois.
+        let Some(mut passes) = self.with_gate(name, |g| {
+            if refuse_held && g.holds > 0 { return None; }
             g.closes.send_modify(|n| *n += 1);
             if held { g.holds += 1; }
-            g.passes.subscribe()
-        });
-        if tokio::time::timeout(wait, passes.wait_for(|n| *n == 0)).await.is_err() { return Err(IngressBusy); }
+            Some(g.passes.subscribe())
+        }) else { return Err(CloseRefused::Held) };
+        guard.armed = true;
+        if tokio::time::timeout(wait, passes.wait_for(|n| *n == 0)).await.is_err() { return Err(CloseRefused::Busy); }
         guard.armed = false;
         Ok(())
     }
