@@ -6,7 +6,7 @@ import { SectionCard } from '../config/SectionCard';
 import { InfoNotice } from '../config/InfoNotice';
 import { Pill } from '../config/PageHeader';
 import { Field, MachineSheet, Notice, styles, useMachineAction } from './parts';
-import { ensureActive, normalizeUrl } from './api';
+import { ensureActive, normalizeUrl, readIdentifier } from './api';
 import { ServerSettings } from './ServerSettings';
 import { MachineOperations } from './MachineOperations';
 import { PeerSettings } from './PeerSettings';
@@ -39,9 +39,16 @@ export function MachineSettingsSheet({ server, onClose }: { server: Server; onCl
   const saveLocal = () => local.run(async (signal) => {
     const baseUrl = normalizeUrl(address);
     if (baseUrl !== server.baseUrl) {
+      const known = await readIdentifier(server, signal);
+      if (!known.identificador) throw new Error(m.mobile_machines_known_identifier_required());
       // O id salvo pode ter rota LAN em cache; este teste precisa atingir o endereço digitado.
-      await getConfigForServer({ id: `machine-probe:${baseUrl}`, label: server.label, baseUrl, token: server.token }, 15_000);
+      const candidate = { id: `machine-probe:${baseUrl}`, label: server.label, baseUrl, token: server.token };
+      await getConfigForServer(candidate, 15_000);
       ensureActive(signal);
+      const target = await readIdentifier(candidate, signal);
+      if (target.identificador !== known.identificador) {
+        throw new Error(m.mobile_machines_other_machine({ expected: known.identificador, actual: target.identificador || '—' }));
+      }
     }
     return { label: label.trim() || server.label, baseUrl };
   }, (patch) => {

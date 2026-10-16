@@ -86,7 +86,7 @@ function OperationControls({ server }: { server: Server }) {
               ensureActive(signal);
               if (Date.now() >= deadline) throw unconfirmed();
               const status = (error as { status?: unknown })?.status;
-              if ((typeof status === 'number' && ![502, 503, 504].includes(status)) || (error instanceof Error && error.message === m.mobile_machines_invalid_response())) throw error;
+              if (status === 401) throw error;
               lastCause = reason(error);
               continue;
             }

@@ -86,12 +86,49 @@ describe('Máquinas: cadastro do aparelho', () => {
     await type(m.mobile_machines_label(), 'fixture-draft');
     await type(m.mobile_machines_endpoint(), 'https://new.test');
     expect(mocks.fetch.mock.calls.some(([url]) => String(url).startsWith('https://new.test'))).toBe(false);
-    mocks.fetch.mockImplementation(async () => json({ detail: 'fixture-refused' }, 403));
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => String(url).startsWith('https://new.test') ? json({ detail: 'fixture-refused' }, 403) : original(url, init));
     await click(m.mobile_machines_save());
     expect(useServers.getState().servers[0]).toEqual(machine);
     expect(container.textContent).toContain('fixture-refused');
     expect((container.querySelector(`input[aria-label="${m.mobile_machines_endpoint()}"]`) as HTMLInputElement).value).toBe('https://new.test');
     expect(calls('/api/config').at(-1)?.[0]).toBe('https://new.test/api/config');
+  });
+
+  it.each([
+    { name: 'outra-identidade', known: 'owner', target: 'other', error: '', expected: 'other' },
+    { name: 'identidade-atual-ausente', known: '', target: 'owner', error: '', expected: '' },
+    { name: 'identidade-destino-ausente', known: 'owner', target: '', error: '', expected: '—' },
+    { name: 'leitura-atual-falhou', known: 'owner', target: 'owner', error: 'current', expected: '' },
+    { name: 'leitura-destino-falhou', known: 'owner', target: 'owner', error: 'target', expected: '' },
+  ])('recusa trocar URL sem confirmar a mesma máquina: $name', async ({ known, target, error, expected }) => {
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/identificador')) {
+        const destination = url.startsWith('https://replacement.test');
+        if ((destination && error === 'target') || (!destination && error === 'current')) return json({ detail: 'fixture-id-unavailable' }, 503);
+        return json({ identificador: destination ? target : known, lan_url: '' });
+      }
+      return original(url, init);
+    });
+    await render(); await click(m.mobile_machines_configure());
+    await type(m.mobile_machines_endpoint(), 'https://replacement.test');
+    expect(mocks.fetch.mock.calls.some(([url]) => String(url).startsWith('https://replacement.test'))).toBe(false);
+    await click(m.mobile_machines_save());
+    expect(useServers.getState().servers[0]).toEqual(machine);
+    expect((container.querySelector(`input[aria-label="${m.mobile_machines_endpoint()}"]`) as HTMLInputElement).value).toBe('https://replacement.test');
+    if (error) expect(container.textContent).toContain('fixture-id-unavailable');
+    else if (!known) expect(container.textContent).toContain(m.mobile_machines_known_identifier_required());
+    else expect(container.textContent).toContain(m.mobile_machines_other_machine({ expected: known, actual: expected }));
+  });
+
+  it('salva URL diferente somente depois de ler o mesmo identificador no destino', async () => {
+    await render(); await click(m.mobile_machines_configure());
+    await type(m.mobile_machines_endpoint(), 'https://same-machine.test');
+    await click(m.mobile_machines_save());
+    expect(calls('/identificador').some(([url]) => url === 'https://same-machine.test/api/peers/identificador')).toBe(true);
+    expect(useServers.getState().servers[0]).toEqual({ ...machine, baseUrl: 'https://same-machine.test' });
+    expect(JSON.parse(mocks.vault.get('cp_servers_v1')!).servers[0].baseUrl).toBe('https://same-machine.test');
   });
 });
 

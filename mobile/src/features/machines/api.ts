@@ -11,7 +11,9 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 const duration = (value: unknown) => value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
 export const validIdentifier = (value: string) => value === '' || /^[a-z0-9][a-z0-9_-]{0,31}$/.test(value);
 const invalid = () => new Error(m.mobile_machines_invalid_response());
-export const reason = (error: unknown) => error instanceof Error ? error.message : m.erro_desconhecido();
+export const reason = (error: unknown) => error instanceof Error
+  ? error.message === 'machine_address_duplicate' ? m.mobile_machines_duplicate_address() : error.message
+  : m.erro_desconhecido();
 export function ensureActive(signal: AbortSignal) {
   if (signal.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
 }
@@ -36,7 +38,13 @@ async function request(server: Server, path: string, signal: AbortSignal, method
     method, signal: comTeto(signal, timeout), ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw Object.assign(new Error(`${response.status}: ${await errorDetail(response)}`), { status: response.status });
-  const value: unknown = await response.json();
+  let value: unknown;
+  try { value = await response.json(); }
+  catch (error) {
+    ensureActive(signal);
+    if (error instanceof SyntaxError) throw invalid();
+    throw error;
+  }
   ensureActive(signal);
   return value;
 }
@@ -113,6 +121,10 @@ export async function registerBoth(owner: Server, remote: Server, remoteId: stri
   const identity = await readIdentifier(owner, signal);
   if (!identity.identificador || !remoteId) throw new Error(m.mobile_machines_identifier_required());
   if (identity.identificador === remoteId) throw new Error(m.mobile_machines_identifier_distinct());
+  const confirmed = await readIdentifier(remote, signal);
+  if (confirmed.identificador !== remoteId) {
+    throw new Error(m.mobile_machines_other_machine({ expected: remoteId, actual: confirmed.identificador || '—' }));
+  }
   const url = await ownerAddress(owner, signal);
   await registerPeer(owner, remoteId, remote.baseUrl, remote.token, signal);
   let partial = '';

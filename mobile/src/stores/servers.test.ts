@@ -667,4 +667,72 @@ describe('update de máquina própria', () => {
     await useServers.getState().load();
     expect(useServers.getState()).toMatchObject(expected);
   });
+
+  test.each([
+    ['http://10.0.0.3:8765', 'http://10.0.0.3:8765'],
+    ['http://10.0.0.3:8765///', 'http://10.0.0.3:8765'],
+    ['http://10.0.0.3:8765', 'http://10.0.0.3:8765///'],
+  ])('recusa URL de outra máquina sem alterar memória ou cofre: %s / %s', async (baseUrl, savedUrl) => {
+    const other = { ...SAVED_SERVER, id: 'other', baseUrl: savedUrl, token: 'other-token' };
+    const saved = { servers: [SAVED_SERVER, other], activeId: other.id };
+    vault.set(VAULT_KEY, JSON.stringify(saved));
+    await useServers.getState().load();
+
+    expect(() => useServers.getState().update(SAVED_SERVER.id, { label: 'Não editar', baseUrl }))
+      .toThrowError('machine_address_duplicate');
+
+    expect(useServers.getState()).toMatchObject(saved);
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(saved));
+    await useServers.getState().load();
+    expect(useServers.getState()).toMatchObject(saved);
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(saved));
+  });
+
+  test.each(['', '/', '///'])('permite a própria URL normalizada sem trocar identidade ou LAN: %s', async (suffix) => {
+    vault.set(VAULT_KEY, JSON.stringify(SAVED));
+    await useServers.getState().load();
+
+    useServers.getState().update(SAVED_SERVER.id, { label: 'Novo nome', baseUrl: `${SAVED_SERVER.baseUrl}${suffix}` });
+    await useServers.getState().load();
+
+    const expected = { servers: [{ ...SAVED_SERVER, label: 'Novo nome' }], activeId: SAVED_SERVER.id };
+    expect(useServers.getState()).toMatchObject(expected);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(expected);
+  });
+
+  test('URL de convite não conflita nem funde as entradas', async () => {
+    const invite = { ...SAVED_SERVER, id: 'invite', baseUrl: 'http://10.0.0.3:8765', token: 'guest-token', invite: true };
+    vault.set(VAULT_KEY, JSON.stringify({ servers: [SAVED_SERVER, invite], activeId: SAVED_SERVER.id }));
+    await useServers.getState().load();
+
+    useServers.getState().update(SAVED_SERVER.id, { baseUrl: invite.baseUrl });
+    await useServers.getState().load();
+
+    const expected = { servers: [{ ...serverWithoutLan, baseUrl: invite.baseUrl }, invite], activeId: SAVED_SERVER.id };
+    expect(useServers.getState()).toMatchObject(expected);
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(expected);
+  });
+
+  test('recusa conhecida com cofre ilegível não fica pendente nem impede uma edição válida de recuperar', async () => {
+    const other = { ...SAVED_SERVER, id: 'other', baseUrl: 'http://10.0.0.3:8765', token: 'other-token' };
+    const saved = { servers: [SAVED_SERVER, other], activeId: other.id };
+    vault.set(VAULT_KEY, JSON.stringify(saved));
+    await useServers.getState().load();
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error('bloqueado'));
+    await useServers.getState().load();
+
+    expect(() => useServers.getState().update(SAVED_SERVER.id, { baseUrl: `${other.baseUrl}/` }))
+      .toThrowError('machine_address_duplicate');
+    expect(useServers.getState()).toMatchObject({ ...saved, vaultReadable: false });
+    expect(vault.get(VAULT_KEY)).toBe(JSON.stringify(saved));
+
+    useServers.getState().update(SAVED_SERVER.id, { label: 'Edição válida' });
+    await useServers.getState().load();
+
+    const expected = { servers: [{ ...SAVED_SERVER, label: 'Edição válida' }, other], activeId: other.id };
+    expect(useServers.getState()).toMatchObject({ ...expected, vaultReadable: true, aviso: null });
+    expect(JSON.parse(vault.get(VAULT_KEY)!)).toEqual(expected);
+    await useServers.getState().load();
+    expect(useServers.getState()).toMatchObject(expected);
+  });
 });

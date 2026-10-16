@@ -72,7 +72,7 @@ describe('operações da máquina explícita', () => {
     expect(el.textContent).not.toContain(m.mobile_machines_operation_ready());
   });
 
-  it.each([502, 503, 504])('mantém a espera após HTTP %i temporário e só conclui com o resultado do mesmo pid', async (status) => {
+  it.each([403, 404, 500, 502, 503, 504])('mantém a espera após HTTP %i dentro do prazo e só conclui com o resultado do mesmo pid', async (status) => {
     let reads = 0;
     mocks.fetch.mockImplementation(async (_url, init) => {
       if (init?.method === 'POST') return json({ ok: true, pid: 77 });

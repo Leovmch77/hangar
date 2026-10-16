@@ -200,12 +200,19 @@ export const useServers = create<ServersState>((set, get) => {
     });
   },
   update(id, patch) {
+    const target = resolveId(id);
+    const servers = get().servers;
+    const baseUrl = patch.baseUrl?.replace(/\/+$/, '');
+    if (servers.find((s) => s.id === target)?.invite) return;
+    if (baseUrl !== undefined && servers.some((s) => s.id !== target && !s.invite && s.baseUrl.replace(/\/+$/, '') === baseUrl)) {
+      throw new Error('machine_address_duplicate');
+    }
     change((p) => ({
       ...p,
       servers: p.servers.map((s) => {
         if (s.id !== resolveId(id) || s.invite) return s;
-        const server = { ...s, label: patch.label ?? s.label, baseUrl: patch.baseUrl ?? s.baseUrl };
-        if (server.baseUrl !== s.baseUrl) {
+        const server = { ...s, label: patch.label ?? s.label, baseUrl: baseUrl ?? s.baseUrl };
+        if (baseUrl !== undefined && baseUrl !== s.baseUrl.replace(/\/+$/, '')) {
           esquecerRota(s.id);
           delete server.lan;
         }
