@@ -296,6 +296,27 @@ test.each([false, true])('árvore real do progresso mantém linha alinhada e SVG
   expect(drawing.style.alignSelf).toBe('center');
 });
 
+test.each([false, true])('muitas linhas usam região limitada com conteúdo natural: painel=%s', withPane => {
+  useMods.setState({ visible: true });
+  const container = renderUi();
+  act(() => chatStore('srv2', 'sess').use.setState({ pluginUi: parsePluginUi({
+    ...surface,
+    above: { type: 'Box', props: { flexDirection: 'column' }, children: Array.from({ length: 8 }, (_, i) => ({ type: 'Text', children: [`mod-line-${i}`] })) },
+    panes: withPane ? surface.panes : [],
+  }) }));
+  const band = labeled(container, m.plugin_band_label());
+  expect(band.style.flexGrow).toBe('0');
+  expect(band.style.flexShrink).toBe('1');
+  expect(Number.parseFloat(band.style.maxHeight)).toBe(126.6);
+  expect(band.textContent).toContain('mod-line-7');
+  if (withPane) {
+    const pane = labeled(container, m.plugin_painel_label({ titulo: 'pane-two' }));
+    const body = pane.children[1] as HTMLElement;
+    expect(body.style.flexGrow).toBe('0');
+    expect(body.style.flexShrink).toBe('1');
+  }
+});
+
 test('conjunto dos mods deixa espaço para o composer quando o teclado abre', () => {
   useMods.setState({ visible: true });
   const container = renderUi();

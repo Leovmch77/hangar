@@ -214,13 +214,13 @@ export function PluginUi({ serverId, name, readOnly = false }: { serverId: strin
             <Icon name="X" size={18} color={theme.tokens.text.secondary} />
           </Pressable> : null}
         </View>
-        <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled" style={{ maxHeight: availableHeight * 0.3 }} contentContainerStyle={styles.paneBody}>
+        <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled" style={[styles.verticalScroll, { maxHeight: availableHeight * 0.3 }]} contentContainerStyle={styles.paneBody}>
           {!pane.tree || typeof pane.tree === 'object' && pane.tree.type === 'engine'
             ? <View style={styles.loading}><ActivityIndicator size="small" /><Text style={styles.muted}>{m.plugin_painel_carregando()}</Text></View>
             : tree(pane.tree, pane.id, pane.columns)}
         </ScrollView>
       </View> : null}
-      {!isEmptyBand(surface.above) ? <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled" style={{ maxHeight: availableHeight * 0.15 }} contentContainerStyle={styles.band}
+      {!isEmptyBand(surface.above) ? <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled" style={[styles.verticalScroll, { maxHeight: availableHeight * 0.15 }]} contentContainerStyle={styles.band}
         accessibilityLabel={m.plugin_band_label()}>{tree(surface.above, BAND_SITE, surface.columns)}</ScrollView> : null}
       {busy ? <ActivityIndicator size="small" /> : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
@@ -237,6 +237,7 @@ const styles = StyleSheet.create(theme => ({
   tabRow: { alignItems: 'center' },
   tab: { minHeight: 44, paddingHorizontal: theme.base.space[2], justifyContent: 'center' },
   close: { minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
+  verticalScroll: { flexGrow: 0, flexShrink: 1 },
   paneBody: { padding: theme.base.space[2] },
   band: { padding: theme.base.space[2] },
   loading: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
