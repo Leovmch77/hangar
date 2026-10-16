@@ -175,6 +175,23 @@ async fn a_queue_held_by_the_usage_limit_delivers_nothing_until_let_go() {
 }
 
 #[tokio::test]
+async fn the_continue_note_goes_ahead_of_what_waited_in_the_held_queue() {
+    use hangar_server::runtime::{gateway::LimitHit,protocol::UsageLimit,queue::Action};
+    let dir = tempfile::tempdir().unwrap();
+    let (registry,mut lines,cano) = opened_recording(dir.path()).await;
+    let (sink,_hits) = tokio::sync::mpsc::unbounded_channel();
+    registry.set_limit_sink(sink);
+    registry.usage_limit(LimitHit { name:"session".into(),provider:"claude".into(),account:None,
+        limit:UsageLimit { window:"five_hour".into(),resets_at:None } });
+    registry.queue_action("session","q1".into(),Action::Append { text:"mensagem-na-fila".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("q1".into()) }).await.unwrap();
+    hangar_server::session_write::limit_switch::enqueue_first(&registry,"session","recado-continue").await.unwrap();
+    registry.release_limit("session");
+    assert_eq!(first_written(&mut lines,&["mensagem-na-fila","recado-continue"],std::time::Duration::from_secs(10)).await.as_deref(),Some("recado-continue"));
+    registry.close("key",1).await.unwrap();
+    cano.abort();
+}
+
+#[tokio::test]
 async fn readonly_headless_binding_comes_from_the_owner_feed() {
     let dir=tempfile::tempdir().unwrap();let (registry,_,cano)=opened(dir.path()).await;
     let binding=registry.interaction_binding_readonly("session").await.unwrap();assert_eq!(binding.key,"key");assert_eq!(binding.generation,1);assert_eq!(binding.conversation,"sid-1");

@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::routes::AppState;
 use crate::runtime::gateway::{LimitHit,RuntimeRegistry};
 use crate::runtime::protocol::UsageLimit;
+use crate::runtime::queue::Action;
 use crate::session_open::{Account,AccountSource,AgentProvider,ChangeReason,SessionSpec};
 
 /// O que fazer com a sessão que bateu o limite.
@@ -94,6 +95,14 @@ pub fn decide(spec:&SessionSpec,current:&str,catalog:&Value,quotas:&[Value],spen
 /// Vai à sessão pela fila, depois de reaberta: sem ele a conversa ficaria parada no aviso de limite.
 pub const CONTINUE:&str = "O limite de uso da conta anterior acabou e esta sessão foi reaberta em outra conta. Continue de onde parou.";
 
+/// Grava `text` na fila durável da sessão, na frente das que esperam. Devolve o id da entrada.
+pub async fn enqueue_first(runtime:&RuntimeRegistry,name:&str,text:&str) -> Result<String,crate::runtime::protocol::RuntimeError> {
+    let id = crate::mods::state::random_hex(16);
+    runtime.queue_action(name,format!("limit-continue:{id}"),Action::Append { text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.clone()) }).await?;
+    runtime.queue_action(name,format!("limit-continue-first:{id}"),Action::Promote { entry_id:id.clone() }).await?;
+    Ok(id)
+}
+
 /// Janela sem reset conhecido fica gasta por cinco horas, a menor das janelas.
 const UNKNOWN_RESET_S:f64 = 5.0 * 3600.0;
 
@@ -112,7 +121,11 @@ pub trait Host: Send + Sync {
     fn catalog(&self) -> Result<Value,String>;
     fn quotas(&self) -> BoxFuture<'_,Result<Vec<Value>,String>>;
     fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen>;
-    fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>>;
+    /// O recado na fila durável, na frente: entregue pela vida nova quando a fila for solta, e não se perde
+    /// se a subida demorar ou o Hangar reiniciar no meio. Devolve o id da entrada.
+    fn enqueue_first<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<String,String>>;
+    /// Tira o recado da fila quando a troca não aconteceu: ele iria à conta esgotada.
+    fn cancel<'a>(&'a self,name:&'a str,entry:&'a str) -> BoxFuture<'a,()>;
     /// A fila da sessão, segurada desde o aviso de limite, volta a entregar.
     fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()>;
     /// A espera entre duas tentativas com a sessão ocupada.
@@ -154,22 +167,25 @@ impl Switcher {
             Decision::Switch { path,label }=>(path,label),
             Decision::Stay(code)=>return Outcome::Stayed(code),
         };
+        // Na frente da fila segurada: a vida nova entrega o recado antes do que esperava nela.
+        let entry = match host.enqueue_first(&hit.name,CONTINUE).await {
+            Ok(entry)=>entry,
+            Err(code)=>return Outcome::Failed(format!("limit_switch_continue_{code}")),
+        };
         // A fila está segurada, mas a sessão pode estar terminando o turno ou com uma pergunta aberta.
         let mut tries = 0;
-        loop {
+        let refused = loop {
             tries += 1;
             match host.reopen(&hit.name,&spec,&path).await {
-                Reopen::NotRust=>return Outcome::Stayed("limit_switch_not_rust"),
-                Reopen::Failed(code)=>return Outcome::Failed(code),
-                Reopen::Busy(code) if tries >= BUSY_TRIES=>return Outcome::Busy(code),
+                Reopen::NotRust=>break Outcome::Stayed("limit_switch_not_rust"),
+                Reopen::Failed(code)=>break Outcome::Failed(code),
+                Reopen::Busy(code) if tries >= BUSY_TRIES=>break Outcome::Busy(code),
                 Reopen::Busy(_)=>host.pause().await,
-                Reopen::Done=>break,
+                Reopen::Done=>return Outcome::Switched { label,explicit:spec.account_source == AccountSource::Explicit },
             }
-        }
-        if let Err(code) = host.deliver(&hit.name,CONTINUE).await {
-            return Outcome::Failed(format!("limit_switch_continue_{code}"));
-        }
-        Outcome::Switched { label,explicit:spec.account_source == AccountSource::Explicit }
+        };
+        host.cancel(&hit.name,&entry).await;
+        refused
     }
 
     async fn handle(&self,host:&dyn Host,hit:LimitHit) {
@@ -250,9 +266,13 @@ impl Host for Native {
             }
         })
     }
-    fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>> {
+    fn enqueue_first<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<String,String>> {
+        Box::pin(async move { enqueue_first(&self.runtime,name,text).await.map_err(|error|error.code) })
+    }
+    fn cancel<'a>(&'a self,name:&'a str,entry:&'a str) -> BoxFuture<'a,()> {
         Box::pin(async move {
-            super::input::deliver_text(&self.st,name,text).await.map_err(|detail|detail["code"].as_str().unwrap_or("failed").to_owned())
+            let cancelled = self.runtime.queue_action(name,format!("limit-cancel:{entry}"),Action::Cancel { entry_id:entry.to_owned() }).await;
+            if let Err(error) = cancelled { tracing::warn!(session=%name,code=%error.code,"recado de continuar ficou na fila depois da troca que falhou"); }
         })
     }
     fn release<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()> { self.runtime.release_limit(name); Box::pin(async {}) }
@@ -413,8 +433,11 @@ mod tests {
                 outcome
             })
         }
-        fn deliver<'a>(&'a self,_:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>> {
-            Box::pin(async move { self.log.lock().unwrap().push(format!("deliver {text}")); Ok(()) })
+        fn enqueue_first<'a>(&'a self,_:&'a str,text:&'a str) -> BoxFuture<'a,Result<String,String>> {
+            Box::pin(async move { self.log.lock().unwrap().push(format!("enqueue {text}")); Ok("e1".into()) })
+        }
+        fn cancel<'a>(&'a self,_:&'a str,entry:&'a str) -> BoxFuture<'a,()> {
+            Box::pin(async move { self.log.lock().unwrap().push(format!("cancel {entry}")); })
         }
         fn release<'a>(&'a self,_:&'a str) -> BoxFuture<'a,()> { Box::pin(async move { self.log.lock().unwrap().push("release".into()); }) }
         fn pause(&self) -> BoxFuture<'_,()> { Box::pin(async move { self.log.lock().unwrap().push("pause".into()); }) }
@@ -430,7 +453,7 @@ mod tests {
     async fn the_stopped_session_reopens_in_the_roomiest_account_and_is_told_to_continue() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}"),"release".into()]);
+        assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"release".into()]);
         assert_eq!(fake.diary(),vec!["switched"]);
     }
 
@@ -460,8 +483,22 @@ mod tests {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
         fake.reopens.lock().unwrap().push(Reopen::Busy("erro_sessao_trabalhando".into()));
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),"pause".into(),"reopen /c".into(),format!("deliver {CONTINUE}"),"release".into()]);
+        assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"pause".into(),"reopen /c".into(),"release".into()]);
         assert_eq!(fake.diary(),vec!["switched"]);
+    }
+
+    #[tokio::test]
+    async fn a_switch_that_does_not_happen_takes_the_continue_note_back() {
+        for outcome in [Reopen::Failed("erro_troca".into()),Reopen::NotRust] {
+            let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+            fake.reopens.lock().unwrap().push(outcome);
+            Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+            assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"cancel e1".into(),"release".into()]);
+        }
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().extend((0..BUSY_TRIES).map(|_|Reopen::Busy("erro_sessao_trabalhando".into())));
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log()[fake.log().len()-2..],["cancel e1".to_owned(),"release".into()]);
     }
 
     #[tokio::test]
