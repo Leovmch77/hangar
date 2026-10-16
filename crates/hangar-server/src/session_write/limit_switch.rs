@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc,Mutex};
 
+use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use crate::routes::AppState;
-use crate::runtime::gateway::LimitHit;
+use crate::runtime::gateway::{LimitHit,RuntimeRegistry};
 use crate::runtime::protocol::UsageLimit;
 use crate::session_open::{Account,AccountSource,AgentProvider,ChangeReason,SessionSpec};
 
@@ -82,6 +83,22 @@ pub const CONTINUE:&str = "O limite de uso da conta anterior acabou e esta sess√
 /// Janela sem reset conhecido fica gasta por cinco horas, a menor das janelas.
 const UNKNOWN_RESET_S:f64 = 5.0 * 3600.0;
 
+/// Resultado da reabertura pedida ao servidor.
+#[derive(Debug,PartialEq)]
+pub enum Reopen { Done, NotRust, Failed(String) }
+
+/// O que a troca usa do servidor; nos testes, um falso que registra as chamadas.
+pub trait Host: Send + Sync {
+    fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>>;
+    fn current_dir(&self,spec:&SessionSpec) -> String;
+    fn catalog(&self) -> Result<Value,String>;
+    fn quotas(&self) -> BoxFuture<'_,Vec<Value>>;
+    fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen>;
+    fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>>;
+    fn diary(&self,name:&str,code:&str,reason:&'static str);
+    fn now(&self) -> f64;
+}
+
 #[derive(Default)]
 struct Switcher {
     spent:Spent,
@@ -96,40 +113,38 @@ impl Switcher {
         self.handled.lock().is_ok_and(|mut handled|handled.insert(name.to_owned(),limit.clone()).as_ref() != Some(limit))
     }
 
-    async fn switch(&self,st:&Arc<AppState>,hit:&LimitHit) -> Outcome {
+    async fn switch(&self,host:&dyn Host,hit:&LimitHit) -> Outcome {
         if hit.provider != "claude" { return Outcome::Stayed("limit_switch_not_claude"); }
-        let Some(runtime) = st.state.runtime.get().cloned() else { return Outcome::Failed("limit_switch_runtime_absent".into()) };
-        let spec = match runtime.claude_spec(&hit.name).await {
+        let spec = match host.spec(&hit.name).await {
             None=>return Outcome::Stayed("limit_switch_not_rust"),
-            Some(Err(error))=>return Outcome::Failed(error.code),
+            Some(Err(code))=>return Outcome::Failed(code),
             Some(Ok(spec))=>spec,
         };
         if matches!(spec.account,Account::Engine{..}) { return Outcome::Stayed("limit_switch_engine"); }
-        let now = crate::state::monitor::wall_now();
-        let current = super::account::current_dir(&runtime,&spec);
+        let now = host.now();
+        let current = host.current_dir(&spec);
         self.spent.mark(&current,hit.limit.resets_at.filter(|reset|*reset > now).unwrap_or(now + UNKNOWN_RESET_S));
-        let catalog = match st.accounts.claude_catalog() { Ok(catalog)=>catalog, Err(error)=>return Outcome::Failed(error.code.into()) };
-        let quotas = st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
-        let quotas:Vec<Value> = quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect();
+        let catalog = match host.catalog() { Ok(catalog)=>catalog, Err(code)=>return Outcome::Failed(code) };
+        let quotas = host.quotas().await;
         let (path,label) = match decide(&spec,&current,&catalog,&quotas,&self.spent,now) {
             Decision::Switch { path,label }=>(path,label),
             Decision::Stay(code)=>return Outcome::Stayed(code),
         };
-        match super::account::reopen_in(st,&runtime,&hit.name,&spec,&path,false,ChangeReason::LimitSwitch).await {
-            None=>return Outcome::Stayed("limit_switch_not_rust"),
-            Some(Err(failure))=>return Outcome::Failed(failure.error.code),
-            Some(Ok(_))=>{},
+        match host.reopen(&hit.name,&spec,&path).await {
+            Reopen::NotRust=>return Outcome::Stayed("limit_switch_not_rust"),
+            Reopen::Failed(code)=>return Outcome::Failed(code),
+            Reopen::Done=>{},
         }
-        if let Err(detail) = super::input::deliver_text(st,&hit.name,CONTINUE).await {
-            return Outcome::Failed(format!("limit_switch_continue_{}",detail["code"].as_str().unwrap_or("failed")));
+        if let Err(code) = host.deliver(&hit.name,CONTINUE).await {
+            return Outcome::Failed(format!("limit_switch_continue_{code}"));
         }
         Outcome::Switched { label,explicit:spec.account_source == AccountSource::Explicit }
     }
 
-    async fn handle(&self,st:&Arc<AppState>,hit:LimitHit) {
+    async fn handle(&self,host:&dyn Host,hit:LimitHit) {
         if !self.first_time(&hit.name,&hit.limit) { return; }
-        let outcome = self.switch(st,&hit).await;
-        let report = |code:&str,reason:&'static str|st.diag.report("session.limit_switch",&hit.name,&super::input::diary_code(code),reason);
+        let outcome = self.switch(host,&hit).await;
+        let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
         match outcome {
             Outcome::Switched { label,explicit } => {
                 tracing::info!(session=%hit.name,window=%hit.limit.window,to=%label,explicit,"limite de uso: sess√£o reaberta em outra conta");
@@ -156,10 +171,43 @@ pub fn spawn(st:Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     let runtime = st.state.runtime.get()?.clone();
     let (sink,mut hits) = tokio::sync::mpsc::unbounded_channel();
     runtime.set_limit_sink(sink);
-    let switcher = Arc::new(Switcher::default());
+    let switcher = Switcher::default();
+    let host = Native { st,runtime };
     Some(tokio::spawn(async move {
-        while let Some(hit) = hits.recv().await { switcher.handle(&st,hit).await; }
+        while let Some(hit) = hits.recv().await { switcher.handle(&host,hit).await; }
     }))
+}
+
+struct Native { st:Arc<AppState>, runtime:Arc<RuntimeRegistry> }
+
+impl Host for Native {
+    fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
+        Box::pin(async move { self.runtime.claude_spec(name).await.map(|spec|spec.map_err(|error|error.code)) })
+    }
+    fn current_dir(&self,spec:&SessionSpec) -> String { super::account::current_dir(&self.runtime,spec) }
+    fn catalog(&self) -> Result<Value,String> { self.st.accounts.claude_catalog().map_err(|error|error.code.into()) }
+    fn quotas(&self) -> BoxFuture<'_,Vec<Value>> {
+        Box::pin(async move {
+            let quotas = self.st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
+            quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect()
+        })
+    }
+    fn reopen<'a>(&'a self,name:&'a str,spec:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen> {
+        Box::pin(async move {
+            match super::account::reopen_in(&self.st,&self.runtime,name,spec,path,false,ChangeReason::LimitSwitch).await {
+                None=>Reopen::NotRust,
+                Some(Err(failure))=>Reopen::Failed(failure.error.code),
+                Some(Ok(_))=>Reopen::Done,
+            }
+        })
+    }
+    fn deliver<'a>(&'a self,name:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>> {
+        Box::pin(async move {
+            super::input::deliver_text(&self.st,name,text).await.map_err(|detail|detail["code"].as_str().unwrap_or("failed").to_owned())
+        })
+    }
+    fn diary(&self,name:&str,code:&str,reason:&'static str) { self.st.diag.report("session.limit_switch",name,code,reason); }
+    fn now(&self) -> f64 { crate::state::monitor::wall_now() }
 }
 
 #[cfg(test)]
@@ -259,6 +307,60 @@ mod tests {
         let hit = hits.try_recv().unwrap();
         assert_eq!((hit.name.as_str(),hit.provider.as_str(),hit.limit),("s1","codex",limit));
         assert!(hits.try_recv().is_err());
+    }
+
+    struct Fake {
+        spec:Mutex<SessionSpec>,
+        catalog:Value,
+        quotas:Mutex<Vec<Value>>,
+        /// Respostas da reabertura, na ordem; vazia = feita.
+        reopens:Mutex<Vec<Reopen>>,
+        log:Mutex<Vec<String>>,
+        diary:Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        fn new(dir:&str,quotas:Vec<Value>) -> Self {
+            Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(quotas),
+                reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()) }
+        }
+        fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
+        fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
+    }
+
+    impl Host for Fake {
+        fn spec<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
+            Box::pin(async move { Some(Ok(self.spec.lock().unwrap().clone())) })
+        }
+        fn current_dir(&self,spec:&SessionSpec) -> String { spec.account.config_dir().unwrap_or("/default").to_owned() }
+        fn catalog(&self) -> Result<Value,String> { Ok(self.catalog.clone()) }
+        fn quotas(&self) -> BoxFuture<'_,Vec<Value>> { Box::pin(async move { self.quotas.lock().unwrap().clone() }) }
+        fn reopen<'a>(&'a self,_:&'a str,_:&'a SessionSpec,path:&'a str) -> BoxFuture<'a,Reopen> {
+            Box::pin(async move {
+                self.log.lock().unwrap().push(format!("reopen {path}"));
+                let mut reopens = self.reopens.lock().unwrap();
+                let outcome = if reopens.is_empty() { Reopen::Done } else { reopens.remove(0) };
+                if outcome == Reopen::Done { *self.spec.lock().unwrap() = spec(claude(path)); }
+                outcome
+            })
+        }
+        fn deliver<'a>(&'a self,_:&'a str,text:&'a str) -> BoxFuture<'a,Result<(),String>> {
+            Box::pin(async move { self.log.lock().unwrap().push(format!("deliver {text}")); Ok(()) })
+        }
+        fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
+        fn now(&self) -> f64 { 1000.0 }
+    }
+
+    fn hit(reset:f64) -> LimitHit {
+        LimitHit { name:"s".into(),provider:"claude".into(),limit:UsageLimit { window:"five_hour".into(),resets_at:Some(reset) } }
+    }
+
+    #[tokio::test]
+    async fn the_stopped_session_reopens_in_the_roomiest_account_and_is_told_to_continue() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
+        Switcher::default().handle(&fake,hit(2000.0)).await;
+        assert_eq!(fake.log(),vec!["reopen /c".to_owned(),format!("deliver {CONTINUE}")]);
+        assert_eq!(fake.diary(),vec!["switched"]);
     }
 
     #[test]
