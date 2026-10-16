@@ -61,7 +61,7 @@ pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()
 
 /// O que o harness grava, na forma do lado Python.
 #[derive(Default)]
-struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, diary: Vec<Value> }
+struct Record { subprocesses: Vec<Value>, probes: Vec<Value>, rust_bridge: Vec<Value>, runtime_requests: Vec<Value>, diary: Vec<Value> }
 
 /// O tmux em memória do harness: o estado inicial do cenário, os `new-session` gravados e as consultas
 /// respondidas pelo estado.
@@ -117,8 +117,26 @@ impl Mux for FakeTmux {
     }
 }
 
-/// Os fatos de disco (`LocalFacts`), com as cotas que o harness deu à ponte do Python e gravadas.
-struct Facts { local: super::facts::LocalFacts, quotas: Vec<Value>, record: std::sync::Arc<Mutex<Record>> }
+/// Os fatos de disco (`LocalFacts`), com as cotas e o catálogo do Codex que o harness deu à ponte do
+/// Python, e gravados como ela os grava.
+struct Facts { local: super::facts::LocalFacts, quotas: Vec<Value>, fakes: Value, record: std::sync::Arc<Mutex<Record>> }
+
+impl Facts {
+    /// `codex_models._call` sobre a resposta falsa da ponte `dictation`; sem resposta, a ponte fora do ar.
+    fn dictation(&self, op: &str, args: Value) -> Result<Value, CodexCatalogError> {
+        self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "dictation", "op": op, "args": args}));
+        let reply = &self.fakes["rust_bridge"][format!("dictation.{op}")];
+        if reply.is_null() { return Err(CodexCatalogError::Unavailable("O servidor Rust de organização está indisponível.".into())); }
+        let error = &reply["error"];
+        if error.is_null() { return Ok(reply["result"].clone()); }
+        let detail = error["detail"].as_str().unwrap_or_default().to_owned();
+        Err(match error["code"].as_str() {
+            Some("dictation_catalog_refused") => CodexCatalogError::Refused(detail),
+            _ if error["status"] == 400 => CodexCatalogError::Invalid(detail),
+            _ => CodexCatalogError::Unavailable(detail),
+        })
+    }
+}
 
 impl OpenFacts for Facts {
     fn providers(&self) -> Result<ProviderCatalog, OpenError> { self.local.providers() }
@@ -141,8 +159,16 @@ impl OpenFacts for Facts {
         Err(OpenError::new(503, "session_open_fact_unavailable", format!("o catálogo do motor '{engine}' não respondeu: rede recusada")))
     }
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError> { self.local.codex_home(account_id) }
+    /// `codex_models.checar_escolha`: o catálogo da conta só quando há modelo, depois a conferência.
     fn codex_choice(&self, home: Option<&str>, model: Option<&str>, effort: Option<&str>, tier: Option<ServiceTier>)
-        -> Result<(), CodexCatalogError> { self.local.codex_choice(home, model, effort, tier) }
+        -> Result<(), CodexCatalogError> {
+        let models = match model {
+            Some(_) => self.dictation("catalog_models", json!({"provider": "codex", "home": home, "fresh": false}))?["models"].clone(),
+            None => json!([]),
+        };
+        self.dictation("validate_model", json!({"models": models, "model": model, "effort": effort, "service_tier": tier.map(ServiceTier::name)}))?;
+        Ok(())
+    }
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> { self.local.account_mode(config_dir) }
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError> { self.local.name_in_use(name) }
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> { self.local.transfer_busy(name) }
@@ -213,6 +239,13 @@ impl OpenHost for Host {
         })
     }
 
+    fn warm_codex<'a>(&'a self, name: &'a str, _initial_prompt: Option<&'a str>) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            self.record.lock().unwrap().runtime_requests.push(json!({"op": "codex.aquecer_sem_terminal", "name": name}));
+            Vec::new()
+        })
+    }
+
     fn diary(&self, events: Vec<Value>) { self.record.lock().unwrap().diary.extend(events); }
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }
@@ -238,18 +271,18 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     for step in substituted["steps"].as_array().into_iter().flatten() {
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
         let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
-        if request.provider.as_deref() == Some("codex") || (request.headless == Some(true) && !matches!(request.provider.as_deref(), Some("pi" | "omp" | "kimi"))) {
+        if request.headless == Some(true) && !matches!(request.provider.as_deref(), Some("pi" | "omp" | "kimi" | "codex")) {
             return json!({"not_ours": true});
         }
         let runtime = tokio::runtime::Handle::current();
         let (facts_env, facts_root, facts_record, quotas) = (env.clone(), root.to_owned(), record.clone(),
             fakes["quotas"].as_array().cloned().unwrap_or_default());
-        let request_for_facts = request.clone();
+        let (request_for_facts, facts_fakes) = (request.clone(), fakes.clone());
         let resolved = tokio::task::spawn_blocking(move || {
             let local = super::facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(facts_env), runtime)
                 .with_terminal(crate::list::mux::Mux::with_program(facts_root.join("bin/tmux"), Duration::from_secs(2)),
                     std::sync::Arc::new(crate::list::procs::ProcFs::with_root(proc_root(&facts_root))));
-            super::resolve_open(&request_for_facts, &OpenCaller::Owner, &Facts { local, quotas, record: facts_record })
+            super::resolve_open(&request_for_facts, &OpenCaller::Owner, &Facts { local, quotas, fakes: facts_fakes, record: facts_record })
         }).await.unwrap();
         let (status, body) = match resolved {
             Ok(resolved) if !super::open::opens_here(&resolved.spec) => return json!({"not_ours": true}),
@@ -267,5 +300,5 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     let record = std::mem::take(&mut *record.lock().unwrap());
     let tmux_sessions: Map<String, Value> = host.mux.sessions.lock().unwrap().clone().into_iter().collect();
     json!({"steps": steps, "subprocesses": record.subprocesses, "probes": record.probes, "rust_bridge": record.rust_bridge,
-        "runtime_requests": [], "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary})
+        "runtime_requests": record.runtime_requests, "signals": [], "network": [], "tmux_sessions": tmux_sessions, "diary": record.diary})
 }

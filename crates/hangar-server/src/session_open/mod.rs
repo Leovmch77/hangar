@@ -3,6 +3,7 @@
 //! spec gravado ⊕ `SessionChange`. Spec: `docs/superpowers/specs/2026-10-15-unified-session-open.md`.
 pub mod agents;
 pub mod claude;
+pub mod codex;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod contract;

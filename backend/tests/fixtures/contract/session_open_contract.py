@@ -611,7 +611,8 @@ def _rule_only_python(expected: dict, raw: dict, scenario: dict) -> None:
 
 # Recusas que o Python dava dentro do `registry.create`, com a trava da conta já tomada; o Rust as dá
 # na resolução.
-_REFUSED_BEFORE_LOCK = ("sessao sem terminal so vale para provider claude ou codex", "Nome de perfil OMP inválido")
+_REFUSED_BEFORE_LOCK = ("sessao sem terminal so vale para provider claude ou codex", "Nome de perfil OMP inválido",
+                        "permission_mode: use um de Ask for approval, Approve for me, Full Access")
 
 
 def _rule_name_before_lock(expected: dict, raw: dict, scenario: dict) -> bool | None:
@@ -632,7 +633,7 @@ def _rule_name_before_lock(expected: dict, raw: dict, scenario: dict) -> bool | 
 def _rule_s40(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """S-40: o prompt inicial do Claude com terminal é entregue: o posicional no fim do comando."""
     prompt = next((st.get("json", {}).get("initial_prompt") for st in scenario["steps"] if "json" in st), None)
-    created = _new_sessions(raw)
+    created = [p for p in _new_sessions(raw) if "CP_PROVIDER=claude" in p["argv"]]
     if not prompt or not created:
         return None
     tail = (" -- " if prompt.startswith("-") else " ") + shlex.quote(prompt)
@@ -641,8 +642,38 @@ def _rule_s40(expected: dict, raw: dict, scenario: dict) -> bool | None:
         if p["argv"][-1].endswith(tail):
             p["argv"][-1], found = p["argv"][-1][:-len(tail)], True
     for s in raw.get("tmux_sessions", {}).values():
-        s["command"] = s["command"].removesuffix(tail)
+        if s.get("env", {}).get("CP_PROVIDER") == "claude":
+            s["command"] = s["command"].removesuffix(tail)
     return found
+
+
+_CODEX_POLICY = re.compile(r" --approval-policy \S+ --sandbox \S+")
+
+
+def _rule_codex_policy(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """Matriz, item 17 (S-05): o Codex com terminal nasce com `--approval-policy`/`--sandbox` do modo
+    do spec; o Python deixava o lançador cair no padrão dele (Full Access) sem dizer."""
+    created = [p for p in _new_sessions(raw) if "CP_PROVIDER=codex" in p["argv"]]
+    found = bool(created) and all(_CODEX_POLICY.search(p["argv"][-1]) for p in created)
+    for p in created:
+        p["argv"][-1] = _CODEX_POLICY.sub("", p["argv"][-1], count=1)
+    for s in raw.get("tmux_sessions", {}).values():
+        if s.get("env", {}).get("CP_PROVIDER") == "codex":
+            s["command"] = _CODEX_POLICY.sub("", s["command"], count=1)
+    return found if created else None
+
+
+def _rule_codex_login_lock(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """A conta Codex lida pelo Rust (login e pasta) cria o arquivo da trava dela, vazio; o Python a lia
+    pela ponte do Rust, que no harness é falsa. Só conta na recusa, quando a criação não chegou à trava."""
+    if not any(st.get("json", {}).get("provider") == "codex" for st in scenario["steps"]):
+        return None
+    if all(st.get("status", 200) < 400 for st in raw.get("steps", [])):
+        return None
+    locks = [p for p in raw.get("files", {}) if "/home/.hangar/account-locks/" in p]
+    for p in locks:
+        del raw["files"][p]
+    return True if locks else None
 
 
 def _created_agent(raw: dict) -> list[tuple[dict, str]]:
@@ -700,6 +731,8 @@ def _rule_pi_session_env(expected: dict, raw: dict, scenario: dict) -> bool | No
 
 RUST_DIFFERENCES = (
     ("S-40", _rule_s40),
+    ("matriz item 17 (política explícita do Codex)", _rule_codex_policy),
+    ("trava da conta Codex lida pelo Rust", _rule_codex_login_lock),
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
     ("S-58/S-73 (CP_PI_SESSION e OMP_PROFILE por -e)", _rule_pi_session_env),

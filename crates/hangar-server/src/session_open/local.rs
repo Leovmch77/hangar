@@ -75,6 +75,14 @@ impl OpenHost for LocalHost {
     }
     fn release_name<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<(), OpenError>> { Box::pin(async { Ok(()) }) }
     fn born<'a>(&'a self, _born: &'a Born) -> BoxFuture<'a, Vec<String>> { Box::pin(async { Vec::new() }) }
+    /// O servidor sobe o Codex sem terminal na primeira escrita depois de voltar; a primeira
+    /// mensagem não tem quem a guarde até lá.
+    fn warm_codex<'a>(&'a self, _name: &'a str, initial_prompt: Option<&'a str>) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            initial_prompt.filter(|t| !t.is_empty()).map(|_| "A sessão foi criada com o servidor fora do ar; a primeira mensagem não foi \
+                entregue: envie de novo quando ele voltar.".to_owned()).into_iter().collect()
+        })
+    }
     fn diary(&self, _events: Vec<Value>) {}
     fn new_session_id(&self) -> String { super::open::uuid4(&crate::mods::state::random_hex(16)) }
     fn new_bridge_key(&self) -> String { crate::mods::state::random_hex(16) }

@@ -46,6 +46,11 @@ fn stored(meta:&Value) -> Result<&'static (&'static str,&'static str,&'static st
         &format!("modo de permissão desconhecido no sidecar: {wanted:?}; a sessão não foi aberta")))
 }
 
+/// (aprovação, sandbox) do modo do app pelo nome (sem caixa nem espaço nas pontas); fora da lista, nenhum.
+pub fn policy_of(mode:&str) -> Option<(&'static str,&'static str)> {
+    MODES.iter().find(|(name,..)|name.eq_ignore_ascii_case(mode.trim())).map(|&(_,approval,sandbox)|(approval,sandbox))
+}
+
 /// `politica` sobre o modo gravado.
 fn policy(meta:&Value) -> Result<(&'static str,&'static str),RuntimeError> {
     let &(_,approval,sandbox) = stored(meta)?;

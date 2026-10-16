@@ -292,6 +292,12 @@ impl RuntimeRegistry {
         let watcher = self.watcher.get()?.clone();
         watcher.switch_mode(self,name,terminal,super::codex_relaunch::PermissionRead::Pane(panels)).await
     }
+    /// Sobe o Codex sem terminal que acabou de ganhar sidecar. `None` = vigia desligada ou sidecar que
+    /// não é sem terminal do Rust.
+    pub async fn open_codex_headless(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        let watcher = self.watcher.get()?.clone();
+        watcher.open_parked(self,name).await
+    }
     /// Reiniciar o Codex do Rust. `None` = não é do Rust ou há transferência a recuperar (o Python atende).
     pub async fn restart_codex(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
         let watcher = self.watcher.get()?.clone();

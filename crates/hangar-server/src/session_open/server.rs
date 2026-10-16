@@ -283,6 +283,26 @@ impl OpenHost for ServerHost {
         })
     }
 
+    fn warm_codex<'a>(&'a self, name: &'a str, initial_prompt: Option<&'a str>) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let opened = match self.st.state.runtime.get() {
+                Some(runtime) => runtime.open_codex_headless(name).await,
+                None => None,
+            };
+            // Não subiu: a sessão existe e o próximo envio tenta de novo, como no aquecimento do Python.
+            match &opened {
+                Some(Ok(())) => {}
+                Some(Err(error)) => tracing::warn!(code = %error.code, "Codex sem terminal criado não subiu agora; o próximo envio abre"),
+                None => tracing::warn!("Codex sem terminal criado sem runtime para subir agora; o próximo envio abre"),
+            }
+            let Some(text) = initial_prompt.filter(|t| !t.is_empty()) else { return Vec::new() };
+            let (status, body) = crate::session_write::input::write_input(&self.st, name, text, false).await;
+            if status.is_success() { return Vec::new(); }
+            let why = body["detail"]["msg"].as_str().or(body["detail"].as_str()).unwrap_or("o envio falhou").to_owned();
+            vec![format!("A sessão foi criada, mas a primeira mensagem não foi entregue: {why}")]
+        })
+    }
+
     fn diary(&self, events: Vec<Value>) {
         let Some(dir) = crate::diag::diary_dir() else {
             tracing::warn!("diário da criação sem pasta de logs; não gravado");
@@ -302,9 +322,10 @@ impl OpenHost for ServerHost {
 /// Pedido que a decisão do Rust nem olha: provedor ou modo explícitos que não são do Rust ainda.
 fn explicitly_other(request: &SessionOpenRequest) -> bool {
     match request.provider.as_deref() {
-        Some("codex") => true,
-        // Pi, omp e Kimi sem terminal: a recusa é da resolução.
-        Some("pi" | "omp" | "kimi") => false,
+        // Pi, omp e Kimi sem terminal: a recusa é da resolução. O Codex abre aqui nos dois modos.
+        Some("pi" | "omp" | "kimi" | "codex") => false,
+        // Sem provedor o padrão pode ser o Codex: a resolução decide, e o Claude sem terminal segue ao Python.
+        None => false,
         _ => request.headless == Some(true),
     }
 }
@@ -327,8 +348,9 @@ async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller
     }).await.unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
 }
 
-/// Resolve e, sendo Claude com terminal, abre. O resto (Codex, Pi, omp, Kimi, sem terminal) ainda é
-/// do Python. Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
+/// Resolve e abre o que é do Rust (com terminal de todo provedor, o Codex também sem terminal); o
+/// Claude sem terminal ainda é do Python. Recusa da resolução é do Rust: as dele são as do Python
+/// mais os consertos.
 pub async fn decide(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
     if explicitly_other(&request) { return Decision::NotOurs; }
     let host = ServerHost::new(st.clone()).await;
