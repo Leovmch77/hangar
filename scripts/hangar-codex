@@ -105,15 +105,20 @@ class LancadorAusente(RuntimeError):
 
 
 def _hangar_server() -> str:
-    """O `hangar-server` desta máquina, o mesmo que o Hangar sobe (`CP_RUST_SERVER_BIN`, `~/.hangar/bin`,
-    o build desta cópia, o PATH)."""
-    exe = "hangar-server.exe" if os.name == "nt" else "hangar-server"
-    candidatos = [os.environ.get("CP_RUST_SERVER_BIN"), str(Path.home() / ".hangar" / "bin" / exe),
-                  str(_repo() / "crates" / "target" / "release" / exe), shutil.which("hangar-server")]
-    for candidato in filter(None, candidatos):
-        if Path(candidato).is_file() and os.access(candidato, os.X_OK):
-            return candidato
-    raise LancadorAusente("hangar-server não encontrado (CP_RUST_SERVER_BIN, ~/.hangar/bin, crates/target/release "
+    """O `hangar-server` que o Supervisor subiria, pela mesma regra do `hangar-open`."""
+    import importlib.machinery
+    import importlib.util
+
+    try:
+        loader = importlib.machinery.SourceFileLoader("hangar_open", str(_repo() / "scripts" / "hangar-open"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        exe = mod.server_bin()
+    except (ImportError, OSError):
+        exe = shutil.which("hangar-server")
+    if exe:
+        return exe
+    raise LancadorAusente("hangar-server não encontrado (CP_RUST_SERVER_BIN, crates/target/release, ~/.hangar/bin "
                           "ou PATH): nenhuma sessão foi aberta")
 
 

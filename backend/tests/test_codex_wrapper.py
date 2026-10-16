@@ -256,3 +256,23 @@ def test_lancador_antigo_ou_sem_token_sai_3_para_o_codex_cru(w, monkeypatch, tmp
     codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
     assert codigo == 3
     assert len(pedidos()) == 1 and chamadas == []
+
+
+def test_acha_o_mesmo_hangar_server_que_o_supervisor(w, monkeypatch, tmp_path):
+    # Mesma regra do `hangar-open` (`rust_bins.find_bin`): o mais novo entre a cópia e o baixado.
+    import shutil
+    raiz = tmp_path / "copia"
+    (raiz / "scripts").mkdir(parents=True)
+    (raiz / "backend" / "app").mkdir(parents=True)
+    shutil.copy(_CAMINHO.parent / "hangar-open", raiz / "scripts" / "hangar-open")
+    shutil.copy(_CAMINHO.parents[1] / "backend" / "app" / "rust_bins.py", raiz / "backend" / "app" / "rust_bins.py")
+    monkeypatch.setattr(w, "_repo", lambda: raiz)
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.delenv("CP_RUST_SERVER_BIN", raising=False)
+    for caminho, mtime in ((tmp_path / "casa" / ".hangar" / "bin" / "hangar-server", 1000),
+                           (raiz / "crates" / "target" / "release" / "hangar-server", 2000)):
+        caminho.parent.mkdir(parents=True)
+        caminho.write_text("#!/bin/sh\n")
+        caminho.chmod(0o755)
+        os.utime(caminho, (mtime, mtime))
+    assert w._hangar_server() == str(raiz / "crates" / "target" / "release" / "hangar-server")
