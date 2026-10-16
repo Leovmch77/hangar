@@ -400,7 +400,7 @@ fn read_text(path: &Path) -> Result<Option<String>, RuntimeError> {
 
 /// Impressão do que o `claude -p` lê ao nascer: só o `mcpServers` do `.claude.json` e o
 /// `settings.json` inteiro. Ilegível é erro: "não li" não pode virar "mudou" nem "não mudou".
-fn config_stamp(config_dir: Option<&str>) -> Result<String, RuntimeError> {
+pub(crate) fn config_stamp(config_dir: Option<&str>) -> Result<String, RuntimeError> {
     let home = || std::env::home_dir().ok_or_else(|| error("policy_input"));
     let root = match config_dir {
         Some("~") => home()?,

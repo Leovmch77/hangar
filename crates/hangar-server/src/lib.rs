@@ -131,7 +131,8 @@ pub async fn serve_until_with_guest(
             cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone())
             .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
             .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
-            .with_permissions(state.state.permissions.clone()));
+            .with_permissions(state.state.permissions.clone())
+            .with_plugin_bridge(session_open::claude::PluginBridge { port: cfg.listen.port(), secret: cfg.auth_token.clone() }));
         registry.bind_lifecycle();
         state.state.lifecycle.set(registry.clone()).map_err(|_|std::io::Error::other("state_lifecycle_already_bound"))?;
         runtime_registry=Some(registry.clone());

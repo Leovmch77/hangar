@@ -1562,6 +1562,25 @@ fn a_live_codex_session_keeps_the_mode_its_terminal_last_wrote() {
     assert_eq!(record::live(home.path(), "mae-codex").unwrap().unwrap().permission_mode, Some(PermissionMode::AskForApproval), "valor inválido não vence");
 }
 
+/// S-02: a sessão nasceu em plano e a CLI saiu dele sozinha; o Rust gravou o modo novo no sidecar. Quem
+/// relança usa o observado, nunca o da criação; o que só o registro tem (as escolhas de plugins) fica.
+#[test]
+fn a_live_claude_headless_relaunches_in_the_mode_the_cli_moved_to() {
+    let home = tempfile::tempdir().unwrap();
+    let born = SessionSpec { key: "c".repeat(32), name: "s1".into(), permission_mode: Some(PermissionMode::Plan),
+        customizations: Some(ClaudeCustomizations { plugins: [("a@l".to_owned(), false)].into_iter().collect(), ..Default::default() }),
+        ..fixture_spec("create_claude_headless_then_launch") };
+    record::write(home.path(), &born).unwrap();
+    let meta = json!({"name": "s1", "key": "c".repeat(32), "cwd": born.cwd, "session_id": "0c657c79-1745-406b-a97f-bbbf5402ff19",
+        "config_dir": born.account.config_dir(), "permission_mode": "acceptEdits", "model": "sonnet", "effort": "low"});
+    let spec = record::claude_live(home.path(), &meta, "s1").unwrap();
+    assert_eq!((spec.permission_mode, spec.model.as_deref(), spec.effort.as_deref()), (Some(PermissionMode::AcceptEdits), Some("sonnet"), Some("low")));
+    assert_eq!(spec.customizations, born.customizations);
+    // Modo fora da lista no sidecar fica ausente: o lançamento recusa em vez de inventar um.
+    let spec = record::claude_live(home.path(), &json!({"key": "c".repeat(32), "cwd": "/x", "session_id": "s", "permission_mode": "Tudo"}), "s1").unwrap();
+    assert_eq!(spec.permission_mode, None);
+}
+
 /// Sidecar quebrado não é "sessão sem sidecar": quem reabre ou herda precisa saber que não leu.
 #[test]
 fn unreadable_sidecars_are_errors_not_absent() {

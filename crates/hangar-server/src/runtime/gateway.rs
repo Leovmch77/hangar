@@ -153,8 +153,8 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado, `codex_launch`). Só o
-/// Codex sobe por aqui.
+/// programa (pid reaproveitado, S-72) ou ausente, sobe outro com o ambiente calculado agora (nunca
+/// guardado): o Codex por `codex_launch`, o Claude pelo spec da sessão (`claude_launch`).
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
     if recorded != 0 {
@@ -162,17 +162,22 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
         let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
         if state == process::Liveness::Ours { return Ok(None); }
     }
-    // O processo do Claude nasce da receita em memória (`claude_relaunch`), nunca por aqui.
-    if target.provider != "codex" {
-        return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));
-    }
     let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
     if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
-    let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
+    let (claude,bridge,name,runtime) = (target.provider == "claude",policy.plugin_bridge(),target.name.clone(),tokio::runtime::Handle::current());
+    let (program,env,stamp) = tokio::task::spawn_blocking(move||if claude {
+        let launch = super::claude_launch::prepare(&base,bridge.as_ref(),&meta,&name,runtime)?;
+        // Marca da configuração que o `claude -p` leu ao nascer: o botão Recarregar compara com ela.
+        let stamp = super::local_policy::config_stamp(meta["config_dir"].as_str().filter(|d|!d.is_empty()))
+            .inspect_err(|error|tracing::warn!(code=%error.code,"configuração da conta ilegível; sem marca de recarga")).ok();
+        Ok((launch.program,launch.env,stamp))
+    } else {
+        super::codex_launch::launch_env(&base,&dir,&meta).map(|launch|(launch.program,launch.env,None))
+    }).await.map_err(|_|failure("launch_job"))??;
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
-        key:target.key.clone(),cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
-    let cano = match process::spawn(&spec).await {
+        key:target.key.clone(),cwd:cwd.into(),program,env:env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
+    let mut cano = match process::spawn(&spec).await {
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
@@ -181,6 +186,7 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
+    if let Some(stamp) = stamp { cano.extra.insert("config_marca".into(),json!(stamp)); }
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
     if let Err(error) = cano_recorded(launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await) {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
@@ -546,6 +552,8 @@ impl RuntimeRegistry {
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
     /// A linha de status do ator lê a cota direto do módulo de contas.
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.policy = self.policy.with_accounts(accounts); self }
+    /// A ponte do plugin que o Claude sem terminal subido aqui recebe no ambiente.
+    pub fn with_plugin_bridge(mut self,bridge:crate::session_open::claude::PluginBridge) -> Self { self.policy = self.policy.with_plugin_bridge(bridge); self }
     pub fn with_plugin(mut self, plugin:Arc<crate::plugin::Store>) -> Self { self.plugin = Some(plugin); self }
     pub fn with_terminal_states(mut self, states:Arc<crate::state::published::Published>) -> Self { self.terminal_states=Some(states);self }
     pub fn with_terms(mut self, terms:Arc<crate::term::Terms>) -> Self {self.terms=Some(terms);self}
@@ -777,10 +785,6 @@ impl RuntimeRegistry {
             if fields.get("conversation").is_some_and(|conversation|conversation == &metadata[if target.provider == "claude" { "session_id" } else { "thread_id" }]) {
                 for (key,value) in fields { if key != "public_state" { metadata[key] = value.clone(); } }
             }
-        }
-        if target.provider=="claude" && spawn && target.binding.pid==0
-            && (!store.state().runtime_state["claude_lifecycle_intent"].is_null() || store.state().runtime_state["view"].is_object()) {
-            return Err(RuntimeError::new("relaunch_recipe_missing","a conversa já teve uma vida e está sem receita comprovada em memória; não reconstruí o processo pelo Python"));
         }
         let queue = QueueActor::start(store,lease);
         // Depois da fila: o `session.patch_meta` do Python lê o estado dela.
@@ -2591,8 +2595,14 @@ mod tests {
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
         assert_eq!(launch_sidecar(&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
-        let mut claude = claude;
-        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("o Claude nunca sobe por aqui").code,"relaunch_recipe_missing");
+        // O Claude sobe pelo spec da sessão: sem o cano no PATH injetado, falha no processo.
+        let mut claude = RuntimeTarget { metadata:json!({"name":"cl","key":"k","headless":true,"cwd":dir.path(),
+            "session_id":"0c657c79-1745-406b-a97f-bbbf5402ff19","permission_mode":"manual"}),..claude };
+        let failed = launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("a subida sem cano precisa falhar");
+        assert!(!failed.code.starts_with("policy_") && failed.code != "relaunch_recipe_missing","{}",failed.code);
+        // Sem terminal não há bwrap: só leitura nunca sobe aqui.
+        claude.metadata["read_only"] = json!(true);
+        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().unwrap().code,"headless_read_only");
     }
 
     #[test]
