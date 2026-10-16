@@ -52,8 +52,8 @@ export default function Layout() {
 
   useEffect(() => {
     if (!ready) return;
-    const onLogin = segments[0] === 'login';
-    if (servers.length === 0 && !onLogin) {
+    const withoutServer = segments[0] === 'login' || segments[0] === 'convite';
+    if (servers.length === 0 && !withoutServer) {
       router.replace('/login');
     }
   }, [ready, servers.length, segments]);
