@@ -135,6 +135,7 @@ export async function redeemInvite(
   link: string,
   device: string,
   fetchImpl: typeof fetch = (...a) => fetch(...a),
+  token?: string,
 ): Promise<InviteRedeemResult> {
   const alvo = parseInviteLink(link);
   if (!alvo) throw new InviteRedeemError('unknown');
@@ -142,8 +143,9 @@ export async function redeemInvite(
   try {
     res = await fetchImpl(`${alvo.address}/api/guest/redeem`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: alvo.code, device }),
+      body: JSON.stringify({ code: alvo.code, device, ...(token ? { token } : {}) }),
       // A primeira conexão pelo Funnel passa dos 8 s padrão quando o túnel está em relay.
       signal: AbortSignal.timeout(20000),
     });
@@ -159,9 +161,9 @@ export async function redeemInvite(
   if (res.status === 503) throw new InviteRedeemError('unavailable');
   if (!res.ok) throw new InviteRedeemError('unknown');
   const r = (await res.json()) as InviteRedeemResult;
-  // O endereço devolvido vira o servidor que recebe o token: só vale se for o mesmo host do convite.
-  const mesmoHost = (() => {
-    try { return new URL(r.address).host === new URL(alvo.address).host; } catch { return false; }
+  // O endereço devolvido recebe o token: só vale na mesma origem do convite.
+  const sameOrigin = (() => {
+    try { return new URL(r.address).origin === new URL(alvo.address).origin; } catch { return false; }
   })();
-  return { ...r, address: mesmoHost ? r.address : alvo.address };
+  return { ...r, address: sameOrigin ? r.address : alvo.address };
 }

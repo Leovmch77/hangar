@@ -1034,7 +1034,7 @@ export async function removerPapel(
 export async function modelOptions(
   provider: string, engine?: string | null, configDir?: string | null,
   codexAccount?: string | null, engineAccount?: string | null,
-): Promise<{ kind: string; reduced: boolean; models: ModelOption[] }> {
+): Promise<{ kind: string; reduced: boolean; models: ModelOption[]; supports_fast?: boolean; default?: string | null }> {
   return apiFetch(modelOptionsPath(provider, engine, configDir, codexAccount, engineAccount));
 }
 

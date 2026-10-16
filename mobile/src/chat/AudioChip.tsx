@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
+import { useVoiceAudioState } from '../features/voice/audioSession';
 
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
@@ -15,9 +16,18 @@ export function AudioChip({ uri, headers, name }: { uri: string; headers?: Recor
   const player = useAudioPlayer(null);
   const status = useAudioPlayerStatus(player);
   const [carregado, setCarregado] = useState(false);
+  const voiceActive = useVoiceAudioState((state) => state.voiceActive);
   const fim = status.duration > 0 && status.currentTime >= status.duration - 0.1;
 
+  useEffect(() => {
+    if (useVoiceAudioState.getState().voiceActive) player.pause();
+    return useVoiceAudioState.subscribe((state, previous) => {
+      if (state.voiceActive && !previous.voiceActive) player.pause();
+    });
+  }, [player]);
+
   const alternar = () => {
+    if (useVoiceAudioState.getState().voiceActive) return;
     if (status.playing) return player.pause();
     if (!carregado) {
       player.replace({ uri, headers });
@@ -34,6 +44,8 @@ export function AudioChip({ uri, headers, name }: { uri: string; headers?: Recor
         onPress={alternar}
         style={styles.btn}
         accessibilityRole="button"
+        disabled={voiceActive}
+        accessibilityState={{ disabled: voiceActive }}
         accessibilityLabel={status.playing ? m.anexos_pausar({ nome: name }) : m.anexos_tocar({ nome: name })}
       >
         <Icon name={status.playing ? 'Pause' : 'Play'} size={16} color={theme.tokens.accent.base} />

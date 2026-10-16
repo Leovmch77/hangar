@@ -194,7 +194,7 @@ export default defineConfig({
       // O bundle principal passou dos 2 MiB que o workbox precacheia por padrão; acima disso ele
       // DEIXA O ARQUIVO DE FORA do cache offline e falha o build. Um teto, não code-splitting:
       // o app é de uma pessoa em LAN/VPN, e o download é pago uma vez por versão.
-      injectManifest: { maximumFileSizeToCacheInBytes: 4 * 1024 * 1024 },
+      injectManifest: { maximumFileSizeToCacheInBytes: 6 * 1024 * 1024 },
       manifest: {
         name: 'Hangar',
         short_name: 'Hangar',
