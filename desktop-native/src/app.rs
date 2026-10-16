@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, tab::{Tab, TabBar}, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-    input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
+    input::{AnyInputState, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
@@ -89,6 +89,7 @@ mod search;
 mod topbar;
 mod voice_ui;
 mod quotes;
+mod questions;
 mod mermaid;
 pub(crate) mod setup;
 /// Variável do ambiente do script com o código de uso único do askpass (`setup::askpass`).
@@ -434,7 +435,7 @@ struct PluginFailure;
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
-struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
+struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<AnyInputState>, _changes: Vec<Subscription>, tab: usize, minimized: bool, body_scroll: ScrollHandle }
 
 impl AskForm {
     fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
@@ -3057,7 +3058,7 @@ impl Hangar {
     fn ask_picks(&self, cx: &Context<Self>) -> Vec<Pick> {
         self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
             if self.ask_form.typing.get(i) == Some(&true) {
-                Pick::Text(self.ask_form.inputs.get(i).map(|input| input.read(cx).value().to_string()).unwrap_or_default())
+                Pick::Text(self.ask_form.inputs.get(i).map(|input| input.value(cx).to_string()).unwrap_or_default())
             } else { pick.clone() }
         }).collect()
     }
@@ -3859,15 +3860,27 @@ impl Hangar {
         if let Some(ask) = &self.chat.ask {
             for item in &ask.payload.questions {
                 form.picks.push(Pick::Empty);
-                form.typing.push(ask.codex() && item.options.is_empty());
+                form.typing.push(item.options.is_empty());
                 let secret = item.is_secret;
-                let input = cx.new(|cx| InputState::new(window, cx).masked(secret).placeholder(tr("ask_placeholder")));
+                let input = questions::new_input(secret, window, cx);
+                let (index, fp) = (form.inputs.len(), form.fingerprint.clone());
                 // O botão Enviar depende do texto: cada edição redesenha o cartão.
-                form._changes.push(cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()));
+                let changed = match &input {
+                    AnyInputState::Input(input) => cx.subscribe(input, move |this, _, event: &InputEvent, cx| this.edit_ask_input(&fp, index, event, cx)),
+                    AnyInputState::Textarea(input) => cx.subscribe(input, move |this, _, event: &InputEvent, cx| this.edit_ask_input(&fp, index, event, cx)),
+                    _ => unreachable!("a resposta é um campo simples ou multilinha"),
+                };
+                form._changes.push(changed);
                 form.inputs.push(input);
             }
         }
         self.ask_form = form;
+    }
+
+    fn edit_ask_input(&mut self, fingerprint: &str, index: usize, event: &InputEvent, cx: &mut Context<Self>) {
+        if self.ask_form.fingerprint != fingerprint { return; }
+        if matches!(event, InputEvent::Change) && let Some(typing) = self.ask_form.typing.get_mut(index) { *typing = true; }
+        cx.notify();
     }
 
     fn set_pick(&mut self, fingerprint: &str, index: usize, pick: Option<Pick>, typing: bool, cx: &mut Context<Self>) {
@@ -3897,12 +3910,19 @@ impl Hangar {
                     if this.ask_form.fingerprint == fp { this.ask_form.tab = *index; cx.notify(); }
                 }))
         });
-        let mut body = div().flex().flex_col().gap_4();
+        let scroll_key = format!("{fingerprint}#{tab}");
+        if self.ask_scroll.0 != scroll_key {
+            self.ask_scroll = (scroll_key, ScrollHandle::new());
+            self.ask_form.body_scroll = ScrollHandle::new();
+        }
+        // A lista cede espaço para o campo e as ações quando a janela é baixa.
+        let options_max = (f32::from(window.viewport_size().height) - 680.).clamp(64., 190.);
+        let mut body = div().flex().flex_col().gap_3();
         for (qi, item) in ask.payload.questions.iter().enumerate().filter(|(qi, _)| *qi == tab) {
             let pick = self.ask_form.picks.get(qi).cloned().unwrap_or(Pick::Empty);
             let typing = self.ask_form.typing.get(qi) == Some(&true);
             let chosen = |i: usize| !typing && matches!(&pick, Pick::Options(list) if list.contains(&i));
-            let mut options = div().flex().flex_col().gap_2();
+            let mut options = div().flex().flex_col().gap_1();
             for (oi, option) in item.options.iter().enumerate() {
                 let (fp, current, entry) = (fingerprint.clone(), pick.clone(), item.clone());
                 let on_pick = cx.listener(move |this, _: &bool, _, cx| {
@@ -3917,28 +3937,23 @@ impl Hangar {
                 });
             }
             let mut escapes = div().flex().flex_wrap().gap_2();
-            if ask.allows_text(item) && !item.options.is_empty() {
-                let fp = fingerprint.clone();
-                escapes = escapes.child(Button::new(SharedString::from(format!("ask-type-{qi}"))).small().ghost().toggled(typing).disabled(busy)
-                    .label(tr("ask_type")).on_click(cx.listener(move |this, _, window, cx| {
-                        let next = !this.ask_form.typing.get(qi).copied().unwrap_or(false);
-                        this.set_pick(&fp, qi, None, next, cx);
-                        if next { if let Some(input) = this.ask_form.inputs.get(qi).cloned() { input.update(cx, |input, cx| input.focus(window, cx)); } }
-                    })));
-            }
             if ask.allows_chat() {
                 let fp = fingerprint.clone();
-                escapes = escapes.child(Button::new(SharedString::from(format!("ask-chat-{qi}"))).small().ghost().toggled(!typing && pick == Pick::Chat).disabled(busy)
+                escapes = escapes.child(Button::new(SharedString::from(format!("ask-chat-{qi}"))).xsmall().ghost().toggled(!typing && pick == Pick::Chat).disabled(busy)
                     .label(tr("ask_chat")).on_click(cx.listener(move |this, _, _, cx| this.set_pick(&fp, qi, Some(Pick::Chat), false, cx))));
             }
-            let input = typing.then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
+            let input = ask.allows_text(item).then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
             body = body.child(div().flex().flex_col().gap_2()
                 .when(total == 1 && !item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
                     .child(item.header.clone())))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
                 .when(item.multi_select, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_multi"))))
-                .child(options)
-                .when_some(input, |el, input| el.child(Input::new(&input).disabled(busy)))
+                .when(!item.options.is_empty(), |el| el.child(scrolled("ask-scroll", &self.ask_scroll.1, options_max, options)))
+                .when_some(input, |el, input| el.child(div().flex().flex_col().flex_shrink_0().gap_2().mt_1()
+                    .child(div().text_xs().text_color(if typing { theme::accent() } else { theme::muted() })
+                        .child(tr(if typing { "ask_written" } else { "ask_write" })))
+                    .child(questions::field(&input, busy))
+                    .child(div().text_xs().text_color(theme::muted()).child(tr("ask_draft_kept")))))
                 .when(item.is_secret, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_secret"))))
                 .child(escapes));
         }
@@ -3946,28 +3961,44 @@ impl Hangar {
         // Cancelar sempre existe: pergunta assíncrona do Codex só se dispensa (Skip); as demais interrompem o turno.
         let cancel = {
             let (action, fp) = if ask.payload.is_async { (Action::Skip, fingerprint.clone()) } else { (Action::Cancel, String::new()) };
-            Button::new("ask-cancel").ghost().label(tr("cancel")).disabled(busy)
+            Button::new("ask-cancel").small().ghost().label(tr("cancel")).disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), fp.clone(), cx)))
         };
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
-        let scroll_key = format!("{fingerprint}#{tab}");
-        if self.ask_scroll.0 != scroll_key { self.ask_scroll = (scroll_key, ScrollHandle::new()); }
         let body = div().flex().flex_col().gap_3().when_some(tabs, |el, tabs| el.child(tabs))
-            .child(scrolled("ask-scroll", &self.ask_scroll.1, 360., body)).into_any_element();
-        Some(self.interaction_card(tr("ask_title"), body,
-            div().flex().items_center().gap_2()
+            .child(body).into_any_element();
+        let completed = self.ask_picks(cx).iter().zip(&ask.payload.questions)
+            .filter(|(pick, item)| interaction::answer(&ask, item, pick).is_some()).count();
+        let progress = tr("ask_progress").replace("{done}", &completed.to_string()).replace("{total}", &total.to_string());
+        let minimized = self.ask_form.minimized;
+        Some(in_column(questions::card(minimized, progress, body,
+            div().flex().flex_wrap().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
+                .when(tab > 0, |el| {
+                    let fp = fingerprint.clone();
+                    el.child(Button::new("ask-previous").small().ghost().label(tr("ask_previous")).disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.ask_form.fingerprint == fp { this.ask_form.tab = tab - 1; cx.notify(); }
+                        })))
+                })
                 .child(cancel)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
-                    Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
+                    Button::new("ask-next").small().primary().label(tr("ask_next")).disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| if this.ask_form.fingerprint == fp { this.ask_form.tab = tab + 1; cx.notify(); }))
                 } else {
-                    Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
+                    Button::new("ask-send").small().primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
                         .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
                 })
-                .into_any_element()))
+                .into_any_element(),
+            &self.ask_form.body_scroll, questions::body_height(f32::from(window.viewport_size().height)),
+            cx.listener(|this, _, window, cx| {
+                this.ask_form.minimized = !this.ask_form.minimized;
+                // O campo sai da árvore ao recolher: o foco volta para um controle que continua visível.
+                this.composer.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }))).py_2().into_any_element())
     }
 
     fn render_options(&mut self, busy: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -5029,8 +5060,8 @@ fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(cont
         .when(selected, |el| el.bg(theme::accent_dim()))
         .when(!busy, |el| el.cursor_pointer())
         .when(!busy && !selected, |el| el.hover(|style| style.bg(theme::hover())))
-        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
-        .when(!option.description.is_empty(), |el| el.child(div().text_sm().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
+        .child(div().text_size(rems(0.8125)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
+        .when(!option.description.is_empty(), |el| el.child(div().text_xs().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
         .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().mt_1().p_2().rounded_md().bg(theme::raised())
             .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
 }

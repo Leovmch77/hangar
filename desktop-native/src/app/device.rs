@@ -564,7 +564,13 @@ impl Hangar {
         for (input, key) in [(self.address.clone(), "server"), (self.token.clone(), "token"), (self.command_search.clone(), "commands_search")] {
             input.update(cx, |input, cx| input.set_placeholder(tr(key), window, cx));
         }
-        for input in self.ask_form.inputs.clone() { input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)); }
+        for input in self.ask_form.inputs.clone() {
+            match input {
+                AnyInputState::Input(input) => input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)),
+                AnyInputState::Textarea(input) => input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)),
+                _ => unreachable!("a resposta é um campo simples ou multilinha"),
+            }
+        }
         if let Some(input) = self.device.channel_input.clone() {
             input.update(cx, |input, cx| input.set_placeholder(tr("settings_channel_branch_placeholder"), window, cx));
         }
