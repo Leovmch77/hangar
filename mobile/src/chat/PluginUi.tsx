@@ -120,7 +120,7 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
       const width = finite(p.width);
       const height = finite(p.height) ?? line * 2;
       const sizing: ViewStyle = width !== undefined && width > 0 && height > 0 ? { aspectRatio: width / height } : { height };
-      return <View style={[styles.svg, { width: width ?? '100%' }, sizing]} accessibilityRole="image" accessibilityLabel={str(p.alt)}>
+      return <View style={[styles.svg, { width: '100%', maxWidth: width ?? '100%' }, sizing]} accessibilityRole="image" accessibilityLabel={str(p.alt)}>
         <SvgXml xml={str(p.source)} width="100%" height="100%" onError={() => toast.erro(m.plugin_svg_falhou())} />
       </View>;
     }

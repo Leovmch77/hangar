@@ -287,9 +287,12 @@ test.each([false, true])('árvore real do progresso mantém linha alinhada e SVG
   expect(header.style.width).toBe('100%');
   expect(header.style.maxWidth).toBe('100%');
   const drawing = container.querySelector('svg')!.parentElement!;
-  expect(drawing.style.width).toBe(collapsed ? '308px' : '721px');
+  expect(drawing.style.width).toBe('100%');
   expect(drawing.style.flexShrink).toBe('1');
-  expect(drawing.style.maxWidth).toBe('100%');
+  const trailing = drawing.nextElementSibling as HTMLElement;
+  expect(trailing.textContent?.trim()).toBe(collapsed ? '50% · 3m 13s' : '50%');
+  expect(trailing.style.flexShrink).toBe('0');
+  expect(drawing.style.maxWidth).toBe(collapsed ? '308px' : '721px');
   expect(drawing.style.alignSelf).toBe('center');
 });
 
