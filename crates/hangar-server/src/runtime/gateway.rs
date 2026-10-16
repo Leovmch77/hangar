@@ -380,22 +380,32 @@ impl RuntimeRegistry {
     /// a sobe. Falha de uma não impede as outras e vai ao diário.
     pub async fn register_claude_headless(self:Arc<Self>) {
         let (dir,queue_dir) = self.claude_dirs();
-        let listed = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<(String,bool,bool)>> {
-            let mut out = Vec::new();
-            let entries = match std::fs::read_dir(&dir) { Ok(entries)=>entries,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(out),Err(error)=>return Err(error) };
+        let listed = tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<(String,bool,bool)>,Vec<String>)> {
+            let (mut out,mut unreadable) = (Vec::new(),Vec::new());
+            let entries = match std::fs::read_dir(&dir) { Ok(entries)=>entries,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok((out,unreadable)),Err(error)=>return Err(error) };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_none_or(|ext|ext != "json") { continue; }
-                let Some(meta) = super::codex_sidecar::load(&path) else { continue };
+                let meta = match super::codex_sidecar::read(&path) {
+                    Ok(Some(meta))=>meta,
+                    Ok(None)=>continue,
+                    Err(_)=>{ unreadable.push(path.file_stem().map(|stem|stem.to_string_lossy().into_owned()).unwrap_or_default()); continue; },
+                };
                 let (Some(name),Some(key)) = (meta.get("name").and_then(Value::as_str),meta.get("key").and_then(Value::as_str).filter(|k|!k.is_empty())) else { continue };
                 let alive = meta.get("cano").and_then(|cano|cano["pid"].as_u64()).and_then(|pid|u32::try_from(pid).ok())
                     .is_some_and(|pid|process::liveness(pid,key)==process::Liveness::Ours);
                 out.push((name.to_owned(),alive,pending(&super::codex_terminal::queue_files(&queue_dir,key).0)));
             }
-            Ok(out)
+            Ok((out,unreadable))
         }).await;
         let listed = match listed {
-            Ok(Ok(listed))=>listed,
+            Ok(Ok((listed,unreadable)))=>{
+                for name in unreadable {
+                    tracing::warn!(session=%name,"sidecar do Claude sem terminal ilegível na subida");
+                    self.diag.report("runtime.registration_failed",&name,"claude_sidecar_read","o sidecar da sessão sem terminal existe e não foi lido na subida");
+                }
+                listed
+            },
             Ok(Err(error))=>{
                 tracing::warn!(kind=?error.kind(),"sidecars do Claude sem terminal ilegíveis na subida");
                 self.diag.report("runtime.registration_failed","*","sidecar_dir","a pasta dos sidecars do Claude sem terminal não foi lida");
@@ -419,7 +429,14 @@ impl RuntimeRegistry {
     pub async fn open_claude_headless(&self,name:&str,launch:bool) -> Option<Result<(),RuntimeError>> {
         let (dir,queue_dir) = self.claude_dirs();
         let path = super::codex_sidecar::path(&dir,name);
-        let meta = tokio::task::spawn_blocking(move||super::codex_sidecar::load(&path)).await.ok().flatten()?;
+        let meta = match tokio::task::spawn_blocking(move||super::codex_sidecar::read(&path)).await {
+            Ok(Ok(meta))=>meta?,
+            failed=>{
+                if let Ok(Err(error)) = &failed { tracing::warn!(session=%name,kind=?error.kind(),"sidecar do Claude sem terminal ilegível"); }
+                self.diag.report("runtime.open_failed",name,"claude_sidecar_read","o sidecar da sessão sem terminal existe e não foi lido");
+                return Some(Err(RuntimeError::new("claude_sidecar_read","o arquivo da sessão sem terminal não pôde ser lido")));
+            },
+        };
         let key = meta.get("key").and_then(Value::as_str).filter(|key|!key.is_empty())?.to_owned();
         if self.entries.lock().await.get(&key).is_some_and(|entry|entry.name == name) { return Some(Ok(())); }
         if self.has_entry(Some(&key),name).await {
@@ -2330,6 +2347,16 @@ mod tests {
         assert!(registry.entries.lock().await.get(&key).unwrap().auto_respawn.is_some(),"o processo que cai é religado aqui");
         assert!(matches!(registry.open_claude_headless("cl",false).await,Some(Ok(()))),"aberta não abre de novo");
         registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// Sidecar que existe e não se lê é erro visível, nunca "não é sessão Claude sem terminal".
+    #[tokio::test]
+    async fn an_unreadable_claude_sidecar_is_an_error_not_an_absent_session() {
+        let home=tempfile::tempdir().unwrap();
+        let (registry,_hubs)=claude_registry(home.path(),&[]);
+        std::fs::write(home.path().join(".hangar/claude-headless/cl.json"),b"{torto").unwrap();
+        let error=registry.open_claude_headless("cl",true).await.expect("o arquivo existe").expect_err("ilegível");
+        assert_eq!(error.code,"claude_sidecar_read");
     }
 
     /// A 1ª mensagem chega enquanto a sessão recém-criada ainda sobe: a segunda abertura espera a primeira
