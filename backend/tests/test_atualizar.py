@@ -1433,6 +1433,30 @@ def test_topo_sem_binario_para_no_commit_do_binario_publicado(repo, rust):
     assert atualizar._behind_top() is True
 
 
+def _workflow_do_server(obra):
+    """O `server.yml` só compila o binário quando o push muda um destes caminhos."""
+    (obra / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+    _commit(obra, ".github/workflows/server.yml",
+            'on:\n  push:\n    branches: ["**"]\n    paths:\n      - "crates/**"\n'
+            '      # o contrato interno\n      - "backend/app/rust_server.py"\n  workflow_dispatch:\n')
+
+
+def test_commit_que_muda_o_rust_espera_o_binario_dele(repo, rust):
+    _workflow_do_server(rust["obra"])
+    _git(rust["obra"], "push", "-q", "origin", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+
+
+def test_commit_so_de_python_depois_do_binario_chega(repo, rust):
+    rust["manifesto"]["commit"] = rust["topo"]
+    _workflow_do_server(rust["obra"])
+    _commit(rust["obra"], "py.txt", "só Python\n")
+    _git(rust["obra"], "push", "-q", "origin", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == _rev(rust["obra"], "HEAD") != rust["topo"]
+
+
 def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
     """O topo publicado para outro sistema não leva este: vale a entrada dele em `platforms`."""
     rust["manifesto"]["commit"] = rust["topo"]
