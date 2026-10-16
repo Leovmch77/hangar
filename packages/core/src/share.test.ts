@@ -84,6 +84,13 @@ describe('redeemInvite', () => {
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ code: 'K7P2', device: 'Navegador · Linux' });
   });
+  it('agrega sessão ao token de convite existente e nunca segue redirect com esse token', async () => {
+    const f = vi.fn(async () => resposta(200, { token: 'tg', session: 's2', owner: 'Ana', address: 'https://dono.ts.net:8443' }));
+    await redeemInvite('https://dono.ts.net:8443/convite/NOVO', 'Android', f as unknown as typeof fetch, 'tg');
+    const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ code: 'NOVO', device: 'Android', token: 'tg' });
+    expect(init.redirect).toBe('error');
+  });
   it('410 vira o motivo certo (envelope com params ou detail cru)', async () => {
     const usado = vi.fn(async () => resposta(410, { detail: { code: 'erro_convite_usado', params: { reason: 'used' }, msg: 'x' } }));
     await expect(redeemInvite('https://d:8443/convite/A', 'x', usado as unknown as typeof fetch))

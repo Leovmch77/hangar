@@ -135,6 +135,7 @@ export async function redeemInvite(
   link: string,
   device: string,
   fetchImpl: typeof fetch = (...a) => fetch(...a),
+  token?: string,
 ): Promise<InviteRedeemResult> {
   const alvo = parseInviteLink(link);
   if (!alvo) throw new InviteRedeemError('unknown');
@@ -142,8 +143,9 @@ export async function redeemInvite(
   try {
     res = await fetchImpl(`${alvo.address}/api/guest/redeem`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: alvo.code, device }),
+      body: JSON.stringify({ code: alvo.code, device, ...(token ? { token } : {}) }),
       // A primeira conexão pelo Funnel passa dos 8 s padrão quando o túnel está em relay.
       signal: AbortSignal.timeout(20000),
     });

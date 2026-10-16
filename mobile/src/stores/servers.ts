@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import { reconcilePairEntries, registrarDiag } from '@hangar/core';
-import type { ExternalPair, LanInfo, PairAttach, Server } from '@hangar/core';
+import type { ExternalPair, InviteRedeemResult, LanInfo, PairAttach, Server } from '@hangar/core';
+import * as m from '../paraglide/messages';
 
 const KEY = 'cp_servers_v1';
 
@@ -50,6 +51,7 @@ export interface ServersState {
   aviso: AvisoServidores | null;
   load(): Promise<void>;
   add(s: Omit<Server, 'id' | 'label'> & { label?: string }): Server;
+  addInvite(result: InviteRedeemResult, activate?: boolean): Server | null;
   remove(id: string): void;
   setActive(id: string): void;
   active(): Server | null;
@@ -190,6 +192,33 @@ export const useServers = create<ServersState>((set, get) => {
       };
     });
     return s;
+  },
+  addInvite(result, activate = true) {
+    if (!get().ready || !get().vaultReadable) return null;
+    const base = result.address.replace(/\/+$/, '');
+    const matches = (server: Server) => {
+      try { return new URL(server.baseUrl).origin === new URL(base).origin; }
+      catch { return false; }
+    };
+    if (get().servers.some((server) => !server.invite && matches(server))) return null;
+    let saved: Server | null = null;
+    change((p) => {
+      const existing = p.servers.find((server) => server.invite && !server.ephemeral && matches(server))
+        ?? p.servers.find((server) => server.invite && matches(server));
+      const server: Server = {
+        ...existing,
+        id: existing?.id ?? `s_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        label: existing?.label ?? m.mobile_share_invite_label({ owner: result.owner }),
+        baseUrl: base, token: result.token, invite: true, ephemeral: false,
+        inviteEnded: false, disabled: false, removed: false,
+      };
+      saved = server;
+      return {
+        servers: existing ? p.servers.map((entry) => entry.id === existing.id ? server : entry) : [...p.servers, server],
+        activeId: activate ? server.id : p.activeId,
+      };
+    });
+    return saved;
   },
   remove(id) {
     change((p) => {
