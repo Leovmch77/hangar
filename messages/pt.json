@@ -1164,6 +1164,8 @@
   "plugin_ui_falhou": "Não foi possível atualizar a interface dos mods. Tentando reconectar…",
   "plugin_painel_carregando": "Carregando painel do mod",
   "plugin_svg_falhou": "Não foi possível desenhar esta imagem do mod.",
+  "plugin_link_inseguro": "O link do mod foi bloqueado: só endereços HTTP ou HTTPS são permitidos.",
+  "plugin_input_desativado": "A edição deste campo foi desativada. O texto local foi mantido; confira no mod o que foi recebido.",
   "mods_celular_guardar_falhou": "Não foi possível guardar a preferência dos mods neste aparelho.",
   "erro_mod_mouse_desligado": "O Claude Code da sessão não está em tela cheia, e só nela ele liga o mouse; clique pelo terminal.",
   "erro_mod_botao_nao_achado": "Não achei “{rotulo}” na tela do terminal.",

@@ -16,6 +16,9 @@ export function PluginInput({ frame, onInput }: Props) {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const submitFlight = useRef(false);
+  const writable = !!onInput;
+  const wasWritable = useRef(writable);
+  const heldDraft = useRef(false);
   const shown = useRef(value);
   const focused = useRef(false);
   const active = useRef(true);
@@ -25,7 +28,9 @@ export function PluginInput({ frame, onInput }: Props) {
   if (!sync.current) sync.current = new FieldSync(str(p.value));
   const send = useMemo(() => fieldSender(async (kind, text) => {
     try {
-      if (active.current && callback.current) await callback.current(kind, text);
+      if (!active.current) return;
+      if (!callback.current) throw new Error(m.plugin_input_desativado());
+      await callback.current(kind, text);
     } finally {
       if (kind === 'submit') {
         submitFlight.current = false;
@@ -33,7 +38,7 @@ export function PluginInput({ frame, onInput }: Props) {
       }
     }
   }, err => {
-    if (active.current) setError(pluginFailureText(err, m.plugin_input_falhou));
+    if (active.current) setError(callback.current ? pluginFailureText(err, m.plugin_input_falhou) : m.plugin_input_desativado());
   }), []);
   useEffect(() => {
     active.current = true;
@@ -43,13 +48,23 @@ export function PluginInput({ frame, onInput }: Props) {
     if (next !== null) { shown.current = next; setValue(next); }
   };
   useLayoutEffect(() => {
-    put(sync.current!.draw(str(frame.props?.value), shown.current, focused.current));
+    if (wasWritable.current && !writable) {
+      heldDraft.current = true;
+      setError(m.plugin_input_desativado());
+    } else if (!wasWritable.current && writable) {
+      setError('');
+    }
+    wasWritable.current = writable;
+  }, [writable]);
+  useLayoutEffect(() => {
+    if (!heldDraft.current) put(sync.current!.draw(str(frame.props?.value), shown.current, focused.current));
   }, [frame]);
   const submit = () => {
     if (!callback.current || submitFlight.current) return;
     submitFlight.current = true;
     setSubmitting(true);
     setError('');
+    heldDraft.current = false;
     sync.current!.submitted();
     send('submit', shown.current);
   };
@@ -58,9 +73,10 @@ export function PluginInput({ frame, onInput }: Props) {
     <TextInput value={value} editable={!!onInput} placeholder={str(p.placeholder)} accessibilityLabel={str(p.label) || str(p.placeholder)}
       style={styles.input} maxLength={16384}
       onFocus={() => { focused.current = true; }}
-      onBlur={() => { focused.current = false; put(sync.current!.draw(null, shown.current, false)); }}
+      onBlur={() => { focused.current = false; if (!heldDraft.current) put(sync.current!.draw(null, shown.current, false)); }}
       onChangeText={text => {
         if (!callback.current) return;
+        heldDraft.current = false;
         shown.current = text;
         setValue(text);
         setError('');

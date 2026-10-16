@@ -36,7 +36,7 @@ const percent = (v: unknown): `${number}%` | undefined => typeof v === 'string' 
 
 async function openLink(value: unknown) {
   const href = safeHref(value);
-  if (!href) return;
+  if (!href) { toast.erro(m.plugin_link_inseguro()); return; }
   try { await Linking.openURL(href); }
   catch { toast.erro(m.plugin_clique_falhou()); }
 }
@@ -68,7 +68,8 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
   switch (node.type) {
     case 'Text': {
       const wrap = str(p.wrap);
-      return <Text style={[!inText && styles.text, textStyle]} numberOfLines={!inText && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle') ? 1 : undefined}
+      const truncate = !inText && (wrap.startsWith('truncate') || wrap === 'end' || wrap === 'middle');
+      return <Text style={[!inText && styles.text, textStyle, truncate && styles.truncated]} numberOfLines={truncate ? 1 : undefined}
         ellipsizeMode={wrap.endsWith('start') ? 'head' : wrap.endsWith('middle') || wrap === 'middle' ? 'middle' : 'tail'}>{kids}</Text>;
     }
     case 'Box': {
@@ -105,7 +106,7 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
       const label = str(p.label) || textOf(node.children);
       const body = <Text style={[styles.text, textStyle, p.variant === 'primary' && !color && { color: theme.tokens.accent.base }]}>{label}</Text>;
       return onPress && control
-        ? <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} accessibilityState={{ disabled: !!disabled }} onPress={() => onPress(control)} style={[styles.button, p.plain === true && styles.plain, disabled && { opacity: 0.5 }]}>{body}</Pressable>
+        ? <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} accessibilityState={{ disabled: !!disabled }} hitSlop={12} onPress={() => onPress(control)} style={[styles.button, p.plain === true && styles.plain, disabled && { opacity: 0.5 }]}>{body}</Pressable>
         : <View style={[styles.button, p.plain === true && styles.plain]}>{body}</View>;
     }
     case 'Link': {
@@ -115,7 +116,14 @@ export function PluginTree({ node, place, onPress, onInput, disabled, inText = f
     case 'Markdown': return <EnrichedMarkdownText markdown={str(p.text)} markdownStyle={markdownStyle} flavor="github" onLinkPress={({ url }) => void openLink(url)} />;
     case 'Code': return <Text selectable style={[styles.text, styles.code]}>{str(p.source)}</Text>;
     case 'Image': return <Text style={styles.muted}>{str(p.alt)}</Text>;
-    case 'Svg': return <SvgXml xml={str(p.source)} width={finite(p.width) ?? '100%'} height={finite(p.height) ?? line * 2} onError={() => toast.erro(m.plugin_svg_falhou())} />;
+    case 'Svg': {
+      const width = finite(p.width);
+      const height = finite(p.height) ?? line * 2;
+      const sizing: ViewStyle = width !== undefined && width > 0 && height > 0 ? { aspectRatio: width / height } : { height };
+      return <View style={[styles.svg, { width: width ?? '100%' }, sizing]} accessibilityRole="image" accessibilityLabel={str(p.alt)}>
+        <SvgXml xml={str(p.source)} width="100%" height="100%" onError={() => toast.erro(m.plugin_svg_falhou())} />
+      </View>;
+    }
     case 'Raster': return <View style={styles.raster}>{decodeRaster(str(p.cells), Number(p.columns) || 0, Number(p.rows) || 0).map((row, i) => (
       <Text key={i} style={styles.code} adjustsFontSizeToFit numberOfLines={1}>{row.map((c, j) => <Text key={j} style={{ color: c.fg ?? theme.tokens.text.primary, backgroundColor: c.bg ?? undefined }}>{c.ch}</Text>)}</Text>
     ))}</View>;
@@ -173,12 +181,13 @@ export function PluginUi({ serverId, name, readOnly = false }: { serverId: strin
       await Clipboard.setStringAsync(reply.copied);
       toast.ok(m.plugin_copiado());
     }
-    if (safeHref(reply.opened)) await openLink(reply.opened);
+    if (reply.opened !== undefined) await openLink(reply.opened);
   }, m.plugin_clique_falhou);
   const ids = surface?.panes.map(pane => pane.id) ?? [];
   const active = activePaneId(ids, readOnly && local ? undefined : surface?.shownId, local);
   const pane = surface?.panes.find(pane => pane.id === active);
   const show = (site: string) => {
+    if (flight.current || streamError) return;
     if (readOnly || !tabFollowsServer(ids, surface?.shownId)) setLocal(site);
     if (readOnly) return;
     void action(async () => {
@@ -196,7 +205,7 @@ export function PluginUi({ serverId, name, readOnly = false }: { serverId: strin
         <View style={styles.header}>
           <ScrollView horizontal style={styles.tabs} contentContainerStyle={styles.tabRow} accessibilityLabel={m.plugin_abas_label()}>
             {surface.panes.map(tab => <Pressable key={tab.id} accessibilityRole="tab" accessibilityLabel={tab.title}
-              accessibilityState={{ selected: tab.id === active, disabled: busy }} disabled={busy} onPress={() => show(tab.id)} style={styles.tab}>
+              accessibilityState={{ selected: tab.id === active, disabled: busy || !!streamError }} disabled={busy || !!streamError} onPress={() => show(tab.id)} style={styles.tab}>
               <Text style={[styles.text, tab.id === active ? { color: theme.tokens.accent.base } : styles.muted]}>{tab.title}</Text>
             </Pressable>)}
           </ScrollView>
@@ -232,10 +241,12 @@ const styles = StyleSheet.create(theme => ({
   band: { padding: theme.base.space[2] },
   loading: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.xs, padding: theme.base.space[2] },
-  text: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm, flexShrink: 1 },
+  text: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm, lineHeight: theme.base.text.sm * 1.4, includeFontPadding: false, flexShrink: 0 },
+  truncated: { flexShrink: 1, minWidth: 0 },
+  svg: { flexShrink: 1, maxWidth: '100%', alignSelf: 'center', overflow: 'hidden' },
   muted: { color: theme.tokens.text.muted, fontSize: theme.base.text.xs },
   code: { fontFamily: theme.base.fontMono, color: theme.tokens.text.secondary, fontSize: theme.base.text.xs },
-  button: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm, backgroundColor: 'transparent' },
+  button: { alignSelf: 'flex-start', flexShrink: 0, maxWidth: '100%', justifyContent: 'center', paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm, backgroundColor: 'transparent' },
   plain: { paddingHorizontal: 0 },
   link: { color: theme.tokens.accent.base, textDecorationLine: 'underline', minHeight: 44 },
   raster: { flexShrink: 1, maxWidth: '100%' },

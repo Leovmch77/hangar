@@ -1164,6 +1164,8 @@
   "plugin_ui_falhou": "Couldn't update the mods interface. Reconnecting…",
   "plugin_painel_carregando": "Loading mod pane",
   "plugin_svg_falhou": "Couldn't render this mod image.",
+  "plugin_link_inseguro": "The mod link was blocked: only HTTP or HTTPS addresses are allowed.",
+  "plugin_input_desativado": "Editing this field was disabled. Your local text was kept; check the mod to see what it received.",
   "mods_celular_guardar_falhou": "Couldn't save the mods preference on this device.",
   "erro_mod_mouse_desligado": "The session's Claude Code isn't in fullscreen, the only mode where it turns the mouse on; click in the terminal.",
   "erro_mod_botao_nao_achado": "Couldn't find “{rotulo}” on the terminal screen.",

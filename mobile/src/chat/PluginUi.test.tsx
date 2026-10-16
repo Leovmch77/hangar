@@ -11,6 +11,7 @@ import { MoreSheet } from './MoreSheet';
 import * as Clipboard from 'expo-clipboard';
 import { Linking } from 'react-native';
 import * as m from '../paraglide/messages';
+import { toast } from '../ui/Toast';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock('react-native', async importOriginal => {
@@ -186,12 +187,110 @@ test('só leitura troca painéis localmente sem escrever no servidor', () => {
   expect(fetch).not.toHaveBeenCalled();
 });
 
+test('erro do stream bloqueia abas sem trocar o painel local nem chamar o servidor', () => {
+  useMods.setState({ visible: true });
+  const container = renderUi();
+  act(() => chatStore('srv2', 'sess').use.setState({ pluginUi: parsePluginUi({ ...surface, shown_id: undefined }), pluginUiError: m.plugin_ui_falhou() }));
+  const tab = labeled(container, 'pane-one') as HTMLButtonElement;
+  expect(tab.disabled).toBe(true);
+  act(() => tab.click());
+  expect(container.textContent).toContain('run-mod');
+  expect(container.textContent).not.toContain('pane-first');
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(m.plugin_ui_falhou());
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each(['javascript:alert(1)', 'file:///tmp/mod'])('link inseguro na resposta de clique avisa e não abre: %s', async opened => {
+  useMods.setState({ visible: true });
+  vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, opened }), { status: 200 }));
+  const container = renderUi();
+  await act(async () => labeled(container, 'run-mod').click());
+  expect(toast.erro).toHaveBeenCalledWith(m.plugin_link_inseguro());
+  expect(Linking.openURL).not.toHaveBeenCalled();
+});
+
+test('sessão morta não oferece interface de mods guardada no menu', () => {
+  renderUi();
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  roots.push(root);
+  act(() => root.render(createElement(MoreSheet, { open: true, onClose: () => {}, serverId: 'srv2', name: 'sess' })));
+  expect(labeled(container, m.mods_celular_mostrar_paineis({ n: '2' }))).not.toBeNull();
+  act(() => chatStore('srv2', 'sess').use.setState({ stateEvent: { session: 'sess', state: 'dead' } }));
+  expect(labeled(container, m.mods_celular_mostrar_paineis({ n: '2' }))).toBeNull();
+});
+
+test('campo que perde edição preserva o texto local e avisa sem enviar mudanças pendentes', async () => {
+  let finish!: () => void;
+  const onInput = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  roots.push(root);
+  const frame: PluginNode = { type: 'Input', props: { key: 'field', value: '' }, press: { plugin: 'mod-a' } };
+  act(() => root.render(createElement(PluginTree, { node: frame, onInput })));
+  const input = container.querySelector<HTMLInputElement>('input')!;
+  act(() => input.focus());
+  const change = (value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  act(() => change('first'));
+  act(() => change('local-pending'));
+  act(() => root.render(createElement(PluginTree, { node: frame })));
+  expect(input.disabled).toBe(true);
+  expect(input.value).toBe('local-pending');
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(m.plugin_input_desativado());
+  expect(container.querySelector('button')).toBeNull();
+  act(() => input.blur());
+  act(() => root.render(createElement(PluginTree, { node: { ...frame, props: { key: 'field', value: 'server-known' } } })));
+  expect(input.value).toBe('local-pending');
+  await act(async () => finish());
+  expect(onInput).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(m.plugin_input_desativado());
+  container.remove();
+});
+
 test('texto de um nó herda cor e ênfase, sem trocar pela cor padrão nos filhos', () => {
   const container = render({ type: 'Text', props: { color: 'red', bold: true }, children: ['colored'] });
   document.body.append(container);
   const leaf = [...container.querySelectorAll('span')].find(el => el.firstChild?.nodeType === 3)!;
   expect(getComputedStyle(leaf).color).toBe('#cd3131');
   container.remove();
+});
+
+const progressTree = (collapsed: boolean): PluginNode => {
+  const width = collapsed ? 308 : 721;
+  const bar: PluginNode = { type: 'Svg', props: { width, height: 6, source: `<svg width="${width}" height="6" viewBox="0 0 ${width} 6"><rect width="100%" height="6" /></svg>` } };
+  return { type: 'Box', props: { flexDirection: 'column' }, children: [{ type: 'Box', props: { flexDirection: 'column' }, children: [
+    { type: 'Box', props: { key: 'header', flexDirection: 'row', justifyContent: 'space-between', width: 110 }, children: [
+      { type: 'Box', props: { flexDirection: 'row' }, children: [
+        { type: 'Text', children: ['● '] },
+        { type: 'Button', props: { key: 'toggle', label: `${collapsed ? '▸' : '▾'} title-mod`, plain: true }, press: { plugin: 'fixture-mod' } },
+        { type: 'Text', props: { dimColor: true, wrap: 'truncate-end' }, children: [' (step-mod)'] },
+      ] },
+      collapsed ? { type: 'Box', props: { flexDirection: 'row' }, children: [{ type: 'Text', children: [' '] }, bar, { type: 'Text', children: [' 50% · 3m 13s'] }] }
+        : { type: 'Text', children: [' 1/2 steps · 3m 30s'] },
+    ] },
+    ...(!collapsed ? [{ type: 'Box', props: { flexDirection: 'row' }, children: [{ type: 'Text', children: ['  '] }, bar, { type: 'Text', children: [' 50%'] }] }] : []),
+  ] }] };
+};
+
+test.each([false, true])('árvore real do progresso mantém linha alinhada e SVG encolhível: recolhida=%s', collapsed => {
+  useMods.setState({ visible: true });
+  const container = renderUi();
+  act(() => chatStore('srv2', 'sess').use.setState({ pluginUi: parsePluginUi({ above: progressTree(collapsed), panes: [], columns: 110, source: 'surface' }) }));
+  const title = labeled(container, `${collapsed ? '▸' : '▾'} title-mod`);
+  expect(title.style.minHeight).toBe('');
+  expect(Number(title.querySelector('span')!.style.lineHeight)).toBe(21);
+  const header = title.parentElement!.parentElement!;
+  expect(header.style.width).toBe('100%');
+  expect(header.style.maxWidth).toBe('100%');
+  const drawing = container.querySelector('svg')!.parentElement!;
+  expect(drawing.style.width).toBe(collapsed ? '308px' : '721px');
+  expect(drawing.style.flexShrink).toBe('1');
+  expect(drawing.style.maxWidth).toBe('100%');
+  expect(drawing.style.alignSelf).toBe('center');
 });
 
 test('conjunto dos mods deixa espaço para o composer quando o teclado abre', () => {

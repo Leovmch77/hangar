@@ -38,10 +38,12 @@ type Item = {
 export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, provider, semTerminal, temPergunta }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
-  const surface = chatStore(serverId, name).use(s => s.pluginUi);
+  const chat = chatStore(serverId, name);
+  const surface = chat.use(s => s.pluginUi);
+  const dead = chat.use(s => s.stateEvent?.state === 'dead');
   const visible = useMods(s => s.visible);
   const panes = surface?.panes.length ?? 0;
-  const hasMods = !!surface && (!isEmptyBand(surface.above) || panes > 0);
+  const hasMods = !dead && !!surface && (!isEmptyBand(surface.above) || panes > 0);
   const modsLabel = visible ? m.mods_celular_ocultar() : panes === 1 ? m.mods_celular_mostrar_um()
     : panes > 1 ? m.mods_celular_mostrar_paineis({ n: String(panes) }) : m.mods_celular_mostrar();
 
