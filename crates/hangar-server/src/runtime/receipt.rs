@@ -179,9 +179,13 @@ impl ReceiptIndex {
             // Mensagens que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto por entrada (cada
             // entrada do Hangar é um bloco). Cada bloco é uma ocorrência, senão a primeira gasta o registro.
             let blocks = if self.provider != "codex" && kind == "user" { text_blocks(&obj["message"]["content"]) } else { Vec::new() };
+            let image_receipt=(self.provider!="codex" && kind=="user").then(||super::local_policy::image_receipt(&text,&obj["message"]["content"])).flatten();
             let records = if blocks.len() > 1 { blocks } else { vec![text] };
             let tagged = records.len() > 1;
             let mut parts:Vec<(String,String)> = Vec::new();
+            if let Some(receipt)=image_receipt {
+                parts.push(("#images".into(),receipt));
+            }
             for (b,record) in records.into_iter().enumerate() {
                 let tag = if tagged { format!("#block{b}") } else { String::new() };
                 // Vários recados num registro só: cada um é uma ocorrência, senão o primeiro gasta o registro e os outros nunca confirmam.

@@ -412,6 +412,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         sh(&dir, &["init", "-q"]);
+        // O restore também precisa ler a mesma política de fim de linha da fixture.
+        sh(&dir, &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("install.sh"), "echo 1\n").unwrap();
         std::fs::write(dir.join("README.md"), "leia\n").unwrap();
         std::fs::write(dir.join(".gitignore"), "backend/.env\n").unwrap();

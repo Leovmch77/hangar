@@ -110,13 +110,14 @@ pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     }
 }
 
-/// `/commands`: o `/compact` embutido primeiro; skill homônima dele sai, `path` e `native_name` não vão ao app.
+/// `/commands`: controles embutidos primeiro, sem skills homônimas nem caminhos locais no catálogo.
 pub fn commands_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let Some(catalog) = accepted(sent) else { return refused() };
-    let mut commands = vec![json!({"name": "compact", "display": "/compact", "source": "builtin",
+    let mut commands = vec![json!({"name": "clear", "display": "/clear", "source": "builtin",
+        "description": "Limpa o histórico da conversa", "destructive": true}), json!({"name": "compact", "display": "/compact", "source": "builtin",
         "description": "Resume e compacta o contexto", "destructive": true})];
     for mut skill in crate::runtime::local_policy::skills(catalog) {
-        if skill["name"] == "compact" { continue; }
+        if matches!(skill["name"].as_str(), Some("clear" | "compact")) { continue; }
         if let Some(fields) = skill.as_object_mut() { fields.remove("path"); fields.remove("native_name"); }
         commands.push(skill);
     }
@@ -130,6 +131,7 @@ const MSG_COMPACT_ARGS: &str = "O /compact do Codex não aceita argumentos.";
 pub fn compact_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let failed = |msg: &str| (StatusCode::BAD_REQUEST, detail_body("erro_envio_falhou", msg, json!({"erro": msg})));
     match sent {
+        Err(error) if error.code == "terminal_panel_open" => super::control::panel_open_refusal(),
         Ok(reply) if matches!(reply.disposition, Disposition::Accepted | Disposition::Deferred) => (StatusCode::OK,
             json!({"ok": true, "delivered": reply.disposition == Disposition::Accepted, "steered": false, "native": false})),
         Ok(reply) if reply.disposition == Disposition::Unknown => failed("resultado incerto; entrada conservada sem reenvio"),
@@ -142,6 +144,44 @@ pub fn compact_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
 pub(super) async fn compact(target: &crate::runtime::gateway::WriteTarget, text: &str) -> Answer {
     if text.trim() != "/compact" { return compact_answer(&Err(RuntimeError::new("codex_command", MSG_COMPACT_ARGS))); }
     compact_answer(&target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::Compact, payload: json!({}) }).await)
+}
+
+/// A conversa nova não pode levar nem descartar uma mensagem que ainda espera na fila.
+pub(super) async fn clear(target: &crate::runtime::gateway::WriteTarget, text: &str, panels: Option<Arc<crate::term::Terms>>) -> Answer {
+    let sent = clear_conversation(target, text, panels).await;
+    compact_answer(&sent)
+}
+
+async fn clear_conversation(target: &crate::runtime::gateway::WriteTarget, text: &str, panels: Option<Arc<crate::term::Terms>>) -> Result<RuntimeReply, RuntimeError> {
+    let failed = |message:&str|RuntimeError::new("codex_clear", message);
+    if text.trim() != "/clear" { return Err(failed("O /clear do Codex não aceita argumentos.")); }
+    let handle = match &target.handle {
+        EntryHandle::Headless(handle) | EntryHandle::CodexTerminal { handle, .. } => handle,
+        _ => return Err(failed("Esta sessão não é do Codex.")),
+    };
+    let _turns = handle.hold_turns().await?;
+    let before = handle.view().await?;
+    if before["deliverable"] != true || before["async_questions"].as_array().is_some_and(|questions|!questions.is_empty()) {
+        return Err(failed("Espere o Codex terminar e responda às perguntas antes de limpar a conversa."));
+    }
+    let rows = handle.queue(random_hex(16), crate::runtime::queue::Action::Load).await?;
+    if rows.as_array().is_some_and(|rows|rows.iter().any(crate::runtime::queue::row_waits)) {
+        return Err(failed("Há mensagens na fila esperando entrega. Envie ou descarte antes de limpar a conversa."));
+    }
+    if let EntryHandle::CodexTerminal { target, cell, .. } = &target.handle {
+        let driver = crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), panels);
+        crate::permission_control::codex_clear(&driver).await?;
+        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let current = handle.view().await?;
+            if current["thread_id"].as_str().is_some_and(|id|!id.is_empty()) && current["thread_id"] != before["thread_id"] {
+                return Ok(RuntimeReply { operation_id:String::new(), disposition:Disposition::Accepted, payload:json!({}) });
+            }
+            if tokio::time::Instant::now() >= until { return Err(failed("Não foi possível confirmar a conversa nova. Confira a sessão antes de repetir o /clear.")); }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    handle.command(RuntimeCommand { operation_id:random_hex(16), kind:OperationKind::Clear, payload:json!({}) }).await
 }
 
 /// `modos_para_tela`: o mesmo formato do picker da TUI.
