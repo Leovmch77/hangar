@@ -74,6 +74,7 @@ export function pageUrls(base: string, session: string, id: string) {
   const root = `${base}/api/sessions/${encodeURIComponent(session)}/pages/${encodeURIComponent(id)}`;
   return {
     raw: `${root}?raw=1`,
+    source: `${root}?raw=1&source=1`,
     isolated: root,
     shot: (theme: 'dark' | 'light', width: number) => `${root}/shot?theme=${theme}&width=${Math.round(width)}`,
   };
@@ -104,6 +105,19 @@ export function themedPageDocument(html: string, scheme: 'dark' | 'light', vars:
     const defaults = new RegExp(` data-${scheme}="([^"]*)"`).exec(attrs)?.[1] ?? '';
     return `${open}:root{color-scheme:${scheme};${unquote(defaults)}${own}}${unquote(base)}${close}`;
   });
+}
+
+// Fonte da página: o servidor já tira o tema e a ponte. Erro HTTP sobe para a tela mostrar.
+export async function fetchPageSource(url: string, headers: Record<string, string>): Promise<string> {
+  const r = await fetch(url, { headers });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+
+// Nome do arquivo salvo: o título sem o que os sistemas de arquivo recusam, até 120 caracteres. Mesma regra no nativo.
+export function pageFileName(title: string): string {
+  const name = [...title.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, ' ').split(/\s+/).filter(Boolean).join(' ')].slice(0, 120).join('').trim();
+  return `${name || 'pagina'}.html`;
 }
 
 // Tela cheia da página (como o HtmlRenderDialog do T3): zoom de 50% a 200% em degraus de 25%.

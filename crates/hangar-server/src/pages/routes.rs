@@ -152,12 +152,12 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
         } else {
             (images::inline(&html).map_err(too_large)?, Vec::new())
         };
-        let page = NewPage { html: theme::inject(&html, !own_theme), title: title2, height, heights: BTreeMap::new(), draft, own_theme, url: None };
+        let page = NewPage { html, title: title2, height, heights: BTreeMap::new(), draft, own_theme, url: None };
         let id = pages.save(&key2, &jsonl, &page).map_err(|e| {
             tracing::warn!(key = %key2, "página não gravada: {e}");
             fail("erro_pagina_nao_gravada", "não foi possível gravar a página")
         })?;
-        Ok(Prepared { id, html: page.html, missing, bin: chromium() })
+        Ok(Prepared { id, html: theme::inject(&page.html, !own_theme), missing, bin: chromium() })
     }).await;
     let Prepared { id, html, missing, bin } = match prepared {
         Ok(Ok(p)) => p,
@@ -274,7 +274,9 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     path: Result<Path<(String, String)>, axum::extract::rejection::PathRejection>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
     let (name, id) = match path { Ok(Path(p)) if owner => p, _ => return pass(&st, req, &fwd).await };
-    let (headers, raw) = (req.headers().clone(), crate::auth::query_param(req.uri().query(), "raw").is_some());
+    let query = req.uri().query();
+    let (raw, source) = (crate::auth::query_param(query, "raw").is_some(), crate::auth::query_param(query, "source").is_some());
+    let headers = req.headers().clone();
     drop(req);
     let key = match session_key(&st, &headers, &name).await { Ok(k) => k, Err(r) => return r };
     let pages = st.pages.clone();
@@ -291,7 +293,8 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let Some(found) = found else { return expired(&headers) };
     let Some((html, meta)) = found else { return no_html(&headers) };
     let mut r = if raw {
-        let mut r = Response::new(Body::from(html));
+        // `source`: a página como o agente a escreveu (Fonte, copiar, salvar), sem o tema e a ponte.
+        let mut r = Response::new(Body::from(if source { theme::source(html, &meta) } else { theme::served(html, &meta) }));
         let h = r.headers_mut();
         h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
         h.insert("content-security-policy", "sandbox".parse().unwrap());
@@ -299,7 +302,7 @@ pub async fn page(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         h.insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
         r
     } else {
-        isolated_shell(&html, &meta.title)
+        isolated_shell(&theme::served(html, &meta), &meta.title)
     };
     cors(&headers, r.headers_mut());
     r
@@ -348,7 +351,7 @@ pub async fn shot(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         let Some(html) = pages.html(&key, &id)? else { return Ok(None) };
         let path = pages.shot_path(&key, &id, theme, width);
         let ready = path.is_file();
-        Ok(Some(Some((html, meta.own_theme, path, ready, if ready { None } else { chromium() }))))
+        Ok(Some(Some((super::theme::served(html, &meta), meta.own_theme, path, ready, if ready { None } else { chromium() }))))
     }).await;
     let found = match found {
         Ok(Ok(f)) => f,

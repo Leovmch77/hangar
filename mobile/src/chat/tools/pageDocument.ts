@@ -3,7 +3,7 @@ import { Linking } from 'react-native';
 import type { WebView } from 'react-native-webview';
 import { useUnistyles } from 'react-native-unistyles';
 import {
-  baseOf, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
+  baseOf, fetchPageSource, fileAuthHeader, pageFetchState, pageUrls, themedPageDocument, themeVariables, type HtmlPageRef, type PageFetchState, type ThemeTokens,
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
@@ -122,5 +122,10 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
 
   // Tema próprio: a página fica como foi desenhada, sem as cores do app.
   const doc = useMemo(() => (raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
-  return { key, state, doc, reported, setReported, load, params };
+  // Fonte: a página como o agente escreveu (o servidor tira o tema e a ponte). Erro sobe para a tela mostrar.
+  const loadSource = useCallback(async () => {
+    if (!base) throw new Error('no-server');
+    return fetchPageSource(pageUrls(base, sessionName, page.id).source, { Authorization: auth });
+  }, [base, auth, sessionName, page.id]);
+  return { key, state, doc, reported, setReported, load, params, loadSource };
 }

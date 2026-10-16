@@ -31,3 +31,14 @@ export async function shareFile(uri: string, headers: Record<string, string> | u
   const f = await localCopy(uri, headers, name);
   await Share.share({ url: f.uri });
 }
+
+// Texto que já está na tela vira arquivo do cache e vai pela mesma folha: sem baixar de novo nem depender da rede.
+// `name` já vem sem o que o sistema de arquivos recusa (`pageFileName`). Pasta própria: em `chat-media` o nome podia
+// coincidir com o de um anexo baixado (`hash-nome`) e sobrescrevê-lo.
+export async function shareTextFile(text: string, name: string): Promise<void> {
+  const dir = new Directory(Paths.cache, 'chat-page-source');
+  dir.create({ idempotent: true, intermediates: true });
+  const f = new File(dir, name);
+  f.write(text);
+  await Share.share({ url: f.uri });
+}
