@@ -22,6 +22,10 @@ def _com_env(session_id: str, cmd: list[str]) -> list[str]:
 class OmpAdapter(PiAdapter):
     provider = "omp"
 
+    def spawn_command(self, *args, **kwargs) -> list[str]:
+        # Sessão nova abre no Rust; o `pi --session-id` herdado subiria o agente errado.
+        raise NotImplementedError("sessão nova do omp abre no Rust")
+
     def resume_command(self, cwd: str, session_id: str,
                        model: str | None = None, effort: str | None = None) -> list[str]:
         caminho = pi_sessions.transcript_path(cwd, session_id, "omp")

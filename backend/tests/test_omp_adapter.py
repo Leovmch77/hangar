@@ -62,3 +62,9 @@ def test_argv0_omp_vira_provider_omp():
     from app.registry import _provider_do_argv
     assert _provider_do_argv(["omp"]) == "omp"
     assert _provider_do_argv(["pi"]) == "pi"
+
+
+def test_omp_nao_herda_o_spawn_do_pi():
+    # Sessão nova do omp abre no Rust; herdar o `pi --session-id` subiria o agente errado.
+    with pytest.raises(NotImplementedError):
+        OmpAdapter().spawn_command("/w", "abc")
