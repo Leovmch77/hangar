@@ -33,6 +33,22 @@ fn queued_batch_store_combines_all_waiting_in_one_durable_entry() {
 }
 
 #[test]
+fn queued_batch_store_claim_receipts_keep_ids_instead_of_copying_prepared_images() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");
+    let row=json!({"id":"batch","text":"texto","ts":1.0,"delivered":false,"batch_entries":[{"id":"a"}],"batch_prompt":{"content":[{"type":"image","source":{"data":"prepared-bytes"}}]}});
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![row])).unwrap();
+    let first=store.exec(1,"claim",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(first[0]["batch_prompt"]["content"][0]["source"]["data"],"prepared-bytes");
+    assert_eq!(store.state().operations["call::claim"].result,json!([{"id":"batch"}]));
+    drop(store);
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    let repeated=store.exec(1,"claim",clock(),Action::ClaimBatch {min_ts:0.0}).unwrap();
+    assert_eq!(repeated[0]["batch_prompt"],first[0]["batch_prompt"]);
+    store.exec(1,"confirm",clock(),Action::Confirm {entry_ids:vec!["batch".into()]}).unwrap();
+    assert!(store.state().rows[0].get("batch_prompt").is_none(),"a confirmação libera os bytes que já não podem ser reenviados");
+}
+
+#[test]
 fn queued_batch_store_excludes_peer_messages_commands_and_reserved_answers() {
     let dir=tempfile::tempdir().unwrap();
     let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();

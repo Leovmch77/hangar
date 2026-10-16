@@ -880,6 +880,20 @@ impl Engine {
     pub fn set_fresh_process(&mut self,fresh:bool) { self.fresh_process = fresh; }
 
     pub fn problem(&self) -> Option<&str> { self.state.problema.as_deref() }
+    fn input_request(&self,payload:&Value) -> ClientRequest {
+        ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+            approval_policy:self.headless.then(||approval(self.launch_mode()).into()),summary:self.headless.then(||"detailed".into()),
+            input:input_of(payload,payload["text"].as_str().unwrap_or("")) })
+    }
+    pub(super) fn input_frame_template(&self) -> Value {
+        let (method,params)=self.input_request(&json!({"text":""})).into_parts();
+        json!({"jsonrpc":"2.0","id":format!("hangar:{}:{}",self.generation,u64::MAX),"method":method,"params":params})
+    }
+    pub(super) fn queue_problem(&mut self,detail:Option<String>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if super::queue::queue_problem(&mut self.state,detail) { self.changed(&mut effects,false); }
+        effects
+    }
     /// Problema que o ator conhece e o motor não (a religação desistiu, o processo não subiu).
     pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
         self.state.problema = Some(code.into());
@@ -1247,13 +1261,10 @@ impl Engine {
                     self.changed(&mut effects,false);
                     return Ok(effects);
                 }
-                let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
+                payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
                 // Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar. Com terminal
                 // aprovação e resumo são da TUI: reenviar a tabela do sem-terminal sobrescreveria o `/permissions` dela.
-                let headless = self.headless;
-                let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
-                    approval_policy:headless.then(||approval(self.launch_mode()).into()),summary:headless.then(||"detailed".into()),
-                    input:input_of(&payload,text) });
+                let request = self.input_request(&payload);
                 self.send(id,request,None,&mut effects);
             }
             OperationKind::Steer => {

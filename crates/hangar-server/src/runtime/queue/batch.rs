@@ -29,7 +29,7 @@ pub(super) fn claim(state: &mut State, min_ts: f64, clock: ClockSample, call_id:
     let id = if indices.len() == 1 {row_id(&state.rows[first]).to_owned()}
         else {format!("batch-{}", sha1_smol::Sha1::from(format!("{}:{}:{call_id}", state.owner_key, state.generation)).digest())};
     let text = entries.iter().map(|row| row["text"].as_str().unwrap_or("")).collect::<Vec<_>>().join("\n");
-    if text.len() > super::super::protocol::MAX_FRAME { return Err(super::invalid("texto do lote ultrapassa o limite do transporte")); }
+    if text.len() > super::super::protocol::MAX_FRAME { return Err(super::invalid(super::BATCH_SIZE_MESSAGE)); }
     let mut row = state.rows[first].clone();
     row["id"] = json!(id);
     row["text"] = json!(text);
@@ -50,8 +50,9 @@ pub(super) fn claim(state: &mut State, min_ts: f64, clock: ClockSample, call_id:
 }
 
 pub(super) fn confirm_members(state: &mut State, id: &str) {
-    let Some(entries) = state.rows.iter_mut().find(|row|row_id(row)==id)
-        .and_then(|row|row["batch_entries"].as_array_mut()) else { return };
+    let Some(row)=state.rows.iter_mut().find(|row|row_id(row)==id) else {return;};
+    if let Some(fields)=row.as_object_mut() {fields.remove("batch_prompt");}
+    let Some(entries)=row["batch_entries"].as_array_mut() else {return;};
     let mut members = BTreeSet::new();
     for entry in entries {
         members.insert(row_id(entry).to_owned());

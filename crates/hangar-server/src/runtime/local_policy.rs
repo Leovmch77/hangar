@@ -82,6 +82,110 @@ fn prepare_prompt(payload: &Value, provider: &str) -> Result<Value, RuntimeError
     }
 }
 
+pub(super) fn batch_validator(provider:String,mut template:Value) -> super::queue::BatchValidator {
+    Box::new(move |rows| {
+        let Some(row)=rows.as_array_mut().and_then(|rows|rows.first_mut()).filter(|row|row["batch_entries"].is_array()) else {return Ok(());};
+        let terminal=provider=="claude-terminal";
+        let prepared=if row["batch_prompt"].is_object() {row["batch_prompt"].clone()} else {
+            prepare_prompt(&json!({"text":row["text"]}),if terminal {"claude"}else{&provider}).map_err(|_|std::io::Error::other("preparo do lote indisponível"))?
+        };
+        if provider=="claude" || terminal {
+            let mut visible=row["text"].as_str().unwrap_or("").to_owned();
+            for excerpt in marker_captures(&visible.clone()) {
+                if let Some(path)=image_path(&excerpt).and_then(Path::to_str) {
+                    visible=visible.replacen(&excerpt,&excerpt.replacen(path,"",1),1);
+                }
+            }
+            if let Some(receipt)=image_receipt(&visible,&prepared["content"]) {
+                row["batch_image_receipt"]=json!(receipt);
+                row["batch_image_source_receipt"]=json!(image_receipt(row["text"].as_str().unwrap_or(""),&prepared["content"]));
+            }
+        }
+        if terminal {template["text"]=row["text"].clone();}
+        else if provider=="claude" {template["message"]["content"]=prepared["content"].clone();}
+        else {template["params"]["input"]=prepared["input"].clone();}
+        if template.to_string().len()>super::protocol::MAX_FRAME {
+            return Err(super::queue::invalid(super::queue::BATCH_SIZE_MESSAGE));
+        }
+        if !terminal {row["batch_prompt"]=prepared;}
+        Ok(())
+    })
+}
+
+/// O texto inteiro e os bytes de todas as imagens formam uma prova só, mesmo quando a TUI tira os paths.
+pub(super) fn image_receipt(text:&str,content:&Value) -> Option<String> {
+    let images:Vec<_>=content.as_array()?.iter().filter(|block|block["type"]=="image")
+        .map(|block|block["source"]["data"].as_str().map(|data|sha1_smol::Sha1::from(data).digest().to_string())).collect::<Option<_>>()?;
+    if images.is_empty() {return None;}
+    static PREFIX:LazyLock<regex::Regex>=LazyLock::new(||regex::Regex::new(r"\A(?:\[Image #\d+\])+\s*").unwrap());
+    let text=PREFIX.replace(text.trim(),"");
+    Some(format!("hangar-image-receipt:{}:{}",sha1_smol::Sha1::from(text.trim()).digest(),images.join(":")))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn queued_batch_runtime_prepared_images_are_frozen_across_retries() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("image.png");std::fs::write(&path,b"original").unwrap();
+        let mut rows=json!([{"text":format!("texto \u{1f4ce} imagem: {}",path.display()),"batch_entries":[]}]);
+        let validate=||batch_validator("claude".into(),super::super::claude::ClaudeEngine::input_frame("batch",&json!({"text":""})));
+        validate()(&mut rows).unwrap();let original=rows.clone();
+        std::fs::write(&path,vec![0u8;IMAGE_CAP as usize]).unwrap();
+        validate()(&mut rows).unwrap();
+        assert_eq!(rows,original,"uma tentativa já selada conserva os bytes preparados e a prova original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_batch_runtime_special_image_files_do_not_block_the_queue() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("pipe.png");
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        let (send,receive)=std::sync::mpsc::channel();let image=path.clone();
+        let worker=std::thread::spawn(move|| {let result=prompt_blocks(&format!("\u{1f4ce} imagem: {}",image.display()));send.send(result).unwrap();});
+        let result=receive.recv_timeout(std::time::Duration::from_millis(500));
+        if result.is_err() {drop(std::fs::OpenOptions::new().write(true).open(path).unwrap());}
+        worker.join().unwrap();
+        let (blocks,notices)=result.expect("arquivo especial não pode bloquear a leitura de anexos");
+        assert_eq!(blocks.len(),1);assert_eq!(notices.len(),1);
+    }
+
+    #[test]
+    fn queued_batch_receipt_terminal_image_requires_all_text_and_all_image_bytes() {
+        let dir=tempfile::tempdir().unwrap();let image=dir.path().join("test.png");std::fs::write(&image,b"image-bytes").unwrap();
+        let text=format!("primeira\nsegunda\n\u{1f4ce} imagem: {}",image.display());
+        let mut rows=json!([{"id":"batch","text":text,"batch_entries":[{"id":"a"},{"id":"b"},{"id":"c"}]}]);
+        batch_validator("claude".into(),super::super::claude::ClaudeEngine::input_frame("batch",&json!({"text":""})))(&mut rows).unwrap();
+        let prepared=prepare_prompt(&json!({"text":text}),"claude").unwrap();
+        let image=prepared["content"][1].clone();
+        for (index,(visible,image,expected)) in [
+            (text.as_str(),image.clone(),true),
+            (text.as_str(),Value::Null,false),
+            (text.as_str(),json!({"type":"image","source":{"data":"other-bytes"}}),false),
+            ("[Image #1]primeira\nsegunda\n\u{1f4ce} imagem:",image.clone(),true),
+            ("[Image #1]primeira",image.clone(),false),
+            ("[Image #1]primeira\nsegunda\n\u{1f4ce} imagem:",Value::Null,false),
+            ("[Image #1]primeira\nsegunda\n\u{1f4ce} imagem:",json!({"type":"image","source":{"data":"other-bytes"}}),false),
+        ].into_iter().enumerate() {
+            let path=dir.path().join(format!("{index}.jsonl"));std::fs::write(&path,"").unwrap();
+            let mut receipts=super::super::receipt::ReceiptIndex::new("claude","sid");let cursor=receipts.capture(&path).unwrap();
+            let record=json!({"type":"user","sessionId":"sid","message":{"role":"user","content":[{"type":"text","text":visible},image]}});
+            std::fs::write(&path,format!("{record}\n")).unwrap();receipts.scan(&path).unwrap();
+            assert_eq!(receipts.match_after(&path,&cursor,&rows[0],&Default::default()).unwrap().is_some(),expected,"cenário {index}");
+        }
+    }
+
+    #[test]
+    fn queued_batch_runtime_image_bytes_count_toward_the_transport_limit() {
+        let dir=tempfile::tempdir().unwrap();let mut text=String::new();
+        for n in 0..3 {let path=dir.path().join(format!("{n}.png"));std::fs::write(&path,vec![0u8;IMAGE_CAP as usize]).unwrap();text.push_str(&format!("\u{1f4ce} imagem: {}\n",path.display()));}
+        let mut rows=json!([{"text":text,"batch_entries":[]}]);
+        let error=batch_validator("claude".into(),super::super::claude::ClaudeEngine::input_frame("batch",&json!({"text":""})))(&mut rows).unwrap_err();
+        assert_eq!(super::super::queue::refusal(&error),Some(super::super::queue::BATCH_SIZE_MESSAGE));
+    }
+}
+
 /// Trechos depois de `📎 imagem:` até o próximo `📎` ou o fim da linha, como o
 /// `📎\s*imagem:\s*(.+?)(?=\s*📎|$)` multilinha do Python (o `regex` não tem lookahead).
 fn marker_captures(text: &str) -> Vec<String> {
@@ -151,10 +255,15 @@ fn prompt_blocks(text: &str) -> (Vec<Value>, Vec<String>) {
         let Some(mime) = image_mime(path) else { continue };
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let mut data = Vec::new();
-        let opened = std::fs::File::open(path).and_then(|mut file| {
+        let opened = (|| {
+            let mut options=std::fs::OpenOptions::new();options.read(true);
+            #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NONBLOCK);}
+            if !std::fs::metadata(path)?.is_file() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
+            let mut file=options.open(path)?;
+            if !file.metadata()?.is_file() {return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));}
             file.by_ref().take(IMAGE_CAP + 1).read_to_end(&mut data)?;
             file.metadata().map(|meta| meta.len())
-        });
+        })();
         match opened {
             Err(error) => notices.push(format!("⚠️ Imagem não anexada (não abre: {}); só o path foi: {name}", strerror(&error))),
             Ok(size) if data.len() as u64 > IMAGE_CAP => notices.push(format!(

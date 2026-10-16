@@ -10,9 +10,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 mod batch;
+pub(super) const BATCH_TOO_LARGE: &str = "queue_batch_too_large";
+pub(super) const BATCH_SIZE_MESSAGE: &str = "texto do lote ultrapassa o limite do transporte";
+
+pub(super) fn queue_problem(state: &mut hangar_api::state::StateEvent, detail: Option<String>) -> bool {
+    if state.problema.as_deref().is_some_and(|code| code != BATCH_TOO_LARGE) { return false; }
+    let code = detail.as_ref().map(|_| BATCH_TOO_LARGE.to_owned());
+    if state.problema == code && state.problema_detalhe == detail { return false; }
+    state.problema = code;
+    state.problema_detalhe = detail;
+    true
+}
 
 const CALL_PREFIX: &str = "call::";
-const CAP: usize = 1000;
+pub(crate) const CAP: usize = 1000;
 const VERSION: u32 = 2;
 /// Janela de chamadas recentes que nunca sai: cobre a repetição da mesma chamada e o ACK atrasado
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
@@ -193,6 +204,10 @@ impl State {
             && OPERATION_RECEIPTS.contains(&receipt.payload["kind"].as_str().unwrap_or(""))) {
             if let Some(intent) = receipt.result.get_mut("payload") { *intent = Value::Null; }
         }
+        // O conteúdo selado mora na linha; recibo de reserva só precisa lembrar quais IDs escolheu.
+        for receipt in self.operations.values_mut().filter(|receipt|receipt.payload["kind"]=="claim_batch") {
+            if let Some(rows)=receipt.result.as_array_mut() {for row in rows {*row=json!({"id":row["id"]});}}
+        }
         // Linha confirmada não volta a confirmar (ConfirmOccurrence recusa), mesmo que a resposta
         // tardia tenha devolvido a operação para `accepted`.
         let confirmed_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] == true).filter_map(|r| r["id"].as_str()).collect();
@@ -276,7 +291,7 @@ pub struct QueueRefusal(pub &'static str);
 impl std::fmt::Display for QueueRefusal { fn fmt(&self, f:&mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) } }
 impl std::error::Error for QueueRefusal {}
 
-fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, QueueRefusal(message)) }
+pub(super) fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, QueueRefusal(message)) }
 
 /// A frase da recusa, se o erro veio da fila; erros do sistema ou do serde ficam só com o tipo.
 pub fn refusal(error: &io::Error) -> Option<&'static str> {
@@ -412,6 +427,10 @@ impl Store {
     /// `hold`: grava com fsync mas não publica a projeção; ela segue segurada só pelo `BindDispatch`
     /// seguinte, e qualquer outra ação (o `BeginDispatch` que marca entregue, o `Finish` que adia) a publica.
     pub fn exec_held(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action, hold: bool) -> io::Result<Value> {
+        self.exec_validated(generation,call_id,clock,action,hold,None)
+    }
+
+    fn exec_validated(&mut self, generation:u64, call_id:&str, clock:ClockSample, action:Action, hold:bool, validate:Option<BatchValidator>) -> io::Result<Value> {
         // Lido sem zerar: ação que falha antes de gravar deixa a linha segurada para a próxima publicar.
         let was_held = self.held;
         let binds = matches!(&action, Action::BindDispatch { .. });
@@ -427,7 +446,10 @@ impl Store {
         }
         if let Some(previous) = self.state.operations.get(&receipt_id) {
             if receipt_payload(previous.payload.clone()) != payload { return Err(invalid("identificador reutilizado com outra operação")); }
-            let result = previous.result.clone();
+            let result = if previous.payload["kind"]=="claim_batch" {
+                json!(previous.result.as_array().into_iter().flatten().filter_map(|claimed|
+                    self.state.rows.iter().find(|row|row_id(row)==row_id(claimed)).cloned()).collect::<Vec<_>>())
+            }else{previous.result.clone()};
             self.ensure_projection()?;
             return Ok(result);
         }
@@ -444,7 +466,14 @@ impl Store {
         if self.recover_before_compact && !readonly && !matches!(&action,Action::Recover) {
             apply(&mut state,Action::Recover,clock,call_id)?;
         }
-        let result = apply(&mut state, action, clock, call_id)?;
+        let mut result = apply(&mut state, action, clock, call_id)?;
+        // A recusa acontece antes do diário e da projeção: os membros continuam editáveis.
+        if let Some(validate)=validate {
+            validate(&mut result)?;
+            for row in result.as_array().into_iter().flatten() {
+                if row["batch_entries"].is_array() && let Some(saved)=state.rows.iter_mut().find(|saved|row_id(saved)==row_id(row)) {*saved=row.clone();}
+            }
+        }
         if !readonly {
             let seq = state.next_seq;
             state.next_seq += 1;
@@ -1131,6 +1160,10 @@ pub(crate) fn legacy_rows(state: &State) -> Vec<Value> {
 }
 
 pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {
+    if row["batch_entries"].is_array() && row["batch_image_receipt"].is_string() {
+        return ["batch_image_receipt","batch_image_source_receipt"].into_iter()
+            .filter_map(|key|row[key].as_str().map(str::to_owned)).collect();
+    }
     let raw = row["text"].as_str().unwrap_or("").trim();
     let stripped = crate::transcript::history::strip_attach(raw);
     let mut lines: BTreeSet<_> = if row["batch_entries"].is_array() {
@@ -1278,8 +1311,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+pub(super) type BatchValidator = Box<dyn FnOnce(&mut Value)->io::Result<()> + Send>;
 enum QueueMessage {
-    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, hold:bool, reply:oneshot::Sender<io::Result<Value>> },
+    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, hold:bool, validate:Option<BatchValidator>, reply:oneshot::Sender<io::Result<Value>> },
     Stop,
     Snapshot(oneshot::Sender<io::Result<State>>),
 }
@@ -1311,11 +1345,11 @@ impl QueueActor {
                         }
                         let _ = reply.send(Ok(store.state.clone()));
                     }
-                    QueueMessage::Exec { generation,call_id,clock,action,hold,reply } => {
+                    QueueMessage::Exec { generation,call_id,clock,action,hold,validate,reply } => {
                         let lease = lease.clone();
                         let job = tokio::task::spawn_blocking(move || {
                             let _lease = lease;
-                            let result = store.exec_held(generation,&call_id,clock,action,hold);
+                            let result = store.exec_validated(generation,&call_id,clock,action,hold,validate);
                             (store,result)
                         }).await;
                         match job {
@@ -1337,8 +1371,12 @@ impl QueueActor {
     }
 
     pub async fn exec_held(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action, hold:bool) -> io::Result<Value> {
+        self.exec_validated(generation,call_id,clock,action,hold,None).await
+    }
+
+    pub(super) async fn exec_validated(&self,generation:u64,call_id:&str,clock:ClockSample,action:Action,hold:bool,validate:Option<BatchValidator>) -> io::Result<Value> {
         let (reply,response) = oneshot::channel();
-        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,hold,reply }).await
+        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,hold,validate,reply }).await
             .map_err(|_|invalid("fila encerrada"))?;
         response.await.map_err(|_|invalid("fila encerrada sem recibo"))?
     }

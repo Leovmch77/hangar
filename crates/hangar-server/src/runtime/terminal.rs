@@ -216,6 +216,7 @@ impl TerminalServices for Services {
 }
 
 struct Executor {
+    batch_blocked:bool,
     target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,options:TerminalOptions,
     events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>,sequence:Arc<AtomicU64>,receipt:ReceiptIndex,deliverable:bool,last_error:Option<String>,
     /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
@@ -343,7 +344,7 @@ impl TerminalActor {
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
-        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
+        let executor=Executor {batch_blocked:false,target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
             unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag()};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
@@ -421,7 +422,8 @@ impl Executor {
             "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
                 "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))
                     .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))
-                    .or_else(||self.no_safe_delivery.then(||"no_safe_delivery".to_owned()))},"channels":{},"error":self.last_error}))
+                    .or_else(||self.no_safe_delivery.then(||"no_safe_delivery".to_owned()))
+                    .or_else(||self.batch_blocked.then(||super::queue::BATCH_TOO_LARGE.to_owned()))},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -534,9 +536,10 @@ impl Executor {
                         else {self.execute(&id,&kind,payload,None,false).await};
                     let _=response.send(result);},
                 Some(Message::Queue {id,action,response})=>{
+                    let retry_batch=matches!(&action,Action::Append {delivered:false,..}|Action::Edit {..}|Action::Cancel {..}|Action::Remove {..});
                     let result=match action {
                         Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
-                        Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                        Action::ClaimBatch {..}|Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
                         action@Action::GiveUp {..}=>{
                             let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
                             if result.as_ref().is_ok_and(|given|*given==json!(true)) {self.release_uncertain().await;}
@@ -544,7 +547,7 @@ impl Executor {
                         },
                         action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                     };
-                    if result.is_ok(){self.publish().await?;} let _=response.send(result);
+                    if result.is_ok(){if retry_batch {self.batch_blocked=false;}self.publish().await?;} let _=response.send(result);
                 },
                 Some(Message::Lifecycle {id,action,response})=> {
                     let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
@@ -1274,6 +1277,7 @@ impl Executor {
         repeated
     }
     async fn drain_once(&mut self,mut entry:Option<String>,steer:bool)->Result<Value,RuntimeError> {
+        if self.batch_blocked && entry.is_none() {return Ok(json!({"drained":0,"batch_too_large":true}));}
         if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
@@ -1305,7 +1309,7 @@ impl Executor {
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
             return Ok(json!({"drained":0}));
         }
-        // A fila do Hangar espera o turno: o Claude parado leva uma por vez. O "Orientar" (`steer`) passa por
+        // A fila comum espera o turno e sai em lote. O "Orientar" (`steer`) passa por
         // cima, e o recado com socket nativo também, porque esse canal o Claude Code atende no meio do turno.
         if !steer && self.turn_busy(facts.idle) {
             // Os fatos da manutenção não sabem do socket (ele depende do texto): o recado candidato relê com o dele.
@@ -1345,7 +1349,19 @@ impl Executor {
             if !driver.composer_free().await {return Ok(json!({"drained":0,"stalled":true}));}
             if let Some(stall)=self.stall.as_mut() {stall.wait=Duration::ZERO;}
         }
-        let rows=self.action(Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:entry}).await?;
+        let claim=match entry {
+            Some(entry)=>Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:Some(entry)},
+            None=>Action::ClaimBatch {min_ts:self.target.created},
+        };
+        let validate=Some(super::local_policy::batch_validator("claude-terminal".into(),json!({"modo":"fill","text":""})));
+        let rows=match self.queue.exec_validated(self.target.generation,&format!("terminal:batch:{}",self.sequence.fetch_add(1,Ordering::Relaxed)),sample(),claim,false,validate).await {
+            Ok(rows)=>rows,
+            Err(failure) if super::queue::refusal(&failure)==Some(super::queue::BATCH_SIZE_MESSAGE)=>{
+                self.batch_blocked=true;self.publish().await?;
+                return Ok(json!({"drained":0,"batch_too_large":true}));
+            },
+            Err(_)=>return Err(error("queue_io")),
+        };
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
