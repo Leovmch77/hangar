@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Cria uma sessao Codex gerenciada pelo hangar e anexa o terminal ao tmux.
 
-Abre pelo `hangar-open`, o lançador do Hangar: com o servidor de pé ele pede ao servidor; fora do
-ar abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois. Cada
-chamada cria uma sessao nova.
+Com o servidor de pé cria pelo `POST /api/sessions`; sem conexão, pelo `hangar-server open`, que
+abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois. Sem nenhum
+dos dois sai com 3, e o wrapper do shell abre o `codex` oficial. Cada chamada cria uma sessao nova.
 """
 from __future__ import annotations
 
@@ -117,30 +117,42 @@ def _nomes_livres(cwd: str, ocupados: set[str]):
             yield name
 
 
-def _hangar_open() -> str:
-    """O lançador do Hangar: no PATH, no `~/.hangar/bin` ou no build desta cópia."""
-    achado = shutil.which("hangar-open")
-    if achado:
-        return achado
-    for candidato in (Path.home() / ".hangar" / "bin" / "hangar-open",
-                      _repo() / "crates" / "target" / "release" / "hangar-open"):
-        if candidato.is_file() and os.access(candidato, os.X_OK):
-            return str(candidato)
-    raise RuntimeError("hangar-open não encontrado (PATH, ~/.hangar/bin ou crates/target/release); "
-                       "instale o Hangar de novo para ter o lançador")
+class LancadorAusente(RuntimeError):
+    """Nem servidor nem `hangar-server` para abrir: o wrapper do shell abre o `codex` oficial."""
 
 
-def _open(body: dict) -> dict:
-    """`hangar-open open`: a sessão nasce como as do app, com o servidor de pé ou fora."""
-    r = subprocess.run([_hangar_open(), "open", json.dumps(body)], capture_output=True, text=True)
+def _hangar_server() -> str:
+    """O `hangar-server` desta máquina, o mesmo que o Hangar sobe (`CP_RUST_SERVER_BIN`, `~/.hangar/bin`,
+    o build desta cópia, o PATH)."""
+    exe = "hangar-server.exe" if os.name == "nt" else "hangar-server"
+    candidatos = [os.environ.get("CP_RUST_SERVER_BIN"), str(Path.home() / ".hangar" / "bin" / exe),
+                  str(_repo() / "crates" / "target" / "release" / exe), shutil.which("hangar-server")]
+    for candidato in filter(None, candidatos):
+        if Path(candidato).is_file() and os.access(candidato, os.X_OK):
+            return candidato
+    raise LancadorAusente("hangar-server não encontrado (CP_RUST_SERVER_BIN, ~/.hangar/bin, crates/target/release "
+                          "ou PATH) e o servidor não respondeu: nenhuma sessão foi aberta")
+
+
+def _open_local(body: dict) -> dict:
+    """`hangar-server open`: sem conexão com o servidor, a sessão nasce aqui igual às do app."""
+    r = subprocess.run([_hangar_server(), "open", json.dumps(body)], capture_output=True, text=True)
     if r.returncode == 0:
         return json.loads(r.stdout)
     texto = (r.stderr or r.stdout).strip()
     try:
         detail = json.loads(texto.splitlines()[-1])["detail"]
     except (ValueError, IndexError, KeyError, TypeError):
-        detail = texto or f"hangar-open saiu com {r.returncode}"
+        detail = texto or f"hangar-server open saiu com {r.returncode}"
     raise BackendHttpError(r.returncode, detail)
+
+
+def _open(body: dict) -> dict:
+    """Com o servidor respondendo, o `POST /api/sessions`; o comando local só sem conexão."""
+    try:
+        return _api("POST", "/api/sessions", body)
+    except BackendTransportError:
+        return _open_local(body)
 
 
 def _conta_do_codex_home() -> str | None:
@@ -209,8 +221,9 @@ def main() -> int:
     try:
         name = _create(cwd, prompt)
     except RuntimeError as exc:
+        # 3: nada abriu; o wrapper do shell segue com o `codex` oficial.
         print(f"hangar-codex: {exc}", file=sys.stderr)
-        return 1
+        return 3
     print(f"Codex gerenciado pelo hangar: {name} (detach: Ctrl-b d)", file=sys.stderr)
     # Um terminal novo pode herdar o ambiente de um pane que ja morreu.
     pane = os.environ.get("TMUX_PANE")

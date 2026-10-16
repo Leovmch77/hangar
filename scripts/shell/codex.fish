@@ -10,5 +10,11 @@ function codex
             return
         end
     end
-    command hangar-codex $argv
+    # Sem o lançador, ou sem sessão aberta (sai 3: nem servidor nem `hangar-server`), o oficial abre.
+    if command -q hangar-codex
+        command hangar-codex $argv
+        set -l rc $status
+        test $rc -ne 3; and return $rc
+    end
+    command codex $argv
 end

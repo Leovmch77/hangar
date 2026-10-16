@@ -128,13 +128,14 @@ def test_api_desembrulha_detail_do_fastapi(w, monkeypatch):
 
 
 
-def _hangar_open_falso(tmp_path, monkeypatch, respostas):
-    """`hangar-open` falso no PATH: grava cada pedido e responde, em ordem, `(código, saída)`."""
+
+def _servidor_falso(tmp_path, monkeypatch, respostas):
+    """`hangar-server` falso (o `open` do lançador): grava cada pedido e responde, em ordem, `(código, saída)`."""
     import sys as _sys
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (tmp_path / "respostas.json").write_text(json.dumps(respostas))
-    script = bin_dir / "hangar-open"
+    script = bin_dir / "hangar-server"
     script.write_text(f"""#!{_sys.executable}
 import json, sys
 from pathlib import Path
@@ -148,19 +149,17 @@ print(saida, file=sys.stdout if codigo == 0 else sys.stderr)
 sys.exit(codigo)
 """)
     script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return lambda: [json.loads(l) for l in (tmp_path / "pedidos.jsonl").read_text().splitlines()]
+    monkeypatch.setenv("CP_RUST_SERVER_BIN", str(script))
+    return lambda: [json.loads(l) for l in (tmp_path / "pedidos.jsonl").read_text().splitlines()] \
+        if (tmp_path / "pedidos.jsonl").exists() else []
 
 
-@pytest.mark.parametrize("pane", ["fora", "vivo"])
-def test_abre_pelo_hangar_open_e_nunca_cria_direto_no_tmux(w, monkeypatch, tmp_path, pane):
-    # S-26: com o backend fora o `hangar-open` abre igual (spec, chave, escopo, nome livre nas três
-    # lojas); o wrapper não monta mais pane próprio.
+def _main(w, monkeypatch, tmp_path, api, pane="fora"):
+    """Roda o `main` com a API dada e um tmux falso; devolve (código, chamadas ao tmux)."""
     from types import SimpleNamespace
-    pedidos = _hangar_open_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": tmp_path.name})]])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(w.sys, "argv", ["hangar-codex", "revise"])
-    monkeypatch.setattr(w, "_api", lambda *a, **k: (_ for _ in ()).throw(w.BackendTransportError("fora")))
+    monkeypatch.setattr(w, "_api", api)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     if pane == "fora":
         monkeypatch.delenv("TMUX", raising=False)
@@ -182,29 +181,86 @@ def test_abre_pelo_hangar_open_e_nunca_cria_direto_no_tmux(w, monkeypatch, tmp_p
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(w.subprocess, "run", run)
-    assert w.main() == 0
+    return w.main(), chamadas
+
+
+def _fora(*_a, **_k):
+    raise RuntimeError("não devia chegar aqui")
+
+
+@pytest.mark.parametrize("pane", ["fora", "vivo"])
+def test_com_o_servidor_de_pe_cria_pela_api(w, monkeypatch, tmp_path, pane):
+    pedidos = []
+
+    def api(method, path, body=None):
+        if method != "POST":
+            return {}      # o DELETE da limpeza quando a sessão terminou
+        pedidos.append((method, path, body))
+        return {"name": body["name"]}
+
+    lancador = _servidor_falso(tmp_path, monkeypatch, [])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, api, pane)
+    assert codigo == 0
+    assert pedidos == [("POST", "/api/sessions", {"name": tmp_path.name, "cwd": str(tmp_path), "provider": "codex",
+                                                  "headless": False, "initial_prompt": "revise"})]
+    assert lancador() == [], "com o servidor respondendo o comando local não roda"
     assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas), "pane próprio fora do lançador único"
-    (comando, pedido), = pedidos()
-    assert comando == "open"
-    assert json.loads(pedido) == {"name": tmp_path.name, "cwd": str(tmp_path), "provider": "codex",
-                                  "headless": False, "initial_prompt": "revise"}
     acao = "switch-client" if pane == "vivo" else "attach-session"
     assert ["tmux", acao, "-t", f"={tmp_path.name}"] in chamadas
 
 
+def test_sem_conexao_abre_pelo_hangar_server_open(w, monkeypatch, tmp_path):
+    # S-26: com o backend fora o `hangar-server open` abre igual (spec, chave, escopo, nome livre).
+    def api(*_a, **_k):
+        raise w.BackendTransportError("fora")
+
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": tmp_path.name})]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
+    assert codigo == 0
+    (comando, pedido), = pedidos()
+    assert comando == "open"
+    assert json.loads(pedido) == {"name": tmp_path.name, "cwd": str(tmp_path), "provider": "codex",
+                                  "headless": False, "initial_prompt": "revise"}
+    assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas)
+
+
+def test_sem_o_lancador_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, capsys):
+    # Sem `hangar-server` em lugar nenhum e sem servidor: nada abre, e o código 3 manda o wrapper do
+    # shell abrir o `codex` oficial.
+    def api(*_a, **_k):
+        raise w.BackendTransportError("fora")
+
+    monkeypatch.setenv("CP_RUST_SERVER_BIN", str(tmp_path / "nao-existe"))
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setattr(w, "_repo", lambda: tmp_path / "sem-copia")
+    monkeypatch.setenv("PATH", str(tmp_path / "vazio"))
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, api)
+    assert codigo == 3
+    assert "hangar-server" in capsys.readouterr().err
+    assert chamadas == []
+
+
 def test_so_nome_ocupado_repete_no_proximo_nome(w, monkeypatch, tmp_path):
-    ocupado = json.dumps({"detail": {"code": "erro_nome_em_uso", "msg": "ja existe uma sessao com esse nome", "params": {}}})
-    pedidos = _hangar_open_falso(tmp_path, monkeypatch, [[1, ocupado], [0, json.dumps({"name": "proj-2"})]])
+    tentativas = []
+
+    def api(method, path, body=None):
+        tentativas.append(body["name"])
+        if len(tentativas) == 1:
+            raise w.BackendHttpError(409, {"code": "erro_nome_em_uso"})
+        return {"name": body["name"]}
+
+    monkeypatch.setattr(w, "_api", api)
     assert w._create("/tmp/proj", None) == "proj-2"
-    assert [json.loads(p[1])["name"] for p in pedidos()] == ["proj", "proj-2"]
+    assert tentativas == ["proj", "proj-2"]
 
 
 @pytest.mark.parametrize("codigo,saida", [
     (1, json.dumps({"detail": {"code": "codex_account_preparing", "msg": "conta preparando", "params": {}}})),
-    (4, "hangar-open: sem CP_AUTH_TOKEN no .env do servidor"),
+    (4, "hangar-server: sem CP_AUTH_TOKEN no .env do servidor"),
 ])
-def test_outra_recusa_nao_repete(w, monkeypatch, tmp_path, codigo, saida):
-    pedidos = _hangar_open_falso(tmp_path, monkeypatch, [[codigo, saida]])
+def test_recusa_local_nao_repete(w, monkeypatch, tmp_path, codigo, saida):
+    monkeypatch.setattr(w, "_api", lambda *a, **k: (_ for _ in ()).throw(w.BackendTransportError("fora")))
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[codigo, saida]])
     with pytest.raises(RuntimeError):
         w._create("/tmp/proj", None)
     assert len(pedidos()) == 1

@@ -14,5 +14,11 @@ codex() {
                 command codex "$@"; return ;;
         esac
     fi
-    command hangar-codex "$@"
+    # Sem o lançador, ou sem sessão aberta (sai 3: nem servidor nem `hangar-server`), o oficial abre.
+    if command -v hangar-codex >/dev/null 2>&1; then
+        command hangar-codex "$@"
+        _hangar_codex_rc=$?
+        [ "$_hangar_codex_rc" -ne 3 ] && return "$_hangar_codex_rc"
+    fi
+    command codex "$@"
 }
