@@ -18,7 +18,7 @@ import type { NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { BranchPicker } from './BranchPicker';
-import { CodexContextControl } from './CodexContextControl';
+import { CodexContextControl, useCodexContextControl } from './CodexContextControl';
 import { NewConversation } from './NewConversation';
 import { QuietPill } from './QuietPill';
 import { readChoices, readMachine, rememberChoices, rememberMachine, type NewChatChoices } from './choicesPrefs';
@@ -90,7 +90,6 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const onWorktree = useCallback((v: WorktreeChoice | null) => setWorktree(v), []);
   const [branchOpen, setBranchOpen] = useState(false);
   const [hasSameFolder, setHasSameFolder] = useState(false);
-  const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
   const [catalogError, setCatalogError] = useState('');
   const [projectWarning, setProjectWarning] = useState('');
@@ -107,9 +106,12 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const [modelsLoading, setModelsLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extrasOpen, setExtrasOpen] = useState(false);
+  const contextOpen = provider === 'codex' && settingsOpen && extrasOpen;
+  const context = useCodexContextControl(active, contextOpen);
+  const contextBusy = context.busy;
   const [catalogFast, setCatalogFast] = useState(false);
   const [catalogDefault, setCatalogDefault] = useState('');
-  const [serviceTier, setServiceTier] = useState<'default' | 'priority' | undefined>();
+  const [serviceTier, setServiceTier] = useState<'priority' | undefined>();
 
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const [codexAccount, setCodexAccount] = useState('');
@@ -151,9 +153,12 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const niveisEsforco = provider === 'codex' ? esforcosDoModelo(modelo)
     : provider === 'claude' && semEsforco(modelo) ? [] : (EFFORT_LEVELS[provider] ?? []);
   const selectedModel = modelos.find((model) => valorModelo(model) === modelo || model.id === modelo);
+  const displayModel = modelo ? selectedModel : modelos.find((md) => md.id === catalogDefault || valorModelo(md) === catalogDefault)
+    ?? modelos.find((md) => md.id === 'default');
+  const codexFastModel = selectedModel ?? displayModel;
   const fastVisible = provider === 'codex' || (provider === 'claude' && !!engine && catalogFast);
   const fastAvailable = !modelsLoading && (provider === 'codex'
-    ? selectedModel?.service_tiers?.some((tier) => tier.id === 'priority' && tier.hidden !== true) === true
+    ? codexFastModel?.id !== 'default' && codexFastModel?.service_tiers?.some((tier) => tier.id === 'priority' && tier.hidden !== true) === true
     : fastVisible && selectedModel?.supports_fast === true);
   useEffect(() => { if (!fastAvailable) setServiceTier(undefined); }, [fastAvailable]);
 
@@ -266,7 +271,11 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     };
   }, [active]);
 
-  // modelos quando provider/config/engine mudam
+  const catalogEngine = provider === 'codex' ? null : engine || null;
+  const catalogConfig = provider === 'codex' ? null : selectedConfig;
+  const catalogAccount = provider === 'codex' ? codexAccount : null;
+
+  // modelos quando o destino efetivo do catálogo muda
   useEffect(() => {
     // reset incondicional — igual à PWA (CreateSessionSheet.svelte:141), evita vazar modelo/esforço pro Codex
     setModelo('');
@@ -283,7 +292,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       setErroModelos('');
       return;
     }
-    if (provider === 'codex' && (!active || !codexAccount)) {
+    if (provider === 'codex' && (!active || !catalogAccount)) {
       setModelos([]);
       setListaReduzida(false);
       setErroModelos('');
@@ -302,9 +311,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         : provider === 'claude' && semEsforco(model) ? [] : EFFORT_LEVELS[provider] ?? [];
       if (effort && levels.includes(effort)) setEsforco(effort);
     };
-    const request = provider === 'codex'
-      ? modelOptionsForServer(active!, 'codex', null, null, codexAccount, controller.signal)
-      : modelOptionsForServer(active, provider, engine || null, selectedConfig, null, controller.signal);
+    const request = modelOptionsForServer(active, provider, catalogEngine, catalogConfig, catalogAccount, controller.signal);
     void request
       .then((r) => {
         if (!alive) return;
@@ -325,7 +332,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       alive = false;
       controller.abort();
     };
-  }, [provider, engine, selectedConfig, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
+  }, [provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token]);
 
   useEffect(() => {
     const generation = ++archiveGeneration.current;
@@ -406,6 +413,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     remember({ provider: p, model: '', effort: '' });
   };
   const chooseModel = (v: string) => {
+    if (!v) setServiceTier(undefined);
     providerTouched.current = true;
     setProvidersError('');
     let effort = esforco;
@@ -485,8 +493,6 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     </View>
   );
 
-  const displayModel = modelo ? selectedModel : modelos.find((md) => md.id === catalogDefault || valorModelo(md) === catalogDefault)
-    ?? modelos.find((md) => md.id === 'default');
   const modelLabel = displayModel?.name ?? (modelo || displayModel?.id || m.config_motores_modelo_padrao());
   const modelContext = displayModel?.context ?? (displayModel?.context_length ? ctxWindow(displayModel.context_length).toUpperCase() : '');
   const chipLabel = retomavel ? m.criar_retomar() : [modelLabel, modelContext].filter(Boolean).join(' · ');
@@ -599,6 +605,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       {!retomavel && listaReduzida ? <Text style={styles.hint}>{m.criar_lista_reduzida()}</Text> : null}
       {!retomavel && erroModelos ? <Text style={styles.hint} accessibilityRole="alert">{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
       {contextBusy ? <Text style={styles.hint} accessibilityLiveRegion="polite">{m.comum_carregando()}</Text> : null}
+      {!contextOpen && context.error ? <Text style={styles.error} accessibilityRole="alert">{context.error}</Text> : null}
       {retomavel ? <Text style={styles.hint}>{m.nova_conversa_retomada_selecionada()}</Text> : null}
       {provider === 'codex' && retomando && codexProgress ? <Text style={styles.hint} accessibilityLiveRegion="polite">{codexProgress}</Text> : null}
     </View>
@@ -625,7 +632,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         </View>
       ) : null}
 
-      {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
+      {provider === 'codex' ? <CodexContextControl control={context} /> : null}
 
       {provider === 'claude' && Object.keys(motores).length ? (
         <View style={styles.field}>
@@ -727,7 +734,11 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
             items: [{ id: '', label: m.criar_padrao(), selected: !esforco }, ...niveisEsforco.map((lv) => ({ label: lv, selected: lv === esforco }))],
             select: async (value) => chooseEffort(value) }}
           fast={{ hidden: !!retomavel || !fastVisible, on: fastAvailable && serviceTier === 'priority', available: fastAvailable,
-            toggle: async () => { if (fastAvailable) setServiceTier(serviceTier === 'priority' ? 'default' : 'priority'); } }}>
+            toggle: async () => {
+              if (!fastAvailable) return;
+              if (provider === 'codex' && !modelo && codexFastModel) chooseModel(valorModelo(codexFastModel));
+              setServiceTier(serviceTier === 'priority' ? undefined : 'priority');
+            } }}>
           <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
             onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>
             <Text style={styles.hint}>{m.criar_mais_opcoes()}</Text>

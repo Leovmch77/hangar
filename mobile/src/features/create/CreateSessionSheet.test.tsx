@@ -11,6 +11,7 @@ const calls = vi.hoisted(() => ({
   accounts: vi.fn(),
   providers: vi.fn(),
   mutate: vi.fn(),
+  contextFetch: vi.fn(),
   models: vi.fn(),
   prepare: vi.fn(),
   preparation: vi.fn(),
@@ -106,7 +107,6 @@ vi.mock('../../stores/prefs', () => ({ prefs: {
   set: (key: string, value: string) => { calls.save(key, value); localStorage.setItem(key, value); },
   remove: (key: string) => localStorage.removeItem(key),
 } }));
-vi.mock('./CodexContextControl', () => ({ CodexContextControl: () => null }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
@@ -214,7 +214,8 @@ vi.mock('../../paraglide/messages', () => ({
     'comum_nenhum_modelo native_new_chat_reasoning modelo_sem_niveis native_ctl_loading native_ctl_retry native_ctl_failed ' +
     'native_ctl_fast native_ctl_fast_on native_ctl_fast_off native_ctl_fast_hint native_ctl_fast_unavailable ' +
     'reasoning_level_low reasoning_level_medium reasoning_level_high reasoning_level_xhigh reasoning_level_max reasoning_level_ultra ' +
-    'native_mode_plan native_mode_manual native_mode_auto native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk chat_mode_plan config_motores_modelo_padrao'
+    'native_mode_plan native_mode_manual native_mode_auto native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk chat_mode_plan config_motores_modelo_padrao ' +
+    'codex_contexto_titulo codex_contexto_padrao codex_contexto_salvando comum_falha_aplicar config_server_tentar_de_novo'
   ).split(' ').map((k) => [k, () => k])),
 }));
 
@@ -234,8 +235,10 @@ function deferred<T>() {
 }
 
 describe('CreateSessionSheet Codex', () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
   beforeEach(() => {
+    calls.contextFetch.mockReset().mockImplementation(async () => new Response(JSON.stringify({ contexto_estendido: true })));
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => calls.contextFetch(input, init));
     calls.dismiss = null;
     calls.pickerActive = 0;
     calls.pickerPeak = 0;
@@ -353,6 +356,142 @@ describe('CreateSessionSheet Codex', () => {
     for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
     expect(calls.create).toHaveBeenCalledExactlyOnceWith(calls.target, expect.objectContaining({ cwd: '/repo' }));
     expect(calls.send).toHaveBeenCalledWith(calls.target, 'nova', 'rascunho entre máquinas');
+    root.unmount();
+  });
+
+  it.each([
+    { defaultModel: 'sol', alias: false, active: false, available: true },
+    { defaultModel: undefined, alias: false, active: true, available: false },
+    { defaultModel: undefined, alias: false, active: false, available: false },
+    { defaultModel: undefined, alias: true, active: false, available: false },
+  ])('Fast fixa somente padrão Codex identificado: $defaultModel / alias=$alias / active=$active', async ({ defaultModel, alias, active, available }) => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, default: defaultModel, models: [
+      { id: alias ? 'default' : 'sol', name: 'Sol', active, context_length: 272000,
+        efforts: ['low', 'high'], default_effort: 'low', service_tiers: [{ id: 'priority', hidden: false }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    const fast = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
+    expect(fast.disabled).toBe(!available);
+    await act(async () => fast.click());
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.mutate).not.toHaveBeenCalled();
+    await send(container);
+    if (available) expect(calls.create.mock.calls[0][1]).toMatchObject({ model: 'sol', service_tier: 'priority' });
+    else {
+      expect(calls.create.mock.calls[0][1].model).toBeNull();
+      expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    }
+    root.unmount();
+  });
+
+  it('contas Claude tardias não recarregam nem apagam escolhas do catálogo Codex', async () => {
+    const configs = deferred<{ path: string; label: string; active: boolean }[]>();
+    calls.configs.mockReturnValue(configs.promise);
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['low', 'high'], default_effort: 'low', service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    await act(async () => button(container, 'reasoning_level_high')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!.click());
+    const codexReads = calls.models.mock.calls.filter((call) => call[1] === 'codex').length;
+    await act(async () => configs.resolve([{ path: '/late-claude', label: 'Conta tardia', active: true }]));
+    expect(calls.models.mock.calls.filter((call) => call[1] === 'codex')).toHaveLength(codexReads);
+    expect(container.querySelector('[role="switch"][aria-label="native_ctl_fast"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(button(container, 'composer_session_settings')!.textContent).toContain('Sol high');
+    await send(container);
+    expect(calls.create).toHaveBeenCalledExactlyOnceWith(server, expect.objectContaining({
+      provider: 'codex', model: 'sol', effort: 'high', service_tier: 'priority', codex_account: 'work',
+    }));
+    root.unmount();
+  });
+
+  it.each([
+    { closing: 'recolher', failure: false }, { closing: 'fechar', failure: false },
+    { closing: 'recolher', failure: true }, { closing: 'fechar', failure: true },
+  ])('contexto global termina a escrita após $closing extras, com erro=$failure', async ({ closing, failure }) => {
+    const post = deferred<Response>();
+    calls.contextFetch.mockImplementation(async (_url, init) => init?.method === 'POST'
+      ? post.promise : new Response(JSON.stringify({ contexto_estendido: true })));
+    const { container, root } = await renderSheet();
+    try {
+      await openOptions(container);
+      const contextSwitch = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="codex_contexto_titulo"]')!;
+      expect(contextSwitch().getAttribute('aria-checked')).toBe('true');
+      await act(async () => contextSwitch().click());
+      const write = calls.contextFetch.mock.calls.find((call) => call[1]?.method === 'POST')!;
+      expect(write[0]).toBe('https://b.local/api/harness/codex/opcoes');
+      expect(write[1].body).toBe('{"contexto_estendido":false}');
+      if (closing === 'recolher') await act(async () => button(container, 'criar_mais_opcoes')!.click());
+      else await closePanel(container, 'composer_session_settings');
+      expect((write[1].signal as AbortSignal).aborted).toBe(false);
+      await act(async () => type(container, 'mensagem aguardando contexto'));
+      expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+      await act(async () => post.resolve(failure
+        ? new Response(JSON.stringify({ detail: 'context-write-failed' }), { status: 500 })
+        : new Response(JSON.stringify({ contexto_estendido: false }))));
+      expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
+      if (failure) expect(container.textContent).toContain('context-write-failed');
+      await openOptions(container);
+      expect(contextSwitch().getAttribute('aria-checked')).toBe(String(failure));
+      if (failure) expect(container.textContent).toContain('context-write-failed');
+      expect(calls.contextFetch.mock.calls.filter((call) => call[1]?.method === 'GET')).toHaveLength(1);
+      expect(calls.create).not.toHaveBeenCalled();
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('fechar contexto cancela só GET e uma leitura antiga não vence a reabertura', async () => {
+    const oldRead = deferred<Response>();
+    calls.contextFetch.mockReturnValueOnce(oldRead.promise)
+      .mockImplementation(async () => new Response(JSON.stringify({ contexto_estendido: false })));
+    const { container, root } = await renderSheet();
+    try {
+      await openOptions(container);
+      const readSignal = calls.contextFetch.mock.calls[0][1].signal as AbortSignal;
+      await closePanel(container, 'composer_session_settings');
+      expect(readSignal.aborted).toBe(true);
+      await openOptions(container);
+      await act(async () => oldRead.resolve(new Response(JSON.stringify({ contexto_estendido: true }))));
+      expect(container.querySelector('[role="switch"][aria-label="codex_contexto_titulo"]')!.getAttribute('aria-checked')).toBe('false');
+      expect(calls.contextFetch.mock.calls.every((call) => call[1]?.method === 'GET')).toBe(true);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('voltar à linha Padrão após Fast limpa tier e conserva model null no envio', async () => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, default: 'sol', models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!.click());
+    await act(async () => button(container, 'criar_padrao')!.click());
+    await send(container);
+    expect(calls.create.mock.calls[0][1].model).toBeNull();
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
+    root.unmount();
+  });
+
+  it('desligar Fast omite service_tier sem desfazer o modelo escolhido', async () => {
+    calls.providers.mockResolvedValue({ codex: { disponivel: true, default: true } });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [
+      { id: 'sol', name: 'Sol', efforts: ['high'], service_tiers: [{ id: 'priority' }] },
+    ] });
+    const { container, root } = await renderSheet(false, false);
+    await openSettings(container);
+    await act(async () => button(container, 'Sol')!.click());
+    const fast = () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="native_ctl_fast"]')!;
+    await act(async () => fast().click());
+    expect(fast().getAttribute('aria-checked')).toBe('true');
+    await act(async () => fast().click());
+    expect(fast().getAttribute('aria-checked')).toBe('false');
+    await send(container);
+    expect(calls.create.mock.calls[0][1].model).toBe('sol');
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('service_tier');
     root.unmount();
   });
 
