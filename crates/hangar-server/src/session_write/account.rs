@@ -166,6 +166,27 @@ fn refusal(failure:&ReopenFailure) -> (StatusCode,Value) {
     }
 }
 
+/// A mesma conversa reaberta na conta Claude `destination`, levando o arquivo dela junto. `None`: a
+/// sessão não é do Rust.
+pub(crate) async fn reopen_in(st:&Arc<AppState>,runtime:&Arc<crate::runtime::gateway::RuntimeRegistry>,name:&str,spec:&SessionSpec,
+    destination:&str,leave_engine:bool,reason:ChangeReason) -> Option<Result<crate::runtime::claude_reopen::Reopened,ReopenFailure>> {
+    // Read-only estacionada à espera do terminal protegido: a troca a reabre no terminal, nunca parada.
+    let parked=spec.read_only && spec.surface==crate::session_open::Surface::Headless;
+    let surface=parked.then_some(crate::session_open::Surface::Terminal);
+    let change=SessionChange { reason,surface,account:Some(Account::Claude { config_dir:destination.to_owned() }),
+        permission_mode:None,model:None,effort:None,service_tier:None };
+    let mover=MoveConversation { env:runtime.codex_environment(),windows:cfg!(windows),leave_engine };
+    let job={let runtime=runtime.clone();let name=name.to_owned();let st=st.clone();
+        tokio::spawn(async move {crate::session_write::relaunch::during_life_change(&st,&name,runtime.reopen_claude_session(&name,change,Some(&mover))).await})};
+    let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
+    st.list.invalidate();
+    outcome
+}
+
+pub(crate) fn current_dir(runtime:&crate::runtime::gateway::RuntimeRegistry,spec:&SessionSpec) -> String {
+    account_dir(&runtime.codex_environment(),spec).to_string_lossy().into_owned()
+}
+
 pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
     let (fwd,owner)=gate(&st,peer,&req);
     let runtime=st.state.runtime.get().cloned();
@@ -231,15 +252,7 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     if !leave_engine && !parked && same(&account_dir(&env,&spec),Path::new(&destination)) {
         return reply(StatusCode::OK,json!({"ok":true,"config_dir":destination}),&parts.headers);
     }
-    // Read-only estacionada à espera do terminal protegido: a troca a reabre no terminal, nunca parada.
-    let surface=parked.then_some(crate::session_open::Surface::Terminal);
-    let change=SessionChange { reason:ChangeReason::AccountSwitch,surface,account:Some(Account::Claude { config_dir:destination.clone() }),
-        permission_mode:None,model:None,effort:None,service_tier:None };
-    let mover=MoveConversation { env,windows:cfg!(windows),leave_engine };
-    let job={let runtime=runtime.clone();let name=name.clone();let st=st.clone();
-        tokio::spawn(async move {crate::session_write::relaunch::during_life_change(&st,&name,runtime.reopen_claude_session(&name,change,Some(&mover))).await})};
-    let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
-    st.list.invalidate();
+    let outcome=reopen_in(&st,&runtime,&name,&spec,&destination,leave_engine,ChangeReason::AccountSwitch).await;
     let (status,body)=match outcome {
         None=>return forward_whole(&st,parts,bytes,&fwd).await,
         Some(Ok(_))=>(StatusCode::OK,json!({"ok":true,"config_dir":destination})),
