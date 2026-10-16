@@ -214,6 +214,26 @@ async fn a_terminal_stuck_launching_stops_going_to_python() {
     assert_eq!(stuck.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_launch_stuck".into())));
 }
 
+/// Trocar de modo logo depois de criar com terminal (a TUI ainda abrindo a conversa, com ou sem
+/// sidecar) é recusa do Rust com código próprio, nunca o Python dizendo que o Rust não está rodando.
+#[tokio::test]
+async fn switching_mode_while_the_terminal_is_still_opening_asks_to_wait() {
+    let fx = fixture();
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    fx.panes(&["cx-new","cx-l"]);
+    fx.put_sidecar("cx-l",json!({"name":"cx-l","provider":"codex","launching":true,"key":"k-l","cwd":fx.root}));
+    for name in ["cx-new","cx-l"] {
+        let error = watcher.switch_mode(&registry,name,false,PermissionRead::Known("Full Access".into())).await
+            .unwrap_or_else(||panic!("{name}: a troca do Codex é do Rust")).unwrap_err();
+        assert_eq!(error.code,"codex_terminal_starting","{name}: {}",error.message);
+    }
+    let (status,body) = hangar_server::session_write::relaunch::mode_refusal(&RuntimeError::new("codex_terminal_starting","x"));
+    assert_eq!((status.as_u16(),body["detail"]["code"].as_str(),body["detail"]["params"]["code"].as_str()),
+        (409,Some("erro_troca_modo"),Some("codex_terminal_starting")));
+}
+
 #[tokio::test]
 async fn limits_of_a_rust_codex_that_cannot_open_answers_its_code() {
     let fx = fixture();

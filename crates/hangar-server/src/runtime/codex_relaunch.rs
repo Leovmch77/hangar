@@ -56,6 +56,9 @@ fn refuse(message:&str) -> RuntimeError { RuntimeError::new("erro_troca_modo",me
 fn busy() -> RuntimeError { RuntimeError::new("session_transfer_busy","a sessão está trocando de agente") }
 fn gone() -> RuntimeError { refuse("A sessão Codex não está mais aberta aqui.") }
 fn job() -> RuntimeError { RuntimeError::new("relaunch_job","etapa da troca de modo interrompida") }
+/// O terminal recém-criado ainda abre a conversa: trocar de modo espera ele.
+pub const STARTING:&str = "codex_terminal_starting";
+fn starting() -> RuntimeError { RuntimeError::new(STARTING,"Espere o terminal abrir a conversa antes de trocar de modo.") }
 
 /// Falha depois de mexer em processo, sem volta automática: a rota responde 500 com o código.
 pub fn kill_phase(error:&RuntimeError) -> bool { error.code.starts_with("relaunch_kill") || error.code == "relaunch_process_alive" }
@@ -386,7 +389,11 @@ impl Watcher {
 
     /// `POST /modo-execucao`. `None`: não é Codex do Rust, e o Python troca como hoje.
     pub async fn switch_mode(&self,registry:&RuntimeRegistry,name:&str,to_terminal:bool,read:PermissionRead) -> Option<Result<Value,RuntimeError>> {
-        let meta = self.load(name).await?;
+        // Sem sidecar ainda, o pane Codex é a TUI abrindo a conversa (o lançador grava depois): é do Rust.
+        let Some(meta) = self.load(name).await else {
+            let opening = self.cfg.mux.list_panes().await.ok().is_some_and(|panes|terminal::pane_of(&panes,name).is_some());
+            return opening.then(||Err(starting()));
+        };
         let headless = meta.get("headless").is_some_and(truthy);
         let adopted = registry.codex_terminals().await.iter().any(|t|t.name == name);
         if headless && let Err(error) = self.open_parked(registry,name).await? { return Some(Err(error)); }
@@ -397,8 +404,13 @@ impl Watcher {
         }
         if headless {
             registry.codex_headless(name).await?;
-        } else if !adopted && let Err(error) = self.adopt_now(registry,name).await? {
-            return Some(Err(error));
+        } else if !adopted {
+            match self.adopt_now(registry,name).await {
+                Some(Ok(())) => {}
+                Some(Err(error)) => return Some(Err(error)),
+                // `launching` recente: a TUI ainda abre a conversa.
+                None => return Some(Err(starting())),
+            }
         }
         if self.transfer_busy(name,&meta).await { return Some(Err(busy())); }
         let switched = async {

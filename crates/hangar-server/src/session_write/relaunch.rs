@@ -52,7 +52,7 @@ pub fn mode_refusal(error: &RuntimeError) -> (StatusCode, Value) {
         return (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({})));
     }
     let mut params = json!({"erro": error.message});
-    if crate::runtime::codex_relaunch::kill_phase(error) { params["code"] = json!(error.code); }
+    if crate::runtime::codex_relaunch::kill_phase(error) || error.code == crate::runtime::codex_relaunch::STARTING { params["code"] = json!(error.code); }
     (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {}", error.message), params))
 }
 
