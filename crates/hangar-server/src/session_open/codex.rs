@@ -194,6 +194,7 @@ mod tests {
         assert_eq!((pane.provider, pane.key.as_str(), pane.config_dir), (AgentProvider::Codex, "k", None));
     }
 
+    #[cfg(unix)]
     #[test]
     fn pretrust_inserts_before_the_managed_block_once_and_keeps_the_mode() {
         use std::os::unix::fs::PermissionsExt;
