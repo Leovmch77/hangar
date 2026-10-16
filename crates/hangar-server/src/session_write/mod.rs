@@ -164,6 +164,12 @@ async fn dead_headless_codex(target: &WriteTarget) -> bool {
 
 pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }
 
+/// Recusa por sessão ocupada (trocando de agente ou nas frases do `_OCUPADA`); `None` = outra recusa.
+pub(crate) fn busy_refusal(error: &crate::runtime::protocol::RuntimeError) -> Option<(StatusCode, Value)> {
+    if error.code == "session_transfer_busy" { return Some((StatusCode::CONFLICT, busy_body())); }
+    crate::runtime::claude_reopen::busy_message(&error.code).map(|message| (StatusCode::CONFLICT, detail_body(&error.code, message, json!({}))))
+}
+
 /// Corpo que a rota do Rust não aceita: 422 com código, nunca o repasse ao Python.
 pub(crate) fn invalid_body(headers: &axum::http::HeaderMap) -> Response {
     let mut response = detail(StatusCode::UNPROCESSABLE_ENTITY, "erro_corpo_invalido", INVALID_BODY_MSG, json!({}));

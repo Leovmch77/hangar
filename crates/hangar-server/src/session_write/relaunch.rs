@@ -146,6 +146,17 @@ async fn detached_relaunch(work: impl Future<Output = Option<Relaunched>> + Send
 /// A reabertura troca a vida da sessão (pane ⇄ sidecar, nascimento novo): durante ela a varredura dos
 /// convites não a revoga, e no fim (também na falha, que pode ter mudado a vida) convite e dono-convidado
 /// passam à vida nova. Falha ao gravar o dono vai ao log e não troca o resultado.
+/// A reabertura do Claude numa tarefa própria (a troca admitida termina mesmo que o cliente desista), dentro
+/// da troca de vida; pânico no meio é falha depois de encerrar, nunca "nada aconteceu". A lista é refeita.
+pub(crate) async fn reopen_detached(st: &Arc<AppState>, name: &str,
+    work: impl Future<Output = Option<Result<Reopened, ReopenFailure>>> + Send + 'static) -> Option<Result<Reopened, ReopenFailure>> {
+    let (st2, owned) = (st.clone(), name.to_owned());
+    let outcome = tokio::spawn(async move { during_life_change(&st2, &owned, work).await }).await.unwrap_or_else(|_| Some(Err(ReopenFailure {
+        error: RuntimeError::new(PANICKED, "A troca parou no meio; confira o estado da sessão antes de tentar de novo."), stopped: true, landed: None })));
+    st.list.invalidate();
+    outcome
+}
+
 pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Future<Output = T>) -> T {
     let Some(share)=st.share.clone() else { return work.await };
     share.lives.facts().begin_mode_change(name);
@@ -164,10 +175,7 @@ pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Futur
 /// o resto é 409 `erro_troca_modo` com o código de origem em `params.code`.
 pub fn claude_refusal(verb: &str, failure: &ReopenFailure) -> (StatusCode, Value) {
     let error = &failure.error;
-    if error.code == "session_transfer_busy" { return (StatusCode::CONFLICT, busy_body()); }
-    if let Some(message) = crate::runtime::claude_reopen::busy_message(&error.code) {
-        return (StatusCode::CONFLICT, super::detail_body(&error.code, message, json!({})));
-    }
+    if let Some(busy) = super::busy_refusal(error) { return busy; }
     (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("{verb}: {}", error.message),
         json!({"erro": error.message, "code": error.code})))
 }

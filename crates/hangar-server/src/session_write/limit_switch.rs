@@ -289,8 +289,7 @@ impl Host for Native {
         Box::pin(async move {
             match super::account::reopen_in(&self.st,&self.runtime,name,spec,path,false,ChangeReason::LimitSwitch).await {
                 None=>Reopen::NotRust,
-                Some(Err(failure)) if !failure.stopped && (crate::runtime::claude_reopen::busy_message(&failure.error.code).is_some()
-                    || matches!(failure.error.code.as_str(),"lifecycle_busy" | "session_transfer_busy")) => Reopen::Busy(failure.error.code),
+                Some(Err(failure)) if !failure.stopped && (super::busy_refusal(&failure.error).is_some() || failure.error.code=="lifecycle_busy") => Reopen::Busy(failure.error.code),
                 Some(Err(failure))=>Reopen::Failed(failure.error.code),
                 Some(Ok(_))=>Reopen::Done,
             }

@@ -13,8 +13,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{Value, json};
 
-use super::{BODY_LIMIT, detail_body, json_response, session_name, too_large};
-use crate::routes::{AppState, cors, gate, pass};
+use super::{BODY_LIMIT, detail_body, session_name, too_large};
+use crate::mods::http::reply;
+use crate::routes::{AppState, gate, pass};
 
 /// Candidatas da pasta: as mais recentes, como a tela de confirmação mostra.
 const CANDIDATES: usize = 6;
@@ -84,11 +85,6 @@ fn choose(found: &[(PathBuf, f64)], in_use: &dyn Fn(&Path) -> Option<String>, si
     }
 }
 
-fn reply(status: StatusCode, body: Value, headers: &axum::http::HeaderMap) -> Response {
-    let mut response = json_response(status, body);
-    cors(headers, response.headers_mut());
-    response
-}
 
 pub async fn route(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
@@ -96,7 +92,7 @@ pub async fn route(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     let headers = req.headers().clone();
     let Ok(bytes) = to_bytes(req.into_body(), BODY_LIMIT).await else { return too_large(&headers) };
     let (status, body) = serve(&st, &name, &bytes).await;
-    reply(status, body, &headers)
+    reply(Some(&headers),status, body)
 }
 
 /// O dono pela porta pública ou pelo repasse do Python (Connect, convidado já filtrado lá).

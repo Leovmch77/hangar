@@ -12,9 +12,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{Value,json};
 
-use super::{BODY_LIMIT,busy_body,detail_body,forward_whole,json_response,session_name,too_large};
-use crate::routes::{AppState,cors,gate};
-use crate::runtime::claude_reopen::ReopenFailure;
+use super::{BODY_LIMIT,detail_body,forward_whole,session_name,too_large};
+use crate::mods::http::reply;
+use crate::routes::{AppState,gate};
 use crate::runtime::gateway::RuntimeRegistry;
 use crate::session_open::{Account,ChangeReason,OpenFacts,ServiceTier,SessionChange,SessionSpec};
 
@@ -22,11 +22,6 @@ pub(crate) fn local_cliproxy(env:&crate::accounts::environment::AccountEnvironme
     crate::session_open::facts::local_engine(env,engine)
 }
 
-fn reply(status:StatusCode,body:Value,headers:&axum::http::HeaderMap) -> Response {
-    let mut response=json_response(status,body);
-    cors(headers,response.headers_mut());
-    response
-}
 
 /// O que o pedido muda na sessão de motor.
 pub(crate) struct EngineChange { pub account:Option<String>, pub model:Option<String>, pub effort:Option<String>, pub tier:Option<ServiceTier> }
@@ -36,19 +31,6 @@ async fn facts<T:Send+'static>(env:crate::accounts::environment::AccountEnvironm
     work:impl FnOnce(&crate::session_open::facts::LocalFacts)->T+Send+'static) -> Option<T> {
     let handle=tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move||work(&crate::session_open::facts::LocalFacts::new(env,handle))).await.ok()
-}
-
-fn failure_body(failure:&ReopenFailure) -> (StatusCode,Value) {
-    let error=&failure.error;
-    if error.code=="session_transfer_busy" {return (StatusCode::CONFLICT,busy_body());}
-    if let Some(message)=crate::runtime::claude_reopen::busy_message(&error.code) {
-        return (StatusCode::CONFLICT,detail_body(&error.code,message,json!({})));
-    }
-    if error.code=="erro_troca_conta_parada" {
-        return (StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({"erro":error.message})));
-    }
-    let message=if failure.stopped {format!("a troca falhou; {}",error.message)} else {format!("não troquei: {}",error.message)};
-    (StatusCode::CONFLICT,detail_body("erro_troca_conta",&message,json!({"erro":error.message,"code":error.code})))
 }
 
 /// A troca na sessão de motor `name` cujo spec é `spec`. `None` = não é sessão de motor com conta fixa
@@ -85,17 +67,14 @@ pub(crate) async fn switch(st:&Arc<AppState>,runtime:&Arc<RuntimeRegistry>,name:
     let change=SessionChange { reason:ChangeReason::AccountSwitch,surface:parked.then_some(crate::session_open::Surface::Terminal),
         account:Some(Account::Engine { name:engine,account:Some(account.clone()),config_dir,context_window:window,context_window_unknown:false }),
         permission_mode:None,model:Some(base),effort:wanted.effort.clone(),service_tier:wanted.tier };
-    let job={let (runtime,name,st)=(runtime.clone(),name.to_owned(),st.clone());
-        tokio::spawn(async move {crate::session_write::relaunch::during_life_change(&st,&name,runtime.reopen_claude_session(&name,change,None)).await})};
-    // Pânico no meio: a vida antiga pode já ter saído, então nunca "nada aconteceu".
-    let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:crate::runtime::protocol::RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
-    match outcome {
+    let (runtime,owned)=(runtime.clone(),name.to_owned());
+    match super::relaunch::reopen_detached(st,name,async move {runtime.reopen_claude_session(&owned,change,None).await}).await {
         Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(match wanted.tier {
             Some(tier)=>json!({"ok":true,"service_tier":tier.name()}),
             None if wanted.model.is_some()=>json!({"ok":true,"model":wanted.model}),
             None=>json!({"ok":true,"engine_account":account}),
         })),
-        Some(Err(failure))=>failure_body(&failure),
+        Some(Err(failure))=>super::account::account_refusal(&failure,"não troquei"),
         None=>(StatusCode::CONFLICT,detail_body("erro_troca_conta","a sessão não está aberta aqui",json!({}))),
     }
 }
@@ -114,7 +93,7 @@ async fn claude_engine(st:&Arc<AppState>,peer:SocketAddr,req:Request) -> Result<
     };
     let Ok(body)=serde_json::from_slice::<Value>(&bytes) else {return Err(super::invalid_body(&parts.headers))};
     if st.term.is_active(&name) {
-        return Err(reply(StatusCode::CONFLICT,detail_body("erro_terminal_aberto","Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",json!({})),&parts.headers));
+        return Err(reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_terminal_aberto","Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",json!({}))));
     }
     Ok((runtime,name,spec,body,parts.headers))
 }
@@ -132,12 +111,12 @@ pub async fn model(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<
         let engine=match &spec.account {Account::Engine { name,.. }=>name.clone(),_=>String::new()};
         let fast={let model=model.clone();facts(runtime.codex_environment(),move|facts|facts.supports_fast(Some(&engine),Some(&model))).await};
         if fast!=Some(true) {
-            return reply(StatusCode::CONFLICT,detail_body("erro_fast_indisponivel","Desligue Fast antes de escolher um modelo que não o suporta",json!({})),&headers);
+            return reply(Some(&headers),StatusCode::CONFLICT,detail_body("erro_fast_indisponivel","Desligue Fast antes de escolher um modelo que não o suporta",json!({})));
         }
     }
     let (status,body)=switch(&st,&runtime,&name,spec,EngineChange { account:None,model:Some(model),effort,tier:None }).await;
     st.list.invalidate();
-    reply(status,body,&headers)
+    reply(Some(&headers),status,body)
 }
 
 /// `POST /model-effort` da conta fixa: só a sessão (`scope: session`); o modelo vai pelo `/engine/model`.
@@ -145,13 +124,13 @@ pub async fn effort(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo
     let (runtime,name,spec,body,headers)=match claude_engine(&st,peer,req).await {Ok(found)=>found,Err(response)=>return response};
     let (Ok(model),Ok(effort))=(text(&body,"model"),text(&body,"effort")) else {return super::invalid_body(&headers)};
     if body.get("scope").is_some_and(|scope|scope!="session") {
-        return reply(StatusCode::CONFLICT,detail_body("erro_cliproxy_modelo_rota","a conta ChatGPT fixa não altera o padrão global de modelo ou esforço",json!({})),&headers);
+        return reply(Some(&headers),StatusCode::CONFLICT,detail_body("erro_cliproxy_modelo_rota","a conta ChatGPT fixa não altera o padrão global de modelo ou esforço",json!({})));
     }
-    if model.is_none() && effort.is_none() {return reply(StatusCode::OK,json!({"ok":true,"scope":"session","result":null}),&headers);}
+    if model.is_none() && effort.is_none() {return reply(Some(&headers),StatusCode::OK,json!({"ok":true,"scope":"session","result":null}));}
     let (status,result)=switch(&st,&runtime,&name,spec,EngineChange { account:None,model,effort,tier:None }).await;
     st.list.invalidate();
-    if status!=StatusCode::OK {return reply(status,result,&headers);}
-    reply(StatusCode::OK,json!({"ok":true,"scope":"session","result":null}),&headers)
+    if status!=StatusCode::OK {return reply(Some(&headers),status,result);}
+    reply(Some(&headers),StatusCode::OK,json!({"ok":true,"scope":"session","result":null}))
 }
 
 /// `POST /service-tier`: o Fast do Claude com GPT no CLIProxyAPI local reabre a mesma identidade com o
@@ -175,24 +154,24 @@ pub async fn service_tier(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     let in_use=runtime.claude_model_in_use(&name).await.or(spec.model.clone());
     let fast={let (engine,model)=(engine.clone(),in_use);facts(runtime.codex_environment(),move|facts|facts.supports_fast(engine.as_deref(),model.as_deref())).await};
     if fast!=Some(true) {
-        return reply(StatusCode::BAD_REQUEST,detail_body("erro_fast_indisponivel","Fast exige GPT no CLIProxyAPI local",json!({})),&parts.headers);
+        return reply(Some(&parts.headers),StatusCode::BAD_REQUEST,detail_body("erro_fast_indisponivel","Fast exige GPT no CLIProxyAPI local",json!({})));
     }
     if st.term.is_active(&name) {
-        return reply(StatusCode::CONFLICT,detail_body("erro_terminal_aberto","Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",json!({})),&parts.headers);
+        return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_terminal_aberto","Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",json!({})));
     }
     let (status,body)=switch(&st,&runtime,&name,spec,EngineChange { account:None,model:None,effort:None,tier:Some(tier) }).await;
     st.list.invalidate();
-    reply(status,body,&parts.headers)
+    reply(Some(&parts.headers),status,body)
 }
 
 /// `POST /conta` com `engine_account`.
 pub(crate) async fn account_route(st:Arc<AppState>,runtime:Arc<RuntimeRegistry>,name:String,account:String,headers:axum::http::HeaderMap) -> Response {
     let spec=match runtime.claude_spec(&name).await {
         Some(Ok(spec))=>spec,
-        Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({})),&headers),
-        None=>return reply(StatusCode::CONFLICT,detail_body("erro_conta_so_claude","só sessão Claude troca de conta por esta rota",json!({})),&headers),
+        Some(Err(error))=>return reply(Some(&headers),StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({}))),
+        None=>return reply(Some(&headers),StatusCode::CONFLICT,detail_body("erro_conta_so_claude","só sessão Claude troca de conta por esta rota",json!({}))),
     };
     let (status,body)=switch(&st,&runtime,&name,spec,EngineChange { account:Some(account),model:None,effort:None,tier:None }).await;
     st.list.invalidate();
-    reply(status,body,&headers)
+    reply(Some(&headers),status,body)
 }

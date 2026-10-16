@@ -79,7 +79,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
         let terminal_reopen=target.terminal && reply.payload["requires_reopen"]==true && reply.payload["cycle_closed"]==true;
         let headless_reopen=!target.terminal && reply.disposition==Disposition::Rejected && reply.payload["permission_boot_rejected"]==true;
         if set && mode.as_deref()==Some("bypassPermissions") && terminal_reopen && reply.payload["uncertain"]!=true {
-            return Ok(crate::session_write::relaunch::during_life_change(&life_st,&name,bypass_reopen(&runtime,&name)).await);
+            return Ok(bypass_reopen(&life_st,runtime.clone(),&name).await);
         }
         if set && mode.as_deref()==Some("bypassPermissions") && headless_reopen && reply.payload["uncertain"]!=true {
             return runtime.reopen_claude(name,target.key,target.generation,id).await.map(|value|(StatusCode::OK,value));
@@ -95,10 +95,11 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
 }
 /// Bypass fora do ciclo do terminal: a sessão reabre pelo spec já em bypass. A falha depois de encerrar
 /// volta pelo spec de antes (S-21) e diz onde a sessão ficou.
-async fn bypass_reopen(runtime:&crate::runtime::gateway::RuntimeRegistry,name:&str)->(StatusCode,Value) {
+async fn bypass_reopen(st:&Arc<AppState>,runtime:Arc<crate::runtime::gateway::RuntimeRegistry>,name:&str)->(StatusCode,Value) {
     use crate::session_open::{ChangeReason,PermissionMode,SessionChange};
     let change=SessionChange {reason:ChangeReason::Bypass,surface:None,account:None,permission_mode:Some(PermissionMode::BypassPermissions),model:None,effort:None,service_tier:None};
-    match runtime.reopen_claude_session(name,change,None).await {
+    let owned=name.to_owned();
+    match crate::session_write::relaunch::reopen_detached(st,name,async move {runtime.reopen_claude_session(&owned,change,None).await}).await {
         Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(json!({"mode":"bypassPermissions","current":"bypassPermissions","previous_non_plan":"bypassPermissions","reopened":true}))),
         Some(Err(failure))=>{
             let error=&failure.error;

@@ -14,8 +14,9 @@ use axum::response::Response;
 use futures_util::future::BoxFuture;
 use serde_json::{Value,json};
 
-use super::{BODY_LIMIT,busy_body,detail_body,forward_whole,json_response,session_name,too_large};
-use crate::routes::{AppState,cors,gate,pass};
+use super::{BODY_LIMIT,busy_refusal,detail_body,forward_whole,session_name,too_large};
+use crate::mods::http::reply;
+use crate::routes::{AppState,gate,pass};
 use crate::runtime::claude_reopen::{Between,ReopenFailure};
 use crate::runtime::protocol::RuntimeError;
 use crate::session_open::{Account,ChangeReason,SessionChange,SessionSpec};
@@ -142,26 +143,18 @@ impl Between for MoveConversation {
     }
 }
 
-fn reply(status:StatusCode,body:Value,headers:&axum::http::HeaderMap) -> Response {
-    let mut response=json_response(status,body);
-    cors(headers,response.headers_mut());
-    response
-}
 
 /// As recusas do `_trocar_conta`: ocupada com a frase do app; o resto 409 `erro_troca_conta` com o código
-/// de origem, ou o código próprio do conflito da conversa e da cota.
-fn refusal(failure:&ReopenFailure) -> (StatusCode,Value) {
+/// de origem (`refused` abre a frase de quando nada mudou), ou o código próprio do conflito da conversa e da cota.
+pub(crate) fn account_refusal(failure:&ReopenFailure,refused:&str) -> (StatusCode,Value) {
     let error=&failure.error;
-    if error.code=="session_transfer_busy" {return (StatusCode::CONFLICT,busy_body());}
-    if let Some(message)=crate::runtime::claude_reopen::busy_message(&error.code) {
-        return (StatusCode::CONFLICT,detail_body(&error.code,message,json!({})));
-    }
+    if let Some(busy)=busy_refusal(error) {return busy;}
     match error.code.as_str() {
         "erro_conversa_ja_na_conta"=>(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({}))),
         "erro_troca_conta_parada"=>(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({"erro":error.message}))),
         "erro_mover_conversa" if !failure.stopped=>(StatusCode::INTERNAL_SERVER_ERROR,detail_body(&error.code,&error.message,json!({"erro":error.message}))),
         _=>{
-            let message=if failure.stopped {format!("a troca falhou: {}",error.message)} else {format!("não troquei de conta: {}",error.message)};
+            let message=if failure.stopped {format!("a troca falhou: {}",error.message)} else {format!("{refused}: {}",error.message)};
             (StatusCode::CONFLICT,detail_body("erro_troca_conta",&message,json!({"erro":error.message,"code":error.code})))
         },
     }
@@ -177,11 +170,8 @@ pub(crate) async fn reopen_in(st:&Arc<AppState>,runtime:&Arc<crate::runtime::gat
     let change=SessionChange { reason,surface,account:Some(Account::Claude { config_dir:destination.to_owned() }),
         permission_mode:None,model:None,effort:None,service_tier:None };
     let mover=MoveConversation { env:runtime.codex_environment(),windows:cfg!(windows),leave_engine };
-    let job={let runtime=runtime.clone();let name=name.to_owned();let st=st.clone();
-        tokio::spawn(async move {crate::session_write::relaunch::during_life_change(&st,&name,runtime.reopen_claude_session(&name,change,Some(&mover))).await})};
-    let outcome=job.await.unwrap_or_else(|_|Some(Err(ReopenFailure { error:RuntimeError::new("relaunch_panicked","A troca parou no meio; confira o estado da sessão antes de tentar de novo."),stopped:true,landed:None })));
-    st.list.invalidate();
-    outcome
+    let (runtime,owned)=(runtime.clone(),name.to_owned());
+    super::relaunch::reopen_detached(st,name,async move {runtime.reopen_claude_session(&owned,change,Some(&mover)).await}).await
 }
 
 pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
@@ -193,17 +183,17 @@ pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conn
     // que não é Claude não tem conta Claude atual: todas são destino.
     let current=match runtime.claude_spec(&name).await {
         Some(Ok(spec))=>(!matches!(spec.account,Account::Engine{..})).then(||account_dir(&env,&spec).to_string_lossy().into_owned()),
-        Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({})),req.headers()),
+        Some(Err(error))=>return reply(Some(req.headers()),StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({}))),
         None if runtime.has_entry(None,&name).await=>None,
-        None=>return reply(StatusCode::NOT_FOUND,detail_body("erro_sessao_inexistente","sessão não encontrada",json!({})),req.headers()),
+        None=>return reply(Some(req.headers()),StatusCode::NOT_FOUND,detail_body("erro_sessao_inexistente","sessão não encontrada",json!({}))),
     };
     let catalog=match st.accounts.claude_catalog() {
         Ok(catalog)=>catalog,
-        Err(error)=>return reply(StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),detail_body(error.code,&error.message,json!({})),req.headers()),
+        Err(error)=>return reply(Some(req.headers()),StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),detail_body(error.code,&error.message,json!({}))),
     };
     let quotas=st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
     let quotas:Vec<Value>=quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect();
-    reply(StatusCode::OK,Value::Array(targets(&catalog,&quotas,current.as_deref())),req.headers())
+    reply(Some(req.headers()),StatusCode::OK,Value::Array(targets(&catalog,&quotas,current.as_deref())))
 }
 
 pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
@@ -220,48 +210,48 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     };
     let catalog=match st.accounts.claude_catalog() {
         Ok(catalog)=>catalog,
-        Err(error)=>return reply(StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),detail_body(error.code,&error.message,json!({})),&parts.headers),
+        Err(error)=>return reply(Some(&parts.headers),StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),detail_body(error.code,&error.message,json!({}))),
     };
     let quotas=st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
     let quotas:Vec<Value>=quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect();
     let Some(chosen)=targets(&catalog,&quotas,None).into_iter().find(|t|t["path"]==destination.as_str()) else {
-        return reply(StatusCode::BAD_REQUEST,detail_body("erro_config_dir_invalido","config_dir invalido",json!({})),&parts.headers);
+        return reply(Some(&parts.headers),StatusCode::BAD_REQUEST,detail_body("erro_config_dir_invalido","config_dir invalido",json!({})));
     };
     if chosen["full"]==true {
         let pct=chosen["pct"].as_f64().unwrap_or(0.0);
-        return reply(StatusCode::CONFLICT,detail_body("erro_conta_cheia",&format!("a conta {} está em {pct:.0}% da cota",chosen["label"].as_str().unwrap_or_default()),
-            json!({"conta":chosen["label"],"pct":pct})),&parts.headers);
+        return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_conta_cheia",&format!("a conta {} está em {pct:.0}% da cota",chosen["label"].as_str().unwrap_or_default()),
+            json!({"conta":chosen["label"],"pct":pct})));
     }
     let spec=match runtime.claude_spec(&name).await {
         None=>{
             let provider=st.list.discover(None).await.map(|rows|rows.iter().find(|r|r.name==name).map(|r|r.provider.clone())).map_err(|e|e.code);
             return match without_claude_spec(provider.as_ref().map(|p|p.as_deref()).map_err(|e|*e)) {
-                Some((status,body))=>reply(status,body,&parts.headers),
+                Some((status,body))=>reply(Some(&parts.headers),status,body),
                 None=>forward_whole(&st,parts,bytes,&fwd).await,
             };
         }
-        Some(Err(error))=>return reply(StatusCode::CONFLICT,detail_body("erro_troca_conta",&format!("não troquei de conta: {}",error.message),json!({"erro":error.message,"code":error.code})),&parts.headers),
+        Some(Err(error))=>return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_troca_conta",&format!("não troquei de conta: {}",error.message),json!({"erro":error.message,"code":error.code}))),
         Some(Ok(spec))=>spec,
     };
     let env=runtime.codex_environment();
     let leave_engine=match &spec.account {
         Account::Engine { name:engine,.. } if !super::engine::local_cliproxy(&env,engine) =>
-            return reply(StatusCode::CONFLICT,detail_body("erro_conta_so_claude","só conta Claude ou motor CLIProxyAPI local troca de conta",json!({})),&parts.headers),
+            return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_conta_so_claude","só conta Claude ou motor CLIProxyAPI local troca de conta",json!({}))),
         Account::Engine{..}=>true,
         _=>false,
     };
     let same=|a:&Path,b:&Path|a==b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a,b)|a==b);
     let parked=spec.read_only && spec.surface==crate::session_open::Surface::Headless;
     if !leave_engine && !parked && same(&account_dir(&env,&spec),Path::new(&destination)) {
-        return reply(StatusCode::OK,json!({"ok":true,"config_dir":destination}),&parts.headers);
+        return reply(Some(&parts.headers),StatusCode::OK,json!({"ok":true,"config_dir":destination}));
     }
     let outcome=reopen_in(&st,&runtime,&name,&spec,&destination,leave_engine,ChangeReason::AccountSwitch).await;
     let (status,body)=match outcome {
         None=>return forward_whole(&st,parts,bytes,&fwd).await,
         Some(Ok(reopened))=>(StatusCode::OK,reopened.answer(json!({"ok":true,"config_dir":destination}))),
-        Some(Err(failure))=>refusal(&failure),
+        Some(Err(failure))=>account_refusal(&failure,"não troquei de conta"),
     };
-    reply(status,body,&parts.headers)
+    reply(Some(&parts.headers),status,body)
 }
 
 /// Sem spec Claude: sessão inexistente é 404 e de outro provedor é 409, como o `_trocar_conta`; a lista
