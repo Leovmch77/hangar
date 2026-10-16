@@ -123,6 +123,9 @@ def _open(body: dict) -> dict:
     if r.returncode == 0:
         return json.loads(r.stdout)
     texto = (r.stderr or r.stdout).strip()
+    # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado.
+    if r.returncode in (2, 4):
+        raise LancadorAusente(f"o hangar-server não abriu a sessão (saída {r.returncode}): {texto}")
     try:
         detail = json.loads(texto.splitlines()[-1])["detail"]
     except (ValueError, IndexError, KeyError, TypeError):

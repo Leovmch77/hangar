@@ -247,3 +247,12 @@ def test_recusa_nao_repete_e_nao_abre_o_codex_oficial(w, monkeypatch, tmp_path, 
     assert codigo == 1
     assert "a pasta não existe" in capsys.readouterr().err
     assert len(pedidos()) == 1 and chamadas == []
+
+
+@pytest.mark.parametrize("saida", [2, 4])
+def test_lancador_antigo_ou_sem_token_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, saida):
+    # 2 = hangar-server sem `open`; 4 = sem token no .env. Nada foi enviado: o `codex` oficial abre.
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[saida, "hangar-server: não abriu"]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 3
+    assert len(pedidos()) == 1 and chamadas == []
