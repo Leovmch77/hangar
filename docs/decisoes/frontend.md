@@ -17,6 +17,11 @@ mesmo espaço; resolução restaura o painel disponível, respeitando a minimiza
 de resposta conserva o cartão. O foco acompanha a identidade da pergunta visível, incluindo a
 sessão, e não cada redesenho; remover painéis não reinicia o foco da pergunta.
 
+O painel começa minimizado no aplicativo e só expande pelo controle de restauração. O padrão
+anterior de `Presentation` iniciava expandido, mesmo sem ação da pessoa. A apresentação inicial
+agora usa `minimized: true`; perguntas continuam visíveis e sua resolução preserva o estado do
+mod. A escolha de expandir continua local à sessão e ao processo do aplicativo.
+
 Medição no aplicativo Linux real, com compositor isolado e servidor sintético: em 1440×1000,
 PM e Jenkins tinham corpos de 323 e 17 px na base. A primeira versão estável reservava 437 px;
 após o ajuste de altura, ambas têm corpos de 314 px dentro do mesmo espaço de 360 px, inclusive
