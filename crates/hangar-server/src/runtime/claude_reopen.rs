@@ -235,7 +235,12 @@ fn legacy_terminal_spec(target:&TerminalTarget,name:&str,cwd:String) -> Result<(
 
 /// O spec do Claude que roda no processo `pid`: conta, motor, modelo, esforço, modo, Fast, Jev e só leitura.
 pub(super) fn process_spec(pid:i64,key:&str,name:&str,cwd:String,created:f64) -> Result<(SessionSpec,Option<Value>),RuntimeError> {
-    let procs=SystemProcs::default();
+    spec_of(&SystemProcs::default(),pid,key,name,cwd,created)
+}
+
+fn spec_of(procs:&dyn ProcessView,pid:i64,key:&str,name:&str,cwd:String,created:f64) -> Result<(SessionSpec,Option<Value>),RuntimeError> {
+    // Ambiente ilegível não diz se a sessão roda protegida (só leitura) nem em que conta.
+    procs.env_var(pid,"HANGAR_ORQ_READ_ONLY").map_err(|_|refused("lifecycle_process_read","o ambiente do Claude não pôde ser lido; nada foi encerrado"))?;
     let env=|var:&str|procs.env_var(pid,var).ok().flatten().map(|v|v.to_string_lossy().into_owned()).filter(|v|!v.is_empty());
     let argv=procs.argv_checked(pid).map_err(|_|refused("lifecycle_process_read","o processo do Claude não pôde ser lido"))?;
     let flag=|name:&str|argv.windows(2).find(|w|w[0]==name).map(|w|w[1].clone())
@@ -757,5 +762,31 @@ impl RuntimeRegistry {
             Err(_)=>false,
             Ok(raw)=>serde_json::from_slice::<Value>(&raw).is_ok_and(|s|s["rows"].as_array().is_some_and(|rows|rows.iter().any(|r|r["delivered"]==false))),
         }).await.unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::list::procs::ChildrenMap;
+    use std::ffi::OsString;
+    use std::sync::Arc;
+
+    /// Um Claude cujo argv se lê e o ambiente não (outro dono, `/proc` protegido).
+    struct Sealed;
+    impl ProcessView for Sealed {
+        fn children(&self,_:Duration) -> std::io::Result<Arc<ChildrenMap>> { Ok(Arc::default()) }
+        fn argv_checked(&self,_:i64) -> std::io::Result<Vec<String>> { Ok(vec!["claude".into(),"--permission-mode".into(),"manual".into()]) }
+        fn cwd(&self,_:i64) -> Option<PathBuf> { None }
+        fn env_var(&self,_:i64,_:&str) -> std::io::Result<Option<OsString>> { Err(std::io::ErrorKind::PermissionDenied.into()) }
+        fn start_time(&self,_:i64) -> Option<f64> { None }
+    }
+
+    /// CRA-012: sem ler o ambiente não se sabe se a sessão roda protegida (só leitura) nem em que conta:
+    /// recusa, como o Python, em vez de reabrir fora da proteção.
+    #[test]
+    fn an_unreadable_environment_refuses_instead_of_guessing_not_read_only() {
+        let error=spec_of(&Sealed,7,"k","s1","/w".into(),0.0).unwrap_err();
+        assert_eq!(error.code,"lifecycle_process_read");
     }
 }
