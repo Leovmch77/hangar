@@ -445,3 +445,30 @@ async fn a_new_life_with_another_identity_is_not_a_reopen() {
     assert_eq!(outcome.map_err(|(code,_)|code),Err("reopen_identity".into()));
     fx.finish();
 }
+
+/// CRA-056: o Fast da sessão de motor confere o modelo em uso (a linha de status do terminal), não o
+/// gravado: o `/model` trocado para um que não aceita Fast recusa.
+#[tokio::test]
+async fn fast_checks_the_model_in_use_not_the_recorded_one() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.home.join(".cli-proxy-api")).unwrap();
+    std::fs::write(fx.home.join(".cli-proxy-api/config.yaml"),"port: 8317\napi-keys:\n  - k\n").unwrap();
+    engines(&fx,"http://127.0.0.1:8317/v1");
+    fx.transcript();
+    let key = "34".repeat(16);
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd).arg("-e").arg(format!("CP_SESSION_KEY={key}")).status().unwrap();
+    let spec = json!({"version":1,"key":key,"name":"s1","cwd":fx.cwd,"provider":"claude","surface":"terminal",
+        "account":{"kind":"engine","name":"e","account":null,"config_dir":null,"context_window":null},
+        "account_source":"explicit","model":"gpt-5.4","effort":null,"service_tier":null,"permission_mode":"acceptEdits","subagent_model":null,
+        "customizations":null,"jev":false,"read_only":false,"worktree":null,"creator":null,"created_at":1.0});
+    std::fs::create_dir_all(fx.home.join(".hangar/session-specs")).unwrap();
+    std::fs::write(fx.home.join(format!(".hangar/session-specs/{key}.json")),spec.to_string()).unwrap();
+    std::fs::create_dir_all(fx.home.join(".claude/.hangar-status")).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    std::fs::write(fx.home.join(format!(".claude/.hangar-status/{SID}.json")),json!({"line":"x","model":"claude-opus-4-5","ts":now}).to_string()).unwrap();
+    let registry = fx.registry().await;
+    let server = serve_with_accounts(&fx,registry.clone()).await;
+    let (status,body) = post(server,"service-tier",json!({"service_tier":"priority"})).await;
+    assert_eq!((status,body["detail"]["code"].as_str()),(400,Some("erro_fast_indisponivel")),"{body}");
+    fx.finish();
+}

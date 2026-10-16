@@ -169,7 +169,8 @@ pub async fn service_tier(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
         .and_then(|b|serde_json::from_value::<ServiceTier>(b["service_tier"].clone()).ok());
     let Some(tier)=tier else {return super::invalid_body(&parts.headers)};
     let engine=match &spec.account {Account::Engine { name,.. }=>Some(name.clone()),_=>None};
-    let fast={let (engine,model)=(engine.clone(),spec.model.clone());facts(runtime.codex_environment(),move|facts|facts.supports_fast(engine.as_deref(),model.as_deref())).await};
+    let in_use=runtime.claude_model_in_use(&name).await.or(spec.model.clone());
+    let fast={let (engine,model)=(engine.clone(),in_use);facts(runtime.codex_environment(),move|facts|facts.supports_fast(engine.as_deref(),model.as_deref())).await};
     if fast!=Some(true) {
         return reply(StatusCode::BAD_REQUEST,detail_body("erro_fast_indisponivel","Fast exige GPT no CLIProxyAPI local",json!({})),&parts.headers);
     }

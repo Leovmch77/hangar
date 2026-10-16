@@ -289,6 +289,14 @@ impl RuntimeRegistry {
     /// O modo que o Rust confirmou por último na conversa (memória dele, sem leitura do rodapé).
     pub fn observed_claude_mode(&self,conversation:&str) -> Option<String> { self.permission_view(conversation).map(|view|view.current) }
 
+    /// O modelo que a sessão Claude `name` usa agora (a vista sem terminal ou a linha de status do terminal);
+    /// `None` = o do spec, sem nada mais novo.
+    pub async fn claude_model_in_use(&self,name:&str) -> Option<String> {
+        if let Some((_,view))=self.claude_headless_view(name).await {return view["model"].as_str().filter(|m|!m.is_empty()).map(str::to_owned);}
+        let (target,_)=self.claude_terminal_entry(name).await?;
+        super::lifecycle::terminal_choices(&target).ok().flatten()?.model.filter(|m|!m.is_empty())
+    }
+
     /// A sessão Claude `name` está sem terminal (tem sidecar)? `None` com o sidecar ilegível.
     pub async fn claude_headless(&self,name:&str) -> Option<bool> { self.claude_sidecar(name).await.ok().map(|meta|meta.is_some()) }
 
