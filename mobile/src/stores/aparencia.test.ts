@@ -150,6 +150,16 @@ describe('aparencia', () => {
     espia.mockRestore();
   });
 
+  it('papel salvo com a pasta antiga do app aponta pra pasta atual', async () => {
+    const { papelNaPastaAtual } = await import('./aparencia');
+    const antiga = 'file:///var/mobile/Containers/Data/Application/E6E3E4A9/Documents/wallpaper-1791020252088.jpg';
+    const pasta = 'file:///var/mobile/Containers/Data/Application/0F1A2B3C/Documents/';
+    expect(papelNaPastaAtual(antiga, pasta)).toBe(`${pasta}wallpaper-1791020252088.jpg`);
+    expect(papelNaPastaAtual(antiga, null)).toBe(antiga);
+    expect(papelNaPastaAtual('content://media/foto.jpg', pasta)).toBe('content://media/foto.jpg');
+    expect(papelNaPastaAtual(null, pasta)).toBeNull();
+  });
+
   it('setImagemUri(null) apaga a foto e volta pro fundo flat', async () => {
     mem.set('aparencia.fundo', 'image');
     mem.set('aparencia.imagemUri', 'file:///x.jpg');
