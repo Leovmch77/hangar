@@ -281,6 +281,21 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     unmount(comp);
   });
 
+  it('celular: Claude sem escolha de permissão não manda o modo (vale o da conta)', async () => {
+    const real = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ ...real.call(window, q), matches: false,
+      addEventListener() {}, removeEventListener() {} })) as typeof window.matchMedia;
+    try {
+      const { comp } = montar();
+      await flush();
+      await escolherPasta();
+      (document.querySelector('.primary-btn') as HTMLElement).click();
+      await flush();
+      expect(onCreate.mock.calls.at(-1)?.[7]).toBeNull();
+      unmount(comp);
+    } finally { window.matchMedia = real; }
+  });
+
   it('B: fetch rejeitando — o .catch re-pede a lista (a tela não fica sem modelos)', async () => {
     vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
 
@@ -1119,17 +1134,18 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
-  it('Codex sem terminal nasce visivelmente e é criado em Full Access', async () => {
+  it('Codex sem terminal sem escolha de permissão não manda o modo (o servidor usa o padrão)', async () => {
     const { comp } = await abrirNoCodex();
     const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
     await flush();
-    expect(document.querySelector('#perm-pick')!.textContent).toContain('Full Access');
+    expect(document.querySelector('#perm-pick')!.textContent).toContain(m.criar_permissao_padrao());
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
-      expect.objectContaining({ provider: 'codex', headless: true, permission_mode: 'Full Access' }));
+    const body = vi.mocked(api.createSessionForServer).mock.calls.at(-1)![1];
+    expect(body).toEqual(expect.objectContaining({ provider: 'codex', headless: true }));
+    expect(body).not.toHaveProperty('permission_mode');
     unmount(comp);
   });
 

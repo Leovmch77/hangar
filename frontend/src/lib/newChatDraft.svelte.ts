@@ -68,7 +68,8 @@ export class NewChatDraft {
   engineAccount = $state('');
   fastChoice = $state<'default' | 'priority' | null>(null);
   contextOn = $state(false);
-  permission = $state('bypassPermissions');
+  // Vazio = "Padrão": o campo não vai e o servidor usa o modo da conta (Claude) ou Full Access (Codex).
+  permission = $state('');
   // null = config do servidor ainda não lida: o corpo não manda o campo e vale o padrão do servidor.
   headless = $state<boolean | null>(null);
   executionError = $state('');
@@ -219,10 +220,10 @@ export class NewChatDraft {
     }
   }
 
-  // Permissão de cada provider como o nativo (create.rs set_provider); motor e janela são do provider anterior.
+  // Trocar de provider volta a permissão ao Padrão, como o nativo (create.rs set_provider); motor e janela são do provider anterior.
   #resetForProvider() {
     this.#permissionTouched = false;
-    this.permission = this.provider === 'codex' ? 'Full Access' : this.provider === 'claude' ? 'bypassPermissions' : '';
+    this.permission = '';
     this.engine = ''; this.engineAccount = ''; this.fastChoice = null; this.contextOn = false;
   }
 
@@ -584,7 +585,7 @@ export class NewChatDraft {
           ...((claude || codex) && this.headless !== null ? { headless: this.headless } : {}),
           ...(claude && this.permission ? { permission_mode: this.permission } : {}),
           // O backend só aceita permissão no Codex sem terminal (api.py, _create_session_owned).
-          ...(codex && this.headless === true ? { permission_mode: this.permission || null } : {}),
+          ...(codex && this.headless === true && this.permission ? { permission_mode: this.permission } : {}),
           // Worktree existente já é o cwd: branch nova ou outra branch não se somam a ela.
           ...(this.existing ? {} : (worktreeChoiceOf(this) ?? {})),
         }).finally(stopProgress);

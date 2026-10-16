@@ -249,13 +249,10 @@
     ? !!fastModel.service_tiers?.some((t) => t.id === 'priority' && !t.hidden)
     : provider === 'claude' && !!proxyAccounts && !!fastModel.supports_fast));
 
-  // Declarado aqui porque a permissão e o 1M do celular dependem dele (o matchMedia fica mais abaixo).
+  // Declarado aqui porque o 1M do celular depende dele (o matchMedia fica mais abaixo).
   let isDesktop = $state(false);
+  // Vazio = "Padrão": o campo não vai e o servidor usa o modo da conta (Claude) ou Full Access (Codex).
   let permissao = $state('');
-  // Celular nasce como o desktop nativo (create.rs set_provider): Claude em Bypass. O desktop web fica como está.
-  function permissaoPadrao(p: string): string {
-    return p === 'codex' ? 'Full Access' : p === 'claude' && !isDesktop ? 'bypassPermissions' : '';
-  }
   // Plugins e skills só desta sessão (celular, Claude, sessão nova). O catálogo é da máquina, conta e
   // pasta: trocar qualquer um descarta o que foi escolhido (customizations.rs set_context).
   let custDelta = $state<ClaudeCustomizationDelta>(emptyDelta());
@@ -386,7 +383,7 @@
       if (!providerTouched && !modelChoiceTouched && !contaEscolhidaAMao && !querRetomar && !conversaAlvo
           && !retomando && !loading && preferred !== provider) {
         provider = preferred;
-        permissao = permissaoPadrao(preferred);
+        permissao = '';
         carregarModelos();
       }
     } catch (e) {
@@ -795,7 +792,7 @@
       // anterior sobrevive à reabertura quando o fetch de contas falha — o reset de carregarModelos
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
-      modelo = ''; esforco = ''; subagente = ''; permissao = permissaoPadrao(provider); contextOn = false;
+      modelo = ''; esforco = ''; subagente = ''; permissao = ''; contextOn = false;
       engineAccount = ''; fastChoice = null; modelosCarregando = false;
       jev = segredos.ligado('jev_padrao'); jevTocado = false;
       // A leitura do dono reaplica o padrão se a pessoa ainda não mexeu no interruptor.
@@ -1081,7 +1078,7 @@
       ...(temJev ? { jev } : {}),
       ...(worktreeChoice ?? {}),
       ...(provider === 'codex' && requestedHeadless !== undefined ? { headless: requestedHeadless,
-        ...(requestedHeadless ? { permission_mode: permissao || null } : {}) } : {}) };
+        ...(requestedHeadless && permissao ? { permission_mode: permissao } : {}) } : {}) };
     // Só existe com motor do proxy escolhido; vai como argumento extra para não mudar a chamada dos outros.
     const custom = !isDesktop && provider === 'claude' && !baton && !conversaAlvo && !isEmptyDelta(custDelta)
       ? { claude_customizations: $state.snapshot(custDelta) } : {};
@@ -1353,9 +1350,7 @@
               disabled={providers[p] ? !providers[p].disponivel : false}
               onclick={() => {
                 providerTouched = true;
-                if (p !== provider) {
-                  permissao = permissaoPadrao(p);
-                }
+                if (p !== provider) permissao = '';
                 provider = p;
                 carregarModelos();
               }}

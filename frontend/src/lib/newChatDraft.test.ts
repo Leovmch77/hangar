@@ -284,7 +284,7 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     core.getCodexAccountsForServer.mockResolvedValue([{ id: 'gpt', is_default: true, auth: { status: 'connected' } }]);
     const draft = await ready();
     expect(draft.provider).toBe('codex');
-    expect(draft.permission).toBe('Full Access');
+    expect(draft.permission).toBe('');
   });
 
   it('sem a config do servidor lida, headless fica nulo e o envio espera', async () => {
@@ -294,7 +294,7 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     expect(draft.loading).toBe(true);
   });
 
-  it('Claude nasce em Bypass e manda o modo de execução lido do servidor', async () => {
+  it('Claude sem escolha de permissão não manda o modo e manda o modo de execução lido do servidor', async () => {
     core.getConfigForServer.mockResolvedValue({ campos: { headless_default: { valor: false } } });
     core.fetchSessionsForServer.mockResolvedValue([]);
     core.createSessionForServer.mockResolvedValue({ name: 'proj' });
@@ -302,7 +302,8 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     const draft = await ready();
     await draft.send('oi');
     expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
-      provider: 'claude', permission_mode: 'bypassPermissions', headless: false }));
+      provider: 'claude', headless: false }));
+    expect(core.createSessionForServer.mock.calls.at(-1)![1]).not.toHaveProperty('permission_mode');
   });
 });
 
