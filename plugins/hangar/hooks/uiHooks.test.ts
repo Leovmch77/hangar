@@ -147,3 +147,20 @@ test("na janela do foco armado, o envio do composer só cai com o alvo confirmad
   expect(bodies(posts, "focus-target")).toHaveLength(perguntas);
   void clock;
 });
+
+test("botão do próprio plugin num painel vai ao app com o dono, senão o app não o deixa clicar", async ($, on) => {
+  on("command.register", () => ({ value: undefined }) as never);
+  on("fs.list", () => ({ value: [] }) as never);
+  on("fs.exists", () => ({ value: false }) as never);
+  on("tool.call", { tool: "Bash" }, () => ({ result: { stdout: "", stderr: "", interrupted: false, backgroundTaskId: "b1" } }) as never);
+  const { clock, posts } = await start($, on);
+  await $.tool.call({ tool: "Bash", command: "sleep 600", run_in_background: true } as never);
+  await clock.advance(3000);
+  const ui = await $.ui.mount({ plugin: "hangar", surface: "terminal", component: "Pane", requestId: "hangar-andamento", props: PANE });
+  await ui.drawn();
+  await clock.advance(1000);
+  const trees = JSON.stringify(lastUi(posts).trees);
+  expect(trees).toContain('"key":"parar-b1"');
+  expect(trees).not.toMatch(/"press":\{(?![^}]*"plugin":"hangar")/);
+  await ui.unmount();
+});

@@ -215,7 +215,8 @@ export function registerUi(on: On) {
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     const tree = await next(e);
     if (e.surface === "terminal") {
-      above = tree;
+      // A faixa do próprio plugin sai daqui sem o dono que o engine carimba na saída: sem ele o app não clica.
+      above = stampOwn(tree, "hangar");
       // O `bodyColumns` que o mod recebeu; o `bandBody` manda ele (para o evento) e ele mais as 5 colunas
       // do `[-]` (o `columns` de hoje, que o Python lê para cortar a prévia).
       columns = e.props.bodyColumns;
@@ -230,7 +231,7 @@ export function registerUi(on: On) {
       lastPlacement = e.props.placement;
       panes.set(e.requestId, {
         id: e.requestId, title: e.props.title, placement: e.props.placement, columns: e.props.bodyColumns,
-        tree: e.requestId === BTW_PANE ? stampOwn(tree, "hangar") : tree,
+        tree: stampOwn(tree, "hangar"),
         ...(e.requestId === BTW_PANE ? { data: btwView() } : {}),
       });
       drawn.add(e.requestId);

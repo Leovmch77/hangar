@@ -261,9 +261,9 @@ export function registerVerificar(on: On) {
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e);
     const { now, runs } = await read($, board);
-    const sh = liveShells(await read($, shells), now);
-    if (runs.length === 0 && sh.length === 0) return next(e);
-    const { Box, Text, Button } = $.ui.resolve(e);
+    // Comandos em segundo plano ficam só no /andamento: na faixa, no Windows, não dava para confiar no estado.
+    if (runs.length === 0) return next(e);
+    const { Box, Text } = $.ui.resolve(e);
     // A faixa é dividida com os outros mods: responder sem `next` os esconde.
     const below = await next(e).catch(() => null);
 
@@ -303,29 +303,6 @@ export function registerVerificar(on: On) {
             </Box>
           );
         })}
-        {sh.slice(0, 3).map((s) => {
-          const last = s.tail?.at(-1) ?? (s.endedAt === undefined && s.current ? `agora: ${s.current}` : undefined);
-          return (
-            <Box key={s.id} flexDirection="row">
-              {s.endedAt === undefined ? (
-                <Button key={`parar-${s.id}`} plain dimColor onPress={() => pressStop($, s.id)}>
-                  parar
-                </Button>
-              ) : (
-                <Text dimColor>{"        "}</Text>
-              )}
-              <Text dimColor wrap="truncate-end">
-                {" "}bg {shellState(s, now)} · {s.command.split("\n")[0]?.slice(0, 60)}
-                {last ? ` │ ${last}` : ""}
-              </Text>
-            </Box>
-          );
-        })}
-        {sh.length > 3 && (
-          <Text dimColor>
-            +{sh.length - 3} em segundo plano ({sh.filter((s) => s.endedAt === undefined).length} rodando) · /andamento
-          </Text>
-        )}
         {below}
       </Box>
     );
