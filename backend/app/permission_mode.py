@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from app import tmux
+from app import atomico, tmux
 
 _log = logging.getLogger("hangar.permissao")
 
@@ -119,7 +119,7 @@ def _launch_mode(session_id: str) -> str | None:
     fala). `plan` não diz a classe: o Claude Code conta plan vindo de bypass como bypass."""
     for path in (Path.home() / ".hangar" / "session-specs").glob("*.json"):
         try:
-            spec = json.loads(path.read_bytes())
+            spec = json.loads(atomico.read(path))
         except (OSError, ValueError):
             continue
         if spec.get("conversation") == session_id and spec.get("permission_mode") not in (None, "plan"):

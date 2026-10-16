@@ -180,3 +180,18 @@ def test_session_non_plan_mode_le_a_memoria_pelo_session_id(tmp_path, monkeypatc
     monkeypatch.setattr(pm, "_ultimos_nao_plan", OrderedDict({"sid-1": "acceptEdits"}))
     assert pm.session_non_plan_mode(jsonl) == "acceptEdits"
     assert pm.session_non_plan_mode(None) is None
+
+
+def test_modo_de_abertura_le_o_registro_sem_atrapalhar_a_troca_do_rust(tmp_path, monkeypatch):
+    # No Windows, ler o registro no meio do tmp+rename do Rust faz a troca dele falhar: a leitura
+    # passa pelo `atomico.read`, que compartilha a exclusão.
+    from app import atomico
+    monkeypatch.setenv("HOME", str(tmp_path))
+    specs = tmp_path / ".hangar" / "session-specs"
+    specs.mkdir(parents=True)
+    (specs / f"{'a' * 32}.json").write_text(json.dumps({"conversation": "sid-1", "permission_mode": "auto"}))
+    lidos = []
+    real = atomico.read
+    monkeypatch.setattr(atomico, "read", lambda caminho: lidos.append(caminho) or real(caminho))
+    assert pm._launch_mode("sid-1") == "auto"
+    assert lidos == [specs / f"{'a' * 32}.json"]
