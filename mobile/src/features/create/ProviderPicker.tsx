@@ -37,9 +37,12 @@ export function ProviderPicker({
         );
       })}
     </View>
-    {PROVIDERS.filter((p) => disabledMap?.[p]?.disponivel === false).map((p) => (
-      <Text key={p} style={styles.reason}>{disabledMap?.[p]?.motivo ?? m.native_create_provider_missing({ p: providerName(p) })}</Text>
-    ))}
+    {PROVIDERS.filter((p) => disabledMap?.[p]?.disponivel === false).map((p) => {
+      const reason = disabledMap?.[p]?.motivo;
+      return <Text key={p} style={styles.reason}>{reason == null || reason === 'nao_encontrado'
+        ? m.native_create_provider_missing({ p: providerName(p) })
+        : reason === 'sem_permissao' ? m.native_create_provider_execution_denied({ p: providerName(p) }) : reason}</Text>;
+    })}
     </View>
   );
 }

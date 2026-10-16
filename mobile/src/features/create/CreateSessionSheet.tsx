@@ -493,7 +493,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     </View>
   );
 
-  const modelLabel = displayModel?.name ?? (modelo || displayModel?.id || m.config_motores_modelo_padrao());
+  const modelLabel = displayModel?.id === 'default' ? m.criar_padrao() : displayModel?.name ?? (modelo || displayModel?.id || m.config_motores_modelo_padrao());
   const modelContext = displayModel?.context ?? (displayModel?.context_length ? ctxWindow(displayModel.context_length).toUpperCase() : '');
   const chipLabel = retomavel ? m.criar_retomar() : [modelLabel, modelContext].filter(Boolean).join(' · ');
   const folderLabel = picked ? basename(picked) : m.native_new_chat_folder();

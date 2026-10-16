@@ -166,6 +166,8 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_ler_falhou: () => 'ler_falhou', arquivo_pasta_nao_encontrada: () => 'pasta_nao_encontrada',
   arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
+  native_create_provider_missing: ({ p }: { p: string }) => `native_create_provider_missing:${p}`,
+  native_create_provider_execution_denied: ({ p }: { p: string }) => `native_create_provider_execution_denied:${p}`,
   native_create_roots: () => 'native_create_roots', native_create_roots_failed: () => 'native_create_roots_failed',
   native_create_search: () => 'native_create_search', native_create_path: () => 'native_create_path',
   native_create_use_folder: () => 'native_create_use_folder', native_create_computer_folder: () => 'native_create_computer_folder',
@@ -206,7 +208,7 @@ vi.mock('../../paraglide/messages', () => ({
     'home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming ' +
     'home_usage_warming_timeout native_close native_create_checkout_branch native_create_checkout_current native_create_checkout_failed ' +
     'native_create_checkout_loading native_create_checkout_worktree ' +
-    'native_create_codex_account native_create_provider_missing native_loading native_new_chat_machine ' +
+    'native_create_codex_account native_loading native_new_chat_machine ' +
     'native_new_chat_no_accounts nova_conversa_anexo_falhou nova_conversa_candidata nova_conversa_conferir_erro nova_conversa_criando ' +
     'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry ' +
     'worktree_base worktree_modo worktree_modo_ajuda worktree_nome_branch worktree_nova_branch ' +
@@ -612,6 +614,33 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
   });
 
+  it.each([
+    { provider: 'claude', motivo: 'nao_encontrado', reason: 'native_create_provider_missing:OMP' },
+    { provider: 'codex', motivo: 'nao_encontrado', reason: 'native_create_provider_missing:OMP' },
+    { provider: 'claude', motivo: 'sem_permissao', reason: 'native_create_provider_execution_denied:OMP' },
+    { provider: 'codex', motivo: 'sem_permissao', reason: 'native_create_provider_execution_denied:OMP' },
+    { provider: 'claude', motivo: null, reason: 'native_create_provider_missing:OMP' },
+    { provider: 'codex', motivo: null, reason: 'native_create_provider_missing:OMP' },
+  ])('traduz motivo da API para OMP indisponível com $provider ativo: $motivo', async ({ provider, motivo, reason }) => {
+    calls.providers.mockResolvedValue({
+      claude: { disponivel: true, motivo: null, default: provider === 'claude' },
+      codex: { disponivel: true, motivo: null, default: provider === 'codex' },
+      omp: { disponivel: false, motivo, default: false },
+    });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await openSettings(container);
+      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain('nao_encontrado');
+      expect(container.textContent).not.toContain('sem_permissao');
+      expect(button(container, 'OMP')!.disabled).toBe(true);
+      expect(button(container, provider === 'claude' ? 'Claude' : 'Codex')!.disabled).toBe(false);
+      await act(async () => button(container, 'OMP')!.click());
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
   it('mostra o motivo do provider indisponível sem permitir escolhê-lo', async () => {
     calls.providers.mockResolvedValue({ claude: { disponivel: true }, kimi: { disponivel: false, motivo: 'Kimi não instalado nesta máquina' } });
     const { container, root } = await renderSheet(false, false);
@@ -701,7 +730,7 @@ describe('CreateSessionSheet Codex', () => {
 
   it.each([
     { provider: 'claude', models: [{ id: 'sonnet', name: 'Sonnet de outra sessão', active: true, context_length: 1000000 }], label: 'config_motores_modelo_padrao', catalogDefault: undefined },
-    { provider: 'claude', models: [{ id: 'default', name: 'Padrão da conta', context_length: 200000 }], label: 'Padrão da conta · 200K', catalogDefault: undefined },
+    { provider: 'claude', models: [{ id: 'default', name: 'Default (recommended)', context_length: 200000 }], label: 'criar_padrao · 200K', catalogDefault: undefined },
     { provider: 'claude', models: [{ id: 'opus', name: 'Opus 5.5' }], label: 'config_motores_modelo_padrao', catalogDefault: undefined },
     { provider: 'kimi', models: [{ id: 'kimi-k2', name: 'Kimi K2', context_length: 256000 }], label: 'Kimi K2 · 256K', catalogDefault: 'kimi-k2' },
   ])('sem preferências o chip informa o modelo conhecido ou padrão honestamente: $provider / $models.0.id / $label', async ({ provider, models, label, catalogDefault }) => {

@@ -6859,6 +6859,7 @@
   "native_create_provider_aria": "Agente da sessão",
   "native_create_probe_failed": "Sonda dos CLIs falhou ({erro}) — a disponibilidade abaixo não foi verificada.",
   "native_create_provider_missing": "«{p}» não encontrado no PATH — instale o CLI para criar sessões {p}",
+  "native_create_provider_execution_denied": "Sem permissão para executar o CLI do {p} nesta máquina.",
   "native_create_claude_account": "Conta Claude",
   "native_create_chatgpt_account": "Conta ChatGPT",
   "native_create_proxy_choose_account": "Escolha uma conta ChatGPT",

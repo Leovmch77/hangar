@@ -6859,6 +6859,7 @@
   "native_create_provider_aria": "Session agent",
   "native_create_probe_failed": "CLI probe failed ({erro}) — availability below was not verified.",
   "native_create_provider_missing": "“{p}” not found in PATH — install the CLI to create {p} sessions",
+  "native_create_provider_execution_denied": "No permission to execute the {p} CLI on this machine.",
   "native_create_claude_account": "Claude account",
   "native_create_chatgpt_account": "ChatGPT account",
   "native_create_proxy_choose_account": "Choose a ChatGPT account",
