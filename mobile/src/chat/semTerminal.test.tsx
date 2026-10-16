@@ -119,7 +119,6 @@ vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
   open: boolean; sendToGroup?: { onPress: () => void };
 }) => open && sendToGroup ? createElement('button', { 'aria-label': 'send-to-group', onClick: sendToGroup.onPress }) : null }));
 vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
-vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
@@ -127,6 +126,7 @@ vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
+    .concat(' cite_action cite_too_long_aria selection_copy selection_copy_markdown selection_copy_image_url selection_copy_image_urls')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')

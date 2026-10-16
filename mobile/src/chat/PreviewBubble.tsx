@@ -3,7 +3,7 @@ import { Animated, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { splitTodoBlock } from '@hangar/core';
-import { mkMarkdownStyle } from './AssistantBubble';
+import { mkMutedMarkdownStyle } from './AssistantBubble';
 
 interface Props {
   text: string;
@@ -41,11 +41,8 @@ export function PreviewBubble({ text, md, full, streaming = true }: Props) {
   const { theme } = useUnistyles();
   const todo = useMemo(() => splitTodoBlock(text), [text]);
   const prose = todo ? todo.rest : text;
-  const mdStyle = useMemo(() => {
-    const base = mkMarkdownStyle(theme);
-    // prévia distinguível da bolha commitada: texto secondary
-    return { ...base, paragraph: { ...base.paragraph, color: theme.tokens.text.secondary } };
-  }, [theme]);
+  // prévia distinguível da bolha commitada: texto secondary
+  const mdStyle = useMemo(() => mkMutedMarkdownStyle(theme), [theme]);
 
   return (
     <View style={styles.wrap}>

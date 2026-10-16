@@ -253,7 +253,7 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 
 ### Enviar
 - **Texto:** digite e envie. **Multi-linha** funciona (Shift+Enter / colar — vai por bracketed paste).
-- **Imagem / arquivo:** 📎 no composer (upload) — ou cole no terminal do Claude que o app mostra o thumbnail.
+- **Imagem / arquivo:** 📎 no campo de mensagem (upload) — ou cole no terminal do Claude que o app mostra o thumbnail.
 - **Áudio (transcrição):** o botão de microfone grava (toque grava, outro toque para); ou anexe
   um arquivo de áudio. O texto aparece ao final, sem transcrição em tempo real. **Enviar encerra
   a gravação**, espera a transcrição e a organização do texto e envia uma mensagem com o texto
@@ -374,23 +374,23 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   pode ter endpoint, chave e modelo próprios. Configuração antiga de LLM não liga a organização
   automaticamente. A leitura em voz continua sendo uma capacidade configurada separadamente.
 - **Furar a fila (só Kimi):** mensagem mandada com a sessão trabalhando fica na fila **do Kimi** —
-  ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do composer
+  ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do campo de mensagem
   mostra **⏳ N na fila · mandar agora**; tocar manda o `ctrl-s` do Kimi e a fila **inteira** entra no
   turno em curso, sem esperar. Não tocar = espera, como sempre.
 - **Painel "Na fila" (Claude e Codex):** mensagem mandada com a sessão trabalhando espera no
-  Hangar, num painel acima do composer (app nativo, PWA no celular e app), na ordem de entrega; ela
+  Hangar, num painel acima do campo de mensagem (app nativo, PWA no celular e app), na ordem de entrega; ela
   sai sozinha quando o agente para. Em Claude e Codex, com ou sem terminal, as mensagens comuns
   que já esperam são reunidas num único prompt, com uma quebra de linha entre elas. Mensagens
   que chegarem depois da reserva esperam o próximo turno. Recados de sessões, comandos e respostas
   a perguntas mantêm seus canais próprios. O lote vira uma única bolha na conversa. Em cada linha:
-  **Apagar** tira a mensagem da fila (em todos os aparelhos abertos); **Editar** leva o texto ao
-  composer, onde o envio vira **Atualizar** (Esc ou Cancelar sai sem mudar; anexo e microfone ficam
+  **Apagar** tira a mensagem da fila (em todos os aparelhos abertos); **Editar** leva o texto ao campo
+  de mensagem, onde o envio vira **Atualizar** (Esc ou Cancelar sai sem mudar; anexo e microfone ficam
   desligados enquanto edita); a alça (ou as setas) **reordena**; **Orientar** manda aquela mensagem
   agora, no meio do turno. No app as ações ficam no toque longo da linha. Se a mensagem sair da
-  fila enquanto você a edita, o composer volta ao rascunho e o app avisa uma vez. Pi, omp, Kimi
+  fila enquanto você a edita, o campo de mensagem volta ao rascunho e o app avisa uma vez. Pi, omp, Kimi
   mostram o painel só para leitura.
 - **Orientar no Codex:** durante um turno, o botão de envio habitual coloca a mensagem no painel
-  "Na fila". **Orientar** (no composer) envia o texto ao turno em andamento; para uma mensagem já
+  "Na fila". **Orientar** (no campo de mensagem) envia o texto ao turno em andamento; para uma mensagem já
   na fila, use o **Orientar** da linha dela. Se o turno terminar antes da entrega, o texto é
   preservado e o app informa a falha; a orientação não inicia outro turno por conta própria.
 - **Slash commands:** `/` abre a lista (`/clear`, `/compact`, …). `/clear` limpa de verdade (zera a
@@ -405,6 +405,18 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   **Alt+Shift+P** percorre todos os modos disponíveis naquela sessão, na ordem do terminal.
   Modos indisponíveis não entram no ciclo. O seletor fica na linha inferior; quando falta espaço,
   ocupa a primeira linha existente, tanto no Claude quanto no Codex.
+- **Citar trecho da resposta:** selecione um trecho de uma resposta já terminada do agente e
+  toque em **Citar** (no app nativo, o botão aparece junto da seleção e também no menu de contexto
+  da mensagem; no PWA do celular, rente ao campo de mensagem; no app do celular, no menu da
+  seleção). Abre **Responder ao trecho**, com o trecho e um campo para a sua resposta ou
+  comentário. **Comentar e continuar** (Enter) guarda a citação acima do campo de mensagem e deixa
+  a conversa onde estava, para citar o próximo trecho; **Finalizar** (Ctrl+Enter) guarda, leva ao
+  campo de mensagem e rola até o fim, sem enviar. Serve para responder item por item uma resposta
+  longa. O comentário continua editável na bandeja, e o X tira a citação. Ao enviar, cada trecho
+  vai com o seu comentário, marcado para o agente como referência e não como pedido novo; o que
+  você digita no campo é a instrução em volta. Na conversa a citação aparece em destaque, com o
+  comentário fora dela, e tocar nela volta ao trecho de origem (se a origem sumiu, a citação
+  continua legível). Até 8000 caracteres por trecho.
 - **Pergunta interativa do Claude** (AskUserQuestion/permissão): as opções viram **botões** —
   toque. (Se não renderizar como botão, responda com o **número** em texto.)
 
@@ -412,6 +424,12 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 - **Streaming ao vivo:** enquanto o Claude escreve, aparece um **preview** da prosa (box contido,
   marcado com hairline). Vira a mensagem final (markdown limpo: tabelas, listas, código) quando fecha.
 - **Estado:** spinner com o label do Claude (`Forging…`), firme (com debounce anti-flicker).
+- **Diagramas Mermaid:** um bloco ` ```mermaid ` de resposta terminada aparece desenhado, no tema
+  do app (no app nativo, no PWA do celular e no app do celular). Enquanto a resposta chega, fica como
+  código. Diagrama com erro mostra a mensagem do Mermaid e o código. Tocar abre em tela cheia com
+  zoom; copiar a mensagem e a busca continuam usando o texto do diagrama. O desenho é feito pelo
+  servidor do Hangar, com o Chromium que ele já usa para as páginas da conversa e sem acesso à rede;
+  sem Chromium no servidor, o diagrama fica como código com o aviso e **Tentar de novo**.
 - **Atividade / Workflows:** ícone de atividade no topo (pulsa quando há workflow/agente rodando) →
   abre o painel: tarefas + workflows → fases/agentes → prompt+resultado de cada agente (3 níveis).
 - **Interromper:** botão **⏹ stop** (manda `Esc`).
@@ -430,10 +448,10 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 ### Mods do Claude Code (faixa e painéis)
 Sessões com terminal espelham o que os mods do Claude Code desenham, sem código de mod nenhum
 no Hangar:
-- **Faixa acima do prompt** (barra de progresso, acompanhamento de review…): aparece acima do
-  composer e se atualiza na hora, mesmo com a sessão parada.
+- **Faixa acima do prompt** (barra de progresso, acompanhamento de review…): aparece acima do campo
+  de mensagem e se atualiza na hora, mesmo com a sessão parada.
 - **Painel que um mod abre:** no app de desktop, coluna à direita da conversa quando o terminal o
-  ancora e há espaço para os dois; senão, e sempre no celular, bloco acima do composer, com o ✕
+  ancora e há espaço para os dois; senão, e sempre no celular, bloco acima do campo de mensagem, com o ✕
   que fecha o painel no terminal também.
 - **Botões dos mods clicam pelo app:** o clique vira clique de mouse no terminal da sessão, e o
   Hangar abre as sessões Claude em tela cheia, o modo em que o Claude Code liga o mouse. Se o botão
@@ -694,6 +712,13 @@ ali: serve pra ver o `localhost:3000` do projeto sem sair do Hangar. O agente da
 o MESMO navegador pelo `hangar-preview` (`open`, clicar, preencher, tirar print) — quando ele abre
 uma página, o painel aparece sozinho na sua tela. No app nativo não há abas: é um navegador por
 sessão.
+
+**Escolher elemento (app nativo):** o botão **Escolher elemento** da barra do navegador liga o modo
+de escolha: o navegador realça o que está sob o ponteiro e o clique não chega à página. Clique num
+elemento para mandá-lo ao campo de mensagem; **Shift+clique** soma mais de um. Esc ou o mesmo botão
+cancelam. Cada elemento entra na bandeja das citações, com comentário editável, e um recorte da tela
+dele vai como anexo. O agente recebe a página, o endereço, o papel e o nome acessível (os mesmos do
+snapshot do `hangar-preview`), a tag, um seletor CSS e o HTML do elemento, marcados como referência.
 
 **Pelo celular:** o mesmo navegador da sessão pode ser visto e mexido do PWA — o toque chega no
 mesmo lugar que o clique do agente, e arrastar rola a página.
@@ -969,7 +994,7 @@ antes de gerar o áudio — custo de verdade, cobrado na sua conta ElevenLabs) e
 - **Mensagem inteira** — toque no `🔊` no rodapé da bolha do assistente, ao lado de copiar e
   encaminhar.
 - **Um trecho** — selecione texto dentro de uma bolha: nasce um botão `🔊 Ouvir · N car.` (pill perto
-  da seleção no desktop, barra rente ao composer no celular). Tocar nele lê só o que foi selecionado.
+  da seleção no desktop, barra rente ao campo de mensagem no celular). Tocar nele lê só o que foi selecionado.
 
 Seleção grande (acima do limite configurado) pede confirmação antes de gastar; acima do teto duro do
 modelo, é recusada mesmo confirmando. O áudio já gerado fica em cache (mesmo texto + mesma voz nunca

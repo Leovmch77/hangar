@@ -17,6 +17,7 @@ pub mod groups;
 pub mod interactions;
 pub mod list;
 pub mod locate;
+pub mod mermaid;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;

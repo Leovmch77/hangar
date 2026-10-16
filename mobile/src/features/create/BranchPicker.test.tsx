@@ -3,11 +3,14 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const theme = vi.hoisted(() => ({ tokens: { text: { muted: '#123456' } } }));
+vi.mock('react-native-unistyles', async (original) => ({ ...await original<typeof import('react-native-unistyles')>(),
+  useUnistyles: () => ({ theme }) }));
 vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(),
   Pressable: (p: { accessibilityLabel?: string; onPress?: () => void; children?: unknown }) =>
     createElement('button', { 'aria-label': p.accessibilityLabel, onClick: p.onPress }, p.children as never),
-  TextInput: (p: { accessibilityLabel?: string; onChangeText?: (t: string) => void }) =>
-    createElement('input', { 'aria-label': p.accessibilityLabel, onChange: (e: { target: { value: string } }) => p.onChangeText?.(e.target.value) }) }));
+  TextInput: (p: { accessibilityLabel?: string; onChangeText?: (t: string) => void; placeholderTextColor?: string }) =>
+    createElement('input', { 'aria-label': p.accessibilityLabel, 'data-placeholder-color': p.placeholderTextColor, onChange: (e: { target: { value: string } }) => p.onChangeText?.(e.target.value) }) }));
 vi.mock('../../paraglide/messages', () => ({
   native_create_checkout_current: () => 'atual', native_create_checkout_worktree: () => 'worktree',
   worktree_nova_branch: ({ base }: { base: string }) => `nova:${base}`, worktree_nome_branch: () => 'nome',
@@ -36,6 +39,7 @@ describe('BranchPicker', () => {
       { server: { id: 's' } as never, cwd: '/r', sessionName: 'rust-parte3',
         value: { branch: 'x', new_branch: true, base: 'main' }, onChange })); });
     expect(el.querySelector('[aria-label="nome"]')).toBeTruthy();
+    expect(el.querySelector('[aria-label="nome"]')!.getAttribute('data-placeholder-color')).toBe(theme.tokens.text.muted);
     expect(onChange).toHaveBeenLastCalledWith({ branch: 'x', new_branch: true, base: 'main' });
     expect(onChange).not.toHaveBeenCalledWith(null);
   });

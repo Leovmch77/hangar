@@ -1,10 +1,9 @@
 import { useState } from 'react';
-import { Modal, Pressable, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Image } from 'expo-image';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as m from '../paraglide/messages';
-import { Lightbox } from '../features/attachments/Lightbox';
+import { LightboxModal } from '../features/attachments/LightboxModal';
 import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 
@@ -58,24 +57,17 @@ export function ImageThumb({ items, index, style }: Props) {
           </View>
         )}
       </Pressable>
-      {/* O Lightbox é camada absoluta: dentro da bolha ele ficaria do tamanho dela. O Modal dá a tela
-          inteira, e o gesto de zoom precisa da própria raiz do gesture-handler ali dentro. */}
-      <Modal visible={cur !== null} transparent animationType="fade" statusBarTranslucent onRequestClose={() => setOpen(null)}>
-        <GestureHandlerRootView style={{ flex: 1 }}>
-          {cur ? (
-            <Lightbox
-              visible
-              uri={cur.uri}
-              headers={cur.headers}
-              filename={cur.name}
-              kind={cur.kind}
-              counter={items.length > 1 ? `${open! + 1}/${items.length}` : undefined}
-              onStep={items.length > 1 ? step : undefined}
-              onClose={() => setOpen(null)}
-            />
-          ) : null}
-        </GestureHandlerRootView>
-      </Modal>
+      <LightboxModal
+        media={cur ? {
+          uri: cur.uri,
+          headers: cur.headers,
+          filename: cur.name,
+          kind: cur.kind,
+          counter: items.length > 1 ? `${open! + 1}/${items.length}` : undefined,
+          onStep: items.length > 1 ? step : undefined,
+        } : null}
+        onClose={() => setOpen(null)}
+      />
     </>
   );
 }

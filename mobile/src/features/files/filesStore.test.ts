@@ -144,6 +144,175 @@ describe('filesStore', () => {
     expect(core.searchFiles).toHaveBeenCalledWith(sessao, 'a', 'names', srv1);
   });
 
+  it.each([
+    { q: '', lateError: false },
+    { q: ' \t ', lateError: true },
+  ])('limpar busca com "$q" ignora resposta ou erro tardio (erro: $lateError)', async ({ q, lateError }) => {
+    const searchFiles = vi.mocked(core.searchFiles);
+    let resolve!: (value: core.SearchResult) => void;
+    let reject!: (reason: Error) => void;
+    searchFiles.mockReturnValueOnce(new Promise((done, fail) => {
+      resolve = done;
+      reject = fail;
+    }));
+    const api = apis();
+    const pending = api.buscar('antiga', 'names');
+
+    await api.buscar(q, 'names');
+    expect(searchFiles).toHaveBeenCalledTimes(1);
+    expect(api.use.getState().resultados).toEqual([]);
+    expect(api.use.getState().buscaCortada).toBe(false);
+
+    if (lateError) reject(new Error('500: busca antiga falhou'));
+    else resolve({ hits: [{ path: 'antigo.txt', line: null, text: null }], truncated: true, mode: 'names' });
+    await pending;
+
+    expect(api.use.getState().resultados).toEqual([]);
+    expect(api.use.getState().buscaCortada).toBe(false);
+    expect(api.use.getState().erro).toBeNull();
+  });
+
+  it('limpar busca remove resultados, corte e erro sem HTTP nem servidor disponível', async () => {
+    vi.mocked(core.searchFiles).mockResolvedValueOnce({
+      hits: [{ path: 'a.txt', line: null, text: null }], truncated: true, mode: 'names',
+    });
+    const api = apis();
+    await api.buscar('a', 'names');
+    expect(api.use.getState().buscaCortada).toBe(true);
+    api.use.setState({ erro: 'busca falhou' });
+    servidores.lista = [];
+
+    await api.buscar('   ', 'contents');
+
+    expect(core.searchFiles).toHaveBeenCalledTimes(1);
+    expect(api.use.getState().resultados).toEqual([]);
+    expect(api.use.getState().buscaCortada).toBe(false);
+    expect(api.use.getState().erro).toBeNull();
+  });
+
+  it('trocar filtro limpa cache de pasta fechada e relê raiz e abertas antes de reabrir', async () => {
+    const listFiles = vi.mocked(core.listFiles);
+    const oldEntries: core.TreeEntry[] = [
+      { name: 'old.txt', path: 'closed/old.txt', is_dir: false, size: 1, changed: 'M', add: 1, del: 0 },
+    ];
+    const newEntries: core.TreeEntry[] = [
+      { name: 'new.txt', path: 'closed/new.txt', is_dir: false, size: 1, changed: null, add: 0, del: 0 },
+    ];
+    const api = apis();
+    await api.listar('');
+    listFiles.mockResolvedValueOnce({ entries: oldEntries, truncated: true });
+    await api.alternarPasta('closed');
+    await api.alternarPasta('closed');
+    await api.alternarPasta('open');
+    listFiles.mockClear();
+
+    await api.setOnlyModified(false);
+
+    expect(api.use.getState().soModificados).toBe(false);
+    expect(api.use.getState().abertos).toEqual(new Set(['open']));
+    expect(listFiles.mock.calls).toEqual([
+      [sessao, undefined, false, srv1],
+      [sessao, 'open', false, srv1],
+    ]);
+    expect([...api.use.getState().porPasta.keys()]).toEqual(['', 'open']);
+    expect([...api.use.getState().cortePorPasta.keys()]).toEqual(['', 'open']);
+    expect(api.listaCortada()).toBe(false);
+
+    listFiles.mockResolvedValueOnce({ entries: newEntries, truncated: false });
+    await api.alternarPasta('closed');
+
+    expect(listFiles).toHaveBeenLastCalledWith(sessao, 'closed', false, srv1);
+    expect(api.use.getState().porPasta.get('closed')).toEqual(newEntries);
+    expect(api.use.getState().cortePorPasta.get('closed')).toBe(false);
+  });
+
+  it.each([false, true])('trocar filtro preserva raiz e pasta aberta durante reload e após falha (erro: %s)', async (fail) => {
+    const listFiles = vi.mocked(core.listFiles);
+    const directory: core.TreeEntry = { name: 'open', path: 'open', is_dir: true, size: 0, changed: null, add: 0, del: 0 };
+    const oldFile: core.TreeEntry = { name: 'old.txt', path: 'open/old.txt', is_dir: false, size: 1, changed: 'M', add: 1, del: 0 };
+    const newFile: core.TreeEntry = { name: 'new.txt', path: 'open/new.txt', is_dir: false, size: 1, changed: null, add: 0, del: 0 };
+    const oldRoot = [directory, { ...oldFile, path: 'old.txt' }];
+    const newRoot = [directory, { ...newFile, path: 'new.txt' }];
+    listFiles.mockResolvedValueOnce({ entries: oldRoot, truncated: true })
+      .mockResolvedValueOnce({ entries: [oldFile], truncated: true });
+    const api = apis();
+    await api.listar('');
+    await api.alternarPasta('open');
+    let resolveRoot!: (value: core.TreeListing) => void;
+    let resolveOpen!: (value: core.TreeListing) => void;
+    let rejectRoot!: (error: Error) => void;
+    let rejectOpen!: (error: Error) => void;
+    listFiles.mockReturnValueOnce(new Promise((done, reject) => { resolveRoot = done; rejectRoot = reject; }))
+      .mockReturnValueOnce(new Promise((done, reject) => { resolveOpen = done; rejectOpen = reject; }));
+
+    const pending = api.setOnlyModified(false);
+
+    expect(api.use.getState().soModificados).toBe(false);
+    expect(listFiles.mock.calls.slice(2)).toEqual([
+      [sessao, undefined, false, srv1],
+      [sessao, 'open', false, srv1],
+    ]);
+    expect(api.entries()).toEqual([directory, oldFile, oldRoot[1]]);
+    expect(api.use.getState().porPasta.get('')).toEqual(oldRoot);
+    expect(api.use.getState().porPasta.get('open')).toEqual([oldFile]);
+    expect(api.use.getState().cortePorPasta).toEqual(new Map([['', true], ['open', true]]));
+    expect(api.listaCortada()).toBe(true);
+
+    if (fail) {
+      rejectRoot(new Error('500: root-reload-failed'));
+      rejectOpen(new Error('500: open-reload-failed'));
+    } else {
+      resolveRoot({ entries: newRoot, truncated: false });
+      resolveOpen({ entries: [newFile], truncated: false });
+    }
+    await pending;
+
+    if (fail) {
+      expect(api.entries()).toEqual([directory, oldFile, oldRoot[1]]);
+      expect(api.use.getState().porPasta.get('')).toEqual(oldRoot);
+      expect(api.use.getState().porPasta.get('open')).toEqual([oldFile]);
+      expect(api.use.getState().cortePorPasta).toEqual(new Map([['', true], ['open', true]]));
+      expect(api.listaCortada()).toBe(true);
+      expect(api.use.getState().erro).toBe('open-reload-failed');
+    } else {
+      expect(api.entries()).toEqual([directory, newFile, newRoot[1]]);
+      expect(api.use.getState().porPasta.get('')).toEqual(newRoot);
+      expect(api.use.getState().porPasta.get('open')).toEqual([newFile]);
+      expect(api.use.getState().cortePorPasta).toEqual(new Map([['', false], ['open', false]]));
+      expect(api.listaCortada()).toBe(false);
+      expect(api.use.getState().erro).toBeNull();
+    }
+  });
+
+  it.each(['response', 'error', '404'] as const)('trocar filtro ignora leitura antiga pendente em pasta fechada: %s', async (outcome) => {
+    const listFiles = vi.mocked(core.listFiles);
+    let resolve!: (value: core.TreeListing) => void;
+    let reject!: (reason: Error) => void;
+    listFiles.mockReturnValueOnce(new Promise((done, fail) => {
+      resolve = done;
+      reject = fail;
+    }));
+    const api = apis();
+    const pending = api.alternarPasta('closed');
+    await api.alternarPasta('closed');
+
+    await api.setOnlyModified(false);
+    expect(listFiles).toHaveBeenCalledTimes(2);
+    expect(listFiles).toHaveBeenLastCalledWith(sessao, undefined, false, srv1);
+
+    if (outcome === 'response') resolve({ entries: [], truncated: true });
+    else reject(Object.assign(new Error('leitura antiga falhou'), { status: outcome === '404' ? 404 : 500 }));
+    await pending;
+
+    expect(api.use.getState().porPasta.has('closed')).toBe(false);
+    expect(api.use.getState().cortePorPasta.has('closed')).toBe(false);
+    expect(api.use.getState().erro).toBeNull();
+    await api.alternarPasta('closed');
+    expect(listFiles).toHaveBeenCalledTimes(3);
+    expect(listFiles).toHaveBeenLastCalledWith(sessao, 'closed', false, srv1);
+    expect(api.use.getState().cortePorPasta.get('closed')).toBe(false);
+  });
+
   it('servidor removido vira erro legível, sem chamar a API', async () => {
     servidores.lista = [srv2];
     const api = apis();

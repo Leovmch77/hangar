@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { defaultBase, getFolderBranchesForServer, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
 import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
@@ -18,6 +18,7 @@ const isNotRepo = (e: unknown) => {
 };
 
 export function BranchPicker({ server, cwd, sessionName, value, onChange }: Props) {
+  const { theme } = useUnistyles();
   const [info, setInfo] = useState<FolderBranches | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState('');
@@ -66,7 +67,7 @@ export function BranchPicker({ server, cwd, sessionName, value, onChange }: Prop
         <View style={styles.box}>
           <TextInput accessibilityLabel={m.worktree_nome_branch()} placeholder={sessionName} value={name}
             onChangeText={setName} autoCapitalize="none" autoCorrect={false} style={styles.input}
-            placeholderTextColor="#8d8489" />
+            placeholderTextColor={theme.tokens.text.muted} />
           <Text style={styles.label}>{m.worktree_base()}</Text>
           {[info.current, ...others].filter((b): b is string => !!b).map((b) => row(`base:${b}`, b, base === b, () => setBase(b)))}
         </View>

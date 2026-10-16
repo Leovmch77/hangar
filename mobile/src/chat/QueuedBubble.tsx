@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { waitsInQueue, type ChatEvent, type SessionInfo } from '@hangar/core';
+import { waitsInQueue, type ChatEvent, type QuoteRef, type SessionInfo } from '@hangar/core';
 import { chatStore } from '../stores/chat';
 import { UserBubble } from './UserBubble';
 import * as m from '../paraglide/messages';
@@ -37,8 +37,9 @@ function DiscardQueued({ id, text, sessionName, serverId }: { id: string; text: 
   );
 }
 
-export const QueuedBubble = memo(function QueuedBubble({ event, working, problem, provider, headless, sessionName, serverId }: {
+export const QueuedBubble = memo(function QueuedBubble({ event, working, problem, provider, headless, sessionName, serverId, onQuoteClick }: {
   event: ChatEvent;
+  onQuoteClick?: (ref: QuoteRef) => void;
   working: boolean;
   problem?: string | null;
   provider?: SessionInfo['provider'];
@@ -65,7 +66,7 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
     <View>
       <View style={working && waitsInQueue(event, provider, headless) ? styles.dim : undefined}>
         <UserBubble text={event.text ?? ''} sessionName={sessionName} serverId={serverId} ts={event.ts}
-          eventId={event.id} imageCount={event.image_count ?? 0} />
+          eventId={event.id} imageCount={event.image_count ?? 0} onQuoteClick={onQuoteClick} />
       </View>
       {notes.length ? <Text style={styles.note}>{notes.join(' · ')}</Text> : null}
       {queued && !event.queued_consumed && (failed || holdsQueue) && sessionName && serverId

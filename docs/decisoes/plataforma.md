@@ -2644,3 +2644,40 @@ Python fica com Pi, omp, Kimi e o modo `python`.
   Python.
 - Contrato interno: as rotas novas da ponte do Claude e do Codex subiram `INTERNAL_PROTOCOL` e
   `RUST_SERVER_PROTOCOL` juntos.
+
+## Citação e elemento no texto da mensagem (15/10/2026)
+
+- A citação de um trecho da resposta e o elemento escolhido no navegador da sessão viajam inteiros no
+  texto enviado, como blocos `<hangar-ref kind="quote|element" v="1">` antes do texto digitado. Sem
+  registro à parte, histórico, lista, fila e os parsers do transcript funcionam como para qualquer
+  mensagem, e Claude (com e sem terminal), Codex, Pi, omp e Kimi recebem o mesmo texto.
+- O bloco traz a nota de que o conteúdo é referência e não instrução nova, e o escape impede que um
+  trecho citado feche o bloco (`<hangar-`/`</hangar-` viram `&lt;`, de forma reversível). Prova com
+  Claude Code real: um trecho com `</hangar-text>` e `<hangar-ref>` dentro chegou ao modelo inteiro,
+  que contou as linhas e repetiu o comentário.
+- Três leitores, porque o nativo não importa `packages/core` e o plugin não alcança `packages/`. Os
+  casos de `contextRefs.fixtures.json` são a especificação dos três; o plugin guarda uma cópia
+  (`contextRefs.fixtures.ts`, o kit de teste dele não lê JSON) conferida por um teste do core.
+- No terminal do Claude, o plugin reescreve só o desenho da linha da mensagem (`ui.render` de
+  `UserMessage`): `> trecho` e o comentário. Com Ctrl+O a linha volta ao bloco inteiro.
+- O nativo cita a fonte Markdown (`selected_source_range()`); a web e o app, o texto selecionado. A
+  volta à origem procura o trecho ignorando marcação, então acha os dois.
+
+## Mermaid desenhado no servidor (15/10/2026)
+
+- Um desenho só para as três interfaces, inclusive o nativo no macOS, que não tem página viva: o
+  `hangar-server` desenha com o Chromium que já usa no `html_render` (`chrome::render_offline`) e
+  devolve PNG em escala 2. O PNG evita sanitizar SVG no cliente e não depende das fontes do
+  renderizador de SVG do nativo.
+- A biblioteca (`mermaid.min.js` 12.2.0, MIT, 5,5 MB) vai em gzip no binário (1,57 MB; o binário de
+  release cresce 1,52 MiB). O desenho recusa TODA requisição (`Fetch` com `*`): numa prova, o
+  diagrama com `%%{init}%%` pedindo `securityLevel: loose`, `themeCSS` com `@import` remoto, `click`
+  com `href` e nó de imagem externa não fez nenhum acesso ao servidor que escutava na porta alvo.
+- Configuração do T3: `securityLevel: strict`, lista `secure` e `htmlLabels: false`.
+- O servidor desenha sempre na largura máxima (1600 px CSS): um flowchart LR largo pedido em 240 px
+  saía com 10 px de altura e a tela cheia herdava a resolução baixa. O cliente reduz para a coluna.
+- Medidas (Chrome da máquina de desenvolvimento): primeiro desenho de um flowchart em 0,71 s, segunda
+  chamada do cache em disco em 0,5 ms. Erro de sintaxe é 422 com a mensagem do parser e fica no
+  cache; Chromium ausente, fila cheia ou prazo é 503, fora do cache, e o cliente oferece "Tentar de
+  novo".
+

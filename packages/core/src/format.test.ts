@@ -14,6 +14,7 @@ import {
 import type { ChatEvent, State } from './types';
 import { overwriteGetLocale } from './paraglide/runtime';
 import { intlLocale } from './i18n';
+import contextRefsFixtures from './contextRefs.fixtures.json';
 
 // Default dos testes antigos: eles foram escritos esperando pt-BR. Quem troca de idioma seta
 // o locale DENTRO do teste e o beforeEach repoe o pt a cada it — nenhum estado vaza entre tests.
@@ -1021,6 +1022,17 @@ describe('parseImageMessage', () => {
   });
   it('sem marcador não é mensagem de imagem', () => {
     expect(parseImageMessage('só texto')).toBeNull();
+  });
+  it('marcador dentro de um bloco citado é texto: só vale o que vem depois do último bloco', () => {
+    const c = contextRefsFixtures.parse.find((x) => x.name === 'marcador de anexo dentro do bloco')!;
+    const out = parseImageMessage(c.message)!;
+    expect(out.filenames).toEqual(['a.png']);
+    expect(out.marcadores).toBe(1);
+    expect(out.caption.startsWith('<hangar-ref ')).toBe(true);
+    expect(out.caption.endsWith('oi')).toBe(true);
+    // Sem anexo depois do bloco, nada de miniatura.
+    const withoutAttachment = c.message.slice(0, c.message.indexOf('</hangar-ref>') + '</hangar-ref>'.length);
+    expect(parseImageMessage(withoutAttachment)).toBeNull();
   });
 });
 

@@ -12,6 +12,11 @@
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
+  import CiteSelectionPill from '../components/CiteSelectionPill.svelte';
+  import CiteReplyDialog from '../components/CiteReplyDialog.svelte';
+  import { citeDialog } from '../lib/citeDialog.svelte';
+  import { contextRefsKey } from '../lib/contextRefsDraft.svelte';
+  import { attachmentCaption, composeWithContextRefs, splitContextRefs, type ContextRef } from '@hangar/core';
   import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
   import { activePaneId, applyPluginUiDelta, closePluginPane, fieldSender, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, pluginFailureText, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginControl, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
@@ -1008,7 +1013,43 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     askOpen = false;
   }
 
-  let listaRef = $state<{ paginar: (tecla: 'PageUp' | 'PageDown' | 'Home' | 'End') => void }>();
+  type ReadingPosition = { top: number; atEnd: boolean };
+  let listaRef = $state<{
+    paginar: (tecla: 'PageUp' | 'PageDown' | 'Home' | 'End') => void;
+    freezeReading: () => ReadingPosition;
+    restoreReading: (p: ReadingPosition) => void;
+  }>();
+
+  // Modal "Responder ao trecho": a conversa congela ao abrir e volta ao mesmo ponto ao fechar, sem
+  // tocar no campo de mensagem (no celular, focar abre o teclado e rola a tela). "Finalizar" é a
+  // exceção: leva ao fim da conversa e ao campo.
+  let citeReading: ReadingPosition | null = null;
+  let citeFinished = false;
+  $effect(() => {
+    const open = !!citeDialog.request;
+    untrack(() => {
+      if (open && !citeReading) {
+        citeReading = listaRef?.freezeReading() ?? null;
+        citeFinished = false;
+        return;
+      }
+      if (open || !citeReading) return;
+      const reading = citeReading;
+      citeReading = null;
+      if (citeFinished) return;
+      const restore = () => listaRef?.restoreReading(reading);
+      void tick().then(() => requestAnimationFrame(restore));
+      // De novo depois que o teclado do celular baixa e o dock é medido outra vez.
+      setTimeout(restore, 350);
+    });
+  });
+  function finishCite() {
+    citeFinished = true;
+    void tick().then(() => requestAnimationFrame(() => {
+      listaRef?.paginar('End');
+      composerRef?.focus();
+    }));
+  }
 
   function onGlobalKey(e: KeyboardEvent) {
     if (!desktop) return;
@@ -2799,14 +2840,6 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     return () => { cancelAnimationFrame(raf); ro.disconnect(); };
   });
 
-  // Legenda canonica de uma msg (sem o marcador "📎 imagem:/arquivo: <path>" + o "—" que liga). Pro
-  // dedup de pending/fila: o eco local carrega o marcador, mas o transcript grava SO a legenda -> sem
-  // normalizar, msg COM ANEXO nunca casava e ficava pendente pra sempre.
-  function _cap(text: string): string {
-    const i = text.search(/(?:\s*—\s*)?📎\s*(?:imagem|arquivo):/u);
-    return (i >= 0 ? text.slice(0, i) : text).trim();
-  }
-
   // Quantas msgs estão ESPERANDO o turno atual — o número do chip de fila do Kimi. Conta só o evento
   // sintético "queued-" da fila durável do backend (visível em TODO cliente): o eco local (`pending`)
   // é o POST ainda em voo, e o dedup o troca pelo "queued-" assim que a fila grava a entrada.
@@ -2901,13 +2934,13 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       if (e.kind !== 'user_msg' || !e.text) continue;
       const t = e.text.trim();
       committed.add(t);
-      committed.add(_cap(t));                       // legenda canonica (msg com imagem grava so ela)
+      committed.add(attachmentCaption(t));                       // legenda canonica (msg com imagem grava so ela)
       for (const line of t.split('\n')) committed.add(line.trim());
     }
     // Remove o eco quando o texto cru OU a legenda (sem "📎 imagem: <path>") ja commitou. Legenda
     // vazia (imagem sem texto) nao casa por texto -> cai no solidify do idle, nao trava aqui.
     const next = pending.filter((p) => {
-      const cap = _cap(p.text);
+      const cap = attachmentCaption(p.text);
       return !committed.has(p.text.trim()) && !(cap && committed.has(cap));
     });
     if (next.length !== pending.length) pending = next;
@@ -3249,12 +3282,16 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try { await run(); } catch (err) { mostrarAviso(formataErro(err) ?? err); }
     finally { queueBusy = false; }
   }
+  // Citações da mensagem em edição: o campo mostra só o texto digitado e elas voltam na frente ao gravar.
+  let queueEditRefs = $state<ContextRef[]>([]);
   function startQueueEdit(id: string) {
     const entry = queueList.entries.find((e) => e.id === id);
     if (!entry || queueEdit?.entryId === id) return;
     const next = beginQueueEdit(entry, composerText, queueEdit);
+    const split = splitContextRefs(entry.text);
+    queueEditRefs = split?.refs ?? [];
     queueEdit = next.edit;
-    composerText = next.composerText;
+    composerText = split ? split.typed : next.composerText;
     void composerRef?.caretToEnd(true);
   }
   function leaveQueueEdit(text: string) {
@@ -3267,7 +3304,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const edit = queueEdit;
     if (!edit) return;
     // Texto igual ao da fila: só sai da edição, sem pedido.
-    const next = queueEditPayload(text, queueList.entries.find((e) => e.id === edit.entryId)?.text);
+    const next = queueEditPayload(composeWithContextRefs(queueEditRefs, text), queueList.entries.find((e) => e.id === edit.entryId)?.text);
     try {
       if (next !== null) await editQueuedMessage(sessionName, edit.entryId, next, sessionServer());
     } catch (err) {
@@ -3819,6 +3856,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         accountWindow={contaPior?.janela.rotulo ?? null}
         onOpenAccounts={() => (accountsOpen = true)}
         queueEditing={queueEdit !== null}
+        {queueEditRefs}
         {queueBusy}
         onQueueEditSubmit={submitQueueEdit}
         onQueueEditCancel={cancelQueueEdit}
@@ -3907,6 +3945,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
        {events} {histGap} cwd={planSession?.cwd ?? null} />
 
   <RunSheet open={runOpen} {sessionName} onClose={() => (runOpen = false)} onRunningChange={(r) => (runRunning = r)} />
+  {#if !desktop && !janela.atual}
+    <!-- Citar trecho: só na vista do celular; a bandeja mora no Composer, pela mesma chave. -->
+    <CiteSelectionPill draftKey={contextRefsKey(sessionServer()?.id, sessionName)} />
+    <CiteReplyDialog onFinish={finishCite} />
+  {/if}
   {#if !desktop}
     <AccountsSheet open={accountsOpen} onClose={() => (accountsOpen = false)} {sessionName}
                    serverKey={chatServerId ?? ''}

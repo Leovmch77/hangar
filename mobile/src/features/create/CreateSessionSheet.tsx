@@ -7,7 +7,7 @@ import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
 import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
-  SESSION_PROVIDERS, hasExecutionMode } from '@hangar/core';
+  SESSION_PROVIDERS, hasExecutionMode, contextRefsPlainText } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
 import { MenuView, type MenuAction } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
@@ -776,7 +776,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
           <Text style={styles.label}>{m.criar_retomar()}</Text>
           <MenuSelect
             value={retomavel}
-            options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: entry.ultima || entry.preview || entry.session_id }))]}
+            options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: contextRefsPlainText(entry.ultima || entry.preview || '') || entry.session_id }))]}
             onChange={setRetomavel}
           />
           <Pressable
@@ -836,7 +836,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         />
       )}
       resume={provider === 'codex' && retomaveis.length ? {
-        entries: retomaveis.map((entry) => ({ id: entry.session_id, label: entry.ultima || entry.preview || entry.session_id })),
+        entries: retomaveis.map((entry) => ({ id: entry.session_id, label: contextRefsPlainText(entry.ultima || entry.preview || '') || entry.session_id })),
         busy: retomando,
         onPick: (id) => { void handleResume(id); },
       } : null}

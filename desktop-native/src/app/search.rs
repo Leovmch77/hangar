@@ -714,7 +714,7 @@ impl Hangar {
             Some(Ok(events)) => div().flex().flex_col().gap(px(10.)).children(events.iter().map(|ev| {
                 let target = hit.event_id.as_deref() == Some(ev.id.as_str());
                 let mine = ev.kind == "user_msg";
-                let text: String = ev.text.clone().unwrap_or_default().chars().take(1200).collect();
+                let text: String = super::quotes::summary(ev.text.as_deref().unwrap_or_default()).chars().take(1200).collect();
                 div().pl(px(10.)).border_l_2().border_color(if target { theme::accent() } else { theme::border() }).flex().flex_col().gap(px(3.))
                     .child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(if mine { theme::accent() } else { theme::muted() })
                         .child(web_with(if mine { "busca_voce" } else { "busca_assistente" }, &[])))

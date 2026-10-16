@@ -64,3 +64,5 @@ export * from './backgroundEffect';
 export * from './conversationList';
 export * from './questionParts';
 export * from './queuePanel';
+export * from './contextRefs';
+export * from './mermaid';

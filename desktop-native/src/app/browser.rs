@@ -6,6 +6,9 @@ use super::*;
 use crate::appearance::SideTab;
 use crate::browser::{Engine, Pointer, model};
 
+#[cfg(not(target_os = "macos"))]
+mod pick;
+
 /// Por que o agente está parado: o botão Pausar ou a pessoa mexendo na página (Assumir, clique, tecla).
 #[cfg(not(target_os = "macos"))]
 #[derive(Clone, Copy, PartialEq)]
@@ -25,8 +28,13 @@ const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(target_os = "windows")]
 const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Pedido do painel ao `Hangar`: o print da página vai para o compositor da sessão.
-pub(super) enum PanelEvent { Shot { key: String, bytes: Vec<u8> } }
+/// Pedido do painel ao `Hangar`: o print da página, ou o elemento escolhido com a foto dele, vai para o compositor da
+/// sessão.
+pub(super) enum PanelEvent {
+    Shot { key: String, bytes: Vec<u8> },
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Element { key: String, element: crate::context_refs::Element, png: Option<Vec<u8>> },
+}
 
 impl EventEmitter<PanelEvent> for BrowserPanel {}
 
@@ -132,6 +140,9 @@ pub(super) struct BrowserPanel {
     errors_open: bool,
     /// O print da página está sendo tirado: o botão fica ocupado.
     shooting: bool,
+    /// Modo "Escolher elemento".
+    #[cfg(not(target_os = "macos"))]
+    pick: pick::Picking,
     /// O endereço acabou de ir para a área de transferência: o ícone vira um visto por um instante.
     copied: bool,
     /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
@@ -196,7 +207,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] importing: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), engine: None, starting: None, _start: None, events, address, dialog_input, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, #[cfg(not(target_os = "macos"))] pick: Default::default(), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(not(target_os = "macos"))] session_working: false, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -205,6 +216,8 @@ impl BrowserPanel {
     fn receive(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "windows")]
         if let crate::browser::Event::UserInput = event { return self.user_input(cx); }
+        #[cfg(target_os = "windows")]
+        if let crate::browser::Event::Escape = event { return self.stop_pick(cx); }
         // Mesma textura com o conteúdo novo: a cópia guardada do painel já a pinta, basta a raiz redesenhar e o quadro
         // ser confirmado depois do desenho. Textura nova (primeiro quadro, outro tamanho) redesenha o painel.
         #[cfg(target_os = "linux")]
@@ -224,7 +237,12 @@ impl BrowserPanel {
             } else if self.address.focus_handle(cx).is_focused(window) && page.url != self.page.url {
                 self.address_stale = true;
             }
-            if page.url != self.page.url { self.local_notice = None; }
+            if page.url != self.page.url {
+                self.local_notice = None;
+                // O elemento escolhido é da página em que o modo foi ligado.
+                #[cfg(not(target_os = "macos"))]
+                self.stop_pick(cx);
+            }
             #[cfg(target_os = "linux")]
             if let Some(key) = crate::browser::take_cookie_notice() { self.cookies_status = Some(tr(key)); }
             if page.dialog != self.page.dialog {
@@ -428,6 +446,7 @@ impl BrowserPanel {
         }
         #[cfg(target_os = "windows")]
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
+        self.listen_pick(&cdp, cx);
         let (activity, acted) = async_channel::unbounded();
         ctl.on_activity(move |a| { let _ = activity.try_send(a); });
         let (answer, answers) = async_channel::unbounded::<(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>)>();
@@ -497,6 +516,7 @@ impl BrowserPanel {
     fn drop_engine(&mut self) {
         self.end_viewer();
         self.relay.borrow_mut().take();
+        self.pick.reset();
         self.controller = None;
         self.cdp = None;
         self.engine = None;
@@ -1129,6 +1149,8 @@ impl BrowserPanel {
     fn set_shown(&mut self, shown: bool, covered: bool, cx: &mut Context<Self>) -> bool {
         if self.shown == shown { return false; }
         self.shown = shown;
+        #[cfg(not(target_os = "macos"))]
+        if !shown { self.stop_pick(cx); }
         #[cfg(target_os = "windows")]
         if shown && let Some(old) = self.still.take() { self.released.push(old); }
         #[cfg(target_os = "windows")]
@@ -1292,6 +1314,10 @@ impl BrowserPanel {
     }
 
     fn pointer(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        // Escolhendo elemento, só o esquerdo vai ao modo de inspeção, que o segura antes da página; o direito e o do
+        // meio abririam menu e aba nela.
+        #[cfg(not(target_os = "macos"))]
+        if self.pick.on && kind != Pointer::Move && button != MouseButton::Left { return; }
         if let Some(engine) = self.engine() { engine.mouse(kind, button, self.page_point(at), clicks, modifiers); }
     }
 
@@ -1323,6 +1349,8 @@ impl BrowserPanel {
         let emulated: Option<(f32, f32)> = None;
         #[cfg(target_os = "linux")]
         let (ctl, scale) = (self.controller.clone(), self.scale.clone());
+        #[cfg(target_os = "linux")]
+        let (hover, zoom) = (self.pick.hover.filter(|_| self.pick.on), if emulated.is_some() && self.page_zoom.0 > 0. { self.page_zoom } else { (1., 0., 0.) });
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
         #[cfg(target_os = "linux")]
         let page = page.cursor(self.cursor);
@@ -1342,6 +1370,12 @@ impl BrowserPanel {
                 };
                 origin.set(placed.origin);
                 engine.place(placed, window);
+                // Realce do modo de escolha por cima do quadro: o do Chromium não sai no `chrome-headless-shell`.
+                #[cfg(target_os = "linux")]
+                if let Some(rect) = hover {
+                    let area = pick::hover_bounds(rect, placed, page_scale.get(), zoom);
+                    window.paint_quad(quad(area, px(0.), theme::accent().opacity(0.18), px(2.), theme::accent(), BorderStyle::Solid));
+                }
                 // A página desenha na escala desta janela (o Chromium nasce em 1, às vezes com ela escondida).
                 #[cfg(target_os = "linux")]
                 if scale.replace(window.scale_factor()) != window.scale_factor() && let Some(ctl) = ctl.clone() {
@@ -1357,6 +1391,8 @@ impl BrowserPanel {
                 #[cfg(not(target_os = "macos"))]
                 this.user_input(cx);
                 this.focus.focus(window, cx);
+                #[cfg(target_os = "linux")]
+                if event.button == MouseButton::Left { this.pick.shift = event.modifiers.shift; }
                 this.pointer(Pointer::Down, event.button, event.position, event.click_count, &event.modifiers);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
@@ -1372,6 +1408,9 @@ impl BrowserPanel {
                 this.probe_cursor(event.position, _cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
+                // A caixa medida ficou para trás; a próxima medida vem com o mouse.
+                #[cfg(target_os = "linux")]
+                { this.pick.hover = None; }
                 let Some(engine) = this.engine() else { return };
                 // A GPUI manda 3 linhas por passo da roda; 17,78 px por linha dá os 53 px do Chrome no Linux.
                 let delta = event.delta.pixel_delta(px(17.78));
@@ -1456,6 +1495,7 @@ impl Render for BrowserPanel {
             toolbar = toolbar.child(chrome::icon_button("browser-shot", IconName::Image, tr("browser_send_shot"), cx)
                 .disabled(!ready || self.page.url.is_none() || self.shooting)
                 .on_click(cx.listener(|this, _, _, cx| this.send_shot(cx))));
+            toolbar = toolbar.child(self.pick_button(ready, cx));
             toolbar = toolbar.child(Button::new("browser-cookies")
                 .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
                     .hover(theme::hover()).active(theme::hover()))
@@ -1476,6 +1516,8 @@ impl Render for BrowserPanel {
                 let (m, page) = (k.modifiers, this.focus.is_focused(window));
                 let only = |alt: bool| m.alt == alt && !m.control && !m.platform && !m.shift;
                 match k.key.as_str() {
+                    #[cfg(not(target_os = "macos"))]
+                    "escape" if this.pick.on && !m.modified() => this.stop_pick(cx),
                     "l" if m.secondary() && !m.alt && !m.shift => this.focus_address(window, cx),
                     "f5" if !m.modified() => this.retry(window, cx),
                     "r" if m.secondary() && !m.alt && !m.shift => this.retry(window, cx),
@@ -1507,7 +1549,7 @@ impl Render for BrowserPanel {
         if let Some(text) = page_notice { root = root.child(notice_line("browser-page-notice", text, cx, |this| this.dismissed_notice = this.page.notice_seq)); }
         if let Some(text) = self.local_notice.clone() { root = root.child(notice_line("browser-local-notice", text, cx, |this| this.local_notice = None)); }
         #[cfg(not(target_os = "macos"))]
-        { root = root.children(self.render_agent(cx)); }
+        { root = root.children(self.render_pick(cx)).children(self.render_agent(cx)); }
         #[cfg(not(target_os = "macos"))]
         if let Some((site, _)) = self.login_request.as_ref().filter(|(_, reply)| !reply.is_canceled()) {
             let text = match site {
@@ -1687,6 +1729,10 @@ impl Hangar {
         let browser = cx.new(|cx| BrowserPanel::new(key.clone(), window, cx));
         cx.subscribe(&browser, |this, _, event: &PanelEvent, cx| match event {
             PanelEvent::Shot { key, bytes } => this.attach_page_shot(key, bytes.clone(), cx),
+            #[cfg(not(target_os = "macos"))]
+            PanelEvent::Element { key, element, png } => this.attach_page_element(key, element.clone(), png.clone(), cx),
+            #[cfg(target_os = "macos")]
+            PanelEvent::Element { .. } => {}
         }).detach();
         self.side.browsers.insert(key, browser.clone());
         browser
@@ -1695,11 +1741,24 @@ impl Hangar {
     /// O print vai para a mensagem da sessão aberta, como uma imagem colada: o botão só existe com o painel dela à vista.
     /// Se a pessoa trocou de sessão enquanto o print saía, ele não vai para a conversa errada.
     fn attach_page_shot(&mut self, owner: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        if self.browser_key().as_deref() != Some(owner) { return eprintln!("[nav] print de {owner} descartado: outra sessao aberta"); }
-        let Some(key) = self.composer_key() else { return };
-        let name = format!("pagina-{}.png", self.attach_seq + 1);
-        if let Err(problem) = self.add_attachment(&key, name, bytes) { self.action_feedback.insert(key, (problem, true)); }
+        let Some(key) = self.page_composer(owner, "print") else { return };
+        self.attach_png(&key, "pagina", bytes);
         cx.notify();
+    }
+
+    /// O campo de mensagem que recebe o que veio do navegador de `owner` (`what`, para o diário): só o da sessão dele.
+    fn page_composer(&self, owner: &str, what: &str) -> Option<SessionKey> {
+        if self.browser_key().as_deref() != Some(owner) { eprintln!("[nav] {what} de {owner} descartado: outra sessao aberta"); return None; }
+        self.composer_key()
+    }
+
+    /// Imagem da página anexada como uma colada (`<prefix>-<n>.png`); devolve o id do anexo, ou mostra por que não entrou.
+    fn attach_png(&mut self, key: &SessionKey, prefix: &str, bytes: Vec<u8>) -> Option<u64> {
+        let name = format!("{prefix}-{}.png", self.attach_seq + 1);
+        match self.add_attachment(key, name, bytes) {
+            Ok(()) => Some(self.attach_seq),
+            Err(problem) => { self.action_feedback.insert(key.clone(), (problem, true)); None }
+        }
     }
 
     /// `hangar-preview open` → backend → evento `nav` na lista. Com a sessão na tela a aba Navegador vem à frente; fora

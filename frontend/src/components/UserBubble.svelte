@@ -1,7 +1,8 @@
 <script lang="ts">
 import { intlLocale } from '../lib/locale';
 import { renderMarkdown } from '../lib/markdown';
-import { parseCanal, parseRealtimeDelegation, type PeerScope } from '@hangar/core';
+import { hasContextRefs, parseCanal, parseRealtimeDelegation, type PeerScope, type QuoteRef } from '@hangar/core';
+import ContextRefSegments from './ContextRefSegments.svelte';
 import { abrirVisor } from '../lib/visor';
 import * as m from '../paraglide/messages';
   interface Props {
@@ -13,8 +14,9 @@ import * as m from '../paraglide/messages';
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
     onOpenPeer?: (() => void) | null; // tap no chip "de: X" -> abre o chat da sessao remetente
     srcs?: string[];               // imagens anexadas (recado de sessao-irma com captura de tela)
+    onQuoteClick?: ((ref: QuoteRef) => void) | null; // toque numa citação: rola até a origem
   }
-  let { text, ts, animate = true, from = null, scope = 'peer', onForward = null, onOpenPeer = null, srcs = [] }: Props = $props();
+  let { text, ts, animate = true, from = null, scope = 'peer', onForward = null, onOpenPeer = null, srcs = [], onQuoteClick = null }: Props = $props();
 
   // Mesmo visor do ImageBubble: os botoes das miniaturas dao ao visor o tamanho natural e a origem
   // da animacao.
@@ -38,6 +40,8 @@ import * as m from '../paraglide/messages';
   const voice = $derived(!from ? parseRealtimeDelegation(text) : null);
   const corpo = $derived(canal ? canal.text : text);
   const html = $derived(from ? renderMarkdown(corpo, { fileLinks: true }) : '');
+  // Citação e elemento (bloco <hangar-ref>) só na mensagem da própria pessoa: recado e voz têm forma própria.
+  const hasRefs = $derived(!from && !voice && hasContextRefs(text));
 
   function formatTime(ts: number | null | undefined): string {
     if (!ts) return '';
@@ -84,6 +88,8 @@ import * as m from '../paraglide/messages';
     {#if from}
       <!-- Sem superfície de XSS: `renderMarkdown` escapa tudo antes de montar o HTML. -->
       <div class="bubble-text md">{@html html}</div>
+    {:else if hasRefs}
+      <ContextRefSegments {text} {onQuoteClick} />
     {:else}
       <p class="bubble-text">{voice ? voice.input : text}</p>
     {/if}

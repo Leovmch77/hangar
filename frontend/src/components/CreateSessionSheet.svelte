@@ -12,7 +12,7 @@
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
            type ModelOption, type Motor, type CliProxyAccount, type SessionOpeningExtras, type ArchiveEntry,
-           sanitizeSessionName, uniqueSessionName } from '@hangar/core';
+           sanitizeSessionName, uniqueSessionName, contextRefsPlainText } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, matchRemembered, temEscolhaDeModelo, valorModelo } from '../lib/modelosPorConta';
   import { basename, claudeAccountFolder, providerName, relativeTime, cotaDaConta, resumoCota, janelaEsgotada, effortLevels, SESSION_PROVIDERS,
     contextModel, setClaudeDefaultsForServer } from '@hangar/core';
@@ -1272,7 +1272,7 @@
          de leitura e sempre bug. Rola pro fim ao carregar. -->
     <div class="previa-bloco">
       <div class="previa-cab">
-        <span class="previa-titulo">{conversaAlvo?.ultima || conversaAlvo?.preview || m.arquivo_sem_mensagens()}</span>
+        <span class="previa-titulo">{contextRefsPlainText(conversaAlvo?.ultima || conversaAlvo?.preview || '') || m.arquivo_sem_mensagens()}</span>
         <button type="button" class="previa-fechar" aria-label={m.criar_previa_fechar()}
           onclick={() => (conversaEscolhida = '')}>✕</button>
       </div>
@@ -1552,7 +1552,7 @@
                     <button type="button" class="conversa" class:on aria-pressed={on}
                       disabled={retomando !== null} onclick={() => escolherConversa(c)}>
                       <span class="conversa-main">
-                        <span class="conversa-txt">{c.ultima || c.preview || m.arquivo_sem_mensagens()}</span>
+                        <span class="conversa-txt">{contextRefsPlainText(c.ultima || c.preview || '') || m.arquivo_sem_mensagens()}</span>
                         <span class="conversa-meta">
                           <!-- O separador vai numa expressao: " · " solto no template perde o espaco no
                                build e vira "Conta·agora". -->
