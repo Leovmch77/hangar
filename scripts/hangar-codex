@@ -3,7 +3,8 @@
 
 Com o servidor de pé cria pelo `POST /api/sessions`; sem conexão, pelo `hangar-server open`, que
 abre igual nesta máquina (spec, chave, escopo, nome livre) e o servidor adota depois. Sem nenhum
-dos dois sai com 3, e o wrapper do shell abre o `codex` oficial. Cada chamada cria uma sessao nova.
+dos dois sai com 3, e o wrapper do shell abre o `codex` oficial; recusa sai com 1 e não abre nada.
+Cada chamada cria uma sessao nova.
 """
 from __future__ import annotations
 
@@ -243,10 +244,14 @@ def main() -> int:
     codex_sessions = _do_backend()
     try:
         name = _create(cwd, prompt)
-    except RuntimeError as exc:
-        # 3: nada abriu; o wrapper do shell segue com o `codex` oficial.
+    except LancadorAusente as exc:
+        # 3: sem conexão e sem lançador; o wrapper do shell segue com o `codex` oficial.
         print(f"hangar-codex: {exc}", file=sys.stderr)
         return 3
+    except RuntimeError as exc:
+        # Recusa: o `codex` oficial abriria fora do Hangar a sessão que ele recusou.
+        print(f"hangar-codex: {exc}", file=sys.stderr)
+        return 1
     print(f"Codex gerenciado pelo hangar: {name} (detach: Ctrl-b d)", file=sys.stderr)
     # Um terminal novo pode herdar o ambiente de um pane que ja morreu.
     pane = os.environ.get("TMUX_PANE")
