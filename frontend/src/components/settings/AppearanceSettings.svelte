@@ -24,6 +24,7 @@
   import { sidebarPrefs, type SidebarHeight } from '../../lib/sidebarPrefs.svelte';
   import { navMode, type NavMode } from '../../lib/navMode.svelte';
   import { sessionOrganization, type SessionOrganization } from '../../lib/sessionOrganization.svelte';
+  import { homeScreen, type HomeScreen } from '../../lib/homeScreen.svelte';
   import { toolLook, type ToolLook } from '../../lib/toolLook.svelte';
   import { taskRows, type TaskRowsPref } from '../../lib/taskRows.svelte';
   import { pensamentoTools, type PensamentoTools } from '../../lib/pensamentoTools.svelte';
@@ -438,6 +439,18 @@
       ]}
       ariaLabel={m.aparencia_organizar_sessoes()}
       onPick={(v) => { sessionOrganization.mode = v as SessionOrganization; }}
+    />
+  </div>
+  <div class="ap-row">
+    <div class="ap-label"><strong>{m.home_open_app()}</strong></div>
+    <SegmentedPicker
+      value={homeScreen.pref}
+      options={[
+        { v: 'sessions', label: m.home_open_app_sessions(), aria: m.home_open_app_sessions() },
+        { v: 'newConversation', label: m.home_open_app_conversation(), aria: m.home_open_app_conversation() },
+      ]}
+      ariaLabel={m.home_open_app()}
+      onPick={(v) => { homeScreen.pref = v as HomeScreen; }}
     />
   </div>
   {/if}
