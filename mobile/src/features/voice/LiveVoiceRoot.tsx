@@ -16,7 +16,6 @@ export function LiveVoiceRoot() {
   const servers = useServers(state => state.servers);
   const open = useLiveVoice(state => state.open);
   const view = useLiveVoice(state => state.view);
-  const chatControls = useLiveVoice(state => state.chatControls);
   const serverId = first(params.server);
   const name = first(params.name);
   const sessionRoute = segments[0] === 's' && !!serverId && !!name;
@@ -56,10 +55,12 @@ export function LiveVoiceRoot() {
   useEffect(() => { useLiveVoice.getState().reconcileServers(); }, [servers]);
 
   const store = useLiveVoice.getState();
+  // A tela inicial, a lista e a conversa já têm o botão no topo; nas outras a chamada aberta precisa de um caminho de volta.
+  const topBarRoute = segments.length === 0 || chatRoute;
   const hasCall = view.phase === 'connecting' || view.phase === 'live' || !!view.error;
   return <>
-    {!(chatRoute && chatControls?.serverId === serverId && chatControls.name === name) && !open && hasCall ? <View pointerEvents="box-none" style={{ position: 'absolute', right: 16, bottom: 32 }}>
-      <LiveVoiceButton phase={view.phase} muted={view.muted} levels={view.levels} error={!!view.error} visible
+    {!topBarRoute && !open && hasCall ? <View pointerEvents="box-none" style={{ position: 'absolute', right: 16, bottom: 32 }}>
+      <LiveVoiceButton phase={view.phase} muted={view.muted} error={!!view.error} visible
         onPress={() => useLiveVoice.setState({ open: true })} />
     </View> : null}
     <LiveVoiceSheet open={open} view={view} onDismiss={store.dismiss}

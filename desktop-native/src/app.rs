@@ -438,6 +438,12 @@ struct PluginFailure;
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<AnyInputState>, _changes: Vec<Subscription>, tab: usize, minimized: bool, body_scroll: ScrollHandle }
 
+// O que já foi escolhido ou escrito numa pergunta aberta: sobrevive à troca de sessão e à recarga do chat até o envio.
+#[derive(Clone)]
+struct AskDraft { picks: Vec<Pick>, typing: Vec<bool>, texts: Vec<String>, tab: usize }
+
+fn draft_key(ask: &Ask) -> String { ask.payload.interaction_id.clone().unwrap_or_else(|| ask.fingerprint.clone()) }
+
 impl AskForm {
     fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
         // Envio com identidade não prova resolução; só a publicação do servidor encerra o cartão.
@@ -513,6 +519,7 @@ pub struct Hangar {
     /// Relógio do "rodando · N min": redesenha a cada 30 s enquanto há um No Hangar vivo.
     live_clock: Option<Task<()>>,
     ask_form: AskForm,
+    ask_drafts: HashMap<String, AskDraft>,
     plans_dismissed: HashSet<String>,
     // Pergunta do transcript aceita pelo backend, por sessão: vale até o `tool_result`, mesmo trocando de seleção.
     answered_tools: HashSet<(SessionKey, String)>,
@@ -962,7 +969,7 @@ impl Hangar {
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), queue: Default::default(), live_terms: Vec::new(), question_open: None, question_card: None,
-            hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
+            hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), ask_drafts: HashMap::new(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             plan_review: Default::default(),
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), conversation: Default::default(), row_assets: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
@@ -3132,11 +3139,13 @@ impl Hangar {
                 Action::Answer => {
                     // O `tool_result` chega depois; sem a marca a pergunta do transcript reabriria nesse meio-tempo.
                     if let Some(tool) = answering { self.answered_tools.insert((key.clone(), tool)); }
+                    if let Some(ask) = self.chat.ask.as_ref().filter(|ask| current && ask.fingerprint == snapshot) { self.ask_drafts.remove(&draft_key(ask)); }
                     if current { self.ask_form.finish_answer(&mut self.chat.ask, &snapshot); }
                     (tr(if value.get("fallback").and_then(Value::as_bool) == Some(true) { "ask_fallback" } else { "ask_sent" }), false)
                 }
                 Action::Skip => {
-                    if current && self.chat.ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot) {
+                    if current && let Some(ask) = self.chat.ask.as_ref().filter(|ask| ask.fingerprint == snapshot) {
+                        self.ask_drafts.remove(&draft_key(ask));
                         self.chat.ask = None;
                         self.ask_form = AskForm::default();
                     }
@@ -3871,12 +3880,21 @@ impl Hangar {
         if fingerprint == self.ask_form.fingerprint { return; }
         let mut form = AskForm { fingerprint, ..Default::default() };
         if let Some(ask) = &self.chat.ask {
+            let draft = self.ask_drafts.get(&draft_key(ask)).filter(|d| d.picks.len() == ask.payload.questions.len()).cloned();
             for item in &ask.payload.questions {
                 form.picks.push(Pick::Empty);
                 form.typing.push(item.options.is_empty());
                 let secret = item.is_secret;
                 let input = questions::new_input(secret, window, cx);
                 let (index, fp) = (form.inputs.len(), form.fingerprint.clone());
+                // `set_value` não emite mudança: o texto volta sem marcar a pergunta como escrita.
+                if let Some(text) = draft.as_ref().map(|d| d.texts[index].clone()).filter(|t| !t.is_empty()) {
+                    match &input {
+                        AnyInputState::Input(input) => input.update(cx, |input, cx| input.set_value(text, window, cx)),
+                        AnyInputState::Textarea(input) => input.update(cx, |input, cx| input.set_value(text, window, cx)),
+                        _ => unreachable!("a resposta é um campo simples ou multilinha"),
+                    }
+                }
                 // O botão Enviar depende do texto: cada edição redesenha o cartão.
                 let changed = match &input {
                     AnyInputState::Input(input) => cx.subscribe(input, move |this, _, event: &InputEvent, cx| this.edit_ask_input(&fp, index, event, cx)),
@@ -3886,13 +3904,33 @@ impl Hangar {
                 form._changes.push(changed);
                 form.inputs.push(input);
             }
+            if let Some(draft) = draft { (form.picks, form.typing, form.tab) = (draft.picks, draft.typing, draft.tab); }
         }
         self.ask_form = form;
     }
 
+    fn save_ask_draft(&mut self, cx: &Context<Self>) {
+        let Some(ask) = self.chat.ask.as_ref().filter(|ask| ask.fingerprint == self.ask_form.fingerprint) else { return };
+        // Segredo não fica guardado: volta vazio e a pessoa digita de novo.
+        let texts = ask.payload.questions.iter().zip(&self.ask_form.inputs)
+            .map(|(item, input)| if item.is_secret { String::new() } else { input.value(cx).to_string() }).collect();
+        let draft = AskDraft { picks: self.ask_form.picks.clone(), typing: self.ask_form.typing.clone(), texts, tab: self.ask_form.tab };
+        self.ask_drafts.insert(draft_key(ask), draft);
+    }
+
+    fn set_ask_tab(&mut self, fingerprint: &str, tab: usize, cx: &mut Context<Self>) {
+        if self.ask_form.fingerprint != fingerprint { return; }
+        self.ask_form.tab = tab;
+        self.save_ask_draft(cx);
+        cx.notify();
+    }
+
     fn edit_ask_input(&mut self, fingerprint: &str, index: usize, event: &InputEvent, cx: &mut Context<Self>) {
         if self.ask_form.fingerprint != fingerprint { return; }
-        if matches!(event, InputEvent::Change) && let Some(typing) = self.ask_form.typing.get_mut(index) { *typing = true; }
+        if matches!(event, InputEvent::Change) && let Some(typing) = self.ask_form.typing.get_mut(index) {
+            *typing = true;
+            self.save_ask_draft(cx);
+        }
         cx.notify();
     }
 
@@ -3900,6 +3938,7 @@ impl Hangar {
         if self.ask_form.fingerprint != fingerprint || index >= self.ask_form.picks.len() { return; }
         if let Some(pick) = pick { self.ask_form.picks[index] = pick; }
         self.ask_form.typing[index] = typing;
+        self.save_ask_draft(cx);
         cx.notify();
     }
 
@@ -3920,7 +3959,7 @@ impl Hangar {
             let fp = fingerprint.clone();
             TabBar::new("ask-tabs").underline().small().selected_index(tab).children(tabs)
                 .on_click(cx.listener(move |this, index: &usize, _, cx| {
-                    if this.ask_form.fingerprint == fp { this.ask_form.tab = *index; cx.notify(); }
+                    this.set_ask_tab(&fp, *index, cx);
                 }))
         });
         let scroll_key = format!("{fingerprint}#{tab}");
@@ -3992,14 +4031,14 @@ impl Hangar {
                     let fp = fingerprint.clone();
                     el.child(Button::new("ask-previous").small().ghost().label(tr("ask_previous")).disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.ask_form.fingerprint == fp { this.ask_form.tab = tab - 1; cx.notify(); }
+                            this.set_ask_tab(&fp, tab - 1, cx);
                         })))
                 })
                 .child(cancel)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
                     Button::new("ask-next").small().primary().label(tr("ask_next")).disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| if this.ask_form.fingerprint == fp { this.ask_form.tab = tab + 1; cx.notify(); }))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_ask_tab(&fp, tab + 1, cx)))
                 } else {
                     Button::new("ask-send").small().primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
                         .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))

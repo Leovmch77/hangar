@@ -728,7 +728,7 @@ describe('Parar no Composer', () => {
 });
 
 describe('linha de botões do Composer', () => {
-  it('voz ao vivo fica após o microfone só no chat, sem entrar na Nova conversa', async () => {
+  it('voz ao vivo mora no topo, fora da linha de botões do Composer e da Nova conversa', async () => {
     composerChat.state = 'idle';
     firstInput.attempt = null;
     const { settingsByServer } = useLiveVoice.getState();
@@ -742,8 +742,7 @@ describe('linha de botões do Composer', () => {
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', queuePanel: noQueue }));
     try {
       await act(async () => useLiveVoice.getState().loadSettings(useServers.getState().servers.find(server => server.id === 's1')!));
-      const voice = container.querySelector('[aria-label^="live_voice_open"]');
-      expect(voice).not.toBeNull();
+      expect(container.querySelector('[aria-label^="live_voice_open"]')).toBeNull();
       const mic = button(container, 'composer_gravar_audio');
       const settings = button(container, 'composer_session_settings');
       const send = button(container, 'composer_enviar_mensagem');
@@ -751,8 +750,6 @@ describe('linha de botões do Composer', () => {
       expect(mic).toBeDefined();
       expect(settings).toBeDefined();
       expect(send).toBeDefined();
-      expect(mic!.nextElementSibling).toBe(voice);
-      expect(voice!.nextElementSibling!.nextElementSibling).toBe(settings);
       expect(settings!.nextElementSibling).toBe(send);
 
       await act(async () => root.render(createElement(NewConversation, newConversationProps({ id: 's1' }))));
