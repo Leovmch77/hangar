@@ -114,3 +114,12 @@ describe('abertura e ciclo de vida da sessão recusados pelo Rust', () => {
     expect(formataErro({ code: 'lifecycleless', params: {}, msg: 'texto-do-servidor' })).toBe('texto-do-servidor');
   });
 });
+
+describe('lista indisponível sem detalhe', () => {
+  it.each(['erro_lista_indisponivel', 'erro_mux_indisponivel'])('%s sem detalhe não mostra "(undefined)"', (code) => {
+    const texto = formataErro({ code, params: {}, msg: 'x' })!;
+    expect(texto).not.toContain('undefined');
+    expect(texto).not.toContain('()');
+    expect(formataErro({ code, params: { detalhe: 'timeout' }, msg: 'x' })).toContain('(timeout)');
+  });
+});

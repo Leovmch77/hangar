@@ -2982,6 +2982,8 @@
   "erro_opcao_fora_da_lista": "that option no longer exists in this request — reload and pick again",
   "erro_lista_indisponivel": "the session list is unavailable ({detalhe}), not empty",
   "erro_mux_indisponivel": "tmux did not answer ({detalhe}) — the session list is unavailable, not empty",
+  "erro_lista_indisponivel_sem_detalhe": "the session list is unavailable, not empty",
+  "erro_mux_indisponivel_sem_detalhe": "tmux did not answer — the session list is unavailable, not empty",
   "erro_sessao_tmux_em_uso": "a tmux session named '{nome}' already exists without the panel mark — it could be one of your sessions with the same name, or this panel's shell that lost its mark. Close or rename it before opening the shell",
   "erro_shell_criacao_falhou": "tmux refused to create the shell",
   "erro_terminal_invalido": "CP_TERMINAL='{nome}' not found in PATH or unsupported",
