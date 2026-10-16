@@ -77,18 +77,18 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         ...pares.map((p, i) => ({ id: `undo:${i}`, title: m.pair_undo_own({ dono: donoDo(p) }) })),
       ] : []),
       ...(orq ? [] : [{
-        id: 'delete',
-        title: m.sessao_excluir_curto(),
+        id: s.serverInvite ? 'stop-following' : 'delete',
+        title: s.serverInvite ? m.convite_parar() : m.sessao_excluir_curto(),
         image: Platform.select({ ios: 'trash', android: 'ic_menu_delete' }),
         attributes: { destructive: true },
       }]),
     ],
-    [s.cwd, orq, fora, parAtivo, pares],
+    [s.cwd, s.serverInvite, orq, fora, parAtivo, pares],
   );
   const acao = (nome: string) => {
     if (nome === 'rename') onRenomear(s);
     else if (nome === 'git') onGit(s);
-    else if (nome === 'delete') onExcluir(s);
+    else if (nome === 'delete' || nome === 'stop-following') onExcluir(s);
     else if (nome === 'leave') onPair?.(s, { kind: 'leave' });
     else if (nome === 'pair-invite') onPair?.(s, { kind: 'invite' });
     else if (nome === 'pair-accept') onPair?.(s, { kind: 'accept' });
@@ -125,12 +125,13 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   // ações nativa abre pelo próprio toque longo e não disputa o toque. Android segue com o PopupMenu.
   const abrirAcoesIOS = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const destructive = acoesMenu.findIndex((a) => a.id === 'delete' || a.id === 'stop-following');
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: s.name,
         options: [...acoesMenu.map((a) => a.title), m.comum_cancelar()],
         cancelButtonIndex: acoesMenu.length,
-        destructiveButtonIndex: acoesMenu.some((a) => a.id === 'delete') ? acoesMenu.findIndex((a) => a.id === 'delete') : undefined,
+        destructiveButtonIndex: destructive >= 0 ? destructive : undefined,
       },
       (i) => { if (i < acoesMenu.length) acao(acoesMenu[i].id); },
     );
