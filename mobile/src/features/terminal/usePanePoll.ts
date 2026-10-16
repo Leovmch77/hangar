@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import { getPane, type Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
@@ -24,6 +25,8 @@ export function criarPanePoller(
 ) {
   const snap: PaneSnapshot = { text: '', scrollback: 0, err: '', pending: false };
   let alive = true;
+  let active = true;
+  let generation = 0;
   let atBottom = true;
   let linhas = lines;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -32,10 +35,15 @@ export function criarPanePoller(
 
   // Publica SÓ quando algum campo mudou: com `onSnapshot` chamado a cada tick o React re-renderiza
   // de 450 em 450ms e o diff-gate deixa de valer pra quem consome o hook.
-  async function ler(forcar: boolean) {
+  async function ler(forcar: boolean, g: number) {
+    if (!alive || !active || g !== generation) return;
     if (!server) throw new Error(m.servidor_nao_existe());
-    const p = await getPaneFn(name, linhas, server);
-    if (!alive) return;
+    const requestedLines = linhas;
+    const p = await getPaneFn(name, requestedLines, server).catch((e: unknown) => {
+      if (requestedLines !== linhas) return null;
+      throw e;
+    });
+    if (!p || !alive || !active || g !== generation || requestedLines !== linhas) return;
     let mudou = false;
     if (snap.err !== '') { snap.err = ''; mudou = true; }
     if (snap.scrollback !== p.scrollback) { snap.scrollback = p.scrollback; mudou = true; }
@@ -51,33 +59,53 @@ export function criarPanePoller(
     publicar();
   }
 
-  function erro(e: unknown) {
-    if (!alive) return;
+  function erro(e: unknown, g: number) {
+    if (!alive || !active || g !== generation) return;
     snap.err = e instanceof Error ? e.message : m.term_erro();
     publicar();
   }
 
   async function tick() {
+    const g = generation;
     try {
-      await ler(false);
+      await ler(false, g);
     } catch (e) {
-      erro(e);
+      erro(e, g);
     } finally {
-      if (alive) timer = setTimeout(tick, 450);
+      if (alive && active && g === generation) timer = setTimeout(tick, 450);
     }
+  }
+
+  function start() {
+    if (!alive || !active) return;
+    if (!server) erro(new Error(m.servidor_nao_existe()), generation);
+    else void tick();
   }
 
   return {
     estado: () => ({ ...snap }),
-    start: () => { if (!server) erro(new Error(m.servidor_nao_existe())); else void tick(); },
+    start,
     stop: () => { alive = false; clearTimeout(timer); },
+    setActive: (v: boolean) => {
+      if (!alive || v === active) return;
+      active = v;
+      generation++;
+      clearTimeout(timer);
+      if (active) start();
+    },
     setAtBottom: (v: boolean) => {
       atBottom = v;
       if (v && snap.pending) { snap.pending = false; publicar(); }
     },
     setLines: (v: number) => { linhas = v; },
     refresh: async () => {
-      try { await ler(true); } catch (e) { erro(e); }
+      const g = generation;
+      const requestedLines = linhas;
+      try { await ler(true, g); } catch (e) {
+        if (!alive || !active || g !== generation || requestedLines !== linhas) return;
+        erro(e, g);
+        throw e;
+      }
     },
   };
 }
@@ -88,10 +116,12 @@ export function usePanePoll(name: string, server: Server | null, lines = 200) {
 
   useEffect(() => {
     const p = criarPanePoller(getPane, name, lines, setSnap, server);
+    p.setActive(AppState.currentState !== 'background');
     setSnap(p.estado());
     poller.current = p;
+    const subscription = AppState.addEventListener('change', (state) => p.setActive(state !== 'background'));
     p.start();
-    return () => { p.stop(); poller.current = undefined; };
+    return () => { p.stop(); subscription.remove(); poller.current = undefined; };
     // `lines` não reinicia o laço de propósito (setLines abaixo) — porte do untrack da barra.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, server]);
@@ -99,7 +129,8 @@ export function usePanePoll(name: string, server: Server | null, lines = 200) {
   useEffect(() => { poller.current?.setLines(lines); }, [lines]);
 
   const setAtBottom = useCallback((v: boolean) => poller.current?.setAtBottom(v), []);
+  const setLines = useCallback((v: number) => poller.current?.setLines(v), []);
   const refresh = useCallback(async () => { await poller.current?.refresh(); }, []);
 
-  return { ...snap, refresh, setAtBottom };
+  return { ...snap, refresh, setAtBottom, setLines };
 }

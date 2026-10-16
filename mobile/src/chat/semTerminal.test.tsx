@@ -119,7 +119,6 @@ vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
   open: boolean; sendToGroup?: { onPress: () => void };
 }) => open && sendToGroup ? createElement('button', { 'aria-label': 'send-to-group', onClick: sendToGroup.onPress }) : null }));
 vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
-vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(

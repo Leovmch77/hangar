@@ -56,6 +56,7 @@ export interface FilesApi {
   recarregarDiff: (path: string) => Promise<void>;
   descartar: (path: string) => Promise<void>;
   alternarPasta: (path: string) => Promise<void>;
+  setOnlyModified: (onlyModified: boolean) => Promise<void>;
   trocarEscopo: (escopo: 'branch' | 'nao_commitado') => Promise<void>;
   // seletores derivados (atalhos)
   entries: () => TreeEntry[];
@@ -219,9 +220,14 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   }
 
   async function buscar(q: string, mode: 'names' | 'contents') {
-    setS({ erro: null });
     const g = ++gBusca;
     const ge = ++gErro;
+    setS({ erro: null });
+    if (q.trim() === '') {
+      setS({ resultados: [], buscaCortada: false });
+      gResultados = g;
+      return;
+    }
     const srv = destino();
     if (!srv) {
       setS({ erro: m.chat_servidor_removido() });
@@ -303,6 +309,18 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
     if (!cur.porPasta.has(path)) await _listar(path, ++gErro);
   }
 
+  async function setOnlyModified(onlyModified: boolean) {
+    if (onlyModified === getS().soModificados) return;
+    for (const [path, generation] of gLista) gLista.set(path, generation + 1);
+    const s = getS();
+    setS({
+      soModificados: onlyModified,
+      porPasta: new Map([...s.porPasta].filter(([path]) => path === '' || s.abertos.has(path))),
+      cortePorPasta: new Map([...s.cortePorPasta].filter(([path]) => path === '' || s.abertos.has(path))),
+    });
+    await recarregarInterno();
+  }
+
   async function trocarEscopo(escopo: 'branch' | 'nao_commitado') {
     if (escopo === getS().escopo) return;
     setS({ escopo });
@@ -342,6 +360,7 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
     recarregarDiff,
     descartar,
     alternarPasta,
+    setOnlyModified,
     trocarEscopo,
     entries() {
       const s = getS();

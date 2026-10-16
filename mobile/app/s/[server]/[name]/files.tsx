@@ -67,17 +67,12 @@ export default function FilesSheet() {
   const listaCortada = listaCortadaOf(cortePorPasta, abertos);
 
   const handleToggleFiltro = () => {
-    api.use.setState({ soModificados: !soModificados });
-    void api.recarregar();
+    void api.setOnlyModified(!soModificados);
   };
 
   const handleBusca = (q: string, mode: 'names' | 'contents') => {
     setQBusca(q);
     setModoBusca(mode);
-    if (q.trim() === '') {
-      api.use.setState({ resultados: [] });
-      return;
-    }
     void api.buscar(q, mode);
   };
 
@@ -108,7 +103,7 @@ export default function FilesSheet() {
     return (
       <View style={[styles.root, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 }]}>
         <Text style={[styles.erro, { color: theme.tokens.status.error }]} accessibilityRole="alert">
-          {m.arq_sessao_encerrada()}
+          {m.chat_servidor_removido()}
         </Text>
         <Pressable onPress={() => router.back()} accessibilityRole="button">
           <Text style={{ color: theme.tokens.accent.base, fontSize: 13 }}>{m.comum_voltar()}</Text>

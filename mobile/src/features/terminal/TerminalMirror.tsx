@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { Pressable, Text, TextInput, View, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
-import { getPane, sendKey, sendTermInput } from '@hangar/core';
+import { sendKey, sendTermInput } from '@hangar/core';
 import type { NavKey } from '@hangar/core';
 import { usePanePoll } from './usePanePoll';
 import { useServers } from '../../stores/servers';
@@ -27,7 +27,7 @@ export function TerminalMirror({ serverId, name, aviso }: Props) {
   const [localErr, setLocalErr] = useState(aviso ?? '');
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const { text, scrollback, err: pollErr, pending, refresh, setAtBottom } = usePanePoll(name, server, lines);
+  const { text, scrollback, err: pollErr, pending, refresh, setAtBottom, setLines: setPollLines } = usePanePoll(name, server, lines);
   const err = !server ? m.servidor_nao_existe() : localErr || pollErr;
 
   const listRef = useRef<LegendListRef>(null);
@@ -58,16 +58,18 @@ export function TerminalMirror({ serverId, name, aviso }: Props) {
     setLoadingMore(true);
     const next = lines === 200 ? 600 : 1200;
     try {
-      await getPane(name, next, server);
+      setPollLines(next);
       setLines(next);
       await refresh();
       setLocalErr('');
     } catch (e) {
+      setPollLines(lines);
+      setLines(lines);
       setLocalErr(e instanceof Error ? e.message : m.term_erro());
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, canLoadMore, lines, name, server, refresh]);
+  }, [loadingMore, canLoadMore, lines, server, refresh, setPollLines]);
 
   const press = useCallback(
     async (key: NavKey | 'C-c') => {
