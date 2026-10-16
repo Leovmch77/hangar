@@ -1,15 +1,25 @@
-# .ipa de desenvolvimento SEM assinatura, para instalar com Apple ID gratuito (SideStore e afins)
-# sem Mac. É dev client: carrega o JS do Metro da máquina, então só precisa rodar de novo quando
-# mudar dependência nativa ou app.json.
+# .ipa SEM assinatura, para instalar com Apple ID gratuito (SideStore e afins), sem Mac.
+# Debug usa o Metro da máquina; Release leva o JS/Hermes embutido, sem launcher/menu de dev.
 name: iOS dev build
 
 on:
   workflow_dispatch:
+    inputs:
+      configuration:
+        description: Configuração do IPA
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
 
 jobs:
   ipa:
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      CONFIGURATION: ${{ inputs.configuration }}
+      IPA_NAME: ${{ inputs.configuration == 'Release' && 'hangar-release' || 'hangar-dev' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,15 +33,33 @@ jobs:
       - working-directory: mobile/ios
         run: |
           ws=$(ls -d *.xcworkspace | head -1)
-          xcodebuild -workspace "$ws" -scheme "${ws%.xcworkspace}" -configuration Debug \
+          xcodebuild -workspace "$ws" -scheme "${ws%.xcworkspace}" -configuration "$CONFIGURATION" \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
           mkdir Payload
-          cp -R build/Build/Products/Debug-iphoneos/*.app Payload/
-          zip -qry hangar-dev.ipa Payload
+          cp -R "build/Build/Products/$CONFIGURATION-iphoneos/"*.app Payload/
+          if [ "$CONFIGURATION" = Release ]; then
+            python3 -I - Payload/*.app <<'PY'
+          import sys
+          from pathlib import Path
+
+          for app_path in sys.argv[1:]:
+              app = Path(app_path)
+              bundle = app / "main.jsbundle"
+              if not bundle.is_file() or bundle.stat().st_size == 0:
+                  raise SystemExit(f"Release sem main.jsbundle válido: {bundle}")
+              with bundle.open("rb") as stream:
+                  if stream.read(8) != bytes.fromhex("c61fbc03c103191f"):
+                      raise SystemExit(f"Release sem bytecode Hermes: {bundle}")
+              for name in ("EXDevLauncher.bundle", "EXDevMenu.bundle"):
+                  if any(app.rglob(name)):
+                      raise SystemExit(f"Recurso de desenvolvimento no Release: {name}")
+          PY
+          fi
+          zip -qry "$IPA_NAME.ipa" Payload
       - uses: actions/upload-artifact@v4
         with:
-          name: hangar-dev-ipa
-          path: mobile/ios/hangar-dev.ipa
+          name: ${{ env.IPA_NAME }}-ipa
+          path: mobile/ios/${{ env.IPA_NAME }}.ipa
           retention-days: 30
           if-no-files-found: error
