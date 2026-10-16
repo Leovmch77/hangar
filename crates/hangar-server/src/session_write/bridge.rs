@@ -45,6 +45,10 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
+    // Abrir Claude com terminal pelo que entrou direto no Python (Connect, MCP): o nome vem no corpo.
+    if rest == "open" && req.method() == Method::POST {
+        return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
+    }
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {
         Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),

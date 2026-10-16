@@ -1,6 +1,7 @@
-//! A abertura no servidor: o `POST /api/sessions` do dono, a ponte privada por onde o Python repassa
-//! o que entra por ele (convidado, Connect, MCP, bastão) e o `OpenHost` com os serviços do Rust e as
-//! lojas que ainda moram no Python (fila, `then`, diário, provedor lembrado).
+//! A abertura no servidor: o `POST /api/sessions` do dono e do convidado com login, o bastão do dono,
+//! a ponte privada por onde o Python repassa o que entrou direto nele (Connect, MCP) e o `OpenHost`
+//! com os serviços do Rust e o que ainda mora no Python (o registro em espera e o `then` do nome
+//! reusado, o dono da sessão do convidado).
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,8 @@ use super::{AgentProvider, OpenCaller, OpenError, SessionOpenRequest, Surface};
 use crate::accounts::environment::AccountEnvironment;
 use crate::routes::AppState;
 
-/// Marca do pedido que o Rust olhou e devolveu ao Python: lá ele não volta à ponte.
+/// Marca do bastão que o Rust repassa ao Python (`rust`): a sucessora Claude com terminal volta como
+/// pedido de abertura, com a mesma marca, e o Rust a abre. Vinda de fora, sai antes.
 pub const DECLINED: &str = "x-hangar-open";
 
 pub struct ServerHost {
@@ -322,10 +324,7 @@ pub async fn create(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             crate::routes::cors(&parts.headers, response.headers_mut());
             response
         }
-        Decision::NotOurs => {
-            parts.headers.insert(DECLINED, axum::http::HeaderValue::from_static("python"));
-            pass(parts, bytes).await
-        }
+        Decision::NotOurs => pass(parts, bytes).await,
     }
 }
 
@@ -361,9 +360,10 @@ pub async fn bastao(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     response
 }
 
-/// `/__hangar_server/sessions/open`: o que entra pelo Python (convidado com a pasta dele, Connect,
-/// MCP, bastão) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o que não é do Rust
-/// volta 421 e o Python segue. A worktree criada volta junto: o registro do convidado a desfaz se falhar.
+/// `/__hangar_server/claude/<nome>/open`: o que entrou direto no Python (Connect, com o convidado e a
+/// pasta dele; o MCP, que roda lá) abre aqui pelo mesmo caminho. `{"request": …, "guest_root": …}`; o
+/// que não é do Rust volta 421 e o Python segue. A worktree criada volta junto: o registro do
+/// convidado no Python a desfaz se falhar.
 pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Ok(bytes) = to_bytes(req.into_body(), crate::session_write::BODY_LIMIT).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };

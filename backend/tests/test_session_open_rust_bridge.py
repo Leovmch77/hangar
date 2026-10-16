@@ -1,5 +1,6 @@
-"""A abertura de Claude com terminal é do Rust: o que entra pelo Python vai à ponte dele, e as rotas
-internas guardam aqui só o que é daqui (fila, `then`, diário, provedor lembrado)."""
+"""A abertura de Claude com terminal é do Rust: só o que entrou direto no Python (Connect, MCP) vai à
+ponte dele, e as rotas internas guardam aqui só o que é daqui (registro em espera, `then`, dono do
+convidado)."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -51,23 +52,27 @@ def _body(**kw):
     return api_mod.CreateBody(name="s1", cwd="/p", **kw)
 
 
-def test_what_comes_through_python_opens_in_rust_and_the_rest_stays_here(monkeypatch):
+def test_only_what_entered_python_directly_goes_to_the_rust_open(monkeypatch):
     from app import runtime_coordinator
+    from app.connect_port import CONNECT_PORT
     sent = []
 
-    def bridge(payload):
-        sent.append(payload)
+    def bridge(name, route, method, body, timeout):
+        sent.append((name, route, method, json.loads(body)))
+        payload = json.loads(body)
         return (200, json.dumps({"info": INFO, "undo": None}).encode()) if payload["request"].get("provider") == "claude" else None
-    monkeypatch.setattr(runtime_coordinator, "rust_session_open", bridge)
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", bridge)
     info = asyncio.run(api_mod._open_in_rust(_body(provider="claude", headless=False), None))
     assert (info.name, info.provider, info.owner) == ("s1", "claude", None)
     # Ausente continua ausente: o Rust decide o provedor padrão.
-    assert sent[0] == {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest_root": None}
+    assert sent[0] == ("s1", "open", "POST", {"request": {"name": "s1", "cwd": "/p", "provider": "claude", "headless": False}, "guest_root": None})
     assert asyncio.run(api_mod._open_in_rust(_body(provider="codex"), None)) is None
-    declined = SimpleNamespace(headers={"x-hangar-open": "python"})
-    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), declined)) is None
-    assert len(sent) == 2, "o que o Rust já olhou não volta à ponte"
-    monkeypatch.setattr(runtime_coordinator, "rust_session_open", lambda payload: (
+    connect = SimpleNamespace(scope={"server": ("127.0.0.1", CONNECT_PORT)})
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), connect)) is not None
+    upstream = SimpleNamespace(scope={"server": ("127.0.0.1", 49152)})
+    assert asyncio.run(api_mod._open_in_rust(_body(provider="claude"), upstream)) is None
+    assert len(sent) == 3, "o que entrou pela 8765 o Rust já decidiu: não volta a ele"
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: (
         409, json.dumps({"detail": {"code": "erro_nome_em_uso", "params": {}, "msg": "ja existe uma sessao com esse nome"}}).encode()))
     with pytest.raises(HTTPException) as refused:
         asyncio.run(api_mod._open_in_rust(_body(provider="claude"), None))
@@ -79,8 +84,8 @@ def test_a_failed_guest_claim_undoes_the_worktree_this_open_created(monkeypatch,
     branch que esta abertura criou) sai junto, senão a nova tentativa daria 409 na branch."""
     from app import guest_users, runtime_coordinator
     undo = {"source": "/r/repo", "path": "/r/repo-feat-x", "branch": "feat/x", "branch_created": True}
-    monkeypatch.setattr(runtime_coordinator, "rust_session_open",
-                        lambda payload: (200, json.dumps({"info": INFO, "undo": undo}).encode()))
+    monkeypatch.setattr(runtime_coordinator, "rust_claude",
+                        lambda *args: (200, json.dumps({"info": INFO, "undo": undo}).encode()))
     killed, undone = [], []
 
     async def kill(name):

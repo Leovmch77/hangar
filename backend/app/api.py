@@ -2320,16 +2320,19 @@ def _create_error_code(e: ValueError) -> str:
 
 
 async def _open_in_rust(body: CreateBody, request: Request | None) -> CreatedSessionInfo | None:
-    """Claude com terminal abre no Rust. O dono pela 8765 já passou por lá (o Rust marca o que
-    devolveu); o que entra por aqui (convidado, Connect, MCP, bastão) vai à ponte, num sentido.
+    """Claude com terminal abre no Rust. O que entra pela 8765 ele decide antes de repassar; à ponte,
+    num sentido, só vai o que entrou direto aqui: o Connect (8768) e quem cria por dentro (o bastão
+    pelo Connect e o MCP, que roda aqui e faz a volta Rust → Python → Rust até ir ao Rust na Task 12).
     `None`: o pedido não é do Rust e segue aqui."""
     from app import runtime_coordinator
-    if request is not None and request.headers.get("x-hangar-open") == "python":
+    port = (request.scope.get("server") or (None, None))[1] if request is not None else None
+    if request is not None and (port != CONNECT_PORT or port == settings.port):
         return None
     guest = guest_users.current.get()
-    payload = {"request": body.model_dump(mode="json", exclude_unset=True),
-               "guest_root": str(guest.root) if guest is not None else None}
-    answer = await asyncio.to_thread(runtime_coordinator.rust_session_open, payload)
+    payload = json.dumps({"request": body.model_dump(mode="json", exclude_unset=True),
+                          "guest_root": str(guest.root) if guest is not None else None}).encode()
+    # O prazo da criação, que prepara conta e worktree.
+    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, body.name, "open", "POST", payload, 180)
     if answer is None:
         return None
     status, raw = answer
