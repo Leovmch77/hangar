@@ -1,9 +1,36 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ReactNode } from 'react';
-import { createRoot } from 'react-dom/client';
-import { expect, it, vi } from 'vitest';
+import { act, createElement, createRef, useEffect, useImperativeHandle, type ReactNode, type Ref } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { DrawerLayoutMethods, DrawerLayoutProps } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 
-const drawer = vi.hoisted(() => ({ progress: { value: 0 }, reactions: [] as (() => void)[] }));
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const route = vi.hoisted(() => ({ focused: true, back: vi.fn(), dismissTo: vi.fn() }));
+const platform = vi.hoisted(() => ({ OS: 'android' as 'android' | 'ios' }));
+const nativeBack = vi.hoisted(() => ({
+  listeners: new Set<() => boolean>(),
+  exitApp: vi.fn(),
+  press() {
+    const handled = [...this.listeners].reverse().some((listener) => listener());
+    if (!handled) this.exitApp();
+    return handled;
+  },
+}));
+const drawer = vi.hoisted(() => ({ progress: { value: 0 }, reactions: [] as (() => void)[], openDrawer: vi.fn(), closeDrawer: vi.fn() }));
+vi.mock('expo-router', () => ({
+  useFocusEffect: (effect: () => void | (() => void)) => useEffect(() => route.focused ? effect() : undefined, [effect, route.focused]),
+}));
+vi.mock('react-native', async (original) => ({
+  ...await original<typeof import('react-native')>(),
+  Platform: { get OS() { return platform.OS; } },
+  BackHandler: {
+    addEventListener: (event: string, listener: () => boolean) => {
+      if (event === 'hardwareBackPress') nativeBack.listeners.add(listener);
+      return { remove: () => { nativeBack.listeners.delete(listener); } };
+    },
+    exitApp: nativeBack.exitApp,
+  },
+}));
 vi.mock('react-native-reanimated', async (original) => {
   const { useEffect, useRef } = await import('react');
   return {
@@ -20,9 +47,23 @@ vi.mock('react-native-reanimated', async (original) => {
   };
 });
 vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
-  default: ({ renderNavigationView, children }: {
-    renderNavigationView: (p: { value: number }) => ReactNode; children: (p: { value: number }) => ReactNode;
-  }) => createElement('div', null, renderNavigationView(drawer.progress), children(drawer.progress)),
+  default: ({ ref, renderNavigationView, children, onDrawerOpen, onDrawerClose }: DrawerLayoutProps & { ref?: Ref<DrawerLayoutMethods> }) => {
+    drawer.openDrawer.mockImplementation(() => {
+      drawer.progress.value = 1;
+      drawer.reactions.forEach((r) => r());
+      onDrawerOpen?.();
+    });
+    drawer.closeDrawer.mockImplementation(() => {
+      drawer.progress.value = 0;
+      drawer.reactions.forEach((r) => r());
+      onDrawerClose?.();
+    });
+    useImperativeHandle(ref, () => ({ openDrawer: drawer.openDrawer, closeDrawer: drawer.closeDrawer }), []);
+    return createElement('div', null,
+      createElement('button', { 'aria-label': 'gesto-abrir', onClick: () => { drawer.progress.value = 1; drawer.reactions.forEach((r) => r()); onDrawerOpen?.(); } }),
+      createElement('button', { 'aria-label': 'gesto-fechar', onClick: () => { drawer.progress.value = 0; drawer.reactions.forEach((r) => r()); onDrawerClose?.(); } }),
+      renderNavigationView(drawer.progress), typeof children === 'function' ? children(drawer.progress) : children);
+  },
   DrawerType: {}, DrawerKeyboardDismissMode: {}, DrawerLockMode: { UNLOCKED: 0, LOCKED_CLOSED: 1 },
 }));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: ({ children }: { children: ReactNode }) => children }));
@@ -33,7 +74,120 @@ vi.mock('./SessionList', async () => {
   return { SessionList: () => createElement('span', { 'data-testid': 'list', 'data-paused': String(useContext(WorkingMarkPaused)) }) };
 });
 
+import { BackHandler } from 'react-native';
 import { drawerEdgeSlop, SessionsDrawer, shouldOpenDrawer } from './SessionsDrawer';
+
+const roots = new Set<Root>();
+beforeEach(() => {
+  vi.clearAllMocks();
+  route.focused = true;
+  platform.OS = 'android';
+  nativeBack.listeners.clear();
+  drawer.progress.value = 0;
+  drawer.reactions = [];
+});
+afterEach(async () => {
+  for (const root of roots) await act(async () => root.unmount());
+  roots.clear();
+});
+
+it.each(['home', 'chat'] as const)('Back fecha só a gaveta de %s; o segundo Back segue a navegação normal', async (screen) => {
+  BackHandler.addEventListener('hardwareBackPress', () => {
+    if (screen === 'home') return false;
+    route.back();
+    return true;
+  });
+  const ref = createRef<DrawerLayoutMethods>();
+  const onClose = vi.fn(() => screen === 'home' ? ref.current?.closeDrawer() : route.dismissTo('/'));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  roots.add(root);
+  await act(async () => root.render(createElement(SessionsDrawer, { ref, onClose, onOpenServers: () => {}, children: 'tela' })));
+  await act(async () => ref.current!.openDrawer());
+  expect(container.querySelector('[data-testid="glass"]')).not.toBeNull();
+
+  await act(async () => { nativeBack.press(); });
+  expect(drawer.closeDrawer).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[data-testid="glass"]')).toBeNull();
+  expect(onClose).not.toHaveBeenCalled();
+  expect(route.dismissTo).not.toHaveBeenCalled();
+  expect(route.back).not.toHaveBeenCalled();
+  expect(nativeBack.exitApp).not.toHaveBeenCalled();
+
+  await act(async () => { nativeBack.press(); });
+  expect(drawer.closeDrawer).toHaveBeenCalledTimes(1);
+  expect(onClose).not.toHaveBeenCalled();
+  expect(route.back).toHaveBeenCalledTimes(screen === 'chat' ? 1 : 0);
+  expect(nativeBack.exitApp).toHaveBeenCalledTimes(screen === 'home' ? 1 : 0);
+});
+
+it('Back respeita foco e limpa a interceptação ao perder foco e desmontar', async () => {
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  roots.add(root);
+  const onClose = vi.fn();
+  const render = () => act(async () => root.render(createElement(SessionsDrawer, { onClose, onOpenServers: () => {}, children: 'tela' })));
+  await render();
+  expect(nativeBack.listeners.size).toBe(0);
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="gesto-abrir"]')!.click());
+  expect(nativeBack.listeners.size).toBe(1);
+
+  route.focused = false;
+  await render();
+  expect(nativeBack.listeners.size).toBe(0);
+  await act(async () => { expect(nativeBack.press()).toBe(false); });
+  expect(drawer.closeDrawer).not.toHaveBeenCalled();
+  expect(container.querySelector('[data-testid="glass"]')).not.toBeNull();
+
+  route.focused = true;
+  await render();
+  expect(nativeBack.listeners.size).toBe(1);
+  await act(async () => { expect(nativeBack.press()).toBe(true); });
+  expect(drawer.closeDrawer).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[data-testid="glass"]')).toBeNull();
+
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="gesto-abrir"]')!.click());
+  expect(nativeBack.listeners.size).toBe(1);
+  await act(async () => root.unmount());
+  roots.delete(root);
+  expect(nativeBack.listeners.size).toBe(0);
+  await act(async () => { expect(nativeBack.press()).toBe(false); });
+  expect(drawer.closeDrawer).toHaveBeenCalledTimes(1);
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it('Back após fechar por gesto segue normal sem chamar onClose', async () => {
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  roots.add(root);
+  const onClose = vi.fn();
+  await act(async () => root.render(createElement(SessionsDrawer, { onClose, onOpenServers: () => {}, children: 'tela' })));
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="gesto-abrir"]')!.click());
+  expect(nativeBack.listeners.size).toBe(1);
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="gesto-fechar"]')!.click());
+  expect(nativeBack.listeners.size).toBe(0);
+  expect(container.querySelector('[data-testid="glass"]')).toBeNull();
+  await act(async () => { expect(nativeBack.press()).toBe(false); });
+  expect(nativeBack.exitApp).toHaveBeenCalledTimes(1);
+  expect(drawer.closeDrawer).not.toHaveBeenCalled();
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it('iOS não intercepta Back com a gaveta aberta', async () => {
+  platform.OS = 'ios';
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  roots.add(root);
+  const ref = createRef<DrawerLayoutMethods>();
+  const onClose = vi.fn();
+  await act(async () => root.render(createElement(SessionsDrawer, { ref, onClose, onOpenServers: () => {}, children: 'tela' })));
+  await act(async () => ref.current!.openDrawer());
+  expect(nativeBack.listeners.size).toBe(0);
+  await act(async () => { expect(nativeBack.press()).toBe(false); });
+  expect(container.querySelector('[data-testid="glass"]')).not.toBeNull();
+  expect(drawer.closeDrawer).not.toHaveBeenCalled();
+  expect(onClose).not.toHaveBeenCalled();
+});
 
 it('vidro só com a gaveta aberta; a lista nasce na primeira abertura e fica, com as marcas paradas fechada', async () => {
   const container = document.createElement('div');

@@ -1,5 +1,6 @@
-import { useContext, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
-import { useWindowDimensions, View } from 'react-native';
+import { useCallback, useContext, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
+import { BackHandler, Platform, useWindowDimensions, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
 import Animated, { interpolate, useAnimatedReaction, useAnimatedStyle, useReducedMotion, type SharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
@@ -29,6 +30,15 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onNewConversation, onO
 }) {
   const { width } = useWindowDimensions();
   const inner = useRef<DrawerLayoutMethods | null>(null);
+  const [open, setOpen] = useState(false);
+  useFocusEffect(useCallback(() => {
+    if (Platform.OS !== 'android' || !open) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      inner.current?.closeDrawer();
+      return true;
+    });
+    return () => sub.remove();
+  }, [open]));
   const setRef = (r: DrawerLayoutMethods | null) => {
     inner.current = r;
     if (typeof ref === 'function') ref(r);
@@ -48,6 +58,8 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onNewConversation, onO
   return (
     <ReanimatedDrawerLayout
       ref={setRef}
+      onDrawerOpen={() => setOpen(true)}
+      onDrawerClose={() => setOpen(false)}
       drawerType={DrawerType.FRONT}
       drawerWidth={Math.min(width * 0.85, 360)}
       edgeWidth={EDGE_WIDTH}
