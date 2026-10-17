@@ -574,7 +574,7 @@ fn waiting_index(state:&State,entry:&str)->Result<usize,&'static str> {
 
 /// As que esperam, na ordem de entrega, com o mesmo corte de idade do `Claim`: linha de vida anterior que a
 /// drenagem nunca levaria não segura comando nem Orientar.
-pub(crate) fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
+pub fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
     state.rows.iter().filter(|row|current(row,min_ts) && waiting_row(state,row)).map(|row|row_id(row).to_owned()).collect()
 }
 

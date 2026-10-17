@@ -963,32 +963,6 @@ impl RuntimeRegistry {
         }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
     }
 
-    /// A entrada `entry` da fila da sessão `key` já foi entregue (leitura do arquivo, sem a trava).
-    pub async fn queue_entry_delivered(&self,key:&str,entry:&str) -> Result<bool,RuntimeError> {
-        let (state,_)=super::codex_terminal::queue_files(&self.codex_environment().claude_base.join(".hangar-queue"),key);
-        let entry=entry.to_owned();
-        tokio::task::spawn_blocking(move||{
-            let raw=super::queue::read_replaced(&state).map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
-            let value:Value=serde_json::from_slice(&raw).map_err(|_|refused("queue_io","fila da sessão ilegível"))?;
-            Ok(value["rows"].as_array().into_iter().flatten().any(|row|row["id"]==entry.as_str() && row["delivered"]==true))
-        }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
-    }
-
-    /// Tira a entrada `entry` da fila da sessão `key` direto no arquivo, para a sessão sem ator aberto.
-    pub async fn cancel_queued(&self,key:&str,entry:&str) -> Result<(),RuntimeError> {
-        let queue=self.codex_environment().claude_base.join(".hangar-queue");
-        let (state_path,lease_path)=super::codex_terminal::queue_files(&queue,key);
-        let (key,entry)=(key.to_owned(),entry.to_owned());
-        tokio::task::spawn_blocking(move||{
-            let _lease=super::queue::acquire_lease_within(&lease_path,Duration::from_secs(3)).map_err(|_|refused("queue_lease","a fila da sessão está presa"))?;
-            let mut store=super::queue::Store::open(&state_path,&queue,super::queue::State::new(&key,1,"",Vec::new())).map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
-            let generation=store.state().generation;
-            let clock=super::protocol::ClockSample {monotonic_s:0.0,epoch_s:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
-            store.exec(generation,&format!("limit-cancel:{entry}"),clock,super::queue::Action::Cancel { entry_id:entry })
-                .map(|_|()).map_err(|_|refused("queue_io","fila da sessão inacessível"))
-        }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
-    }
-
     async fn queue_generation(&self,key:&str) -> Result<u64,RuntimeError> {
         let (state,_)=super::codex_terminal::queue_files(&self.codex_environment().claude_base.join(".hangar-queue"),key);
         tokio::task::spawn_blocking(move||match super::queue::read_replaced(&state) {

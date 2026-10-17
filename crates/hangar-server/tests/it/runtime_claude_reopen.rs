@@ -148,6 +148,29 @@ async fn a_headless_session_parked_by_a_reboot_is_launched_by_the_next_write() {
     assert!(fx.args().is_empty(),"nenhum terminal nasceu");
 }
 
+/// A vida nova só entrega o que chegou depois dela: o recado de continuar vai pelo `/input` depois da
+/// reabertura, e não gravado antes dela.
+#[tokio::test]
+async fn after_a_reopen_the_new_life_delivers_what_arrives_after_it_not_before() {
+    use hangar_server::runtime::queue::Action;
+    let fx = fixture();
+    let key = "ef".repeat(16);
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    let registry = fx.registry().await;
+    registry.reopen_claude_session("s1",mode_switch(true),None).await.unwrap().map_err(|f|f.error.code).unwrap();
+    let target = registry.terminal_target("s1").await.unwrap().expect("a vida nova com terminal");
+    let append = |id:&str,ts:Option<f64>| Action::Append { text:id.into(),delivered:false,ts,pre_transcript:false,entry_id:Some(id.into()) };
+    registry.queue_action("s1","antes".into(),append("antes",Some(target.created - 5.0))).await.unwrap();
+    registry.queue_action("s1","depois".into(),append("depois",None)).await.unwrap();
+    let raw = std::fs::read(fx.queue.join(format!("runtime/{key}.json"))).unwrap();
+    let (state,_) = hangar_server::runtime::queue::State::load(&raw).unwrap();
+    assert_eq!(hangar_server::runtime::queue::waiting_ids(&state,target.created),vec!["depois".to_owned()]);
+    registry.close(&key,2).await.unwrap();
+    fx.finish();
+}
+
 #[tokio::test]
 async fn switching_to_the_mode_the_session_is_in_changes_nothing() {
     let fx = fixture();
