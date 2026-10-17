@@ -103,6 +103,7 @@ export const SF_SYMBOLS: Partial<Record<IconName, SFSymbol>> = {
   TriangleAlert: 'exclamationmark.triangle',
   Type: 'textformat',
   Upload: 'square.and.arrow.up',
+  UploadIcon: 'square.and.arrow.up',
   User: 'person',
   Users: 'person.2',
   Volume2: 'speaker.wave.2',

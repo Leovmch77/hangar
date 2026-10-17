@@ -55,7 +55,7 @@ function GitDiff({ server, name, target, kind, revision }: { server: Server; nam
   useEffect(() => {
     let active = true;
     setContent(null); setError('');
-    const read = deadline(() => kind === 'file' ? getFileDiff(name, target, server) : getCommitDiff(name, target, server));
+    const read = deadline<{ diff: string; truncated: boolean }>(() => kind === 'file' ? getFileDiff(name, target, server) : getCommitDiff(name, target, server));
     void read.then((value) => { if (active) setContent(value); }, (error) => { if (active) setError(reason(error)); });
     return () => { active = false; };
   }, [server, name, target, kind, revision, deadline]);
@@ -274,7 +274,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
         const response = check(await write(() => gitAction(name, action, server)));
         return response.output || (action === 'fetch' ? m.native_git_fetched() : action === 'pull' ? m.native_git_pulled() : m.mobile_git_status());
       }, undefined, action !== 'status')} />)}
-      <GitButton label={m.native_git_push()} icon="Upload" disabled={unavailable} onPress={() => request(async (write) => { check(await write(() => gitPush(name, server))); return m.native_git_pushed(); }, publishConfirmation(m.native_git_push()))} />
+      <GitButton label={m.native_git_push()} icon="UploadIcon" disabled={unavailable} onPress={() => request(async (write) => { check(await write(() => gitPush(name, server))); return m.native_git_pushed(); }, publishConfirmation(m.native_git_push()))} />
     </View>
     {repo && tab === 'history' ? <GitHistory server={server} name={name} revision={revision} /> : null}
     {repo && tab === 'branches' ? <>
@@ -318,7 +318,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
         <MultilineInput accessibilityLabel={m.native_git_message()} placeholder={m.native_git_message()} value={message} onChangeText={setMessage} editable={!busy} maxHeight={100} style={styles.input} />
         <View style={styles.bar}>
           <GitButton label={m.native_git_commit()} icon="GitCommitHorizontal" disabled={commitDisabled} onPress={() => commit(false)} />
-          <GitButton label={m.native_git_commit_push()} icon="Upload" disabled={commitDisabled} onPress={() => commit(true)} />
+          <GitButton label={m.native_git_commit_push()} icon="UploadIcon" disabled={commitDisabled} onPress={() => commit(true)} />
         </View>
       </View>}
     </> : null}
