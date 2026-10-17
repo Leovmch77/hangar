@@ -687,7 +687,7 @@ function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respost
   texto = oculto(texto);
   return [
     'Voce ajuda um laco que navega numa pagina web rumo a um objetivo. O classificador do laco (Jev) '
-      + 'nao achou um alvo confiavel para o proximo passo; escolha voce o proximo passo, um so.',
+      + 'nao achou um alvo confiavel para o proximo passo; escolha voce os proximos passos.',
     `Objetivo do usuario: ${objetivo}`,
     `URL atual: ${url}`,
     `Ja feito: ${feito.slice(-8).join('; ') || 'nada ainda'}`,
@@ -712,11 +712,38 @@ function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respost
     'Com uma lista suspensa aberta, a pagina esconde o resto do formulario e so as options aparecem: '
       + 'o passo e escolher uma delas com SELECT (a que serve ao objetivo ou a dados), nunca NONE por faltar campo.',
     'CLICK aciona botao, link, aba, caixa ou abre uma lista fechada; SELECT escolhe uma option ja listada; '
-      + 'TYPE_TEXT escolhe o campo onde digitar (o valor vem depois, de outro lugar). Sem passo seguro rumo ao objetivo, NONE.',
+      + 'TYPE_TEXT escolhe o campo onde digitar (o valor vem depois, de outro lugar).',
+    `De 1 a ${MAX_PASSOS_DO_AUXILIAR} passos em ordem; o segundo e o terceiro so quando ja estao nesta pagina e nao `
+      + 'dependem do que o anterior abre. Sem passo seguro rumo ao objetivo, a lista vai vazia.',
     'Responda APENAS com um objeto JSON, sem cercas de codigo: '
-      + '{"operacao": "CLICK"|"SELECT"|"TYPE_TEXT"|"NONE", "ref": "eN" ou null, "motivo": "frase curta"}',
+      + '{"acoes": [{"operacao": "CLICK"|"SELECT"|"TYPE_TEXT", "ref": "eN"}], "motivo": "frase curta"}',
   ].join('\n');
 }
+
+const MAX_PASSOS_DO_AUXILIAR = 3;
+
+/** O formato da resposta do auxiliar, imposto pela API (`response_format`) quando o provedor aceita. */
+const ESQUEMA_DO_AUXILIAR = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['acoes', 'motivo'],
+  properties: {
+    acoes: {
+      // Sem `maxItems`: a rota compatível da Anthropic recusa o esquema com ele; o corte é no código.
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['operacao', 'ref'],
+        properties: { operacao: { type: 'string', enum: [...OPERACOES_DO_AUXILIAR] }, ref: { type: 'string' } },
+      },
+    },
+    motivo: { type: 'string' },
+  },
+};
+
+const pedidoDeCorrecao = (pedido, bruto) => `${pedido}\n---\nSua resposta anterior nao era o objeto JSON pedido: `
+  + `${String(bruto).slice(0, 200)}\nResponda de novo so com o objeto JSON, nada mais.`;
 
 /**
  * A resposta do auxiliar no formato do `decidir`, ou `{ falhou }`. A trava de risco do clique é a
@@ -729,7 +756,25 @@ function decidirPeloAuxiliar(bruto, respostas, candidatos, limiares = LIMIARES) 
   } catch {
     return { falhou: `resposta fora de JSON: ${String(bruto).slice(0, 80)}` };
   }
-  if (!OPERACOES_DO_AUXILIAR.has(r.operacao)) return { falhou: `sem passo (${String(r.operacao)}: ${String(r.motivo ?? '').slice(0, 80)})` };
+  // Resposta no formato de um passo só (provedor que ignora o esquema) vale como lista de um.
+  const itens = Array.isArray(r.acoes) ? r.acoes : [r];
+  const primeiro = itens[0] ?? {};
+  if (!OPERACOES_DO_AUXILIAR.has(primeiro.operacao)) {
+    return { falhou: `sem passo (${String(primeiro.operacao ?? 'nenhum')}: ${String(r.motivo ?? '').slice(0, 80)})` };
+  }
+  const d = passoDoAuxiliar(primeiro, respostas, candidatos, limiares);
+  if (!d.operacao) return d;
+  // Os seguintes vão por nome e papel: as refs renumeram depois do primeiro passo.
+  const fila = itens.slice(1, MAX_PASSOS_DO_AUXILIAR).map((i) => {
+    const c = OPERACOES_DO_AUXILIAR.has(i?.operacao) && candidatos.find((x) => x.ref === i.ref);
+    return c ? { operacao: i.operacao, nome: c.nome, papel: c.papel } : null;
+  });
+  const valida = fila.indexOf(null);
+  return { ...d, fila: valida < 0 ? fila : fila.slice(0, valida) };
+}
+
+/** Um passo do auxiliar já com ref desta página: papel conferido e trava de risco do Jev. */
+function passoDoAuxiliar(r, respostas, candidatos, limiares = LIMIARES) {
   const escolhido = candidatos.find((c) => c.ref === r.ref);
   if (!escolhido) return { falhou: `escolheu ${String(r.ref)}, que nao esta na pagina` };
   // "Escolher" um botão (dia do calendário) é clicar nele: vira CLICK, e a trava de risco abaixo
@@ -929,9 +974,11 @@ class FalhaDoNavegador extends Error {
  * `escreverTexto(pedido)` com o LLM pequeno. `ajudar(pedido)`, opcional, devolve o texto do modelo
  * auxiliar que escolhe o passo quando o Jev fica sem alvo confiável.
  */
-async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, ajudar, permitirRisco = false, log = () => {}, feitoInicial = [] }) {
+async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, ajudar, permitirRisco = false, log = () => {}, registrar = () => {}, feitoInicial = [] }) {
   // Quem repetiu um roteiro e divergiu entrega os passos já feitos: o Jev continua dali.
   const feito = [...feitoInicial];
+  // Passos que o auxiliar propôs depois do primeiro: usados antes de chamá-lo de novo.
+  let filaDoAuxiliar = [];
   let anterior = null;
   let repetidas = 0;
   let esperouCarregar = false;
@@ -989,7 +1036,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
     // Texto escrito para um campo vale so na pagina em que foi pedido.
     // A recusa também: era de outro formulário, e levava os valores dele ao modelo de texto.
-    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); recusados = {}; recusaParaTexto = null; urlDosEscritos = url; }
+    if (url !== urlDosEscritos) { escritos.clear(); pulados.clear(); recusados = {}; recusaParaTexto = null; filaDoAuxiliar = []; urlDosEscritos = url; }
     // Campo deixado de lado sai dos alvos: oferecido de novo, o Jev voltava a mirar o mesmo filtro.
     const candidatos = parsarSnapshot(snapshot).filter((c) => !((PAPEIS_DE_TEXTO.has(c.papel) || c.papel === 'combobox') && pulados.has(c.nome)));
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
@@ -1142,18 +1189,48 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // Olhou de novo e o Jev segue sem alvo: o modelo auxiliar lê a página e propõe o passo. Falha
     // dele não muda a parada, mas vai junto no texto dela.
     if (ajudar && decisao.parar && / sem alvo confiavel/.test(decisao.parar)) {
-      let ajuda;
-      try {
-        const bruto = await ajudar(pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas,
-          recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot),
-          valores: anotacao.valores, vazios: anotacao.obrigatorios_vazios }));
-        ajuda = decidirPeloAuxiliar(bruto, respostas, candidatos);
-        if (permitirRisco && ajuda.parar?.startsWith('operacao arriscada')) {
-          log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${ajuda.parar}, via auxiliar)`);
-          ajuda = decidirPeloAuxiliar(bruto, respostas, candidatos, { ...LIMIARES, arriscado: Infinity, arriscadoAlvo: Infinity });
+      const liberado = (fazer, origem) => {
+        const d = fazer(LIMIARES);
+        if (!(permitirRisco && d.parar?.startsWith('operacao arriscada'))) return d;
+        log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${d.parar}, ${origem})`);
+        return fazer({ ...LIMIARES, arriscado: Infinity, arriscadoAlvo: Infinity });
+      };
+      let ajuda = null;
+      // O passo seguinte que o auxiliar já propôs vem antes de chamá-lo de novo, se o elemento
+      // continua na página (um só com o mesmo nome e papel); senão a fila inteira cai.
+      if (filaDoAuxiliar.length) {
+        const item = filaDoAuxiliar.shift();
+        const iguais = candidatos.filter((c) => c.nome === item.nome && c.papel === item.papel);
+        const d = iguais.length === 1
+          ? liberado((l) => passoDoAuxiliar({ operacao: item.operacao, ref: iguais[0].ref }, respostas, candidatos, l), 'via auxiliar, fila')
+          : { falhou: 'saiu da pagina' };
+        if (d.falhou) {
+          log(`jev-objetivo passo ${passo}: fila do auxiliar descartada (${item.operacao} ${item.papel} "${item.nome}": ${d.falhou})`);
+          registrar({ passo, tipo: 'fila', descartada: `${item.operacao} ${item.papel} "${item.nome}"`, falhou: d.falhou });
+          filaDoAuxiliar = [];
+        } else ajuda = d.operacao ? { ...d, via: 'auxiliar (fila)' } : d;
+      }
+      if (!ajuda) {
+        let primeira = null;
+        try {
+          const pedido = pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas,
+            recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot),
+            valores: anotacao.valores, vazios: anotacao.obrigatorios_vazios });
+          let bruto = await ajudar(pedido);
+          registrar({ passo, tipo: 'auxiliar', resposta: String(bruto).slice(0, 2000) });
+          ajuda = liberado((l) => decidirPeloAuxiliar(bruto, respostas, candidatos, l), 'via auxiliar');
+          // Uma segunda chance, mostrando o que veio: sem ela a corrida inteira acabava num texto solto.
+          if (ajuda.falhou?.startsWith('resposta fora de JSON')) {
+            primeira = ajuda.falhou;
+            bruto = await ajudar(pedidoDeCorrecao(pedido, bruto));
+            registrar({ passo, tipo: 'auxiliar', resposta: String(bruto).slice(0, 2000), correcao: true });
+            ajuda = liberado((l) => decidirPeloAuxiliar(bruto, respostas, candidatos, l), 'via auxiliar');
+          }
+          filaDoAuxiliar = ajuda.fila ?? [];
+        } catch (err) {
+          const motivo = String(err?.message ?? err).slice(0, 200);
+          ajuda = { falhou: primeira ? `${primeira}; na segunda tentativa: ${motivo}` : motivo };
         }
-      } catch (err) {
-        ajuda = { falhou: String(err?.message ?? err).slice(0, 200) };
       }
       decisao = ajuda.falhou ? { parar: `${decisao.parar}; auxiliar: ${ajuda.falhou}` } : ajuda;
       // Clicar num campo de digitar vazio não muda nada na página: o auxiliar repetia o clique na busca
@@ -1162,6 +1239,18 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (decisao.operacao === 'CLICK' && (PAPEIS_DE_TEXTO.has(decisao.escolhido.papel) || ehEditavel(decisao.escolhido, anotacao.editaveis))
         && (vazioNaPagina(decisao.escolhido) || buscasVazias.has(decisao.escolhido.nome))) decisao = { ...decisao, operacao: 'TYPE_TEXT' };
     }
+    // A fila vale só para passos seguidos do auxiliar: depois que o Jev agiu, a tela já não é a que
+    // o auxiliar planejou.
+    if (!String(decisao.via ?? '').startsWith('auxiliar')) filaDoAuxiliar = [];
+    registrar({
+      passo,
+      tipo: 'decisao',
+      url: [...segredos].reduce((t, v) => t.split(v).join('(oculto)'), String(url).replace(/^ok:\s*"?|"$/g, '')),
+      candidatos: candidatos.length,
+      jev: { operacao: distribuicao(respostas.operacao), concluido: respostas.concluido?.noul ?? null, arriscado: respostas.arriscado?.noul ?? null },
+      ...(decisao.parar ? { parar: decisao.parar }
+        : { operacao: decisao.operacao, alvo: decisao.escolhido ? rotulo(decisao.escolhido) : null, confianca: decisao.confianca ?? null, via: decisao.via ?? 'jev' }),
+    });
     if (decisao.parar) {
       return { feito, sucesso: decisao.sucesso === true, parou: decisao.sucesso ? decisao.parar : comRecusa(decisao.parar) };
     }
@@ -1421,5 +1510,5 @@ module.exports = {
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev, nomeComOrdem, avisoDeSucesso,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
-  SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda,
+  SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda, ESQUEMA_DO_AUXILIAR,
 };

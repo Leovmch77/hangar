@@ -3,7 +3,9 @@ use super::rpc::{Rpc, RpcError};
 use serde_json::{Value, json};
 use std::{ffi::OsString, path::{Path, PathBuf}, time::Duration};
 
-/// O `objetivo` do HCC desiste sozinho em 240 s; a folga cobre a subida do servidor e do agente.
+/// O HCC desiste sozinho em `OBJECTIVE_LIMIT_SECS` (sem o argumento, o padrão dele é horas); a folga
+/// do prazo cobre a subida do servidor e do agente.
+const OBJECTIVE_LIMIT_SECS: u64 = 240;
 const OBJECTIVE_DEADLINE: Duration = Duration::from_secs(300);
 pub const JEV_KEY: &str = "TYPESAFE_API_KEY";
 const JEV_ENDPOINT: &str = "JEV_ENDPOINT";
@@ -108,7 +110,7 @@ const PROGRESS_TOKEN: &str = "voice-computer";
 
 /// Com o token o HCC manda cada etapa em `notifications/progress`; sem ele, nada.
 pub fn objective_params(objective: &str) -> Value {
-    json!({"name": "objetivo", "arguments": {"texto": objective}, "_meta": {"progressToken": PROGRESS_TOKEN}})
+    json!({"name": "objetivo", "arguments": {"texto": objective, "limite_segundos": OBJECTIVE_LIMIT_SECS}, "_meta": {"progressToken": PROGRESS_TOKEN}})
 }
 
 /// A etapa legível (`message`) de uma notificação de progresso deste objetivo.
@@ -342,7 +344,7 @@ mod tests {
         let init = initialize_params();
         assert_eq!(init["protocolVersion"], json!("2025-06-18"));
         assert!(init["capabilities"].is_object() && init["clientInfo"]["name"].is_string());
-        assert_eq!(objective_params("abrir o Bloco de Notas"), json!({"name": "objetivo", "arguments": {"texto": "abrir o Bloco de Notas"},
+        assert_eq!(objective_params("abrir o Bloco de Notas"), json!({"name": "objetivo", "arguments": {"texto": "abrir o Bloco de Notas", "limite_segundos": 240},
             "_meta": {"progressToken": PROGRESS_TOKEN}}));
     }
 
