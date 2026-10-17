@@ -56,7 +56,7 @@ vi.mock('./CreateSessionSheet', () => ({
       React.createElement('button', { 'aria-label': 'open-mic', onClick: () => home?.onNewConversation(false) })),
 }));
 vi.mock('../../paraglide/messages', () => ({
-  native_sessions: () => 'Sessões', maquinas_este_aparelho: () => 'machines', config_modal_titulo: () => 'settings',
+  native_sessions: () => 'Sessões', maquinas_este_aparelho: () => 'machines', config_modal_titulo: () => 'settings', nav_custos: () => 'costs',
 }));
 
 import Index from '../../../app/index';
@@ -78,6 +78,19 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); });
 
 describe('inicial Expo', () => {
+  it('Custos abre pela barra em sessões e Nova conversa sem alterar a criação', async () => {
+    await act(async () => root.render(React.createElement(Index)));
+    const button = () => container.querySelector<HTMLButtonElement>('button[aria-label="costs"]');
+    expect(button()).not.toBeNull();
+    await act(async () => button()!.click());
+    expect(calls.push).toHaveBeenLastCalledWith('/costs');
+    expect(mode()).toBe('sessions');
+    await act(async () => click('open-text'));
+    await act(async () => button()!.click());
+    expect(calls.push).toHaveBeenLastCalledWith('/costs');
+    expect(mode()).toBe('newConversation');
+  });
+
   it('retorno explícito do chat abre criação na mesma inicial só ao ganhar foco e consome compose', async () => {
     calls.focused = false;
     calls.params = { compose: '1' };
