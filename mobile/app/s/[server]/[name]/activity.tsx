@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { formatElapsed, getSubagents, getWorkflow, getWorkflowAgent, getWorkflows } from '@hangar/core';
 import type { SubagentRun, WorkflowDetail, WorkflowAgentDetail, WorkflowSummary } from '@hangar/core';
@@ -11,18 +13,22 @@ import { TaskRows } from '../../../../src/features/activity/TaskRows';
 import { WorkflowList } from '../../../../src/features/activity/WorkflowList';
 import { WorkflowDetailView } from '../../../../src/features/activity/WorkflowDetailView';
 import { AgentDetailView } from '../../../../src/features/activity/AgentDetailView';
-import { SubagentLive } from '../../../../src/features/activity/SubagentLive';
+import { SubagentLive, subagentProblemText, subagentStatus } from '../../../../src/features/activity/SubagentLive';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
+import { HeaderBack, useGlassHeader } from '../../../../src/ui/glassHeader';
 import { Icon } from '../../../../src/ui/Icon';
 
 type Level = 'list' | 'workflow' | 'agent' | 'subagent';
 
 export default function ActivitySheet() {
   const { theme } = useUnistyles();
+  const header = useGlassHeader();
+  const headerHeight = useHeaderHeight();
   const params = useLocalSearchParams<{ server: string; name: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
+  const listKey = JSON.stringify([serverId, name]);
 
   const chat = chatStore(serverId, name);
   const events = chat.use((s) => s.events);
@@ -40,9 +46,14 @@ export default function ActivitySheet() {
 
   const [level, setLevel] = useState<Level>('list');
   const [runId, setRunId] = useState<string | null>(null);
-  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
-  const [subs, setSubs] = useState<SubagentRun[]>([]);
-  const [subError, setSubError] = useState('');
+  const [list, setList] = useState<{ key: string; workflows: WorkflowSummary[]; subs: SubagentRun[]; workflowLoading: boolean; subLoading: boolean; workflowError: string; subError: string }>({ key: listKey, workflows: [], subs: [], workflowLoading: true, subLoading: true, workflowError: '', subError: '' });
+  const currentList = list.key === listKey;
+  const workflows = currentList ? list.workflows : [];
+  const subs = currentList ? list.subs : [];
+  const listLoading = !currentList || list.workflowLoading || list.subLoading;
+  const workflowListError = currentList ? list.workflowError : '';
+  const subError = currentList ? list.subError : '';
+  const [olderOpen, setOlderOpen] = useState(false);
   const [wfLoading, setWfLoading] = useState(false);
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [agentDetail, setAgentDetail] = useState<WorkflowAgentDetail | null>(null);
@@ -58,27 +69,49 @@ export default function ActivitySheet() {
   const [subTitle, setSubTitle] = useState('');
   const genWf = useRef(0);
   const genAgent = useRef(0);
+  const genList = useRef(0);
+  const genSubs = useRef(0);
 
   const fetchAll = useCallback(async () => {
     // Sem o servidor da rota (lista ainda carregando ou máquina removida) não pergunta ao ativo.
     if (!server) return;
-    setWfLoading(true);
+    const generation = ++genList.current;
+    const subGeneration = ++genSubs.current;
+    setList({ key: listKey, workflows: [], subs: [], workflowLoading: true, subLoading: true, workflowError: '', subError: '' });
+    await Promise.all([
+      getWorkflows(name, server).then(
+        (workflows) => {
+          if (generation === genList.current) setList((current) => ({ ...current, workflows, workflowLoading: false }));
+        },
+        () => {
+          if (generation === genList.current) setList((current) => ({ ...current, workflowLoading: false, workflowError: m.atividade_erro_run() }));
+        },
+      ),
+      getSubagents(name, server).then(
+        (subs) => {
+          if (generation === genList.current && subGeneration === genSubs.current) setList((current) => ({ ...current, subs, subLoading: false }));
+        },
+        () => {
+          if (generation === genList.current && subGeneration === genSubs.current) setList((current) => ({ ...current, subLoading: false, subError: m.atividade_erro_subagentes() }));
+        },
+      ),
+    ]);
+  }, [listKey, name, server]);
+
+  const refreshSubs = useCallback(async () => {
+    if (!server) return;
+    const generation = genList.current;
+    const subGeneration = ++genSubs.current;
+    setList((current) => current.key === listKey ? { ...current, subLoading: true, subError: '' } : current);
     try {
-      const w = await getWorkflows(name, server);
-      setWorkflows(w);
+      const subs = await getSubagents(name, server);
+      if (generation !== genList.current || subGeneration !== genSubs.current) return;
+      setList((current) => ({ ...current, subs, subLoading: false, subError: '' }));
     } catch {
-      // workflow sem erro visível separado; segue vazio
-    } finally {
-      setWfLoading(false);
+      if (generation !== genList.current || subGeneration !== genSubs.current) return;
+      setList((current) => ({ ...current, subLoading: false, subError: m.atividade_erro_subagentes() }));
     }
-    try {
-      const s = await getSubagents(name, server);
-      setSubs(s);
-      setSubError('');
-    } catch {
-      setSubError(m.atividade_erro_subagentes());
-    }
-  }, [name, server]);
+  }, [listKey, name, server]);
 
   useEffect(() => {
     setLevel('list');
@@ -87,8 +120,18 @@ export default function ActivitySheet() {
     setAgentDetail(null);
     setSubAgentId(null);
     setSubTitle('');
+    setOlderOpen(false);
     void fetchAll();
+    return () => { genList.current += 1; };
   }, [fetchAll, name, serverId]);
+
+  const agentSignature = JSON.stringify(activity.agents.filter((agent) => agent.kind === 'agent').map((agent) => [agent.id, agent.running]));
+  const previousAgents = useRef({ key: listKey, signature: agentSignature });
+  useEffect(() => {
+    const previous = previousAgents.current;
+    previousAgents.current = { key: listKey, signature: agentSignature };
+    if (previous.key === listKey && previous.signature !== agentSignature) void refreshSubs();
+  }, [agentSignature, listKey, refreshSubs]);
 
   // helpers de matching (casamento por prompt, como no frontend)
   const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -104,23 +147,67 @@ export default function ActivitySheet() {
     [subs],
   );
 
-  const orfaos = subs.filter((s2) => !activity.agents.some((a: any) => matchSub(a.prompt)?.agentId === s2.agentId));
-  const runningAgents = activity.agents.filter((a: any) => a.kind === 'agent' && a.running);
+  function parentRunning(agentId: string): boolean | null {
+    const parent = activity.agents.find((a) => matchSub(a.prompt)?.agentId === agentId);
+    return parent ? parent.running : null;
+  }
+
+  const subRows = subs.map((run) => ({
+    run,
+    status: subagentStatus(run, parentRunning(run.agentId), agora * 1000),
+    at: Date.parse(run.endedAt ?? '') || Date.parse(run.updatedAt) || run.mtime * 1000,
+  }));
+  const runningAgents = activity.agents.filter((a) => {
+    if (a.kind !== 'agent' || !a.running) return false;
+    const sub = matchSub(a.prompt);
+    return !sub || subRows.find((row) => row.run.agentId === sub.agentId)?.status === 'running';
+  });
+  const shown = new Set(runningAgents.map((a) => matchSub(a.prompt)?.agentId));
+  const runningSubs = subRows.filter((row) => row.status === 'running' && !shown.has(row.run.agentId));
+  const uncertainSubs = subRows.filter((row) => row.status === 'silent' || row.status === 'unknown');
+  const finishedSubs = subRows.filter((row) => row.status === 'finished' || row.status === 'failed');
+  const midnight = new Date(agora * 1000).setHours(0, 0, 0, 0);
+  const olderSubs = finishedSubs.filter((row) => row.at < midnight);
+  const recentSubs = finishedSubs.filter((row) => !(row.at < midnight));
+  const runningCount = runningAgents.length + runningSubs.length;
   const shellsVivos = activity.shells.filter((s2) => s2.running);
   const ha = (desde: number) => m.atividade_shell_ha({ t: formatElapsed(agora - desde) });
-
-  // O subagente aberto ainda roda? No Claude quem sabe é o transcript do pai; null = só o disco o
-  // conhece (o próprio arquivo dele pode dizer, no Kimi/Pi).
-  const paiRodando = (() => {
-    if (!subAgentId) return null;
-    const pai = activity.agents.find((a) => matchSub(a.prompt)?.agentId === subAgentId);
-    return pai ? pai.running : null;
-  })();
+  const paiRodando = subAgentId ? parentRunning(subAgentId) : null;
 
   function tituloDoSub(s2: SubagentRun): string {
     const linhas = (s2.prompt ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
     const util = linhas.find((l) => !/^base directory for this skill:/i.test(l) && !l.startsWith('#'));
     return (util ?? linhas[0] ?? s2.agentId).slice(0, 90);
+  }
+
+  function renderSub({ run, status, at }: (typeof subRows)[number]) {
+    const ended = status === 'finished' || status === 'failed';
+    const date = new Date(at);
+    const clock = Number.isFinite(at) ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}` : null;
+    let endedLabel = '';
+    if (status === 'failed') {
+      endedLabel = clock ? m.atividade_parou({ h: clock }) : m.formato_tool_falhou();
+    } else if (status === 'finished') {
+      endedLabel = clock ? m.atividade_terminou({ h: clock }) : m.atividade_sub_concluido();
+    }
+    return (
+      <Pressable key={run.agentId} onPress={() => abrirDoDisco(run)} style={[styles.agentRow, styles.agentOpenable, ended && styles.concluido]} accessibilityRole="button">
+        <View style={styles.agentBody}>
+          <View style={styles.agentHead}>
+            <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>{tituloDoSub(run)}</Text>
+            {run.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{run.agentType}</Text> : null}
+          </View>
+          <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+            {ended ? `${endedLabel} · ` : ''}
+            {status === 'silent' ? `${m.atividade_sem_noticia({ t: formatElapsed(agora - at / 1000) })} · ` : ''}
+            {run.ilegivel ? m.atividade_sub_ilegivel() : run.problema ? '' : m.atividade_chamadas({ n: run.toolCalls })}
+            {!run.ilegivel && !run.problema && run.recent.length ? ` · ${run.recent[run.recent.length - 1]?.name ?? ''}` : ''}
+          </Text>
+          {run.problema ? <Text style={[styles.err, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{subagentProblemText(run.problema)}</Text> : null}
+        </View>
+        <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} />
+      </Pressable>
+    );
   }
 
   async function openWorkflow(rid: string) {
@@ -178,11 +265,12 @@ export default function ActivitySheet() {
     setLevel('subagent');
   }
 
-  function back() {
+  const back = useCallback(() => {
     if (level === 'subagent') {
       setSubAgentId(null);
       setSubTitle('');
       setLevel('list');
+      void refreshSubs();
       return;
     }
     if (level === 'agent') {
@@ -195,53 +283,72 @@ export default function ActivitySheet() {
       setDetail(null);
       setRunId(null);
     }
-  }
+  }, [level, refreshSubs]);
+
+  useFocusEffect(useCallback(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (level === 'list') return false;
+      back();
+      return true;
+    });
+    return () => sub.remove();
+  }, [back, level]));
 
   const headerTitle = level === 'list' ? m.ctx_atividade() : level === 'subagent' ? subTitle || m.atividade_subagente() : level === 'workflow' ? (detail?.name ?? m.atividade_workflow()) : (agentDetail?.label ?? m.atividade_agente());
   const countBadge = level === 'list' && activity.total > 0 ? `${activity.done}/${activity.total}` : null;
   const wfBadge = level === 'workflow' && detail ? detail.status : null;
+  const headerOptions = {
+    ...header,
+    headerShown: Platform.OS !== 'android',
+    title: headerTitle,
+    headerLeft: level === 'list' ? undefined : () => <HeaderBack onPress={back} />,
+    headerRight: countBadge ? () => <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : wfBadge ? () => (
+      <Text style={[styles.wfStatus, wfBadge === 'completed' ? { color: theme.tokens.status.success } : wfBadge === 'running' ? { color: theme.tokens.accent.base } : { color: theme.tokens.text.secondary }]}>{wfBadge}</Text>
+    ) : undefined,
+    sheetAllowedDetents: [0.92],
+    sheetGrabberVisible: true,
+    contentStyle: { backgroundColor: 'transparent' },
+  };
+
+  const androidHeader = Platform.OS === 'android' ? (
+    <View style={styles.header}>
+      {headerOptions.headerLeft?.()}
+      <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{headerTitle}</Text>
+      {headerOptions.headerRight?.()}
+    </View>
+  ) : null;
 
   if (!server) {
     return (
       <>
-        <Stack.Screen options={{ headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true, contentStyle: { backgroundColor: 'transparent' } }} />
-        <View style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
+        <Stack.Screen options={headerOptions} />
+        <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' ? 0 : headerHeight }]}>
+          {androidHeader}
           <Text style={[styles.error, { color: theme.tokens.status.error }]}>{m.compare_servidor_nao_encontrado()}</Text>
-        </View>
+        </SafeAreaView>
       </>
     );
   }
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true, contentStyle: { backgroundColor: 'transparent' } }} />
-      <View style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
-        <View style={[styles.header, { borderBottomColor: theme.tokens.border.subtle }]}>
-          {level !== 'list' ? (
-            <Pressable onPress={back} hitSlop={6} style={styles.headBtn} accessibilityLabel={m.comum_voltar()} accessibilityRole="button">
-              <Icon name="ChevronLeft" size={22} color={theme.tokens.text.secondary} />
-            </Pressable>
-          ) : null}
-          <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-            {headerTitle}
-          </Text>
-          {countBadge ? <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : null}
-          {wfBadge ? <Text style={[styles.wfStatus, wfBadge === 'completed' ? { color: theme.tokens.status.success } : wfBadge === 'running' ? { color: theme.tokens.accent.base } : { color: theme.tokens.text.secondary }]}>{wfBadge}</Text> : null}
-        </View>
-
+      <Stack.Screen options={headerOptions} />
+      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' || (level === 'list' && Platform.OS === 'ios') ? 0 : headerHeight }]}>
+        {androidHeader}
         {level === 'list' ? (
-          <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+          <ScrollView contentContainerStyle={styles.body} contentInsetAdjustmentBehavior="automatic" showsVerticalScrollIndicator={false}>
             {workflows.length > 0 ? <WorkflowList workflows={workflows} onSelect={openWorkflow} /> : null}
-            {wfLoading && workflows.length === 0 ? (
+            {listLoading ? (
               <View style={styles.center}>
                 <ActivityIndicator color={theme.tokens.text.muted} />
                 <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
               </View>
             ) : null}
 
-            {runningAgents.length > 0 ? (
+            {runningAgents.length > 0 || runningSubs.length > 0 ? (
               <View style={styles.section}>
-                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_rodando_agora()}</Text>
+                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_grupo_rodando({ n: runningCount })}</Text>
                 {runningAgents.map((a) => {
                   const sub = matchSub(a.prompt);
                   const isButton = !!sub;
@@ -265,45 +372,40 @@ export default function ActivitySheet() {
                         </View>
                         {sub ? (
                           <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-                            {m.atividade_chamadas({ n: sub.toolCalls })}
-                            {sub.recent.length ? ` · ${sub.recent[sub.recent.length - 1]?.name ?? ''}` : ''}
+                            {sub.ilegivel ? m.atividade_sub_ilegivel() : sub.problema ? '' : m.atividade_chamadas({ n: sub.toolCalls })}
+                            {!sub.ilegivel && !sub.problema && sub.recent.length ? ` · ${sub.recent[sub.recent.length - 1]?.name ?? ''}` : ''}
                           </Text>
                         ) : null}
+                        {sub?.problema ? <Text style={[styles.err, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{subagentProblemText(sub.problema)}</Text> : null}
                       </View>
-                      {sub ? <Text style={[styles.chevron, { color: theme.tokens.text.muted }]}>›</Text> : null}
+                      {sub ? <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} /> : null}
                     </Row>
                   );
                 })}
+                {runningSubs.map(renderSub)}
               </View>
             ) : null}
 
-            {orfaos.length > 0 ? (
+            {uncertainSubs.length > 0 ? (
               <View style={styles.section}>
                 <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_subagentes()}</Text>
-                {orfaos.map((s2) => (
-                  // Concluído recua em vez de sumir: o histórico explica o que já rodou.
-                  <Pressable key={s2.agentId} onPress={() => abrirDoDisco(s2)} style={[styles.agentRow, styles.agentOpenable, s2.finished && styles.concluido]} accessibilityRole="button">
-                    <View style={styles.agentBody}>
-                      <View style={styles.agentHead}>
-                        <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-                          {tituloDoSub(s2)}
-                        </Text>
-                        {s2.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{s2.agentType}</Text> : null}
-                      </View>
-                      <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-                        {/* Ilegível vem com tudo zerado: "0 chamadas" ali afirmaria que ele não fez nada. */}
-                        {s2.ilegivel ? m.atividade_sub_ilegivel() : (
-                          <>
-                            {s2.finished ? `${m.atividade_sub_concluido()} · ` : ''}
-                            {m.atividade_chamadas({ n: s2.toolCalls })}
-                            {s2.recent.length ? ` · ${s2.recent[s2.recent.length - 1]?.name ?? ''}` : ''}
-                          </>
-                        )}
-                      </Text>
-                    </View>
-                    <Text style={[styles.chevron, { color: theme.tokens.text.muted }]}>›</Text>
-                  </Pressable>
-                ))}
+                {uncertainSubs.map(renderSub)}
+              </View>
+            ) : null}
+
+            {finishedSubs.length > 0 ? (
+              <View style={styles.section}>
+                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_grupo_terminados({ n: finishedSubs.length })}</Text>
+                {recentSubs.map(renderSub)}
+                {olderSubs.length > 0 ? (
+                  <>
+                    <Pressable onPress={() => setOlderOpen((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: olderOpen }} style={styles.olderToggle}>
+                      <Icon name={olderOpen ? 'ChevronDown' : 'ChevronRight'} size={18} color={theme.tokens.text.muted} />
+                      <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_grupo_antigos({ n: olderSubs.length })}</Text>
+                    </Pressable>
+                    {olderOpen ? olderSubs.map(renderSub) : null}
+                  </>
+                ) : null}
               </View>
             ) : null}
 
@@ -352,8 +454,14 @@ export default function ActivitySheet() {
             ) : null}
 
             {activity.tasks.length > 0 ? <TaskRows tasks={activity.tasks} /> : null}
-            {subError ? <Text style={[styles.err, { color: theme.tokens.status.warning }]}>⚠ {subError}</Text> : null}
-            {workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && shellsVivos.length === 0 && processos.length === 0 && !subError ? <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.atividade_vazio()}</Text> : null}
+            {workflowListError ? <Text style={[styles.err, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{workflowListError}</Text> : null}
+            {subError ? <Text style={[styles.err, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{subError}</Text> : null}
+            {workflowListError || subError ? (
+              <Pressable onPress={() => void fetchAll()} style={styles.olderToggle} accessibilityRole="button">
+                <Text style={[styles.muted, { color: theme.tokens.accent.base }]}>{m.sync_retry()}</Text>
+              </Pressable>
+            ) : null}
+            {!listLoading && !workflowListError && !subError && workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && subs.length === 0 && shellsVivos.length === 0 && processos.length === 0 ? <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.atividade_vazio()}</Text> : null}
           </ScrollView>
         ) : level === 'workflow' ? (
           <WorkflowDetailView
@@ -371,33 +479,36 @@ export default function ActivitySheet() {
             onTentar={() => openAgent(agentAberto)}
           />
         ) : level === 'subagent' && subAgentId ? (
-          <SubagentLive sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
+          <View style={styles.subagentDetail}>
+            <SubagentLive key={`${serverId}::${name}::${subAgentId}`} server={server} sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
+          </View>
         ) : (
           <View style={styles.center}>
             <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.atividade_sem_transcript()}</Text>
           </View>
         )}
-      </View>
+      </SafeAreaView>
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3], borderBottomWidth: 1 },
-  headBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-  title: { flex: 1, fontSize: theme.base.text.base, fontWeight: '600', minWidth: 0 },
+  header: { flexDirection: 'row', alignItems: 'center', minHeight: 44, paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[2], gap: theme.base.space[2] },
+  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600' },
   count: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, fontVariant: ['tabular-nums'] },
   wfStatus: { fontSize: theme.base.text.xs, fontWeight: '600', paddingHorizontal: theme.base.space[2], paddingVertical: 2, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   body: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: theme.base.space[6] },
+  subagentDetail: { flex: 1, minHeight: 0, paddingHorizontal: theme.base.space[4] },
   section: { gap: theme.base.space[2] },
+  olderToggle: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minHeight: 44, minWidth: 44 },
   label: { fontSize: theme.base.text.xs, textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: '600' },
   center: { alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[4] },
   muted: { fontSize: theme.base.text.sm, textAlign: 'center' },
   empty: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[4] },
   err: { fontSize: theme.base.text.xs, marginTop: theme.base.space[2] },
   agentRow: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[2], paddingVertical: theme.base.space[1] },
-  agentOpenable: { paddingHorizontal: theme.base.space[1], marginHorizontal: -theme.base.space[1], borderRadius: theme.base.radius.sm },
+  agentOpenable: { minHeight: 44, paddingHorizontal: theme.base.space[1], marginHorizontal: -theme.base.space[1], borderRadius: theme.base.radius.sm },
   spin: { fontSize: theme.base.text.sm, marginTop: 2 },
   agentBody: { flex: 1, gap: 3, minWidth: 0 },
   agentHead: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
@@ -407,6 +518,5 @@ const styles = StyleSheet.create((theme) => ({
   agentNow: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs },
   shellCmd: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
   concluido: { opacity: 0.6 },
-  chevron: { fontSize: theme.base.text.base, lineHeight: theme.base.text.base },
   error: { fontSize: theme.base.text.sm, textAlign: 'center', padding: theme.base.space[4] },
 }));
