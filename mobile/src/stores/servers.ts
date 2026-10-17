@@ -3,6 +3,8 @@ import * as SecureStore from 'expo-secure-store';
 import { esquecerRota, mergeImportedMachines, reconcilePairEntries, registrarDiag } from '@hangar/core';
 import type { ExternalPair, InviteRedeemResult, LanInfo, PairAttach, Server } from '@hangar/core';
 import * as m from '../paraglide/messages';
+import { readIdentifier } from '../features/machines/api';
+import { toast } from '../ui/Toast';
 
 const KEY = 'cp_servers_v1';
 
@@ -24,14 +26,6 @@ function isPersisted(value: unknown): value is Persisted {
       return typeof lan.url === 'string' && typeof lan.id === 'string';
     });
 }
-
-const hostLabel = (u: string) => {
-  try {
-    return new URL(u).hostname.split('.')[0] || u;
-  } catch {
-    return u;
-  }
-};
 
 // Por que estes dois avisos existem: as duas formas de perder um servidor eram mudas. A gravação
 // no keystore podia falhar (keystore invalidado depois de restaurar backup, disco cheio) com a
@@ -80,6 +74,7 @@ export const useServers = create<ServersState>((set, get) => {
   let pending: { update: (p: Persisted) => Persisted; userAction: boolean }[] = [];
   let warnings: AvisoServidores[] = [];
   const ids = new Map<string, string>();
+  const naming = new Map<string, AbortController>();
   const resolveId = (id: string) => ids.get(id) ?? id;
 
   function warn(aviso: AvisoServidores) {
@@ -170,6 +165,27 @@ export const useServers = create<ServersState>((set, get) => {
     return reading;
   }
 
+  async function resolveLabel(server: Server) {
+    const controller = new AbortController();
+    naming.set(server.id, controller);
+    const isCurrent = () => !controller.signal.aborted && get().vaultReadable
+      && get().servers.some((s) => s.id === server.id && s.baseUrl === server.baseUrl && s.token === server.token && s.label === server.label);
+    try {
+      if (reading) await reading;
+      // A leitura pode descobrir um cadastro salvo, que conserva seu apelido.
+      if (!isCurrent() || get().servers.find((s) => s.id === server.id) !== server) return;
+      const identity = await readIdentifier(server, controller.signal);
+      if (reading) await reading;
+      if (!isCurrent()) return;
+      if (!identity.identificador) throw new Error(m.mobile_machines_invalid_response());
+      change((p) => ({ ...p, servers: p.servers.map((s) => s.id === server.id ? { ...s, label: identity.identificador } : s) }), false);
+    } catch (error) {
+      if (isCurrent()) toast.aviso(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (naming.get(server.id) === controller) naming.delete(server.id);
+    }
+  }
+
   return ({
   servers: [],
   activeId: null,
@@ -181,9 +197,10 @@ export const useServers = create<ServersState>((set, get) => {
     const base = baseUrl.replace(/\/+$/, '');
     // Só máquina própria troca o token: a entrada do par no mesmo endereço tem o token de convidado.
     const existing = get().servers.find((s) => s.baseUrl === base && !s.invite);
+    if (existing) naming.get(existing.id)?.abort();
     const s: Server = existing
       ? { ...existing, token }
-      : { id: `s_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, label: label ?? hostLabel(base), baseUrl: base, token };
+      : { id: `s_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, label: label ?? m.native_settings_group_server(), baseUrl: base, token };
     change((p) => {
       const saved = p.servers.find((x) => x.baseUrl === base && !x.invite);
       const server = saved ? { ...saved, token } : s;
@@ -193,6 +210,7 @@ export const useServers = create<ServersState>((set, get) => {
         activeId: server.id,
       };
     });
+    if (!existing && label === undefined) void resolveLabel(s);
     return s;
   },
   appendImported(servers) {
@@ -231,6 +249,7 @@ export const useServers = create<ServersState>((set, get) => {
     return saved;
   },
   remove(id) {
+    naming.get(resolveId(id))?.abort();
     change((p) => {
       const target = resolveId(id);
       const servers = p.servers.filter((s) => s.id !== target);
@@ -245,6 +264,7 @@ export const useServers = create<ServersState>((set, get) => {
     if (baseUrl !== undefined && servers.some((s) => s.id !== target && !s.invite && s.baseUrl.replace(/\/+$/, '') === baseUrl)) {
       throw new Error('machine_address_duplicate');
     }
+    if (patch.label !== undefined || patch.baseUrl !== undefined) naming.get(target)?.abort();
     change((p) => ({
       ...p,
       servers: p.servers.map((s) => {

@@ -2,8 +2,11 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 
 const vault = vi.hoisted(() => new Map<string, string>());
 const diag = vi.hoisted(() => vi.fn());
+const probe = vi.hoisted(() => vi.fn());
+const warning = vi.hoisted(() => vi.fn());
 const realCore = await vi.importActual<typeof import('@hangar/core')>('@hangar/core');
-vi.mock('@hangar/core', () => ({ ...realCore, registrarDiag: diag }));
+vi.mock('@hangar/core', () => ({ ...realCore, registrarDiag: diag, probeServerResponse: probe }));
+vi.mock('sonner-native', () => ({ toast: warning, Toaster: () => null }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(),
   setItemAsync: vi.fn(),
@@ -18,6 +21,8 @@ beforeEach(async () => {
   vi.resetModules();
   vault.clear();
   diag.mockClear();
+  probe.mockReset().mockImplementation(async () => new Response(JSON.stringify({ identificador: '', lan_url: '' })));
+  warning.mockClear();
   vi.mocked(SecureStore.getItemAsync).mockReset().mockImplementation(async (k) => vault.get(k) ?? null);
   vi.mocked(SecureStore.setItemAsync).mockReset().mockImplementation(async (k, v) => { vault.set(k, v); });
   vi.mocked(SecureStore.deleteItemAsync).mockReset().mockImplementation(async (k) => { vault.delete(k); });
@@ -459,6 +464,133 @@ describe('diário seguro do cofre', () => {
     expect(JSON.stringify(diag.mock.calls)).not.toContain(secret);
     expect(JSON.stringify(diag.mock.calls)).not.toContain(SAVED_SERVER.baseUrl);
     expect(useServers.getState().aviso).toEqual({ tipo: stage === 'write' ? 'persistencia' : 'vault_unread' });
+  });
+});
+
+describe('label no add', () => {
+  test('sem nome explícito usa rótulo neutro e persiste o identificador da máquina', async () => {
+    await useServers.getState().load();
+    const response = deferred<Response>();
+    probe.mockReturnValueOnce(response.promise);
+    const m = await import('../paraglide/messages');
+
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+
+    expect(added.label).toBe(m.native_settings_group_server());
+    expect(useServers.getState().active()?.label).toBe(m.native_settings_group_server());
+    await settle();
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe(m.native_settings_group_server());
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: added.baseUrl, token: 'abc' }), '/api/peers/identificador', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    response.resolve(new Response(JSON.stringify({ identificador: 'machine-home', lan_url: '' })));
+    await settle();
+    expect(useServers.getState().active()?.label).toBe('machine-home');
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe('machine-home');
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  test('conserva o nome explícito em memória e no cofre', async () => {
+    await useServers.getState().load();
+
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc', label: 'Minha máquina' });
+
+    expect(added.label).toBe('Minha máquina');
+    expect(useServers.getState().active()?.label).toBe('Minha máquina');
+    await settle();
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe('Minha máquina');
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  test.each(['outro nome', 'mesmo rótulo neutro'])('resposta atrasada não substitui edição manual: %s', async (edit) => {
+    await useServers.getState().load();
+    const response = deferred<Response>();
+    probe.mockReturnValueOnce(response.promise);
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+    await settle();
+    const label = edit === 'outro nome' ? 'Meu notebook' : added.label;
+
+    useServers.getState().update(added.id, { label });
+    response.resolve(new Response(JSON.stringify({ identificador: 'stale-machine', lan_url: '' })));
+    await settle();
+
+    expect(useServers.getState().active()?.label).toBe(label);
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe(label);
+  });
+
+  test.each(['endereço', 'token', 'remover e recadastrar'])('resposta atrasada não alcança cadastro alterado: %s', async (edit) => {
+    await useServers.getState().load();
+    const response = deferred<Response>();
+    probe.mockReturnValueOnce(response.promise);
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+    await settle();
+
+    if (edit === 'endereço') useServers.getState().update(added.id, { baseUrl: 'http://10.0.2.3:8765' });
+    if (edit === 'token') useServers.getState().add({ baseUrl: added.baseUrl, token: 'changed' });
+    if (edit === 'remover e recadastrar') {
+      useServers.getState().remove(added.id);
+      useServers.getState().add({ baseUrl: added.baseUrl, token: 'new', label: 'Outra máquina' });
+    }
+    const expected = structuredClone(useServers.getState().servers);
+    response.resolve(new Response(JSON.stringify({ identificador: 'stale-machine', lan_url: '' })));
+    await settle();
+
+    expect(useServers.getState().servers).toEqual(expected);
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers).toEqual(expected);
+  });
+
+  test('resposta durante releitura aguarda o cofre antes de persistir o identificador', async () => {
+    await useServers.getState().load();
+    const response = deferred<Response>();
+    probe.mockReturnValueOnce(response.promise);
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+    await settle();
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+    const loading = useServers.getState().load();
+
+    response.resolve(new Response(JSON.stringify({ identificador: 'machine-home', lan_url: '' })));
+    await settle();
+    expect(useServers.getState().active()?.label).toBe(added.label);
+    read.resolve(JSON.stringify({ servers: [added], activeId: added.id }));
+    await loading;
+    await settle();
+
+    expect(useServers.getState().active()?.label).toBe('machine-home');
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe('machine-home');
+  });
+
+  test.each(['resposta vazia', 'HTTP recusado', 'rede indisponível'])('identificação falha mantém rótulo neutro e mostra a causa: %s', async (failure) => {
+    await useServers.getState().load();
+    const m = await import('../paraglide/messages');
+    if (failure === 'HTTP recusado') probe.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'identity-refused' }), { status: 503 }));
+    if (failure === 'rede indisponível') probe.mockRejectedValueOnce(new Error('identity-offline'));
+
+    useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+    await settle();
+
+    expect(useServers.getState().active()?.label).toBe(m.native_settings_group_server());
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe(m.native_settings_group_server());
+    const cause = failure === 'resposta vazia' ? m.mobile_machines_invalid_response()
+      : failure === 'HTTP recusado' ? '503: identity-refused' : 'identity-offline';
+    expect(warning).toHaveBeenCalledExactlyOnceWith(cause, expect.any(Object));
+  });
+
+  test('cadastro salvo descoberto durante load conserva apelido e não consulta nome', async () => {
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+    const loading = useServers.getState().load();
+    const saved = { ...SAVED_SERVER, baseUrl: 'http://10.0.2.2:8765', label: '10' };
+    useServers.getState().add({ baseUrl: saved.baseUrl, token: 'renewed' });
+
+    read.resolve(JSON.stringify({ servers: [saved], activeId: saved.id }));
+    await loading;
+    await settle();
+    useServers.getState().add({ baseUrl: saved.baseUrl, token: 'latest' });
+    await settle();
+
+    const expected = { ...saved, token: 'latest' };
+    expect(useServers.getState().servers).toEqual([expected]);
+    expect(JSON.parse(vault.get(VAULT_KEY)!).servers).toEqual([expected]);
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 
