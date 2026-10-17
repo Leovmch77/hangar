@@ -246,15 +246,20 @@ impl Switcher {
                 // O limite vence a conta escolhida pela pessoa, e isso fica registrado.
                 if *explicit { report("explicit_account","limite de uso: a conta escolhida pela pessoa foi trocada"); }
                 // "Recebeu o recado" só depois de entregue: antes disso é recado na fila.
-                let mut delivered = false;
+                let (mut delivered,mut cause) = (false,None);
                 for _ in 0..CONTINUE_CHECKS {
-                    if host.delivered(key,entry).await.unwrap_or(false) { delivered = true; break; }
+                    match host.delivered(key,entry).await {
+                        Ok(true) => { delivered = true; break; }
+                        Ok(false) => {}
+                        Err(code) => cause = Some(code),
+                    }
                     host.wait_delivery().await;
                 }
                 if delivered { report("limit_switch_continue_delivered","limite de uso: a vida nova recebeu o recado para continuar"); }
                 else {
                     tracing::warn!(session=%hit.name,"limite de uso: o recado de continuar segue na fila depois da troca");
-                    report("limit_switch_continue_pending","limite de uso: o recado de continuar não foi entregue à vida nova; a fila é drenada de novo");
+                    let code = cause.map_or_else(||"limit_switch_continue_pending".to_owned(),|cause|format!("limit_switch_continue_pending:{cause}"));
+                    report(&code,"limite de uso: o recado de continuar não foi entregue à vida nova; a fila é drenada de novo");
                     host.drain(&hit.name).await;
                 }
             }

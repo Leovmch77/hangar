@@ -212,10 +212,11 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
     }
 }
 
-/// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria).
+/// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria). O
+/// pedido, não o resultado: o encerramento pode falhar depois, e a sessão que some sem ele vai como `sessao.sumiu`.
 fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
     let header = |key: &str| headers.get(key).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(80).collect::<String>());
-    json!({"evento": "sessao.fechada", "nivel": "ok", "sessao": name, "codigo": "session_closed_by_owner",
+    json!({"evento": "sessao.fechamento_pedido", "nivel": "ok", "sessao": name, "codigo": "session_close_requested_by_owner",
         "cliente": header("user-agent"), "req": header("x-hangar-req"), "origem": header("x-forwarded-for").unwrap_or_else(|| peer.ip().to_string())})
 }
 
@@ -227,7 +228,7 @@ mod close_tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("user-agent", "curl/8.10".parse().unwrap());
         let line = super::close_line("s1", &headers, "127.0.0.1:5000".parse().unwrap());
-        assert_eq!((line["evento"].as_str(), line["sessao"].as_str(), line["codigo"].as_str()), (Some("sessao.fechada"), Some("s1"), Some("session_closed_by_owner")));
+        assert_eq!((line["evento"].as_str(), line["sessao"].as_str(), line["codigo"].as_str()), (Some("sessao.fechamento_pedido"), Some("s1"), Some("session_close_requested_by_owner")));
         assert_eq!((line["cliente"].as_str(), line["origem"].as_str()), (Some("curl/8.10"), Some("127.0.0.1")));
     }
 }

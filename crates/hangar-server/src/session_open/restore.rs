@@ -410,6 +410,7 @@ const AGENT_WAIT: Duration = Duration::from_secs(20);
 /// Passadas de reconferência de quem abriu e não mostrou o agente, antes de desistir.
 const AGENT_TRIES: u32 = 20;
 pub const AGENT_MISSING: &str = "restore_agent_not_started";
+pub const MUX_SILENT: &str = "restore_mux_unavailable";
 
 /// O problema na linha da sessão sem agente: o canal de status do terminal existe sem ator.
 fn agent_problem(st: &crate::routes::AppState, name: &str, shown: bool) {
@@ -422,9 +423,13 @@ fn agent_problem(st: &crate::routes::AppState, name: &str, shown: bool) {
 async fn restore_one(host: &super::server::ServerHost, st: &crate::routes::AppState, program: &std::ffi::OsStr, key: &str, entry: &Entry) -> Result<(), String> {
     let mut result = reopen(host, key, entry).await;
     // Restaurada é o agente de pé: o `new-session` volta antes de o shell soltar o comando.
-    if result.is_ok() && entry.provider != AgentProvider::Codex && agent_up(program, &entry.name, AGENT_WAIT).await != Some(true) {
-        agent_problem(st, &entry.name, true);
-        result = Err(AGENT_MISSING.into());
+    if result.is_ok() && entry.provider != AgentProvider::Codex {
+        match agent_up(program, &entry.name, AGENT_WAIT).await {
+            Some(true) => {}
+            Some(false) => { agent_problem(st, &entry.name, true); result = Err(AGENT_MISSING.into()); }
+            // O multiplexador calado não diz que o agente faltou: o código é dele, e a reconferência decide.
+            None => result = Err(MUX_SILENT.into()),
+        }
     }
     let mut event = json!({"evento": "sessao.restaurada", "nivel": "ok", "sessao": entry.name, "provider": entry.provider.name()});
     if let Err(code) = &result {
@@ -495,7 +500,7 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                     let host = super::server::ServerHost::new(st.clone()).await;
                     for (key, entry) in &pending {
                         let result = restore_one(&host, &st, &program, key, entry).await;
-                        if result.as_ref().err().is_some_and(|code| code == AGENT_MISSING) { waiting.push((entry.clone(), 0)); }
+                        if result.as_ref().err().is_some_and(|code| code == AGENT_MISSING || code == MUX_SILENT) { waiting.push((entry.clone(), 0)); }
                         results.push((key.clone(), result));
                     }
                 }

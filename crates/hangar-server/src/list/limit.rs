@@ -29,7 +29,11 @@ impl LimitWatch {
         // Pela sessão, não pelo arquivo: a troca move a conversa para a pasta da conta nova, com o aviso dentro.
         let sent = self.0.get(&row.name).and_then(|s| s.sent);
         let mut seen = Seen { jsonl: jsonl.to_owned(), mtime: row.last_activity, sent };
-        // Sem a hora da linha ou do agente não há como dizer que o aviso é desta vida.
+        // Sem a hora do agente não dá para dizer que o aviso é desta vida: não guarda, relê no próximo tique.
+        if found.is_some() && agent_started.is_none() {
+            super::facts::note("rust.list_limit_seen", &row.name, "limit_seen_no_agent_start".into(), "aviso de limite sem a hora do agente; conferido de novo no próximo tique");
+            return None;
+        }
         let fresh = found.as_ref().and_then(|(_, at)| *at).zip(agent_started).filter(|(at, born)| *at + SLACK >= *born);
         let limit = match (found, fresh) {
             (Some((limit, Some(at))), Some(_)) if sent != Some(at) => { seen.sent = Some(at); Some(limit) }
@@ -61,6 +65,7 @@ mod tests {
         let jsonl = dir.path().join("c.jsonl");
         std::fs::write(&jsonl, include_str!("../../tests/it/fixtures/usage_limit/claude_weekly_limit_tui_2026_10.jsonl")).unwrap();
         let mut watch = LimitWatch::default();
+        assert_eq!(watch.seen(&row(&jsonl, 1.0), None, NOW), None, "sem a hora do agente, espera");
         let first = watch.seen(&row(&jsonl, 1.0), Some(LINE_AT - 600.0), NOW);
         assert_eq!(first, Some(UsageLimit { window: "seven_day".into(), resets_at: Some(1792270800.0) }));
         assert_eq!(watch.seen(&row(&jsonl, 1.0), Some(LINE_AT - 600.0), NOW), None, "o mesmo tique de novo");
