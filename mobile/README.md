@@ -147,5 +147,6 @@ sem afirmar que toda regra compartilhável já foi extraída.
 - Voz/ditado dependem dos recursos de áudio configurados no servidor; sem eles, aparecem
   indisponíveis com o motivo.
 - Sem notificação push com o app fechado, sem OTA (EAS Update) e sem loja.
-- Board, Canvas, terminal completo e navegador embutido são do desktop/PWA, não do app.
+- Board, Canvas e navegador embutido são do desktop/PWA, não do app. O app tem terminal real
+  para sessões com terminal, com espelho disponível como alternativa explícita.
 - Situação de aceitação de cada entrega: `docs/analysis/2026-09-29-mobile-acceptance.md`.

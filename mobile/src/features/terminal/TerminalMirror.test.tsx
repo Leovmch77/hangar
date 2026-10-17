@@ -23,6 +23,7 @@ vi.mock('react-native', async (original) => ({
     },
   },
 }));
+vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 34, left: 0 }) }));
 vi.mock('../../stores/servers', () => ({
   useServers: (select: (state: { servers: typeof calls.server[] }) => unknown) => select({ servers: [calls.server] }),
 }));
@@ -51,6 +52,20 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('TerminalMirror', () => {
+  it('soma o inset inferior ao padding da barra de teclas do espelho', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(React.createElement(TerminalMirror, { name: 'fixture', serverId: 'srv1' }));
+      });
+      const bar = container.querySelector<HTMLElement>('[aria-label="term_teclas_resgate"]')!;
+      expect(bar.style.paddingBottom).toBe('42px');
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it('monta em segundo plano sem HTTP, pausa com AppState e remove a assinatura ao desmontar', async () => {
     calls.appState = 'background';
     const container = document.createElement('div');

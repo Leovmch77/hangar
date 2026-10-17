@@ -24,6 +24,18 @@ describe('Icon', () => {
     expect((await render('ChevronLeft')).symbol).toBe('chevron.left');
   });
 
+  it.each([
+    { name: 'ArrowLeft', symbol: 'arrow.left' },
+    { name: 'ArrowRightToLine', symbol: 'arrow.right.to.line' },
+    { name: 'CornerDownLeft', symbol: 'arrow.turn.down.left' },
+    { name: 'Delete', symbol: 'delete.left' },
+    { name: 'OctagonX', symbol: 'xmark.octagon' },
+    { name: 'ScanText', symbol: 'text.viewfinder' },
+  ] satisfies { name: IconName; symbol: string }[])('iOS usa $symbol para $name do terminal', async ({ name, symbol }) => {
+    Platform.OS = 'ios';
+    expect((await render(name)).symbol).toBe(symbol);
+  });
+
   it('iOS sem símbolo mapeado fica no Lucide', async () => {
     Platform.OS = 'ios';
     expect((await render('Bot')).symbol).toBeNull();

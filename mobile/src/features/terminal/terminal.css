@@ -1,0 +1,19 @@
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+.terminal-host .xterm,
+.terminal-host .xterm-viewport {
+  background: transparent !important;
+}
