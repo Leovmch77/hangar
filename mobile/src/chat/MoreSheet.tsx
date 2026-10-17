@@ -73,6 +73,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
     ...(orq || semTerminal ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
     ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),
     ...(provider === 'codex' ? [{ icon: 'Gauge' as IconName, label: m.codex_limites_titulo(), sub: m.ctx_limites(), route: 'codex-limits' }] : []),
+    ...(!orq && canShare && provider === 'claude' ? [{ icon: 'RefreshCw' as IconName, label: m.bastao_menu(), sub: m.conta_mesma_conversa_sub(), route: 'account' }] : []),
     { icon: 'Flag', label: m.bastao_dossie_titulo(), sub: m.bastao_dossie_sub(), route: 'bastao' },
   ];
 
