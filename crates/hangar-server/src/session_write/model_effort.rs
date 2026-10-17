@@ -108,8 +108,9 @@ fn headless_answer(sent: Result<Result<RuntimeReply, crate::runtime::protocol::R
         Ok(Ok(reply)) if reply.disposition == Disposition::Unknown => failed("resultado incerto; a operação foi conservada sem reenvio"),
         Ok(Ok(reply)) => failed(reply.payload["error"].as_str().unwrap_or("operação recusada pelo runtime")),
         Ok(Err(error)) => failed(&error.message),
-        // O `TimeoutError` do Python não tem texto.
-        Err(_) => failed(""),
+        // O comando pode ainda chegar depois do prazo: o código diz que o resultado é desconhecido.
+        Err(_) => (StatusCode::GATEWAY_TIMEOUT, detail_body("erro_modelo_sem_resposta",
+            "o Claude não respondeu à troca de modelo a tempo; confira a sessão antes de tentar de novo", json!({}))),
     }
 }
 
@@ -127,4 +128,16 @@ fn terminal_answer(reply: Result<RuntimeReply, crate::runtime::protocol::Runtime
 
 fn public_code(code: &str) -> &str {
     match code { "terminal_panel_active" | "terminal_panel_open" => "erro_terminal_aberto", _ => code }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    /// O prazo da troca sem terminal vencido sai com código e frase: a troca pode ter acontecido depois.
+    #[tokio::test]
+    async fn a_headless_switch_past_its_deadline_answers_a_code() {
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>()).await.unwrap_err();
+        let (status, body) = super::headless_answer(Err(elapsed));
+        assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (504, Some("erro_modelo_sem_resposta")));
+        assert!(!body["detail"]["msg"].as_str().unwrap_or("").is_empty());
+    }
 }

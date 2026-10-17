@@ -3079,6 +3079,8 @@
   "erro_btw_ilegivel": "/btw answered, but the answer could not be read",
   "erro_btw_composer_ocupado": "text left in the terminal input box that Ctrl-U won't clear; clear it in the terminal before asking",
   "erro_btw_fechado": "/btw was closed in the terminal before the answer could be read",
+  "erro_btw_captura_falhou": "could not read the session terminal; /btw may still be open there",
+  "erro_modelo_sem_resposta": "Claude did not answer the model switch in time; check the session before trying again",
   "erro_btw_nao_digitou": "could not type /btw into the session's terminal",
   "erro_btw_barra_perdida": "the terminal dropped the / of /btw; nothing was sent to the conversation, try again",
   "erro_btw_overlay_aberto": "a /btw is already open in the session's terminal; close it before asking",
