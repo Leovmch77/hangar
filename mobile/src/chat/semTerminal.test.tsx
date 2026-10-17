@@ -601,6 +601,39 @@ describe('ações e atualização da conversa na rota', () => {
     } finally { act(() => root.unmount()); }
   });
 
+  it('confirmações antigas da fila não redesenham a tela com histórico carregado', async () => {
+    vi.useFakeTimers();
+    const listeners: Record<string, ((event: { data: string }) => void)[]> = {};
+    configureApi({ getBaseUrl: () => 'http://unused', getToken: () => '', onUnauthorized: () => {}, origin: null,
+      createEventSource: () => ({
+        addEventListener: (type, callback) => { (listeners[type] ??= []).push(callback); },
+        removeEventListener: () => {}, close: () => {}, onerror: null, onopen: null, readyState: 1,
+      }) });
+    realFirstInput.history.mockResolvedValue(Array.from({ length: 400 }, (_, i) => ({
+      id: `history:${i}`, kind: i % 2 ? 'assistant_msg' : 'user_msg', text: `histórico ${i}`, ts: 1_700_000_000,
+    })));
+    const { root } = await render(createElement(ChatScreen));
+    try {
+      expect(chatStore('s1', 'sess').use.getState().events).toHaveLength(400);
+      expect(listeners.queue_confirmed).toHaveLength(1);
+      const before = screenRenders.n;
+      for (let i = 0; i < 160; i++) {
+        await act(async () => listeners.queue_confirmed.forEach(listener => listener({ data: JSON.stringify({
+          id: `queued-old-${i}`, kind: 'user_msg', text: 'já entregue',
+          queued_delivered: true, queued_confirmed: true, queued_ts: 1_700_000_000,
+        }) })));
+      }
+      expect(screenRenders.n - before).toBe(0);
+      await act(async () => listeners.message.forEach(listener => listener({ data: JSON.stringify({
+        id: 'live:1', kind: 'assistant_msg', text: 'mensagem nova', ts: 1_700_000_001,
+      }) })));
+      expect(bubbleTexts).toContain('mensagem nova');
+      const after = screenRenders.n;
+      await act(async () => vi.advanceTimersByTimeAsync(1000));
+      expect(screenRenders.n).toBe(after);
+    } finally { act(() => root.unmount()); }
+  });
+
   it('lista reserva o espaço real dos mods e volta ao vidro do composer quando eles saem', async () => {
     layouts.clear();
     const { container, root } = await render(createElement(ChatScreen));

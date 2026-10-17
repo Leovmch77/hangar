@@ -264,6 +264,49 @@ test('eventsRevision só conserva a revisão no append e invalida replace, remo�
   expect(chat.use.getState().events.map(e => e.id)).toEqual(['reset:1']);
 });
 
+test('confirmações antigas da fila não publicam atualizações após carregar o histórico', async () => {
+  historyResponses = [[...Array.from({ length: 400 }, (_, i) => ev({
+    id: `history:${i}`, kind: i % 2 ? 'assistant_msg' : 'user_msg', text: `histórico ${i}`,
+  })), ev({ id: 'queued-current', text: 'aguardando confirmação', queued_delivered: true })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const source = created[0];
+  const original = chat.use.getState();
+  let updates = 0;
+  const unsubscribe = chat.use.subscribe(() => { updates++; });
+  const replay = () => {
+    for (let i = 0; i < 160; i++) {
+      source.trigger('queue_confirmed', JSON.stringify(ev({
+        id: `queued-old-${i}`, queued_delivered: true, queued_confirmed: true, queued_ts: 1_700_000_000,
+      })));
+    }
+  };
+  try {
+    replay();
+    replay();
+    expect(updates).toBe(0);
+    expect(chat.use.getState()).toBe(original);
+    source.trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-current', queued_confirmed: true })));
+    expect(updates).toBe(1);
+    expect(chat.use.getState().events).toHaveLength(400);
+    expect(chat.use.getState().events.some(e => e.id === 'queued-current')).toBe(false);
+    const confirmed = chat.use.getState();
+    source.trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-current', queued_confirmed: true })));
+    replay();
+    expect(updates).toBe(1);
+    expect(chat.use.getState()).toBe(confirmed);
+    source.trigger('message', JSON.stringify(ev({ id: 'history:399', kind: 'assistant_msg', text: 'conteúdo atualizado' })));
+    source.trigger('message', JSON.stringify(ev({ id: 'new:1', kind: 'assistant_msg', text: 'mensagem nova' })));
+    expect(chat.use.getState().events.slice(-2).map(e => e.text)).toEqual(['conteúdo atualizado', 'mensagem nova']);
+    expect(chat.use.getState().events[0]).toBe(original.events[0]);
+    expect(original.events).toHaveLength(401);
+  } finally {
+    unsubscribe();
+    chat.release();
+  }
+});
+
 test('confirmação retira apenas o eco da fila e preserva índices no próximo evento', async () => {
   historyResponses = [[ev({ id: 'queued-a' }), ev({ id: 'real' }), ev({ id: 'queued-b' })]];
   const chat = chatStore('srv1', 'sess');
