@@ -11,7 +11,7 @@ export default function TerminalSheet() {
   const sessionName = Array.isArray(name) ? name[0] : (name ?? '');
   const avisoText = Array.isArray(aviso) ? aviso[0] : aviso;
   return (
-    <KeyboardAvoidingView behavior="padding" style={styles.root}>
+    <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.root}>
       <View style={styles.inner}>
         <TerminalScreen serverId={serverId} name={sessionName} focused={focused} aviso={avisoText} />
       </View>

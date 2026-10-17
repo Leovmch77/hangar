@@ -24,7 +24,7 @@ vi.mock('expo-router', () => ({
   useIsFocused: () => boundary.focused,
   useLocalSearchParams: () => ({ server: 'chosen', name: 'fixture', aviso: 'route-warning' }),
 }));
-vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: React.ReactNode }) => React.createElement('div', null, children) }));
+vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children, automaticOffset }: { children: React.ReactNode; automaticOffset?: boolean }) => React.createElement('div', { 'data-automatic-offset': String(!!automaticOffset) }, children) }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: { hostUri: '192.168.1.2:8081' } } }));
 vi.mock('./TerminalDom', () => ({ default: (props: TerminalDomProps) => {
   boundary.dom = props;
@@ -104,6 +104,11 @@ const ready = () => act(async () => {
 const state = (next: string) => act(async () => { boundary.appState = next; for (const listener of boundary.listeners) listener(next); });
 
 describe('terminal screen with native WebSocket and DOM boundary', () => {
+  it('folha do terminal usa offset automático do teclado', async () => {
+    await act(async () => root.render(<TerminalRoute />));
+    expect(host.querySelector('[data-automatic-offset]')?.getAttribute('data-automatic-offset')).toBe('true');
+  });
+
   it('rota usa terminal real e respeita foco sem iniciar o espelho', async () => {
     boundary.focused = true;
     await act(async () => root.render(<TerminalRoute />));
