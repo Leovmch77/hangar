@@ -140,7 +140,11 @@ time.sleep(60)
         except psutil.NoSuchProcess:pass
         assert runtime_process.reconcile_startup(record) is True
         # O filho pode sumir entre as consultas; sumir conta como limpo.
-        try:alive=psutil.Process(info['child']).status()!=psutil.STATUS_ZOMBIE
+        # No Windows o processo encerrado segue listado, sem threads, enquanto há handle dele: o mesmo
+        # critério do `_same_process`.
+        try:
+            child=psutil.Process(info['child'])
+            alive=child.status()!=psutil.STATUS_ZOMBIE and (sys.platform!='win32' or child.num_threads()>0)
         except psutil.NoSuchProcess:alive=False
         assert not alive
         assert not record.exists()
