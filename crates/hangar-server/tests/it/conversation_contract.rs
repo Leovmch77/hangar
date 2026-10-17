@@ -233,6 +233,10 @@ async fn claude_bridge_serves_only_answer_and_select_of_a_rust_claude() {
     assert_eq!((status, reply["sondavel"].as_bool()), (200, Some(false)), "{reply}");
     assert_eq!(post("s/permission-modes", "{}".into()).await.0, 421, "lista só por GET");
     assert_eq!(python.hits_to("/api/sessions/s/permission-modes"), 0);
+    // Btw: a pergunta lateral do Connect chega à rota do Rust, que responde até o corpo errado.
+    let (status, reply) = post("s/btw", r#"{"question":"q","x":1}"#.into()).await;
+    assert_eq!((status, reply["detail"][0]["type"].as_str()), (422, Some("extra_forbidden")), "{reply}");
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
     // A rota irmã das personalizações não é engolida pela ponte.
     assert_ne!(post("customizations", "{}".into()).await.0, 421);
     for route in ["answer", "select", "select/submit", "input"] {

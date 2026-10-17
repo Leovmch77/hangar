@@ -27,7 +27,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
 from app import groups_bridge, internal_api, list_bridge, migration_status, share_bridge, update_channel
@@ -440,9 +440,12 @@ async def _codex_rust_port(name: str, request: Request):
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
-        if reply is None and (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/")) \
-                and getattr(await _cached_info(name), "provider", "claude") == "claude":
-            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
+        # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
+        if reply is None and (rota == "btw" or (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
+                and getattr(await _cached_info(name), "provider", "claude") == "claude"):
+            # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body,
+                                            200 if rota == "btw" else 90)
         if reply:
             raise _RustReply(*reply)
 
@@ -1914,10 +1917,6 @@ class BroadcastBody(_StrictBody):
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
     interaction_id: str | None = None    # do cliente; quem confere é o Rust
-
-
-class BtwBody(_StrictBody):
-    question: str = Field(min_length=1, max_length=4000)
 
 
 class KeyBody(_StrictBody):
@@ -5314,42 +5313,10 @@ async def interrupt(name: str, clear: bool = False):
     return {"ok": True}
 
 
-def _exige_claude_de_terminal(name: str) -> None:
-    # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
-    # (Claude SEM terminal tem caminho próprio — o fork da conversa — e não passa por aqui.)
-    provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
-    if provider != "claude":
-        raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
-
-
-@app.post("/api/sessions/{name}/btw", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def pergunta_lateral(name: str, body: BtwBody):
-    if not await _send_thread(_session_exists, name):
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    # Sem terminal não há overlay pra dirigir: a pergunta vira um fork descartável da conversa.
-    sem_terminal = await _send_thread(_headless, name)
-    if not sem_terminal:
-        await _send_thread(_exige_claude_de_terminal, name)
-        await asyncio.to_thread(_recusa_se_painel_aberto, name)
-    try:
-        perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
-        item = await asyncio.to_thread(perguntar, name, body.question)
-    except btw.BtwError as e:
-        raise HTTPException(e.status, detail=erro(e.code, e.detail))
-    # A TUI já respondeu e gastou a chamada: falha ao guardar o histórico não pode virar 500 e
-    # levar o cliente a perguntar de novo. Vai marcada, não escondida.
-    try:
-        await asyncio.to_thread(btw.registrar, name, item)
-        item["salvo"] = True
-    except OSError:
-        _log.exception("btw de %s: resposta entregue, historico nao gravado", name)
-        item["salvo"] = False
-    return item
-
-
-@app.get("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
-async def historico_lateral(name: str):
-    return await asyncio.to_thread(btw.historico, name)
+# A pergunta lateral é do Rust (`session_write/btw.rs`); pelo Connect o `_codex_rust_port` a repassa.
+@app.api_route("/api/sessions/{name}/btw", methods=["GET", "POST"], dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
+async def pergunta_lateral_precisa_do_rust(name: str):
+    raise HTTPException(503, detail=erro("btw_needs_rust_server", "a pergunta lateral precisa do servidor Rust"))
 
 
 _TOOL_USE_ID = re.compile(r"^toolu_[A-Za-z0-9_-]{1,80}$")

@@ -44,6 +44,7 @@ pub mod terminal_control;
 pub mod terminal_input;
 pub mod permission_control;
 pub mod model_picker;
+pub mod btw_control;
 pub mod terminal_facts;
 mod terminal_process;
 mod thumbnail;

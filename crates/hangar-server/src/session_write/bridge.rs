@@ -40,7 +40,7 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit`, `input`,
 /// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
-/// mesma rota do dono. Outra rota, método ou sessão: 421.
+/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide). Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
@@ -48,6 +48,13 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     // Abrir Claude com terminal pelo que entrou direto no Python (Connect, MCP): o nome vem no corpo.
     if rest == "open" && req.method() == Method::POST {
         return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
+    }
+    // Pergunta lateral (`POST`/`GET btw`): a própria rota decide sessão, provedor e modo, inclusive o
+    // Claude sem terminal parado, que ainda não tem entrada.
+    if rest == "btw" && matches!(*req.method(), Method::POST | Method::GET) {
+        if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+        let (s, c) = (State(st), ConnectInfo(peer));
+        return if req.method() == Method::POST { super::btw::ask(s, c, req).await } else { super::btw::list(s, c, req).await };
     }
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {

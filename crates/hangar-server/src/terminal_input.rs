@@ -146,6 +146,10 @@ pub enum WriteOutcome { Written, NotWritten, Unknown }
 pub trait TerminalIo: Send + Sync {
     fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput>;
     fn socket<'a>(&'a self, descriptor: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome>;
+    /// O comando com o erro que ele escreveu na falha: os de buffer decidem pelo texto da recusa.
+    fn command_stderr<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, (CommandOutput, Vec<u8>)> {
+        Box::pin(async move { Ok((self.command(request).await?, Vec::new())) })
+    }
 }
 #[derive(Clone)]
 pub struct ProcessIo { pub command_timeout: Duration, pub socket_timeout: Duration }
@@ -177,6 +181,7 @@ impl TerminalIo for ProcessIo {
         })
     }
     fn socket<'a>(&'a self, descriptor: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome> { self.socket_inner(descriptor, envelope) }
+    fn command_stderr<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, (CommandOutput, Vec<u8>)> { Box::pin(self.run(request)) }
 }
 impl ProcessIo {
     async fn run(&self, request: CommandRequest) -> Result<(CommandOutput, Vec<u8>), IoFailure> {
@@ -517,6 +522,17 @@ impl PermissionSequence<'_> {
     }
     /// Sem guarda: fechar o que esta sequência abriu não pode depender do painel continuar fechado.
     pub(crate) async fn escape(&self) -> Result<(), IoFailure> { self.driver.key_inner("Escape").await }
+    /// Sem guarda nem política de menu: a pergunta lateral lê e dirige o próprio overlay, que é um menu.
+    pub(crate) async fn plain_screen(&self) -> Result<String, IoFailure> { self.driver.capture_inner().await }
+    pub(crate) async fn guard(&self) -> Result<(), IoFailure> {
+        self.driver.services.permission_guard(&self.driver.binding).await.map_err(|e| IoFailure { code: e.0, may_have_written: false })
+    }
+    pub(crate) async fn key(&self, key: &str) -> Result<(), IoFailure> { self.driver.key_inner(key).await }
+    pub(crate) async fn write(&self, text: &str) -> Result<(), IoFailure> { self.driver.literal(text).await }
+    pub(crate) async fn mux(&self, args: Vec<String>) -> Result<(CommandOutput, Vec<u8>), IoFailure> {
+        self.driver.io.command_stderr(self.driver.request(args, vec![])?).await
+    }
+    pub(crate) fn binding(&self) -> &TerminalBinding { &self.driver.binding }
     pub(crate) async fn capture(&self) -> Result<String, IoFailure> {
         let screen = self.screen().await?;
         let analysis = crate::terminal_state::analyze(&screen);

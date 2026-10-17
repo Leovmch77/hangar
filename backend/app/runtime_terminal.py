@@ -22,7 +22,7 @@ _log = logging.getLogger("hangar.runtime_terminal")
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 
 
-# Teto do teclado emprestado pelo Rust a uma administração (troca de modelo/motor, /btw, modo).
+# Teto do teclado emprestado pelo Rust a uma administração (troca de modelo/motor, modo).
 _LOAN_S = 60
 # Folga sobre o prazo do Rust: o Python para de digitar antes de o Rust retomar o pane.
 _LOAN_MARGIN_S = 1

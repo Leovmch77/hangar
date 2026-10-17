@@ -200,6 +200,7 @@ mod runtime_receipt;
 mod runtime_recovery;
 mod runtime_side_events;
 mod session_open;
+mod btw;
 mod session_write_answer;
 mod session_write_control;
 mod session_write_input;

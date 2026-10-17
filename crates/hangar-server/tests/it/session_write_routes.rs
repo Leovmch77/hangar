@@ -213,6 +213,35 @@ async fn gate_closed_past_the_wait_answers_409_busy() {
     assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
+/// Btw B2 (`api.py:404`): troca de conta em curso é 409 antes do corpo, e nada chega ao Python.
+#[tokio::test]
+async fn btw_with_the_gate_closed_is_409_busy_before_the_body() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
+    let (python, upstream) = spawn_fake().await;
+    let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    state.write_gate_wait = Duration::from_millis(100);
+    assert!(state.state.runtime.set(registry).is_ok());
+    let server = spawn_state(state).await;
+    let (status, text) = post(server, "btw", "não é json", OWNER).await;
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("session_transfer_busy")));
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
+}
+
+/// Btw B6: com a porta aberta, o corpo fora do modelo é o 422 do Rust, sem o Python.
+#[tokio::test]
+async fn btw_body_outside_the_model_is_a_rust_422() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    let (python, server) = serve_with(Some(registry)).await;
+    let (status, text) = post(server, "btw", r#"{"question":"q","x":1}"#, OWNER).await;
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((status, body["detail"][0]["type"].as_str()), (422, Some("extra_forbidden")));
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
+}
+
 #[tokio::test]
 async fn gate_held_by_a_transfer_answers_409_without_waiting() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
