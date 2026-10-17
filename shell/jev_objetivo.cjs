@@ -1204,10 +1204,14 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         const d = iguais.length === 1
           ? liberado((l) => passoDoAuxiliar({ operacao: item.operacao, ref: iguais[0].ref }, respostas, candidatos, l), 'via auxiliar, fila')
           : { falhou: 'saiu da pagina' };
-        if (d.falhou) filaDoAuxiliar = [];
-        else ajuda = d.operacao ? { ...d, via: 'auxiliar (fila)' } : d;
+        if (d.falhou) {
+          log(`jev-objetivo passo ${passo}: fila do auxiliar descartada (${item.operacao} ${item.papel} "${item.nome}": ${d.falhou})`);
+          registrar({ passo, tipo: 'fila', descartada: `${item.operacao} ${item.papel} "${item.nome}"`, falhou: d.falhou });
+          filaDoAuxiliar = [];
+        } else ajuda = d.operacao ? { ...d, via: 'auxiliar (fila)' } : d;
       }
       if (!ajuda) {
+        let primeira = null;
         try {
           const pedido = pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas,
             recusa: estado.envio_recusado, bloqueados: desabilitados(snapshot),
@@ -1217,13 +1221,15 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           ajuda = liberado((l) => decidirPeloAuxiliar(bruto, respostas, candidatos, l), 'via auxiliar');
           // Uma segunda chance, mostrando o que veio: sem ela a corrida inteira acabava num texto solto.
           if (ajuda.falhou?.startsWith('resposta fora de JSON')) {
+            primeira = ajuda.falhou;
             bruto = await ajudar(pedidoDeCorrecao(pedido, bruto));
             registrar({ passo, tipo: 'auxiliar', resposta: String(bruto).slice(0, 2000), correcao: true });
             ajuda = liberado((l) => decidirPeloAuxiliar(bruto, respostas, candidatos, l), 'via auxiliar');
           }
           filaDoAuxiliar = ajuda.fila ?? [];
         } catch (err) {
-          ajuda = { falhou: String(err?.message ?? err).slice(0, 200) };
+          const motivo = String(err?.message ?? err).slice(0, 200);
+          ajuda = { falhou: primeira ? `${primeira}; na segunda tentativa: ${motivo}` : motivo };
         }
       }
       decisao = ajuda.falhou ? { parar: `${decisao.parar}; auxiliar: ${ajuda.falhou}` } : ajuda;
@@ -1233,6 +1239,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (decisao.operacao === 'CLICK' && (PAPEIS_DE_TEXTO.has(decisao.escolhido.papel) || ehEditavel(decisao.escolhido, anotacao.editaveis))
         && (vazioNaPagina(decisao.escolhido) || buscasVazias.has(decisao.escolhido.nome))) decisao = { ...decisao, operacao: 'TYPE_TEXT' };
     }
+    // A fila vale só para passos seguidos do auxiliar: depois que o Jev agiu, a tela já não é a que
+    // o auxiliar planejou.
+    if (!String(decisao.via ?? '').startsWith('auxiliar')) filaDoAuxiliar = [];
     registrar({
       passo,
       tipo: 'decisao',

@@ -779,6 +779,24 @@ test('o segundo passo do auxiliar sai da fila sem chamá-lo de novo, e o trajeto
   assert.ok(eventos.some((e) => e.tipo === 'auxiliar' && e.resposta.includes('"acoes"')));
 });
 
+test('depois que o Jev age sozinho, a fila do auxiliar cai e ele é chamado de novo', async () => {
+  const executados = [];
+  const pedidos = [];
+  let jevAgiu = false;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: navegador(executados),
+    perguntar: async () => {
+      // Passo 1 sem alvo (auxiliar), passo 2 o Jev clica sozinho, depois sem alvo de novo.
+      if (executados.includes('click @e1') && !jevAgiu) { jevAgiu = true; return resposta({ click: 'e2' }); }
+      return resposta({ click: NENHUM });
+    },
+    ajudar: async (p) => { pedidos.push(p); return '{"acoes":[{"operacao":"CLICK","ref":"e1"},{"operacao":"CLICK","ref":"e2"}],"motivo":"x"}'; },
+  });
+  assert.equal(pedidos.length, 2);
+});
+
 test('resposta do auxiliar fora de JSON ganha uma segunda chance com o texto que veio', async () => {
   const executados = [];
   const pedidos = [];
