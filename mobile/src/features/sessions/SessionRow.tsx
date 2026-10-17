@@ -20,6 +20,20 @@ const TOM_DO_LOOP: Record<'ok' | 'warn' | 'attention' | 'muted', Tone> = {
   muted: 'neutral',
 };
 
+const ACCOUNT_COLORS = ['#80bbc3', '#d3a781', '#97c69d', '#cd99b9', '#9ba9d9', '#ccbf87'];
+
+// O cabeçalho inclui motor e reservas; na lista só a conta de assinatura vira chip.
+function accountChip(account: string | null | undefined) {
+  const harness = ['claude', 'codex'].find(h => account?.startsWith(`${h}:`));
+  if (!account || !harness) return null;
+  const base = account.slice(harness.length + 1).replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+  const name = base === `.${harness}` ? '' : base.replace(new RegExp(`^\\.${harness}-`), '');
+  const label = name.replace(new RegExp(`^${harness}-(?=.)`), '') || m.conta_padrao();
+  let hash = 0;
+  for (const char of base) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return { label, name: name || m.conta_padrao(), color: ACCOUNT_COLORS[hash % ACCOUNT_COLORS.length] };
+}
+
 // A marca é a única pista visual de estado na linha: lê a cor da pílula do tema, que acompanha
 // tema claro/escuro e o acento escolhido na Aparência.
 const PILL_DO_ESTADO: Record<State, 'working' | 'idle' | 'input' | 'dead'> = {
@@ -109,9 +123,11 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const peers = s.pair_peers ?? [];
   // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
   const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
+  const engineLabel = !orq && s.provider === 'claude' ? s.engine : null;
+  const providerLabel = orq ? null : engineLabel || providerName(s.provider);
+  const account = accountChip(s.conta);
   const meta = [
-    orq ? null : providerName(s.provider),
-    s.engine,
+    engineLabel ? null : providerLabel,
     s.cwd && cwd.base !== s.name ? cwd.base : null,
     s.branch,
     pairLabel,
@@ -163,7 +179,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       // estado e a pergunta sumiriam do leitor de tela.
       // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
       // é o que distingue duas conversas de mesmo nome no leitor de tela.
-      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}, ${providerName(s.provider)}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}`}
+      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}`}
       accessibilityActions={acoesA11y}
       onAccessibilityAction={({ nativeEvent }) => {
         acao(nativeEvent.actionName);
@@ -180,6 +196,12 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}
           {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
           {fora ? <Chip tone="accent" icon={s.guest_kind === 'share' ? 'Link' : 'Eye'}>{m.pair_from_owner({ dono: fora.owner })}</Chip> : null}
+          {account ? (
+            <View style={[styles.account, { backgroundColor: superficie(theme, 0.5) }]} accessibilityLabel={m.sessao_conta({ n: account.name })}>
+              <View style={[styles.accountDot, { backgroundColor: account.color }]} />
+              <Text style={[styles.accountText, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{account.label}</Text>
+            </View>
+          ) : null}
           <Text style={[styles.tempo, { color: muted }]} numberOfLines={1}>{relativeTime(s.last_activity)}</Text>
         </View>
         {/* O que a sessão está fazendo: a pergunta (cor de input), a atividade (itálico) ou o estado. */}
@@ -196,14 +218,18 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         >
           {sub ?? rotuloEstado(s.state)}
         </Text>
-        {/* Uma linha discreta de contexto, sem ícones: provedor · máquina · pasta · ramo · par.
-            Diff fica na tela de Git; a pasta some quando repete o nome da sessão. A pasta da
-            worktree vem logo abaixo, num chip próprio que abre a folha dela. */}
-        {meta.length || mostrarServidor ? (
-          <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>
-            {mostrarServidor ? <Text style={{ color: s.serverColor }}>{s.serverLabel}{meta.length ? ' · ' : ''}</Text> : null}
-            {meta.join(' · ')}
-          </Text>
+        {/* A pasta some quando repete o nome; a worktree tem seu próprio chip abaixo. */}
+        {meta.length || engineLabel || mostrarServidor ? (
+          <View style={styles.metaRow}>
+            {mostrarServidor ? <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}{meta.length || engineLabel ? ' · ' : ''}</Text> : null}
+            {engineLabel ? (
+              <View style={styles.engine}>
+                <Icon name="Settings" size={12} color={theme.tokens.accent.base} />
+                <Text style={[styles.meta, styles.engineText, { color: theme.tokens.accent.base }]} numberOfLines={1}>{engineLabel}</Text>
+              </View>
+            ) : null}
+            {meta.length ? <Text style={[styles.meta, styles.metaRest, { color: muted }]} numberOfLines={1}>{engineLabel ? ' · ' : ''}{meta.join(' · ')}</Text> : null}
+          </View>
         ) : null}
         {s.worktree_gone ? (
           <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>{m.worktree_apagada()}</Text>
@@ -253,8 +279,15 @@ const styles = StyleSheet.create((theme) => ({
   col: { flex: 1, gap: 2, minWidth: 0 },
   linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
   nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
+  account: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: 96, flexShrink: 1, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full },
+  accountDot: { width: 5, height: 5, borderRadius: theme.base.radius.full, flexShrink: 0 },
+  accountText: { fontSize: theme.base.text.xxs, fontWeight: '500', minWidth: 0, flexShrink: 1 },
   tempo: { marginLeft: 'auto', paddingLeft: 4, flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   sub: { fontSize: theme.base.text.sm, lineHeight: 20 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  engine: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, flexShrink: 1 },
+  engineText: { fontWeight: '600', flexShrink: 1 },
+  metaRest: { flexShrink: 1 },
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
