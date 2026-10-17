@@ -58,6 +58,15 @@ function GitButton({ label, icon, onPress, disabled = false, flexible = false }:
   </Pressable>;
 }
 
+function fileStatus(code: string) {
+  const status = code.trim();
+  if (status === '??' || status.startsWith('A')) return m.git_tag_novo();
+  if (status.includes('D')) return m.git_tag_del();
+  if (status.startsWith('R')) return m.git_tag_ren();
+  if (status.includes('U')) return m.git_tag_conflito();
+  return m.git_tag_mod();
+}
+
 function GitDiff({ server, name, target, kind, revision }: { server: Server; name: string; target: string; kind: 'file' | 'commit'; revision: number }) {
   const deadline = useDeadline();
   const [content, setContent] = useState<{ diff: string; truncated: boolean } | null>(null);
@@ -114,7 +123,7 @@ function GitHistory({ server, name, revision }: { server: Server; name: string; 
       <FlatList data={commits} keyExtractor={(item) => item.hash}
         ListEmptyComponent={!loading && !error ? <Text style={styles.meta}>{m.native_git_no_commits()}</Text> : null}
         renderItem={({ item }) => <Pressable accessibilityRole="button" accessibilityLabel={m.git_titulo_commit({ short: item.short, subject: item.subject || m.native_git_no_subject() })} onPress={() => { haptic.selection(); setSelected(item); }} style={styles.commitRow}>
-          <Text style={styles.text}>{item.subject || m.native_git_no_subject()}</Text>
+          <Text style={[styles.text, styles.commitSubject]}>{item.subject || m.native_git_no_subject()}</Text>
           <Text style={styles.meta}>{item.short} · {item.author} · {relativeTime(item.ts)}</Text>
           {item.refs ? <Text style={styles.meta}>{item.refs}</Text> : null}
           {item.local ? <Text style={styles.meta}>{m.native_git_commit_local()}</Text> : null}
@@ -303,7 +312,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
     </> : null}
     {repo && !readError && tab === 'changes' ? filePath ? <>
       <View style={styles.bar}>
-        <GitButton label={m.git_voltar_arquivos()} icon="X" onPress={() => setFilePath(null)} />
+        <GitButton label={m.arq_aba()} icon="ChevronLeft" onPress={() => setFilePath(null)} />
         <GitButton label={m.native_git_discard_hint()} icon="Trash2" disabled={unavailable} onPress={() => request(async (write) => {
           check(await write(() => discardFile(name, filePath, server)));
           return m.native_git_discarded({ path: filePath });
@@ -329,7 +338,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
             </View>
           </Pressable>
           <View style={styles.fileStats}>
-            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.meta}>{item.code} {item.staged ? m.git_grupo_staged() : m.git_grupo_nao_staged()}</Text>
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.meta}>{fileStatus(item.code)}</Text>
             <Text><Text style={styles.add}>{item.added === null ? '' : `+${item.added}`}</Text> <Text style={styles.remove}>{item.removed === null ? '' : `−${item.removed}`}</Text></Text>
           </View>
         </View>; }} />
@@ -355,6 +364,7 @@ const styles = StyleSheet.create((theme) => ({
   input: { minHeight: 44, padding: theme.base.space[2], borderWidth: 1, borderColor: theme.tokens.border.subtle, borderRadius: theme.base.radius.md },
   bar: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
   commitContent: { paddingHorizontal: theme.base.space[3] },
+  commitSubject: { paddingHorizontal: theme.base.space[1] },
   commitRow: { minHeight: 44, padding: theme.base.space[2], borderBottomWidth: 1, borderColor: theme.tokens.border.subtle },
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], paddingHorizontal: theme.base.space[2], borderBottomWidth: 1, borderColor: theme.tokens.border.subtle },
   button: { minHeight: 44, padding: theme.base.space[2], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },

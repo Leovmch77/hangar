@@ -29,7 +29,10 @@ vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return { ...actual, Alert: { alert: boundary.alert },
     ScrollView: ({ nestedScrollEnabled, contentContainerStyle, ...props }: any) => createElement(actual.ScrollView, { ...props, 'data-scroll': true, 'data-content-padding-horizontal': contentContainerStyle?.paddingHorizontal }),
-    Text: ({ selectable, ellipsizeMode, numberOfLines, ...props }: any) => createElement(actual.Text, { ...props, 'data-selectable': !!selectable, 'data-lines': numberOfLines, 'data-ellipsis': ellipsizeMode }),
+    Text: ({ selectable, ellipsizeMode, numberOfLines, style, ...props }: any) => {
+      const textStyle = Array.isArray(style) ? Object.assign({}, ...style.flat(Infinity).filter(Boolean)) : style;
+      return createElement(actual.Text, { ...props, style, 'data-selectable': !!selectable, 'data-lines': numberOfLines, 'data-ellipsis': ellipsizeMode, 'data-padding-horizontal': textStyle?.paddingHorizontal ?? textStyle?.padding });
+    },
     Pressable: ({ accessibilityState, accessibilityHint, ...props }: any) => createElement(actual.Pressable, { ...props, 'aria-checked': accessibilityState?.checked, 'aria-selected': accessibilityState?.selected }),
     TextInput: ({ onChangeText, accessibilityLabel, value, editable, ...props }: any) => createElement('textarea', {
       'aria-label': accessibilityLabel, value: value ?? '', disabled: editable === false,
@@ -39,6 +42,7 @@ vi.mock('react-native', async (original) => {
 });
 import { Platform } from 'react-native';
 import GitRoute from '../../../app/s/[server]/[name]/git';
+import { GitPanel } from './GitPanel';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 import { getLocale, overwriteGetLocale } from '../../paraglide/runtime';
@@ -194,6 +198,21 @@ describe('iOS Git', () => {
     expect(boundary.notification).not.toHaveBeenCalled();
   });
 
+  it.each(['pt', 'en'] as const)('volta do diff para arquivos com um único chevron e sem seta no texto em %s', async (locale) => {
+    const previous = getLocale(); overwriteGetLocale(() => locale);
+    try {
+      boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/diff') ? json({ diff: '+fixture-back-diff', truncated: false }) : respond(url, init));
+      await render(); await click('a.ts');
+      const back = button(m.arq_aba());
+      expect(back?.textContent).toBe(m.arq_aba());
+      expect(back?.querySelectorAll('[data-symbol]')).toHaveLength(1);
+      expect(back?.querySelector('[data-symbol]')?.getAttribute('data-symbol')).toBe('chevron.left');
+      await click(m.arq_aba());
+      expect(button('a.ts')).toBeTruthy();
+      expect(el.textContent).not.toContain('+fixture-back-diff');
+    } finally { overwriteGetLocale(() => previous); }
+  });
+
   it('desenha os símbolos iOS de arquivo marcado e desmarcado', async () => {
     await render();
     expect(button(m.native_git_include({ path: 'a.ts' }))?.querySelector('[data-symbol="checkmark.square"]')).toBeTruthy();
@@ -317,7 +336,7 @@ describe('Git pela rota explícita', () => {
     expect(el.textContent).toContain('+fixture-recovered-diff');
     expect(JSON.parse(diffRequests().at(-1)![1].body)).toEqual({ path: 'a.ts' });
     expect(el.querySelector('textarea')).toBeNull();
-    await click(m.git_voltar_arquivos());
+    await click(m.arq_aba());
     expect(el.querySelector('textarea')?.value).toBe('fixture-offline-draft');
     expect(button(m.native_git_include({ path: 'a.ts' }))?.getAttribute('aria-checked')).toBe('true');
     expect(button(m.native_git_include({ path: 'b.ts' }))?.getAttribute('aria-checked')).toBe('false');
@@ -345,6 +364,40 @@ describe('Git pela rota explícita', () => {
     files = []; branches.dirty = false;
     await click(m.native_git_reload());
     expect(el.textContent).toContain(m.native_git_clean());
+  });
+
+  it.each(['pt', 'en'] as const)('mostra estado traduzido sem código cru nem staging em %s', async (locale) => {
+    const previous = getLocale(); overwriteGetLocale(() => locale);
+    try {
+      const cases = [
+        [' ?? ', m.git_tag_novo], ['A ', m.git_tag_novo], ['AD', m.git_tag_novo], ['AU', m.git_tag_novo],
+        [' D', m.git_tag_del], ['DU', m.git_tag_del], ['RD', m.git_tag_del],
+        ['R ', m.git_tag_ren], ['RU', m.git_tag_ren], ['UU', m.git_tag_conflito],
+        [' M', m.git_tag_mod], ['M ', m.git_tag_mod], [' T', m.git_tag_mod],
+      ] as const;
+      files = cases.map(([code], index) => ({ ...changed(`fixture-status-${index}.ts`, index % 2 === 0), code }));
+      await render();
+      for (const [index, [, label]] of cases.entries()) {
+        const row = button(files[index].path)!.parentElement!;
+        expect(row.lastElementChild?.firstElementChild?.textContent).toBe(label());
+      }
+    } finally { overwriteGetLocale(() => previous); }
+  });
+
+  it('marca ?? e A inicialmente e preserva desmarcados ao reler inclusive quando ?? vira A', async () => {
+    files = [{ ...changed('fixture-untracked.ts'), code: '??' }, { ...changed('fixture-added.ts', true), code: 'A ' }];
+    await render();
+    for (const file of files) {
+      expect(button(m.native_git_include({ path: file.path }))?.getAttribute('aria-checked')).toBe('true');
+      await click(m.native_git_include({ path: file.path }));
+    }
+    await click(m.native_git_reload());
+    for (const file of files) expect(button(m.native_git_include({ path: file.path }))?.getAttribute('aria-checked')).toBe('false');
+    files = files.map((file) => ({ ...file, code: 'A ', staged: true }));
+    await click(m.native_git_reload());
+    for (const file of files) expect(button(m.native_git_include({ path: file.path }))?.getAttribute('aria-checked')).toBe('false');
+    expect(el.textContent).toContain(m.native_git_picked({ n: 0, total: 2 }));
+    expect(writes()).toHaveLength(0);
   });
 
   it('preserva desmarcados e seleção recente durante releitura e remove arquivos sumidos', async () => {
@@ -541,12 +594,12 @@ describe('Git pela rota explícita', () => {
     await click(m.native_git_reload());
     expect(button('b.ts')).toBeUndefined();
     expect(el.textContent).toContain('+fixture-isolated-diff');
-    await click(m.git_voltar_arquivos());
+    await click(m.arq_aba());
     expect(el.querySelector('textarea')?.value).toBe('fixture-kept-draft');
     expect(button(m.native_git_include({ path: 'b.ts' }))?.getAttribute('aria-checked')).toBe('false');
     await click('a.ts'); files = [changed('b.ts')];
     await click(m.native_git_reload());
-    expect(button(m.git_voltar_arquivos())).toBeUndefined();
+    expect(button(m.arq_aba())).toBeUndefined();
     expect(button('b.ts')).toBeTruthy();
     expect(el.querySelector('textarea')?.value).toBe('fixture-kept-draft');
   });
@@ -559,14 +612,14 @@ describe('Git pela rota explícita', () => {
     });
     await render(); await click('a.ts');
     expect(el.textContent).toContain(m.native_git_diff_loading());
-    await click(m.git_voltar_arquivos());
+    await click(m.arq_aba());
     await click('b.ts');
     expect(el.textContent).toContain('+fixture-new-diff');
     expect(el.textContent).toContain(m.git_diff_cortado());
     expect(el.querySelector('[data-selectable="true"]')).toBeTruthy();
     await act(async () => old.resolve(json({ path: 'a.ts', diff: '+fixture-stale-diff', truncated: false })));
     expect(el.textContent).not.toContain('+fixture-stale-diff');
-    await click(m.git_voltar_arquivos());
+    await click(m.arq_aba());
     expect(el.textContent).not.toContain('+fixture-new-diff');
     expect(writes()).toHaveLength(0);
   });
@@ -648,6 +701,16 @@ describe('Git pela rota explícita', () => {
     failed = false; await click(m.native_git_reload());
     expect(el.textContent).toContain(m.native_git_no_commits());
     expect(el.textContent).not.toContain('fixture-history-offline');
+  });
+
+  it('alinha o assunto às demais linhas do histórico com 4 pt de margem horizontal', async () => {
+    const item = { ...committed(1), refs: 'fixture-ref' };
+    boundary.fetch.mockImplementation((url, init) => String(url).includes('/git/log') && new URL(String(url)).searchParams.get('n') !== '1'
+      ? json({ commits: [item], ahead: null, behind: null }) : respond(url, init));
+    await act(async () => root.render(<GitPanel server={server} name="fixture-session" />));
+    await click(m.native_git_history());
+    const row = button(m.git_titulo_commit({ short: item.short, subject: item.subject }))!;
+    expect([...row.querySelectorAll('span')].map((node) => node.getAttribute('data-padding-horizontal'))).toEqual(['4', '4', '4', '4']);
   });
 
   it('dá respiro horizontal ao assunto e corpo sem envolver a área do diff', async () => {
