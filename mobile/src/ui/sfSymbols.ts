@@ -94,6 +94,8 @@ export const SF_SYMBOLS: Partial<Record<IconName, SFSymbol>> = {
   SlidersHorizontal: 'slider.horizontal.3',
   Smartphone: 'iphone',
   Sparkles: 'sparkles',
+  Square: 'square',
+  SquareCheck: 'checkmark.square',
   SquarePen: 'square.and.pencil',
   Star: 'star',
   Terminal: 'terminal',

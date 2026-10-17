@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { checkoutBranch, commitFiles, discardFile, getBranches, getChangedFiles, getCommitDiff, getFileDiff, getGitLog, getSessions, gitAction, gitCreateBranch, gitPush, type BranchInfo, type ChangedFile, type GitCommit, type Server, type SessionInfo } from '@hangar/core';
 import { Icon, type IconName } from '../../ui/Icon';
 import { MultilineInput } from '../../ui/MultilineInput';
+import { haptic } from '../../ui/haptics';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 
@@ -102,7 +103,7 @@ function GitHistory({ server, name, revision }: { server: Server; name: string; 
     </> : <>
       <FlatList data={commits} keyExtractor={(item) => item.hash}
         ListEmptyComponent={!loading && !error ? <Text style={styles.meta}>{m.native_git_no_commits()}</Text> : null}
-        renderItem={({ item }) => <Pressable accessibilityRole="button" accessibilityLabel={m.git_titulo_commit({ short: item.short, subject: item.subject || m.native_git_no_subject() })} onPress={() => setSelected(item)} style={styles.commitRow}>
+        renderItem={({ item }) => <Pressable accessibilityRole="button" accessibilityLabel={m.git_titulo_commit({ short: item.short, subject: item.subject || m.native_git_no_subject() })} onPress={() => { haptic.selection(); setSelected(item); }} style={styles.commitRow}>
           <Text style={styles.text}>{item.subject || m.native_git_no_subject()}</Text>
           <Text style={styles.meta}>{item.short} · {item.author} · {item.rel}</Text>
           {item.refs ? <Text style={styles.meta}>{item.refs}</Text> : null}
@@ -170,7 +171,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
     void reload();
     return () => { alive.current = false; generation.current++; operation.current = null; };
   }, [reload]);
-  const request = (work: (write: Write) => Promise<string>, confirmation?: { title: string; body: string; destructive?: boolean }) => {
+  const request = (work: (write: Write) => Promise<string>, confirmation?: { title: string; body: string; destructive?: boolean }, notify = true) => {
     if (!current() || operation.current || loading || readError || !repo) return;
     const ticket = { started: false };
     operation.current = ticket; setBusy(true);
@@ -189,9 +190,9 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
           return deadline(call, true);
         };
         const output = await work(write);
-        if (current()) setResult(output);
+        if (current()) { setResult(output); if (notify) haptic.success(); }
       } catch (error) {
-        if (current()) setOperationError(reason(error));
+        if (current()) { setOperationError(reason(error)); if (notify) haptic.error(); }
       } finally {
         // Uma escrita recusada ainda pode ter alterado o stage ou criado uma branch.
         if (current()) await reload();
@@ -205,13 +206,13 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
     else void run();
   };
   const isSelected = (path: string) => Object.hasOwn(selection, path) && selection[path] === true;
+  const selectedPaths = repo?.files.filter((file) => isSelected(file.path)).map((file) => file.path) ?? [];
   const publishConfirmation = (action: string) => ({ title: m.mobile_git_publish_title(), body: m.mobile_git_publish_body({ action }) });
   const commit = (publish: boolean) => {
-    const paths = repo?.files.filter((file) => isSelected(file.path)).map((file) => file.path) ?? [];
     const text = message.trim();
-    if (!text || !paths.length) return;
+    if (!text || !selectedPaths.length) return;
     request(async (write) => {
-      check(await write(() => commitFiles(name, text, paths, undefined, server)));
+      check(await write(() => commitFiles(name, text, selectedPaths, undefined, server)));
       if (current()) setMessage('');
       if (publish && current()) {
         try { check(await write(() => gitPush(name, server))); }
@@ -229,7 +230,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
   const changeBranch = (branch: string, create: boolean) => {
     if (!repo || !branch || operation.current) return;
     const problem = branchProblem(repo.branches, repo.files, create ? undefined : branch);
-    if (problem) { setOperationError(problem); return; }
+    if (problem) { setOperationError(problem); haptic.error(); return; }
     request(async (write) => {
       const [freshBranches, freshFiles] = await Promise.all([deadline(() => getBranches(name, server)), deadline(() => getChangedFiles(name, server))]);
       if (!current()) return '';
@@ -246,7 +247,7 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
     }, { title: m.mobile_git_checkout_title({ branch }), body: m.mobile_git_branch_body() });
   };
   const unavailable = busy || loading || !!readError || !repo;
-  const commitDisabled = unavailable || !message.trim() || !repo?.files.some((file) => isSelected(file.path));
+  const commitDisabled = unavailable || !message.trim() || !selectedPaths.length;
   return <View style={styles.root}>
     <View style={styles.bar}>
       <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.text, styles.grow]}>{repo?.branches.current ?? m.ctx_sem_branch()}</Text>
@@ -260,15 +261,19 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
       {result ? <Text selectable style={styles.meta}>{result}</Text> : null}
     </ScrollView> : null}
     <View style={styles.bar}>
-      {(['changes', 'history', 'branches'] as const).map((value) => <Pressable key={value} accessibilityRole="tab" accessibilityState={{ selected: tab === value }} accessibilityLabel={value === 'changes' ? m.native_git_changes() : value === 'history' ? m.native_git_history() : m.git_aba_branches()} onPress={() => setTab(value)} style={styles.button}>
-        <Text style={[styles.text, tab === value && styles.selected]}>{value === 'changes' ? m.native_git_changes() : value === 'history' ? m.native_git_history() : m.git_aba_branches()}</Text>
+      {([
+        ['changes', m.native_git_changes()],
+        ['history', m.native_git_history()],
+        ['branches', m.git_aba_branches()],
+      ] as const).map(([value, label]) => <Pressable key={value} accessibilityRole="tab" accessibilityState={{ selected: tab === value }} accessibilityLabel={label} onPress={() => { if (tab !== value) { haptic.selection(); setTab(value); } }} style={styles.button}>
+        <Text style={[styles.text, tab === value && styles.selected]}>{label}</Text>
       </Pressable>)}
     </View>
     <View style={styles.bar}>
       {(['fetch', 'pull', 'status'] as const).map((action) => <GitButton key={action} label={action === 'fetch' ? m.native_git_fetch() : action === 'pull' ? m.native_git_pull() : m.mobile_git_status()} disabled={unavailable} onPress={() => request(async (write) => {
         const response = check(await write(() => gitAction(name, action, server)));
         return response.output || (action === 'fetch' ? m.native_git_fetched() : action === 'pull' ? m.native_git_pulled() : m.mobile_git_status());
-      })} />)}
+      }, undefined, action !== 'status')} />)}
       <GitButton label={m.native_git_push()} icon="Upload" disabled={unavailable} onPress={() => request(async (write) => { check(await write(() => gitPush(name, server))); return m.native_git_pushed(); }, publishConfirmation(m.native_git_push()))} />
     </View>
     {repo && tab === 'history' ? <GitHistory server={server} name={name} revision={revision} /> : null}
@@ -287,15 +292,15 @@ export function GitPanel({ server, name }: { server: Server; name: string }) {
       <GitButton label={m.native_git_branch_create({ n: branchName.trim() })} icon="GitBranch" disabled={unavailable || !branchName.trim()} onPress={() => changeBranch(branchName.trim(), true)} />
     </> : null}
     {repo && tab === 'changes' ? <>
-      <Text style={styles.meta}>{m.native_git_picked({ n: repo.files.filter((file) => isSelected(file.path)).length, total: repo.files.length })}</Text>
+      <Text style={styles.meta}>{m.native_git_picked({ n: selectedPaths.length, total: repo.files.length })}</Text>
       <FlatList data={repo.files} keyExtractor={(file) => file.path} extraData={selection}
         ListEmptyComponent={!loading && !readError ? <Text style={styles.meta}>{m.native_git_clean()}</Text> : null}
         renderItem={({ item }) => <View style={styles.row}>
           <Pressable disabled={busy} accessibilityRole="checkbox" accessibilityLabel={m.native_git_include({ path: item.path })} accessibilityState={{ checked: isSelected(item.path) }}
-            onPress={() => setSelection((previous) => ({ ...previous, [item.path]: !(Object.hasOwn(previous, item.path) && previous[item.path]) }))} style={[styles.button, styles.checkbox]}>
+            onPress={() => { haptic.selection(); setSelection((previous) => ({ ...previous, [item.path]: !(Object.hasOwn(previous, item.path) && previous[item.path]) })); }} style={[styles.button, styles.checkbox]}>
             <Icon name={isSelected(item.path) ? 'SquareCheck' : 'Square'} />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel={item.path} accessibilityHint={m.git_ver_diff()} onPress={() => setFilePath(item.path)} style={[styles.button, styles.grow]}><Text numberOfLines={2} ellipsizeMode="middle" style={[styles.text, styles.shrink]}>{item.path}</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={item.path} accessibilityHint={m.git_ver_diff()} onPress={() => { if (filePath !== item.path) { haptic.selection(); setFilePath(item.path); } }} style={[styles.button, styles.grow]}><Text numberOfLines={2} ellipsizeMode="middle" style={[styles.text, styles.shrink]}>{item.path}</Text></Pressable>
           <Text style={styles.meta}>{item.code} {item.staged ? m.git_grupo_staged() : m.git_grupo_nao_staged()}</Text>
           <Text style={styles.add}>{item.added === null ? '' : `+${item.added}`}</Text>
           <Text style={styles.remove}>{item.removed === null ? '' : `−${item.removed}`}</Text>

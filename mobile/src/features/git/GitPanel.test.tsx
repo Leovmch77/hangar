@@ -5,11 +5,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, type ChangedFile, type GitCommit, type SessionInfo } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const boundary = vi.hoisted(() => ({ fetch: vi.fn(), alert: vi.fn(), back: vi.fn(), params: { server: 'route-b', name: 'fixture-session' } }));
-vi.mock('expo-router', () => ({ useLocalSearchParams: () => boundary.params, useRouter: () => ({ back: boundary.back }) }));
+const boundary = vi.hoisted(() => ({
+  fetch: vi.fn(), alert: vi.fn(), back: vi.fn(), replace: vi.fn(), canGoBack: true,
+  selection: vi.fn(), notification: vi.fn(), header: {} as Record<string, any>,
+  params: { server: 'route-b', name: 'fixture-session' },
+}));
+vi.mock('expo-router', () => ({
+  useLocalSearchParams: () => boundary.params,
+  useRouter: () => ({ back: boundary.back, replace: boundary.replace, canGoBack: () => boundary.canGoBack }),
+  Stack: { Screen: ({ options }: any) => { boundary.header = options; return null; } },
+}));
+vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: async () => null, setItemAsync: async () => {} }));
-vi.mock('react-native-keyboard-controller', async () => ({ KeyboardAvoidingView: (await import('react-native')).View }));
-vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
+vi.mock('expo-blur', () => ({ BlurView: () => null }));
+vi.mock('expo-glass-effect', () => ({ GlassView: () => null, isLiquidGlassAvailable: () => false }));
+vi.mock('expo-haptics', async (original) => ({ ...await original<typeof import('expo-haptics')>(), selectionAsync: boundary.selection, notificationAsync: boundary.notification }));
+vi.mock('react-native-safe-area-context', async (original) => ({ ...await original<typeof import('react-native-safe-area-context')>(), useSafeAreaInsets: () => ({ top: 20, bottom: 24, left: 0, right: 0 }) }));
+vi.mock('react-native-keyboard-controller', async () => {
+  const { View } = await import('react-native');
+  return { KeyboardAvoidingView: ({ automaticOffset, behavior, ...props }: any) => createElement(View, { ...props, 'data-keyboard': behavior, 'data-automatic-offset': !!automaticOffset }) };
+});
 vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return { ...actual, Alert: { alert: boundary.alert },
@@ -22,6 +37,7 @@ vi.mock('react-native', async (original) => {
     }),
   };
 });
+import { Platform } from 'react-native';
 import GitRoute from '../../../app/s/[server]/[name]/git';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
@@ -57,7 +73,9 @@ function respond(url: string, init?: RequestInit) {
   throw new Error(`unexpected-fetch:${url}`);
 }
 beforeEach(() => {
-  boundary.fetch.mockReset().mockImplementation(respond); boundary.alert.mockReset(); boundary.back.mockReset();
+  boundary.fetch.mockReset().mockImplementation(respond); boundary.alert.mockReset(); boundary.back.mockReset(); boundary.replace.mockReset();
+  boundary.selection.mockReset().mockResolvedValue(undefined); boundary.notification.mockReset().mockResolvedValue(undefined);
+  boundary.header = {}; boundary.canGoBack = true;
   boundary.params = { server: server.id, name: 'fixture-session' };
   configureApi({ getBaseUrl: () => 'https://wrong-active.test', getToken: () => 'wrong-token', origin: null, onUnauthorized: vi.fn(), createEventSource: vi.fn() });
   vi.stubGlobal('fetch', boundary.fetch);
@@ -68,6 +86,108 @@ beforeEach(() => {
   el = document.createElement('div'); document.body.appendChild(el); root = createRoot(el); mounted = true;
 });
 afterEach(async () => { if (mounted) await act(async () => root.unmount()); el.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+describe('iOS Git', () => {
+  beforeEach(() => { Platform.OS = 'ios'; });
+  afterEach(() => { Platform.OS = 'android'; });
+
+  it('usa cabeçalho nativo e mantém os controles abaixo dele com compensação do teclado', async () => {
+    await render();
+    expect(boundary.header).toMatchObject({ headerShown: true, headerTransparent: true, headerBackButtonDisplayMode: 'minimal', title: m.sessao_git() });
+    expect(boundary.header.headerBackground).toBeTypeOf('function');
+    expect(boundary.header.headerLeft).toBeUndefined();
+    expect(button(m.comum_voltar())).toBeUndefined();
+    const content = button(m.native_git_reload())?.closest<HTMLElement>('[data-keyboard]');
+    expect(content?.style.paddingTop).toBe('64px');
+    expect(content?.style.paddingBottom).toBe('24px');
+    expect(content?.getAttribute('data-keyboard')).toBe('padding');
+    expect(content?.getAttribute('data-automatic-offset')).toBe('true');
+    expect(button(m.native_git_commit())).toBeTruthy();
+  });
+
+  it('vibra ao trocar aba e marcar arquivo, não ao tocar a aba já selecionada', async () => {
+    await render();
+    expect(boundary.selection).not.toHaveBeenCalled();
+    await click(m.git_aba_branches());
+    expect(boundary.selection).toHaveBeenCalledTimes(1);
+    await click(m.git_aba_branches());
+    expect(boundary.selection).toHaveBeenCalledTimes(1);
+    await click(m.native_git_changes());
+    expect(boundary.selection).toHaveBeenCalledTimes(2);
+    await click(m.native_git_include({ path: 'a.ts' }));
+    expect(button(m.native_git_include({ path: 'a.ts' }))?.getAttribute('aria-checked')).toBe('false');
+    expect(boundary.selection).toHaveBeenCalledTimes(3);
+    await click(m.native_git_include({ path: 'a.ts' }));
+    expect(boundary.selection).toHaveBeenCalledTimes(4);
+    expect(boundary.notification).not.toHaveBeenCalled();
+  });
+
+  it('vibra ao escolher arquivo e commit sem vibrar quando o diff termina de carregar', async () => {
+    const item = committed(1); const diff = deferred<Response>();
+    boundary.fetch.mockImplementation((url, init) => {
+      if (String(url).endsWith('/git/diff') || String(url).endsWith('/diff-full')) return diff.promise.then((response) => response.clone());
+      if (String(url).includes('/git/log') && new URL(String(url)).searchParams.get('n') !== '1') return json({ commits: [item], ahead: null, behind: null });
+      return respond(url, init);
+    });
+    await render(); await click('a.ts');
+    expect(boundary.selection).toHaveBeenCalledTimes(1);
+    await act(async () => diff.resolve(json({ diff: '+fixture-diff', truncated: false })));
+    expect(el.textContent).toContain('+fixture-diff');
+    expect(boundary.selection).toHaveBeenCalledTimes(1);
+    await click(m.native_git_history());
+    expect(boundary.selection).toHaveBeenCalledTimes(2);
+    await click(m.git_titulo_commit({ short: item.short, subject: item.subject }));
+    expect(el.textContent).toContain('+fixture-diff');
+    expect(boundary.selection).toHaveBeenCalledTimes(3);
+    expect(boundary.notification).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('notifica o resultado da operação ok:%s uma vez, sem repetir na releitura', async (ok) => {
+    await render(); await fill(m.native_git_message(), 'fixture-haptic-commit');
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/commit') ? json({ ok, output: 'fixture-operation-result' }) : respond(url, init));
+    await click(m.native_git_commit());
+    expect(el.textContent).toContain(ok ? m.native_git_committed() : 'fixture-operation-result');
+    expect(boundary.notification).toHaveBeenCalledExactlyOnceWith(ok ? 'success' : 'error');
+    await click(m.native_git_reload());
+    expect(boundary.notification).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifica a recusa local de checkout sem enviar operação', async () => {
+    await render(); await click(m.git_aba_branches()); await click('next');
+    expect(el.textContent).toContain(m.git_working_tree_suja());
+    expect(boundary.notification).toHaveBeenCalledExactlyOnceWith('error');
+    expect(writes()).toHaveLength(0);
+  });
+
+  it('não vibra por leituras, falha de leitura, status ou confirmação cancelada', async () => {
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/files') ? json({ detail: 'fixture-read-refused' }, 503) : respond(url, init));
+    await render();
+    expect(el.textContent).toContain('fixture-read-refused');
+    boundary.fetch.mockImplementation(respond); await click(m.native_git_reload());
+    await click(m.mobile_git_status());
+    expect(el.textContent).toContain('fixture-operation');
+    await click(m.native_git_push());
+    await act(async () => boundary.alert.mock.calls.at(-1)![2].find((b: { style: string }) => b.style === 'cancel').onPress());
+    expect(boundary.selection).not.toHaveBeenCalled();
+    expect(boundary.notification).not.toHaveBeenCalled();
+  });
+
+  it('não notifica resultado atrasado depois de sair da rota', async () => {
+    const pending = deferred<Response>();
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/commit') ? pending.promise : respond(url, init));
+    await render(); await fill(m.native_git_message(), 'fixture-late-commit'); await click(m.native_git_commit());
+    await act(async () => root.unmount()); mounted = false;
+    await act(async () => pending.resolve(json({ ok: true })));
+    expect(boundary.notification).not.toHaveBeenCalled();
+  });
+
+  it('desenha os símbolos iOS de arquivo marcado e desmarcado', async () => {
+    await render();
+    expect(button(m.native_git_include({ path: 'a.ts' }))?.querySelector('[data-symbol="checkmark.square"]')).toBeTruthy();
+    await click(m.native_git_include({ path: 'a.ts' }));
+    expect(button(m.native_git_include({ path: 'a.ts' }))?.querySelector('[data-symbol="square"]')).toBeTruthy();
+  });
+});
 
 describe('Git pela rota explícita', () => {
   it('aguarda o cofre e carrega apenas o destino da rota, sem montar histórico oculto', async () => {
@@ -564,9 +684,14 @@ describe('Git pela rota explícita', () => {
   });
 
   it.each(['missing', 'removed', 'invite'])('recusa deep link de servidor %s sem usar o ativo', async (kind) => {
+    boundary.canGoBack = false;
     useServers.setState({ servers: kind === 'missing' ? [] : [{ ...server, [kind]: true }] });
     await render(); expect(boundary.fetch).not.toHaveBeenCalled();
     expect(el.querySelector('[role="alert"]')).toBeTruthy();
-    await click(m.comum_voltar()); expect(boundary.back).toHaveBeenCalledOnce();
+    expect(boundary.header.headerLeft).toBeTypeOf('function');
+    await act(async () => root.render(boundary.header.headerLeft()));
+    await click(m.comum_voltar());
+    expect(boundary.replace).toHaveBeenCalledExactlyOnceWith('/s/route-b/fixture-session');
+    expect(boundary.back).not.toHaveBeenCalled();
   });
 });
