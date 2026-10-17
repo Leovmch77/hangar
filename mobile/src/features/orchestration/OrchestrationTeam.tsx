@@ -86,8 +86,23 @@ const writeScope = (server: Server, name: string) => JSON.stringify([server.id, 
 const rowKey = (row: TeamRow) => row.key;
 const normalizeName = (value: string) => value.trim().replace(/^`+|`+$/g, '').replace(/\*\*/g, '').trim().normalize('NFKD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').toLowerCase();
 function editable(role: Papel): Papel {
-  return { papel: role.papel, vez: role.vez ?? '', sessao: role.sessao, provider: role.provider || 'claude', conta: role.conta, modelo: role.modelo, esforco: role.esforco,
-    headless: role.headless ?? null, permissao: role.permissao ?? '', motor: role.motor ?? '', jev: role.jev ?? false, subagente: role.subagente ?? '', perfil: role.perfil ?? '', janela: role.janela ?? '', viva: null };
+  return {
+    papel: role.papel,
+    vez: role.vez ?? '',
+    sessao: role.sessao,
+    provider: role.provider || 'claude',
+    conta: role.conta,
+    modelo: role.modelo,
+    esforco: role.esforco,
+    headless: role.headless ?? null,
+    permissao: role.permissao ?? '',
+    motor: role.motor ?? '',
+    jev: role.jev ?? false,
+    subagente: role.subagente ?? '',
+    perfil: role.perfil ?? '',
+    janela: role.janela ?? '',
+    viva: null
+  };
 }
 function accountPatch(role: Papel, conta: string, policy: OrqPolitica, keepDefault = true): Partial<Papel> {
   const provider = role.provider || 'claude';
@@ -336,7 +351,15 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
   };
   const add = () => {
     if (!policy || !active || busy.current || readingRef.current !== null || blockedRef.current || !targetRef.current()) return;
-    const blank = editable({ papel: '', sessao: '', provider: 'claude', conta: '', modelo: '', esforco: '', viva: null });
+    const blank = editable({
+      papel: '',
+      sessao: '',
+      provider: 'claude',
+      conta: '',
+      modelo: '',
+      esforco: '',
+      viva: null
+    });
     const conta = contasLiberadas(policy.politica, policy.inventario, 'claude')[0]?.conta ?? '';
     const key = `new:${++newId.current}`;
     setDrafts(previous => ({ ...previous, [key]: { ...blank, ...accountPatch(blank, conta, policy, false) } })); setSelected(key);
