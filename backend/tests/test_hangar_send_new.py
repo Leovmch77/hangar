@@ -11,7 +11,7 @@ import pytest
 
 @pytest.fixture
 def backend(tmp_path):
-    requests = []
+    requests, paths = [], []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -20,6 +20,7 @@ def backend(tmp_path):
             self.wfile.write(b'{"claude": {"disponivel": true, "default": true}}')
 
         def do_POST(self):
+            paths.append(self.path)
             requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
             self.send_response(200)
             self.end_headers()
@@ -41,6 +42,7 @@ def backend(tmp_path):
     def run(*args):
         return subprocess.run(["bash", str(script), "--new", *args], capture_output=True, text=True, timeout=10, env=env)
 
+    run.paths = paths
     yield run, requests
     server.shutdown()
     server.server_close()
@@ -92,3 +94,22 @@ def test_terminal_with_a_pane_provider_is_accepted(backend):
     assert result.returncode == 0, result.stderr
     assert requests[-1]["provider"] == "pi"
     assert requests[-1]["headless"] is False
+
+
+SID = "11111111-1111-4111-8111-111111111111"
+
+
+def test_resume_brings_back_a_conversation_through_the_archive_route(backend):
+    run, requests = backend
+    result = run("volta", "--resume", SID, "--terminal")
+    assert result.returncode == 0, result.stderr
+    assert run.paths[-1] == f"/api/archive/-/{SID}/resume"
+    assert requests[-1] == {"name": "volta", "provider": "claude", "headless": False}
+    assert "sessão retomada: Area-de-trabalho" in result.stdout
+
+
+def test_resume_refuses_what_the_resume_does_not_take(backend):
+    run, requests = backend
+    result = run("volta", "--resume", SID, "--permissao", "plan")
+    assert result.returncode == 2 and "--permissao" in result.stderr
+    assert not requests

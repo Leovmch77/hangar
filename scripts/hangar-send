@@ -36,6 +36,9 @@
 #   hangar-send --new <servidor>::<nome> [cwd]  idem, NOUTRO servidor (peers.json), com as mesmas
 #                                  flags. cwd, --conta e --conta auto são resolvidos LÁ (cwd default
 #                                  = home de lá; --conta pelo nome da conta de lá).
+#   hangar-send --new <nome> --resume <id>  a sessão nova RETOMA uma conversa que existe no disco
+#                                  (a pasta vem dela, sem cwd). Combina com --provider, --conta,
+#                                  --model, --engine, --engine-account e --headless/--terminal.
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
 #                                  nova (padrão do servidor). Ex: --provider kimi abre o Kimi Code.
 #                                  --remember-provider grava o provedor desta criação como padrão.
@@ -408,7 +411,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--resume <id da conversa>]}"
     shift
     # servidor::nome cria a sessão NOUTRA máquina, pela API dela (peers.json), igual ao recado.
     remoto=""
@@ -424,7 +427,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--resume <id da conversa>]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -447,7 +450,7 @@ if [[ "$1" == "--new" ]]; then
     # --subagente: modelo dos subagentes (CLAUDE_CODE_SUBAGENT_MODEL); só Claude sem motor.
     # --conta com --provider codex: conta Codex (~/.codex-<nome>); `openai-codex` é a padrão.
     cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""; subagente=""; codex_conta=""; service_tier=""
-    remember_provider="false"; no_inherit=""; engine_account=""; branch=""; new_branch=""; base=""; customizations=""; prompt=""
+    remember_provider="false"; no_inherit=""; engine_account=""; branch=""; new_branch=""; base=""; customizations=""; prompt=""; resume=""
     # Uma flag que só aceita valor uma vez: `once <variável> <flag> <valor>`.
     once() {
         [[ -n "${!1}" ]] && { echo "erro: $2 informado duas vezes" >&2; exit 2; }
@@ -464,6 +467,8 @@ if [[ "$1" == "--new" ]]; then
             # --customizations: o delta de plugins/skills da tela de criação, em JSON.
             --customizations) once customizations "$1" "${2:?uso: --customizations <json>}"; shift 2 ;;
             --prompt) once prompt "$1" "${2:?uso: --prompt <texto>}"; shift 2 ;;
+            # --resume: a sessão nova retoma uma conversa que já existe no disco (a pasta vem dela).
+            --resume) once resume "$1" "${2:?uso: --resume <id da conversa>}"; shift 2 ;;
             --service-tier)
                 [[ -n "$service_tier" ]] && { echo "erro: --service-tier informado duas vezes" >&2; exit 2; }
                 service_tier="${2:?uso: --service-tier <default|priority>}"; shift 2 ;;
@@ -566,7 +571,8 @@ print(home + "\t" + achada)' "$configs" "$conta")
             fi
         fi
     fi
-    cwd="${cwd:-$HOME}"
+    [[ -n "$resume" && -n "$cwd" ]] && { echo "erro: com --resume a pasta vem da conversa; tire o cwd" >&2; exit 2; }
+    [[ -z "$resume" ]] && cwd="${cwd:-$HOME}"
     # Mesma regra do servidor, antes do POST: --base só com --new-branch, que pede o nome da branch.
     if [[ -n "$new_branch" && -z "$branch" ]] || [[ -n "$base" && -z "$new_branch" ]]; then
         echo "erro: --new-branch pede --branch <nome>; --base só vale com --new-branch" >&2
@@ -621,6 +627,30 @@ s = json.load(sys.stdin); print(s["path"] + "\t" + s["label"])' <<<"$sugestao")
         if [[ -z "$criadora" && -n "${TMUX:-}${CP_SESSION_KEY:-}${HANGAR_CANO_KEY:-}" ]]; then
             echo "aviso: não identifiquei esta sessão; conta, modo de permissão e sem terminal não serão herdados" >&2
         fi
+    fi
+    if [[ -n "$resume" ]]; then
+        [[ "$resume" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "erro: id de conversa inválido: $resume" >&2; exit 2; }
+        for pair in "--effort:$effort" "--permissao:$permissao" "--profile:$perfil" "--read-only:$read_only" "--jev/--sem-jev:$jev" \
+                    "--subagente:$subagente" "--service-tier:$service_tier" "--no-inherit:$no_inherit" "--branch:$branch" \
+                    "--new-branch:$new_branch" "--base:$base" "--customizations:$customizations" "--prompt:$prompt" \
+                    "--remember-provider:${remember_provider#false}"; do
+            [[ -n "${pair#*:}" ]] && { echo "erro: ${pair%%:*} não combina com --resume" >&2; exit 2; }
+        done
+        body=$(python3 -c 'import json,sys
+d = {"name": sys.argv[1], "provider": sys.argv[2]}
+for key, value in zip(("engine", "config_dir", "model", "codex_account", "engine_account"), sys.argv[3:8]):
+    if value:
+        d[key] = value
+if sys.argv[8]:
+    d["headless"] = sys.argv[8] == "true"
+print(json.dumps(d))' "$name" "$provider" "$engine" "$config_dir" "$model" "$codex_conta" "$engine_account" "$headless")
+        # A rota do Arquivo, com `-` no lugar do projeto: o servidor acha a pasta pela conversa.
+        creation_result=$(API_TIMEOUT=120 api POST "/api/archive/-/$resume/resume" "$body") || exit 1
+        IFS=$'\t' read -r name cwd < <(python3 -c 'import json,sys
+r = json.load(sys.stdin); print((r.get("name") or sys.argv[1]) + "\t" + (r.get("cwd") or ""))' "$name" <<<"$creation_result") || true
+        [[ -n "$remoto" ]] && name="$remoto::$name"
+        echo "sessão retomada: $name ($cwd) na conversa $resume — fala com ela via: hangar-send $name \"msg\""
+        exit 0
     fi
     body=$(python3 -c 'import json,sys
 d = {"name": sys.argv[1], "cwd": sys.argv[2],
