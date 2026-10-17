@@ -129,7 +129,7 @@ export default function ChatScreen() {
   const turnSeen = chat.use((s) => s.turnSeen);
   // Mesma fonte do painel Atividade: um Agent em background devolve resultado na hora e só o fold
   // sabe que ele segue rodando.
-  const activity = useActivity(events);
+  const activity = useActivity(events, eventsRevision);
   const agentesRodando = useMemo(() => activity.agents.filter((a) => a.running), [activity]);
   const loading = chat.use((s) => s.loading);
   const error = chat.use((s) => s.error);

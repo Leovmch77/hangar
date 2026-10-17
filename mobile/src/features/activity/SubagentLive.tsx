@@ -190,6 +190,7 @@ function SubagentConversation({ server, sessionName, agentId, paiRodando = null 
       {detail.events?.length ? (
         <View style={[styles.chatBox, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
           <MessageList
+            alignItemsAtEnd={false}
             events={detail.events}
             preview=""
             olderFailed=""

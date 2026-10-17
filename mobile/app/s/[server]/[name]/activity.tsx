@@ -32,9 +32,10 @@ export default function ActivitySheet() {
 
   const chat = chatStore(serverId, name);
   const events = chat.use((s) => s.events);
+  const eventsRevision = chat.use((s) => s.eventsRevision);
   // Processos vivos lidos do sistema pelo backend (vêm no `state` do stream que o chat já mantém).
   const processos = chat.use((s) => s.stateEvent?.shells) ?? [];
-  const activity = useActivity(events);
+  const activity = useActivity(events, eventsRevision);
   // Relógio do "há N" dos shells; com a folha aberta só.
   const [agora, setAgora] = useState(Date.now() / 1000);
   useEffect(() => {
@@ -72,37 +73,21 @@ export default function ActivitySheet() {
   const genList = useRef(0);
   const genSubs = useRef(0);
 
-  const fetchAll = useCallback(async () => {
-    // Sem o servidor da rota (lista ainda carregando ou máquina removida) não pergunta ao ativo.
-    if (!server) return;
-    const generation = ++genList.current;
-    const subGeneration = ++genSubs.current;
-    setList({ key: listKey, workflows: [], subs: [], workflowLoading: true, subLoading: true, workflowError: '', subError: '' });
-    await Promise.all([
-      getWorkflows(name, server).then(
-        (workflows) => {
-          if (generation === genList.current) setList((current) => ({ ...current, workflows, workflowLoading: false }));
-        },
-        () => {
-          if (generation === genList.current) setList((current) => ({ ...current, workflowLoading: false, workflowError: m.atividade_erro_run() }));
-        },
-      ),
-      getSubagents(name, server).then(
-        (subs) => {
-          if (generation === genList.current && subGeneration === genSubs.current) setList((current) => ({ ...current, subs, subLoading: false }));
-        },
-        () => {
-          if (generation === genList.current && subGeneration === genSubs.current) setList((current) => ({ ...current, subLoading: false, subError: m.atividade_erro_subagentes() }));
-        },
-      ),
-    ]);
-  }, [listKey, name, server]);
+  const subRequest = useRef<{ generation: number; rerun: boolean } | null>(null);
 
-  const refreshSubs = useCallback(async () => {
+  const refreshSubs = useCallback(async (invalidate = true): Promise<void> => {
     if (!server) return;
     const generation = genList.current;
+    if (subRequest.current?.generation === generation) {
+      if (invalidate) {
+        genSubs.current += 1;
+        subRequest.current.rerun = true;
+      }
+      return;
+    }
+    const request = { generation, rerun: false };
+    subRequest.current = request;
     const subGeneration = ++genSubs.current;
-    setList((current) => current.key === listKey ? { ...current, subLoading: true, subError: '' } : current);
     try {
       const subs = await getSubagents(name, server);
       if (generation !== genList.current || subGeneration !== genSubs.current) return;
@@ -110,10 +95,40 @@ export default function ActivitySheet() {
     } catch {
       if (generation !== genList.current || subGeneration !== genSubs.current) return;
       setList((current) => ({ ...current, subLoading: false, subError: m.atividade_erro_subagentes() }));
+    } finally {
+      if (subRequest.current === request) {
+        subRequest.current = null;
+        if (request.rerun && generation === genList.current) void refreshSubs();
+      }
     }
   }, [listKey, name, server]);
 
+  const workflowRequest = useRef<number | null>(null);
+  const fetchAll = useCallback(async () => {
+    // Sem o servidor da rota (lista ainda carregando ou máquina removida) não pergunta ao ativo.
+    if (!server) return;
+    const generation = genList.current;
+    const subRefresh = refreshSubs();
+    if (workflowRequest.current === generation) return subRefresh;
+    workflowRequest.current = generation;
+    await Promise.all([
+      getWorkflows(name, server).then(
+        (workflows) => {
+          if (generation === genList.current) setList((current) => ({ ...current, workflows, workflowLoading: false, workflowError: '' }));
+        },
+        () => {
+          if (generation === genList.current) setList((current) => ({ ...current, workflowLoading: false, workflowError: m.atividade_erro_run() }));
+        },
+      ).finally(() => {
+        if (workflowRequest.current === generation) workflowRequest.current = null;
+      }),
+      subRefresh,
+    ]);
+  }, [name, refreshSubs, server]);
+
   useEffect(() => {
+    genList.current += 1;
+    setList({ key: listKey, workflows: [], subs: [], workflowLoading: true, subLoading: true, workflowError: '', subError: '' });
     setLevel('list');
     setRunId(null);
     setDetail(null);
@@ -132,6 +147,12 @@ export default function ActivitySheet() {
     previousAgents.current = { key: listKey, signature: agentSignature };
     if (previous.key === listKey && previous.signature !== agentSignature) void refreshSubs();
   }, [agentSignature, listKey, refreshSubs]);
+
+  useFocusEffect(useCallback(() => {
+    if (level !== 'list') return;
+    const timer = setInterval(() => void refreshSubs(false), 5_000);
+    return () => clearInterval(timer);
+  }, [level, refreshSubs]));
 
   // helpers de matching (casamento por prompt, como no frontend)
   const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();

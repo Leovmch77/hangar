@@ -13,7 +13,7 @@ const nativeBack = vi.hoisted(() => ({ listeners: new Set<() => boolean>() }));
 const stores = vi.hoisted(() => ({ servers: [
   { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' },
   { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' },
-] as Server[], activeId: 'b', chat: { events: [] as ChatEvent[], stateEvent: null as Pick<StateEvent, 'shells'> | null } }));
+] as Server[], activeId: 'b', chat: { events: [] as ChatEvent[], eventsRevision: 0, stateEvent: null as Pick<StateEvent, 'shells'> | null } }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => route.params,
@@ -147,6 +147,7 @@ beforeEach(() => {
   route.focused = true;
   nativeBack.listeners.clear();
   stores.chat.events = events;
+  stores.chat.eventsRevision = 0;
   stores.chat.stateEvent = null;
   api.getWorkflows.mockResolvedValue([workflow]);
   api.getSubagents.mockResolvedValue([sub]);
@@ -313,6 +314,7 @@ describe('ActivitySheet real', () => {
   });
 
   it.each(['workflows', 'subagentes'])('isola carga do destino B de resposta atrasada de A: %s', async (waiting) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     stores.chat.events = [];
     const workflowsA = Promise.withResolvers<WorkflowSummary[]>();
     const subsA = Promise.withResolvers<SubagentRun[]>();
@@ -339,6 +341,20 @@ describe('ActivitySheet real', () => {
     expect(el.textContent).toContain('Subagente da máquina B');
     expect(el.textContent).not.toContain('Fluxo da máquina A');
     expect(el.textContent).not.toContain('Subagente da máquina A');
+    const refreshB = Promise.withResolvers<SubagentRun[]>();
+    api.getSubagents.mockReturnValueOnce(refreshB.promise).mockResolvedValue([
+      { ...sub, prompt: 'Subagente atual da máquina A', state: 'running', toolCalls: 22 },
+    ]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getSubagents).toHaveBeenLastCalledWith('outra', stores.servers[1]);
+    api.getWorkflows.mockResolvedValue([oldWorkflow]);
+    route.params = { server: 'a', name: 'sess' };
+    await render();
+    expect(button(el, 'Subagente atual da máquina A').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    await act(async () => { refreshB.resolve([{ ...sub, prompt: 'Resposta antiga da máquina B', state: 'running', toolCalls: 99 }]); });
+    expect(button(el, 'Subagente atual da máquina A').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    expect(el.textContent).not.toContain('Resposta antiga da máquina B');
+    expect(api.getSubagents).toHaveBeenLastCalledWith('sess', stores.servers[0]);
   });
 
   it('limpa lista carregada ao trocar destino sem mostrar vazio durante carga', async () => {
@@ -409,6 +425,107 @@ describe('ActivitySheet real', () => {
     expect(el.textContent).not.toContain(m.comum_carregando());
     if (outcome === 'erro') expect(el.textContent).toContain(m.atividade_erro_subagentes());
     else expect(el.textContent).not.toContain(m.atividade_erro_subagentes());
+  });
+
+  it('renova snapshot em 5s de 22 para 29 chamadas e concluído sem novo evento nem detalhe', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 22 }]);
+    const { el } = await mount();
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 29 }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 29 }));
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'finished', toolCalls: 29, endedAt: new Date().toISOString() }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(el.textContent).toContain(m.atividade_grupo_terminados({ n: 1 }));
+    expect(el.textContent).not.toContain(m.atividade_grupo_rodando({ n: 1 }));
+    expect(api.getSubagent).not.toHaveBeenCalled();
+    expect(api.getSubagents).toHaveBeenLastCalledWith('sess', stores.servers[0]);
+  });
+
+  it('serializa carga inicial, assinatura e timer respeitando invalidação pendente', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const initial = Promise.withResolvers<SubagentRun[]>();
+    const refreshed = Promise.withResolvers<SubagentRun[]>();
+    api.getSubagents.mockReturnValueOnce(initial.promise).mockReturnValueOnce(refreshed.promise);
+    const { el, render } = await mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(1);
+    stores.chat.events = [...events, { id: 'end', kind: 'tool_result', tool_use_id: 'launch', result: 'fim' }];
+    await render();
+    expect(api.getSubagents).toHaveBeenCalledTimes(1);
+    await act(async () => { initial.resolve([{ ...sub, state: 'running', toolCalls: 22 }]); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
+    expect(el.textContent).not.toContain(m.atividade_chamadas({ n: 22 }));
+    await act(async () => { refreshed.resolve([{ ...sub, state: 'finished', toolCalls: 29, endedAt: new Date().toISOString() }]); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 29 }));
+    expect(el.textContent).toContain(m.atividade_grupo_terminados({ n: 1 }));
+  });
+
+  it('preserva snapshot sem spinner na consulta e no erro e recupera no próximo timer', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 22 }]);
+    const { el } = await mount();
+    const pending = Promise.withResolvers<SubagentRun[]>();
+    api.getSubagents.mockReturnValueOnce(pending.promise);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    expect(el.textContent).not.toContain(m.comum_carregando());
+    await act(async () => { pending.reject(new Error('503')); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(m.atividade_erro_subagentes());
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 29 }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 29 }));
+    expect(el.textContent).not.toContain(m.atividade_erro_subagentes());
+    expect(el.textContent).toContain(workflow.name);
+    expect(api.getWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializa retry e volta do detalhe com timer pendente sem apagar snapshot', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    api.getWorkflows.mockRejectedValueOnce(new Error('503'));
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 22 }]);
+    const { el } = await mount();
+    const pending = Promise.withResolvers<SubagentRun[]>();
+    const workflows = Promise.withResolvers<WorkflowSummary[]>();
+    api.getWorkflows.mockReturnValue(workflows.promise);
+    api.getSubagents.mockReturnValueOnce(pending.promise);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    await click(el, m.sync_retry());
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 22 }));
+    expect(el.textContent).not.toContain(m.comum_carregando());
+    await click(el, m.sync_retry());
+    expect(api.getWorkflows).toHaveBeenCalledTimes(2);
+    await click(el, 'Conferir atividade');
+    await click(el, m.comum_voltar());
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', toolCalls: 29 }]);
+    await act(async () => {
+      pending.resolve([{ ...sub, state: 'running', toolCalls: 7 }]);
+      workflows.resolve([workflow]);
+    });
+    expect(api.getSubagents).toHaveBeenCalledTimes(3);
+    expect(button(el, 'Conferir atividade').textContent).toContain(m.atividade_chamadas({ n: 29 }));
+    expect(el.textContent).toContain(workflow.name);
+    expect(el.textContent).not.toContain(m.atividade_erro_run());
+  });
+
+  it('acompanha revisão de eventos na mesma lista do store', async () => {
+    stores.chat.events = [...events];
+    const { el, render } = await mount();
+    expect(el.querySelector('header')?.textContent).toContain('1/2');
+    stores.chat.events[0] = { ...events[0]!, tool_input: { todos: [
+      { content: 'Conferir cabeçalho', status: 'completed' },
+      { content: 'Conferir retorno', status: 'completed' },
+    ] } };
+    stores.chat.eventsRevision += 1;
+    await render();
+    expect(el.querySelector('header')?.textContent).toContain('2/2');
   });
 
   it('renova subagentes quando o pai conclui sem apagar a lista durante atualização', async () => {
@@ -521,10 +638,21 @@ describe('ActivitySheet real', () => {
   });
 
   it('Android remove hardwareBackPress ao perder foco e desmontar, retomando o nível atual', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     platform.OS = 'android';
     const { el, render, unmount } = await mount();
+    route.focused = false;
+    await render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(1);
+    route.focused = true;
+    await render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
     await click(el, workflow.name);
     expect(nativeBack.listeners.size).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
     route.focused = false;
     await render();
     expect(nativeBack.listeners.size).toBe(0);
@@ -537,7 +665,24 @@ describe('ActivitySheet real', () => {
     expect(await hardwareBackPress()).toBe(true);
     expectAndroidHeader(el, m.ctx_atividade());
     expect(route.back).not.toHaveBeenCalled();
+    await click(el, 'Conferir atividade');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(2);
+    await click(el, m.comum_voltar());
+    expect(api.getSubagents).toHaveBeenCalledTimes(3);
+    const pending = Promise.withResolvers<SubagentRun[]>();
+    api.getSubagents.mockReturnValue(pending.promise);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getSubagents).toHaveBeenCalledTimes(4);
+    stores.chat.events = [...events, { id: 'end', kind: 'tool_result', tool_use_id: 'launch', result: 'fim' }];
+    await render();
     await unmount();
+    await act(async () => {
+      pending.resolve([{ ...sub, toolCalls: 99 }]);
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(api.getSubagents).toHaveBeenCalledTimes(4);
+    expect(vi.getTimerCount()).toBe(0);
     expect(nativeBack.listeners.size).toBe(0);
     expect(await hardwareBackPress()).toBe(false);
     expect(route.back).toHaveBeenCalledTimes(1);
