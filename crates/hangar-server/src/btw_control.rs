@@ -68,15 +68,13 @@ pub fn answer_from_pane(screen: &str) -> String {
     py_strip(&body.join("\n")).to_owned()
 }
 
-/// Captura que falha vale tela vazia, como no Python: quem chama decide pelo que (não) viu.
-async fn screen(seq: &PermissionSequence<'_>) -> String {
+/// Captura que falha é erro com código, nunca tela vazia: lida como vazia, o overlay aberto parecia fechado.
+async fn screen(seq: &PermissionSequence<'_>) -> Result<String, BtwError> {
     match seq.plain_screen().await {
-        Ok(screen) => screen,
+        Ok(screen) => Ok(screen),
         Err(failure) => {
-            if crate::warn_limit::allow(Some(seq.binding().name.as_str()), "btw_capture") {
-                tracing::warn!(session=%seq.binding().name, code=failure.code, "btw: captura do pane falhou; lida como tela vazia");
-            }
-            String::new()
+            tracing::warn!(session=%seq.binding().name, code=failure.code, "btw: captura do pane falhou");
+            Err(fail(503, "erro_btw_captura_falhou", "não consegui ler o terminal da sessão; o /btw pode ter ficado aberto lá"))
         }
     }
 }
@@ -127,7 +125,7 @@ async fn close(seq: &PermissionSequence<'_>, limits: &BtwLimits) -> Result<(), B
     let until = Instant::now() + limits.open;
     loop {
         tokio::time::sleep(limits.poll).await;
-        let pane = screen(seq).await;
+        let pane = screen(seq).await?;
         if !py_strip(&pane).is_empty() && !footer(&pane).contains(OPEN) { return Ok(()); }
         // Sem repetir o Esc: o overlay pode já ter fechado, e a tecla interromperia o turno.
         if Instant::now() >= until { return Err(fail(502, "erro_btw_overlay_aberto", "não consegui confirmar o fechamento do /btw")); }
@@ -204,7 +202,7 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
     if question.is_empty() { return Err(fail(400, "erro_btw_vazia", "pergunta vazia")); }
     // Overlay de uma pergunta anterior ainda fechando: digitar agora perdia a `/`.
     let until = Instant::now() + limits.open;
-    while footer(&screen(&seq).await).contains(OPEN) {
+    while footer(&screen(&seq).await?).contains(OPEN) {
         // Preso aberto (um /btw feito à mão no terminal): digitar agora cairia dentro dele.
         if Instant::now() >= until {
             return Err(fail(409, "erro_btw_overlay_aberto", "há um /btw aberto no terminal da sessão; feche antes de perguntar"));
@@ -255,7 +253,7 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
     let mut open = false;
     loop {
         tokio::time::sleep(limits.poll).await;
-        let footer = footer(&screen(&seq).await);
+        let footer = footer(&screen(&seq).await?);
         if footer.contains(OPEN) {
             open = true;
             if footer.contains(READY) { break; }
@@ -279,7 +277,7 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
         while Instant::now() < until {
             tokio::time::sleep(limits.poll).await;
             fresh = buffers(&seq).await.into_iter().filter(|b| !before.contains(b)).collect();
-            if !fresh.is_empty() || footer(&screen(&seq).await).contains(COPIED) { break; }
+            if !fresh.is_empty() || footer(&screen(&seq).await?).contains(COPIED) { break; }
         }
         let mut copied = String::new();
         if let Some(first) = fresh.first() {
@@ -290,7 +288,7 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
     };
     let (answer, source) = if !py_strip(&copied).is_empty() { (copied, "buffer") } else {
         tracing::warn!(session=%seq.binding().name, "btw: o buffer do OSC 52 não trouxe a resposta; resposta lida do pane");
-        (answer_from_pane(&screen(&seq).await), "pane")
+        (answer_from_pane(&screen(&seq).await?), "pane")
     };
     close(&seq, limits).await?;
     let answer = answer.trim_end_matches('\n');

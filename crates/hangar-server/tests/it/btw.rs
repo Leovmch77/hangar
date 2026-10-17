@@ -120,7 +120,9 @@ impl TerminalIo for Fake {
                 "capture-pane" if r.args.iter().any(|a| a == "-e") => ok(self.composer_screen()),
                 "capture-pane" => {
                     let mut screens = self.screens.lock().unwrap();
-                    ok(if screens.len() > 1 { screens.pop_front().unwrap() } else { screens[0].clone() })
+                    let pane = if screens.len() > 1 { screens.pop_front().unwrap() } else { screens[0].clone() };
+                    if pane == CAPTURE_FAILS { return Err(hangar_server::terminal_input::IoFailure { code: "capture_failed", may_have_written: false }); }
+                    ok(pane)
                 }
                 "send-keys" => {
                     let sent = self.send(&r.args[3..]);
@@ -162,6 +164,16 @@ async fn ask_with(fake: Arc<Fake>, tag: &str, question: &str, windows: bool, pan
 }
 async fn ask(fake: &Arc<Fake>, tag: &str, question: &str) -> Result<Value, btw_control::BtwError> { ask_with(fake.clone(), tag, question, false, false, limits()).await }
 fn code(result: Result<Value, btw_control::BtwError>) -> (u16, String) { let e = result.unwrap_err(); (e.status, e.code) }
+
+/// Tela que o terminal falso não consegue capturar.
+const CAPTURE_FAILS: &str = "\u{0}captura falha";
+
+/// Captura que falha não é tela vazia: com o overlay aberto ela não vira "fechado por fora", e diz o que foi.
+#[tokio::test]
+async fn a_capture_failure_is_its_own_code_not_a_closed_overlay() {
+    let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      · Answering…", WALKING]), CAPTURE_FAILS.to_owned()]));
+    assert_eq!(code(ask(&fake, "capture", "q").await), (503, "erro_btw_captura_falhou".into()));
+}
 
 fn answered() -> Vec<String> { vec![screen(&["❯ "]), screen(&["    /btw q", "      4", READY]), screen(&["    /btw q", "      4", COPIED])] }
 
