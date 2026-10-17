@@ -18,10 +18,12 @@ const deferred = <T,>() => { let resolve!: (v: T) => void; const promise = new P
 let root: Root;
 let node: HTMLDivElement;
 let latest: ReturnType<typeof useReports>;
+let latestCosts: ReturnType<typeof useReports<'costs'>>;
 type ProbeProps = { kind?: ReportKind; servers?: Server[]; period?: string; filters?: UsoFiltros; active?: boolean };
 function CostProbe({ servers = [a, b], period = '30d', filters = {}, active = true }: ProbeProps) {
   const load = useReports('costs', servers, period, filters, active);
   latest = load;
+  latestCosts = load;
   const merged = mergeReports(load.parts, period).report;
   return React.createElement('output', null, load.accepted ? merged.totals.cost : 'no-report', load.parts.map((p) => p.error).filter(Boolean).join('|'));
 }
@@ -90,7 +92,7 @@ it('falha total não vira zeros, parcial nomeia causa e período incompatível n
   await act(async () => latest.refresh());
   expect(node.textContent).toContain('4');
   expect(latest.parts[0].error).toBeTruthy();
-  expect(mergeReports(latest.parts, '30d').mismatched).toEqual(['a']);
+  expect(mergeReports(latestCosts.parts, '30d').mismatched).toEqual(['a']);
 });
 
 it.each(['conta', 'projeto', 'modelo', 'plugin', 'foco'] as const)('uso recusa eco ausente ou divergente de %s sem somar relatório errado', async (key) => {
