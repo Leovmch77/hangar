@@ -14,6 +14,22 @@ pub(crate) fn coded(mut response: axum::response::Response, code: &'static str) 
     response
 }
 
+/// O código no formato que o `/internal/diag` aceita (`[A-Za-z0-9_:]{1,64}`).
+fn wire_code(code:&str) -> String {
+    let code:String = code.chars().map(|c|if c.is_ascii_alphanumeric() || c == '_' || c == ':' { c } else { '_' }).take(64).collect();
+    if code.is_empty() { "sem_codigo".into() } else { code }
+}
+
+/// O nome que o `/internal/diag` do Python aceita para `event`.
+fn wire_event(event:&str) -> String {
+    const PYTHON:[&str;5] = ["runtime.send_failed","runtime.send_uncertain","runtime.command_deferred","opcao.nao_convergiu","opcao.envio_falhou"];
+    let ok = |name:&str| name.len() <= 48 && !name.is_empty() && name.bytes().all(|b|b.is_ascii_lowercase() || b == b'_');
+    if PYTHON.contains(&event) || event.strip_prefix("rust.").is_some_and(ok) { return event.to_owned(); }
+    let name:String = event.strip_prefix("rust.").unwrap_or(event).chars()
+        .map(|c|if c.is_ascii_lowercase() { c } else { '_' }).take(48).collect();
+    format!("rust.{name}")
+}
+
 #[derive(Clone)]
 pub struct DiagClient { upstream:SocketAddr,secret:String,http:crate::proxy::HttpClient }
 
@@ -36,7 +52,7 @@ impl DiagClient {
         // Por diário (o Python de destino): em produção há um só, e cada servidor de teste tem o seu.
         if !crate::warn_limit::allow(Some(session),&format!("diag:{}:{event}:{code}",self.upstream)) { return; }
         let session:String = session.chars().take(128).collect();
-        let body = json!({"evento":event,"sessao":session,"codigo":code,"motivo":reason}).to_string();
+        let body = json!({"evento":wire_event(event),"sessao":session,"codigo":wire_code(code),"motivo":reason}).to_string();
         let (client,code) = (self.clone(),code.to_owned());
         tokio::spawn(async move {
             let request = axum::http::Request::post(format!("http://{}/internal/diag",client.upstream))
@@ -124,6 +140,17 @@ pub fn record(dir: Option<std::path::PathBuf>, events: Vec<serde_json::Value>, w
 mod tests {
     use super::*;
     use std::sync::{Arc,Mutex};
+
+    /// O diário do Python recusa evento fora de `rust.*` (400): o resto sai com o nome inteiro sob `rust.`.
+    #[test]
+    fn every_event_reaches_the_python_diary_under_a_name_it_takes() {
+        assert_eq!(wire_event("session.limit_check"),"rust.session_limit_check");
+        assert_eq!(wire_event("runtime.registration_failed"),"rust.runtime_registration_failed");
+        assert_eq!(wire_event("rust.state_deliver_failed"),"rust.state_deliver_failed");
+        assert_eq!(wire_event("runtime.send_failed"),"runtime.send_failed","os que o Python já aceita ficam");
+        assert_eq!(wire_code("limit_switch_continue_lifecycle-busy.x"),"limit_switch_continue_lifecycle_busy_x");
+        assert_eq!((wire_code(&"a".repeat(80)).len(),wire_code("").as_str()),(64,"sem_codigo"));
+    }
 
     /// No formato do `diag.registrar` do Python, num arquivo do dia que o export dele junta
     /// (`uso-*.jsonl` em qualquer pasta do diário): texto cortado em 300, vazio fora, `origem` servidor.
