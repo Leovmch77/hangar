@@ -1630,6 +1630,12 @@ export function getSubagent(name: string, agentId: string, events = 0, server?: 
   return sessionFetch<SubagentRun>(server, `/api/sessions/${encodeURIComponent(name)}/subagents/${encodeURIComponent(agentId)}${q}`);
 }
 
+export async function sendSubagentMessage(name: string, agentId: string, text: string, server: Server): Promise<void> {
+  await sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/subagents/${encodeURIComponent(agentId)}/message`, {
+    method: 'POST', body: JSON.stringify({ text: text.trim() }), signal: AbortSignal.timeout(40_000),
+  });
+}
+
 // Raízes liberadas do scanner (chips no topo do FolderScanner).
 export function getRoots(): Promise<FsRoot[]> {
   return apiFetch<FsRoot[]>('/api/fs/roots');
