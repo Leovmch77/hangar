@@ -153,7 +153,7 @@ export function OrchestrationContent({ panel, history = false, live = NO_LIVE, o
     };
     if (panel.metadata) {
       out.push({ key: 'metadata', text: panel.metadata.title, detail: panel.metadata.repo, heading: true });
-      text('plan', m.orq_history_plan({ path: panel.metadata.plan }));
+      text('plan', m.orq_history_plan({ path: panel.metadata.plan.trim() ? panel.metadata.plan : '—' }));
       if (panel.metadata.error) text('metadata-error', panel.metadata.error, undefined, true);
     }
     panel.errors.forEach((error, index) => text(`error-${index}`, m.orq_panel_file_error(error), undefined, true));
@@ -169,7 +169,7 @@ export function OrchestrationContent({ panel, history = false, live = NO_LIVE, o
       action('pending', onlyPending ? m.orq_show_all_tasks() : m.orq_show_pending_tasks(), () => setOnlyPending(value => !value));
       const pending = panel.tasks.rows.filter(task => !onlyPending || task.state !== 'integrated');
       const tasks = taskRows(pending);
-      const addTask = (task: OrqPanelTask) => text(`task-${task.n}`, `T${task.n} · ${task.title}`, `${taskState(task)} · ${m.orq_rodada()} ${task.round ?? '—'} · ${m.orq_task_elapsed({ time: formatElapsed(task.timing?.elapsed_seconds) })}`);
+      const addTask = (task: OrqPanelTask) => text(`task-${task.n}`, `T${task.n}${task.title.trim() ? ` · ${task.title}` : ''}`, `${taskState(task)} · ${m.orq_rodada()} ${task.round ?? '—'} · ${m.orq_task_elapsed({ time: formatElapsed(task.timing?.elapsed_seconds) })}`);
       if (!pending.length) text('no-pending', m.orq_no_pending_tasks());
       tasks.visible.forEach(addTask);
       if (onlyPending) tasks.queued.forEach(addTask);

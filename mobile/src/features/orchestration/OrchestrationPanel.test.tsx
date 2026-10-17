@@ -90,6 +90,26 @@ it('conteúdo sete seções preserva dados, recolhe corpo e filtra somente integ
   await click(m.orq_expand_all()); expect(container.textContent).toContain('fixture-question');
 });
 
+it.each([false, true])('plan fallback preserves nonblank text with history=%s', async (history) => {
+  for (const [plan, expectedPath] of [['', '—'], [' \t ', '—'], ['/plans/fixture.md', '/plans/fixture.md'], [' /plans/fixture.md ', ' /plans/fixture.md ']]) {
+    const panel = panelFixture();
+    panel.metadata!.plan = plan;
+    await renderContent(panel, history);
+    const texts = [...container.querySelectorAll('span')].map(span => span.textContent);
+    expect(texts).toContain(m.orq_history_plan({ path: expectedPath }));
+  }
+});
+
+it.each([false, true])('task label omits blank title and preserves valid text with history=%s', async (history) => {
+  for (const [title, label] of [['', 'T1'], [' \t ', 'T1'], ['integrated-task', 'T1 · integrated-task'], [' integrated-task ', 'T1 ·  integrated-task ']]) {
+    const panel = panelFixture();
+    panel.tasks.rows[0].title = title;
+    await renderContent(panel, history);
+    const texts = [...container.querySelectorAll('span')].map(span => span.textContent);
+    expect(texts).toContain(label);
+  }
+});
+
 it('pergunta Markdown usa renderer nativo tanto no painel vivo quanto no histórico', async () => {
   const panel = panelFixture();
   panel.decisions[0].question = 'Revisar `file.tsx` e [parecer](https://example.com/review)?';
