@@ -124,6 +124,26 @@ async fn a_claude_without_proof_of_its_conversation_is_refused_with_a_code() {
     finish(&mut agent);
 }
 
+/// A sessão restaurada nasce depois da adoção da subida: a drenagem do `Monitor` a adota, como a escrita,
+/// em vez de falhar com `runtime_binding` e deixar a fila parada.
+#[tokio::test]
+async fn the_drain_of_a_restored_claude_terminal_adopts_it_instead_of_failing() {
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let key = "ef".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
+    let registry = fx.registry().await;
+    let drained = registry.drain("s1").await.map(|_|()).map_err(|e|e.code);
+    assert_eq!(drained,Ok(()));
+    let (found,_) = registry.terminal_view("s1").await.expect("adotada pela drenagem");
+    assert_eq!(found,key);
+    registry.close(&key,1).await.unwrap();
+    finish(&mut agent);
+}
+
 #[tokio::test]
 async fn at_startup_only_the_claude_terminals_that_had_a_queue_are_adopted() {
     let fx = fixture();
