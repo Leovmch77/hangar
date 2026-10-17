@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, Switch, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useRouter } from 'expo-router';
 import { parseStatusLine } from '@hangar/core';
 import { chatStore } from '../stores/chat';
+import { useSessions } from '../stores/sessions';
+import { useServers } from '../stores/servers';
+import { sessionAccountLabel } from './sessionAccountLabel';
 import { AnchoredPanel } from '../ui/AnchoredPanel';
 import { SettingsList } from '../ui/SettingsList';
 import { Icon, type IconName } from '../ui/Icon';
@@ -20,7 +24,7 @@ interface Props {
   name: string;
   provider: string | null;
   headless: boolean;
-  openRequest?: { which: 'model' | 'effort'; n: number } | null;
+  openRequest?: { which: 'model' | 'effort' | 'mode' | 'account'; n: number } | null;
 }
 
 const MODE_ICON: Record<string, IconName> = {
@@ -34,6 +38,11 @@ const LEVEL: Record<string, () => string> = {
 const effortLabel = (lv: string) => LEVEL[lv.toLowerCase()]?.() ?? lv.charAt(0).toUpperCase() + lv.slice(1);
 
 export function SessionSettingsButton({ serverId, name, provider, headless, openRequest }: Props) {
+  const router = useRouter();
+  const server = useServers((s) => s.servers.find((row) => row.id === serverId) ?? null);
+  const canSwitchAccount = provider === 'claude' && !!server && !server.removed && !server.invite && !server.inviteEnded;
+  const session = useSessions((s) => s.rows.find((row) => row.serverId === serverId && row.name === name) ?? null);
+  const account = session ? sessionAccountLabel(session) : null;
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusModel = useMemo(() => parseStatusLine(statusLine), [statusLine]);
@@ -79,7 +88,17 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
     if (mo === approval.current || await approval.select(mo)) close();
   };
   return <SessionSettingsControl open={open} onOpen={() => setOpen(true)} onClose={close}
-    model={model} effort={effort} fast={fast} plan={plan} icon={icon} modeText={modeText}>
+    model={model} effort={effort} fast={fast} plan={plan} icon={icon} modeText={modeText}
+    header={<>
+      <Title text={m.cota_conta_ativa()} />
+      {account ? <Text style={styles.note}>{account}</Text> : null}
+      {canSwitchAccount ? <Pressable accessibilityRole="button" accessibilityLabel={m.accounts_switch_title()}
+        style={({ pressed }) => [styles.accountAction, pressed && styles.accountPressed]}
+        onPress={() => { close(); router.push(`/s/${serverId}/${name}/account` as never); }}>
+        <Icon name="RefreshCw" size={16} /><Text style={styles.effortText}>{m.accounts_switch_title()}</Text>
+      </Pressable> : null}
+      <Separator />
+    </>}>
     {permission.enabled ? <>
       <Separator /><Title text={m.native_ctl_mode_title()} />
       {permission.options.length ? <ChoiceChips busy={permission.applying}
@@ -214,6 +233,8 @@ const styles = StyleSheet.create((theme) => ({
   chipStrong: { fontWeight: '600' },
   panel: { flexShrink: 1 },
   panelContent: { gap: 2 },
+  accountAction: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderRadius: 6 },
+  accountPressed: { backgroundColor: theme.tokens.bg.hover },
   title: { paddingHorizontal: 8, paddingTop: 6, paddingBottom: 4, fontSize: theme.base.text.xxxs, fontWeight: '500', letterSpacing: 0.4, textTransform: 'uppercase', color: theme.tokens.text.muted },
   separator: { height: 1, marginHorizontal: -4, marginVertical: 2, backgroundColor: theme.tokens.border.default },
   efforts: { flexDirection: 'row', gap: 2, paddingHorizontal: 4, paddingBottom: 2 },
