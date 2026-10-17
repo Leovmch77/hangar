@@ -639,8 +639,9 @@ mod tests {
     }
     fn policy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        let wt = dir.path().join("wt");
+        let root = crate::real(dir.path());
+        let repo = root.join("repo");
+        let wt = root.join("wt");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-b", "main"]);
         git(
@@ -666,7 +667,7 @@ mod tests {
     #[test]
     fn missing_worktree_removes_only_its_registration_without_needing_the_branch() {
         let (dir, repo, wt) = policy_fixture();
-        let other = dir.path().join("other");
+        let other = repo.parent().unwrap().join("other");
         git(&repo, &["worktree", "add", "-b", "other", other.to_str().unwrap()]);
         std::fs::remove_dir_all(&wt).unwrap();
         std::fs::remove_dir_all(&other).unwrap();
