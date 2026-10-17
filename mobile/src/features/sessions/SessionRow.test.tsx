@@ -27,6 +27,7 @@ vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   orq_row_badge: () => 'orq_row_badge',
   sessao_excluir_curto: () => 'sessao_excluir_curto',
+  sessao_git: () => 'sessao_git',
   convite_parar: () => 'convite_parar',
   sessao_renomear: () => 'sessao_renomear',
   sessao_retomar: () => 'sessao_retomar',
