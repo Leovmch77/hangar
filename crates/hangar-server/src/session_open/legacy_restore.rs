@@ -32,9 +32,17 @@ impl Paths {
     }
 }
 
-/// As linhas `nome, agente, conversa, conta` do mapa; ausente = nenhuma.
-fn read_map(path: &Path) -> Vec<(String, String, String, Option<String>)> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+/// Ausente = vazio; ilegível = o código.
+fn read_text(path: &Path, code: &'static str) -> Result<String, &'static str> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(_) => Err(code),
+    }
+}
+
+/// As linhas `nome, agente, conversa, conta` do mapa.
+fn read_map(text: &str) -> Vec<(String, String, String, Option<String>)> {
     text.lines().filter_map(|line| {
         let mut fields = line.split('\t');
         let (name, provider, conversation) = (fields.next()?, fields.next()?, fields.next()?);
@@ -44,16 +52,17 @@ fn read_map(path: &Path) -> Vec<(String, String, String, Option<String>)> {
 }
 
 /// As sessões da última gravação do resurrect (`last`, linhas `pane`/`window`).
-fn last_saved(dir: &Path) -> HashSet<String> {
-    let text = std::fs::read_to_string(dir.join("last")).unwrap_or_default();
+fn last_saved(text: &str) -> HashSet<String> {
     text.lines().filter_map(|line| {
         let mut fields = line.split('\t');
         matches!(fields.next(), Some("pane" | "window")).then(|| fields.next()).flatten().map(str::to_owned)
     }).collect()
 }
 
-fn read_done(path: &Path) -> HashSet<String> {
-    std::fs::read(path).ok().and_then(|raw| serde_json::from_slice::<Vec<String>>(&raw).ok()).unwrap_or_default().into_iter().collect()
+fn read_done(path: &Path) -> Result<HashSet<String>, &'static str> {
+    let text = read_text(path, "legacy_restore_done_unreadable")?;
+    if text.is_empty() { return Ok(HashSet::new()); }
+    serde_json::from_str::<Vec<String>>(&text).map(|l| l.into_iter().collect()).map_err(|_| "legacy_restore_done_unreadable")
 }
 
 #[derive(Debug, PartialEq)]
@@ -104,17 +113,25 @@ async fn pane(program: &std::ffi::OsStr, name: &str, init: Duration) -> Pane {
 }
 
 /// A pasta de projeto onde a conversa mora na conta.
-fn project_of(projects: &Path, conversation: &str) -> Option<String> {
+fn project_of(projects: &Path, conversation: &str) -> Result<String, &'static str> {
+    const MISSING: &str = "legacy_restore_transcript_missing";
     let uuid = conversation.len() == 36 && conversation.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
-    if !uuid { return None; }
+    if !uuid { return Err(MISSING); }
     let file = format!("{conversation}.jsonl");
-    std::fs::read_dir(projects).ok()?.flatten().find(|e| e.path().join(&file).is_file())?.file_name().into_string().ok()
+    let entries = match std::fs::read_dir(projects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(MISSING),
+        Err(_) => return Err("legacy_restore_projects_unreadable"),
+    };
+    entries.flatten().find(|e| e.path().join(&file).is_file()).and_then(|e| e.file_name().into_string().ok()).ok_or(MISSING)
 }
 
 fn line(name: &str, code: &str) -> Value {
     let (evento, nivel) = match code {
         "legacy_restore_resumed" => ("sessao.legado_retomada", "ok"),
-        c if c.starts_with("legacy_restore_") => ("sessao.legado_pulada", "aviso"),
+        "legacy_restore_done_unwritten" => ("sessao.legado_retomada", "aviso"),
+        "legacy_restore_has_key" | "legacy_restore_pane_busy" | "legacy_restore_not_in_last_save" | "legacy_restore_already_resumed"
+            | "legacy_restore_provider_unsupported" => ("sessao.legado_pulada", "aviso"),
         _ => ("sessao.legado_falhou", "erro"),
     };
     json!({"evento": evento, "nivel": nivel, "sessao": name, "codigo": code})
@@ -123,10 +140,14 @@ fn line(name: &str, code: &str) -> Value {
 /// `resume(sessão, projeto)` reabre pelo Arquivo e devolve o código da falha. Devolve as linhas do diário.
 pub async fn run(program: &std::ffi::OsStr, paths: &Paths, init: Duration,
                  resume: &(dyn Fn(Legacy, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync)) -> Vec<Value> {
-    let map = read_map(&paths.resurrect.join("claude-sessions.tsv"));
-    if map.is_empty() { return Vec::new(); }
-    let last = last_saved(&paths.resurrect);
-    let mut done = read_done(&paths.done);
+    let read = read_text(&paths.resurrect.join("claude-sessions.tsv"), "legacy_restore_map_unreadable").and_then(|map| {
+        let last = read_text(&paths.resurrect.join("last"), "legacy_restore_last_save_unreadable")?;
+        Ok((read_map(&map), last_saved(&last), read_done(&paths.done)?))
+    });
+    let (map, last, mut done) = match read {
+        Ok(read) => read,
+        Err(code) => return vec![line("-", code)],
+    };
     let mut out = Vec::new();
     for (name, provider, conversation, config_dir) in map {
         let skip = |code: &str| line(&name, code);
@@ -142,7 +163,10 @@ pub async fn run(program: &std::ffi::OsStr, paths: &Paths, init: Duration,
         };
         if let Some(code) = code { out.push(skip(code)); continue; }
         let projects = config_dir.as_ref().map_or_else(|| paths.server_projects.clone(), |d| Path::new(d).join("projects"));
-        let Some(project) = project_of(&projects, &conversation) else { out.push(skip("legacy_restore_transcript_missing")); continue };
+        let project = match project_of(&projects, &conversation) {
+            Ok(project) => project,
+            Err(code) => { out.push(skip(code)); continue; }
+        };
         // O shell vazio ocupa o nome.
         if state == Pane::EmptyShell && !mux(program, &["kill-session", "-t", &format!("={name}")]).await.is_some_and(|o| o.status.success()) {
             out.push(skip("legacy_restore_kill_failed"));
@@ -156,10 +180,7 @@ pub async fn run(program: &std::ffi::OsStr, paths: &Paths, init: Duration,
                 list.sort();
                 let written = serde_json::to_vec(&list).map_err(std::io::Error::other)
                     .and_then(|raw| { std::fs::create_dir_all(paths.done.parent().unwrap_or(Path::new("."))).and_then(|()| crate::runtime::queue::atomic_write(&paths.done, &raw)) });
-                if let Err(error) = written {
-                    tracing::warn!(code = "legacy_restore_done_unwritten", kind = ?error.kind(), "a conversa retomada pode voltar de novo na próxima subida");
-                }
-                out.push(skip("legacy_restore_resumed"));
+                out.push(skip(if written.is_ok() { "legacy_restore_resumed" } else { "legacy_restore_done_unwritten" }));
             }
             Err(code) => out.push(skip(&code)),
         }
@@ -298,5 +319,10 @@ mod tests {
         assert_eq!(second["vazia"], "legacy_restore_already_resumed");
         assert_eq!(second["sumida"], "legacy_restore_already_resumed");
         assert_eq!(calls.lock().unwrap().len(), 2, "a mesma conversa não volta duas vezes");
+
+        std::fs::write(&paths.done, "{torto").unwrap();
+        let broken = codes(run(tmux.program.as_os_str(), &paths, Duration::from_secs(1), &resume).await);
+        assert_eq!(broken, BTreeMap::from([("-".to_owned(), "legacy_restore_done_unreadable".to_owned())]), "sem a lista, nada volta");
+        assert_eq!(calls.lock().unwrap().len(), 2);
     }
 }
