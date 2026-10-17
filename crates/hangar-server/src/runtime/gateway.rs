@@ -1067,20 +1067,14 @@ impl RuntimeRegistry {
             }
         }
     }
-    /// O fim de turno do Claude: o aviso de limite no fim do transcript da conversa vigente vai ao vigia. O
-    /// Claude avisa o fim antes de gravar o `jsonl`: sem o aviso, relê até `wait`.
-    pub async fn turn_limit(&self,name:&str,binding:&crate::interactions::InteractionBinding,now:f64,wait:Duration)->Result<TurnLimit,RuntimeError> {
+    /// O fim de turno do Claude: o aviso de limite no fim do transcript da conversa vigente vai ao vigia.
+    pub async fn turn_limit(&self,name:&str,binding:&crate::interactions::InteractionBinding,now:f64)->Result<TurnLimit,RuntimeError> {
         let Some(target)=self.limit_target(name).await? else {return Ok(TurnLimit::NotTerminal)};
         let (live,transcript)=self.context_transcript(name).await?;
         if live!=*binding {return Err(failure("plugin_conversation_mismatch"));}
-        let deadline=tokio::time::Instant::now()+wait;
-        let limit=loop {
-            let path=transcript.clone();
-            let limit=tokio::task::spawn_blocking(move||crate::session_write::limit_switch::file_limit(&path,now)).await
-                .map_err(|_|failure("limit_transcript_read_job"))?;
-            if limit.is_some() || tokio::time::Instant::now()>=deadline {break limit;}
-            tokio::time::sleep(Duration::from_millis(150).min(deadline-tokio::time::Instant::now())).await;
-        };
+        let path=transcript.clone();
+        let limit=tokio::task::spawn_blocking(move||crate::session_write::limit_switch::file_limit(&path,now)).await
+            .map_err(|_|failure("limit_transcript_read_job"))?;
         let sent=limit.clone().is_some_and(|limit|self.usage_limit(LimitHit { name:name.to_owned(),provider:"claude".into(),
             account:Some(target.metadata.config_dir.to_string_lossy().into_owned()),limit }));
         Ok(TurnLimit::Checked { transcript,limit,sent })
