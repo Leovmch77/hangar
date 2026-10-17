@@ -337,21 +337,21 @@ export function TextTabs<T extends string>({ options, value, onChange, label }: 
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   // Sem moldura, como no PC: os números ficam direto sobre o fundo.
   card: { width: '100%', maxWidth: 560, alignSelf: 'center', gap: 12, paddingHorizontal: 4 },
   header: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between', alignItems: 'center' },
   textTabs: { flexDirection: 'row', gap: 2 },
   textTab: { height: 28, paddingHorizontal: 8, borderRadius: 6, justifyContent: 'center' },
-  textTabLabel: { fontSize: 14.5 },
-  note: { fontSize: 13.5 },
+  textTabLabel: { fontSize: theme.base.text.sm },
+  note: { fontSize: theme.base.text.xs },
   errorBox: { gap: 8, alignItems: 'flex-start' },
   retry: { minHeight: 36, justifyContent: 'center' },
-  retryText: { fontSize: 15, fontWeight: '500' },
+  retryText: { fontSize: theme.base.text.sm, fontWeight: '500' },
   metricRow: { flexDirection: 'row', gap: 12 },
   metric: { flex: 1, minWidth: 0, gap: 4 },
-  metricLabel: { fontSize: 13 },
-  metricValue: { fontSize: 15, fontWeight: '500', fontVariant: ['tabular-nums'] },
+  metricLabel: { fontSize: theme.base.text.xs },
+  metricValue: { fontSize: theme.base.text.sm, fontWeight: '500', fontVariant: ['tabular-nums'] },
   calendar: { gap: 8 },
   // flexGrow centraliza quando cabe; quando não cabe o conteúdo passa da largura e rola.
   weeks: { gap: 3, flexGrow: 1, justifyContent: 'center' },
@@ -361,8 +361,8 @@ const styles = StyleSheet.create({
   modelListInner: { gap: 8 },
   model: { gap: 4 },
   modelRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  modelName: { flex: 1, minWidth: 0, fontSize: 15 },
-  modelValue: { fontSize: 15, fontVariant: ['tabular-nums'] },
+  modelName: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm },
+  modelValue: { fontSize: theme.base.text.sm, fontVariant: ['tabular-nums'] },
   track: { height: 4, borderRadius: 999, overflow: 'hidden' },
   fill: { height: '100%', borderRadius: 999 },
-});
+}));

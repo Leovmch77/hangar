@@ -46,10 +46,10 @@ export function Pill({ label, icon, onPress, disabled = false }: PageAction) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   top: { gap: 14, paddingHorizontal: 4 },
-  title: { fontSize: 20, fontWeight: '600' },
-  subtitle: { marginTop: 6, fontSize: 15, lineHeight: 20 },
+  title: { fontSize: theme.base.text.lg, fontWeight: '600' },
+  subtitle: { marginTop: 6, fontSize: theme.base.text.sm, lineHeight: 20 },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   pill: {
     flexDirection: 'row',
@@ -60,5 +60,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 9999,
   },
-  pillText: { fontSize: 14, fontWeight: '500' },
-});
+  pillText: { fontSize: theme.base.text.xs, fontWeight: '500' },
+}));

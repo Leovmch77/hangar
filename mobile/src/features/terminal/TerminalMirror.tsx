@@ -323,7 +323,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingBottom: theme.base.space[2],
   },
   mono: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     lineHeight: 14,
   },
   err: {
@@ -360,7 +360,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.base.space[2],
     borderRadius: theme.base.radius.sm,
     borderWidth: 1,
-    fontSize: 14,
+    fontSize: theme.base.text.xs,
   },
   sendBtn: {
     minHeight: 44,

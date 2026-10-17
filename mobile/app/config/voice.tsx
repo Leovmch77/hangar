@@ -269,11 +269,11 @@ function TuneRow({ cfg, t }: { cfg: ServerConfig; t: Tune }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   links: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
-  small: { fontSize: 13.5, lineHeight: 17 },
+  small: { fontSize: theme.base.text.xs, lineHeight: 17 },
   ends: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   right: { textAlign: 'right' },
   menuPill: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 32, paddingHorizontal: 12, borderWidth: 1, borderRadius: 9999, maxWidth: 260 },
-  menuText: { fontSize: 14, fontWeight: '500', flexShrink: 1 },
-});
+  menuText: { fontSize: theme.base.text.xs, fontWeight: '500', flexShrink: 1 },
+}));

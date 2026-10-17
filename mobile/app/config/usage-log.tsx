@@ -167,10 +167,10 @@ export default function UsageLogPage() {
 
 const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  note: { paddingHorizontal: 16, paddingVertical: 14, fontSize: 14 },
+  note: { paddingHorizontal: 16, paddingVertical: 14, fontSize: theme.base.text.xs },
   lines: { maxHeight: 420 },
   line: { borderTopWidth: 1, paddingHorizontal: 16, paddingVertical: 8, gap: 2 },
   lineHead: { flexDirection: 'row', gap: 10, alignItems: 'baseline' },
   event: { flexShrink: 1, fontWeight: '600' },
-  mono: { fontFamily: theme.base.fontMono, fontSize: 13 },
+  mono: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
 }));

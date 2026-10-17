@@ -207,6 +207,7 @@ pub struct View<'a> {
     pub panes: &'a [Value],
     pub minimize: Option<Minimize>,
     pub show: Show,
+    pub open: Show,
     /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
     pub tabs_scroll: &'a ScrollHandle,
     /// O app conserva o deslocamento mesmo quando outra aba ou a pergunta ocupa o lugar.
@@ -608,11 +609,14 @@ fn contains_settings_button(v: &Value) -> bool {
     is_settings_button(v) || children(v).iter().any(contains_settings_button)
 }
 
-/// O painel já capturado abre pelo controle local; repetir o lançador do terminal não o restaura.
-fn captured_pane_label<'a>(v: &Value, label: &'a str, panes: &[Value]) -> Option<&'a str> {
+/// O lançador de um painel capturado restaura o app sem repetir a ação do mod no terminal.
+fn captured_pane<'a>(v: &Value, label: &str, panes: &'a [Value]) -> Option<&'a Value> {
     if v["props"]["plain"] != true { return None; }
     let title = label.strip_prefix('▸').or_else(|| label.strip_prefix('▾'))?.trim();
-    (panes.iter().filter(|pane| pane["title"].as_str() == Some(title)).count() == 1).then_some(title)
+    let mut matching = panes.iter().filter(|pane| pane["title"].as_str() == Some(title));
+    let pane = matching.next()?;
+    if matching.next().is_some() || pane["id"].as_str().is_none_or(str::is_empty) { return None; }
+    Some(pane)
 }
 
 fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
@@ -652,8 +656,15 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
         }
         "Button" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
-            if c.site == BAND_SITE && let Some(title) = captured_pane_label(v, &label, c.view.panes) {
-                return div().flex_shrink_0().child(title.to_owned()).into_any_element();
+            if c.site == BAND_SITE && let Some(pane) = captured_pane(v, &label, c.view.panes) {
+                let site = pane["id"].as_str().unwrap().to_owned();
+                let open = c.view.open.clone();
+                return div().id(SharedString::from(format!("plg-open-{site}"))).flex_shrink_0().cursor_pointer()
+                    .focusable().tab_stop(true).role(Role::Button)
+                    .hover(|el| el.text_color(theme::accent_text()).underline())
+                    .focus_visible(|el| el.text_color(theme::accent_text()).underline())
+                    .on_click(move |_, window, cx| open(&site, window, cx))
+                    .child(label).into_any_element();
             }
             let settings = is_settings_button(v);
             let plain = p["plain"] == true && !settings;
@@ -1046,6 +1057,22 @@ fn unmark(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captured_launcher_matches_only_one_named_pane() {
+        let launcher = serde_json::json!({"props": {"plain": true}});
+        let pane = serde_json::json!({"id": "pm", "title": "DEMO-10001"});
+        let panes = vec![pane.clone()];
+        for label in ["▸ DEMO-10001", "▾ DEMO-10001"] {
+            assert_eq!(super::captured_pane(&launcher, label, &panes), Some(&panes[0]));
+        }
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001 · Plano", &panes).is_none());
+        assert!(super::captured_pane(&launcher, "DEMO-10001", &panes).is_none());
+        assert!(super::captured_pane(&serde_json::json!({}), "▸ DEMO-10001", &panes).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[]).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[pane.clone(), pane]).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[serde_json::json!({"title": "DEMO-10001"})]).is_none());
+    }
+
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, apply_delta, box_background, button_control, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, older_server_retry, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,

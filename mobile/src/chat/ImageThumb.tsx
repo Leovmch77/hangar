@@ -82,7 +82,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   videoName: {
     color: '#fff',
-    fontSize: 10,
+    fontSize: theme.base.text.xxxs,
     maxWidth: '100%',
   },
   broken: {
