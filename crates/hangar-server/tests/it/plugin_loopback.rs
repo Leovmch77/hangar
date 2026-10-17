@@ -419,13 +419,16 @@ mod held_routes {
     }
 
     #[tokio::test]
-    async fn plugin_loopback_only_a_turn_ending_in_error_is_checked_for_the_usage_limit() {
+    async fn plugin_loopback_every_turn_end_is_checked_for_the_usage_limit() {
+        // O limite semanal chega num fim de turno que não vem com motivo `error`: todo idle confere.
         let (_store, facts, address, _server) = start().await;
-        for motivo in ["answer", "aborted", "error"] {
-            let mut body = envelope(); body["estado"] = json!("idle"); body["motivo"] = json!(motivo);
+        for motivo in [json!("completed"), json!("api-error"), json!("error"), Value::Null] {
+            let mut body = envelope(); body["estado"] = json!("idle"); body["motivo"] = motivo.clone();
             assert_eq!(post(address, "state", body).await.status().as_u16(), 200, "{motivo}");
         }
-        assert_eq!(*facts.turn_errors.lock().unwrap(), vec!["renamed".to_owned()]);
+        let mut working = envelope(); working["estado"] = json!("working");
+        assert_eq!(post(address, "state", working).await.status().as_u16(), 200);
+        assert_eq!(facts.turn_errors.lock().unwrap().len(), 4, "um por fim de turno, nenhum no working");
     }
 
     #[tokio::test]

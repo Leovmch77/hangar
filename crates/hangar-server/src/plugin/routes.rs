@@ -280,11 +280,12 @@ async fn state_event(State(st): State<Arc<RouteState>>, Json(body): Json<Envelop
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     let body = body.body;
     if body.context.as_ref().is_some_and(|c| c.used == 0 || c.window == 0) { return fail(ServiceError("plugin_body_invalid")); }
-    let errored = body.motivo.as_deref() == Some("error");
+    // Todo fim de turno confere o limite: o aviso de limite semanal não chega com motivo `error`.
+    let turn_end = body.estado == "idle";
     if let Err(error) = st.store.record_state(&identity.binding, body.estado, body.motivo, Instant::now()) { return fail(error); }
     // O estado já valeu; a leitura do limite que falha não muda a resposta ao plugin.
-    if errored && let Err(error) = st.sources.turn_error(&identity).await {
-        tracing::warn!(session = %identity.name, code = error.0, "fim de turno com erro: o limite de uso não foi conferido");
+    if turn_end && let Err(error) = st.sources.turn_error(&identity).await {
+        tracing::warn!(session = %identity.name, code = error.0, "fim de turno: o limite de uso não foi conferido");
     }
     if let Some(context) = body.context {
         if body.session_id.as_deref() != Some(identity.binding.conversation.as_str()) { return fail(ServiceError("plugin_conversation_mismatch")); }

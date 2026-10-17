@@ -335,6 +335,9 @@ mod tests {
         assert_eq!(transcript_limit(FIVE_HOUR,1791570000.0),Some(UsageLimit { window:"five_hour".into(),resets_at:Some(1791577800.0) }));
         assert_eq!(transcript_limit(SEVEN_DAY,1791900000.0),Some(UsageLimit { window:"seven_day".into(),resets_at:Some(1791928800.0) }));
         assert_eq!(transcript_limit(OLD_CLI,1789560000.0),Some(UsageLimit { window:"five_hour".into(),resets_at:Some(1789566600.0) }));
+        // O limite semanal do CLI de 10/2026, entre `api-request` e `turn_duration`.
+        let weekly = include_str!("../../tests/it/fixtures/usage_limit/claude_weekly_limit_tui_2026_10.jsonl");
+        assert_eq!(transcript_limit(weekly,1792249428.0),Some(UsageLimit { window:"seven_day".into(),resets_at:Some(1792270800.0) }));
     }
 
     #[test]
