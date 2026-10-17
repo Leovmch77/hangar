@@ -196,6 +196,8 @@ impl Switcher {
             return;
         };
         let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
+        // O recado que não saiu: a sessão segue parada no aviso, e a linha mostra isso em vez de limpar.
+        let mut continue_failed = None;
         // Só o aviso que não pede troca fica guardado. Na conta nova o limite é outro (mesmo com o mesmo reset
         // arredondado); a troca que falhou, sem folga ou ocupada tenta de novo no próximo turno parado, e o aviso
         // velho relido é barrado pela conta gasta e pelo `limit_switch_stale`.
@@ -216,7 +218,9 @@ impl Switcher {
                     Ok(false) => report("limit_switch_continue_pending","limite de uso: o recado para continuar está na fila da vida nova, esperando a vez"),
                     Err(code) => {
                         tracing::warn!(session=%hit.name,%code,"limite de uso: o recado para continuar não foi enviado");
-                        report(&format!("limit_switch_continue_failed:{code}"),"limite de uso: o recado para continuar não foi enviado à vida nova");
+                        let code = format!("limit_switch_continue_failed:{code}");
+                        report(&code,"limite de uso: o recado para continuar não foi enviado à vida nova");
+                        continue_failed = Some(code);
                     }
                 }
             }
@@ -242,7 +246,7 @@ impl Switcher {
             }
         }
         let problem = match &outcome {
-            Outcome::Switched { .. }=>Some(LimitProblem::Clear),
+            Outcome::Switched { .. }=>Some(continue_failed.map_or(LimitProblem::Clear,|code|LimitProblem::Failed { code })),
             Outcome::Stayed("limit_switch_no_room")=>Some(LimitProblem::NoRoom { resets_at:hit.limit.resets_at }),
             Outcome::Failed(code) | Outcome::Busy(code)=>Some(LimitProblem::Failed { code:code.clone() }),
             Outcome::Stayed(_)=>None,
@@ -445,13 +449,15 @@ mod tests {
         on_pause:Mutex<Option<String>>,
         /// A vida nova nunca recebe o recado.
         undelivered:std::sync::atomic::AtomicBool,
+        /// O `/input` do recado recusa.
+        continue_fails:std::sync::atomic::AtomicBool,
     }
 
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
             Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
                 reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),problems:Mutex::new(Vec::new()),gone:Default::default(),
-                on_pause:Mutex::new(None),undelivered:Default::default() }
+                on_pause:Mutex::new(None),undelivered:Default::default(),continue_fails:Default::default() }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
         fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
@@ -486,7 +492,11 @@ mod tests {
         fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
         fn now(&self) -> f64 { 1000.0 }
         fn send_continue<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Result<bool,String>> {
-            Box::pin(async move { self.log.lock().unwrap().push("continue".into()); Ok(!self.undelivered.load(std::sync::atomic::Ordering::Relaxed)) })
+            Box::pin(async move {
+                self.log.lock().unwrap().push("continue".into());
+                if self.continue_fails.load(std::sync::atomic::Ordering::Relaxed) { return Err("erro_sessao_trabalhando".into()); }
+                Ok(!self.undelivered.load(std::sync::atomic::Ordering::Relaxed))
+            })
         }
     }
 
@@ -509,6 +519,15 @@ mod tests {
         fake.undelivered.store(true,std::sync::atomic::Ordering::Relaxed);
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_pending"]);
+    }
+
+    /// O recado que não sai deixa a sessão parada no aviso de limite: a linha mostra isso, em vez de limpar.
+    #[tokio::test]
+    async fn a_continue_note_that_fails_shows_on_the_session_row() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.continue_fails.store(true,std::sync::atomic::Ordering::Relaxed);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(*fake.problems.lock().unwrap(),vec![LimitProblem::Failed { code:"limit_switch_continue_failed:erro_sessao_trabalhando".into() }]);
     }
 
     #[tokio::test]

@@ -866,7 +866,7 @@ impl Executor {
         let driver=TerminalDriver::new(self.target.binding.clone(),self.services(&id,&id,""),self.options.io.clone(),self.options.limits.clone()).controls();
         let (limits,task_id)=(self.options.btw.clone(),id.clone());
         let task=tokio::spawn(async move {
-            let result=crate::btw_control::ask(&driver,&question,&limits).await;
+            let result=crate::btw_control::contained(crate::btw_control::ask(&driver,&question,&limits)).await;
             let _=done.send((task_id,result)).await;
         });
         self.btw=Some(BtwRun {id,task,response});

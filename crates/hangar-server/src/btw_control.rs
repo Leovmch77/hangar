@@ -32,6 +32,13 @@ impl Default for BtwLimits {
 pub struct BtwError { pub status: u16, pub code: String, pub message: String }
 pub fn fail(status: u16, code: &str, message: &str) -> BtwError { BtwError { status, code: code.into(), message: message.into() } }
 
+/// A pergunta que dá panic vira erro com código: sem resultado o ator não soltaria o pane nem fecharia o diário.
+pub async fn contained(work: impl std::future::Future<Output = Result<serde_json::Value, BtwError>>) -> Result<serde_json::Value, BtwError> {
+    use futures_util::FutureExt;
+    std::panic::AssertUnwindSafe(work).catch_unwind().await
+        .unwrap_or_else(|_| Err(fail(500, "erro_btw_tarefa_morreu", "a pergunta lateral parou no meio; tente de novo")))
+}
+
 // Buffers do tmux são do SERVIDOR, não do pane: dois `c` em sessões diferentes trocariam as respostas.
 // A trava do pane é por sessão; o trecho "c → achar → apagar" tem trava própria, global.
 static COPY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -141,15 +148,15 @@ async fn buffer_cmd(seq: &PermissionSequence<'_>, sub: &str, args: &[&str]) -> (
             Err(_) => (false, String::new(), String::new()),
         }
     };
-    let known = BUFFER_TARGET.lock().unwrap().get(&mux).copied();
+    let known = BUFFER_TARGET.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&mux).copied();
     if known != Some(false) {
         let (ok, out, err) = run(true).await;
         if known == Some(true) || ok {
-            BUFFER_TARGET.lock().unwrap().insert(mux, true);
+            BUFFER_TARGET.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(mux, true);
             return (ok, out);
         }
         if !err.contains("unknown flag") && !err.contains("unknown option") { return (ok, out); }
-        BUFFER_TARGET.lock().unwrap().insert(mux, false);
+        BUFFER_TARGET.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(mux, false);
     }
     let (ok, out, _) = run(false).await;
     (ok, out)
@@ -173,7 +180,7 @@ async fn delete_buffers(seq: &PermissionSequence<'_>, fresh: &[String], before: 
     for name in fresh { buffer_cmd(seq, "delete-buffer", &["-b", name]).await; }
     // psmux (aceitou o `-t`): o `-b` não apagou nada e o OSC 52 vira duas cópias. No tmux o `-b` já
     // apagou, e apagar por contagem levaria a cópia manual de outra pessoa (buffers do servidor inteiro).
-    if BUFFER_TARGET.lock().unwrap().get(&seq.binding().mux_argv.join("\u{0}")).copied() != Some(true) { return; }
+    if BUFFER_TARGET.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&seq.binding().mux_argv.join("\u{0}")).copied() != Some(true) { return; }
     for _ in 0..4 {
         if buffers(seq).await.len() <= before { break; }
         buffer_cmd(seq, "delete-buffer", &[]).await;
@@ -292,3 +299,14 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
 }
 
 pub fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
+
+#[cfg(test)]
+mod contained_tests {
+    /// Um panic no meio da pergunta chega ao ator como erro, nunca como resultado que falta.
+    #[tokio::test]
+    async fn a_panic_in_the_side_question_is_an_error_with_a_code() {
+        let failed = super::contained(async { panic!("caiu") }).await.unwrap_err();
+        assert_eq!((failed.status, failed.code.as_str()), (500, "erro_btw_tarefa_morreu"));
+        assert_eq!(super::contained(async { Ok(serde_json::json!(1)) }).await.unwrap(), serde_json::json!(1));
+    }
+}
