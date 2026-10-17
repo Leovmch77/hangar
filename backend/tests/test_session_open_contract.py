@@ -75,7 +75,7 @@ def test_rust_differences_undo_each_fix_and_report_a_missing_one():
                "claude --session-id x")
     raw = {"subprocesses": [{"prog": "tmux", "argv": ["new-session", "-s", "s1", "-e", "CP_PROVIDER=claude",
                                                       "-e", "CP_SESSION_KEY=k", "-e", "XDG_RUNTIME_DIR=/run/user/1",
-                                                      command], "rc": 0}],
+                                                      "/bin/sh", "-c", command], "rc": 0}],
            "tmux_sessions": {"s1": {"env": {"CP_SESSION_KEY": "k", "XDG_RUNTIME_DIR": "/run/user/1"}, "command": command}},
            "files": {"/r/home/.hangar/session-specs/k.json": {"created": {}}},
            "diary": [{"evento": "sessao.criar_recusada", "nivel": "erro", "codigo": "terminal_nao_criado", "etapa": "criar_terminal",

@@ -148,6 +148,10 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         | "permission-mode" | "modo-execucao" | "recarregar" | "conta" | "engine/model" | "model-effort" | "bastao" | "resume")) {
         return true;
     }
+    // A pergunta lateral do Claude, com e sem terminal, e o histórico dela.
+    if matches!(*method, Method::POST | Method::GET) && tail == Some("btw") {
+        return true;
+    }
     // Retomar do Arquivo: a abertura do Rust com a conversa que já existe.
     if *method == Method::POST && path.strip_prefix("/api/archive/").and_then(|r| r.strip_suffix("/resume"))
         .is_some_and(|r| r.split('/').count() == 2) {

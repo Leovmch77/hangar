@@ -95,7 +95,9 @@ def test_jev_que_falha_deixa_rastro_e_descansa(tmp_path, monkeypatch):
         chamadas.append(req)
         raise OSError("401 Unauthorized")
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", recusa)
+    # O hook importa o `urllib.request` só quando vai chamar o Jev: o teste o carrega antes de trocar.
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", recusa)
     assert mod._jev_precisa("abre a tela de login") is None
     assert mod._jev_precisa("abre a tela de login") is None
     assert len(chamadas) == 1
