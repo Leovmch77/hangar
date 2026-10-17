@@ -45,7 +45,10 @@ impl Spent {
 
 /// A última mensagem da conversa principal no fim do transcript, se for o aviso de limite do plano ainda valendo.
 /// `apiErrorParams` é do CLI de hoje; `quotaLimits` recusado, do antigo. O aperto temporário não traz nenhum.
-pub fn transcript_limit(tail:&str,now:f64) -> Option<UsageLimit> {
+pub fn transcript_limit(tail:&str,now:f64) -> Option<UsageLimit> { transcript_limit_at(tail,now).map(|(limit,_)|limit) }
+
+/// O aviso e a hora em que a linha foi gravada (segundos), quando ela diz.
+pub fn transcript_limit_at(tail:&str,now:f64) -> Option<(UsageLimit,Option<f64>)> {
     let last = tail.lines().rev().filter_map(|line|serde_json::from_str::<Value>(line).ok())
         .find(|line|matches!(line["type"].as_str(),Some("user" | "assistant")) && line["isSidechain"] != true)?;
     if last["type"] != "assistant" || last["isApiErrorMessage"] != true { return None; }
@@ -54,20 +57,23 @@ pub fn transcript_limit(tail:&str,now:f64) -> Option<UsageLimit> {
         else if last["apiError"].is_null() && last["error"] == "rate_limit" && last["quotaLimits"]["status"] == "rejected" { &last["quotaLimits"] }
         else { return None };
     let limit = UsageLimit::from_info(info);
-    limit.resets_at.is_none_or(|reset|reset > now).then_some(limit)
+    let at = last["timestamp"].as_str().and_then(|ts|chrono::DateTime::parse_from_rfc3339(ts).ok()).map(|ts|ts.timestamp_millis() as f64 / 1000.0);
+    limit.resets_at.is_none_or(|reset|reset > now).then_some((limit,at))
 }
 
 /// O fim do arquivo basta: depois do aviso só vêm linhas de controle curtas.
 const TAIL_BYTES:u64 = 64 * 1024;
 
-pub fn file_limit(path:&std::path::Path,now:f64) -> Option<UsageLimit> {
+pub fn file_limit(path:&std::path::Path,now:f64) -> Option<UsageLimit> { file_limit_at(path,now).map(|(limit,_)|limit) }
+
+pub fn file_limit_at(path:&std::path::Path,now:f64) -> Option<(UsageLimit,Option<f64>)> {
     use std::io::{Read,Seek,SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES))).ok()?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail).ok()?;
-    transcript_limit(&String::from_utf8_lossy(&tail),now)
+    transcript_limit_at(&String::from_utf8_lossy(&tail),now)
 }
 
 /// A mesma escolha da abertura (`quotas::suggestion`): a conta Claude lida de mais folga, fora a atual e as

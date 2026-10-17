@@ -170,7 +170,7 @@ impl<T> Guarded<T> {
 
 /// O que a decoração das linhas Claude e de todas guarda entre rodadas.
 #[derive(Default)]
-struct Decor { context: ContextCache, replies: ReplyCache }
+struct Decor { context: ContextCache, replies: ReplyCache, limits: super::limit::LimitWatch }
 
 /// Marcadores junto da classificação: duas produções seguidas não releem tudo do zero.
 #[derive(Default)]
@@ -189,6 +189,8 @@ struct Caches {
     /// Quando cada pasta teve o Git relido e com que atividade e versão de refs.
     git_gate: Mutex<HashMap<String, GitGate>>,
     config_dirs: Mutex<Option<(Instant, Arc<Vec<PathBuf>>)>>,
+    /// Avisos de limite que a rodada viu, à espera do vigia da troca de conta.
+    limits: Mutex<Vec<crate::runtime::gateway::LimitHit>>,
 }
 
 struct GitGate { at: Instant, activity: u64, fingerprint: Option<Vec<u128>> }
@@ -725,6 +727,15 @@ impl ListBridge {
         for n in list_facts::take_notes() {
             self.facts.diag.report(n.event, &n.session, &n.code, n.reason);
         }
+        let hits = std::mem::take(&mut *self.caches.limits.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for hit in hits {
+            tracing::info!(session = %hit.name, window = %hit.limit.window, "lista: aviso de limite de uso no fim do transcript");
+            self.facts.diag.report("rust.list_limit_seen", &hit.name, &format!("limit_seen:{}", hit.limit.window), "a lista viu o aviso de limite de uso e o entregou ao vigia da troca de conta");
+            match self.plugin_runtime.get() {
+                Some(runtime) => { runtime.usage_limit(hit); }
+                None => self.facts.diag.report("rust.list_limit_seen", &hit.name, "limit_no_runtime", "a lista viu o aviso de limite sem o runtime para entregá-lo"),
+            }
+        }
     }
 
     /// Sessão fora da lista há `FORGET_AFTER` sai dos caches por nome, como o `_forget` do fechamento:
@@ -947,6 +958,15 @@ fn decorate(env: &ListEnv, caches: &Caches, dirs: &Dirs, config_dirs: &[PathBuf]
                 tracing::warn!(session = %name, kind = ?error.kind(), "lista: última resposta ilegível");
             }
             list_facts::note("rust.list_reply_unreadable", &name, format!("{:?}", error.kind()), "última resposta ilegível");
+        }
+        // O fim do transcript já gravado: o aviso de limite do Claude com terminal vai ao vigia daqui.
+        for row in rows.iter() {
+            let started = inp.agent_pids.get(&row.name).and_then(|pid| env.procs.start_time(i64::from(*pid)));
+            if let Some(limit) = d.limits.seen(row, started, wall) {
+                let account = super::context::config_dir_of(row.conta.as_deref()).unwrap_or_else(|| dirs.claude.clone());
+                caches.limits.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(crate::runtime::gateway::LimitHit {
+                    name: row.name.clone(), provider: "claude".into(), account: Some(account.to_string_lossy().into_owned()), limit });
+            }
         }
     });
     caches.plans.with(|plans| rows.iter_mut().for_each(|row| plans.decorate(row, wall, mono)));
