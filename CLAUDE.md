@@ -281,6 +281,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Com o Rust de pé, o PTY é só dele (Windows incluído): o `termsock` faz a porta de entrada de quem
   chega ao Python (convidado, Connect) e liga os bytes a `/__hangar_server/term`; o 409 pergunta
   `term.active` e erro da ponte é 503 (fechamento 1013 no socket), nunca PTY no Python.
+- **WebSocket do dono com `?token=` não confere Origin** (terminal, voz e navegador, Rust e
+  Python). A Origin (`_origem_aceita`, `CP_TERM_ORIGINS`) só barra credencial que o navegador manda
+  sozinho: hoje, o login de convidado no `termsock`. [Motivo](docs/decisoes/plataforma.md#websocket-do-dono-com-token-não-confere-origin-17102026).
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
@@ -552,7 +555,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
   custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo
-  `?token=`; a Origin ainda é decidida pelo Python em `/internal/term/origin`). Custos e uso têm índice próprio
+  `?token=`, sem conferir Origin). Custos e uso têm índice próprio
   (`custos-rust.sqlite3`) no cache local; stats continuam no Python. Contas Claude/Codex e
   cotas são só do Rust: no modo `python` respondem `accounts_need_rust_server`, sem reserva
   Python. Anexos de sessão pertencem ao Rust enquanto o supervisor estiver em `rust` ou

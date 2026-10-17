@@ -164,7 +164,7 @@ ou em `backend/.env`):
 | `CP_PORT` | `8765` | porta do backend |
 | `CP_FRONT_PORT` | — | porta onde o PWA é servido (entra no QR). Vazio = o próprio backend, que serve o `frontend/dist` na raiz. Só quem mantém um `vite preview` separado grava `5173` aqui. |
 | `CP_PUBLIC_URL` | — | sobrescreve a URL base do QR (ex: hostname Tailscale) |
-| `CP_TERM_ORIGINS` | — | origens EXTRAS aceitas pelo WebSocket do terminal (csv). Precisa quando o PWA é servido de um host que não é este backend, nem a `CP_PUBLIC_URL`, nem um peer — é o caso do app carregado da VPS falando com a máquina de casa. Sem isso o terminal abre e cai em "desconectado". |
+| `CP_TERM_ORIGINS` | — | origens EXTRAS de onde o convidado com login pode abrir o terminal (csv). O dono não precisa: o acesso dele (`?token=`) abre o terminal de qualquer endereço. Vale quando o convidado usa um app servido de um host que não é este backend, nem a `CP_PUBLIC_URL`, nem um peer. |
 | `CP_SCAN_ROOTS` | — | pastas que o seletor "Nova sessão" pode listar (csv) |
 | `CP_TERMINAL` | — | emulador do botão **terminal nativo** (`wezterm`, `kitty`, `alacritty`, `konsole`, `gnome-terminal`, `xterm`). Vazio = procura nessa ordem no PATH. |
 

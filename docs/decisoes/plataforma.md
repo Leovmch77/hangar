@@ -1532,8 +1532,9 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 
 **Terminal real do dono (parte 4, Task 8, 06/10/2026).** Fora do Windows, o `WS .../term` do
 dono (`?token=` só; Bearer e cookie seguem ao Python, como no `termsock`) abre o PTY no Rust
-(`term/`, `portable-pty`). A Origin continua decidida pelo `_origem_aceita` do Python, perguntada
-uma vez por conexão em `/internal/term/origin` (prazo 1 s; falha = 503 com código no diário).
+(`term/`, `portable-pty`). A Origin era perguntada ao Python em `/internal/term/origin`; desde
+17/10/2026 o dono com token não a confere mais (entrada "WebSocket do dono com token não confere
+Origin").
 Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette; multiplexador
 fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
 opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
@@ -2706,3 +2707,19 @@ Python fica com Pi, omp, Kimi e o modo `python`.
   cache; Chromium ausente, fila cheia ou prazo é 503, fora do cache, e o cliente oferece "Tentar de
   novo".
 
+## WebSocket do dono com token não confere Origin (17/10/2026)
+
+- Regra: a conexão WebSocket autenticada pelo token do dono na query (`?token=`) não consulta a
+  Origin. Vale para o terminal (`term/mod.rs` no Rust, `termsock._porta_de_entrada` no Python), a
+  voz (`voice/routes.rs`, `voicesock._owner_only`) e o navegador remoto (`navsock._autorizado`).
+- Motivo: WebSocket não passa por CORS, e a Origin existe para impedir que uma página qualquer
+  aberta no navegador use uma credencial AMBIENTE (cookie, login guardado) que o navegador manda
+  sozinho. O token na query não é ambiente: uma página estranha não o tem. Conferir a Origin nesse
+  caso não acrescenta proteção e só barra quem entrou de verdade.
+- Caso real: o app iOS pelo Hangar Connect (`https://app.hangar.dev.br/casa`) levava
+  `voice origin refused` e precisou de `CP_TERM_ORIGINS` declarado em cada máquina.
+- O que continua: o login de convidado do `termsock` (`guest_users.current`, sessão por cookie)
+  segue com a Origin conferida por `_origem_aceita`, e `CP_TERM_ORIGINS`/`term_origins` seguem
+  valendo para ele. Convidado da 8766 continua decidido pelo porteiro, sem Origin, como antes.
+- Removidos por ficarem sem chamador: `crates/hangar-server/src/term/origin.rs` e a rota interna
+  `POST /internal/term/origin`; contrato interno 74 → 75.

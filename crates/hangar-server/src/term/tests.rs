@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -61,29 +61,16 @@ async fn until(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
-/// Python falso: responde a Origin pelo modo e conta o que recebeu.
+/// Python falso: conta os terminais que chegaram a ele.
 #[derive(Default)]
 struct Python {
-    origin_mode: Mutex<&'static str>,
-    origin_bodies: Mutex<Vec<serde_json::Value>>,
     term_hits: AtomicUsize,
 }
 
 async fn python() -> (SocketAddr, Arc<Python>) {
-    let py = Arc::new(Python { origin_mode: Mutex::new("ok"), ..Default::default() });
-    let (p1, p2) = (py.clone(), py.clone());
+    let py = Arc::new(Python::default());
+    let p2 = py.clone();
     let app = Router::new()
-        .route("/internal/term/origin", post(move |body: String| {
-            let p1 = p1.clone();
-            async move {
-                p1.origin_bodies.lock().unwrap().push(serde_json::from_str(&body).unwrap());
-                match *p1.origin_mode.lock().unwrap() {
-                    "ok" => (StatusCode::OK, r#"{"ok":true}"#),
-                    "no" => (StatusCode::OK, r#"{"ok":false}"#),
-                    _ => (StatusCode::INTERNAL_SERVER_ERROR, ""),
-                }
-            }
-        }))
         .route("/internal/diag", post(|| async { "{}" }))
         .route("/api/sessions/{name}/term", any(move || {
             let p2 = p2.clone();
@@ -335,37 +322,21 @@ async fn query_token_only() {
     assert_eq!(srv.py.term_hits.load(Ordering::SeqCst), 3);
 }
 
+/// O `?token=` do dono não é credencial ambiente: página estranha não o tem, então a Origin não é conferida.
 #[tokio::test]
-async fn origin_refused_before_upgrade() {
+async fn owner_token_opens_from_any_origin() {
     let tmux = Tmux::new();
     tmux.session("s9");
     let srv = server(&tmux, |_| {}).await;
     let path = "/api/sessions/s9/term?token=dono";
-    *srv.py.origin_mode.lock().unwrap() = "no";
-    assert_eq!(connect_with(srv.addr, path, &[("origin", "https://evil.com")]).await.err(), Some(403));
-    let host = srv.addr.to_string();
-    assert_eq!(srv.py.origin_bodies.lock().unwrap().last().unwrap(),
-               &serde_json::json!({"origin": "https://evil.com", "host": host}));
-    *srv.py.origin_mode.lock().unwrap() = "fail";
-    assert_eq!(connect_with(srv.addr, path, &[("origin", "https://x.com")]).await.err(), Some(503));
-    assert!(tmux.clients("s9").is_empty(), "nenhum PTY antes da Origin aceita");
-    // Origin que não é texto não vira "sem Origin": recusa sem perguntar e sem abrir.
-    *srv.py.origin_mode.lock().unwrap() = "ok";
-    let asked = srv.py.origin_bodies.lock().unwrap().len();
+    let ws = connect_with(srv.addr, path, &[("origin", "https://evil.com")]).await.expect("Origin estranha com token abre");
+    drop(ws);
     let mut req = tungstenite::client::IntoClientRequest::into_client_request(format!("ws://{}{path}", srv.addr)).unwrap();
     req.headers_mut().insert("origin", axum::http::HeaderValue::from_bytes(b"https://\xe9vil.com").unwrap());
-    match tokio_tungstenite::connect_async(req).await {
-        Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status().as_u16(), 403),
-        other => panic!("Origin ilegível abriu: {:?}", other.map(|_| ())),
-    }
-    assert_eq!(srv.py.origin_bodies.lock().unwrap().len(), asked);
-    assert!(tmux.clients("s9").is_empty());
-    *srv.py.origin_mode.lock().unwrap() = "ok";
-    let _ws = connect_with(srv.addr, path, &[("origin", "https://ok.com")]).await.expect("aceita");
-    let asked = srv.py.origin_bodies.lock().unwrap().len();
-    drop(_ws);
-    let _ws = connect(srv.addr, path).await.expect("sem Origin não pergunta");
-    assert_eq!(srv.py.origin_bodies.lock().unwrap().len(), asked);
+    tokio_tungstenite::connect_async(req).await.expect("Origin ilegível com token abre");
+    assert_eq!(connect_with(srv.addr, "/api/sessions/s9/term", &[("origin", "https://evil.com")]).await.err(), Some(403),
+               "sem token segue ao Python");
+    assert_eq!(srv.py.term_hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

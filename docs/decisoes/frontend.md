@@ -569,7 +569,8 @@ below run only in the `python` reserve mode.
     não é a `public_url` e não está no `peers.json` — o handshake voltava **403** e a tela dizia só
     "desconectado". Vazio (o default) **não** pode virar "aceita qualquer um": o handshake também
     autentica pelo cookie `cp_token`, então origem arbitrária seria qualquer site abrindo um
-    terminal na máquina.
+    terminal na máquina. Desde 17/10/2026 isso vale só para o login de convidado: o dono com
+    `?token=` não confere Origin (plataforma.md, "WebSocket do dono com token não confere Origin").
 
 ## Fechar `x` e criar outra `x`: a chave do Chat e a marca de exclusão eram só o NOME
 

@@ -136,3 +136,22 @@ def test_rota_aceita_sessao_sem_terminal(monkeypatch, nome, motivo):
             pass
     # Sem terminal passa da checagem de sessão e só para por não ter navegador.
     assert (e.value.code, e.value.reason) == (1008, motivo)
+
+
+def test_token_do_dono_abre_de_qualquer_origem(monkeypatch):
+    """Token na query não é credencial ambiente: a Origin não é conferida e a conexão segue."""
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    import app.api as api_mod
+    from app import tmux
+    from app.config import settings
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    monkeypatch.setattr(tmux, "has_session", lambda n: False)
+    monkeypatch.setattr(api_mod, "_session_exists", lambda n: False)
+    cliente = TestClient(api_mod.app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 1))
+    with pytest.raises(WebSocketDisconnect) as e:
+        with cliente.websocket_connect("/api/sessions/x/nav-remoto?token=secret",
+                                       headers={"origin": "https://evil.com"}):
+            pass
+    assert (e.value.code, e.value.reason) == (1008, "sessao nao existe")

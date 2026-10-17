@@ -6964,10 +6964,11 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 
     Sem `Origin` (cliente que nao e navegador) e True: o handshake tambem so cobra origem quando o
     cabecalho existe, e responder False aqui poria um aviso de recusa numa tela que abre normal.
+    O dono abre com `?token=` e o handshake nao confere a Origin dele: so o login de convidado cobra.
     """
     from app import termsock
     origem = request.headers.get("origin")
-    if not origem:
+    if not origem or guest_users.current.get() is None:
         return True
     return termsock._origem_aceita(origem, request.headers.get("host"))
 

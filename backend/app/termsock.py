@@ -397,20 +397,18 @@ async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[
         # compare_digest, nao `!=` de string (mesmo cuidado do require_auth, auth.py:104): `!=` sai fora
         # na primeira letra diferente e vira canal lateral de tempo. Este e o endpoint que abre um shell
         # completo. `.encode()` tambem evita o TypeError do compare_digest com string nao-ASCII.
-        # Convidado com login próprio: o porteiro já o reconheceu; a Origin abaixo continua valendo.
-        if guest_users.current.get() is None and (
-                not settings.auth_token or not secrets.compare_digest(
-                    tok.encode(), settings.auth_token.encode())):
+        dono = bool(settings.auth_token) and secrets.compare_digest(tok.encode(), settings.auth_token.encode())
+        if not dono and guest_users.current.get() is None:
             if host not in _LOOPBACK:            # mesma isencao do require_auth (auth.py:46)
                 _record_fail(host, agora)
             await ws.close(code=1008)            # fecha SEM accept: o PTY nunca chega a nascer
             return
+        # A Origin so barra credencial AMBIENTE (o login do convidado, que o navegador manda sozinho):
+        # WebSocket nao e coberto por CORS. O `?token=` do dono uma pagina estranha nao tem.
         origem = ws.headers.get("origin")
-        if origem and not _origem_aceita(origem, ws.headers.get("host")):
-            # WebSocket nao e coberto por CORS: sem isto, uma pagina qualquer aberta no navegador do
-            # dono poderia abrir um shell usando o cookie/token dele. Igualdade normalizada, nao
-            # prefixo: Origin nunca tem path, e um `startswith` deixava passar
-            # "https://<public_url>.evil.com" (achado da revisao).
+        if not dono and origem and not _origem_aceita(origem, ws.headers.get("host")):
+            # Igualdade normalizada, nao prefixo: Origin nunca tem path, e um `startswith` deixava
+            # passar "https://<public_url>.evil.com" (achado da revisao).
             _log.warning("termsock: origem %r recusada (host=%r, public_url=%r)",
                          origem, ws.headers.get("host"), settings.public_url)
             await ws.close(code=1008)
