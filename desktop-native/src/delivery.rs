@@ -47,6 +47,16 @@ pub struct DeliveryTracker {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SendTiming { Queued, Direct, Jev { task: String, message: String } }
 
+/// A fala do agente dá sentido a respostas curtas que o pedido inicial, sozinho, não explica.
+pub fn timing_context(task: &str, recent: &str) -> String {
+    if task.trim().is_empty() && recent.trim().is_empty() { return String::new(); }
+    if recent.trim().is_empty() { return task.chars().take(1000).collect(); }
+    // Perguntas e pedidos de confirmação costumam fechar a fala do agente.
+    let recent = recent.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect::<String>();
+    format!("Pedido atual:\n{}\n\nFala recente do agente:\n{}",
+        task.chars().take(350).collect::<String>(), recent)
+}
+
 impl From<bool> for SendTiming {
     fn from(direct: bool) -> Self { if direct { Self::Direct } else { Self::Queued } }
 }
@@ -168,6 +178,17 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn timing_context_keeps_the_recent_question_even_with_a_long_original_request() {
+        let context = timing_context(&"Descrição extensa da tarefa. ".repeat(100), "As PMs prontas também ficam na sprint anterior?");
+        assert!(context.contains("As PMs prontas também ficam na sprint anterior?"));
+        assert!(context.chars().count() <= 1000);
+        let long_explanation = format!("{} Posso incluir a coluna?", "Detalhes do trabalho. ".repeat(50));
+        assert!(timing_context("Ajustar a tabela", &long_explanation).ends_with("Posso incluir a coluna?"));
+        assert!(timing_context("", "").is_empty());
+        assert!(timing_context(&"á".repeat(2000), &"é".repeat(2000)).chars().count() <= 1000);
+    }
 
     fn key(jsonl: &str) -> SessionKey {
         SessionKey { server: "http://fixture/".into(), name: "same-name".into(), jsonl: jsonl.into() }

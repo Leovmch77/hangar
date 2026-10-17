@@ -1754,8 +1754,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             if reply.disposition == Disposition::Deferred && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer)
                                 && !rowless(&target.provider,&pending.command) {
                                 let queue = queue.clone(); let id = reply.operation_id.clone(); let generation = target.generation; let sample = clock(start);
-                                jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("unclaim:{}",unique()),sample,
-                                    Action::SetDelivered { entry_id:id,value:false,steered:false }).await.map(|_|()).map_err(io_failure)) });
+                                let wake = pending.command.kind == OperationKind::DispatchAsyncAnswer;
+                                jobs.spawn(async move {
+                                    let result = queue.exec(generation,&format!("unclaim:{}",unique()),sample,
+                                        Action::SetDelivered { entry_id:id,value:false,steered:false }).await.map(|_|()).map_err(io_failure);
+                                    // A reserva só pode acordar depois de a entrada voltar à fila no disco.
+                                    if wake { Job::Queued { wake:true,result } } else { Job::Saved(result) }
+                                });
                             }
                             // Reserva recusada (pergunta encerrada, outra conversa, turno recusado): a entrada não volta a sair.
                             if reply.disposition == Disposition::Rejected && pending.command.kind == OperationKind::DispatchAsyncAnswer {
