@@ -24,10 +24,10 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration,pub start_grace:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT,start_grace:START_GRACE}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -266,6 +266,9 @@ struct Executor {
     /// trata a sessão como trabalhando, para a próxima não cair no mesmo turno.
     turn_wait:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
+    /// Quando o ator nasceu e se esta vida já provou a conversa: até lá, sem a prova é o Claude subindo.
+    started:tokio::time::Instant,
+    conversation_proved:bool,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
@@ -289,6 +292,8 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 const MAX_LOAN_S:u64=120;
 /// O `clear_wait` padrão: o transcript novo do `/clear` nasce em menos de um segundo.
 const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
+/// Vida nova sem a conversa provada ainda (o Claude subindo): espera assim, sem erro, até este prazo.
+const START_GRACE:Duration=Duration::from_secs(60);
 /// O `give_up_after` padrão: a prova chega em segundos; minutos sem ela, com o Claude parado, é perda.
 const GIVE_UP_AFTER:Duration=Duration::from_secs(180);
 /// Quanto o aviso de `/clear` não aplicado fica na vista.
@@ -345,7 +350,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {batch_blocked:false,target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag()};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag(),started:tokio::time::Instant::now(),conversation_proved:false};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -1322,7 +1327,13 @@ impl Executor {
         if self.stall.as_ref().is_some_and(|s|!state.rows.iter().any(|r|r["delivered"]==false && r["id"]==s.row.as_str()))
             && self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
         let services=self.services("maintenance","maintenance","");
-        let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
+        let facts=match services.facts(&self.target.binding).await {
+            Ok(facts)=>{self.conversation_proved=true;facts},
+            // O Claude Code só registra e abre a conversa depois de subir: a entrada espera, sem erro na sessão.
+            Err(failure) if failure.0=="terminal_conversation_unavailable" && !self.conversation_proved
+                && self.started.elapsed()<self.options.start_grace=>return Ok(json!({"drained":0,"starting":true})),
+            Err(_)=>return Err(error("terminal_facts")),
+        };
         // O composer legível e sem pergunta é o que libera a escrita; o turno é conferido logo abaixo.
         self.deliverable=facts.binding==self.target.binding && facts.ready && !facts.open_question;
         // Composer que não se lê (o desenho mudou): não digita às cegas, mas a série de espera aparece na vista.

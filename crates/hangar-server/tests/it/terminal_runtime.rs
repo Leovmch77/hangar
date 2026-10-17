@@ -166,6 +166,13 @@ impl Fixture {
         let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
     }
+    fn start_grace(&self,start_grace:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_plugin();
+        let lease=crate::lease_when_free(&self.target.lease_path);
+        let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),status:Some(self.status.clone()),start_grace,turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
+        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
+    }
     /// Espera do turno depois de uma entrega comum: zero por padrão, para os testes de duas mensagens seguidas.
     fn turn_start_wait(&self)->Duration {Duration::from_millis(self.turn_start_ms.load(std::sync::atomic::Ordering::Acquire))}
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -983,6 +990,31 @@ async fn terminal_runtime_missing_native_record_and_silent_plugin_mark_no_safe_d
     assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
     *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
     f.wait_for("o aviso sai com a prova de volta",||f.status.borrow().input_stalled.is_none()).await;
+    h.stop().await.unwrap();
+}
+/// Vida nova: o Claude ainda subindo não tem registro nativo nem conversa aberta. A primeira mensagem espera
+/// na fila sem erro na sessão e sai quando a prova chega; passado o prazo de subida, a falta de prova é erro.
+#[tokio::test]
+async fn terminal_runtime_a_starting_life_without_its_conversation_waits_without_an_error() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    let saved=f.io.native_record.lock().unwrap().take();std::fs::remove_file(&native).unwrap();
+    let h=f.start_grace(Duration::from_secs(60));
+    assert_eq!(h.command(f.command("primeira","oi")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert!(h.drain().await.is_ok(),"subindo não é erro");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(h.snapshot().await.unwrap()["error"].is_null(),"nenhum tique publicou erro");
+    assert!(f.status.borrow().error.is_none(),"a sessão não mostra problema");
+    *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
+    f.wait_for("a primeira mensagem sai com a prova",||!typed_at(&f,"oi").is_empty()).await;
+    h.stop().await.unwrap();
+
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    f.io.native_record.lock().unwrap().take();std::fs::remove_file(&native).unwrap();
+    let h=f.start_grace(Duration::ZERO);
+    h.command(f.command("primeira","oi")).await.unwrap();
+    assert_eq!(h.drain().await.unwrap_err().code,"terminal_facts","passado o prazo de subida");
     h.stop().await.unwrap();
 }
 #[tokio::test]
