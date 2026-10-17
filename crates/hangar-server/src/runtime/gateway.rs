@@ -1024,14 +1024,27 @@ impl RuntimeRegistry {
             if matches.next().is_some() {return Err(failure("runtime_binding"));}entry.handle.clone()
         };handle.queue(id,action).await
     }
-    pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
-        // O Claude com terminal sem ator (restaurado depois da adoção da subida) é adotado como na escrita,
-        // pela porta: sem isso a fila dele nunca drena. O sem terminal estacionado não sobe por isto.
-        if !self.has_entry(None,name).await && let Some(watcher)=self.watcher.get().cloned() {
-            let _pass=self.ingress.enter(name,Duration::ZERO).await
-                .map_err(|_|RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"))?;
-            if let Some(adopted)=watcher.adopt_claude(self,name).await {adopted?;}
+    /// O Claude com terminal sem ator (restaurado depois da adoção da subida) é adotado como na escrita,
+    /// pela porta. O sem terminal estacionado não sobe por isto.
+    async fn adopt_claude_terminal(&self,name:&str)->Result<(),RuntimeError> {
+        if self.has_entry(None,name).await {return Ok(());}
+        let Some(watcher)=self.watcher.get().cloned() else {return Ok(())};
+        let _pass=self.ingress.enter(name,Duration::ZERO).await
+            .map_err(|_|RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"))?;
+        watcher.adopt_claude(self,name).await.unwrap_or(Ok(()))
+    }
+    /// O alvo do Claude com terminal para conferir o limite de uso no fim do turno; `None`: a sessão é sem
+    /// terminal, e quem vê o limite é o ator dela.
+    pub async fn limit_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
+        self.adopt_claude_terminal(name).await?;
+        match self.terminal_target(name).await? {
+            Some(target)=>Ok(Some(target)),
+            None if self.has_entry(None,name).await=>Ok(None),
+            None=>Err(failure("limit_switch_no_target")),
         }
+    }
+    pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
+        self.adopt_claude_terminal(name).await?;
         let handle={
             let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name);
             let entry=matches.next().ok_or_else(||failure("runtime_binding"))?;

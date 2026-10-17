@@ -256,7 +256,14 @@ impl Sources for NativeSources {
         Box::pin(async move {
             let state = self.state()?;
             let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
-            let Ok(Some(target)) = registry.terminal_target(&identity.name).await else { return Ok(()) };
+            let target = match registry.limit_target(&identity.name).await {
+                Ok(Some(target)) => target,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    state.diag.report("session.limit_switch", &identity.name, &error.code, "fim de turno com erro sem o alvo do terminal: o limite de uso não foi conferido");
+                    return Err(ServiceError("limit_switch_no_target"));
+                }
+            };
             let read = async {
                 let (live, transcript) = registry.context_transcript(&identity.name).await.map_err(|_| ServiceError("plugin_context_source_missing"))?;
                 if live != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
