@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from 'react';
+import { Children, Fragment as ReactFragment, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { create } from 'zustand';
+import Svg, { Circle, Line, Polyline, Rect } from 'react-native-svg';
 import { intlLocale, type Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { Stack, useRouter } from 'expo-router';
@@ -15,6 +16,7 @@ import * as m from '../../paraglide/messages';
 
 export const useUsagePreferences = create(() => ({ period: '30d', off: [] as string[] }));
 export const number = (value: number, digits = 0) => value.toLocaleString(intlLocale(), { maximumFractionDigits: digits });
+export const compactNumber = (value: number) => value.toLocaleString(intlLocale(), { notation: 'compact', maximumFractionDigits: 1 });
 export const dollars = (value: number) => `US$ ${value.toLocaleString(intlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const percent = (part: number, total: number) => `${number(total > 0 ? part / total * 100 : 0, 1)}%`;
 
@@ -32,10 +34,10 @@ export function Copy({ children, title = false, muted = false }: { children: Rea
   return <Text style={{ color: muted ? c.muted : c.text, fontSize: title ? theme.base.text.lg : theme.base.text.sm, fontWeight: title ? '600' : '400' }}>{children}</Text>;
 }
 
-export function Action({ label, onPress, selected = false, disabled = false, icon }: { label: string; onPress: () => void; selected?: boolean; disabled?: boolean; icon?: IconName }) {
+export function Action({ label, accessibilityLabel, onPress, selected = false, disabled = false, icon }: { label: string; accessibilityLabel?: string; onPress: () => void; selected?: boolean; disabled?: boolean; icon?: IconName }) {
   const { theme } = useUnistyles();
   const c = useSettingsColors();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress}
     style={{ minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderRadius: theme.base.radius.md, backgroundColor: selected ? c.accentDim : 'transparent', flexDirection: 'row', alignItems: 'center', gap: 8, opacity: disabled ? 0.45 : 1 }}>
     {icon && <Icon name={icon} size={18} color={c.accentText} />}
     <Text style={{ color: selected ? c.accentText : c.text, fontSize: theme.base.text.sm, flexShrink: 1 }}>{label}</Text>
@@ -46,6 +48,10 @@ export function Card({ children }: { children: ReactNode }) {
   const c = useSettingsColors();
   const { theme } = useUnistyles();
   return <View style={{ padding: 16, gap: 10, backgroundColor: c.inset, borderRadius: theme.base.radius.lg }}>{children}</View>;
+}
+
+export function Grid({ children }: { children: ReactNode }) {
+  return <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>{Children.toArray(children).map((child, index) => <View key={index} style={{ flexGrow: 1, flexBasis: '45%', minWidth: 140 }}>{child}</View>)}</View>;
 }
 
 export function Search({ value, onChange }: { value: string; onChange: (text: string) => void }) {
@@ -78,7 +84,7 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
         <Copy title>{label}</Copy>
         <Search value={query} onChange={setQuery} />
         <Action label={m.uso_limpar()} onPress={() => onChange([])} />
-        <Paged key={query} items={matches} render={(item) => <Action label={`${label}: ${item.label ?? item.key}`} selected={values.includes(item.key)}
+        <Paged key={query} items={matches} render={(item) => <Action label={item.label ?? item.key} accessibilityLabel={`${label}: ${item.label ?? item.key}`} selected={values.includes(item.key)}
           disabled={!values.includes(item.key) && max !== undefined && max > 1 && values.length >= max}
           icon={values.includes(item.key) ? 'CheckSquare' : 'Square'} onPress={() => onChange(values.includes(item.key) ? values.filter((v) => v !== item.key) : max === 1 ? [item.key] : [...values, item.key])} />} />
         <Action label={m.native_close()} icon="X" onPress={() => setOpen(false)} />
@@ -119,9 +125,71 @@ export function ReportStatus<R>({ parts, loading, accepted, selected }: { parts:
   </View>;
 }
 
+export function useChartColors() {
+  const { theme } = useUnistyles();
+  const c = useSettingsColors();
+  return [c.accent, theme.tokens.status.warning, theme.tokens.status.success, theme.tokens.status.error, c.accentText, c.muted, c.faint];
+}
+
+export function Composition({ label, items }: { label: string; items: { label: string; value: number; color: string; detail?: string }[] }) {
+  const c = useSettingsColors();
+  const total = items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+  return <View accessible accessibilityRole="image" accessibilityLabel={`${label}: ${items.map((item) => `${item.label}: ${item.detail ?? number(item.value)} (${percent(item.value, total)})`).join(' · ')}`} style={{ flexDirection: 'row', height: 12, backgroundColor: c.hover, borderRadius: 6, overflow: 'hidden' }}>
+    {items.map((item, index) => <View key={index} style={{ width: `${total > 0 ? Math.max(0, item.value) / total * 100 : 0}%`, height: 12, backgroundColor: item.color }} />)}
+  </View>;
+}
+
+export interface ChartSeries { key: string; label: string; color: string }
+export interface ChartDay { key: string; values: (number | null)[]; detail?: string }
+
+export function Columns({ label, days, series, format = number, axisFormat = compactNumber, onPress, lines = false }: { label: string; days: ChartDay[]; series: ChartSeries[]; format?: (value: number) => string; axisFormat?: (value: number) => string; onPress?: (key: string) => void; lines?: boolean }) {
+  const c = useSettingsColors();
+  const { theme } = useUnistyles();
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  if (!days.length) return <Copy muted>{m.uso_sem_dias()}</Copy>;
+  const describe = (day: ChartDay) => {
+    const sum = day.values.some((value) => value === null) ? '—' : format(day.values.reduce<number>((value, part) => value + (part ?? 0), 0));
+    return `${day.key}: ${sum}; ${day.values.map((value, index) => `${series[index].label}: ${value === null ? '—' : format(value)}`).join(' · ')}${day.detail ? ` · ${day.detail}` : ''}`;
+  };
+  const selected = days.find((day) => day.key === selectedDay);
+  const maximum = Math.max(1, ...days.map((day) => lines ? Math.max(0, ...day.values.map((value) => value ?? 0)) : day.values.reduce<number>((sum, value) => sum + Math.max(0, value ?? 0), 0)));
+  const step = Math.max(64, 264 / days.length);
+  const width = days.length * step;
+  const height = 180;
+  return <View accessibilityLabel={label} style={{ gap: 8 }}><View style={{ flexDirection: 'row', gap: 8 }}>
+    <View style={{ width: 64, flexShrink: 0, height, justifyContent: 'space-between' }}>{[maximum, maximum / 2, 0].map((value, index) => <Text key={index} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={{ color: c.muted, fontSize: theme.base.text.sm }}>{axisFormat(value)}</Text>)}</View>
+    <ScrollView horizontal style={{ flex: 1, flexShrink: 1, minWidth: 0 }}><View style={{ width }}>
+      <Svg width={width} height={height} accessible={false}>
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <Line key={ratio} x1={0} x2={width} y1={height * ratio} y2={height * ratio} stroke={c.borderStrong} />)}
+        {lines ? series.map((item, seriesIndex) => {
+          const runs: string[][] = [[]];
+          const points = days.flatMap((day, index) => {
+            const value = day.values[seriesIndex];
+            if (value === null) { if (runs.at(-1)!.length) runs.push([]); return []; }
+            const x = index * step + step / 2;
+            const y = height - 6 - Math.max(0, value) / maximum * (height - 12);
+            runs.at(-1)!.push(`${x},${y}`);
+            return [{ x, y, key: day.key }];
+          });
+          return <ReactFragment key={item.key}>{runs.filter((run) => run.length > 1).map((run, index) => <Polyline key={index} points={run.join(' ')} fill="none" stroke={item.color} strokeWidth={2} />)}{points.map((point) => <Circle key={point.key} cx={point.x} cy={point.y} r={3} fill={item.color} />)}</ReactFragment>;
+        }) : days.map((day, index) => {
+          let bottom = height;
+          return day.values.map((value, segment) => {
+            const size = Math.max(0, value ?? 0) / maximum * height;
+            bottom -= size;
+            return size > 0 ? <Rect key={`${day.key}:${segment}`} x={index * step + step * 0.22} y={bottom} width={step * 0.56} height={size} fill={series[segment].color} /> : null;
+          });
+        })}
+      </Svg>
+      <View style={{ position: 'absolute', top: 0, left: 0, flexDirection: 'row' }}>{days.map((day) => <Pressable key={day.key} accessibilityRole="button" accessibilityLabel={describe(day)} onPress={() => onPress ? onPress(day.key) : setSelectedDay(day.key)} style={{ width: step, height, minHeight: 44 }} />)}</View>
+      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} numberOfLines={1} accessibilityLabel={day.key} style={{ width: step, paddingTop: 8, textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{`${day.key.slice(8, 10)}/${day.key.slice(5, 7)}`}</Text>)}</View>
+    </View></ScrollView>
+  </View>{!onPress && selected && <Copy>{describe(selected)}</Copy>}</View>;
+}
+
 export function Bar({ label, value, max, detail, onPress, color }: { label: string; value: number; max: number; detail: string; onPress?: () => void; color?: string }) {
   const c = useSettingsColors();
-  const body = <View style={{ gap: 6, paddingVertical: 8 }}><View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12 }}><View style={{ flex: 1 }}><Copy>{label}</Copy></View><Copy>{detail}</Copy></View>
+  const body = <View style={{ gap: 6, paddingVertical: 8 }}><Copy>{label}</Copy><Copy>{detail}</Copy>
     <View style={{ height: 5, backgroundColor: c.hover, borderRadius: 3 }}><View style={{ height: 5, width: `${Math.max(0, Math.min(100, max > 0 ? value / max * 100 : 0))}%`, backgroundColor: color ?? c.accent, borderRadius: 3 }} /></View>
   </View>;
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${detail}`} onPress={onPress} style={{ minHeight: 44 }}>{body}</Pressable> : <View accessible accessibilityLabel={`${label}: ${detail}`}>{body}</View>;
