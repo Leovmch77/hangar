@@ -85,6 +85,7 @@ describe('organização do ditado na tela de Voz', () => {
     overwriteGetLocale(() => 'pt');
     try {
       await render();
+      expect(container.textContent!.split(m.native_voice_cleanup()).length - 1).toBe(1);
       const group = container.querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${m.native_voice_cleanup()}"]`)!;
       expect(group.parentElement?.style.paddingLeft).toBe('0px');
       expect([...group.querySelectorAll('button')].map((el) => el.textContent)).toEqual([

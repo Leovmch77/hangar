@@ -126,7 +126,7 @@ export function Muted({ children }: { children: ReactNode }) {
 
 /** Linha no desenho do SettingsRow, com etiquetas ao lado do título e o controle embaixo. */
 export function RowShell({ icon, title, chips, help, right, children, fullWidthControl }: {
-  icon: IconName; title: string; chips?: ReactNode; help?: string; right?: ReactNode; children?: ReactNode; fullWidthControl?: boolean;
+  icon: IconName; title?: string; chips?: ReactNode; help?: string; right?: ReactNode; children?: ReactNode; fullWidthControl?: boolean;
 }) {
   const c = useSettingsColors();
   return (
@@ -135,7 +135,7 @@ export function RowShell({ icon, title, chips, help, right, children, fullWidthC
         <View style={[styles.iconBox, { borderColor: c.border, backgroundColor: c.inset }]}><Icon name={icon} size={16} color={c.muted} /></View>
         <View style={styles.flex}>
           <View style={styles.titleLine}>
-            <Text style={[styles.title, { color: c.text }]}>{title}</Text>
+            {title ? <Text style={[styles.title, { color: c.text }]}>{title}</Text> : null}
             {chips}
           </View>
           {help ? <Text style={[styles.help, { color: c.muted }]}>{help}</Text> : null}
