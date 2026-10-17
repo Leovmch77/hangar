@@ -72,6 +72,11 @@ function family(name: string | null | undefined): number {
 export function appendFoldSummary(before: FoldSummary | undefined, parts: ChatEvent[], resultOf: (ev: ChatEvent) => ChatEvent | null): FoldSummary {
   const out: FoldSummary = before ? { ...before, lines: before.lines.slice(), counts: before.counts.slice(), live: new Set(before.live) }
     : { lines: [], calls: 0, thoughts: 0, counts: [0, 0, 0, 0, 0, 0], failures: 0, live: new Set() };
+  return accumulateFoldSummary(out, parts, resultOf);
+}
+
+/** Acumula apenas em um resumo ainda não publicado, exclusivo do chamador. */
+export function accumulateFoldSummary(out: FoldSummary, parts: ChatEvent[], resultOf: (ev: ChatEvent) => ChatEvent | null): FoldSummary {
   for (const ev of parts) {
     if (ev.kind === 'thinking') { out.thoughts++; out.lines.push(ev); }
     else if (ev.kind === 'tool_use' && ev.tool_name !== 'ToolSearch') {

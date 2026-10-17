@@ -86,6 +86,103 @@ it.each([false, true])('promoção em lote conta o erro da segunda uma vez, resu
   expect(before.data.map((row) => [...row.summary!.live])).toEqual([[events[0]], [events[1]]]);
 });
 
+it.each([true, false])('lote frio de 400 ferramentas mantém trabalho linear, árvore=%s', (merge) => {
+  const events = Array.from({ length: 400 }, (_, i) => tool(`t${i}`));
+  const original = structuredClone(events);
+  for (const ev of events) { Object.freeze(ev.tool_input); Object.freeze(ev); }
+  Object.freeze(events);
+  const options = input(events, { merge });
+  const arrayIterator = Array.prototype[Symbol.iterator];
+  const slice = Array.prototype.slice;
+  const setIterator = Set.prototype[Symbol.iterator];
+  const work = { array: 0, slice: 0, set: 0 };
+  let state: ConversationProjection;
+  try {
+    Array.prototype[Symbol.iterator] = function* () {
+      for (const value of arrayIterator.call(this)) { work.array++; yield value; }
+      return undefined;
+    };
+    Array.prototype.slice = function (start?: number, end?: number) {
+      const copied = slice.call(this, start, end);
+      work.slice += copied.length;
+      return copied;
+    };
+    Set.prototype[Symbol.iterator] = function* () {
+      for (const value of setIterator.call(this)) { work.set++; yield value; }
+      return undefined;
+    };
+    state = projectConversation(null, options);
+  } finally {
+    Array.prototype[Symbol.iterator] = arrayIterator;
+    Array.prototype.slice = slice;
+    Set.prototype[Symbol.iterator] = setIterator;
+  }
+  const total = work.array + work.slice + work.set;
+  process.stdout.write(`lote frio árvore=${merge}: ${JSON.stringify({ ...work, total })}\n`);
+  expect(state.data.map((row) => row.id)).toEqual(['f-g-t0']);
+  const row = state.data[0];
+  if (row.type !== 'fold') throw new Error('expected fold');
+  const ids = Array.from({ length: 400 }, (_, i) => `t${i}`);
+  expect(row.source).toBe(merge ? undefined : 'group');
+  expect(row.parts.map((ev) => ev.id)).toEqual(ids);
+  expect(row.parts.every((ev, i) => ev === events[i])).toBe(true);
+  expect(row.summary).toMatchObject({ calls: 400, thoughts: 0, failures: 0, counts: [0, 0, 0, 0, 400, 0] });
+  expect(row.summary!.lines.map((ev) => ev.id)).toEqual(ids);
+  expect([...row.summary!.live].map((ev) => ev.id)).toEqual(ids);
+  expect(events).toEqual(original);
+  expect(total, JSON.stringify(work)).toBeLessThanOrEqual(events.length * 12);
+});
+
+it.each([true, false])('lote appended preserva snapshots na promoção e no resultado tardio, árvore=%s', (merge) => {
+  const calls = Array.from({ length: 400 }, (_, i) => tool(`t${i}`));
+  for (const ev of calls) { Object.freeze(ev.tool_input); Object.freeze(ev); }
+  const events = [message('start'), ...calls.slice(0, 2)];
+  Object.freeze(events[0]);
+  Object.freeze(events);
+  const capture = (state: ConversationProjection) => state.rows.map((row) => {
+    const { resultOf: _resultOf, ...plain } = row;
+    return structuredClone(plain);
+  });
+  const before = projectConversation(null, input(events, { merge }));
+  const originalRows = before.rows.slice();
+  const original = capture(before);
+  expect(before.data.map((row) => row.id)).toEqual(merge ? ['start', 'f-t0'] : ['start', 'f-t0', 'f-t1']);
+
+  const appended = [...events, ...calls.slice(2)];
+  const grown = projectConversation(before, input(appended, { merge }));
+  const grownRows = grown.rows.slice();
+  const grownSnapshot = capture(grown);
+  expect(grown.data.map((row) => row.id)).toEqual(['start', 'f-g-t0']);
+  const row = grown.data[1];
+  if (row.type !== 'fold') throw new Error('expected fold');
+  expect(row.parts).toEqual(calls);
+  expect(row.source).toBe(merge ? undefined : 'group');
+  expect(row.summary).toMatchObject({ lines: calls, calls: 400, thoughts: 0, failures: 0, counts: [0, 0, 0, 0, 400, 0] });
+  expect([...row.summary!.live]).toEqual(calls);
+  expect(grown.data[0]).toBe(before.data[0]);
+
+  const tail = tool('tail');
+  const failed = result('t1', 'failed', true);
+  const after = projectConversation(grown, input([...appended, tail, failed], { merge }));
+  expect(after.data.map((row) => row.id)).toEqual(['start', 'f-g-t0']);
+  const finalRow = after.data[1];
+  if (finalRow.type !== 'fold') throw new Error('expected fold');
+  expect(finalRow.parts).toEqual([...calls, tail]);
+  expect(finalRow.summary).toMatchObject({ lines: [...calls, tail], calls: 401, thoughts: 0, failures: 1, counts: [0, 0, 0, 0, 401, 0] });
+  expect([...finalRow.summary!.live].map((ev) => ev.id)).toEqual(['t0', ...Array.from({ length: 398 }, (_, i) => `t${i + 2}`), 'tail']);
+  expect(finalRow.resultOf!(calls[1])).toBe(failed);
+  expect(row.resultOf!(calls[1])).toBeNull();
+  expect(after.data[0]).toBe(before.data[0]);
+  expect(capture(before)).toEqual(original);
+  expect(capture(grown)).toEqual(grownSnapshot);
+  expect(before.rows.every((r, i) => r === originalRows[i])).toBe(true);
+  expect(grown.rows.every((r, i) => r === grownRows[i])).toBe(true);
+  expect(before.results.size).toBe(0);
+  expect(grown.results.size).toBe(0);
+  expect(events).toEqual([message('start'), calls[0], calls[1]]);
+  expect(appended).toEqual([message('start'), ...calls]);
+});
+
 it('resumo de 5000 ferramentas e 200 resultados tardios não relê o trecho fechado', () => {
   let reads = 0;
   const counted = (ev: ChatEvent) => new Proxy(ev, { get(target, key, receiver) {
