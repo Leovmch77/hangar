@@ -278,10 +278,35 @@ async fn alive(st: &crate::routes::AppState, home: &Path, program: &std::ffi::Os
     Some(out)
 }
 
+/// As sessões que a fotografia pulou e o motivo já anotado: uma linha no diário por sessão e motivo.
+static SKIPPED: std::sync::Mutex<BTreeMap<String, &'static str>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// `true` na primeira vez deste motivo para a sessão; `None` limpa (a sessão entrou na fotografia).
+fn first_skip(name: &str, code: Option<&'static str>) -> bool {
+    let mut skipped = SKIPPED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match code {
+        Some(code) => skipped.insert(name.to_owned(), code) != Some(code),
+        None => { skipped.remove(name); false }
+    }
+}
+
+fn skip(name: &str, code: &'static str, detail: &str) {
+    if !first_skip(name, Some(code)) { return; }
+    crate::diag::record_blocking(crate::diag::diary_dir().as_deref(),
+        &[json!({"evento": "sessao.restauro_pulada", "nivel": "aviso", "sessao": name, "codigo": code, "detalhe": detail})], "restore");
+}
+
 /// A chave da sessão `name` quando o spec dela é de uma sessão com terminal.
 async fn proven(home: &Path, program: &std::ffi::OsStr, name: &str) -> Option<String> {
-    let key = session_key(program, name).await?;
+    let Some(key) = session_key(program, name).await else {
+        skip(name, "session_restore_no_key", "a sessão não tem CP_SESSION_KEY: foi aberta fora do lançador e não volta pelo spec");
+        return None;
+    };
     let (spec, unreadable) = recorded(home, &key, name);
+    if spec.is_none() && unreadable.is_none() {
+        skip(name, "session_restore_no_spec", "a chave da sessão não tem spec gravado: ela não volta pelo spec");
+    }
+    if spec.is_some() { first_skip(name, None); }
     // Uma linha por spec ilegível, não uma a cada fotografia; volta a avisar depois de lido de novo.
     let first = {
         let mut reported = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -338,6 +363,24 @@ async fn reopen(host: &super::server::ServerHost, key: &str, entry: &Entry) -> R
     super::open::open_session(host, resolved, &OpenCaller::Owner).await.map(|_| ()).map_err(|e| e.code.unwrap_or("restore_open_failed").to_owned())
 }
 
+/// Até `wait`, o pane da sessão deixa o shell: o agente subiu. `None`: o multiplexador não respondeu.
+async fn agent_up(program: &std::ffi::OsStr, name: &str, wait: Duration) -> Option<bool> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let target = if cfg!(windows) { name.to_owned() } else { format!("={name}:") };
+    loop {
+        let mut command = crate::terminal_input::child_command(program);
+        command.args(["display-message", "-p", "-t", &target, "#{pane_current_command}"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        let out = tokio::time::timeout(Duration::from_secs(5), command.output()).await.ok()?.ok()?;
+        let current = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        // `tmux` é o filho antes do `exec`; `env`, o passo entre o `/bin/sh -c` e o `exec` do agente.
+        let up = out.status.success() && !matches!(current.as_str(), "" | "tmux" | "env") && !super::legacy_restore::SHELLS.contains(&current.as_str());
+        if up { return Some(true); }
+        if !out.status.success() && !crate::list::mux::is_absence(&String::from_utf8_lossy(&out.stderr)) { return None; }
+        if tokio::time::Instant::now() >= deadline { return Some(false); }
+        tokio::time::sleep(Duration::from_millis(200).min(deadline - tokio::time::Instant::now())).await;
+    }
+}
+
 /// Tentativas de uma sessão que falhou por um motivo passageiro (conta ocupada, multiplexador calado).
 const TRIES: u32 = 3;
 
@@ -362,8 +405,27 @@ fn settle(results: &[(String, Result<(), String>)], attempts: &mut std::collecti
 }
 
 /// Reabre uma sessão e grava o resultado no diário.
-async fn restore_one(host: &super::server::ServerHost, key: &str, entry: &Entry) -> Result<(), String> {
-    let result = reopen(host, key, entry).await;
+/// Quanto o restore espera o agente sair do shell depois de abrir.
+const AGENT_WAIT: Duration = Duration::from_secs(20);
+/// Passadas de reconferência de quem abriu e não mostrou o agente, antes de desistir.
+const AGENT_TRIES: u32 = 20;
+pub const AGENT_MISSING: &str = "restore_agent_not_started";
+
+/// O problema na linha da sessão sem agente: o canal de status do terminal existe sem ator.
+fn agent_problem(st: &crate::routes::AppState, name: &str, shown: bool) {
+    let Some(runtime) = st.state.runtime.get() else { return };
+    let sender = runtime.terminal_status_sender(name);
+    if shown { crate::runtime::terminal_status::publish_problem(&sender, AGENT_MISSING, "a sessão reabriu e o agente não subiu no terminal"); }
+    else { crate::runtime::terminal_status::clear_problem(&sender, AGENT_MISSING); }
+}
+
+async fn restore_one(host: &super::server::ServerHost, st: &crate::routes::AppState, program: &std::ffi::OsStr, key: &str, entry: &Entry) -> Result<(), String> {
+    let mut result = reopen(host, key, entry).await;
+    // Restaurada é o agente de pé: o `new-session` volta antes de o shell soltar o comando.
+    if result.is_ok() && entry.provider != AgentProvider::Codex && agent_up(program, &entry.name, AGENT_WAIT).await != Some(true) {
+        agent_problem(st, &entry.name, true);
+        result = Err(AGENT_MISSING.into());
+    }
     let mut event = json!({"evento": "sessao.restaurada", "nivel": "ok", "sessao": entry.name, "provider": entry.provider.name()});
     if let Err(code) = &result {
         tracing::warn!(session = %entry.name, code = %code, "sessão com terminal não restaurada");
@@ -386,7 +448,10 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
     let mut windows: Option<bool> = None;
     // As sessões da versão antiga, sem spec, voltam uma vez por subida (`legacy_restore`).
     let mut legacy = false;
+    // As que abriram sem o agente aparecer: reconferidas a cada passada.
+    let mut waiting: Vec<(Entry, u32)> = Vec::new();
     loop {
+        waiting = recheck(&st, &program, std::mem::take(&mut waiting)).await;
         let (current, count) = mux_now(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
         if cfg!(windows) && windows.is_none() { windows = windows_startup(current, &snap); }
@@ -428,7 +493,11 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                 let mut results = Vec::new();
                 if !pending.is_empty() {
                     let host = super::server::ServerHost::new(st.clone()).await;
-                    for (key, entry) in &pending { results.push((key.clone(), restore_one(&host, key, entry).await)); }
+                    for (key, entry) in &pending {
+                        let result = restore_one(&host, &st, &program, key, entry).await;
+                        if result.as_ref().err().is_some_and(|code| code == AGENT_MISSING) { waiting.push((entry.clone(), 0)); }
+                        results.push((key.clone(), result));
+                    }
                 }
                 // Só com nada mais a tentar o servidor de agora (o restore pode tê-lo subido) passa a ser o da
                 // fotografia; antes disso as entradas ficam, e um reinício só do Rust não reabre nada.
@@ -451,6 +520,23 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
         }
         tokio::time::sleep(EVERY).await;
     }
+}
+
+/// Reconfere quem abriu sem o agente: o que subiu vai ao diário como restaurada e perde o problema; o que
+/// esgotou as passadas vai como falha definitiva; o resto espera a próxima.
+async fn recheck(st: &crate::routes::AppState, program: &std::ffi::OsStr, waiting: Vec<(Entry, u32)>) -> Vec<(Entry, u32)> {
+    let mut left = Vec::new();
+    for (entry, tries) in waiting {
+        let (event, code) = match agent_up(program, &entry.name, Duration::ZERO).await {
+            Some(true) => { agent_problem(st, &entry.name, false); ("sessao.restaurada", "restore_agent_late") }
+            _ if tries + 1 >= AGENT_TRIES => ("sessao.restauro_falhou", "restore_agent_never_started"),
+            _ => { left.push((entry, tries + 1)); continue; }
+        };
+        let nivel = if event == "sessao.restaurada" { "ok" } else { "erro" };
+        crate::diag::record_blocking(crate::diag::diary_dir().as_deref(),
+            &[json!({"evento": event, "nivel": nivel, "sessao": entry.name, "provider": entry.provider.name(), "codigo": code})], "restore");
+    }
+    left
 }
 
 /// A tarefa do restore, com o runtime e as pastas da lista de pé.
@@ -585,6 +671,35 @@ mod tests {
         let next = observe(&prev, &BTreeMap::new(), 10.0, Some(1));
         assert_eq!(vanished(&prev, &next, &["b".to_owned()]), vec![("a".to_owned(), Some("c1".to_owned()))],
             "b foi fechada pelo dono; c já estava ausente");
+    }
+
+    /// Restaurada é o pane com o agente de pé: o shell parado (o `config.fish` travado) não conta.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_restored_pane_counts_only_once_it_left_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("tmux");
+        let socket = format!("hangar-restore-agent-{}", std::process::id());
+        std::fs::write(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = |args: &[&str]| std::process::Command::new(&program).args(args).status().unwrap().success();
+        assert!(run(&["new-session", "-d", "-s", "parada", "sh"]) && run(&["new-session", "-d", "-s", "viva", "sleep", "60"]));
+        let program = program.as_os_str();
+        assert_eq!(agent_up(program, "viva", Duration::from_secs(5)).await, Some(true));
+        assert_eq!(agent_up(program, "parada", Duration::from_millis(600)).await, Some(false), "shell parado");
+        assert!(run(&["send-keys", "-t", "=parada:", "exec sleep 60", "Enter"]));
+        assert_eq!(agent_up(program, "parada", Duration::from_secs(5)).await, Some(true), "o agente subiu depois");
+        assert_eq!(agent_up(program, "nenhuma", Duration::from_millis(300)).await, Some(false), "sem a sessão");
+        let _ = std::process::Command::new(dir.path().join("tmux")).arg("kill-server").status();
+    }
+
+    /// A sessão que a fotografia pula vai ao diário uma vez por motivo, e de novo depois de entrar nela.
+    #[test]
+    fn a_skipped_session_is_noted_once_per_reason() {
+        assert!(first_skip("sk-a", Some("session_restore_no_key")) && !first_skip("sk-a", Some("session_restore_no_key")));
+        assert!(first_skip("sk-a", Some("session_restore_no_spec")), "outro motivo");
+        first_skip("sk-a", None);
+        assert!(first_skip("sk-a", Some("session_restore_no_spec")), "depois de entrar na fotografia");
     }
 
     #[test]

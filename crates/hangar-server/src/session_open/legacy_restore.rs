@@ -74,7 +74,7 @@ async fn mux(program: &std::ffi::OsStr, args: &[&str]) -> Option<std::process::O
     tokio::time::timeout(Duration::from_secs(5), command.output()).await.ok()?.ok()
 }
 
-const SHELLS: [&str; 5] = ["fish", "bash", "zsh", "sh", "dash"];
+pub(super) const SHELLS: [&str; 5] = ["fish", "bash", "zsh", "sh", "dash"];
 
 /// Todo pane da sessão é um shell, e o que roda debaixo dele nasceu até `init` depois dele: o
 /// `config.fish` e afins. ponytail: pela hora de nascimento; o comando digitado nesse intervalo conta como

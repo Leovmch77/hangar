@@ -35,6 +35,16 @@ pub(crate) fn publish_problem(sender: &StatusSender, code: &str, message: &str) 
     });
 }
 
+/// Tira o problema `code`, se ainda for ele: outro que chegou depois fica.
+pub(crate) fn clear_problem(sender: &StatusSender, code: &str) {
+    sender.send_if_modified(|current| {
+        if current.error.as_deref() != Some(code) { return false; }
+        current.error = None;
+        current.message = None;
+        true
+    });
+}
+
 pub(crate) fn publish_limit(sender: &StatusSender, limit: Option<(String, String)>) {
     sender.send_if_modified(|current| {
         if current.limit == limit { return false; }
