@@ -8,6 +8,7 @@ import { useServers } from '../../stores/servers';
 const mocks = vi.hoisted(() => ({
   read: vi.fn(), replace: vi.fn(), discover: vi.fn(), segments: ['importar'],
   appState: null as null | ((state: string) => void), remove: vi.fn(),
+  warning: vi.fn(), error: vi.fn(),
 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: mocks.read, setItemAsync: vi.fn(async () => {}) }));
 vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
@@ -19,7 +20,7 @@ vi.mock('../../stores/sessions', () => ({ useSessions: { getState: () => ({ setF
 vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, useAparencia: { getState: () => ({}) } }));
 vi.mock('../../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
 vi.mock('../../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
-vi.mock('../../ui/Toast', () => ({ Toaster: () => null, toast: { erro: vi.fn() } }));
+vi.mock('sonner-native', () => ({ Toaster: () => null, toast: Object.assign(mocks.warning, { error: mocks.error }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: mocks.replace }), useSegments: () => mocks.segments,
   Stack: Object.assign(({ children }: { children: ReactNode }) => <>{children}</>, { Screen: () => null }),
@@ -55,6 +56,18 @@ test('espera hidratação, descobre uma vez e não repete ao entrar máquina nov
   expect(mocks.discover).toHaveBeenCalledTimes(1);
   await act(async () => { mocks.appState?.('background'); mocks.appState?.('active'); });
   expect(mocks.discover).toHaveBeenCalledTimes(2);
+});
+
+test('aviso de identificação mostra a causa e limpa sem erro de persistência', async () => {
+  await act(async () => root.render(<Layout />));
+
+  await act(async () => {
+    useServers.setState({ aviso: { tipo: 'identification', message: '503: identity-refused' } });
+  });
+
+  expect(mocks.warning).toHaveBeenCalledExactlyOnceWith('503: identity-refused', { duration: 12_000 });
+  expect(mocks.error).not.toHaveBeenCalled();
+  expect(useServers.getState().aviso).toBeNull();
 });
 
 test('rota importar fica aberta sem máquina salva, mas conversa continua protegida', async () => {

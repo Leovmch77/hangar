@@ -2,8 +2,7 @@ import { Stack, useRouter } from 'expo-router';
 import { HeaderBack, useGlassHeader } from '../../src/ui/glassHeader';
 import * as m from '../../src/paraglide/messages';
 
-// O recuo do conteúdo vem da `Pagina`. As páginas internas não repetem o título na barra: quem o
-// mostra é o PageHeader, como no desktop. Aqui o voltar leva o nome da página anterior.
+// Voz mantém o título na barra durante a rolagem; o voltar leva o nome da página anterior.
 export default function ConfigLayout() {
   const router = useRouter();
   return (
@@ -16,6 +15,7 @@ export default function ConfigLayout() {
           headerLeft: () => <HeaderBack onPress={() => router.back()} />,
         }}
       />
+      <Stack.Screen name="voice" options={{ title: m.native_settings_page_voice() }} />
     </Stack>
   );
 }

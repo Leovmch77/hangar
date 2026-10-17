@@ -275,15 +275,18 @@ test('pausa cancela retry; erro tardio do stream fechado não agenda outro', asy
   rel();
 });
 
-test('GET antigo é abortado e não publica lista nem stream após a volta', async () => {
+test('GET antigo não é abortado na pausa e não publica lista nem stream após a volta', async () => {
   const old = deferred<Response>();
   fetchMock.mockReturnValueOnce(old.promise);
   const rel = useSessions.getState().retain();
   await settle();
   const signal = fetchMock.mock.calls[0][1].signal as AbortSignal;
   useSessions.getState().setForeground(false);
-  expect(signal.aborted).toBe(true);
+  expect(signal.aborted).toBe(false);
   useSessions.getState().setForeground(true);
+  await settle();
+  expect(created).toHaveLength(1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
   old.resolve(response([{ name: 'late', state: 'idle' }]));
   await settle();
   expect(useSessions.getState().rows).toHaveLength(0);
@@ -331,6 +334,65 @@ test('troca de token durante GET descarta resposta antiga e usa destino capturad
   expect(created[0].url).toContain('token=new-token');
   expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer new-token');
   rel();
+});
+
+test('troca de endereço inativo cancela GET antigo sem registrar queda falsa e conecta o novo', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
+  const first = useServers.getState().servers[0];
+  const second = { ...first, id: 'srv2', baseUrl: 'http://localhost:8766', token: 'tok2' };
+  const nextBase = 'http://localhost:8767';
+  useServers.setState({ servers: [first, second] });
+  const old = deferred<Response>();
+  const current = deferred<Response>();
+  let oldSignal: AbortSignal | undefined;
+  const unexpected: string[] = [];
+  const diagnostics: unknown[] = [];
+  configureDiag({ registrar: (entry) => { if (entry.nivel === 'erro') diagnostics.push(entry); }, novoReq: () => 'lista-teste' });
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (url === `${second.baseUrl}/api/sessions`) {
+      oldSignal = init?.signal ?? undefined;
+      oldSignal?.addEventListener('abort', () => old.reject(new TypeError('cancelled_fetch')), { once: true });
+      return old.promise;
+    }
+    if (url === `${nextBase}/api/sessions`) return current.promise;
+    if (url === `${first.baseUrl}/api/sessions`) return Promise.resolve(response([{ name: 'healthy', state: 'working' }]));
+    if (new URL(url).pathname === '/api/external-pairs') return Promise.resolve(response([]));
+    unexpected.push(url);
+    return Promise.reject(new Error(`unexpected_request: ${url}`));
+  });
+  const release = useSessions.getState().retain();
+  try {
+    await settle();
+    expect(oldSignal?.aborted).toBe(false);
+    const healthyStream = created.find((es) => es.url.startsWith(first.baseUrl));
+    expect(healthyStream).toBeDefined();
+    useServers.getState().update(second.id, { baseUrl: nextBase });
+    await settle();
+    expect(oldSignal?.aborted).toBe(true);
+    expect(useServers.getState().activeId).toBe(first.id);
+    expect.soft(retryAfterMs(second.id)).toBe(0);
+    expect.soft(estaDesligado(second.id)).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === `${nextBase}/api/sessions`)).toHaveLength(1);
+    expect(healthyStream?.close).not.toHaveBeenCalled();
+    current.resolve(response([{ name: 'new-address', state: 'working' }]));
+    await settle();
+    expect(useSessions.getState().rows.map((row) => row.name).sort()).toEqual(['healthy', 'new-address']);
+    expect(useSessions.getState().byServer.find((bucket) => bucket.server.id === second.id)?.error).toBeNull();
+    expect(created.filter((es) => es.url.startsWith(nextBase))).toHaveLength(1);
+    expect(created.some((es) => es.url.startsWith(second.baseUrl))).toBe(false);
+    expect(retryAfterMs(second.id)).toBe(0);
+    expect(estaDesligado(second.id)).toBe(false);
+    expect(unexpected).toEqual([]);
+    for (const entry of diagnostics) {
+      expect(entry).toMatchObject({ evento: 'api.sem_rede', codigo: 'rede', detalhe: 'GET /api/sessions' });
+    }
+  } finally {
+    release();
+    old.resolve(response([]));
+    current.resolve(response([]));
+    await settle();
+  }
 });
 
 test('remoção no fundo conserva outro servidor e retoma um stream por servidor restante', async () => {

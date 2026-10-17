@@ -78,6 +78,9 @@ vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ server: 'server-1', name: 'fixture-files', path: 'README.md' }),
   useRouter: () => ({ back: vi.fn() }),
 }));
+vi.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 34, left: 0 }),
+}));
 vi.mock('../../stores/servers', () => ({ useServers: mocks.useServers }));
 vi.mock('./filesStore', () => ({
   filesStore: () => mocks.api,
@@ -192,6 +195,29 @@ describe('FilesSheet — deep-link', () => {
     expect(mocks.api.use.setState).not.toHaveBeenCalled();
     expect(mocks.api.recarregar).not.toHaveBeenCalled();
     root.unmount();
+  });
+
+  it('reserva inset inferior na raiz e mantém filtro funcional', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        mocks.setReady(true);
+        root.render(React.createElement(FilesSheet));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find((button) => button.textContent === 'Arquivos')!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find((button) => button.textContent === 'toggle-filter')!.click();
+      });
+
+      expect(mocks.api.setOnlyModified).toHaveBeenCalledWith(false);
+      expect((container.firstElementChild as HTMLElement).style.paddingBottom).toBe('34px');
+    } finally {
+      await act(async () => root.unmount());
+    }
   });
 
   it('servidor fora da lista mostra aviso e não abre nada', async () => {

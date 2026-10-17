@@ -6,7 +6,7 @@ import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const boundary = vi.hoisted(() => ({
-  params: {} as Record<string, string | string[]>, replace: vi.fn(), redeem: vi.fn(), sessions: vi.fn(), fetch: vi.fn(),
+  params: {} as Record<string, string | string[]>, replace: vi.fn(), redeem: vi.fn(), sessions: vi.fn(), fetch: vi.fn(), warning: vi.fn(),
   scan: null as null | ((event: { data: string }) => void), vault: new Map<string, string>(),
 }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), redeemInvite: boundary.redeem, getSessions: boundary.sessions }));
@@ -18,7 +18,7 @@ vi.mock('expo-glass-effect', async () => ({ GlassView: (await import('react-nati
 vi.mock('expo-linear-gradient', async () => ({ LinearGradient: (await import('react-native')).View }));
 vi.mock('expo-file-system', () => ({ Directory: class {}, File: class {}, Paths: { cache: '/cache', document: '/document' } }));
 vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, getNumber: () => undefined, getBoolean: () => undefined, set: () => {}, remove: () => {} }) }));
-vi.mock('sonner-native', () => ({ toast: Object.assign(() => {}, { success: () => {}, error: () => {}, dismiss: () => {} }), Toaster: () => null }));
+vi.mock('sonner-native', () => ({ toast: Object.assign(boundary.warning, { success: () => {}, error: () => {}, dismiss: () => {} }), Toaster: () => null }));
 vi.mock('expo-camera', () => ({ useCameraPermissions: () => [{ granted: true }, () => {}], CameraView: (props: { onBarcodeScanned: (event: { data: string }) => void }) => { boundary.scan = props.onBarcodeScanned; return null; } }));
 vi.mock('@lodev09/react-native-true-sheet', () => ({ TrueSheet: forwardRef(function NativeSheet({ children }: { children: ReactNode }, ref) {
   const [visible, setVisible] = useState(false);
@@ -74,6 +74,7 @@ beforeEach(async () => {
   });
   vi.stubGlobal('fetch', boundary.fetch);
   boundary.replace.mockReset();
+  boundary.warning.mockClear();
   boundary.vault.clear();
   useServers.setState({ servers: [], activeId: null, ready: false, vaultReadable: false, aviso: null });
   await useServers.getState().load();
@@ -81,6 +82,53 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => { roots.splice(0).forEach((root) => root.unmount()); });
   vi.unstubAllGlobals();
+});
+
+describe('nome de máquina no login', () => {
+  it.each(['identificador atrasado', 'identificador vazio', 'consulta falha'])('cadastro novo não usa IP: %s', async (scenario) => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((yes) => { resolve = yes; });
+    boundary.fetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/identificador')) return pending;
+      return new Response(JSON.stringify(url.endsWith('/app-list') ? { rev: 'r1', servers: [] } : []));
+    });
+    const el = await mount(Login);
+    await click(el, m.login_qr());
+    await act(async () => { boundary.scan?.({ data: 'http://10.0.0.5:8765/?token=owner-token' }); });
+
+    await click(el, m.login_conectar());
+
+    expect(useServers.getState().active()?.label).toBe(m.native_settings_group_server());
+    expect(JSON.parse(boundary.vault.get('cp_servers_v1')!).servers[0].label).toBe(m.native_settings_group_server());
+    expect(boundary.replace).not.toHaveBeenCalled();
+    await act(async () => { resolve(new Response(JSON.stringify(scenario === 'consulta falha'
+      ? { detail: 'fixture-identity-unavailable' }
+      : { identificador: scenario === 'identificador vazio' ? '' : 'fixture-owner', lan_url: '' }), { status: scenario === 'consulta falha' ? 503 : 200 })); });
+
+    const label = scenario === 'identificador atrasado' ? 'fixture-owner' : m.native_settings_group_server();
+    expect(useServers.getState().active()?.label).toBe(label);
+    expect(JSON.parse(boundary.vault.get('cp_servers_v1')!).servers[0].label).toBe(label);
+    expect(boundary.replace).toHaveBeenCalledExactlyOnceWith('/');
+    expect(boundary.fetch.mock.calls.filter(([url]) => String(url).endsWith('/identificador'))).toHaveLength(1);
+    if (scenario === 'identificador atrasado') expect(boundary.warning).not.toHaveBeenCalled();
+    else expect(boundary.warning).toHaveBeenCalledExactlyOnceWith(scenario === 'consulta falha'
+      ? '503: fixture-identity-unavailable' : m.mobile_machines_invalid_response(), expect.any(Object));
+  });
+
+  it('cadastro salvo conserva apelido inclusive 10 sem consultar identificador', async () => {
+    const saved = { id: 'saved', baseUrl: 'http://10.0.0.5:8765', token: 'old-token', label: '10' };
+    boundary.vault.set('cp_servers_v1', JSON.stringify({ servers: [saved], activeId: saved.id }));
+    await useServers.getState().load();
+    boundary.fetch.mockImplementation(async (url: string) => new Response(JSON.stringify(url.endsWith('/app-list') ? { rev: 'r1', servers: [] } : [])));
+    const el = await mount(Login);
+    await click(el, m.login_qr());
+    await act(async () => { boundary.scan?.({ data: `${saved.baseUrl}/?token=new-token` }); });
+
+    await click(el, m.login_conectar());
+
+    expect(useServers.getState().active()).toEqual({ ...saved, token: 'new-token' });
+    expect(boundary.fetch.mock.calls.some(([url]) => String(url).endsWith('/identificador'))).toBe(false);
+  });
 });
 
 describe('entrada de convite nas rotas', () => {
