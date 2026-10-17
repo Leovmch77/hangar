@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Platform, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -62,6 +62,7 @@ function search(query: string) {
 }
 
 export default function ConfigIndex() {
+  useEffect(() => useSessions.getState().retain(), []);
   const router = useRouter();
   const c = useSettingsColors();
   const [query, setQuery] = useState('');

@@ -105,7 +105,7 @@ export default function Voice() {
       <BlockHead title={m.native_voice_cleanup()} help={m.native_voice_cleanup_help()}
         right={<Chip text={organization?.label() ?? m.native_voice_organization_unknown()} tone={organization && organizing ? 'success' : 'muted'} />} />
       <Box>
-        <RowShell icon="SlidersHorizontal" title={m.native_voice_cleanup()}
+        <RowShell icon="SlidersHorizontal" title={m.native_voice_cleanup()} fullWidthControl
           chips={<ScopeChips cfg={cfg} k="dictation_organization_mode" />} help={organization?.hint() ?? m.native_voice_organization_unknown_hint()}>
           <Segmented options={ORGANIZATION_MODES.map((o) => ({ v: o.v, label: o.label(), aria: `${o.label()}. ${o.hint()}` }))}
             value={organization?.v ?? ''} label={m.native_voice_cleanup()} disabled={!('dictation_organization_mode' in cfg.fields)}

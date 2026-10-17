@@ -275,15 +275,18 @@ test('pausa cancela retry; erro tardio do stream fechado não agenda outro', asy
   rel();
 });
 
-test('GET antigo é abortado e não publica lista nem stream após a volta', async () => {
+test('GET antigo não é abortado na pausa e não publica lista nem stream após a volta', async () => {
   const old = deferred<Response>();
   fetchMock.mockReturnValueOnce(old.promise);
   const rel = useSessions.getState().retain();
   await settle();
   const signal = fetchMock.mock.calls[0][1].signal as AbortSignal;
   useSessions.getState().setForeground(false);
-  expect(signal.aborted).toBe(true);
+  expect(signal.aborted).toBe(false);
   useSessions.getState().setForeground(true);
+  await settle();
+  expect(created).toHaveLength(1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
   old.resolve(response([{ name: 'late', state: 'idle' }]));
   await settle();
   expect(useSessions.getState().rows).toHaveLength(0);

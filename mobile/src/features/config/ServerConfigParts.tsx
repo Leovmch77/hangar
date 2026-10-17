@@ -125,8 +125,8 @@ export function Muted({ children }: { children: ReactNode }) {
 }
 
 /** Linha no desenho do SettingsRow, com etiquetas ao lado do título e o controle embaixo. */
-export function RowShell({ icon, title, chips, help, right, children }: {
-  icon: IconName; title: string; chips?: ReactNode; help?: string; right?: ReactNode; children?: ReactNode;
+export function RowShell({ icon, title, chips, help, right, children, fullWidthControl }: {
+  icon: IconName; title: string; chips?: ReactNode; help?: string; right?: ReactNode; children?: ReactNode; fullWidthControl?: boolean;
 }) {
   const c = useSettingsColors();
   return (
@@ -142,7 +142,7 @@ export function RowShell({ icon, title, chips, help, right, children }: {
         </View>
         {right}
       </View>
-      {children ? <View style={styles.below}>{children}</View> : null}
+      {children ? <View style={[styles.below, fullWidthControl && { paddingLeft: 0 }]}>{children}</View> : null}
     </View>
   );
 }
