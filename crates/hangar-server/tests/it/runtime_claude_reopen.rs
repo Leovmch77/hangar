@@ -569,6 +569,10 @@ async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_park
     fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":"ab".repeat(16),"cwd":fx.cwd,"session_id":SID,
         "permission_mode":"acceptEdits","cano":null,"read_only":true}));
     std::fs::write(fx.state.with_extension("nospawn"),"").unwrap();
+    // `bwrap` falso que só executa o comando: a recusa a provar é a do terminal que não volta, não a da
+    // máquina sem bubblewrap.
+    std::fs::create_dir_all(fx.home.join("bin")).unwrap();
+    crate::write_executable(&fx.home.join("bin/bwrap"),"#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n");
     let registry = fx.registry().await;
     let server = serve_with_accounts(&fx,registry).await;
     let (status,body) = post(server,"conta",json!({"config_dir":b})).await;

@@ -26,6 +26,9 @@ pub fn place(text: &str, root: &Path) -> String {
 /// O `/proc` dos panes do cenário, fora do instantâneo de arquivos do harness.
 fn proc_root(root: &Path) -> PathBuf { root.join(".harness").join("proc-rust") }
 
+/// A `backend/` do cenário: a venv e o `skill_bridge.py` existem sempre, tenha ou não a árvore uma venv.
+fn fake_backend(root: &Path) -> PathBuf { root.join(".harness").join("backend") }
+
 /// O que o lado Python não monta e o Rust lê do disco: os panes do cenário (um `tmux` que só lista e
 /// o `/proc` deles), o `plugin-dir` que o servidor publica ao subir e o `hangar-conta` desta árvore.
 pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()> {
@@ -50,6 +53,8 @@ pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()
         write(&proc.join("environ"), environ.as_bytes())?;
         if session["environ_unreadable"] == true { std::fs::set_permissions(proc.join("environ"), std::fs::Permissions::from_mode(0o000))?; }
     }
+    write(&fake_backend(root).join(".venv/bin/python"), b"")?;
+    write(&fake_backend(root).join("app/skill_bridge.py"), b"")?;
     write(&bin.join("panes.txt"), panes.as_bytes())?;
     write(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n")?;
     std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755))?;
@@ -200,7 +205,7 @@ impl OpenHost for Host {
     fn mux(&self) -> &dyn Mux { &self.mux }
     fn bridge(&self) -> Option<PluginBridge> { Some(PluginBridge { port: 8765, secret: self.env.get("CP_AUTH_TOKEN").cloned().unwrap_or_default() }) }
     fn server_projects(&self) -> PathBuf { self.home.join(".claude/projects") }
-    fn backend_dir(&self) -> Option<PathBuf> { Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend")) }
+    fn backend_dir(&self) -> Option<PathBuf> { self.home.parent().map(fake_backend) }
 
     fn run(&self, argv: Vec<String>, timeout: Duration) -> BoxFuture<'_, MuxOutput> {
         Box::pin(async move {
