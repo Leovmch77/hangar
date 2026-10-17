@@ -903,6 +903,14 @@ async fn model_picker_effort_below_moves_left() {
  assert_eq!(keys, ["/model", "Enter", "Left", "s"]);
  assert!(out.is_ok(), "{out:?}");
 }
+/// O redesenho que atrasa um passo (marcador ainda no anterior) relê uma vez antes de dizer que parou.
+#[tokio::test]
+async fn model_picker_effort_rereads_a_late_redraw_before_refusing() {
+ let case = picker_screens(&picker_case("effort_with_right"));
+ let (keys, out) = effort_drive(vec![case[0].clone(), effort_pane("High"), effort_pane("High"), effort_pane("Medium"), case[3].clone()], "medium").await;
+ assert!(out.is_ok(), "{out:?}");
+ assert_eq!(keys, ["/model", "Enter", "Left", "s"]);
+}
 /// Marcador que não muda (Right no Max) ou que pula o alvo é recusa com código, com Esc e sem confirmar.
 #[tokio::test]
 async fn model_picker_effort_that_cannot_reach_the_target_is_refused() {

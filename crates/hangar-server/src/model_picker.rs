@@ -244,7 +244,8 @@ pub async fn drive(driver: &TerminalDriver, model: Option<&str>, effort: Option<
             sleep(SETTLE).await;
             pane = picker.screen().await?;
             let mut current = parse_current_effort(&pane);
-            if current.is_none() {
+            // Sem marcador ou ainda no anterior: o redesenho pode só ter atrasado.
+            if current.as_deref().and_then(rank).is_none_or(|now| now == previous) {
                 sleep(SETTLE).await;
                 pane = picker.screen().await?;
                 current = parse_current_effort(&pane);
