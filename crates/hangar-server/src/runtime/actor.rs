@@ -1173,7 +1173,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 && (root.cancelled || root.timed_out));
             let interaction_error = engine.interaction_write_error(&attempt.logical_id);
             let stale_transport = attempt.epoch != transport_epoch;
-            if result.is_err() || ended || stale_transport || interaction_error.is_some() || !engine.write_is_current(&attempt.logical_id) {
+            let stale_work = roots.iter().any(|(id, root)|(attempt.logical_id == *id || attempt.logical_id.starts_with(&format!("{id}:")))
+                && root.command.payload.get("expected_turn").is_some_and(|expected|turn_marker(&engine.view()).as_ref()!=Some(expected)));
+            if result.is_err() || ended || stale_transport || stale_work || interaction_error.is_some() || !engine.write_is_current(&attempt.logical_id) {
                 let mut acknowledgements = engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?;
                 if let Some(failure) = interaction_error {
                     for effect in &mut acknowledgements {
