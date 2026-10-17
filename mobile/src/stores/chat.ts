@@ -412,6 +412,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     let { events } = useChatStore.getState();
     let removedQueued = false;
     if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+      if (!idIndex.has(ev.id)) return;
       events = events.filter((x) => x.id !== ev.id);
       publishEvents(events);
       return;
