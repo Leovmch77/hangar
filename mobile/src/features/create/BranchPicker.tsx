@@ -83,7 +83,7 @@ const styles = StyleSheet.create((theme) => ({
   on: { backgroundColor: theme.tokens.accent.dim },
   rowTxt: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary },
   input: {
-    minHeight: 44, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.md, fontSize: 16,
+    minHeight: 44, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.md, fontSize: theme.base.text.sm,
     color: theme.tokens.text.primary, backgroundColor: superficie(theme), borderWidth: 1, borderColor: theme.tokens.border.default,
   },
   label: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },

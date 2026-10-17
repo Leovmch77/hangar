@@ -76,7 +76,7 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   iconText: {
-    fontSize: 14,
+    fontSize: theme.base.text.xs,
     fontWeight: '700',
   },
   body: {
@@ -98,7 +98,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
   },
   badgeText: {
-    fontSize: 11,
+    fontSize: theme.base.text.xxxs,
     fontWeight: '600',
   },
   chevron: {

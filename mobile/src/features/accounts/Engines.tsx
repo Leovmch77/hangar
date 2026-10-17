@@ -76,6 +76,6 @@ export function EngineStatus({ state }: { state: ReturnType<typeof useEngines> }
 }
 
 const styles = StyleSheet.create(theme => ({
-  error: { color: theme.tokens.status.error, fontSize: 14, paddingHorizontal: 4 },
-  muted: { color: theme.tokens.text.muted, fontSize: 14, paddingHorizontal: 4 },
+  error: { color: theme.tokens.status.error, fontSize: theme.base.text.xs, paddingHorizontal: 4 },
+  muted: { color: theme.tokens.text.muted, fontSize: theme.base.text.xs, paddingHorizontal: 4 },
 }));

@@ -13,8 +13,8 @@ export function InfoNotice({ text }: { text: string }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   box: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
   icon: { paddingTop: 1 },
-  text: { flex: 1, fontSize: 14, lineHeight: 18 },
-});
+  text: { flex: 1, fontSize: theme.base.text.xs, lineHeight: 18 },
+}));

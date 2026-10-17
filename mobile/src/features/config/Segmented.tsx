@@ -54,8 +54,8 @@ export function Segmented<T extends string>({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   rail: { flexDirection: 'row', alignSelf: 'stretch', borderWidth: 1, borderRadius: 6, overflow: 'hidden' },
   option: { flex: 1, height: 36, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center' },
-  text: { fontSize: 15, fontWeight: '500' },
-});
+  text: { fontSize: theme.base.text.sm, fontWeight: '500' },
+}));
