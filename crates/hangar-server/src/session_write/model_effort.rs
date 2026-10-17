@@ -104,7 +104,10 @@ fn terminal_checks(st: &AppState, name: &str, body: &Body) -> Result<(Option<Str
 fn headless_answer(sent: Result<Result<RuntimeReply, crate::runtime::protocol::RuntimeError>, tokio::time::error::Elapsed>) -> (StatusCode, Value) {
     let failed = |why: &str| (StatusCode::CONFLICT, detail_body("erro_modelo_indisponivel", &format!("não consegui trocar: {why}"), json!({})));
     match sent {
-        Ok(Ok(reply)) if matches!(reply.disposition, Disposition::Accepted | Disposition::Deferred) => (StatusCode::OK, json!({"ok": true, "scope": "session", "result": null})),
+        Ok(Ok(reply)) if reply.disposition == Disposition::Accepted => (StatusCode::OK, json!({"ok": true, "scope": "session", "result": null})),
+        // Adiada não foi aplicada: um "ok" faria o app mostrar o modelo novo que a sessão ainda não usa.
+        Ok(Ok(reply)) if reply.disposition == Disposition::Deferred => (StatusCode::CONFLICT, detail_body("erro_modelo_adiado",
+            "a troca de modelo não foi aplicada agora; confira o modelo da sessão antes de tentar de novo", json!({}))),
         Ok(Ok(reply)) if reply.disposition == Disposition::Unknown => failed("resultado incerto; a operação foi conservada sem reenvio"),
         Ok(Ok(reply)) => failed(reply.payload["error"].as_str().unwrap_or("operação recusada pelo runtime")),
         Ok(Err(error)) => failed(&error.message),
@@ -139,5 +142,13 @@ mod timeout_tests {
         let (status, body) = super::headless_answer(Err(elapsed));
         assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (504, Some("erro_modelo_sem_resposta")));
         assert!(!body["detail"]["msg"].as_str().unwrap_or("").is_empty());
+    }
+
+    /// Troca adiada não é troca feita: sai com código, nunca `ok`.
+    #[test]
+    fn a_deferred_switch_is_not_ok() {
+        let reply = crate::runtime::protocol::RuntimeReply { operation_id: "x".into(), disposition: super::Disposition::Deferred, payload: serde_json::json!({}) };
+        let (status, body) = super::headless_answer(Ok(Ok(reply)));
+        assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (409, Some("erro_modelo_adiado")));
     }
 }

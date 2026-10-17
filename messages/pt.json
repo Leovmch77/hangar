@@ -3081,6 +3081,7 @@
   "erro_btw_fechado": "o /btw foi fechado no terminal antes de eu ler a resposta",
   "erro_btw_captura_falhou": "não consegui ler o terminal da sessão; o /btw pode ter ficado aberto lá",
   "erro_modelo_sem_resposta": "o Claude não respondeu à troca de modelo a tempo; confira a sessão antes de tentar de novo",
+  "erro_modelo_adiado": "a troca de modelo não foi aplicada agora; confira o modelo da sessão antes de tentar de novo",
   "erro_btw_nao_digitou": "não consegui digitar o /btw no terminal da sessão",
   "erro_btw_barra_perdida": "o terminal perdeu a / do /btw; nada foi enviado pra conversa, tente de novo",
   "erro_btw_overlay_aberto": "há um /btw aberto no terminal da sessão; feche antes de perguntar",
