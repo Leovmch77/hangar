@@ -46,38 +46,41 @@ fn headless_invalid(model: Option<&str>, effort: Option<&str>) -> Option<&'stati
     None
 }
 
-pub(super) async fn serve(st: &Arc<AppState>, runtime: Arc<RuntimeRegistry>, name: String, headers: &HeaderMap, bytes: &[u8]) -> Response {
-    // Só objeto, como o modelo do pydantic: o serde aceitaria a lista `[]` como struct vazio.
-    let body = serde_json::from_slice::<Value>(bytes).ok().filter(Value::is_object).and_then(|v| serde_json::from_value::<Body>(v).ok());
-    let Some(body) = body else { return invalid_body(headers) };
+/// `None`: a sessão não é um Claude do Rust (Pi, omp, Kimi, Codex sem ator, nenhuma) e o pedido segue ao Python
+/// como veio.
+pub(super) async fn serve(st: &Arc<AppState>, runtime: Arc<RuntimeRegistry>, name: String, headers: &HeaderMap, bytes: &[u8]) -> Option<Response> {
     // Claude com terminal ainda sem ator aqui: o Rust o adota agora.
     let found = match enter_then_find(&runtime, &name, st.write_gate_wait).await {
         Ok(None) => match runtime.adopt_now(&name).await {
             Some(Ok(())) => enter_then_find(&runtime, &name, st.write_gate_wait).await,
-            Some(Err(error)) => return answer(headers, StatusCode::CONFLICT, detail_body(&error.code, &error.message, json!({}))),
+            Some(Err(error)) => return Some(answer(headers, StatusCode::CONFLICT, detail_body(&error.code, &error.message, json!({})))),
             None => Ok(None),
         },
         other => other,
     };
-    let Ok(found) = found else { return answer(headers, StatusCode::CONFLICT, busy_body()) };
+    let Ok(found) = found else { return Some(answer(headers, StatusCode::CONFLICT, busy_body())) };
+    let (held, target) = found.filter(|(_, target)| target.provider == "claude")?;
+    // Só objeto, como o modelo do pydantic: o serde aceitaria a lista `[]` como struct vazio.
+    let body = serde_json::from_slice::<Value>(bytes).ok().filter(Value::is_object).and_then(|v| serde_json::from_value::<Body>(v).ok());
+    let Some(body) = body else { return Some(invalid_body(headers)) };
     let id = crate::mods::state::random_hex(16);
-    let (status, value) = match found {
-        Some((held, target)) if target.provider == "claude" && !target.terminal => {
+    let (status, value) = match (held, target) {
+        (held, target) if !target.terminal => {
             if let Some(text) = headless_invalid(body.model.as_deref(), body.effort.as_deref()) {
                 plain(StatusCode::UNPROCESSABLE_ENTITY, text)
             } else {
-                let EntryHandle::Headless(handle) = &target.handle else { return answer(headers, StatusCode::CONFLICT, busy_body()) };
+                let EntryHandle::Headless(handle) = &target.handle else { return Some(answer(headers, StatusCode::CONFLICT, busy_body())) };
                 let command = RuntimeCommand { operation_id: id, kind: OperationKind::SetModel, payload: json!({"model": body.model, "effort": body.effort}) };
                 let sent = tokio::time::timeout(HEADLESS_WAIT, handle.command(command)).await;
                 drop(held);
                 headless_answer(sent)
             }
         }
-        Some((held, target)) if target.provider == "claude" => {
+        (held, target) => {
             match terminal_checks(st, &name, &body) {
                 Err(refusal) => refusal,
                 Ok((model, effort)) => {
-                    let EntryHandle::Terminal { handle, .. } = &target.handle else { return answer(headers, StatusCode::CONFLICT, busy_body()) };
+                    let EntryHandle::Terminal { handle, .. } = &target.handle else { return Some(answer(headers, StatusCode::CONFLICT, busy_body())) };
                     let payload = json!({"model": model, "effort": effort, "scope": if body.scope == Scope::Default { "default" } else { "session" }});
                     let reply = handle.control(id, "set_model_effort".into(), payload).await;
                     drop(held);
@@ -85,14 +88,8 @@ pub(super) async fn serve(st: &Arc<AppState>, runtime: Arc<RuntimeRegistry>, nam
                 }
             }
         }
-        Some(_) => (StatusCode::CONFLICT, detail_body("erro_modelo_so_claude", "esta rota troca modelo e esforço só de sessão Claude", json!({}))),
-        // Sem sessão: as recusas da rota Python, nesta ordem.
-        None => match terminal_checks(st, &name, &body) {
-            Err(refusal) => refusal,
-            Ok(_) => plain(StatusCode::CONFLICT, "sessao nao esta viva"),
-        },
     };
-    answer(headers, status, value)
+    Some(answer(headers, status, value))
 }
 
 /// Painel aberto e a validação de antes da trava, na ordem do Python.

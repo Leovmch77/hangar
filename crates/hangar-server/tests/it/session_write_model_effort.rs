@@ -81,14 +81,16 @@ async fn model_effort_b6_open_terminal_panel_refuses() {
     assert_eq!(python.hits_to("/api/sessions/t/model-effort"), 0);
 }
 
-/// B8 e B9: sessão que não existe: a validação vem antes, depois "sessao nao esta viva".
+/// Sessão sem entrada no Rust e que não é Claude com terminal para adotar (Pi, omp, Kimi, ou nenhuma): segue
+/// ao Python como antes, com o corpo como veio; lá ficam a validação e o "sessao nao esta viva".
 #[tokio::test]
-async fn model_effort_b8_b9_unknown_session_after_validation() {
+async fn model_effort_without_a_rust_claude_goes_to_python() {
     let terms = Arc::new(Terms::new(TermConfig::default()));
     let (python, server) = serve(registry(&terms).await, terms, None, Duration::from_secs(5)).await;
-    assert_eq!(post(server, "nada", r#"{"scope":"session"}"#).await, (422, json!({"detail": "must provide model or effort"})));
-    assert_eq!(post(server, "nada", r#"{"model":"sonnet"}"#).await, (409, json!({"detail": "sessao nao esta viva"})));
-    assert_eq!(python.hits_to("/api/sessions/nada/model-effort"), 0);
+    for (n, body) in [r#"{"scope":"session"}"#, r#"{"model":"sonnet"}"#].into_iter().enumerate() {
+        assert_eq!(post(server, "pi1", body).await.1, "from-python", "{body}");
+        assert_eq!(python.hits_to("/api/sessions/pi1/model-effort"), n + 1);
+    }
 }
 
 /// B9: com terminal, modelo torto é 422 antes do terminal.

@@ -117,6 +117,21 @@ def test_model_effort_of_any_claude_needs_the_rust_server(cli, monkeypatch):
     apply.assert_not_called()
 
 
+@pytest.mark.parametrize("info", [None, "pi", "omp", "kimi"])
+def test_model_effort_of_a_non_claude_session_stays_in_python(cli, monkeypatch, info):
+    # Sem entrada no Rust (Pi, omp, Kimi, ou nenhuma sessão), o Rust repassa e o Python atende como antes.
+    from app import api
+    from app.models import SessionInfo
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=info and SessionInfo(name="p", provider=info)))
+    apply = MagicMock(return_value={"ok": True, "scope": "session", "result": None})
+    monkeypatch.setattr(api.terminal, "set_model_effort", apply)
+    monkeypatch.setattr(api, "_recusa_se_painel_aberto", lambda name: None)
+    response = cli.post("/api/sessions/p/model-effort", headers=AUTH, json={"model": "sonnet", "scope": "default"})
+    assert response.status_code == 200, response.text
+    apply.assert_called_once_with("p", "sonnet", None, "default")
+    assert cli.post("/api/sessions/p/model-effort", headers=AUTH, json={"model": "sonnet", "x": 1}).status_code == 422
+
+
 def test_selected_models_and_routes_never_fall_back(tmp_path, monkeypatch):
     _proxy_accounts(tmp_path, monkeypatch)
     prefix = cliproxy_accounts.resolve("default")["prefix"]

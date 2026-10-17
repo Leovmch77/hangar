@@ -8300,10 +8300,27 @@ def answer(name: str, body: AnswerBody):
     return {"ok": True, "fallback": fallback}
 
 
+class ModelEffortBody(_StrictBody):
+    # scope: 'session' (aperta `s`) ou 'default' (aperta Enter).
+    model: str | None = None
+    effort: str | None = None
+    scope: Literal["session", "default"] = "session"
+
+
 @app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
-async def model_effort(name: str):
-    # Trocar modelo e esforço é do Rust (seletor do `/model` no ator do terminal, controle no sem terminal).
-    raise HTTPException(503, detail=erro("model_effort_needs_rust_server", "trocar modelo e esforço precisa do servidor Rust"))
+async def model_effort(name: str, body: ModelEffortBody):
+    # Do Claude é o Rust que troca (seletor no ator do terminal, controle no sem terminal); Pi, omp e Kimi,
+    # que não têm entrada lá, seguem aqui.
+    info = await _cached_info(name)
+    if info is not None and getattr(info, "provider", "claude") == "claude":
+        raise HTTPException(503, detail=erro("model_effort_needs_rust_server", "trocar modelo e esforço precisa do servidor Rust"))
+    await asyncio.to_thread(_recusa_se_painel_aberto, name)
+    try:
+        return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
+    except PickerError as e:
+        raise HTTPException(e.status, e.detail)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 # ── Modo de permissão em sessão viva (Task 5) ─────────────────────────────────────────
