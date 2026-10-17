@@ -211,6 +211,16 @@ describe('newConversation', () => {
     expect(adoptCandidate('server-a', attempt()!.id)).toBe(false);
   });
 
+  it('nome automático em uso tenta uma vez com o próximo, mesmo sem a lista', async () => {
+    calls.sessions.mockRejectedValue(new Error('503'));
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    calls.create.mockRejectedValueOnce(Object.assign(httpError(409, 'já existe uma sessão com esse nome'), { code: 'erro_nome_em_uso' }));
+    await beginAttempt('server-a', input);
+    expect(calls.create.mock.calls.map((c) => c[1].name)).toEqual(['mobile', 'mobile-2']);
+    expect(attempt()?.sessionName).toBe('mobile-2');
+    expect(issue()).toBeNull();
+  });
+
   it('nome explícito é gravado antes do POST e não ganha sufixo nem troca após conflito', async () => {
     const create = deferred<SessionInfo>();
     calls.create.mockReturnValue(create.promise);

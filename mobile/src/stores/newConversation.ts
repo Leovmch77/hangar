@@ -68,6 +68,7 @@ const KEY = (serverId: string) => `create.attempt.v1:${serverId}`;
 const PHASES = new Set(['draft', 'creating', 'create_unknown', 'created', 'sending', 'send_unknown', 'sent']);
 // Promessas em voo por servidor: dois toques (ou remontagem) no meio do GET/POST recebem a mesma.
 const inFlight = new Map<string, Promise<void>>();
+const refusedNames = new Map<string, Set<string>>();
 
 export const useNewConversation = create<State>(() => ({ attempts: {}, issues: {}, busy: {} }));
 
@@ -154,7 +155,7 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
   return attempt;
 }
 
-async function runCreate(serverId: string, input: NewConversationInput): Promise<void> {
+async function runCreate(serverId: string, input: NewConversationInput, retried = false): Promise<void> {
   const current = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
   if (!current && prefs.getString(KEY(serverId)) !== undefined) return;
   if (current && current.phase !== 'draft') return;
@@ -169,6 +170,8 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
   let taken = new Set<string>();
   if (!explicit) {
     try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
+    // Nome automático já recusado não volta: sem a lista, o mesmo nome seria recusado a cada envio.
+    for (const name of refusedNames.get(serverId) ?? []) taken.add(name);
   }
   const finalName = explicit || uniqueSessionName(basename(input.body.cwd), taken);
   // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
@@ -192,9 +195,12 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     // 4xx definitivo não criou nada; 409, 408, 5xx e rede podem ter criado. Nome em uso é recusa:
     // a sessão com esse nome é outra, e recuperá-la pelo nome mandaria a mensagem para a conversa errada.
     const nameInUse = (cause as { code?: unknown } | null)?.code === 'erro_nome_em_uso';
+    if (nameInUse && !explicit) refusedNames.set(serverId, new Set([...(refusedNames.get(serverId) ?? []), finalName]));
     const rejected = nameInUse
       || (status !== null && status >= 400 && status < 500 && status !== 408 && status !== 409);
     if (!apply(creating, { type: rejected ? 'create_rejected' : 'create_unknown' })) return;
+    // Nome automático em uso (lista fora do ar, ou outra tela criou no meio): uma tentativa com o próximo.
+    if (nameInUse && !explicit && !retried) return runCreate(serverId, input, true);
     setIssue(serverId, rejected
       ? { kind: 'rejected', message: messageOf(cause) }
       : status === 409
@@ -440,5 +446,6 @@ export function discardAttempt(serverId: string, attemptId: string): void {
 
 export function _resetNewConversationForTests(): void {
   inFlight.clear();
+  refusedNames.clear();
   useNewConversation.setState({ attempts: {}, issues: {}, busy: {} });
 }

@@ -898,7 +898,8 @@
   // A sugestão de cota mostrou outra conta que não a ativa: ela vai, senão a sessão nasceria noutra.
   let contaSugerida = $state(false);
   // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais.
-  // A troca automática da esgotada é a mesma regra do servidor, então também não conta como escolha.
+  // A troca automática da esgotada é a regra do servidor: sem sugestão não vai; a sugerida que esgotou
+  // leva a nova, a mesma que a tela mostra.
   const contaDoPedido = $derived(contaEscolhidaAMao || contaSugerida || conversaAlvo ? selectedConfig : null);
   function escolherConversa(c: ArchiveEntry) {
     if (conversaEscolhida === c.session_id) { conversaEscolhida = ''; return; }

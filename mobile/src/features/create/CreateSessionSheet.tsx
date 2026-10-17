@@ -136,8 +136,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   // Só a escolha à mão no menu de conta desliga a troca automática por cota esgotada.
   const accountTouched = useRef(false);
   // D-003: só vai no pedido a conta que a pessoa escolheu (agora ou lembrada de antes). A ativa sem
-  // escolha não vai, e o servidor troca a que estiver a 95% ou mais; a troca automática da tela é essa
-  // mesma regra, então não conta como escolha.
+  // escolha não vai, e o servidor troca a que estiver a 95% ou mais. A lembrada que a tela trocou por
+  // cota esgotada vai como a que a tela mostra: a regra é a mesma do servidor.
   const [accountChosen, setAccountChosen] = useState(false);
   // Conta que a troca automática deixou para trás; a pílula avisa até a próxima escolha.
   const [switchedFrom, setSwitchedFrom] = useState('');
