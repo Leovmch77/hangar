@@ -15,7 +15,7 @@ import * as m from '../../paraglide/messages';
 
 export const useUsagePreferences = create(() => ({ period: '30d', off: [] as string[] }));
 export const number = (value: number, digits = 0) => value.toLocaleString(intlLocale(), { maximumFractionDigits: digits });
-export const dollars = (value: number) => new Intl.NumberFormat(intlLocale(), { style: 'currency', currency: 'USD', maximumFractionDigits: 4 }).format(value);
+export const dollars = (value: number) => `US$ ${value.toLocaleString(intlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const percent = (part: number, total: number) => `${number(total > 0 ? part / total * 100 : 0, 1)}%`;
 
 export function useReportSelection() {

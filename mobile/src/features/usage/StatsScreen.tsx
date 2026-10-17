@@ -15,15 +15,16 @@ const groupName = (key: string) => {
   const names: Record<string, string> = { '@repo': m.uso_grupo_repo(), '@pessoal': m.uso_grupo_pessoal(), '@avulsa': m.uso_grupo_avulsa(), '@embutida': m.uso_grupo_embutida(), '@nativo': m.uso_grupo_nativo(), '': m.uso_grupo_sem() };
   return names[key] ?? key;
 };
+const imageLabel = (key: string) => key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: key.replace(/^lida:/, '') });
 const weight = (item: UsoBucket) => item.ocupados_eq_tokens_est ?? 0;
 const filterNames = () => ({ conta: m.uso_conta(), projeto: m.uso_projeto(), modelo: m.uso_modelo(), plugin: m.uso_plugin() });
 
-function UsageDetail({ servers, period, filters, focus, plugin, active, close }: { servers: Server[]; period: string; filters: UsoFiltros; focus: string; plugin: boolean; active: boolean; close: () => void }) {
+function UsageDetail({ servers, period, filters, focus, label, plugin, active, close }: { servers: Server[]; period: string; filters: UsoFiltros; focus: string; label: string; plugin: boolean; active: boolean; close: () => void }) {
   const detailFilters = plugin ? { ...filters, plugin: [focus] } : { ...filters, foco: focus };
   const load = useReports('usage', servers, period, detailFilters, active);
   const report = mergeUso(load.parts, period).report;
   return <Sheet open onDismiss={close} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
-    <Copy title>{`${m.uso_foco()}: ${focus}`}</Copy>
+    <Copy title>{`${m.uso_foco()}: ${label}`}</Copy>
     <Action label={m.custos_atualizar()} icon="RefreshCw" onPress={load.refresh} />
     <ReportStatus {...load} selected={servers.length} />
     {load.accepted && <><Copy title>{m.uso_detalhe_por_dia()}</Copy>
@@ -66,7 +67,7 @@ export function StatsScreen() {
   }, [load.parts, load.accepted, period]);
 
   const matches = (text: string) => text.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim());
-  const list = (tab === 'by_tool' ? toolsOf(report) : report[tab]).filter((item) => matches(`${item.label ?? ''} ${item.key} ${item.plugin ?? ''}`));
+  const list = (tab === 'by_tool' ? toolsOf(report) : report[tab]).filter((item) => matches(`${item.label ?? ''} ${item.key} ${item.plugin ?? ''} ${tab === 'by_imagem' ? imageLabel(item.key) : ''}`));
   list.sort((a, b) => (effectiveSort === 'name' ? 0 : effectiveSort === 'calls' ? b.chamadas - a.chamadas : effectiveSort === 'cost' ? b.cost - a.cost : measure(b, tab).value - measure(a, tab).value) || (a.label ?? a.key).localeCompare(b.label ?? b.key));
   const groups = agruparPorPlugin(report.by_skill.filter((item) => matches(`${item.key} ${item.plugin ?? ''}`)), presenceAvailable ? weight : (item) => item.chamadas);
   groups.sort((a, b) => (effectiveSort === 'calls' ? b.vezes - a.vezes : effectiveSort === 'name' ? 0 : b.peso - a.peso) || a.plugin.localeCompare(b.plugin));
@@ -86,7 +87,7 @@ export function StatsScreen() {
   const dailyMax = Math.max(1, ...report.by_day.map((item) => item.chamadas));
   const row = (item: UsoBucket) => {
     const measured = measure(item, tab);
-    return <Card><Bar label={item.label ?? item.key} value={rowValue(item)} max={listMax} detail={!presenceAvailable && presenceTab ? '—' : `${measured.approximate ? '≈ ' : ''}${number(measured.value)}`} onPress={() => setFocus(item.key)} />
+    return <Card><Bar label={tab === 'by_imagem' ? imageLabel(item.key) : item.label ?? item.key} value={rowValue(item)} max={listMax} detail={!presenceAvailable && presenceTab ? '—' : `${measured.approximate ? '≈ ' : ''}${number(measured.value)}`} onPress={() => setFocus(item.key)} />
       <Copy muted>{`${m.uso_col_chamadas()}: ${number(item.chamadas)} · ${m.uso_col_sessoes()}: ${number(item.sessions)} · ${tab === 'by_contexto' ? m.uso_col_media() : tab === 'by_agente' ? m.uso_col_tok_chamada() : tab === 'by_plugin' ? m.uso_col_tamanho() : m.uso_col_ctx_chamada()}: ${measured.approximate ? '≈ ' : ''}${number(measured.perCall, 1)}`}</Copy>
       {tab === 'by_agente' && <><Copy>{`${m.uso_col_custo_real()}: ${dollars(item.cost)}`}</Copy><Copy>{`${m.custos_input_sem_cache()}: ${number(item.input)} · ${m.custos_output_total()}: ${number(item.output)} · ${m.custos_tipo_cache_escrito()}: ${number(item.cache_write)} · ${m.custos_tipo_cache_lido()}: ${number(item.cache_read)}`}</Copy></>}
     </Card>;
@@ -144,6 +145,6 @@ export function StatsScreen() {
         <Card><Copy title>{m.uso_graf_ctx()}</Copy><Copy muted>{m.uso_graf_ctx_nota()}</Copy>{categoryTotals.map((item) => <Bar key={item.label} label={item.label} value={item.value} max={Math.max(1, ...categoryTotals.map((b) => b.value))} detail={`≈ ${number(item.value, 1)}`} />)}</Card>
       </>}
     </>}
-    {focus !== null && <UsageDetail key={focus} servers={selected} period={period} filters={filters} focus={focus} plugin={tab === 'by_plugin'} active={active} close={() => setFocus(null)} />}
+    {focus !== null && <UsageDetail key={focus} servers={selected} period={period} filters={filters} focus={focus} label={tab === 'by_imagem' ? imageLabel(focus) : focus} plugin={tab === 'by_plugin'} active={active} close={() => setFocus(null)} />}
   </ReportFrame>;
 }
