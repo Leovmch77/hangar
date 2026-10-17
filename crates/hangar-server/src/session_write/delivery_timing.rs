@@ -69,7 +69,7 @@ pub async fn decide(st: &AppState, message: &str, task: &str) -> (bool, &'static
         match result {
             Ok(Ok(answers)) => {
                 let Some(pick) = answers.get("timing") else { return (false, "unavailable") };
-                tracing::info!(target: "delivery_timing", choice=%pick.choice, probability=pick.p, "resposta do Jev para o envio");
+                tracing::info!(target: "delivery_timing", probability=pick.p, "resposta do Jev para o envio");
                 let direct = direct_answer(&json!({"choice": pick.choice, "probabilities": {"direct": pick.p}}));
                 if direct { (true, "direct") }
                 else if pick.choice == "queue" && (0.9..=1.0).contains(&pick.p) { (false, "queue") }
