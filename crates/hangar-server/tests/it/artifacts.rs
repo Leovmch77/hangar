@@ -559,15 +559,29 @@ async fn artifacts_missing_file_and_invalid_complete_json_are_errors_not_empty_c
     let scene = Scene::new(&[frame("a", "Antigo")]).await;
     assert_eq!(scene.items().await[0]["id"], "a");
     std::fs::remove_file(&scene.path).unwrap();
-    let (status, body) = scene.get("s").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error_code"], "artifacts_io");
+    for _ in 0..2 {
+        let (status, body) = scene.get("s").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "sumido continua erro na leitura seguinte");
+        assert_eq!(body["error_code"], "artifacts_io");
+    }
     write_lines(&scene.path, &[frame("b", "Novo")]);
     assert_eq!(scene.items().await[0]["id"], "b");
     append_raw(&scene.path, "{json quebrado}\n");
     let (status, body) = scene.get("s").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error_code"], "artifacts_io");
+}
+
+/// Vida nova (sessão recém-aberta, depois do `/clear`): o Claude só cria o transcript na primeira mensagem.
+/// O que ainda não existe é catálogo vazio; o que já foi lido e sumiu continua erro (acima).
+#[tokio::test]
+async fn artifacts_transcript_not_yet_created_is_an_empty_catalog() {
+    let scene = Scene::new(&[]).await;
+    let fresh = scene.path.with_file_name("ainda-nao.jsonl");
+    scene.sessions.0.lock().unwrap().insert("s".into(), info(&fresh, "fresh-life", "claude"));
+    assert_eq!(scene.items().await, json!([]));
+    write_lines(&fresh, &[frame("c", "Primeiro")]);
+    assert_eq!(scene.items().await[0]["id"], "c");
 }
 
 #[tokio::test]

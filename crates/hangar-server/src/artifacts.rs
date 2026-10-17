@@ -236,6 +236,8 @@ struct Entry {
     offset: u64,
     prefix_hash: ring::digest::Context,
     fold: Fold,
+    /// O transcript já abriu nesta vida; o `reset` não o esquece.
+    seen: bool,
 }
 impl Entry {
     fn new(binding: Binding) -> Self {
@@ -245,6 +247,7 @@ impl Entry {
             offset: 0,
             prefix_hash: ring::digest::Context::new(&ring::digest::SHA256),
             fold: Fold::default(),
+            seen: false,
         }
     }
     fn reset(&mut self) {
@@ -254,7 +257,14 @@ impl Entry {
         self.fold = Fold::default();
     }
     fn sync(&mut self) -> io::Result<()> {
-        let mut file = File::open(&self.binding.jsonl)?;
+        let mut file = match File::open(&self.binding.jsonl) {
+            Ok(file) => file,
+            // Nunca lido nesta vida: o Claude só cria o transcript na primeira mensagem. O que sumiu depois
+            // de lido continua erro.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !self.seen => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.seen = true;
         let stamp = Stamp::of(&file, &file.metadata()?)?;
         let unchanged = self.stamp.as_ref() == Some(&stamp);
         let mut reusable = self.stamp.as_ref().is_some_and(|old| {
