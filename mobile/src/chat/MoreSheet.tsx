@@ -61,6 +61,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
       disabled: recarregar.bloqueado,
     }] : []),
     ...(orq || !temPergunta ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
+    ...(canShare ? [{ icon: 'Users' as IconName, label: m.orqcfg_aba_papeis(), route: 'orchestration-team' }] : []),
     orq
       ? { icon: 'PanelsTopLeft', label: m.orq_tab_title(), route: 'orchestration' }
       : { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },

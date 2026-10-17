@@ -43,16 +43,39 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(serverId: string, orq = false) {
+async function render(serverId: string, orq = false, name = 'conversation') {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
   const onClose = vi.fn();
-  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name: 'conversation', orq })); });
+  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name, orq })); });
   return { container, onClose };
 }
 
 const shareButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.compartilhar_menu()}"]`);
+
+test.each([
+  { kind: 'normal', orq: false, name: 'conversation' },
+  { kind: 'orq', orq: true, name: 'orq-run' },
+])('Time do trabalho: dono da conversa $kind abre o editor no servidor explícito', async ({ orq, name }) => {
+  const { container, onClose } = await render(own.id, orq, name);
+  const team = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orqcfg_aba_papeis()}"]`);
+  expect(team).not.toBeNull();
+  await act(async () => { team!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith(`/s/own/${name}/orchestration-team`);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([guest.id, removed.id, 'unknown'])('Time do trabalho: servidor %s não oferece editor em conversa normal nem orq', async serverId => {
+  useServers.setState({ activeId: own.id });
+  for (const orq of [false, true]) {
+    const { container } = await render(serverId, orq);
+    expect(container.querySelector(`[aria-label="${m.orqcfg_aba_papeis()}"]`)).toBeNull();
+  }
+  expect(boundary.push).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
 
 test('servidor próprio da conversa oferece compartilhar entre grupo e arquivos mesmo com convidado ativo', async () => {
   const { container, onClose } = await render(own.id);
