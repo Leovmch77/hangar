@@ -2,7 +2,7 @@ import {
   agruparConversa, entraNoPensamento, foldTasks, hiddenByQueuePanel, htmlPageFromResult,
   isHtmlRenderTool, type ChatEvent, type PensamentoTools, type QueuePanel,
 } from '@hangar/core';
-import { appendFoldSummary, foldConversation, updateFoldSummary, type ConversationRow, type FoldSummary } from './tools/fold';
+import { accumulateFoldSummary, appendFoldSummary, foldConversation, updateFoldSummary, type ConversationRow, type FoldSummary } from './tools/fold';
 
 export type MessageRow = ConversationRow & {
   dayTs?: number;
@@ -105,15 +105,24 @@ export function projectConversation(before: ConversationProjection | null, input
     next.eventRows.set(ev.id, index);
     if (ev.kind === 'tool_use' && ev.tool_use_id) next.toolRows.set(ev, index);
   };
+  // Só o trecho da cauda exclusivo desta chamada pode crescer sem copiar seus recipientes.
+  let editableFold: MessageRow | undefined;
   const addFold = (ev: ChatEvent, id: string, source: 'tool' | 'group' | 'pensamento', extend: boolean) => {
     const index = rows.length - 1;
-    const last = rows[index];
+    let last = rows[index];
     if (last?.type === 'fold' && (input.merge || extend)) {
-      rows[index] = { ...last, parts: [...last.parts, ev], summary: appendFoldSummary(last.summary, [ev], resultOf(next.results)), resultOf: resultOf(next.results) };
+      if (last !== editableFold) {
+        last = { ...last, parts: last.parts.slice(), summary: appendFoldSummary(last.summary, [], resultOf(next.results)), resultOf: resultOf(next.results) };
+        rows[index] = last;
+      }
+      last.parts.push(ev);
+      accumulateFoldSummary(last.summary!, [ev], resultOf(next.results));
+      editableFold = last;
       remember(ev, index);
       return index;
     }
-    rows.push({ type: 'fold', id: `f-${id}`, parts: [ev], ...(!input.merge && { source }), summary: appendFoldSummary(undefined, [ev], resultOf(next.results)), resultOf: resultOf(next.results) });
+    editableFold = { type: 'fold', id: `f-${id}`, parts: [ev], ...(!input.merge && { source }), summary: appendFoldSummary(undefined, [ev], resultOf(next.results)), resultOf: resultOf(next.results) };
+    rows.push(editableFold);
     remember(ev, rows.length - 1);
     return rows.length - 1;
   };
@@ -168,13 +177,16 @@ export function projectConversation(before: ConversationProjection | null, input
           };
           const row: MessageRow = { type: 'fold', id: `f-g-${g.first}`, source: 'group',
             parts: [...first.parts, ...second.parts, ev],
-            summary: appendFoldSummary(summary, [ev], resultOf(next.results)), resultOf: resultOf(next.results) };
+            summary: accumulateFoldSummary(summary, [ev], resultOf(next.results)), resultOf: resultOf(next.results) };
           rows.splice(rows.length - 2, 2, row);
+          editableFold = row;
           for (const part of row.parts) remember(part, rows.length - 1);
         }
       } else {
         const index = addFold(ev, g.count >= 3 ? `g-${g.first}` : ev.id, g.count >= 3 ? 'group' : 'tool', extend && g.count > 3);
-        if (input.merge && g.count === 3 && rows[index].id === `f-${g.first}`) rows[index] = { ...rows[index], id: `f-g-${g.first}` };
+        if (input.merge && g.count === 3 && rows[index].id === `f-${g.first}`) {
+          rows[index].id = `f-g-${g.first}`;
+        }
       }
       g.mode = 'run';
     } else if (kind === 'tool_use') {
