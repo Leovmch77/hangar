@@ -149,6 +149,22 @@ pub fn remove_with_guard(
     if in_use(&path, sessions) {
         return Err(error(409, "sessão aberta dentro da worktree"));
     }
+    // Sem pasta, o registro pode sobreviver até à branch: sua limpeza não depende do HEAD.
+    if missing_path(&path)? && !require_merged {
+        with_removed(home, &path, &main, || {
+            registered(&main, &path)?;
+            guard(&path)?;
+            if !missing_path(&path)? {
+                return Err(error(409, "a pasta reapareceu; confira a worktree antes de remover"));
+            }
+            git::remove_worktree(Path::new(&main), &path, false)?;
+            if worktrees::worktree_paths(&main).contains(&path) {
+                return Err(error(409, "a worktree continua registrada"));
+            }
+            Ok(())
+        })?;
+        return Ok(json!({"removed":path,"branch_deleted":false,"moved":0}));
+    }
     let repo_info = worktrees::Repo::read(&main);
     let st = worktrees::status(&path, sessions, &repo_info, false, bases);
     if st["degraded"] != false || st["head"].as_str().is_none() {
@@ -247,6 +263,14 @@ pub fn remove_with_guard(
         );
     }
     Ok(json!({"removed":path,"branch_deleted":branch_deleted,"moved":0}))
+}
+
+fn missing_path(path: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(error(409, "não consegui conferir a pasta da worktree")),
+    }
 }
 
 pub fn clear_deleted_branch_config(repo: &Path, branch: &str) -> Result<bool> {
@@ -615,8 +639,9 @@ mod tests {
     }
     fn policy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        let wt = dir.path().join("wt");
+        let root = crate::real(dir.path());
+        let repo = root.join("repo");
+        let wt = root.join("wt");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-b", "main"]);
         git(
@@ -637,6 +662,58 @@ mod tests {
             &["worktree", "add", "-b", "topic", wt.to_str().unwrap()],
         );
         (dir, repo, wt)
+    }
+
+    #[test]
+    fn missing_worktree_removes_only_its_registration_without_needing_the_branch() {
+        let (dir, repo, wt) = policy_fixture();
+        let other = repo.parent().unwrap().join("other");
+        git(&repo, &["worktree", "add", "-b", "other", other.to_str().unwrap()]);
+        std::fs::remove_dir_all(&wt).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+        git(&repo, &["update-ref", "-d", "refs/heads/topic"]);
+        let result = remove(
+            repo.to_str().unwrap(), wt.to_str().unwrap(), &[], &[], dir.path(),
+            RemoveOptions { delete_branch: true, ..Default::default() },
+        ).unwrap();
+        assert_eq!(Path::new(result["removed"].as_str().unwrap()), wt);
+        assert_eq!(result["branch_deleted"], false);
+        assert_eq!(worktrees::worktree_paths(repo.to_str().unwrap()).into_iter().map(PathBuf::from).collect::<Vec<_>>(), vec![other]);
+        git(&repo, &["rev-parse", "--verify", "refs/heads/other"]);
+    }
+
+    #[test]
+    fn missing_worktree_preserves_its_branch_and_protects_locks_and_sessions() {
+        let (dir, repo, wt) = policy_fixture();
+        git(&repo, &["worktree", "lock", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&wt).unwrap();
+        let run = |sessions: &[Session]| remove(
+            repo.to_str().unwrap(), wt.to_str().unwrap(), sessions, &[], dir.path(),
+            RemoveOptions { delete_branch: true, ..Default::default() },
+        );
+        assert_eq!(run(&[]).unwrap_err().status, 409);
+        git(&repo, &["worktree", "unlock", wt.to_str().unwrap()]);
+        let sessions = [Session { name: "busy".into(), cwd: Some(wt.to_string_lossy().into_owned()), ..Default::default() }];
+        assert_eq!(run(&sessions).unwrap_err().status, 409);
+        assert_eq!(run(&[]).unwrap()["branch_deleted"], false);
+        git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]);
+    }
+
+    #[test]
+    fn missing_worktree_that_reappears_during_admission_is_preserved() {
+        let (dir, repo, wt) = policy_fixture();
+        std::fs::remove_dir_all(&wt).unwrap();
+        let result = remove_with_guard(
+            repo.to_str().unwrap(), wt.to_str().unwrap(), &[], &[], dir.path(),
+            RemoveOptions::default(), &|_| {
+                std::fs::create_dir(&wt).unwrap();
+                std::fs::write(wt.join("local"), "trabalho recuperado").unwrap();
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err().status, 409);
+        assert_eq!(std::fs::read_to_string(wt.join("local")).unwrap(), "trabalho recuperado");
+        assert!(worktrees::worktree_paths(repo.to_str().unwrap()).contains(&wt.to_string_lossy().into_owned()));
     }
 
     #[test]
