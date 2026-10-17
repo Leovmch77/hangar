@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useIsFocused, useRouter } from 'expo-router';
-import { custoDesconhecido, custoSemCacheDe, equivalenteDe, fillDayGaps, intlLocale, mergeReports, mergeUso, partirOcultos, precoParcial, tarifasPorModelo, type DimBucket } from '@hangar/core';
+import { custoDesconhecido, custoSemCacheDe, equivalenteDe, fillDayGaps, intlLocale, isFree, mergeReports, mergeUso, partirOcultos, precoParcial, tarifasPorModelo, type DimBucket } from '@hangar/core';
 import { Sheet } from '../../ui/Sheet';
-import { Action, Bar, Card, Choice, Copy, dollars, number, Paged, percent, ReportControls, ReportFrame, ReportStatus, useReportSelection } from './ReportUI';
-import { comparison, costView, dimensionBuckets, dimensions, filterCombos, groupCombos, priceLabel, rawTokens, setCostFilter, sumCombos, type CostFilter, type Dimension } from './costs-model';
+import { Action, Bar, Card, Choice, Columns, Composition, Copy, dollars, Grid, number, Paged, percent, ReportControls, ReportFrame, ReportStatus, useChartColors, useReportSelection } from './ReportUI';
+import { comparison, costView, dimensionBuckets, dimensions, filterCombos, groupCombos, rawTokens, setCostFilter, sumCombos, type CostFilter, type Dimension } from './costs-model';
 import { useReports } from './useReports';
 import * as m from '../../paraglide/messages';
 
-type Panel = 'daily' | Dimension | 'sessions' | 'comparison' | 'areas' | 'method';
 const dimensionNames = () => ({ provider: m.custos_dim_provedor(), source: m.custos_dim_fonte(), project: m.custos_dim_projeto(), model: m.custos_dim_modelo(), servidor: m.custos_dim_maquina() });
 const typeNames = () => ({ input: m.custos_input_sem_cache(), output: m.custos_output_total(), cache_write: m.custos_tipo_cache_escrito(), cache_read: m.custos_tipo_cache_lido() });
 const tokenTypes = ['input', 'output', 'cache_write', 'cache_read'] as const;
@@ -19,28 +18,38 @@ export function CostsScreen() {
   const focused = useIsFocused();
   const { period, own, selected } = useReportSelection();
   const [filter, setFilter] = useState<CostFilter>({});
-  const [panel, setPanel] = useState<Panel>('daily');
+  const [methodOpen, setMethodOpen] = useState(false);
   const [brl, setBrl] = useState(false);
   const [hidden, setHidden] = useState(new Set<string>());
-  const [metric, setMetric] = useState<'cost' | 'tokens'>('cost');
-  const [layer, setLayer] = useState<Dimension | 'type'>('type');
-  const [visibleTypes, setVisibleTypes] = useState<TokenType[]>(['input', 'output', 'cache_write']);
+  const [projectsExpanded, setProjectsExpanded] = useState(false);
+  const [sessionsExpanded, setSessionsExpanded] = useState(false);
+  const [metric, setMetric] = useState<'cost' | 'tokens'>('tokens');
+  const [hiddenLayers, setHiddenLayers] = useState<string[]>(['cache_read']);
+  const colors = useChartColors();
   const [day, setDay] = useState<string | null>(null);
   const [compareDimension, setCompareDimension] = useState<Dimension>('provider');
   const [compareKeys, setCompareKeys] = useState<string[]>([]);
+  const [compareMetric, setCompareMetric] = useState<'tokens' | 'cost'>('tokens');
   const load = useReports('costs', selected, period, {}, focused);
   const report = mergeReports(load.parts, period).report;
   const areaServers = selected.filter((server) => !filter.servidor?.length || filter.servidor.includes(server.id));
-  const areaLoad = useReports('usage', areaServers, period, { projeto: filter.project ?? [], modelo: filter.model ?? [] }, focused && panel === 'areas');
+  const areaLoad = useReports('usage', areaServers, period, { projeto: filter.project ?? [], modelo: filter.model ?? [] }, focused);
   const areas = mergeUso(areaLoad.parts, period).report;
-  const areasMax = Math.max(1, ...areas.by_area.map(rawTokens));
+  const areaOrder = ['front', 'back', 'banco', 'infra', 'docs', 'outros', 'conversa'];
+  const orderedAreas = [...areas.by_area].filter((item) => rawTokens(item) > 0).sort((a, b) => {
+    const position = (key: string) => areaOrder.includes(key) ? areaOrder.indexOf(key) : areaOrder.indexOf('outros');
+    return position(a.key) - position(b.key) || a.key.localeCompare(b.key);
+  });
+  const areaTokens = orderedAreas.reduce((sum, item) => sum + rawTokens(item), 0);
   const view = costView(report, filter);
   const activeFilter = dimensions.some((d) => filter[d]?.length) || filter.sub !== undefined;
   const rates = tarifasPorModelo(report.rates);
   const validRate = report.usd_brl !== null && Number.isFinite(report.usd_brl) && report.usd_brl > 0;
   const money = (value: number) => brl && validRate ? new Intl.NumberFormat(intlLocale(), { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value * report.usd_brl!) : dollars(value);
-  const cost = (bucket: Pick<DimBucket, 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'>, model?: string) => priceLabel(bucket, model) === 'priced' ? money(bucket.cost) : '—';
-  const labelPrice = (bucket: DimBucket, model?: string) => priceLabel(bucket, model) === 'free' ? m.custos_gratis() : custoDesconhecido(bucket) ? m.custos_sem_tarifa() : '';
+  const freeOnly = view.cross && view.rows.length > 0 && view.rows.every((row) => isFree(row.model));
+  const unknownCost = (bucket: Pick<DimBucket, 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'>, model?: string) => (rawTokens(bucket) > 0 && bucket.cost === 0) && !isFree(model ?? '') && !((bucket === view.total || view.days.some((item) => item === bucket)) && freeOnly);
+  const cost = (bucket: Pick<DimBucket, 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'>, model?: string) => unknownCost(bucket, model) ? '—' : money(bucket.cost);
+  const labelPrice = (bucket: DimBucket, model?: string) => isFree(model ?? '') || bucket === view.total && freeOnly ? m.custos_gratis() : unknownCost(bucket, model) ? m.custos_sem_tarifa() : '';
   const names = dimensionNames();
   const types = typeNames();
   const total = view.total;
@@ -48,6 +57,18 @@ export function CostsScreen() {
   const newTokens = total.input + total.output + total.cache_write;
   const noCache = view.cross ? custoSemCacheDe(view.rows, rates) : activeFilter ? null : report.custo_sem_cache;
   const equivalent = view.cross ? equivalenteDe(view.rows, rates) : activeFilter ? null : report.equivalente_cobrado;
+  const periodDays = ({ '1d': 1, '7d': 7, '30d': 30, '90d': 90 } as Record<string, number>)[period] ?? Math.max(1, report.by_day.length);
+  const periodLabel = ({ '1d': m.custos_periodo_1d(), '7d': m.custos_periodo_7d(), '30d': m.custos_periodo_30d(), '90d': m.custos_periodo_90d(), all: m.custos_periodo_tudo() } as Record<string, string>)[period];
+  const savingsKnown = noCache !== null && (noCache > 0 || freeOnly) && !unknownCost(total);
+  const sessionsText = (bucket: DimBucket, rows = view.rows) => {
+    const word = (value: number, one: string, many: string) => `${number(value)} ${value === 1 ? one : many}`;
+    if (!view.cross) return word(bucket.sessions, m.custos_sessao_ou_subagente(), m.custos_sessoes_e_subagentes());
+    if (filter.sub === true) return word(bucket.sessions, m.custos_subagente(), m.custos_subagentes());
+    const children = sumCombos(rows.filter((row) => row.subagente)).sessions;
+    return `${word(bucket.sessions - children, m.sessao_singular(), m.lista_sessoes_plural())}${children ? ` · ${word(children, m.custos_subagente(), m.custos_subagentes())}` : ''}`;
+  };
+  const subCost = filter.sub === undefined ? sumCombos(view.rows.filter((row) => row.subagente)).cost : 0;
+  const delta = !activeFilter && report.anterior && report.anterior.cost > 0 ? (report.totals.cost - report.anterior.cost) / report.anterior.cost * 100 : null;
   const namesOfServers = new Map(own.map((s) => [s.id, s.label]));
   const labelOf = (dim: Dimension, key: string) => dim === 'servidor' ? namesOfServers.get(key) ?? key : key;
 
@@ -69,46 +90,74 @@ export function CostsScreen() {
     <Action label={m.custos_limpar_filtros()} onPress={() => setFilter({})} />
     {!view.cross && <Copy muted>{m.custos_recorte_parcial()}</Copy>}
   </Card>;
-  const panels: [Panel, string][] = [['daily', m.custos_gasto_por_dia()], ['provider', m.custos_por_provedor()], ['source', m.custos_por_fonte()], ['servidor', m.custos_por_maquina()], ['project', m.custos_por_projeto()], ['model', m.custos_por_modelo()], ['sessions', m.custos_sessoes_caras()], ['comparison', m.lista_comparar()], ['areas', m.uso_graf_areas()], ['method', m.custos_como_calculamos()]];
-  const renderTypes = (bucket: DimBucket) => <View style={{ gap: 8 }}>{tokenTypes.map((type) => <Bar key={type} label={types[type]} value={bucket[type]} max={rawTokens(bucket)} detail={`${number(bucket[type])} · ${custoDesconhecido(bucket) && bucket[type] > 0 ? '—' : money(bucket[`cost_${type}`])}`} />)}</View>;
+  const rankingTitles = { provider: m.custos_por_provedor(), source: m.custos_por_fonte(), servidor: m.custos_por_maquina(), project: m.custos_por_projeto() };
+  const typeCost = (bucket: DimBucket, type: TokenType) => custoDesconhecido(bucket) && bucket[type] > 0 ? '—' : money(bucket[`cost_${type}`]);
+  const costParts = (bucket: DimBucket) => tokenTypes.map((type, index) => ({ label: types[type], value: bucket[`cost_${type}`], color: colors[index], detail: typeCost(bucket, type) }));
+  const renderTypes = (bucket: DimBucket) => <View style={{ gap: 8 }}>{tokenTypes.map((type) => <Bar key={type} label={types[type]} value={bucket[type]} max={rawTokens(bucket)} detail={`${number(bucket[type])} · ${typeCost(bucket, type)} · ${m.custos_col_pct_conta()}: ${custoDesconhecido(bucket) && bucket[type] > 0 ? '—' : percent(bucket[`cost_${type}`], bucket.cost)}`} />)}</View>;
+  const toggleFilter = (dim: Dimension, key: string) => setFilter(setCostFilter(filter, dim, filter[dim]?.includes(key) ? [] : [key], view.cross));
 
   function renderDaily() {
-    const days = fillDayGaps(view.days);
-    const valueOf = (bucket: Pick<DimBucket, 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'>) => metric === 'tokens' ? rawTokens(bucket) : bucket.cost;
-    const max = Math.max(1, ...days.map(valueOf));
-    return <Card><Copy title>{m.custos_gasto_por_dia()}</Copy>
-      <View style={{ flexDirection: 'row' }}><Action label={m.custos_custo()} selected={metric === 'cost'} onPress={() => setMetric('cost')} /><Action label={m.ctx_tokens()} selected={metric === 'tokens'} onPress={() => setMetric('tokens')} /></View>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}><Action label={m.custos_tipo_token()} selected={layer === 'type'} onPress={() => setLayer('type')} />{dimensions.map((dim) => <Action key={dim} label={names[dim]} selected={layer === dim} disabled={!view.cross} onPress={() => setLayer(dim)} />)}</View>
-      {layer === 'type' && <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{tokenTypes.map((type) => <Action key={type} label={types[type]} selected={visibleTypes.includes(type)} onPress={() => setVisibleTypes((old) => old.includes(type) ? old.filter((v) => v !== type) : [...old, type])} />)}</View>}
-      <Copy muted>{m.mobile_costs_daily_description({ mode: layer === 'type' ? m.custos_tipo_token() : names[layer] })}</Copy>
-      <Copy muted>{m.mobile_costs_daily_hint()}</Copy>
-      <Paged key={`${period}:${layer}:${metric}`} items={days} render={(item) => <View>
-        <Bar label={item.key} value={valueOf(item)} max={max} detail={metric === 'tokens' ? number(rawTokens(item)) : cost(item as DimBucket)} onPress={() => setDay(item.key)} />
-        {layer === 'type' ? visibleTypes.map((type) => <Bar key={type} label={types[type]} value={metric === 'tokens' ? item[type] : (item as DimBucket)[`cost_${type}`] ?? 0} max={max} detail={metric === 'tokens' ? number(item[type]) : custoDesconhecido(item as DimBucket) && item[type] > 0 ? '—' : money((item as DimBucket)[`cost_${type}`] ?? 0)} />)
-          : groupCombos(view.rows.filter((row) => row.dia === item.key), layer).map((bucket) => <Bar key={bucket.key} label={labelOf(layer, bucket.key)} value={valueOf(bucket)} max={max} detail={metric === 'tokens' ? number(rawTokens(bucket)) : cost(bucket)} />)}
-      </View>} />
+    const byType = metric === 'tokens' || !view.cross;
+    const layers = byType ? tokenTypes.map((key, index) => ({ key, label: types[key], color: colors[index] })) : view.groups.source.map((bucket, index) => ({ key: bucket.key, label: bucket.label ?? bucket.key, color: colors[index % colors.length] }));
+    const visible = layers.filter((item) => !hiddenLayers.includes(item.key));
+    const days = fillDayGaps(view.days).reverse().map((item) => {
+      const bucket = view.days.find((bucket) => bucket.key === item.key) ?? { ...sumCombos([]), key: item.key };
+      return { key: item.key, values: visible.map((layer) => {
+        if (byType) {
+          const type = layer.key as TokenType;
+          return metric === 'tokens' ? bucket[type] : custoDesconhecido(bucket) && bucket[type] > 0 ? null : bucket[`cost_${type}`];
+        }
+        const part = sumCombos(view.rows.filter((row) => row.dia === item.key && row.source === layer.key));
+        return custoDesconhecido(part) ? null : part.cost;
+      }) };
+    });
+    const changeMetric = (value: 'cost' | 'tokens') => { setMetric(value); setHiddenLayers(value === 'tokens' ? ['cache_read'] : []); };
+    return <Card><Copy title>{m.custos_uso_por_dia()}</Copy>
+      <View accessibilityLabel={m.custos_metrica_diaria()} style={{ flexDirection: 'row', flexWrap: 'wrap' }}><Action label={m.ctx_tokens()} selected={metric === 'tokens'} onPress={() => changeMetric('tokens')} /><Action label={m.custos_estimativa_api()} selected={metric === 'cost'} onPress={() => changeMetric('cost')} /></View>
+      <Copy muted>{m.custos_empilhado_por({ modo: byType ? m.custos_tipo_token() : m.custos_dim_fonte() })}</Copy><Copy muted>{m.custos_hover_detalhe()}</Copy>
+      {metric === 'tokens' && <Copy muted>{m.custos_cache_lido_desligado()}</Copy>}
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{layers.map((layer) => <View key={layer.key} style={{ flexDirection: 'row', alignItems: 'center' }}><View style={{ width: 8, height: 8, backgroundColor: layer.color }} /><Action label={layer.label} selected={!hiddenLayers.includes(layer.key)} onPress={() => setHiddenLayers((previous) => {
+        const next = previous.includes(layer.key) ? previous.filter((key) => key !== layer.key) : [...previous, layer.key];
+        return layers.every((item) => next.includes(item.key)) ? [] : next;
+      })} /></View>)}</View>
+      <Columns label={m.custos_grafico_diario({ metrica: metric === 'tokens' ? m.ctx_tokens() : m.custos_estimativa_api() })} days={days} series={visible} format={metric === 'tokens' ? number : money} onPress={setDay} />
     </Card>;
   }
 
-  function renderRanking(dim: Dimension) {
-    const buckets = [...view.groups[dim]].sort((a, b) => metric === 'tokens' ? rawTokens(b) - rawTokens(a) : b.cost - a.cost);
+  function renderRanking(dim: keyof typeof rankingTitles) {
+    const buckets = [...(dim === 'servidor' ? report.by_servidor : view.groups[dim])].sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key));
     const split = partirOcultos(buckets, dim === 'project' ? hidden : new Set());
-    const max = Math.max(1, ...split.visiveis.map((b) => metric === 'tokens' ? rawTokens(b) : b.cost));
-    const hiddenTotal = split.escondidos.reduce((s, b) => s + b.cost, 0);
-    return <Card><Copy title>{panels.find(([key]) => key === dim)![1]}</Copy>
-      <Action label={m.custos_metrica()} onPress={() => setMetric(metric === 'tokens' ? 'cost' : 'tokens')} /><Copy>{metric === 'tokens' ? m.ctx_tokens() : m.custos_custo()}</Copy>
-      {dim === 'model' && <Copy muted>{m.custos_com_tarifa()}</Copy>}
-      <Paged key={`${dim}:${period}:${metric}`} items={split.visiveis} render={(bucket) => <View style={{ gap: 6 }}>
-        <Bar label={labelOf(dim, bucket.key)} value={metric === 'tokens' ? rawTokens(bucket) : bucket.cost} max={max} detail={`${cost(bucket, dim === 'model' ? bucket.key : undefined)} · ${number(rawTokens(bucket))}`} onPress={() => setFilter(setCostFilter(filter, dim, [bucket.key], view.cross))} />
-        {!!labelPrice(bucket, dim === 'model' ? bucket.key : undefined) && <Copy muted>{labelPrice(bucket, dim === 'model' ? bucket.key : undefined)}</Copy>}
-        {dim === 'project' && <Action label={m.custos_tirar_da_lista({ nome: bucket.key })} icon="EyeOff" onPress={() => setHidden(new Set([...hidden, bucket.key]))} />}
-        {dim === 'model' && <>
-          {precoParcial(bucket.key, rates.has(bucket.key), report.sem_tarifa) && <Copy>{m.custos_preco_parcial()}</Copy>}
-          {report.rates.filter((rate) => rate.model === bucket.key).map((rate, index) => <Copy key={index} muted>{`${rate.provider} · ${m.custos_tarifa_in_out()}: ${money(rate.input)} / ${money(rate.output)} · ${m.custos_tipo_cache_escrito()}: ${money(rate.cache_write)} · ${m.custos_tipo_cache_lido()}: ${money(rate.cache_read)} · ${m.custos_origem()}: ${rate.origin}${rate.cache_estimado ? ` · ${m.custos_cache_estimado()}` : ''}`}</Copy>)}
-        </>}
-      </View>} />
+    const max = Math.max(1, ...split.visiveis.map((bucket) => bucket.cost));
+    const hiddenTotal = split.escondidos.reduce((sum, bucket) => sum + bucket.cost, 0);
+    const visible = dim === 'project' && !projectsExpanded ? split.visiveis.slice(0, 12) : split.visiveis;
+    const row = (bucket: DimBucket) => <View key={bucket.key} style={{ gap: 6 }}>
+      <Bar label={bucket.label ?? labelOf(dim, bucket.key)} value={bucket.cost} max={max} detail={`${cost(bucket)} · ${number(rawTokens(bucket))}`} onPress={() => toggleFilter(dim, bucket.key)} />
+      <Composition label={bucket.label ?? labelOf(dim, bucket.key)} items={costParts(bucket)} />
+      {!!labelPrice(bucket) && <Copy muted>{labelPrice(bucket)}</Copy>}
+      {dim === 'project' && <Action label={m.custos_tirar_da_lista({ nome: bucket.key })} icon="EyeOff" onPress={() => setHidden(new Set([...hidden, bucket.key]))} />}
+    </View>;
+    return <Card><Copy title>{rankingTitles[dim]}</Copy><Copy muted>{dim === 'provider' ? m.custos_quem_cobra() : dim === 'source' ? m.custos_qual_agente() : dim === 'servidor' ? m.custos_onde_sessao() : m.custos_pasta_sessao()}</Copy>
+      {!visible.length && <Copy muted>{m.uso_vazio_secao()}</Copy>}{visible.map(row)}
+      {dim === 'project' && split.visiveis.length > 12 && <Action label={projectsExpanded ? m.custos_mostrar_menos() : m.custos_ver_projetos({ n: split.visiveis.length })} onPress={() => setProjectsExpanded(!projectsExpanded)} />}
       {split.escondidos.length > 0 && <><Copy muted>{m.custos_fora_da_lista({ n: split.escondidos.length, valor: hiddenTotal === 0 && split.escondidos.some(custoDesconhecido) ? '—' : money(hiddenTotal) })}</Copy>
-        <Paged items={split.escondidos} render={(bucket) => <Action label={bucket.key} onPress={() => setHidden(new Set([...hidden].filter((key) => key !== bucket.key)))} />} /><Action label={m.custos_mostrar_todos()} onPress={() => setHidden(new Set())} /></>}
+        {split.escondidos.map((bucket) => <Action key={bucket.key} label={bucket.key} onPress={() => setHidden(new Set([...hidden].filter((key) => key !== bucket.key)))} />)}<Action label={m.custos_mostrar_todos()} onPress={() => setHidden(new Set())} /></>}
+    </Card>;
+  }
+
+  function renderModels() {
+    const buckets = [...view.groups.model].sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key));
+    return <Card><Copy title>{m.custos_por_modelo()}</Copy><Copy muted>{m.custos_com_tarifa()}</Copy><Copy muted>{m.custos_col_entrada_ajuda()}</Copy>
+      <Paged items={buckets} render={(bucket) => <Card>
+        <Bar label={bucket.key} value={bucket.cost} max={Math.max(1, ...buckets.map((item) => item.cost))} detail={cost(bucket, bucket.key)} onPress={() => toggleFilter('model', bucket.key)} />
+        <Copy>{`${m.custos_col_entrada()}: ${number(bucket.input + bucket.cache_write + bucket.cache_read)} / ${number(bucket.input)}${bucket.cache_write === 0 && bucket.cache_read > 0 ? '*' : ''}`}</Copy>
+        <Copy>{`${m.custos_output_total()}: ${number(bucket.output)} · ${m.custos_tipo_cache_lido()}: ${number(bucket.cache_read)}`}</Copy>
+        <Copy>{`${m.custos_col_pct_conta()}: ${custoDesconhecido(bucket) ? '—' : percent(bucket.cost, total.cost)}`}</Copy>
+        {!!labelPrice(bucket, bucket.key) && <Copy muted>{labelPrice(bucket, bucket.key)}</Copy>}
+        {precoParcial(bucket.key, rates.has(bucket.key), report.sem_tarifa) && <Copy>{m.custos_preco_parcial()}</Copy>}
+        {!report.rates.some((rate) => rate.model === bucket.key) && <Copy muted>{`${m.custos_tarifa_in_out()}: — · ${m.custos_origem()}: —`}</Copy>}
+        {report.rates.filter((rate) => rate.model === bucket.key).map((rate, index) => <Copy key={index} muted>{`${rate.provider} · ${m.custos_tarifa_in_out()}: ${money(rate.input)} / ${money(rate.output)} · ${m.custos_tipo_cache_escrito()}: ${money(rate.cache_write)} · ${m.custos_tipo_cache_lido()}: ${money(rate.cache_read)} · ${m.custos_origem()}: ${rate.origin}${rate.cache_estimado ? ` · ${m.custos_cache_estimado()}` : ''}`}</Copy>)}
+        {bucket.cache_write === 0 && bucket.cache_read > 0 && <Copy muted>{m.custos_sem_cache_escrito_ajuda()}</Copy>}
+      </Card>} />
     </Card>;
   }
 
@@ -116,56 +165,112 @@ export function CostsScreen() {
     const sessions = report.sessoes.filter((session) => dimensions.every((dim) => !filter[dim]?.length || filter[dim]!.includes(session[dim]))).sort((a, b) => b.cost - a.cost);
     return <Card><Copy title>{m.custos_sessoes_caras()}</Copy><Copy muted>{m.custos_sessoes_hint()}</Copy>
       {!report.sessoes.length && <Copy muted>{load.parts.some((p) => p.report && !Array.isArray(p.report.sessoes)) ? m.custos_sessoes_atualize() : m.custos_sessoes_vazio()}</Copy>}
-      <Paged items={sessions} render={(session) => <Card><Copy title>{session.project || session.session_id}</Copy><Copy>{`${session.source} · ${session.provider} · ${session.model} · ${labelOf('servidor', session.servidor)}`}</Copy><Copy>{`${cost(session, session.model)} · ${number(rawTokens(session))} · ${m.custos_sessoes_e_subagentes()}: ${number(session.subagentes + 1)}`}</Copy><Copy muted>{`${session.session_id} · ${session.inicio} — ${session.fim}`}</Copy></Card>} />
+      {sessions.slice(0, sessionsExpanded ? 30 : 10).map((session) => <Card key={`${session.servidor}:${session.session_id}`}><Copy title>{session.project || session.session_id}</Copy><Copy>{cost(session, session.model)}</Copy><Copy>{`${session.source} · ${session.provider} · ${session.model} · ${labelOf('servidor', session.servidor)}`}</Copy><Copy>{`${m.custos_sessao_tokens_novos({ tokens: number(session.input + session.output + session.cache_write) })} · ${m.custos_subagentes()}: ${number(session.subagentes)}`}</Copy>{session.custo_regravado > 0 && <Copy>{m.custos_sessao_cache_perdido({ valor: money(session.custo_regravado) })}</Copy>}<Copy muted>{`${session.session_id} · ${session.inicio} — ${session.fim}`}</Copy></Card>)}
+      {sessions.length > 10 && <Action label={sessionsExpanded ? m.custos_mostrar_menos() : m.custos_ver_sessoes({ n: Math.min(30, sessions.length) })} onPress={() => setSessionsExpanded(!sessionsExpanded)} />}
     </Card>;
   }
 
   function renderComparison() {
     const comparisons = comparison(report, filter, compareDimension, compareKeys);
-    const comparisonMax = Math.max(1, ...comparisons.flatMap((v) => v.days.map((d) => metric === 'tokens' ? rawTokens(d) : d.cost)));
+    const weekly = period === '90d' || period === 'all';
+    const dateKey = (key: string) => {
+      if (!weekly) return key;
+      const date = new Date(`${key}T12:00:00Z`);
+      date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
+      return date.toISOString().slice(0, 10);
+    };
+    const maps = comparisons.map((entity) => {
+      const groups = new Map<string, DimBucket[]>();
+      for (const day of entity.days) { const key = dateKey(day.key); groups.set(key, [...(groups.get(key) ?? []), day]); }
+      return new Map([...groups].map(([key, buckets]) => [key, compareMetric === 'cost' && buckets.some(custoDesconhecido) ? null : buckets.reduce((sum, bucket) => sum + (compareMetric === 'tokens' ? rawTokens(bucket) : bucket.cost), 0)]));
+    });
+    const keys = [...new Set(maps.flatMap((map) => [...map.keys()]))].sort();
+    const points = [];
+    if (keys.length) for (let time = Date.parse(keys[0]); time <= Date.parse(keys.at(-1)!); time += (weekly ? 7 : 1) * 86_400_000) {
+      const key = new Date(time).toISOString().slice(0, 10);
+      points.push({ key, values: maps.map((map) => map.has(key) ? map.get(key)! : 0) });
+    }
+    const comparable = comparisons.reduce((sum, entity) => sum + (compareMetric === 'tokens' ? rawTokens(entity.total) : entity.total.cost), 0);
+    const metricLabel = compareMetric === 'tokens' ? m.ctx_tokens() : m.custos_estimativa_api();
     return <Card><Copy title>{m.lista_comparar()}</Copy><Copy muted>{m.custos_comparar_hint({ n: 4 })}</Copy>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{dimensions.map((dim) => <Action key={dim} label={`${m.custos_comparar_por()} ${names[dim]}`} selected={compareDimension === dim} onPress={() => { setCompareDimension(dim); setCompareKeys([]); }} />)}</View>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}><Action label={m.ctx_tokens()} selected={compareMetric === 'tokens'} onPress={() => setCompareMetric('tokens')} /><Action label={m.custos_estimativa_api()} selected={compareMetric === 'cost'} onPress={() => setCompareMetric('cost')} /></View>
       <Choice label={m.custos_entidades_comparadas()} options={optionBuckets(compareDimension)} values={compareKeys} max={4} onChange={setCompareKeys} />
       {!view.cross && <Copy muted>{m.custos_sem_detalhamento()}</Copy>}
       {compareKeys.length < 2 && <Copy>{m.custos_marque_duas()}</Copy>}
-      {comparisons.length >= 2 && <Paged items={comparisons} render={(entity) => <Card><Copy title>{labelOf(compareDimension, entity.key)}</Copy><Copy>{`${cost(entity.total, compareDimension === 'model' ? entity.key : undefined)} · ${number(rawTokens(entity.total))}`}</Copy>
-        <Paged items={fillDayGaps(entity.days)} render={(item) => <Bar label={item.key} value={metric === 'tokens' ? rawTokens(item) : item.cost} max={comparisonMax} detail={metric === 'tokens' ? number(rawTokens(item)) : cost(item as DimBucket)} />} />
-      </Card>} />}
+      {comparisons.length >= 2 && <>
+        <Grid>{comparisons.map((entity, index) => <Card key={entity.key}><Copy title>{labelOf(compareDimension, entity.key)}</Copy><View style={{ height: 3, backgroundColor: colors[index] }} /><Copy>{compareMetric === 'tokens' ? number(rawTokens(entity.total)) : cost(entity.total, compareDimension === 'model' ? entity.key : undefined)}</Copy>
+          <Copy muted>{compareMetric === 'tokens' ? cost(entity.total, compareDimension === 'model' ? entity.key : undefined) : number(rawTokens(entity.total))}</Copy><Copy>{`${m.uso_col_sessoes()}: ${number(entity.total.sessions)}`}</Copy>
+          <Copy muted>{compareMetric === 'cost' && custoDesconhecido(entity.total) ? '—' : m.custos_do_comparado({ pct: percent(compareMetric === 'tokens' ? rawTokens(entity.total) : entity.total.cost, comparable) })}</Copy>
+          <Copy muted>{`${compareMetric === 'tokens' ? number(rawTokens(entity.total) / periodDays, 1) : custoDesconhecido(entity.total) ? '—' : money(entity.total.cost / periodDays)} ${m.custos_por_dia()}`}</Copy>
+        </Card>)}</Grid>
+        {view.cross && <><Copy muted>{weekly ? m.custos_ponto_semana() : m.custos_ponto_dia()}</Copy><Columns lines label={m.custos_grafico_comp_aria({ metrica: metricLabel, modo: weekly ? m.custos_semana() : m.custos_dia() })} days={points} series={comparisons.map((entity, index) => ({ key: entity.key, label: labelOf(compareDimension, entity.key), color: colors[index] }))} format={compareMetric === 'tokens' ? number : money} /></>}
+      </>}
     </Card>;
   }
 
   const dayBucket = day ? view.days.find((item) => item.key === day) ?? { ...sumCombos([]), key: day } : undefined;
   return <ReportFrame title={m.nav_custos()} back={() => router.back()} sibling={m.uso_painel_titulo()} onSibling={() => router.push('/stats' as never)}>
+    <Copy title>{m.custos_consumo_estimativa()}</Copy><Copy muted>{m.custos_aviso_estimativa()}</Copy>
     <ReportControls own={own} refresh={() => { load.refresh(); areaLoad.refresh(); }} />
     <ReportStatus {...load} selected={selected.length} />
     {load.accepted && <>
-      <Copy muted>{m.custos_aviso_estimativa()}</Copy>
-      {report.sem_tarifa.length > 0 && <Copy muted>{`${m.custos_estimativa_incompleta({ n: report.sem_tarifa.length })} ${report.sem_tarifa.join(', ')}`}</Copy>}
+      {report.sem_tarifa.some((model) => !isFree(model)) && <Copy muted>{`${m.custos_estimativa_incompleta({ n: report.sem_tarifa.filter((model) => !isFree(model)).length })} ${report.sem_tarifa.filter((model) => !isFree(model)).join(', ')}`}</Copy>}
       <Card><Copy title>{m.custos_moeda()}</Copy><View style={{ flexDirection: 'row' }}><Action label="USD" selected={!brl || !validRate} onPress={() => setBrl(false)} /><Action label="BRL" disabled={!validRate} selected={brl && validRate} onPress={() => setBrl(true)} /></View>
         <Copy muted>{validRate ? m.custos_usd_brl({ taxa: number(report.usd_brl!, 4) }) : m.custos_cotacao_indisponivel()}</Copy>
       </Card>
       {filters}
-      <View style={{ gap: 10 }}>
-        <Card><Copy>{m.custos_custo_periodo()}</Copy><Copy title>{cost(total)}</Copy><Copy muted>{labelPrice(total)}</Copy><Copy muted>{m.custos_preco_tabela()}</Copy></Card>
+      <ScrollView horizontal><View style={{ flexDirection: 'row' }}><Action label={m.custos_todas_fontes()} selected={!filter.source?.length} onPress={() => setFilter(setCostFilter(filter, 'source', [], view.cross))} />{optionBuckets('source').map((source) => {
+        const bucket = costView(report, { ...filter, source: [source.key] }).total;
+        return <Action key={source.key} label={`${source.label} · ${number(bucket.input + bucket.output + bucket.cache_write)}`} selected={filter.source?.includes(source.key)} onPress={() => toggleFilter('source', source.key)} />;
+      })}</View></ScrollView>
+      <Grid>
+        <Card><Copy>{m.custos_custo_periodo()}</Copy><Copy title>{cost(total)}</Copy><Copy muted>{`${sessionsText(total)} · ${unknownCost(total) ? '—' : money(total.cost / periodDays)} ${m.custos_por_dia()}`}</Copy>
+          {unknownCost(total) && <Copy muted>{m.custos_sem_tarifa_volume()}</Copy>}{freeOnly && <Copy muted>{m.custos_modelo_gratis_nada()}</Copy>}
+          {view.cross && activeFilter && !view.rows.length && <Copy muted>{m.custos_recorte_vazio()}</Copy>}
+          {subCost > 0 && total.cost > 0 && <Copy muted>{m.custos_veio_subagente({ pct: percent(subCost, total.cost) })}</Copy>}
+          {delta !== null && <Copy muted>{Math.abs(delta) < 1 ? m.custos_delta_igual() : `${delta > 0 ? '▲' : '▼'} ${m.custos_delta_vs({ n: number(Math.abs(delta)), rot: periodLabel })}`}</Copy>}
+          {selected.length < own.length && <Copy muted>{m.custos_somando_maquinas({ n: selected.length, m: own.length })}</Copy>}<Copy muted>{m.custos_preco_tabela()}</Copy></Card>
         <Card><Copy>{m.custos_tokens_novos()}</Copy><Copy title>{number(newTokens)}</Copy><Copy muted>{m.custos_tokens_novos_pe()}</Copy></Card>
         <Card><Copy>{m.custos_tokens_processados()}</Copy><Copy title>{number(raw)}</Copy><Copy muted>{m.custos_tokens_processados_pe({ relidos: number(total.cache_read), pct: percent(total.cache_read, raw) })}</Copy></Card>
-        <Card><Copy>{m.custos_cache_na_entrada()}</Copy><Copy title>{percent(total.cache_read, total.input + total.cache_write + total.cache_read)}</Copy></Card>
-        <Card><Copy>{m.custos_economia_cache()}</Copy><Copy title>{noCache === null || custoDesconhecido(total) ? '—' : money(Math.max(0, noCache - total.cost))}</Copy><Copy muted>{m.custos_mesmos_tokens()}</Copy></Card>
-        <Card><Copy>{m.custos_equivalente_cobrado()}</Copy><Copy title>{equivalent === null || custoDesconhecido(total) ? '—' : number(equivalent)}</Copy><Copy muted>{m.custos_equivalente_metodo()}</Copy></Card>
-        <Card><Copy>{m.custos_custo_por_milhao()}</Copy><Copy title>{raw && !custoDesconhecido(total) ? money(total.cost / raw * 1e6) : '—'}</Copy><Copy muted>{m.custos_por_milhao_novos({ valor: newTokens && !custoDesconhecido(total) ? money(total.cost / newTokens * 1e6) : '—' })}</Copy></Card>
-        <Card><Copy>{m.custos_cache_perdido()}</Copy><Copy title>{report.cache_detalhado && !custoDesconhecido(total) ? money(total.custo_regravado ?? 0) : '—'}</Copy><Copy muted>{report.cache_detalhado ? m.custos_cache_perdido_pe({ tokens: number(total.regravado ?? 0) }) : m.custos_cache_sem_dado()}</Copy></Card>
+        <Card><Copy>{m.custos_cache_na_entrada()}</Copy><Copy title>{percent(total.cache_read, total.input + total.cache_write + total.cache_read)}</Copy>{total.cache_write > 0 && <Copy muted>{m.custos_cada_gravado_lido({ x: number(total.cache_read / total.cache_write, 1) })}</Copy>}</Card>
+        <Card><Copy>{m.custos_economia_cache()}</Copy><Copy title>{savingsKnown ? money(Math.max(0, noCache! - total.cost)) : '—'}</Copy><Copy muted>{!view.cross && activeFilter ? m.custos_so_total_periodo() : savingsKnown ? m.custos_abaixo_preco_cheio({ n: number(noCache! > 0 ? Math.max(0, 100 - total.cost / noCache! * 100) : 0) }) : m.custos_mesmos_tokens()}</Copy></Card>
+        <Card><Copy>{m.custos_custo_por_milhao()}</Copy><Copy title>{raw && !unknownCost(total) ? money(total.cost / raw * 1e6) : '—'}</Copy><Copy muted>{m.custos_por_milhao_novos({ valor: newTokens && !unknownCost(total) ? money(total.cost / newTokens * 1e6) : '—' })}</Copy></Card>
+        <Card><Copy>{m.custos_cache_perdido()}</Copy><Copy title>{report.cache_detalhado && !unknownCost(total) ? money(total.custo_regravado ?? 0) : '—'}</Copy><Copy muted>{report.cache_detalhado ? m.custos_cache_perdido_pe({ tokens: number(total.regravado ?? 0) }) : m.custos_cache_sem_dado()}</Copy></Card>
         <Card><Copy>{m.custos_cache_1h()}</Copy><Copy title>{report.cache_detalhado ? percent(total.cache_write_1h ?? 0, total.cache_write) : '—'}</Copy><Copy muted>{report.cache_detalhado ? m.custos_cache_1h_pe({ h1: number(total.cache_write_1h ?? 0), total: number(total.cache_write) }) : m.custos_cache_sem_dado()}</Copy></Card>
-      </View>
+      </Grid>
       {raw === 0 && <Copy>{activeFilter ? m.custos_sem_dados_recorte() : m.custos_sem_dados_periodo()}</Copy>}
-      <Card><Copy title>{m.custos_para_onde_dolar()}</Copy><Copy muted>{m.custos_tipo_token_conta()}</Copy>{renderTypes(total)}</Card>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}><View style={{ flexDirection: 'row' }}>{panels.map(([key, label]) => <Action key={key} label={label} selected={panel === key} onPress={() => { setPanel(key); setDay(null); }} />)}</View></ScrollView>
-      {panel === 'daily' ? renderDaily() : dimensions.includes(panel as Dimension) ? renderRanking(panel as Dimension) : panel === 'sessions' ? renderSessions() : panel === 'comparison' ? renderComparison() : panel === 'areas' ? <Card>
+      {renderDaily()}
+      <Card><Copy title>{m.custos_para_onde_dolar()}</Copy><Copy muted>{m.custos_tipo_token_conta()}</Copy><Composition label={m.custos_para_onde_dolar()} items={costParts(total)} />{renderTypes(total)}{!!labelPrice(total) && <Copy muted>{labelPrice(total)}</Copy>}</Card>
+      {(() => {
+        const cacheTotal = view.cross ? total : report.totals;
+        const without = view.cross ? noCache : report.custo_sem_cache;
+        const known = without !== null && without > 0 && !custoDesconhecido(cacheTotal);
+        const saved = known ? Math.max(0, without - cacheTotal.cost) : 0;
+        return <Card><Copy title>{m.custos_o_que_cache()}</Copy><Copy muted>{m.custos_mesmos_tokens()}</Copy>{!view.cross && activeFilter && <Copy muted>{m.custos_ressalva_cache()}</Copy>}
+          <Copy>{`${m.custos_pago_de_verdade()}: ${cost(cacheTotal)}`}</Copy>
+          {known && <Composition label={m.custos_o_que_cache()} items={[{ label: m.custos_pago_de_verdade(), value: cacheTotal.cost, color: colors[0], detail: money(cacheTotal.cost) }, { label: m.custos_economizado(), value: saved, color: colors[2], detail: money(saved) }]} />}
+          <Copy>{`${m.custos_se_nada_cache()}: ${known ? money(without) : '—'}`}</Copy><Copy>{`${m.custos_economizado()}: ${known ? money(saved) : '—'}`}</Copy><Copy>{`${percent(cacheTotal.cache_read, rawTokens(cacheTotal))} ${m.custos_do_volume_cache_lido()}`}</Copy>
+        </Card>;
+      })()}
+      {renderRanking('provider')}{renderRanking('source')}
+      {selected.length > 1 && renderRanking('servidor')}
+      <Card>
         <Copy title>{m.uso_graf_areas()}</Copy><Copy muted>{m.uso_graf_areas_nota()}</Copy><Copy muted>{m.mobile_costs_area_scope()}</Copy>
         <ReportStatus {...areaLoad} selected={areaServers.length} />
-        {areaLoad.accepted && <Paged items={areas.by_area} render={(item) => <Bar label={item.label ?? item.key} value={rawTokens(item)} max={areasMax} detail={`${number(rawTokens(item))} · ${cost(item)}`} />} />}
+        {areaLoad.accepted && <><Composition label={m.uso_graf_areas()} items={orderedAreas.map((item, index) => ({ label: item.label ?? item.key, value: rawTokens(item), color: colors[index % colors.length] }))} /><Copy muted>{`${m.uso_col_nome()} · ${m.ctx_tokens()} · ${m.custos_custo()} · ${m.custos_areas_pct()}`}</Copy><Paged items={orderedAreas} render={(item) => <Bar label={item.label ?? item.key} value={rawTokens(item)} max={areaTokens} detail={`${number(rawTokens(item))} · ${cost(item)} · ${percent(rawTokens(item), areaTokens)}`} />} /></>}
         {areaLoad.accepted && <Paged items={areas.by_area_dia} render={(item) => <View><Copy>{item.key.slice(0, 10)}</Copy><Copy>{`${item.key.slice(11)}: ${number(rawTokens(item))} · ${cost(item)}`}</Copy></View>} />}
-      </Card> : <Card><Copy title>{m.custos_como_calculamos()}</Copy><Copy>{m.custos_custo_tabela()}{m.custos_nao_fatura()}{m.custos_assinatura()}</Copy><Copy>{m.custos_metodo_standard()}</Copy><Copy>{m.custos_metodo_codex()}</Copy><Copy>{m.custos_equivalente_metodo()}</Copy><Copy>{m.custos_tarifas_models()}</Copy></Card>}
-      {day !== null && <Sheet open onDismiss={() => setDay(null)} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}><Copy title>{day}</Copy>{dayBucket && <><Copy>{`${number(rawTokens(dayBucket))} · ${cost(dayBucket)}`}</Copy>{renderTypes(dayBucket)}</>}<Action label={m.native_close()} onPress={() => setDay(null)} /></ScrollView></Sheet>}
+      </Card>
+      {renderRanking('project')}{renderSessions()}{renderModels()}{renderComparison()}
+      <Action label={m.custos_como_calculamos()} selected={methodOpen} icon={methodOpen ? 'ChevronDown' : 'ChevronRight'} onPress={() => setMethodOpen(!methodOpen)} />
+      {methodOpen && <Card><Copy>{m.custos_metodo_standard()}</Copy><Copy>{m.custos_metodo_codex()}</Copy><Copy>{`${m.custos_equivalente_cobrado()}: ${equivalent === null || unknownCost(total) ? '—' : number(equivalent)}`}</Copy><Copy>{m.custos_equivalente_metodo()}</Copy>
+        <Copy>{`${m.custos_fontes()} ${m.custos_claude_code()} · Codex · Pi · omp · Kimi`}</Copy><Copy>{m.custos_tarifas()}{m.custos_tarifas_models()}</Copy>
+        {brl && validRate && <Copy>{`${m.custos_cotacao()}: ${m.custos_usd_brl({ taxa: number(report.usd_brl!, 4) })}`}</Copy>}
+        <Copy>{m.custos_custo_tabela()}{m.custos_nao_fatura()}{m.custos_assinatura()}</Copy>
+        {report.sem_tarifa.some(isFree) && <Copy>{`${m.custos_modelos_gratis()}: ${report.sem_tarifa.filter(isFree).join(', ')} · ${m.custos_modelo_gratis_nenhum_dolar()}`}</Copy>}
+        {report.sem_tarifa.some((model) => !isFree(model)) && <Copy>{`${m.custos_modelos_sem_tarifa()}: ${m.custos_aparecem_traco({ lista: report.sem_tarifa.filter((model) => !isFree(model)).join(', ') })}`}</Copy>}
+      </Card>}
+      {day !== null && <Sheet open onDismiss={() => setDay(null)} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}><Copy title>{day}</Copy>{dayBucket && <><Copy>{`${number(rawTokens(dayBucket))} · ${cost(dayBucket)}`}</Copy><Copy>{sessionsText(dayBucket, view.rows.filter((row) => row.dia === day))}</Copy><Copy muted>{m.custos_dia_reuso({ pct: percent(dayBucket.cache_read, dayBucket.input + dayBucket.cache_write + dayBucket.cache_read) })}</Copy>{renderTypes(dayBucket)}</>}<Action label={m.native_close()} onPress={() => setDay(null)} /></ScrollView></Sheet>}
     </>}
   </ReportFrame>;
 }

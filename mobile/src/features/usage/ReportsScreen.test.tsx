@@ -21,6 +21,10 @@ vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open: boolean; children: ReactNode }) => React.createElement('section', { 'data-sheet-mounted': true }, open ? React.createElement('aside', null, children) : null) }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(), TextInput: ({ value, onChangeText, accessibilityLabel }: { value: string; onChangeText: (text: string) => void; accessibilityLabel: string }) => React.createElement('input', { value, 'aria-label': accessibilityLabel, onInput: (event: React.FormEvent<HTMLInputElement>) => onChangeText(event.currentTarget.value) }) }));
+vi.mock('react-native-svg', () => {
+  const tag = (name: string) => ({ children, ...props }: Record<string, unknown>) => React.createElement(name, props, children as ReactNode);
+  return { default: tag('svg'), Rect: tag('rect'), Line: tag('line'), Polyline: tag('polyline'), Circle: tag('circle'), Text: tag('text') };
+});
 import CostsScreen from '../../../app/costs';
 import StatsScreen from '../../../app/stats';
 import { useServers } from '../../stores/servers';
@@ -98,24 +102,73 @@ it.each(['costs', 'stats'] as const)('folhas fechadas não montam e desmontam ao
   expect(sheets()).toHaveLength(0);
 });
 
-it('custos públicos têm cartões honestos, painéis tocáveis, comparação, áreas e navegação inteira', async () => {
+it('custos sequenciais seguem a ordem desktop com oito cartões e metodologia recolhida', async () => {
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const headings = [m.custos_consumo_estimativa(), m.custos_periodo(), m.custos_moeda(), m.custos_filtros(), m.custos_todas_fontes(), m.custos_custo_periodo(), m.custos_tokens_novos(), m.custos_tokens_processados(), m.custos_cache_na_entrada(), m.custos_economia_cache(), m.custos_custo_por_milhao(), m.custos_cache_perdido(), m.custos_cache_1h(), m.custos_uso_por_dia(), m.custos_para_onde_dolar(), m.custos_o_que_cache(), m.custos_por_provedor(), m.custos_por_fonte(), m.custos_por_maquina(), m.uso_graf_areas(), m.custos_por_projeto(), m.custos_sessoes_caras(), m.custos_por_modelo(), m.lista_comparar(), m.custos_como_calculamos()];
+  const text = node.textContent!;
+  let previous = -1;
+  for (const label of headings) {
+    const index = text.indexOf(label, previous + 1);
+    expect(index, label).toBeGreaterThan(previous);
+    previous = index;
+  }
+  for (const label of [m.custos_uso_por_dia(), m.custos_por_provedor(), m.custos_por_projeto(), m.custos_por_modelo(), m.lista_comparar()]) expect(node.querySelector(`button[aria-label="${label}"]`)).toBeNull();
+  const kpi = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_tokens_novos())!;
+  expect(kpi.parentElement?.parentElement?.parentElement?.style.flexWrap).toBe('wrap');
+  expect(text).not.toContain(m.custos_equivalente_cobrado());
+  expect(text).not.toContain(m.custos_metodo_standard());
+  expect(net.usage).toHaveBeenCalledWith(a, '30d', { projeto: [], modelo: [] }, false);
+  await click(m.custos_como_calculamos());
+  expect(node.textContent).toContain(m.custos_equivalente_cobrado());
+  expect(node.textContent).toContain(m.custos_metodo_standard());
+  await click(m.custos_como_calculamos());
+  expect(node.textContent).not.toContain(m.custos_metodo_standard());
+});
+
+it('custos rodapés identificam sessões, subagentes, média, comparação, máquinas e reuso diário', async () => {
+  useUsagePreferences.setState({ off: ['b'] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), anterior: { ...combo, key: 'previous', cost: 2 }, combos: [{ ...combo, cost: 3, custo_sem_cache: 6 }, { ...combo, subagente: true, session_ids: ['child'], cost: 1, custo_sem_cache: 2 }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const card = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!;
+  expect(card(m.custos_custo_periodo()).textContent).toContain(`1 ${m.sessao_singular()} · 1 ${m.custos_subagente()}`);
+  expect(card(m.custos_custo_periodo()).textContent).toContain(`US$ 0,13 ${m.custos_por_dia()}`);
+  expect(card(m.custos_custo_periodo()).textContent).toContain(m.custos_veio_subagente({ pct: '25%' }));
+  expect(card(m.custos_custo_periodo()).textContent).toContain(m.custos_delta_vs({ n: '100', rot: m.custos_periodo_30d() }));
+  expect(card(m.custos_custo_periodo()).textContent).toContain(m.custos_somando_maquinas({ n: 1, m: 2 }));
+  expect(card(m.custos_cache_na_entrada()).textContent).toContain(m.custos_cada_gravado_lido({ x: '5' }));
+  expect(card(m.custos_economia_cache()).textContent).toContain(m.custos_abaixo_preco_cheio({ n: '50' }));
+  await click('2026-10-01');
+  expect(node.querySelector('aside')?.textContent).toContain(`1 ${m.sessao_singular()} · 1 ${m.custos_subagente()}`);
+  expect(node.querySelector('aside')?.textContent).toContain(m.custos_dia_reuso({ pct: '31,3%' }));
+});
+
+it('custos grátis e estimativa hipotética ausente não se confundem com economia zero', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, model: 'free-model:free' }], sem_tarifa: ['free-model:free'] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const card = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!;
+  expect(card(m.custos_custo_periodo()).textContent).toContain('US$ 0,00');
+  expect(card(m.custos_custo_periodo()).textContent).toContain(m.custos_modelo_gratis_nada());
+  expect(node.textContent).not.toContain(m.custos_estimativa_incompleta({ n: 1 }));
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 2 }] }));
+  await click(m.custos_atualizar());
+  expect(card(m.custos_economia_cache()).textContent).toContain('—');
+  expect(card(m.custos_economia_cache()).textContent).not.toContain('US$ 0,00');
+});
+
+it('custos públicos têm cartões honestos, seções sequenciais, comparação, áreas e navegação inteira', async () => {
   await act(async () => root.render(React.createElement(CostsScreen)));
   expect(node.textContent).toContain(m.custos_custo_periodo());
   expect(node.textContent).toContain(m.custos_sem_tarifa());
   expect(net.costs).toHaveBeenCalledWith(a, '30d', false, false);
-  await click(m.custos_gasto_por_dia());
   await click('2026-10-01');
-  expect(node.textContent).toContain('360');
-  await click(m.custos_por_modelo());
+  expect(node.querySelector('aside')?.textContent).toContain('360');
+  await click(m.native_close());
   expect(node.textContent).toContain('missing');
-  await click(m.custos_por_projeto());
   await click(m.custos_tirar_da_lista({ nome: '/project-one' }));
   expect(node.textContent).toContain(m.custos_fora_da_lista({ n: 1, valor: '—' }));
-  await click(m.lista_comparar());
   expect(node.textContent).toContain(m.custos_comparar_hint({ n: 4 }));
-  await click(m.custos_sessoes_caras());
   expect(node.textContent).toContain(m.custos_sessoes_hint());
-  await click(m.uso_graf_areas());
   expect(node.textContent).toContain('front');
   expect(net.usage).toHaveBeenCalledWith(a, '30d', { projeto: [], modelo: [] }, false);
   await click(m.custos_como_calculamos());
@@ -126,24 +179,371 @@ it('custos públicos têm cartões honestos, painéis tocáveis, comparação, �
   expect(net.back).toHaveBeenCalledTimes(1);
 });
 
-it.each([
-  ['pt', 'Detalhado por tipo de token. Cada linha é um dia.', 'toque numa linha para o detalhe do dia', 'Detalhado por conta / provedor. Cada linha é um dia.'],
-  ['en', 'Detailed by token type. Each row is a day.', "tap a row for the day's detail", 'Detailed by account / provider. Each row is a day.'],
-] as const)('instruções diárias descrevem linhas e sublinhas sem empilhamento em %s', async (locale, description, hint, providerDescription) => {
-  configureLocale({ getLocale: () => locale });
-  overwriteGetLocale(() => locale);
+it.each(['pt', 'en'] as const)('diário usa colunas empilhadas tocáveis, legenda e custo por fonte em %s', async (locale) => {
+  configureLocale({ getLocale: () => locale }); overwriteGetLocale(() => locale);
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 4, cost_input: 1, cost_output: 2, cost_cache_write: 0.8, cost_cache_read: 0.2 }, { ...combo, dia: '2026-10-03', source: 'codex', cost: 6, cost_input: 2, cost_output: 3, cost_cache_write: 0.8, cost_cache_read: 0.2 }] }));
   await act(async () => root.render(React.createElement(CostsScreen)));
-  expect(node.textContent).toContain(description);
-  expect(node.textContent).toContain(hint);
-  expect(node.textContent).not.toContain(m.custos_empilhado_por({ modo: m.custos_tipo_token() }));
-  expect(node.textContent).not.toContain(m.custos_hover_detalhe());
-  const day = [...node.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('2026-10-01: '));
-  expect(day?.parentElement?.textContent).toContain(m.custos_input_sem_cache());
-  expect(day?.parentElement?.textContent).toContain(m.custos_output_total());
-  const provider = [...node.querySelectorAll('button')].filter((button) => button.getAttribute('aria-label') === m.custos_dim_provedor()).at(-1);
-  expect(provider).toBeTruthy();
-  await act(async () => provider!.click());
-  expect(node.textContent).toContain(providerDescription);
+  const chart = () => node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: m.ctx_tokens() })}"]`)!;
+  expect(node.textContent).toContain(m.custos_empilhado_por({ modo: m.custos_tipo_token() }));
+  expect(node.textContent).toContain(m.custos_hover_detalhe());
+  expect(node.textContent).not.toContain(m.mobile_costs_daily_hint());
+  expect(chart()).toBeTruthy();
+  expect(chart().querySelectorAll('rect')).toHaveLength(6);
+  const dayButton = () => chart().querySelector('button[aria-label^="2026-10-01:"]')!;
+  expect(dayButton().getAttribute('aria-label')).toContain('130');
+  await click(m.custos_tipo_cache_lido());
+  expect(chart().querySelectorAll('rect')).toHaveLength(8);
+  expect(dayButton().getAttribute('aria-label')).toContain('180');
+  await click('2026-10-02');
+  expect(node.querySelector('aside')?.textContent).toContain(m.custos_tipo_cache_lido());
+  expect(node.querySelector('aside')?.textContent).toContain('0');
+  await click(m.native_close());
+  await click(m.custos_estimativa_api());
+  expect(node.textContent).toContain(m.custos_empilhado_por({ modo: m.custos_dim_fonte() }));
+  const costChart = node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: m.custos_estimativa_api() })}"]`)!;
+  expect(costChart.querySelectorAll('rect')).toHaveLength(2);
+  expect(costChart.querySelector('button[aria-label^="2026-10-03:"]')?.getAttribute('aria-label')).toContain('codex');
+  await click('codex');
+  expect(costChart.querySelectorAll('rect')).toHaveLength(1);
+  await click('claude · 130');
+  const kpi = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_tokens_processados())?.parentElement;
+  expect(kpi?.textContent).toContain('180');
+  expect(node.textContent).toContain(m.custos_por_modelo());
+  await click(m.custos_todas_fontes());
+  expect(kpi?.textContent).toContain('360');
+});
+
+it('diário legado estima por tipo e não desenha custo desconhecido como zero', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_estimativa_api());
+  expect(node.textContent).toContain(m.custos_recorte_parcial());
+  expect(node.textContent).toContain(m.custos_empilhado_por({ modo: m.custos_tipo_token() }));
+  const chart = node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: m.custos_estimativa_api() })}"]`)!;
+  expect(chart.querySelectorAll('rect')).toHaveLength(0);
+  expect(chart.querySelector('button')?.getAttribute('aria-label')).toContain('—');
+});
+
+it('comparação desenha linhas e pontos diários ou semanais com métrica independente', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [
+    { ...combo, cost: 3 }, { ...combo, provider: 'provider-two', dia: '2026-10-03', cost: 7 },
+    { ...combo, dia: '2026-10-09', input: 200, cost: 5 }, { ...combo, provider: 'provider-two', project: '/other', cost: 99 },
+  ] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_dim_provedor()); await click(`${m.custos_dim_provedor()}: provider-one`); await click(m.native_close());
+  await click(m.custos_dim_projeto()); await click(`${m.custos_dim_projeto()}: /project-one`); await click(m.native_close());
+  await click(m.custos_entidades_comparadas()); await click(`${m.custos_entidades_comparadas()}: provider-one`); await click(`${m.custos_entidades_comparadas()}: provider-two`); await click(m.native_close());
+  const chart = (metric: string, mode: string) => node.querySelector(`[aria-label="${m.custos_grafico_comp_aria({ metrica: metric, modo: mode })}"]`)!;
+  expect(chart(m.ctx_tokens(), m.custos_dia())).toBeTruthy();
+  expect(chart(m.ctx_tokens(), m.custos_dia()).querySelectorAll('polyline')).toHaveLength(2);
+  expect(chart(m.ctx_tokens(), m.custos_dia()).querySelectorAll('circle')).toHaveLength(18);
+  const section = [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+  const costMetric = [...section.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === m.custos_estimativa_api())!;
+  await act(async () => costMetric.click());
+  expect(chart(m.custos_estimativa_api(), m.custos_dia()).querySelectorAll('circle')).toHaveLength(18);
+  expect(node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: m.ctx_tokens() })}"]`)).toBeTruthy();
+  const entity = [...section.querySelectorAll('span')].find((span) => span.textContent === 'provider-two')!.parentElement!;
+  expect(entity.textContent).toContain('US$ 7,00'); expect(entity.textContent).not.toContain('US$ 106,00');
+  await click(m.custos_periodo_90d());
+  expect(chart(m.custos_estimativa_api(), m.custos_semana()).querySelectorAll('circle')).toHaveLength(4);
+  const weeklySection = chart(m.custos_estimativa_api(), m.custos_semana()).parentElement!;
+  expect(weeklySection.textContent).toContain('2026-09-28'); expect(weeklySection.textContent).toContain('2026-10-05');
+  expect(weeklySection.textContent).toContain(m.custos_ponto_semana());
+});
+
+it('comparação sem detalhamento conserva cartões sem inventar série', async () => {
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [], by_provider: [{ ...combo, key: 'provider-one' }, { ...combo, key: 'provider-two' }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_entidades_comparadas()); await click(`${m.custos_entidades_comparadas()}: provider-one`); await click(`${m.custos_entidades_comparadas()}: provider-two`); await click(m.native_close());
+  const section = [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+  expect(section.textContent).toContain(m.custos_sem_detalhamento()); expect(section.textContent).toContain('provider-two');
+  expect(section.querySelector('polyline')).toBeNull(); expect(section.querySelector('circle')).toBeNull();
+});
+
+it('custos composição conserva custos e percentuais, economia e áreas ordenadas', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 10, cost_input: 2, cost_output: 6, cost_cache_write: 1, cost_cache_read: 1, custo_sem_cache: 20 }] }));
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [{ ...skill, key: 'conversa', input: 2, output: 0 }, { ...skill, key: 'back', input: 6, output: 0 }, { ...skill, key: 'front', input: 2, output: 0 }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const composition = node.querySelector(`[aria-label^="${m.custos_para_onde_dolar()}:"]`);
+  expect(composition).toBeTruthy();
+  expect(composition?.getAttribute('aria-label')).toContain('60%');
+  expect([...composition!.children].map((part) => (part as HTMLElement).style.width)).toEqual(['20%', '60%', '10%', '10%']);
+  const cache = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_o_que_cache())?.parentElement;
+  expect(cache?.textContent).toContain(`${m.custos_se_nada_cache()}: US$ 20,00`);
+  expect(cache?.textContent).toContain(`${m.custos_economizado()}: US$ 10,00`);
+  expect(cache?.textContent).toContain('27,8%');
+  const areas = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_graf_areas())?.parentElement;
+  const areaLabels = [...areas!.querySelectorAll('[aria-label]')].map((row) => row.getAttribute('aria-label')).filter((label) => /^(front|back|conversa):/.test(label ?? ''));
+  expect(areaLabels.map((label) => label?.split(':')[0])).toEqual(['front', 'back', 'conversa']);
+  expect(areaLabels[0]).toContain('20%');
+  expect(node.querySelector('button[aria-label="' + m.custos_por_maquina() + '"]')).toBeNull();
+});
+
+it('custos listas expandem projetos e sessões e modelos conservam todos os campos', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period),
+    combos: Array.from({ length: 14 }, (_, index) => ({ ...combo, project: `/project-${String(index).padStart(2, '0')}`, model: 'known', cost: 20 - index, cost_input: 2, cost_output: 3, cost_cache_write: 1, cost_cache_read: 1 })),
+    rates: [{ model: 'known', provider: 'catalog', input: 1, output: 5, cache_write: 1.25, cache_read: 0.1, origin: 'snapshot', cache_estimado: true }], sem_tarifa: ['known'],
+    sessoes: Array.from({ length: 31 }, (_, index) => ({ ...combo, model: 'known', session_id: `session-${index}`, project: `/session-${String(index).padStart(2, '0')}`, inicio: '2026-10-01', fim: '2026-10-02', cost: 40 - index, subagentes: 2, custo_regravado: 0.25 })),
+  }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const section = (title: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === title)?.parentElement!;
+  const projects = section(m.custos_por_projeto());
+  expect(projects.textContent).not.toContain('/project-12');
+  await click(m.custos_ver_projetos({ n: 14 }));
+  expect(projects.textContent).toContain('/project-13');
+  await click(m.custos_tirar_da_lista({ nome: '/project-13' }));
+  expect(projects.textContent).toContain(m.custos_fora_da_lista({ n: 1, valor: 'US$ 7,00' }));
+  await click(m.custos_mostrar_todos());
+  expect(projects.textContent).not.toContain(m.custos_fora_da_lista({ n: 1, valor: 'US$ 7,00' }));
+  const sessions = section(m.custos_sessoes_caras());
+  expect(sessions.textContent).toContain('/session-09');
+  expect(sessions.textContent).not.toContain('/session-10');
+  expect(sessions.textContent).toContain(m.custos_sessao_tokens_novos({ tokens: '130' }));
+  expect(sessions.textContent).toContain(m.custos_sessao_cache_perdido({ valor: 'US$ 0,25' }));
+  expect(sessions.textContent).toContain(`${m.custos_subagentes()}: 2`);
+  await click(m.custos_ver_sessoes({ n: 30 }));
+  expect(sessions.textContent).toContain('/session-29');
+  expect(sessions.textContent).not.toContain('/session-30');
+  const models = section(m.custos_por_modelo());
+  for (const label of [m.custos_col_entrada(), m.custos_output_total(), m.custos_tipo_cache_lido(), m.custos_tarifa_in_out(), m.custos_origem(), m.custos_col_pct_conta(), m.custos_preco_parcial(), m.custos_cache_estimado()]) expect(models.textContent).toContain(label);
+  expect(models.textContent).toContain('2.240 / 1.400');
+  expect(models.textContent).toContain('snapshot');
+  expect(models.textContent).toContain(`${m.custos_tipo_cache_escrito()}: US$ 1,25`);
+  expect(models.textContent).toContain(`${m.custos_tipo_cache_lido()}: US$ 0,10`);
+  await click(m.custos_como_calculamos());
+  for (const label of [m.custos_fontes(), m.custos_tarifas(), m.custos_modelos_sem_tarifa(), m.custos_equivalente_cobrado()]) expect(node.textContent).toContain(label);
+});
+
+it('modelo com tarifas diferentes entre provedores mantém aviso de preço parcial', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period),
+    combos: [{ ...combo, model: 'shared-model', cost: 3 }], sem_tarifa: ['shared-model'],
+    rates: [{ model: 'shared-model', provider: 'provider-one', input: 1, output: 5, cache_write: 1.25, cache_read: 0.1, origin: 'snapshot' }, { model: 'shared-model', provider: 'provider-two', input: 2, output: 10, cache_write: 2.5, cache_read: 0.2, origin: 'snapshot' }],
+  }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const models = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_modelo())!.parentElement!;
+  const model = models.querySelector('button[aria-label^="shared-model:"]')!.parentElement!.parentElement!;
+  expect(model.textContent).toContain('US$ 3,00');
+  expect(model.textContent).toContain('provider-one'); expect(model.textContent).toContain('provider-two');
+  expect(model.textContent).toContain(m.custos_preco_parcial());
+});
+
+it('custos máquina mantém total do período mesmo após recortar projeto', async () => {
+  net.costs.mockImplementation((server: Server, period: string) => Promise.resolve({ ...costs(period), totals: { ...combo, key: 'totals', cost: server.id === 'a' ? 10 : 20 }, combos: [{ ...combo, cost: 2 }, { ...combo, project: '/other', cost: 8 }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_dim_projeto()); await click(`${m.custos_dim_projeto()}: /project-one`); await click(m.native_close());
+  const machines = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_maquina())?.parentElement;
+  expect(machines?.textContent).toContain(m.custos_onde_sessao());
+  expect(machines?.querySelector('button[aria-label^="Machine A:"]')?.getAttribute('aria-label')).toContain('US$ 10,00');
+  expect(machines?.querySelector('button[aria-label^="Machine B:"]')?.getAttribute('aria-label')).toContain('US$ 20,00');
+});
+
+it('estatísticas mostram seis respostas na ordem desktop e excluem grupos internos e valores zero', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_skill: [{ ...skill, key: '@repo:internal', plugin: '@repo', ocupados_eq_tokens_est: 2_000 }, { ...skill, key: 'real:heavy', plugin: 'real', ocupados_eq_tokens_est: 800, chamadas: 2 }, { ...skill, key: 'real:loaded', plugin: 'real', ocupados_eq_tokens_est: 100, chamadas: 30 }],
+    by_agente: [{ ...skill, key: '@nativo:internal-agent', plugin: '@nativo', cost: 20 }, { ...skill, key: 'real:review', plugin: 'real', cost: 4, chamadas: 3 }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  const labels = [m.uso_resp_plugin_skills(), m.uso_resp_skill_contexto(), m.uso_resp_skill_usada(), m.uso_resp_plugin_agentes(), m.uso_resp_agente_caro(), m.uso_resp_ferramenta()];
+  const cards = labels.map((label) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!);
+  expect(cards.map((card) => card.querySelectorAll('span')[1].textContent)).toEqual(['real', 'internal', 'loaded', 'real', 'internal-agent', 'Read']);
+  expect(cards[0].textContent).toContain(m.uso_resp_plugin_skills_sub({ n: '900', pct: '31' }));
+  expect(cards[2].textContent).toContain(m.uso_resp_grupo_vezes({ grupo: 'real', n: '30' }));
+  expect(cards[3].textContent).toContain(m.uso_resp_agente_custo_sub({ custo: 'US$ 4,00', n: '3' }));
+  let index = -1; for (const label of labels) { const next = node.textContent!.indexOf(label); expect(next).toBeGreaterThan(index); index = next; }
+  expect(cards[0].parentElement?.parentElement?.style.flexWrap).toBe('wrap');
+  expect(node.textContent).not.toContain(m.mobile_usage_most_loaded_plugin());
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...filters, applied: { period }, totals: zeroUso('totals'), by_skill: [zeroUso('empty')], by_agente: [zeroUso('empty')], by_tool: [zeroUso('empty')] }));
+  await click(m.custos_atualizar());
+  for (const label of labels) expect([...node.querySelectorAll('span')].find((span) => span.textContent === label)?.parentElement?.textContent).toBe(`${label}—`);
+});
+
+it('estatísticas principais mantêm skills duplas, ferramentas e agentes visíveis durante busca e expansão', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_skill: [{ ...skill, key: 'first:heavy', plugin: 'first', ocupados_eq_tokens_est: 800, chamadas: 2 }, { ...skill, key: 'first:light', plugin: 'first', ocupados_eq_tokens_est: 20, chamadas: 12 }, { ...skill, key: 'second:hidden-skill', plugin: 'second', ocupados_eq_tokens_est: 50 }],
+    by_tool: [{ ...skill, key: 'Bash', chamadas: 100 }, ...Array.from({ length: 12 }, (_, index) => ({ ...skill, key: `tool-${index}`, chamadas: 20 - index })), { ...skill, key: 'Skill', chamadas: 999 }, { ...skill, key: 'Agent', chamadas: 999 }],
+    by_bash: Array.from({ length: 6 }, (_, index) => ({ ...skill, key: `command-${index}`, chamadas: 10 - index })),
+    by_agente: [{ ...skill, key: 'agents:review', plugin: 'agents', cost: 4, input: 101, output: 22, cache_write: 33, cache_read: 44, cost_input: 1, cost_output: 2, cost_cache_write: 0.6, cost_cache_read: 0.4 }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  const section = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!;
+  const skills = () => section(m.uso_sec_por_plugin());
+  expect(skills().querySelector('button[aria-label^="heavy:"]')).toBeTruthy();
+  expect(skills().querySelector('button[aria-label^="hidden-skill:"]')).toBeNull();
+  const heavy = skills().querySelector('button[aria-label^="heavy:"]')!;
+  expect(heavy.textContent).toContain(`${m.uso_col_peso()}≈ 800`); expect(heavy.textContent).toContain(`${m.uso_col_cargas()}2`);
+  await click('second'); expect(skills().querySelector('button[aria-label^="hidden-skill:"]')).toBeTruthy();
+  await click(m.uso_ordenar_por({ col: m.uso_col_vezes() }));
+  expect([...skills().querySelectorAll('button')].filter((button) => /^(heavy|light):/.test(button.getAttribute('aria-label') ?? '')).map((button) => button.getAttribute('aria-label')?.split(':')[0])).toEqual(['light', 'heavy']);
+  const tools = section(m.uso_rank_ferramentas());
+  expect(tools.querySelectorAll('button')).toHaveLength(12); expect(tools.textContent).toContain(m.uso_mais_na_tabela({ n: 1 }));
+  expect(tools.textContent).toContain('command-4'); expect(tools.textContent).not.toContain('command-5');
+  expect(tools.querySelector('button[aria-label^="Skill:"]')).toBeNull(); expect(tools.querySelector('button[aria-label^="Agent:"]')).toBeNull();
+  const agents = section(m.uso_sub_titulo());
+  expect(agents.textContent).toContain(m.uso_cache_legado_nota());
+  for (const text of ['agents', 'review', '101 · US$ 1,00', '22 · US$ 2,00', '33 · US$ 0,60', '44 · US$ 0,40', `${m.uso_col_sessoes()}: 2`]) expect(agents.textContent).toContain(text);
+  const search = node.querySelector<HTMLInputElement>('input')!;
+  await act(async () => { search.value = 'hidden-skill'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+  expect(skills().textContent).not.toContain('heavy'); expect(skills().textContent).toContain('hidden-skill');
+  expect(section(m.uso_rank_ferramentas()).textContent).toContain('Bash'); expect(section(m.uso_sub_titulo()).textContent).toContain('review');
+  expect(section(m.uso_resp_skill_contexto()).textContent).toContain('heavy');
+  for (const label of [m.uso_aba_skills(), m.uso_aba_tools(), m.uso_aba_agentes()]) expect(node.querySelector(`button[aria-label="${label}"]`)).toBeNull();
+});
+
+it('estatísticas avançadas reúnem colunas diárias, composição por sessão e oito tabelas ordenáveis de vinte itens', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    totals: { ...skill, sessions: 2 },
+    by_skill: Array.from({ length: 25 }, (_, index) => ({ ...skill, key: `plugin:item-${String(index).padStart(2, '0')}`, ocupados_eq_tokens_est: index + 1, chamadas: 25 - index, respostas: 100 + index })),
+    by_contexto: [{ ...skill, key: 'instructions', ctx_tokens_est: 60 }, { ...skill, key: 'hooks', ctx_tokens_est: 40 }],
+    by_day: [{ ...skill, key: '2026-10-01', chamadas: 2 }, { ...skill, key: '2026-10-03', chamadas: 8 }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  expect(node.textContent).not.toContain(m.uso_graf_chamadas_dia());
+  await click(m.uso_avancado());
+  const heading = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!;
+  const daily = heading(m.uso_graf_chamadas_dia());
+  expect(daily.querySelectorAll('rect')).toHaveLength(2);
+  expect([...daily.querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['45', '180']);
+  const composition = node.querySelector(`[aria-label^="${m.uso_graf_ctx()}:"]`)!;
+  expect([...composition.children].map((part) => (part as HTMLElement).style.width)).toEqual(['60%', '0%', '40%', '0%', '0%']);
+  expect(heading(m.uso_graf_ctx()).textContent).toContain(`≈ 50 ${m.uso_por_sessao()}`);
+  expect(heading(m.uso_graf_ctx()).textContent).toContain('≈ 30 · 60%');
+  for (const label of [m.uso_aba_skills(), m.uso_aba_agentes(), m.uso_aba_plugins(), m.uso_aba_tools(), m.uso_aba_bash(), m.uso_aba_mcp(), m.uso_aba_contexto(), m.uso_aba_imagens()]) expect(node.querySelector(`button[aria-label="${label}"]`)).toBeTruthy();
+  const table = () => node.querySelector(`div[aria-label="${m.uso_aba_skills()}"]`)!;
+  expect(table().querySelectorAll('button[aria-label^="plugin:item-"]')).toHaveLength(20);
+  expect(table().textContent).toContain(`${m.uso_col_respostas()}: 124`);
+  expect(table().textContent).toContain(`${m.uso_col_tamanho()}: ≈ 20`);
+  expect(table().textContent).not.toContain(m.uso_sec_por_plugin());
+  const sort = async (column: string) => { const button = table().querySelector<HTMLButtonElement>(`button[aria-label="${m.uso_ordenar_por({ col: column })}"]`)!; expect(button).toBeTruthy(); await act(async () => button.click()); };
+  const first = () => table().querySelector('button[aria-label^="plugin:item-"]')!.getAttribute('aria-label');
+  await sort(m.uso_col_cargas()); expect(first()).toMatch(/^plugin:item-00:/);
+  await sort(m.uso_col_cargas()); expect(first()).toMatch(/^plugin:item-24:/);
+  await sort(m.uso_col_respostas()); expect(first()).toMatch(/^plugin:item-24:/);
+  const more = table().querySelector<HTMLButtonElement>(`button[aria-label="${m.uso_mostrar_mais({ n: 5 })}"]`)!;
+  await act(async () => more.click()); expect(table().querySelectorAll('button[aria-label^="plugin:item-"]')).toHaveLength(25);
+  const less = table().querySelector<HTMLButtonElement>(`button[aria-label="${m.uso_mostrar_menos()}"]`)!;
+  await act(async () => less.click()); expect(table().querySelectorAll('button[aria-label^="plugin:item-"]')).toHaveLength(20);
+  await click(m.uso_aba_agentes());
+  expect(node.querySelector(`div[aria-label="${m.uso_aba_agentes()}"]`)?.textContent).toContain(`${m.uso_col_tok_chamada()}: 60`);
+  await click(m.uso_avancado()); expect(node.querySelector('svg')).toBeNull(); expect(node.querySelector(`div[aria-label="${m.uso_aba_agentes()}"]`)).toBeNull();
+});
+
+it.each(['by_skill', 'by_agente'] as const)('detalhe de item agrupado usa o registro da chave de foco, não a soma, em %s', async (tab) => {
+  useServers.setState({ servers: [a] });
+  const chosen = { ...skill, key: 'plugin:heavy', input: 800, output: 0, cost: 8 };
+  const alias = { ...skill, key: 'heavy', chamadas: 1, input: 200, output: 0, cost: 2, ocupados_eq_tokens_est: 200 };
+  let finish!: (report: ReturnType<typeof usage>) => void;
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => filters.foco
+    ? new Promise((resolve) => { finish = resolve; })
+    : Promise.resolve({ ...usage(period, filters), [tab]: [chosen, alias] }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  const section = [...node.querySelectorAll('span')].find((span) => span.textContent === (tab === 'by_skill' ? m.uso_sec_por_plugin() : m.uso_sub_titulo()))!.parentElement!;
+  const grouped = section.querySelector<HTMLButtonElement>('button[aria-label^="heavy:"]')!;
+  expect(grouped.textContent).toContain(tab === 'by_skill' ? '≈ 1.000' : `${m.custos_input_sem_cache()}: 1.000`);
+  await act(async () => grouped.click());
+  const detail = () => node.querySelector('aside')!;
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { foco: 'plugin:heavy' }, false);
+  expect(detail().textContent).toContain(`${m.uso_col_chamadas()}: 4`);
+  expect(detail().textContent).toContain(tab === 'by_skill' ? `${m.uso_col_ocupados_eq()}: ≈ 800` : `${m.custos_input_sem_cache()}: 800`);
+  await act(async () => finish({ ...usage('30d', { foco: chosen.key }), [tab]: [chosen], by_day: [{ ...chosen, key: '2026-10-02' }] }));
+  expect(detail().textContent).toContain(`${m.uso_col_chamadas()}: 4`);
+  expect(detail().querySelector('[aria-label^="2026-10-02:"]')?.getAttribute('aria-label')).toContain('800');
+});
+
+it('atualizar detalhe renova resumo e série sem recarregar o relatório principal', async () => {
+  useServers.setState({ servers: [a] });
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  await click('heavy');
+  const detail = () => node.querySelector('aside')!;
+  expect(detail().textContent).toContain(`${m.uso_col_chamadas()}: 4`);
+  expect(detail().textContent).toContain(`${m.uso_col_ocupados_eq()}: ≈ 800`);
+  const mainCalls = () => net.usage.mock.calls.filter((call) => !call[2].foco && !call[2].plugin?.length).length;
+  const before = mainCalls();
+  let finish!: (report: ReturnType<typeof usage>) => void;
+  net.usage.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const refresh = detail().querySelector<HTMLButtonElement>(`button[aria-label="${m.custos_atualizar()}"]`)!;
+  await act(async () => refresh.click());
+  expect(detail().textContent).toContain(`${m.uso_col_chamadas()}: 4`);
+  expect(detail().textContent).toContain(m.custos_carregando_maquinas({ n: 1 }));
+  const updated = { ...skill, chamadas: 5, ocupados_eq_tokens_est: 1_000 };
+  await act(async () => finish({ ...usage('30d', { foco: skill.key }), by_skill: [updated], by_day: [{ ...updated, key: '2026-10-02' }, { ...updated, key: '2026-10-03', ocupados_eq_tokens_est: 200 }] }));
+  expect(detail().textContent).toContain(`${m.uso_col_chamadas()}: 5`);
+  expect(detail().textContent).toContain(`${m.uso_col_ocupados_eq()}: ≈ 1.000`);
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['180', '36']);
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { foco: skill.key }, true);
+  expect(mainCalls()).toBe(before);
+});
+
+it.each(['comparação', 'diário', 'detalhe'] as const)('tocar ponto ou coluna mostra data e valores exatos sem leitor de tela em %s', async (chartType) => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 1.25 }, { ...combo, provider: 'provider-two', cost: 0 }] }));
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_day: [{ ...skill, key: '2026-10-01', chamadas: 3, ocupados_eq_tokens_est: 150 }, { ...skill, key: '2026-10-02', chamadas: 9, ocupados_eq_tokens_est: 800 }] }));
+  await act(async () => root.render(React.createElement(chartType === 'comparação' ? CostsScreen : StatsScreen)));
+  let label: string;
+  let expected: string;
+  if (chartType === 'comparação') {
+    await click(m.custos_entidades_comparadas()); await click(`${m.custos_entidades_comparadas()}: provider-one`); await click(`${m.custos_entidades_comparadas()}: provider-two`); await click(m.native_close());
+    const comparison = [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+    await act(async () => comparison.querySelector<HTMLButtonElement>(`button[aria-label="${m.custos_estimativa_api()}"]`)!.click());
+    label = m.custos_grafico_comp_aria({ metrica: m.custos_estimativa_api(), modo: m.custos_dia() });
+    expected = '2026-10-01: —; provider-one: US$ 1,25 · provider-two: —';
+  } else {
+    if (chartType === 'diário') await click(m.uso_avancado()); else await click('heavy');
+    label = chartType === 'diário' ? m.uso_graf_chamadas_dia() : m.uso_detalhe_por_dia();
+    expected = `2026-10-01: ${chartType === 'diário' ? '3' : '150'}; ${chartType === 'diário' ? m.uso_col_chamadas() : m.uso_col_peso()}: ${chartType === 'diário' ? '3' : '150'}`;
+  }
+  const chart = node.querySelector(`[aria-label="${label}"]`)!;
+  expect(chart.textContent).not.toContain(expected);
+  const point = chart.querySelector<HTMLButtonElement>('button[aria-label^="2026-10-01:"]');
+  expect(point).toBeTruthy();
+  expect(point!.getAttribute('aria-label')).toBe(expected);
+  await act(async () => point!.click());
+  expect(chart.textContent).toContain(expected);
+  if (chartType !== 'detalhe') expect(node.querySelector('aside')).toBeNull();
+});
+
+it('detalhes principais guardam identidade e valores do item com série em colunas sem refazer o relatório', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_skill: [{ ...skill, pedidas: 1, ocupados_tokens_est: 400, respostas: 8 }],
+    by_agente: [{ ...skill, key: 'agents:review', plugin: 'agents', pedidas: 2, input: 100, output: 20, cache_write: 30, cache_read: 40, cost: 4, cost_input: 1, cost_output: 2, cost_cache_write: 0.6, cost_cache_read: 0.4 }],
+    by_day: [{ ...skill, key: '2026-10-02', ocupados_eq_tokens_est: 100, ctx_tokens_est: 8, input: 6, output: 2 }, { ...skill, key: '2026-10-03', ocupados_eq_tokens_est: 400, ctx_tokens_est: 16, input: 18, output: 2 }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  await click(m.uso_avancado()); await click(m.uso_aba_plugins());
+  const mainCalls = () => net.usage.mock.calls.filter((call) => !call[2].foco && !call[2].plugin).length;
+  const before = mainCalls();
+  await click('heavy');
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { foco: 'plugin:heavy' }, false);
+  const detail = () => node.querySelector('aside')!;
+  expect(detail().textContent).toContain(`${m.uso_col_origem_skill()}: 1 / 3`);
+  expect(detail().textContent).toContain(`${m.uso_col_ocupados_eq()}: ≈ 800`);
+  expect(detail().textContent).toContain(`${m.uso_col_ocupados()}: ≈ 400`);
+  expect(detail().textContent).toContain(`${m.uso_col_respostas()}: 8`);
+  expect(detail().textContent).toContain(`${m.uso_detalhe_ctx_chamada()}: ≈ 5`);
+  expect(detail().textContent).toContain(`${m.uso_detalhe_media_sessao()}: ≈ 10`);
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['45', '180']);
+  await click(m.native_close());
+  await click(m.uso_aba_imagens()); await click('Read');
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { foco: 'Read' }, false);
+  expect(detail().textContent).toContain(`${m.uso_col_ctx()}: ≈ 20`);
+  expect(detail().textContent).not.toContain(m.uso_col_ocupados_eq());
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['90', '180']);
+  await click(m.native_close());
+  await click(m.uso_aba_plugins()); await click('review');
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { foco: 'agents:review' }, false);
+  for (const value of [`${m.uso_col_origem_agente()}: 2 / 2`, '100 · US$ 1,00', '20 · US$ 2,00', '30 · US$ 0,60', '40 · US$ 0,40', `${m.uso_col_tok_sem_cache_chamada()}: 30`]) expect(detail().textContent).toContain(value);
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['72', '180']);
+  expect(mainCalls()).toBe(before);
+  await click(m.native_close()); expect(node.querySelector('aside')).toBeNull();
 });
 
 it('estatísticas conservam filtros, detalhe usa foco sem refazer tabela e abas não ficam escondidas montadas', async () => {
@@ -158,10 +558,11 @@ it('estatísticas conservam filtros, detalhe usa foco sem refazer tabela e abas 
   await click('heavy');
   expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { conta: ['account'], foco: 'plugin:heavy' }, false);
   expect(net.usage.mock.calls.filter((call) => !call[2].foco)).toHaveLength(before);
-  expect(node.textContent).toContain('2026-10-02');
-  await click(m.uso_aba_agentes());
-  expect(node.textContent).toContain('480');
-  expect(node.textContent).not.toContain(m.uso_sec_por_plugin());
+  expect(node.querySelector('aside')?.textContent).toContain('2026-10-02');
+  await click(m.native_close());
+  await click(m.uso_avancado()); await click(m.uso_aba_agentes());
+  expect(node.querySelector(`div[aria-label="${m.uso_aba_agentes()}"]`)?.textContent).toContain('480');
+  expect(node.textContent).toContain(m.uso_sec_por_plugin());
   await click(m.uso_ir_custos());
   expect(net.back).toHaveBeenCalledTimes(1);
 });
@@ -173,7 +574,7 @@ it('imagens exibem rótulos humanos na lista e no detalhe mantendo o foco técni
     by_plugin: [{ ...skill, key: '@repo', label: 'plugin preservado' }],
   }));
   await act(async () => root.render(React.createElement(StatsScreen)));
-  await click(m.uso_aba_imagens());
+  await click(m.uso_avancado()); await click(m.uso_aba_imagens());
   expect(node.textContent).toContain('lidas por Read');
   expect(node.textContent).toContain('enviadas por você');
   expect(node.textContent).toContain('lidas por mcp:captura');
@@ -203,7 +604,7 @@ it.each(['pt', 'en'] as const)('busca de imagens inclui rótulos exibidos e pres
     by_imagem: [{ ...skill, key: 'lida:Read', label: 'read-metadata', plugin: 'read-plugin' }, { ...skill, key: 'enviada', label: 'sent-metadata', plugin: 'sent-plugin' }],
   }));
   await act(async () => root.render(React.createElement(StatsScreen)));
-  await click(m.uso_aba_imagens());
+  await click(m.uso_avancado()); await click(m.uso_aba_imagens());
   const readLabel = m.uso_img_lida({ tool: 'Read' });
   const sentLabel = m.uso_img_enviada();
   const search = node.querySelector<HTMLInputElement>(`input[aria-label="${m.uso_busca()}"]`);
@@ -250,8 +651,9 @@ it.each([
   await click('BRL');
   expect.soft(amount(m.custos_custo_periodo())).toBe(brl);
   await act(async () => root.render(React.createElement(StatsScreen)));
-  expect.soft(amount(m.uso_resp_agente_caro(), 2)).toBe(usd);
-  await click(m.uso_aba_agentes());
+  const agentCard = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_resp_agente_caro())!.parentElement!;
+  if (value > 0) expect.soft(agentCard.textContent?.replace(/\s/g, ' ')).toContain(usd);
+  else expect.soft(agentCard.textContent).toBe(`${m.uso_resp_agente_caro()}—`);
   await click('reviewer');
   expect(node.querySelector('aside')?.textContent?.replace(/\s/g, ' ')).toContain(`${m.uso_col_custo_real()}: ${usd}`);
 });
@@ -264,13 +666,15 @@ it('cache perdido medido sem tarifa mostra traço em vez de custo zero', async (
   expect(card?.textContent).not.toContain('US$');
 });
 
-it('resumo distingue plugin mais carregado do mais pesado e agente mostra tokens reais por chamada', async () => {
-  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_plugin: [{ ...skill, key: 'frequent', plugin: 'frequent', chamadas: 30, ocupados_eq_tokens_est: 10 }, { ...skill, key: 'heavy-plugin', plugin: 'heavy-plugin', chamadas: 1, ocupados_eq_tokens_est: 900 }] }));
+it('resumo distingue presença de cargas sem cartão extra e agente mostra tokens reais por chamada', async () => {
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_skill: [{ ...skill, key: 'frequent:loaded', plugin: 'frequent', chamadas: 30, ocupados_eq_tokens_est: 10 }, { ...skill, key: 'heavy-plugin:heavy', plugin: 'heavy-plugin', chamadas: 1, ocupados_eq_tokens_est: 900 }] }));
   await act(async () => root.render(React.createElement(StatsScreen)));
-  const summary = [...node.querySelectorAll('span')].find((span) => span.textContent === m.mobile_usage_most_loaded_plugin())?.parentElement;
-  expect(summary?.textContent).toContain('frequent');
-  expect(summary?.textContent).toContain('60');
-  await click(m.uso_aba_agentes());
+  const card = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)!.parentElement!;
+  expect(card(m.uso_resp_plugin_skills()).textContent).toContain('heavy-plugin');
+  expect(card(m.uso_resp_skill_usada()).textContent).toContain('loaded');
+  expect(card(m.uso_resp_skill_usada()).textContent).toContain(m.uso_resp_grupo_vezes({ grupo: 'frequent', n: '60' }));
+  expect(node.textContent).not.toContain(m.mobile_usage_most_loaded_plugin());
+  await click(m.uso_avancado()); await click(m.uso_aba_agentes());
   expect(node.textContent).toContain(`${m.uso_col_tok_chamada()}: 60`);
 });
 
@@ -337,7 +741,6 @@ it.each(['stats', 'areas'] as const)('rede de uso preserva sucesso parcial e ide
     ? Promise.reject(new Error('fetch failed: Fetch request has been canceled'))
     : Promise.resolve(usage(period, filters)));
   await act(async () => root.render(React.createElement(screen === 'stats' ? StatsScreen : CostsScreen)));
-  if (screen === 'areas') await click(m.uso_graf_areas());
   expect(node.textContent).toContain(`Machine B: ${m.native_network_error()}`);
   expect(node.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
   expect(node.textContent).toContain(m.custos_total_parcial());
@@ -371,19 +774,35 @@ it('detalhe de uso separa vazio, parcial e erro e opções sobrevivem ao recorte
   expect(node.querySelector('aside')?.textContent).toContain('account');
 });
 
+it.each([false, true])('comparação usa os trinta dias do período nas médias de tokens e dinheiro, legado=%s', async (legacy) => {
+  useServers.setState({ servers: [a] });
+  const rows = ['provider-one', 'provider-two'].map((provider) => ({ ...combo, provider, input: 300, output: 0, cache_write: 0, cache_read: 0, cost: 30 }));
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: legacy ? [] : rows, by_provider: rows.map((row) => ({ ...row, key: row.provider })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_entidades_comparadas());
+  await click(`${m.custos_entidades_comparadas()}: provider-one`);
+  await click(`${m.custos_entidades_comparadas()}: provider-two`);
+  await click(m.native_close());
+  const comparison = () => [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+  const entity = () => [...comparison().querySelectorAll('span')].find((span) => span.textContent === 'provider-one' && span.style.fontWeight === '600')!.parentElement!;
+  expect(entity().textContent).toContain(`10 ${m.custos_por_dia()}`);
+  const money = comparison().querySelector<HTMLButtonElement>(`button[aria-label="${m.custos_estimativa_api()}"]`)!;
+  await act(async () => money.click());
+  expect(entity().textContent).toContain(`US$ 1,00 ${m.custos_por_dia()}`);
+  if (legacy) expect(comparison().textContent).toContain(m.custos_sem_detalhamento());
+});
+
 it('comparação pública ignora provedor selecionado e conserva o projeto; áreas atualizam frescas', async () => {
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 3 }, { ...combo, provider: 'provider-two', cost: 7 }, { ...combo, provider: 'provider-two', project: '/other', cost: 99 }] }));
   await act(async () => root.render(React.createElement(CostsScreen)));
   await click(m.custos_dim_provedor()); await click(`${m.custos_dim_provedor()}: provider-one`); await click(m.native_close());
   await click(m.custos_dim_projeto()); await click(`${m.custos_dim_projeto()}: /project-one`); await click(m.native_close());
-  await click(m.lista_comparar());
   await click(m.custos_entidades_comparadas());
   await click(`${m.custos_entidades_comparadas()}: provider-one`);
   await click(`${m.custos_entidades_comparadas()}: provider-two`);
   await click(m.native_close());
   const entity = [...node.querySelectorAll('span')].find((span) => span.textContent === 'provider-two' && span.style.fontWeight === '600')?.parentElement;
   expect(entity?.textContent?.replace(/\s/g, '')).toContain('US$14,00');
-  await click(m.uso_graf_areas());
   await click(m.custos_atualizar());
   expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { projeto: ['/project-one'], modelo: [] }, true);
 });
@@ -400,10 +819,28 @@ it('atualização preserva filtros cruzados enquanto outra máquina ainda entreg
   expect(node.textContent).toContain('/project-one');
 });
 
+it('detalhe diário de plugin usa chamadas quando a API não fornece presença e skill continua usando presença', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_plugin: [{ ...skill, key: 'usage-plugin', ocupados_eq_tokens_est: 900 }],
+    by_day: [{ ...skill, key: '2026-10-01', chamadas: 2, ocupados_eq_tokens_est: filters.foco ? 200 : 0 }, { ...skill, key: '2026-10-02', chamadas: 8, ocupados_eq_tokens_est: filters.foco ? 400 : 0 }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  await click(m.uso_avancado()); await click(m.uso_aba_plugins()); await click('usage-plugin');
+  const detail = () => node.querySelector('aside')!;
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['45', '180']);
+  expect(detail().textContent).toContain(`${m.uso_detalhe_por_dia()} (${m.uso_col_chamadas()})`);
+  expect(detail().querySelector('[aria-label^="2026-10-01:"]')?.getAttribute('aria-label')).toContain(`${m.uso_col_chamadas()}: 2`);
+  expect(detail().textContent).toContain(`${m.uso_col_ocupados_eq()}: ≈ 900`);
+  await click(m.native_close()); await click('heavy');
+  expect(detail().textContent).toContain(`${m.uso_detalhe_por_dia()} (${m.uso_col_peso()})`);
+  expect([...detail().querySelectorAll('rect')].map((rect) => rect.getAttribute('height'))).toEqual(['90', '180']);
+});
+
 it('plugin abre série pelo filtro de plugin sem transformar nome do grupo em foco de item', async () => {
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_plugin: [{ ...skill, key: 'usage-plugin', plugin: 'usage-plugin' }] }));
   await act(async () => root.render(React.createElement(StatsScreen)));
-  await click(m.uso_aba_plugins());
+  await click(m.uso_avancado()); await click(m.uso_aba_plugins());
   await click('usage-plugin');
   expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { plugin: ['usage-plugin'] }, false);
   expect(node.querySelector('aside')?.textContent).toContain('2026-10-01');
@@ -412,7 +849,7 @@ it('plugin abre série pelo filtro de plugin sem transformar nome do grupo em fo
 it('detalhe de plugin conserva chamadas contexto e custo sem inventar tokens reais', async () => {
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_plugin: [{ ...skill, key: 'detail-plugin' }], by_day: [{ ...skill, key: '2026-10-01', input: 0, output: 0 }] }));
   await act(async () => root.render(React.createElement(StatsScreen)));
-  await click(m.uso_aba_plugins()); await click('detail-plugin');
+  await click(m.uso_avancado()); await click(m.uso_aba_plugins()); await click('detail-plugin');
   const detail = node.querySelector('aside');
   expect(detail?.textContent).not.toContain(m.uso_detalhe_tokens());
   expect(detail?.textContent).toContain(`${m.uso_col_chamadas()}: 8`);
@@ -427,8 +864,8 @@ it('áreas diárias separam data e área inteira sem trocar tokens ou custo', as
     { ...zeroUso('2026-09-18|front – área compartilhada'), output: 43, cache_read: 7, cost: 2.5 },
   ] }));
   await act(async () => root.render(React.createElement(CostsScreen)));
-  await click(m.uso_graf_areas());
-  const dates = [...node.querySelectorAll('span')].filter((span) => ['2026-09-17', '2026-09-18'].includes(span.textContent ?? ''));
+  const areas = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_graf_areas())!.parentElement!;
+  const dates = [...areas.querySelectorAll('span')].filter((span) => ['2026-09-17', '2026-09-18'].includes(span.textContent ?? ''));
   expect(dates.map((span) => span.textContent)).toEqual(['2026-09-17', '2026-09-18']);
   expect(dates[0].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-17back:serviçosdeautorização:153.583.509·US$91,96');
   expect(dates[1].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-18front–áreacompartilhada:50·US$2,50');
@@ -438,13 +875,12 @@ it('áreas diárias separam data e área inteira sem trocar tokens ou custo', as
 it('áreas sem tarifa mantêm traço e barras interativas anunciam valores além do nome', async () => {
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [{ ...skill, key: 'front', cost: 0 }], by_area_dia: [{ ...skill, key: '2026-10-01|front', cost: 0 }] }));
   await act(async () => root.render(React.createElement(CostsScreen)));
-  await click(m.custos_por_provedor());
   const bar = [...node.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('provider-one'));
   expect(bar?.getAttribute('aria-label')).toContain('360');
-  await click(m.uso_graf_areas());
-  const area = node.querySelector('[aria-label^="front:"]');
+  const areas = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_graf_areas())!.parentElement!;
+  const area = areas.querySelector('[aria-label^="front:"]');
   expect(area?.getAttribute('aria-label')).toContain('—');
-  const daily = [...node.querySelectorAll('span')].find((span) => span.textContent === '2026-10-01');
+  const daily = [...areas.querySelectorAll('span')].find((span) => span.textContent === '2026-10-01');
   expect(daily?.parentElement?.textContent).toContain('front: 24 · —');
 });
 
@@ -452,8 +888,9 @@ it('áreas respeitam a máquina do filtro sem consultar ou somar a outra máquin
   await act(async () => root.render(React.createElement(CostsScreen)));
   await click(m.custos_dim_maquina()); await click(`${m.custos_dim_maquina()}: Machine A`); await click(m.native_close());
   let finish!: (report: ReturnType<typeof usage>) => void;
+  net.usage.mockClear();
   net.usage.mockImplementation((server: Server, period: string, filters: UsoFiltros) => server.id === 'a' ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ...usage(period, filters), by_area: [{ ...skill, key: 'area-from-b' }] }));
-  await click(m.uso_graf_areas());
+  await click(m.custos_atualizar());
   expect(net.usage.mock.calls.map((call) => call[0].id)).toEqual(['a']);
   expect(node.textContent).toContain(m.custos_carregando_maquinas({ n: 1 }));
   await act(async () => finish({ ...usage('30d', {}), by_area: [{ ...skill, key: 'area-from-a' }] }));
@@ -473,15 +910,16 @@ it.each([[false, true, true], [true, true, true], [false, true, false], [false, 
   const card = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)?.parentElement;
   expect(card(m.uso_resp_skill_contexto())?.textContent).toBe(`${m.uso_resp_skill_contexto()}—`);
   expect(card(m.uso_resp_plugin_skills())?.textContent).toBe(`${m.uso_resp_plugin_skills()}—`);
-  expect(card(m.uso_resp_skill_usada())?.textContent).toContain('legacy-plugin:legacy');
+  expect(card(m.uso_resp_skill_usada())?.textContent).toContain('legacy');
+  expect(card(m.uso_resp_skill_usada())?.textContent).toContain(m.uso_resp_grupo_vezes({ grupo: 'legacy-plugin', n: '12' }));
   const weightButton = node.querySelector<HTMLButtonElement>(`button[aria-label="${m.uso_ordenar_por({ col: m.uso_col_peso() })}"]`);
   expect(weightButton?.disabled).toBe(true);
   const skillRows = [...node.querySelectorAll('button')].filter((button) => ['legacy:', 'heavy:'].some((prefix) => button.getAttribute('aria-label')?.startsWith(prefix)));
   expect(skillRows[0]?.getAttribute('aria-label')).toBe('legacy: — · 12');
-  await click(m.uso_aba_plugins());
+  await click(m.uso_avancado()); await click(m.uso_aba_plugins());
   const pluginRows = [...node.querySelectorAll('button')].filter((button) => ['legacy-plugin:', 'plugin:'].some((prefix) => button.getAttribute('aria-label')?.startsWith(prefix)));
   expect(pluginRows[0]?.getAttribute('aria-label')).toBe('legacy-plugin: —');
-  expect(pluginRows[0]?.parentElement?.textContent).toContain(`${m.uso_col_chamadas()}: 12`);
+  expect(pluginRows[0]?.parentElement?.textContent).toContain(`${m.uso_col_cargas()}: 12`);
   expect(pluginRows[0]?.parentElement?.textContent).toContain('≈ 5');
   await click(m.uso_aba_agentes());
   expect(node.textContent).toContain(`${m.uso_col_tok_chamada()}: 60`);

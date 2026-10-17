@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from 'react';
+import { Children, Fragment as ReactFragment, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { create } from 'zustand';
+import Svg, { Circle, Line, Polyline, Rect } from 'react-native-svg';
 import { intlLocale, type Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { Stack, useRouter } from 'expo-router';
@@ -46,6 +47,10 @@ export function Card({ children }: { children: ReactNode }) {
   const c = useSettingsColors();
   const { theme } = useUnistyles();
   return <View style={{ padding: 16, gap: 10, backgroundColor: c.inset, borderRadius: theme.base.radius.lg }}>{children}</View>;
+}
+
+export function Grid({ children }: { children: ReactNode }) {
+  return <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>{Children.toArray(children).map((child, index) => <View key={index} style={{ flexGrow: 1, flexBasis: '45%', minWidth: 140 }}>{child}</View>)}</View>;
 }
 
 export function Search({ value, onChange }: { value: string; onChange: (text: string) => void }) {
@@ -117,6 +122,68 @@ export function ReportStatus<R>({ parts, loading, accepted, selected }: { parts:
     {!selected && <Copy>{m.custos_sem_dados_periodo()}</Copy>}
     {!!selected && !loading && !accepted && <Copy>{m.home_usage_load_failed()}</Copy>}
   </View>;
+}
+
+export function useChartColors() {
+  const { theme } = useUnistyles();
+  const c = useSettingsColors();
+  return [c.accent, theme.tokens.status.warning, theme.tokens.status.success, theme.tokens.status.error, c.accentText, c.muted, c.faint];
+}
+
+export function Composition({ label, items }: { label: string; items: { label: string; value: number; color: string; detail?: string }[] }) {
+  const c = useSettingsColors();
+  const total = items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+  return <View accessible accessibilityRole="image" accessibilityLabel={`${label}: ${items.map((item) => `${item.label}: ${item.detail ?? number(item.value)} (${percent(item.value, total)})`).join(' · ')}`} style={{ flexDirection: 'row', height: 12, backgroundColor: c.hover, borderRadius: 6, overflow: 'hidden' }}>
+    {items.map((item, index) => <View key={index} style={{ width: `${total > 0 ? Math.max(0, item.value) / total * 100 : 0}%`, height: 12, backgroundColor: item.color }} />)}
+  </View>;
+}
+
+export interface ChartSeries { key: string; label: string; color: string }
+export interface ChartDay { key: string; values: (number | null)[]; detail?: string }
+
+export function Columns({ label, days, series, format = number, onPress, lines = false }: { label: string; days: ChartDay[]; series: ChartSeries[]; format?: (value: number) => string; onPress?: (key: string) => void; lines?: boolean }) {
+  const c = useSettingsColors();
+  const { theme } = useUnistyles();
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  if (!days.length) return <Copy muted>{m.uso_sem_dias()}</Copy>;
+  const describe = (day: ChartDay) => {
+    const sum = day.values.some((value) => value === null) ? '—' : format(day.values.reduce<number>((value, part) => value + (part ?? 0), 0));
+    return `${day.key}: ${sum}; ${day.values.map((value, index) => `${series[index].label}: ${value === null ? '—' : format(value)}`).join(' · ')}${day.detail ? ` · ${day.detail}` : ''}`;
+  };
+  const selected = days.find((day) => day.key === selectedDay);
+  const maximum = Math.max(1, ...days.map((day) => lines ? Math.max(0, ...day.values.map((value) => value ?? 0)) : day.values.reduce<number>((sum, value) => sum + Math.max(0, value ?? 0), 0)));
+  const step = Math.max(64, 264 / days.length);
+  const width = days.length * step;
+  const height = 180;
+  return <View accessibilityLabel={label} style={{ gap: 8 }}><View style={{ flexDirection: 'row', gap: 8 }}>
+    <View style={{ width: 64, height, justifyContent: 'space-between' }}><Copy muted>{format(maximum)}</Copy><Copy muted>{format(maximum / 2)}</Copy><Copy muted>{format(0)}</Copy></View>
+    <ScrollView horizontal><View style={{ width }}>
+      <Svg width={width} height={height} accessible={false}>
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <Line key={ratio} x1={0} x2={width} y1={height * ratio} y2={height * ratio} stroke={c.borderStrong} />)}
+        {lines ? series.map((item, seriesIndex) => {
+          const runs: string[][] = [[]];
+          const points = days.flatMap((day, index) => {
+            const value = day.values[seriesIndex];
+            if (value === null) { if (runs.at(-1)!.length) runs.push([]); return []; }
+            const x = index * step + step / 2;
+            const y = height - 6 - Math.max(0, value) / maximum * (height - 12);
+            runs.at(-1)!.push(`${x},${y}`);
+            return [{ x, y, key: day.key }];
+          });
+          return <ReactFragment key={item.key}>{runs.filter((run) => run.length > 1).map((run, index) => <Polyline key={index} points={run.join(' ')} fill="none" stroke={item.color} strokeWidth={2} />)}{points.map((point) => <Circle key={point.key} cx={point.x} cy={point.y} r={3} fill={item.color} />)}</ReactFragment>;
+        }) : days.map((day, index) => {
+          let bottom = height;
+          return day.values.map((value, segment) => {
+            const size = Math.max(0, value ?? 0) / maximum * height;
+            bottom -= size;
+            return size > 0 ? <Rect key={`${day.key}:${segment}`} x={index * step + step * 0.22} y={bottom} width={step * 0.56} height={size} fill={series[segment].color} /> : null;
+          });
+        })}
+      </Svg>
+      <View style={{ position: 'absolute', top: 0, left: 0, flexDirection: 'row' }}>{days.map((day) => <Pressable key={day.key} accessibilityRole="button" accessibilityLabel={describe(day)} onPress={() => onPress ? onPress(day.key) : setSelectedDay(day.key)} style={{ width: step, height, minHeight: 44 }} />)}</View>
+      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} style={{ width: step, paddingTop: 8, textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{day.key}</Text>)}</View>
+    </View></ScrollView>
+  </View>{!onPress && selected && <Copy>{describe(selected)}</Copy>}</View>;
 }
 
 export function Bar({ label, value, max, detail, onPress, color }: { label: string; value: number; max: number; detail: string; onPress?: () => void; color?: string }) {
