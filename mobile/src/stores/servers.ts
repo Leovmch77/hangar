@@ -180,6 +180,7 @@ export const useServers = create<ServersState>((set, get) => {
       if (!identity.identificador) throw new Error(m.mobile_machines_invalid_response());
       change((p) => ({ ...p, servers: p.servers.map((s) => s.id === server.id ? { ...s, label: identity.identificador } : s) }), false);
     } catch (error) {
+      if (reading) await reading;
       if (isCurrent()) warn({ tipo: 'identification', message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (naming.get(server.id) === controller) naming.delete(server.id);

@@ -555,6 +555,28 @@ describe('label no add', () => {
     expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe('machine-home');
   });
 
+  test.each([false, true])('falha durante releitura aguarda o cofre e respeita edição manual: %s', async (edited) => {
+    await useServers.getState().load();
+    const response = deferred<Response>();
+    probe.mockReturnValueOnce(response.promise);
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.2.2:8765', token: 'abc' });
+    await settle();
+    const read = deferred<string>();
+    vi.mocked(SecureStore.getItemAsync).mockReturnValueOnce(read.promise);
+    const loading = useServers.getState().load();
+
+    response.reject(new Error('identity-offline'));
+    await settle();
+    expect(useServers.getState().aviso).toBeNull();
+    if (edited) useServers.getState().update(added.id, { label: 'Meu notebook' });
+    read.resolve(JSON.stringify({ servers: [added], activeId: added.id }));
+    await loading;
+    await settle();
+
+    expect(useServers.getState().active()?.label).toBe(edited ? 'Meu notebook' : added.label);
+    expect(takeWarnings()).toEqual(edited ? [] : [{ tipo: 'identification', message: 'identity-offline' }]);
+  });
+
   test.each(['resposta vazia', 'HTTP recusado', 'rede indisponível'])('identificação falha mantém rótulo neutro e mostra a causa: %s', async (failure) => {
     await useServers.getState().load();
     const m = await import('../paraglide/messages');
