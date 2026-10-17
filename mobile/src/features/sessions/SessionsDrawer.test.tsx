@@ -47,7 +47,11 @@ vi.mock('react-native-reanimated', async (original) => {
   };
 });
 vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
-  default: ({ ref, renderNavigationView, children, onDrawerOpen, onDrawerClose }: DrawerLayoutProps & { ref?: Ref<DrawerLayoutMethods> }) => {
+  default: ({ ref, renderNavigationView, children, onDrawerOpen, onDrawerClose }: Pick<DrawerLayoutProps, 'onDrawerOpen' | 'onDrawerClose'> & {
+    ref?: Ref<DrawerLayoutMethods>;
+    renderNavigationView: (progress: { value: number }) => ReactNode;
+    children: ReactNode | ((progress: { value: number }) => ReactNode);
+  }) => {
     drawer.openDrawer.mockImplementation(() => {
       drawer.progress.value = 1;
       drawer.reactions.forEach((r) => r());
