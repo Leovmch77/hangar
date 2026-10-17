@@ -155,7 +155,7 @@ def _sem_acento(s: str) -> str:
 
 
 def _jev_precisa(prompt: str) -> bool | None:
-    """True/False pelo Jev; None quando não há chave ou ele não responde — aí vale a regex."""
+    """True/False pelo Jev; None quando não há chave ou ele não responde — aí vale o que a regex achou."""
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
         return None
