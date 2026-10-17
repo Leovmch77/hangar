@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, Text, TextInput, View, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
 import { sendKey, sendTermInput } from '@hangar/core';
 import type { NavKey } from '@hangar/core';
@@ -21,6 +22,7 @@ const LINES_MAX = 1200;
 export function TerminalMirror({ serverId, name, aviso }: Props) {
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const { theme } = useUnistyles();
+  const insets = useSafeAreaInsets();
   const [lines, setLines] = useState(200);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
@@ -232,7 +234,8 @@ export function TerminalMirror({ serverId, name, aviso }: Props) {
 
       {/* barra de teclas de resgate */}
       <View
-        style={[styles.keysBar, { borderTopColor: theme.tokens.border.subtle, backgroundColor: superficie(theme) }]}
+        style={[styles.keysBar, { borderTopColor: theme.tokens.border.subtle, backgroundColor: superficie(theme),
+          paddingBottom: theme.base.space[2] + insets.bottom }]}
         accessibilityLabel={m.term_teclas_resgate()}
       >
         <Text style={[styles.keysHint, { color: theme.tokens.text.muted }]}>{m.term_resgate()}</Text>

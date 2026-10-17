@@ -1,6 +1,12 @@
 // @ts-check
 const path = require('node:path');
 const { getDefaultConfig } = require('expo/metro-config');
+const { generateTerminalDocument, watchTerminalDocument } = require('./scripts/build-terminal-document.cjs');
+generateTerminalDocument();
+if (process.env.NODE_ENV !== 'production') {
+  const observer = watchTerminalDocument();
+  process.once('exit', () => observer.close());
+}
 
 const raiz = path.resolve(__dirname, '..');
 

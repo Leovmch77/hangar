@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Pressable, ScrollView, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import Constants from 'expo-constants';
 import type { Server } from '@hangar/core';
 import TerminalDom, { type TerminalDomHandle } from './TerminalDom';
 import { TerminalMirror } from './TerminalMirror';
@@ -51,10 +51,10 @@ function TerminalConnection({ server, name, retry, initialFailure, onFailure }: 
   initialFailure: TerminalFailure | null; onFailure: (failure: TerminalFailure) => void;
 }) {
   const { theme } = useUnistyles();
+  const insets = useSafeAreaInsets();
   const dom = useRef<TerminalDomHandle>(null);
   const socket = useRef<ReturnType<typeof openTerminalSocket> | null>(null);
   const alive = useRef(true);
-  const documentUrl = useRef<string | null>(null);
   const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const initiallyBlocked = useRef(!!initialFailure).current;
   const [status, setStatus] = useState<{ state: 'connecting' | 'connected' | 'disconnected'; error: string }>({
@@ -80,14 +80,7 @@ function TerminalConnection({ server, name, retry, initialFailure, onFailure }: 
     try {
       const url = new URL(request.url);
       url.hash = '';
-      if (documentUrl.current) return url.href === documentUrl.current;
-      const hostUri = Constants.expoConfig?.hostUri;
-      const devOrigin = hostUri ? new URL(`http://${hostUri}`).origin : null;
-      const local = url.protocol === 'file:' && url.pathname.includes('/www.bundle/');
-      const development = url.origin === devOrigin && url.pathname.startsWith('/_expo/@dom/');
-      if (!local && !development) return false;
-      documentUrl.current = url.href;
-      return true;
+      return url.href === 'about:blank';
     } catch { return false; }
   };
   const keys: { label: string; data: string; icon: IconName }[] = [
@@ -103,51 +96,52 @@ function TerminalConnection({ server, name, retry, initialFailure, onFailure }: 
   ];
   const connected = status.state === 'connected' && !loadError;
   return <View style={styles.root}>
-    {status.state === 'connecting' && !loadError ? <View style={styles.loading}>
-      <ActivityIndicator color={theme.tokens.text.secondary} />
-      <Text style={styles.notice}>{m.native_term_connecting()}</Text>
-    </View> : null}
-    {loadError || status.error ? <Text accessibilityRole="alert" style={styles.error}>{loadError || status.error}</Text> : null}
-    {loadError || status.state === 'disconnected' ? <Pressable accessibilityRole="button"
-      accessibilityLabel={loadError ? m.lista_tentar_novamente() : m.native_term_reconnect()} style={styles.modeButton} onPress={retry}>
-      <Icon name="RefreshCw" color={theme.tokens.text.primary} />
-      <Text style={styles.label}>{loadError ? m.lista_tentar_novamente() : m.native_term_reconnect()}</Text>
-    </Pressable> : null}
-    {!loadError && !initiallyBlocked ? <TerminalDom ref={dom} foreground={theme.tokens.text.primary} cursor={theme.tokens.accent.base}
-      fontSize={theme.base.text.xs} connected={!!connected}
-      onReady={async (cols, rows) => {
-        if (!alive.current || initiallyBlocked || socket.current) return;
-        clearTimeout(loadTimer.current);
-        socket.current = openTerminalSocket(server, name, { cols, rows }, {
-          output: bytes => { if (alive.current) dom.current?.write(bytes); },
-          status: next => {
-            if (!alive.current) return;
-            setStatus(next);
-            if (next.state === 'disconnected') onFailure({ error: next.error, load: false });
-          },
-        });
-      }}
-      onResize={async (cols, rows) => { if (alive.current) socket.current?.resize(cols, rows); }}
-      onData={async (data, binary) => { if (alive.current) socket.current?.send(data, binary); }}
-      onError={async message => fail(message)}
-      dom={{
-        useExpoDOMWebView: false,
-        unstable_useExpoModulesBridge: false,
-        style: styles.webview,
-        containerStyle: styles.root,
-        originWhitelist: ['*'],
-        onShouldStartLoadWithRequest: navigate,
-        onOpenWindow: () => {},
-        javaScriptCanOpenWindowsAutomatically: false,
-        setSupportMultipleWindows: false,
-        allowFileAccessFromFileURLs: false,
-        allowUniversalAccessFromFileURLs: false,
-        onError: event => fail(event.nativeEvent.description),
-        onHttpError: event => fail(String(event.nativeEvent.statusCode)),
-        onContentProcessDidTerminate: () => fail(),
-        onRenderProcessGone: () => fail(),
-      }} /> : null}
-    <ScrollView horizontal keyboardShouldPersistTaps="always" style={styles.keyScroll} contentContainerStyle={styles.keys}>
+    <View style={styles.root}>
+      {status.state === 'connecting' && !loadError ? <View style={styles.loading}>
+        <ActivityIndicator color={theme.tokens.text.secondary} />
+        <Text style={styles.notice}>{m.native_term_connecting()}</Text>
+      </View> : null}
+      {loadError || status.error ? <Text accessibilityRole="alert" style={styles.error}>{loadError || status.error}</Text> : null}
+      {loadError || status.state === 'disconnected' ? <Pressable accessibilityRole="button"
+        accessibilityLabel={loadError ? m.lista_tentar_novamente() : m.native_term_reconnect()} style={styles.modeButton} onPress={retry}>
+        <Icon name="RefreshCw" color={theme.tokens.text.primary} />
+        <Text style={styles.label}>{loadError ? m.lista_tentar_novamente() : m.native_term_reconnect()}</Text>
+      </Pressable> : null}
+      {!loadError && !initiallyBlocked ? <TerminalDom ref={dom} foreground={theme.tokens.text.primary} cursor={theme.tokens.accent.base}
+        fontSize={theme.base.text.xs} connected={!!connected}
+        onReady={async (cols, rows) => {
+          if (!alive.current || initiallyBlocked || socket.current) return;
+          clearTimeout(loadTimer.current);
+          socket.current = openTerminalSocket(server, name, { cols, rows }, {
+            output: bytes => { if (alive.current) dom.current?.write(bytes); },
+            status: next => {
+              if (!alive.current) return;
+              setStatus(next);
+              if (next.state === 'disconnected') onFailure({ error: next.error, load: false });
+            },
+          });
+        }}
+        onResize={async (cols, rows) => { if (alive.current) socket.current?.resize(cols, rows); }}
+        onData={async (data, binary) => { if (alive.current) socket.current?.send(data, binary); }}
+        onError={async message => fail(message)}
+        webView={{
+          style: styles.webview,
+          containerStyle: styles.root,
+          originWhitelist: ['*'],
+          onShouldStartLoadWithRequest: navigate,
+          onOpenWindow: () => {},
+          javaScriptCanOpenWindowsAutomatically: false,
+          setSupportMultipleWindows: false,
+          allowFileAccessFromFileURLs: false,
+          allowUniversalAccessFromFileURLs: false,
+          onError: event => fail(event.nativeEvent.description),
+          onHttpError: event => fail(String(event.nativeEvent.statusCode)),
+          onContentProcessDidTerminate: () => fail(),
+          onRenderProcessGone: () => fail(),
+        }} /> : null}
+    </View>
+    <ScrollView horizontal keyboardShouldPersistTaps="always" style={styles.keyScroll}
+      contentContainerStyle={[styles.keys, { paddingBottom: theme.base.space[2] + insets.bottom }]}>
       {keys.map(key => <Pressable key={key.data} accessibilityRole="button" accessibilityLabel={key.label}
         disabled={!connected} style={[styles.key, { opacity: connected ? 1 : 0.4 }]}
         onPress={() => { socket.current?.send(key.data); }}>

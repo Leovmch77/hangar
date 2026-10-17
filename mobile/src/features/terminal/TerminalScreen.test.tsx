@@ -25,7 +25,7 @@ vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ server: 'chosen', name: 'fixture', aviso: 'route-warning' }),
 }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children, automaticOffset }: { children: React.ReactNode; automaticOffset?: boolean }) => React.createElement('div', { 'data-automatic-offset': String(!!automaticOffset) }, children) }));
-vi.mock('expo-constants', () => ({ default: { expoConfig: { hostUri: '192.168.1.2:8081' } } }));
+vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 34, left: 0 }) }));
 vi.mock('./TerminalDom', () => ({ default: (props: TerminalDomProps) => {
   boundary.dom = props;
   useImperativeHandle(props.ref, () => ({
@@ -43,18 +43,22 @@ vi.mock('./TerminalDom', () => ({ default: (props: TerminalDomProps) => {
 vi.mock('../../stores/servers', () => ({
   useServers: (select: (state: { servers: typeof boundary.servers; activeId: string }) => unknown) => select({ servers: boundary.servers, activeId: 'wrong-active' }),
 }));
-vi.mock('react-native', async (original) => ({
-  ...await original<typeof import('react-native')>(),
-  AppState: {
-    get currentState() { return boundary.appState; },
-    addEventListener: (_event: string, listener: (state: string) => void) => {
-      boundary.listeners.add(listener);
-      return { remove: () => boundary.listeners.delete(listener) };
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return {
+    ...native,
+    AppState: {
+      get currentState() { return boundary.appState; },
+      addEventListener: (_event: string, listener: (state: string) => void) => {
+        boundary.listeners.add(listener);
+        return { remove: () => boundary.listeners.delete(listener) };
+      },
     },
-  },
-  ScrollView: ({ children }: { children: React.ReactNode }) => React.createElement('div', null, children),
-  Text: ({ children, accessibilityRole }: { children: React.ReactNode; accessibilityRole?: string }) => React.createElement('span', { role: accessibilityRole }, children),
-}));
+    ScrollView: ({ children, style, contentContainerStyle }: React.ComponentProps<typeof native.ScrollView>) => React.createElement(native.View, { style },
+      React.createElement(native.View, { style: contentContainerStyle }, children)),
+    Text: ({ children, accessibilityRole }: { children: React.ReactNode; accessibilityRole?: string }) => React.createElement('span', { role: accessibilityRole }, children),
+  };
+});
 vi.mock('@legendapp/list/react-native', () => ({ LegendList: () => React.createElement('div') }));
 vi.mock('@hangar/core', async original => ({
   ...await original<typeof import('@hangar/core')>(),
@@ -107,6 +111,60 @@ describe('terminal screen with native WebSocket and DOM boundary', () => {
   it('folha do terminal usa offset automático do teclado', async () => {
     await act(async () => root.render(<TerminalRoute />));
     expect(host.querySelector('[data-automatic-offset]')?.getAttribute('data-automatic-offset')).toBe('true');
+  });
+
+  it('mantém conteúdo expansível e rodapé fora dele com inset inferior ao falhar e tentar novamente', async () => {
+    const expectFooterLayout = (visible: Element) => {
+      const row = button(m.term_seta_cima()).parentElement!;
+      const footer = row.parentElement!;
+      const content = footer.previousElementSibling as HTMLElement | null;
+      expect(content?.style.flexGrow).toBe('1');
+      expect(content?.contains(visible)).toBe(true);
+      expect(content?.contains(footer)).toBe(false);
+      expect(footer.style.flexGrow).toBe('0');
+      expect(row.style.paddingBottom).toBe('42px');
+    };
+    await render();
+    expect(host.textContent).toContain(m.native_term_connecting());
+    expectFooterLayout(host.querySelector('[data-terminal]')!);
+
+    await act(async () => boundary.dom!.onError('fixture-load-error'));
+    expect(host.textContent).toContain('fixture-load-error');
+    expect(boundary.mounted).toBe(0);
+    expectFooterLayout(button(m.lista_tentar_novamente()));
+
+    await click(m.lista_tentar_novamente());
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.textContent).toContain(m.native_term_connecting());
+    expectFooterLayout(host.querySelector('[data-terminal]')!);
+
+    await ready();
+    await act(async () => Socket.instances[0].open());
+    expect(button(m.term_seta_cima()).disabled).toBe(false);
+    expectFooterLayout(host.querySelector('[data-terminal]')!);
+    await act(async () => Socket.instances[0].end(1013, 'fixture-disconnected'));
+    expectFooterLayout(button(m.native_term_reconnect()));
+  });
+
+  it('usa documento local sem injeção inicial e conserva as proteções de navegação', async () => {
+    await render();
+    const config = boundary.dom!.webView;
+    expect(config).toBeDefined();
+    expect(config!.injectedJavaScriptBeforeContentLoaded).toBeUndefined();
+    expect(config!.injectedJavaScript).toBeUndefined();
+    expect(config!.injectedJavaScriptObject).toBeUndefined();
+    expect(config).toMatchObject({
+      javaScriptCanOpenWindowsAutomatically: false,
+      setSupportMultipleWindows: false,
+      allowFileAccessFromFileURLs: false,
+      allowUniversalAccessFromFileURLs: false,
+    });
+    const navigate = (url: string) => config!.onShouldStartLoadWithRequest?.({ url } as any);
+    expect(navigate('about:blank')).toBe(true);
+    expect(navigate('about:blank#terminal')).toBe(true);
+    for (const url of ['https://outside.test', 'javascript:alert(1)', 'data:text/html,hi',
+      'file:///android_asset/www.bundle/terminal.html', 'http://192.168.1.2:8081/_expo/@dom/terminal',
+      'about:blank?remote=1', 'about:srcdoc', 'not-a-url']) expect(navigate(url)).toBe(false);
   });
 
   it('rota usa terminal real e respeita foco sem iniciar o espelho', async () => {
@@ -256,10 +314,8 @@ describe('terminal screen with native WebSocket and DOM boundary', () => {
 
   it('erro de carga/processo DOM fecha socket, dá tentar novamente/espelho e bloqueia navegação remota', async () => {
     await render(); await ready();
-    const dom = boundary.dom!.dom!;
-    expect(dom.useExpoDOMWebView).toBe(false);
-    expect(dom.unstable_useExpoModulesBridge).not.toBe(true);
-    expect(dom.onShouldStartLoadWithRequest?.({ url: 'file:///android_asset/www.bundle/terminal.html' } as any)).toBe(true);
+    const dom = boundary.dom!.webView!;
+    expect(dom.onShouldStartLoadWithRequest?.({ url: 'about:blank' } as any)).toBe(true);
     expect(dom.onShouldStartLoadWithRequest?.({ url: 'https://outside.test' } as any)).toBe(false);
     expect(dom.onShouldStartLoadWithRequest?.({ url: 'javascript:alert(1)' } as any)).toBe(false);
     await act(async () => dom.onRenderProcessGone?.({ nativeEvent: { didCrash: true } } as any));
@@ -270,7 +326,7 @@ describe('terminal screen with native WebSocket and DOM boundary', () => {
     expect(button(m.mobile_terminal_mirror())).not.toBeNull();
     await click(m.lista_tentar_novamente()); await ready();
     expect(Socket.instances).toHaveLength(2);
-    await act(async () => boundary.dom!.dom?.onError?.({ nativeEvent: { description: 'fixture-load-error' } } as any));
+    await act(async () => boundary.dom!.webView?.onError?.({ nativeEvent: { description: 'fixture-load-error' } } as any));
     expect(host.textContent).toContain('fixture-load-error');
     expect(Socket.instances[1].closed).toBe(true);
   });

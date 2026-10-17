@@ -1,20 +1,17 @@
-'use dom';
-
-import { useEffect, useRef, type Ref } from 'react';
-import { useDOMImperativeHandle, type DOMImperativeFactory, type DOMProps } from 'expo/dom';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
-import './terminal.css';
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, type Ref } from 'react';
+import WebView, { type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
+import { terminalDocument } from './terminalDocument.generated';
 import * as m from '../../paraglide/messages';
 
-export interface TerminalDomHandle extends DOMImperativeFactory {
+const source = { html: terminalDocument };
+
+export interface TerminalDomHandle {
   write(bytes: unknown): void;
 }
 
 export interface TerminalDomProps {
   ref: Ref<TerminalDomHandle>;
-  dom?: DOMProps;
+  webView?: Omit<WebViewProps, 'source' | 'onMessage' | 'ref'>;
   foreground: string;
   cursor: string;
   fontSize: number;
@@ -26,91 +23,84 @@ export interface TerminalDomProps {
 }
 
 export default function TerminalDom(props: TerminalDomProps) {
-  const host = useRef<HTMLDivElement>(null);
-  const terminal = useRef<Terminal | null>(null);
-  const fit = useRef<(() => void) | null>(null);
+  const webview = useRef<WebView>(null);
+  const phase = useRef<'loading' | 'loaded' | 'ready'>('loading');
+  const alive = useRef(true);
   const current = useRef(props);
   current.current = props;
-  const report = (error: unknown) => current.current.onError(error instanceof Error ? error.message : String(error));
-
-  useDOMImperativeHandle(props.ref, () => ({
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const report = (error: unknown) => {
+    if (alive.current) void current.current.onError(error instanceof Error ? error.message : String(error));
+  };
+  const invoke = (action: () => Promise<void>) => {
+    try { void action().catch(report); } catch (error) { report(error); }
+  };
+  const send = (message: object) => {
+    if (!alive.current) return;
+    // JSON é dado, inclusive quando o tema contém separadores ou fechamento de script.
+    const json = JSON.stringify(message).replace(/</g, '\\u003c')
+      .replaceAll(String.fromCharCode(0x2028), '\\u2028').replaceAll(String.fromCharCode(0x2029), '\\u2029');
+    try { webview.current?.injectJavaScript(`window.__hangarTerminalReceive(${json});true;`); } catch (error) { report(error); }
+  };
+  const configuration = () => {
+    const p = current.current;
+    return { foreground: p.foreground, cursor: p.cursor, fontSize: p.fontSize, connected: p.connected };
+  };
+  useImperativeHandle(props.ref, () => ({
     write(bytes: unknown) {
+      if (!alive.current) return;
       if (!Array.isArray(bytes) || !bytes.every(byte => typeof byte === 'number' && Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-        void report(m.mobile_terminal_output_error());
+        report(m.mobile_terminal_output_error());
         return;
       }
-      try { terminal.current?.write(Uint8Array.from(bytes)); } catch (error) { void report(error); }
+      if (phase.current === 'ready') send({ type: 'write', bytes });
     },
   }), []);
-
   useEffect(() => {
-    let disposed = false;
-    let term: Terminal | undefined;
-    let observer: ResizeObserver | undefined;
-    const subscriptions: { dispose(): void }[] = [];
-    const invoke = (action: Promise<void>) => { void action.catch(error => { if (!disposed) void report(error); }); };
-    try {
-      const p = current.current;
-      term = new Terminal({
-        allowTransparency: true,
-        theme: { background: 'rgba(0, 0, 0, 0)', foreground: p.foreground, cursor: p.cursor },
-        fontFamily: 'monospace',
-        fontSize: p.fontSize,
-        convertEol: false,
-        screenReaderMode: true,
-        disableStdin: !p.connected,
-        linkHandler: { activate() {} },
-      });
-      terminal.current = term;
-      // O psmux trata respostas de cores como digitação; clipboard remoto também fica bloqueado.
-      for (const osc of [4, 10, 11, 12, 52]) subscriptions.push(term.parser.registerOscHandler(osc, () => true));
-      const addon = new FitAddon();
-      term.loadAddon(addon);
-      term.open(host.current!);
-      const measure = () => {
-        const dimensions = addon.proposeDimensions();
-        const cols = Math.max(20, Math.min(500, Math.floor(dimensions?.cols ?? 80)));
-        const rows = Math.max(5, Math.min(200, Math.floor(dimensions?.rows ?? 24)));
-        term!.resize(cols, rows);
-        return { cols, rows };
-      };
-      const dimensions = measure();
-      fit.current = () => {
-        if (disposed) return;
-        try {
-          const next = measure();
-          invoke(current.current.onResize(next.cols, next.rows));
-        } catch (error) { void report(error); }
-      };
-      subscriptions.push(term.onData(data => {
-        if (!disposed && current.current.connected) invoke(current.current.onData(data, false));
-      }), term.onBinary(data => {
-        if (!disposed && current.current.connected) invoke(current.current.onData(data, true));
-      }));
-      observer = new ResizeObserver(() => fit.current?.());
-      observer.observe(host.current!);
-      invoke(current.current.onReady(dimensions.cols, dimensions.rows));
-    } catch (error) { void report(error); }
-    return () => {
-      disposed = true;
-      fit.current = null;
-      terminal.current = null;
-      observer?.disconnect();
-      for (const subscription of subscriptions) subscription.dispose();
-      term?.dispose();
-    };
-  }, []);
-
-  useEffect(() => {
-    const term = terminal.current;
-    if (!term) return;
-    term.options.theme = { background: 'rgba(0, 0, 0, 0)', foreground: props.foreground, cursor: props.cursor };
-    term.options.disableStdin = !props.connected;
-    if (term.options.fontSize !== props.fontSize) {
-      term.options.fontSize = props.fontSize;
-      fit.current?.();
-    }
+    if (phase.current !== 'loading') send({ type: 'config', ...configuration() });
   }, [props.foreground, props.cursor, props.fontSize, props.connected]);
 
-  return <div ref={host} className="terminal-host" />;
+  const onMessage = (event: WebViewMessageEvent) => {
+    if (!alive.current) return;
+    try {
+      const raw = event.nativeEvent.data;
+      if (typeof raw !== 'string') throw new Error();
+      const message = JSON.parse(raw);
+      if (!message || typeof message !== 'object') throw new Error();
+      const dimensions = () => Number.isInteger(message.cols) && message.cols >= 20 && message.cols <= 500
+        && Number.isInteger(message.rows) && message.rows >= 5 && message.rows <= 200;
+      switch (message.type) {
+        case 'loaded':
+          if (phase.current !== 'loading') return;
+          phase.current = 'loaded';
+          send({ type: 'init', ...configuration() });
+          break;
+        case 'ready':
+          if (!dimensions()) throw new Error();
+          if (phase.current === 'ready') return;
+          if (phase.current !== 'loaded') throw new Error();
+          phase.current = 'ready';
+          invoke(() => current.current.onReady(message.cols, message.rows));
+          break;
+        case 'resize':
+          if (!dimensions()) throw new Error();
+          if (phase.current === 'ready') invoke(() => current.current.onResize(message.cols, message.rows));
+          break;
+        case 'data':
+          if (typeof message.data !== 'string' || typeof message.binary !== 'boolean') throw new Error();
+          if (phase.current === 'ready' && current.current.connected) invoke(() => current.current.onData(message.data, message.binary));
+          break;
+        case 'error':
+          if (typeof message.message !== 'string' || (message.kind !== 'load' && message.kind !== 'output')) throw new Error();
+          report(`${message.kind === 'output' ? m.mobile_terminal_output_error() : m.mobile_terminal_load_error()} ${message.message}`);
+          break;
+        default: throw new Error();
+      }
+    } catch { report(m.mobile_terminal_output_error()); }
+  };
+  return <WebView {...props.webView} ref={webview} source={source} onMessage={onMessage}
+    injectedJavaScript={undefined} injectedJavaScriptBeforeContentLoaded={undefined} injectedJavaScriptObject={undefined} />;
 }

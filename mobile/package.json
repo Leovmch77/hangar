@@ -79,6 +79,7 @@
     "i18n:compile:core": "paraglide-js compile --project ../project.inlang --outdir ../packages/core/src/paraglide --strategy baseLocale --output-structure locale-modules",
     "web": "expo start --web",
     "pretypecheck": "npm run i18n:compile",
+    "prei18n:compile": "node scripts/build-terminal-document.cjs",
     "typecheck": "flock -w 900 /tmp/hangar-verificacao.lock tsc --noEmit",
     "test": "npm run i18n:compile && flock -w 900 /tmp/hangar-verificacao.lock vitest run",
     "i18n:compile": "paraglide-js compile --project ../project.inlang --outdir ./src/paraglide --strategy baseLocale --output-structure locale-modules",
