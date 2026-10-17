@@ -7,9 +7,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 const push = vi.hoisted(() => vi.fn());
 vi.mock('expo-router', () => ({ useRouter: () => ({ push }) }));
+vi.mock('react-native', async (original) => {
+  const actual = await original<typeof import('react-native')>();
+  return { ...actual, Pressable: ({ accessibilityState, ...props }: Record<string, unknown>) => createElement(actual.Pressable, props) };
+});
 vi.mock('../paraglide/messages', () => ({
   orq_talk_to_arbiter: () => 'orq_talk_to_arbiter',
   orq_row_badge: () => 'orq_row_badge',
+  orq_tab_title: () => 'orq_tab_title',
 }));
 
 import { OrqFooter } from './OrqFooter';
@@ -17,11 +22,28 @@ import { OrqFooter } from './OrqFooter';
 async function render(arbiter: string | null) {
   const container = document.createElement('div');
   const root = createRoot(container);
-  await act(async () => root.render(createElement(OrqFooter, { serverId: 's1', arbiter })));
+  await act(async () => root.render(createElement(OrqFooter, { serverId: 's1', name: 'orq-run', arbiter })));
   return { container, root };
 }
 
 describe('OrqFooter', () => {
+  it.each(['arb-2', null])('abre o painel da própria orquestração com árbitro %s', async (arbiter) => {
+    push.mockClear();
+    const { container, root } = await render(arbiter);
+    try {
+      const panel = container.querySelector<HTMLButtonElement>('button[aria-label="orq_tab_title"]');
+      expect(panel).not.toBeNull();
+      expect(panel!.disabled).toBe(false);
+      await act(async () => panel!.click());
+      expect(push).toHaveBeenCalledExactlyOnceWith('/s/s1/orq-run/orchestration');
+      const talk = container.querySelector<HTMLButtonElement>('button[aria-label="orq_talk_to_arbiter"]');
+      expect(talk).not.toBeNull();
+      expect(talk!.disabled).toBe(!arbiter);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('abre a sessão do árbitro no mesmo servidor', async () => {
     push.mockClear();
     const { container, root } = await render('arb-2');

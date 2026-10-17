@@ -109,7 +109,6 @@ vi.mock('react-native-keyboard-controller', () => ({
   useKeyboardState: <T,>(select: (s: { isVisible: boolean; height: number }) => T) => select({ isVisible: false, height: 0 }),
 }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
-vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
 vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
 vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
@@ -136,11 +135,14 @@ vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
 vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
-vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
+vi.mock('../paraglide/messages', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../paraglide/messages')>(),
+  ...Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
+    .concat(' orq_tab_title orq_row_badge orq_talk_to_arbiter')
     .concat(' cite_action cite_too_long_aria selection_copy selection_copy_markdown selection_copy_image_url selection_copy_image_urls')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
@@ -188,7 +190,7 @@ beforeEach(() => {
 });
 afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
-const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {},
+const sessionsState = vi.hoisted(() => ({ rows: [] as (Pick<SessionInfo, 'name' | 'jsonl' | 'pair_peers' | 'provider' | 'orq_arbiter'> & { serverId: string })[], byServerRecord: {},
   holders: 0, retain: () => { sessionsState.holders++; return () => { sessionsState.holders--; }; } }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
@@ -412,6 +414,41 @@ describe('ações e atualização da conversa na rota', () => {
       expect(navigation.dismissTo).toHaveBeenLastCalledWith({ pathname: '/', params: { compose: '1' } });
       await act(async () => button(container, 'drawer-navigation-close')!.click());
       expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('rodapé acompanha sucessão e ausência de árbitro na lista sem reutilizar o árbitro antigo', async () => {
+    chatRow.extra = { provider: 'orq', orq_arbiter: 'arb-old' };
+    const row: (typeof sessionsState.rows)[number] = { serverId: 's1', name: 'sess', provider: 'orq', orq_arbiter: 'arb-old' };
+    sessionsState.rows = [row];
+    routerPush.mockClear();
+    const { container, root } = await render(createElement(ChatScreen));
+    const talk = () => container.querySelector<HTMLButtonElement>('[aria-label="orq_talk_to_arbiter"]');
+    try {
+      expect(talk()).not.toBeNull();
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-old');
+      await act(async () => button(container, 'orq_tab_title')!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/orchestration');
+
+      sessionsState.rows = [{ ...row, orq_arbiter: 'arb-new' }];
+      await act(async () => root.render(createElement(ChatScreen)));
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-new');
+
+      sessionsState.rows = [{ ...row, orq_arbiter: null }];
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(talk()!.disabled).toBe(true);
+      routerPush.mockClear();
+      await act(async () => talk()!.click());
+      expect(routerPush).not.toHaveBeenCalled();
+
+      sessionsState.rows = [];
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(talk()!.disabled).toBe(false);
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-old');
+      expect(fetchSessionsForServer).toHaveBeenCalledTimes(1);
     } finally { act(() => root.unmount()); }
   });
 

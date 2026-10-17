@@ -81,6 +81,25 @@ test('conversa de orquestração em servidor próprio não oferece compartilhar'
   expect(shareButton(container)).toBeNull();
 });
 
+test('orquestração abre seu painel no lugar de Atividade e sessão comum mantém Atividade', async () => {
+  const { container, onClose } = await render(own.id, true);
+  const panel = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orq_tab_title()}"]`);
+  expect(panel).not.toBeNull();
+  expect(container.querySelector(`[aria-label="${m.ctx_atividade()}"]`)).toBeNull();
+  await act(async () => { panel!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/orchestration');
+
+  boundary.push.mockClear();
+  const normal = await render(own.id);
+  expect(normal.container.querySelector(`[aria-label="${m.orq_tab_title()}"]`)).toBeNull();
+  const activity = normal.container.querySelector<HTMLButtonElement>(`[aria-label="${m.ctx_atividade()}"]`);
+  expect(activity).not.toBeNull();
+  await act(async () => { activity!.click(); });
+  expect(normal.onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/activity');
+});
+
 test('servidor inexistente não oferece compartilhar', async () => {
   useServers.setState({ activeId: own.id });
   const { container } = await render('unknown');

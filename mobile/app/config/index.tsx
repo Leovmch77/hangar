@@ -34,6 +34,7 @@ const SERVER: Page[] = [
   { route: '/config/contas', icon: 'User', title: m.native_settings_page_accounts,
     rows: [m.contas_atualizar, m.contas_secao_claude, m.contas_secao_modelos, m.contas_secao_outros] },
   { route: '/config/orchestration', icon: 'Users', title: m.native_settings_page_orchestration, rows: [] },
+  { route: '/config/orchestration-history', icon: 'History', title: m.orq_history_title, rows: [] },
   { route: '/config/harnesses', icon: 'Activity', title: m.native_settings_page_harnesses, rows: [] },
   { route: '/config/voice', icon: 'Mic', title: m.native_settings_page_voice, rows: [] },
   { route: '/config/jev', icon: 'Zap', title: m.jev_title, rows: [] },
