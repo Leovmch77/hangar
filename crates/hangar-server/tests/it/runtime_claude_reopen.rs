@@ -572,7 +572,7 @@ async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_park
     // `bwrap` falso que só executa o comando: a recusa a provar é a do terminal que não volta, não a da
     // máquina sem bubblewrap.
     std::fs::create_dir_all(fx.home.join("bin")).unwrap();
-    crate::write_executable(&fx.home.join("bin/bwrap"),"#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n");
+    crate::write_executable(&fx.home.join("bin/bwrap"),"#!/bin/sh\nwhile [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n");
     let registry = fx.registry().await;
     let server = serve_with_accounts(&fx,registry).await;
     let (status,body) = post(server,"conta",json!({"config_dir":b})).await;
