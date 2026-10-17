@@ -43,6 +43,8 @@ interface Props {
   // Texto devolvido pelo Parar/cancelar: entra antes do que já está no campo, nunca no lugar.
   returned?: { text: string };
   onReturnedAdopted?: () => void;
+  settingsRequest?: { which: 'mode' | 'account'; n: number } | null;
+  onSettingsRequestConsumed?: (n: number) => void;
   firstInputId?: string;
   firstInputSent?: boolean;
   sessionProvider?: string | null;
@@ -137,7 +139,7 @@ const dictatedInField = (bar: DictationBar, value: string) => {
   return value.slice(start, start + bar.shown.length) === bar.shown;
 };
 
-export function Composer({ serverId, name, draft, returned, onReturnedAdopted, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false, queuePanel: queueList }: Props) {
+export function Composer({ serverId, name, draft, returned, onReturnedAdopted, settingsRequest, onSettingsRequestConsumed, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false, queuePanel: queueList }: Props) {
   const { theme } = useUnistyles();
   const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
   const inputRef = useRef<TextInput>(null);
@@ -456,8 +458,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
   const organizationOff = useDictationOrganization(styleServer) === 'off';
   const [commandSheetOpen, setCommandSheetOpen] = useState(false);
-  // `/model` e `/effort` abrem a folha do chip da sessão; o número sobe a cada pedido.
-  const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort'; n: number } | null>(null);
+  // Comandos e rodapé abrem a mesma folha; o número sobe a cada pedido.
+  const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort' | 'mode' | 'account'; n: number } | null>(null);
+  const lastSettingsRequest = useRef<number | null>(null);
   // null = pergunta lateral fechada; string = a pergunta que veio com o `/btw` (pode ser vazia).
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
@@ -1342,9 +1345,16 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
   }, [replaceText, isClaude, origin]);
 
-  const openSelector = useCallback((which: 'model' | 'effort') => {
+  const openSelector = useCallback((which: 'model' | 'effort' | 'mode' | 'account') => {
     setSelectorRequest((cur) => ({ which, n: (cur?.n ?? 0) + 1 }));
   }, []);
+  useEffect(() => {
+    if (!settingsRequest || lastSettingsRequest.current === settingsRequest.n) return;
+    lastSettingsRequest.current = settingsRequest.n;
+    openSelector(settingsRequest.which);
+    // A tela larga o pedido para ele não voltar ao remontar o Composer.
+    onSettingsRequestConsumed?.(settingsRequest.n);
+  }, [settingsRequest, onSettingsRequestConsumed, openSelector]);
 
   // Sugestão tocada: model/effort abrem o seletor; com argumento, destrutivo ou no Codex preenche
   // para revisar; o resto envia direto.

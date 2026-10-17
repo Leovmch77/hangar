@@ -61,6 +61,17 @@ export default function ChatScreen() {
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
   const rota = `${serverId}::${name}`;
+  const settingsSequence = useRef(0);
+  const [settingsRequest, setSettingsRequest] = useState<{ route: string; which: 'mode' | 'account'; n: number } | null>(null);
+  const openSettings = useCallback((which: 'mode' | 'account') => {
+    setSettingsRequest({ route: rota, which, n: ++settingsSequence.current });
+  }, [rota]);
+  const consumeSettingsRequest = useCallback((n: number) => {
+    setSettingsRequest(current => current?.n === n ? null : current);
+  }, []);
+  useEffect(() => {
+    setSettingsRequest(current => current && current.route !== rota ? null : current);
+  }, [rota]);
 
   const chat = chatStore(serverId, name);
   const [servidorSumiu, setServidorSumiu] = useState(false);
@@ -622,6 +633,8 @@ export default function ChatScreen() {
                   <MemoComposer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
                             returned={returned?.route === rota ? returned.value : undefined}
                             onReturnedAdopted={onReturnedAdopted}
+                            settingsRequest={settingsRequest?.route === rota ? settingsRequest : null}
+                            onSettingsRequestConsumed={consumeSettingsRequest}
                             firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
                             headless={headless} onStop={handleStop} stopping={stopping} queuePanel={queuePanel} />
                 </>
@@ -630,7 +643,7 @@ export default function ChatScreen() {
           </View>
           {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
           {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !soLeitura && !dead
-            ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
+            ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} onOpenSettings={openSettings} />
             : null}
           <KeyboardBar />
         </KeyboardAvoidingView>
