@@ -345,27 +345,6 @@ def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     asyncio.run(flow())
 
 
-def test_plugin_click_writes_with_the_terminal_ownership(monkeypatch,tmp_path):
-    # O clique de mod pelo app com o Rust dono do pane: sem a posse, era o 500 do log de 04/10/2026.
-    from app import plugin_click, tmux
-    gateway=LoanGateway()
-    owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
-    sent=[]
-    def send_keys(name, keys, literal=False):
-        from app.runtime_terminal import assert_writer
-        assert_writer(name)
-        sent.append((name, keys, slot.phase))
-        return True
-    monkeypatch.setattr(tmux,'send_keys',send_keys)
-    async def flow():
-        await _to_rust(owner,'session')
-        assert await asyncio.to_thread(plugin_click.click,'session',2,5)
-        assert [(name, phase) for name, _, phase in sent]==[('session',Phase.Rust)]
-        assert [kind for kind,_ in gateway.controls] == ['keyboard_loan','keyboard_return']
-        await owner.detach('session')
-    asyncio.run(flow())
-
-
 def test_admin_loan_refused_has_zero_effect(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
     class Silent(LoanGateway):
@@ -1165,28 +1144,6 @@ def test_terminal_session_registers_in_rust_without_python_phase(monkeypatch, tm
         slot = owner.slot('session')
         assert slot.phase == Phase.Rust and slot.lease is None and slot.store is None
         assert gateway.calls == ['open']
-        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
-    asyncio.run(flow())
-
-
-def test_click_that_opens_the_terminal_in_rust_borrows_the_keyboard(monkeypatch, tmp_path):
-    # Primeira operação depois de reiniciar o backend: ainda não há slot. O próprio clique abre a sessão
-    # no Rust e recebe o teclado emprestado, também quando quem clica é convidado.
-    from app import plugin_click, tmux, runtime_terminal as terminal
-    gateway = LoanGateway()
-    owner = _born_terminal(monkeypatch, tmp_path, gateway)
-    sent = []
-    def send_keys(name, keys, literal=False):
-        terminal.assert_writer(name)
-        sent.append(name)
-        return True
-    monkeypatch.setattr(tmux, 'send_keys', send_keys)
-    async def flow():
-        owner.loop = asyncio.get_running_loop()
-        assert 'session' not in owner.names and not owner.terminal_in_rust('session')
-        await plugin_click._click('session', 2, 5)
-        assert owner.slot('session').phase == Phase.Rust and gateway.calls.count('open') == 1
-        assert sent == ['session'] and [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return']
         await owner.change('session', lambda: asyncio.sleep(0), remove=True)
     asyncio.run(flow())
 

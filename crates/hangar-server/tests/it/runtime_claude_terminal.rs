@@ -198,6 +198,28 @@ async fn the_turn_end_of_a_restored_claude_hands_its_weekly_limit_to_the_switche
     finish(&mut agent);
 }
 
+/// O clique de mod adota o Claude com terminal ainda sem ator: a adoção liga a sessão ao `Mods`, que é o que
+/// faz a rota atender no Rust em vez de mandar ao Python.
+#[tokio::test]
+async fn adopting_a_terminal_claude_attaches_it_to_the_mods() {
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let key = "ab".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
+    let mods = hangar_server::mods::state::Mods::default();
+    let map = [("HOME",fx.home.to_string_lossy().into_owned())].into_iter().map(|(k,v)|(k.to_owned(),v)).collect();
+    let registry = crate::runtime_open::registry_with(|r|r.with_codex_environment(AccountEnvironment::from_map(map)).with_mods(mods.clone())).await;
+    registry.bind_watcher(fx.watcher());
+    assert!(!mods.owns("s1"));
+    registry.adopt_claude_terminal("s1").await.map_err(|e|e.code).unwrap();
+    assert!(mods.owns("s1"),"adotado, o clique fica no Rust");
+    registry.close(&key,1).await.unwrap();
+    finish(&mut agent);
+}
+
 #[tokio::test]
 async fn at_startup_only_the_claude_terminals_that_had_a_queue_are_adopted() {
     let fx = fixture();

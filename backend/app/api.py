@@ -5197,6 +5197,8 @@ class PluginCloseBody(_StrictBody):
 
 
 _MOD_SEM_RESPOSTA = erro("erro_mod_clique_sem_resposta", "O mod não respondeu a tempo.")
+# O clique dos mods é do Rust, sem reserva aqui: modo `python` ou sessão que ele não atende.
+_MOD_SEM_RUST = erro("mods_need_rust_server", "O clique do mod precisa do servidor Rust de pé e da sessão aberta nele.")
 
 
 def _convidado(request: Request) -> bool:
@@ -5207,9 +5209,8 @@ def _convidado(request: Request) -> bool:
 async def _mod_no_rust(name: str, op: str, request: Request) -> Response | None:
     """Operação de mod de sessão que o Rust atende, pedida por quem entrou pelo Python (convidado, de
     convite ou com login, e o Connect): a autenticação foi a desta porta, e o Rust aciona pela ponte
-    privada com o mesmo efeito do dono. `None`: a sessão não é dele (só o 404), e quem trata é o Python.
-    Convidado não chega ao `plugin_click` de terminal que é do Rust: com a ponte recusando, o clique
-    daqui dirigiria o pane do executor dele calado."""
+    privada com o mesmo efeito do dono. `None`: a sessão não é dele (só o 404) ou o Rust está fora; o
+    clique e o fechamento respondem o código, a aba e a digitação ficam no app."""
     from app import list_bridge, runtime_coordinator
     owner = runtime_coordinator.current()
     endpoint = list_bridge.endpoint()
@@ -5245,22 +5246,17 @@ async def _mod_no_rust(name: str, op: str, request: Request) -> Response | None:
 @app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
-    from app import plugin_click
     if (rust := await _mod_no_rust(name, "press", request)) is not None:
         return rust
-    # O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
-    if body.plugin is None and body.key == plugin_click.CLOSE_KEY:
-        return await _acao_de_mod(plugin_click.close(name, body.site))
-    return await _acao_de_mod(plugin_click.press(name, body.site, body.key, body.plugin))
+    raise HTTPException(503, detail=_MOD_SEM_RUST)
 
 
 @app.post("/api/sessions/{name}/plugin/close", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def plugin_close(name: str, body: PluginCloseBody, request: Request):
     """Fecha um painel de mod pelo `✕` do cabeçalho, pedido pelo app."""
-    from app import plugin_click
     if (rust := await _mod_no_rust(name, "close", request)) is not None:
         return rust
-    return await _acao_de_mod(plugin_click.close(name, body.site))
+    raise HTTPException(503, detail=_MOD_SEM_RUST)
 
 
 @app.post("/api/sessions/{name}/plugin/show", dependencies=[Depends(require_auth)])
@@ -5278,15 +5274,6 @@ async def plugin_input(name: str, request: Request):
         return rust
     raise HTTPException(409, detail=erro("erro_mod_sem_digitacao",
         "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app."))
-
-
-async def _acao_de_mod(acao):
-    """Roda o clique pela tela e traduz as recusas para o app."""
-    from app import plugin_click
-    try:
-        return await acao
-    except plugin_click.PressRefused as e:
-        raise HTTPException(409, detail=e.detail)
 
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
