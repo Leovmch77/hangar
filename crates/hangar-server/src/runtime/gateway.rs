@@ -1037,7 +1037,7 @@ impl RuntimeRegistry {
     }
     /// O Claude com terminal sem ator (restaurado depois da adoção da subida) é adotado como na escrita,
     /// pela porta. O sem terminal estacionado não sobe por isto.
-    async fn adopt_claude_terminal(&self,name:&str)->Result<(),RuntimeError> {
+    pub async fn adopt_claude_terminal(&self,name:&str)->Result<(),RuntimeError> {
         if self.has_entry(None,name).await {return Ok(());}
         let Some(watcher)=self.watcher.get().cloned() else {return Ok(())};
         let _pass=self.ingress.enter(name,Duration::ZERO).await
