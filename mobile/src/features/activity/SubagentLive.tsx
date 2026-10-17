@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { formatElapsed, getSubagent, mensagemDeErro, sendSubagentMessage } from '@hangar/core';
+import { formatElapsed, getSubagent, mensagemDeErro, prependOlder, sendSubagentMessage } from '@hangar/core';
 import type { Server, SubagentRun } from '@hangar/core';
 import { MessageList } from '../../chat/MessageList';
 import { WorkingLine } from '../../chat/LiveWork';
@@ -83,7 +83,7 @@ function SubagentConversation({ server, sessionName, agentId, paiRodando = null 
           stopped = true;
           return;
         }
-        setDetail(d);
+        setDetail(previous => ({ ...d, events: d.events?.length ? prependOlder(previous?.events ?? [], d.events) ?? d.events : d.events }));
         setError('');
         failCount = 0;
         setLoading(false);

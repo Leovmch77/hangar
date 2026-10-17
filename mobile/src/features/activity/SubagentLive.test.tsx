@@ -24,9 +24,9 @@ vi.mock('react-native', async (original) => ({
     value, 'aria-label': accessibilityLabel, disabled: editable === false,
     onInput: (event: { currentTarget: HTMLTextAreaElement }) => onChangeText(event.currentTarget.value),
   }),
-  Pressable: ({ children, onPress, accessibilityRole, accessibilityLabel, disabled }: {
-    children?: ReactNode; onPress?: () => void; accessibilityRole?: string; accessibilityLabel?: string; disabled?: boolean;
-  }) => createElement(accessibilityRole === 'button' ? 'button' : 'div', { onClick: onPress, role: accessibilityRole, 'aria-label': accessibilityLabel, disabled }, children),
+  Pressable: ({ children, onPress, accessibilityRole, accessibilityLabel, accessibilityState, disabled }: {
+    children?: ReactNode; onPress?: () => void; accessibilityRole?: string; accessibilityLabel?: string; accessibilityState?: { expanded?: boolean }; disabled?: boolean;
+  }) => createElement(accessibilityRole === 'button' ? 'button' : 'div', { onClick: onPress, role: accessibilityRole, 'aria-label': accessibilityLabel, 'aria-expanded': accessibilityState?.expanded, disabled }, children),
 }));
 vi.mock('react-native-keyboard-controller', () => ({
   KeyboardAvoidingView: ({ children, style, automaticOffset, behavior }: { children: ReactNode; style?: Record<string, unknown>; automaticOffset?: boolean; behavior?: string }) => createElement('div', { style, 'data-keyboard-offset': automaticOffset, 'data-keyboard-behavior': behavior }, children),
@@ -150,6 +150,110 @@ it('detalhe habilita pausa de grupo e nested scroll preservando polling e pagina
   await reply(2, { ...page, events: [...page.events!, { id: 'new-notice', kind: 'notice', text: 'new-notice' }] });
   expect(config().maintainScrollAtEnd).toBe(false);
   expect(container.textContent).toContain('new-notice');
+});
+
+it('janela móvel preserva grupo aberto e Mostrar todas no polling concorrente ao toque', async () => {
+  const { container, render } = mount();
+  await render();
+  const page = { ...detail('one', ''), toolCalls: 99, events: [
+    { id: 'thought-prefix', kind: 'thinking' as const, text: 'prefixo carregado' },
+    { id: 'thought-next', kind: 'thinking' as const, text: 'pensamento seguinte' },
+    ...Array.from({ length: 99 }, (_, i) => [
+      { id: `use-${i}`, kind: 'tool_use' as const, tool_name: 'Read', tool_use_id: `call-${i}`, tool_input: { file_path: `/src/arquivo-${i}.ts` } },
+      { id: `result-${i}`, kind: 'tool_result' as const, tool_use_id: `call-${i}`, result: `conteúdo-${i}` },
+    ]).flat(),
+  ] };
+  await reply(0, page);
+  const group = () => container.querySelector('[aria-expanded]') as HTMLButtonElement;
+  expect(group().getAttribute('aria-expanded')).toBe('false');
+  await act(async () => group().click());
+  expect(group().getAttribute('aria-expanded')).toBe('true');
+  expect(container.textContent).toContain('prefixo carregado');
+  expect(container.textContent).not.toContain('arquivo-80.ts');
+  const showAll = [...container.querySelectorAll('button')].find(button => button.textContent === m.tool_mostrar_todas({ n: 101 }));
+  expect(showAll).toBeDefined();
+  await poll();
+  expect(requests[1].url).toBe('http://remote.test:8765/api/sessions/sess/subagents/one?events=200');
+  await act(async () => {
+    showAll!.click();
+    requests[1].response.resolve(new Response(JSON.stringify({ ...page, events: [
+      ...page.events.slice(1), { id: 'thought-new', kind: 'thinking', text: 'pensamento novo' },
+    ] })));
+  });
+  expect(group().getAttribute('aria-expanded')).toBe('true');
+  expect(container.textContent).toContain('arquivo-80.ts');
+  expect(container.textContent).toContain('prefixo carregado');
+  expect(container.textContent).toContain('pensamento novo');
+  expect([...container.querySelectorAll('button')].some(button => button.textContent === m.tool_mostrar_todas({ n: 102 }))).toBe(false);
+});
+
+it('resposta nova atualiza texto resultado e metadados sem duplicar eventos compartilhados', async () => {
+  const { container, render } = mount();
+  await render();
+  const page: SubagentRun = { ...detail('one', ''), canMessage: true, toolCalls: 1, events: [
+    { id: 'prefix', kind: 'notice', text: 'histórico preservado' },
+    { id: 'thought', kind: 'thinking', text: 'texto antigo' },
+    { id: 'use', kind: 'tool_use', tool_name: 'Read', tool_use_id: 'call', tool_input: { file_path: '/src/arquivo.ts' } },
+    { id: 'result', kind: 'tool_result', tool_use_id: 'call', result: 'resultado antigo' },
+  ] };
+  await reply(0, page);
+  await act(async () => (container.querySelector('[aria-expanded]') as HTMLButtonElement).click());
+  expect(container.textContent).toContain('texto antigo');
+  expect(container.querySelector('textarea')).not.toBeNull();
+  await poll();
+  await reply(1, { ...page, state: 'finished', agentType: 'ResearchNew', toolCalls: 7,
+    tools: [{ name: 'Read', count: 7 }], recent: [{ name: 'Read-recent-new', target: 'arquivo.ts' }], canMessage: false,
+    events: [
+      { ...page.events![1], text: 'texto atualizado' },
+      page.events![2],
+      { ...page.events![3], result: 'resultado atualizado', is_error: true },
+    ],
+  });
+  expect(container.textContent?.split('texto atualizado')).toHaveLength(2);
+  expect(container.textContent?.split('resultado atualizado')).toHaveLength(2);
+  expect(container.textContent?.split('arquivo.ts')).toHaveLength(2);
+  expect(container.textContent?.split('histórico preservado')).toHaveLength(2);
+  expect(container.textContent).not.toContain('texto antigo');
+  expect(container.textContent).not.toContain('resultado antigo');
+  expect(container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true');
+  expect(container.textContent).toContain(m.native_tools_failed_1());
+  expect(container.textContent).toContain(m.atividade_sub_concluido());
+  expect(container.textContent).toContain(m.atividade_chamadas({ n: 7 }));
+  expect(container.textContent).toContain('ResearchNew');
+  expect(container.textContent).toContain('Read-recent-new');
+  expect(container.textContent).toContain('Read ×7');
+  expect(container.querySelector('textarea')).toBeNull();
+  await poll();
+  expect(requests).toHaveLength(2);
+});
+
+it.each(['sem IDs comuns', 'vazia'])('cauda %s substitui conversa e estado anteriores', async (mode) => {
+  const { container, render } = mount();
+  await render();
+  await reply(0, { ...detail('one', ''), events: [
+    { id: 'old-thought', kind: 'thinking', text: 'conversa antiga aberta' },
+    { id: 'old-next', kind: 'thinking', text: 'outro pensamento antigo' },
+  ] });
+  await act(async () => (container.querySelector('[aria-expanded]') as HTMLButtonElement).click());
+  expect(container.textContent).toContain('conversa antiga aberta');
+  await poll();
+  await reply(1, { ...detail('one', ''), events: mode === 'vazia' ? [] : [
+    { id: 'new-thought', kind: 'thinking', text: 'conversa substituta' },
+    { id: 'new-next', kind: 'thinking', text: 'outro pensamento novo' },
+  ] });
+  expect(container.textContent).not.toContain('conversa antiga aberta');
+  expect(container.textContent).not.toContain('outro pensamento antigo');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  if (mode === 'vazia') {
+    expect(container.querySelector('[aria-label="load-older"]')).toBeNull();
+    expect(container.textContent).toContain(m.atividade_pensando());
+  } else {
+    expect(container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('conversa substituta');
+    await act(async () => (container.querySelector('[aria-expanded]') as HTMLButtonElement).click());
+    expect(container.textContent).toContain('conversa substituta');
+    expect(container.textContent).toContain('outro pensamento novo');
+  }
 });
 
 it('detalhe do subagente alinha conversa curta no topo da LegendList', async () => {
@@ -339,24 +443,33 @@ it.each([true, false])('tempo parte de startedAt com eventos %s e usa relógio l
   expect(container.textContent).toContain('6 min');
 });
 
-it('carrega 200 eventos e mantém anteriores no polling de 2500ms', async () => {
+it('paginação real de 200 para 400 preserva anteriores e atualização nova no polling de 2500ms', async () => {
   const { container, render } = mount();
   await render();
   expect(requests[0].url).toBe('http://remote.test:8765/api/sessions/sess/subagents/one?events=200');
   const page = detail('one', 'recente');
-  page.events = Array.from({ length: 200 }, (_, i) => ({ id: `n-${i}`, kind: 'notice', text: `linha-${i}` }));
+  page.events = Array.from({ length: 200 }, (_, i) => ({ id: `n-${i + 200}`, kind: 'notice', text: `linha-${i + 200}` }));
   await reply(0, page);
   await act(async () => (container.querySelector('[aria-label="load-older"]') as HTMLElement).click());
   expect(requests[1].url).toBe('http://remote.test:8765/api/sessions/sess/subagents/one?events=400');
-  const older = { ...page, events: [{ id: 'old', kind: 'notice' as const, text: 'histórico anterior' }, ...page.events] };
+  const older = { ...page, events: [
+    ...Array.from({ length: 200 }, (_, i) => ({ id: `n-${i}`, kind: 'notice' as const, text: `histórico anterior-${i}` })),
+    ...page.events,
+  ] };
   await reply(1, older);
-  expect(container.textContent).toContain('histórico anterior');
+  expect(container.textContent).toContain('histórico anterior-0');
   await act(async () => { await vi.advanceTimersByTimeAsync(2499); });
   expect(requests).toHaveLength(2);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(requests[2].url).toBe('http://remote.test:8765/api/sessions/sess/subagents/one?events=400');
-  await reply(2, older);
-  expect(container.textContent).toContain('histórico anterior');
+  await reply(2, { ...older, events: [
+    ...older.events.slice(1).map(event => event.id === 'n-250' ? { ...event, text: 'conteúdo revisado' } : event),
+    { id: 'n-400', kind: 'notice', text: 'evento recém-chegado' },
+  ] });
+  expect(container.textContent?.split('histórico anterior-0')).toHaveLength(2);
+  expect(container.textContent?.split('conteúdo revisado')).toHaveLength(2);
+  expect(container.textContent?.split('evento recém-chegado')).toHaveLength(2);
+  expect(container.textContent).not.toContain('linha-250');
 });
 
 it('contrato nativo permite lista encolher em 320pt sem ferramentas empurrarem envio', async () => {
