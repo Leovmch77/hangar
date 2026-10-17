@@ -110,6 +110,10 @@ pub struct RuntimeRegistry {
     limit_holds:std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
+/// O que o fim de turno achou: sem terminal quem vê o limite é o ator da sessão.
+#[derive(Debug)]
+pub enum TurnLimit { NotTerminal, Checked { transcript:std::path::PathBuf, limit:Option<super::protocol::UsageLimit>, sent:bool } }
+
 /// Sessão que parou no limite de uso da conta.
 #[derive(Debug)]
 pub struct LimitHit {
@@ -311,8 +315,13 @@ impl RuntimeRegistry {
     /// Liga a troca de conta no limite; sem ela o aviso de limite só fica no estado da sessão.
     pub fn set_limit_sink(&self,sink:tokio::sync::mpsc::UnboundedSender<LimitHit>) { let _ = self.limits.set(sink); }
     /// A fila do Claude para já, no mesmo passo do aviso: o que estiver nela iria para a conta esgotada.
-    pub fn usage_limit(&self,hit:LimitHit) {
-        let Some(sink) = self.limits.get() else { return };
+    /// `true`: o vigia recebeu. Sem vigia vai ao diário.
+    pub fn usage_limit(&self,hit:LimitHit) -> bool {
+        let Some(sink) = self.limits.get() else {
+            tracing::warn!(session=%hit.name,"aviso de limite sem o vigia da troca de conta");
+            self.diag.report("runtime.limit_sink_closed",&hit.name,"limit_sink_absent","o vigia da troca de conta não existe; o aviso de limite se perdeu");
+            return false;
+        };
         let name = hit.name.clone();
         if hit.provider == "claude" { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).insert(name.clone()); }
         // Segurada antes de enviar (a troca pode soltar antes de esta linha voltar); sem o vigia, ninguém soltaria.
@@ -320,7 +329,9 @@ impl RuntimeRegistry {
             self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).remove(&name);
             tracing::warn!(session=%name,"aviso de limite sem o vigia da troca de conta; a fila segue entregando");
             self.diag.report("runtime.limit_sink_closed",&name,"limit_sink_closed","o vigia da troca de conta não recebeu o aviso de limite");
+            return false;
         }
+        true
     }
     pub fn limit_held(&self,name:&str) -> bool { self.limit_holds.lock().unwrap_or_else(|e|e.into_inner()).contains(name) }
     /// Fim da troca (feita ou não): a fila volta a entregar, a começar pelo recado de continuar.
@@ -1055,6 +1066,18 @@ impl RuntimeRegistry {
                 Err(failure(NO_TARGET))
             }
         }
+    }
+    /// O fim de turno do Claude: o aviso de limite no fim do transcript da conversa vigente vai ao vigia.
+    pub async fn turn_limit(&self,name:&str,binding:&crate::interactions::InteractionBinding,now:f64)->Result<TurnLimit,RuntimeError> {
+        let Some(target)=self.limit_target(name).await? else {return Ok(TurnLimit::NotTerminal)};
+        let (live,transcript)=self.context_transcript(name).await?;
+        if live!=*binding {return Err(failure("plugin_conversation_mismatch"));}
+        let path=transcript.clone();
+        let limit=tokio::task::spawn_blocking(move||crate::session_write::limit_switch::file_limit(&path,now)).await
+            .map_err(|_|failure("limit_transcript_read_job"))?;
+        let sent=limit.clone().is_some_and(|limit|self.usage_limit(LimitHit { name:name.to_owned(),provider:"claude".into(),
+            account:Some(target.metadata.config_dir.to_string_lossy().into_owned()),limit }));
+        Ok(TurnLimit::Checked { transcript,limit,sent })
     }
     pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
         self.adopt_claude_terminal(name).await?;

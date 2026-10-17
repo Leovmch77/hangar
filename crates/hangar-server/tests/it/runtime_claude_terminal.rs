@@ -169,6 +169,35 @@ async fn the_usage_limit_target_adopts_the_restored_claude_or_says_why_not() {
     finish(&mut agent);
 }
 
+/// O caso real: Claude com terminal restaurado, conta padrão, o aviso de limite semanal no fim do transcript.
+/// O fim de turno lê esse transcript e entrega o aviso ao vigia da troca, com a conta da sessão.
+#[tokio::test]
+async fn the_turn_end_of_a_restored_claude_hands_its_weekly_limit_to_the_switcher() {
+    use hangar_server::runtime::gateway::TurnLimit;
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let key = "bb".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
+    let projects = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.root.to_string_lossy()));
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(projects.join(format!("{SID}.jsonl")),include_str!("fixtures/usage_limit/claude_weekly_limit_tui_2026_10.jsonl")).unwrap();
+    let registry = fx.registry().await;
+    let (sink,mut hits) = tokio::sync::mpsc::unbounded_channel();
+    registry.set_limit_sink(sink);
+    registry.adopt_now("s1").await.unwrap().unwrap();
+    let binding = registry.interaction_binding_readonly("s1").await.unwrap();
+    let checked = registry.turn_limit("s1",&binding,1792249428.0).await.map_err(|e|e.code).unwrap();
+    assert!(matches!(checked,TurnLimit::Checked { sent:true,.. }),"{checked:?}");
+    let hit = hits.try_recv().expect("o vigia recebeu");
+    assert_eq!((hit.name.as_str(),hit.limit.window.as_str(),hit.limit.resets_at),("s1","seven_day",Some(1792270800.0)));
+    assert_eq!(hit.account.map(std::path::PathBuf::from).map(|p|p.canonicalize().unwrap()),Some(fx.home.join(".claude").canonicalize().unwrap()));
+    registry.close(&key,1).await.unwrap();
+    finish(&mut agent);
+}
+
 #[tokio::test]
 async fn at_startup_only_the_claude_terminals_that_had_a_queue_are_adopted() {
     let fx = fixture();

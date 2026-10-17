@@ -207,7 +207,10 @@ impl Switcher {
         let outcome = if self.first_time(&hit.name,&hit.limit) { Some(self.switch(host,&hit).await) } else { None };
         // Todo aviso segura a fila, inclusive o repetido: qualquer fim a solta.
         host.release(&hit.name).await;
-        let Some(outcome) = outcome else { return };
+        let Some(outcome) = outcome else {
+            host.diary(&hit.name,"limit_switch_repeated","limite de uso: o mesmo aviso já tratado chegou de novo e não troca outra vez");
+            return;
+        };
         let report = |code:&str,reason:&'static str|host.diary(&hit.name,&super::input::diary_code(code),reason);
         // Só o aviso que não pede troca fica guardado. Na conta nova o limite é outro (mesmo com o mesmo reset
         // arredondado); a troca que falhou, sem folga ou ocupada tenta de novo no próximo turno parado, e o aviso
@@ -232,7 +235,10 @@ impl Switcher {
                 tracing::warn!(session=%hit.name,code,"limite de uso: a sessão saiu do Rust antes da troca");
                 report(code,"limite de uso: a sessão fechou ou mudou de nome antes da troca de conta");
             }
-            Outcome::Stayed(code) => tracing::info!(session=%hit.name,code,"limite de uso sem troca de conta"),
+            Outcome::Stayed(code) => {
+                tracing::info!(session=%hit.name,code,"limite de uso sem troca de conta");
+                report(code,"limite de uso: a sessão não troca de conta por este motivo");
+            }
             Outcome::Failed(code) => {
                 tracing::warn!(session=%hit.name,%code,"limite de uso: a troca de conta falhou");
                 report(&code,"limite de uso: a troca de conta falhou; a sessão fica parada");

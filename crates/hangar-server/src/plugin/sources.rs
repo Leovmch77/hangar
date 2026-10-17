@@ -251,33 +251,21 @@ impl Sources for NativeSources {
             state.side.hubs.plugin_rates().record(&identity.binding, tokens, seconds, crate::state::monitor::wall_now())
         })
     }
-    /// Só com terminal: sem terminal quem vê o limite é o próprio ator, pelo stream-json.
+    /// Todo fim de turno, e cada desfecho vai ao diário: a troca de conta calada já passou despercebida.
     fn turn_error<'a>(&'a self, identity: &'a Identity) -> SourceFuture<'a, ()> {
         Box::pin(async move {
             let state = self.state()?;
             let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
-            let target = match registry.limit_target(&identity.name).await {
-                Ok(Some(target)) => target,
-                Ok(None) => return Ok(()),
+            let name = &identity.name;
+            let report = |code: &str, reason: &'static str| state.diag.report("session.limit_check", name, code, reason);
+            match registry.turn_limit(name, &identity.binding, crate::state::monitor::wall_now()).await {
+                Ok(crate::runtime::gateway::TurnLimit::NotTerminal) => report("limit_check_not_terminal", "fim de turno sem terminal: o limite é conferido pelo ator"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: None, .. }) => report("limit_check_none", "fim de turno conferido: sem aviso de limite no transcript"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: Some(_), sent: true, .. }) => report("limit_check_sent", "fim de turno: aviso de limite entregue ao vigia da troca de conta"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: Some(_), sent: false, .. }) => report("limit_check_unsent", "fim de turno: aviso de limite achado e não entregue ao vigia"),
                 Err(error) => {
-                    state.diag.report("session.limit_switch", &identity.name, &error.code, "fim de turno com erro sem o alvo do terminal: o limite de uso não foi conferido");
-                    return Err(ServiceError("limit_switch_no_target"));
-                }
-            };
-            let read = async {
-                let (live, transcript) = registry.context_transcript(&identity.name).await.map_err(|_| ServiceError("plugin_context_source_missing"))?;
-                if live != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
-                let now = crate::state::monitor::wall_now();
-                tokio::task::spawn_blocking(move || crate::session_write::limit_switch::file_limit(&transcript, now)).await
-                    .map_err(|_| ServiceError("plugin_context_source_missing"))
-            };
-            match read.await {
-                Ok(Some(limit)) => registry.usage_limit(crate::runtime::gateway::LimitHit { name: identity.name.clone(), provider: "claude".into(),
-                    account: Some(target.metadata.config_dir.to_string_lossy().into_owned()), limit }),
-                Ok(None) => {},
-                Err(error) => {
-                    state.diag.report("session.limit_switch", &identity.name, error.0, "fim de turno com erro: o limite de uso não foi conferido");
-                    return Err(error);
+                    report(&error.code, "fim de turno: o limite de uso não foi conferido");
+                    return Err(ServiceError("limit_check_failed"));
                 }
             }
             Ok(())
