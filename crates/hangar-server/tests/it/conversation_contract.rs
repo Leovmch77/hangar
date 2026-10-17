@@ -216,7 +216,8 @@ async fn claude_bridge_serves_input_answers_and_queue_of_a_rust_claude() {
     let (status, reply) = post("s/answer", r#"{"answers":"x"}"#.into()).await;
     assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
     let (status, reply) = post("s/input", json!({"text":"oi","jev_task":"","jev_message":"oi"}).to_string()).await;
-    assert_eq!((status, reply["ok"].as_bool(), reply["timing_note"].as_str()), (200, Some(true), Some("uncertain")), "{reply}");
+    assert_eq!((status, reply["ok"].as_bool(), reply["timing_note"].as_str()), (200, Some(true), Some("delivered")), "{reply}");
+    assert_eq!(reply["steered"], false, "sem contexto não há orientação automática");
     let (status, reply) = post("s/input", json!({"text":"oi","jev_task":"t"}).to_string()).await;
     assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
     assert_eq!(call(reqwest::Method::POST, "s/input", r#"{"text":"oi"}"#, false).await.0, 404);
