@@ -10,6 +10,7 @@ pub mod codex;
 #[doc(hidden)]
 pub mod contract;
 pub mod facts;
+pub mod legacy_restore;
 pub mod local;
 pub mod open;
 pub mod record;

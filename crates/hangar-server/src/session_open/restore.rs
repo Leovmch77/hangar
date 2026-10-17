@@ -376,6 +376,8 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
     let mut last_count: Option<u64> = None;
     let mut known = HashMap::new();
     let mut windows: Option<bool> = None;
+    // As sessões da versão antiga, sem spec, voltam uma vez por subida (`legacy_restore`).
+    let mut legacy = false;
     loop {
         let (current, count) = mux_now(&program).await;
         let live = st.list.discover(None).await.ok().map(|rows| rows.iter().map(|r| r.name.clone()).collect::<HashSet<String>>());
@@ -419,6 +421,10 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                 // Só com nada mais a tentar o servidor de agora (o restore pode tê-lo subido) passa a ser o da
                 // fotografia; antes disso as entradas ficam, e um reinício só do Rust não reabre nada.
                 if settle(&results, &mut attempts, &mut done) {
+                    if cfg!(target_os = "linux") && !legacy {
+                        legacy = true;
+                        super::legacy_restore::after_restore(&st, &home, &program).await;
+                    }
                     if cfg!(windows) {
                         windows = Some(false);
                         attempts.clear();
