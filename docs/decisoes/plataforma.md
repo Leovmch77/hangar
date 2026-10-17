@@ -733,7 +733,8 @@ por decisão explícita — o app Expo fica para depois.
 
 16/10/2026: o envio pelo nativo também usa essa configuração no servidor da sessão. No painel
 "Na fila", "Jev Decide" e "Mandar direto" são escolhas exclusivas. Ambas desligadas conservam a
-fila comum. O Jev recebe até 2.000 caracteres do texto digitado e 1.000 do pedido atual, sem o
+fila comum. O Jev recebe até 2.000 caracteres do texto digitado e 1.000 de contexto, com o pedido
+atual e a fala recente do agente (ou a pergunta pendente), sem o
 conteúdo de arquivos, imagens ou saídas de ferramentas. Só uma decisão de mandar direto com
 probabilidade de pelo menos 0,9 orienta a entrada específica. Consulta com prazo de 2 s, erro,
 contexto insuficiente, mensagem maior que 2.000 caracteres, resposta duvidosa ou sessão alterada
@@ -746,6 +747,15 @@ automática. A decisão é do Rust; não instala hooks nem um roteador adicional
 `GET /api/jev/delivery` confirma suporte nesta conexão e configuração, sem devolver a chave.
 No Connect, o Python só autentica e repassa a disponibilidade e o corpo original do envio ao
 Rust, antes de validar o formato antigo da entrada. Não há classificação nem outra fila no Python.
+
+17/10/2026: as respostas às perguntas assíncronas do Codex com terminal seguem esses controles. Com
+"Mandar direto" ou "Jev Decide", a identidade da pergunta comprova que a resposta pertence ao
+trabalho atual: ela pode orientar esse turno sem uma classificação adicional. Com ambos
+desligados, espera na fila. No terminal, a resposta é persistida antes da escrita; a orientação
+só vale no turno em que foi respondida. Turno encerrado permite envio normal; outro turno em
+andamento espera, sem reaproveitar a orientação antiga. Incerteza de entrega nunca gera reenvio.
+Mensagens comuns mantêm o limite de 0,9. Falta de contexto, timeout e mudança de turno têm avisos
+próprios; o log registra decisão, probabilidade, duração e código de falha, sem o texto da conversa.
 
 09/10/2026, decisão do Jefferson. Navegador (`objetivo`/`confere`), orquestração, voz e Computer Use
 (Windows e Linux) leem a MESMA chave, URL e modelo: `jev_api_key`, `jev_endpoint` e `jev_model` no

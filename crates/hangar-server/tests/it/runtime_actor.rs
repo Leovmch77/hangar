@@ -2065,7 +2065,7 @@ mod terminal_async {
     /// `refused`, uma tentativa anterior foi recusada sem escrita e a operação voltou a `prepared`.
     fn claimed_before_prepare(dir:&std::path::Path,refused:bool) -> String {
         let reservation = ReservedAsyncAnswer { request_id:QUESTION.into(),interaction_id:"old-life".into(),
-            entry_id:"async-answer:1:7".into(),operation_id:"async-answer:1:7".into(),text:ANSWER.into() };
+            entry_id:"async-answer:1:7".into(),operation_id:"async-answer:1:7".into(),text:ANSWER.into(),steer_turn:None };
         let entry = reservation.entry_id.clone();
         let payload = serde_json::to_value(Engine::async_answer_command(&reservation,"thread-1",1)).unwrap();
         let clock = ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 };
@@ -2119,7 +2119,7 @@ mod terminal_async {
         std::fs::write(&rollout,"").unwrap();
         // Gravada por uma vida de outra geração: nada prova que ela não saiu.
         let reservation = ReservedAsyncAnswer { request_id:QUESTION.into(),interaction_id:"old-life".into(),
-            entry_id:"async-answer:2:1".into(),operation_id:"async-answer:2:1".into(),text:ANSWER.into() };
+            entry_id:"async-answer:2:1".into(),operation_id:"async-answer:2:1".into(),text:ANSWER.into(),steer_turn:None };
         let payload = serde_json::to_value(Engine::async_answer_command(&reservation,"thread-1",2)).unwrap();
         let clock = ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 };
         {

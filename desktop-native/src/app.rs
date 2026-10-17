@@ -1935,6 +1935,9 @@ impl Hangar {
                 "queue" => ("queue_jev_queued", false),
                 "delivered" => ("queue_jev_delivered", false),
                 "uncertain" => ("queue_jev_uncertain", true),
+                "no_context" => ("queue_jev_no_context", true),
+                "timeout" => ("queue_jev_timeout", true),
+                "work_changed" => ("queue_jev_work_changed", true),
                 "refused" => ("queue_jev_refused", true),
                 _ => ("queue_jev_unavailable", true),
             };
@@ -3100,7 +3103,14 @@ impl Hangar {
     fn answer_body(&self, cx: &Context<Self>) -> Option<Value> {
         let ask = self.chat.ask.as_ref()?;
         if self.ask_form.fingerprint != ask.fingerprint { return None; }
-        interaction::answer_body(ask, &self.ask_picks(cx))
+        let mut body = interaction::answer_body(ask, &self.ask_picks(cx))?;
+        let preferences = appearance::get();
+        // A identidade da pergunta já comprova a relação com o trabalho: o Jev não precisa inferi-la.
+        if ask.payload.is_async && ask.payload.provider.as_deref() == Some("codex")
+            && (preferences.steer_while_working || preferences.jev_delivery && self.queue_jev_ready()) {
+            body["steer"] = json!(true);
+        }
+        Some(body)
     }
 
     /// Escolhas do formulário com o texto digitado no lugar de quem está digitando.

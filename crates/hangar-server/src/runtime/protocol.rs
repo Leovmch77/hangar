@@ -74,7 +74,7 @@ pub enum OperationKind {
 }
 
 /// Resposta a uma pergunta assíncrona do Codex com terminal, já formada e guardada na fila como
-/// entrada própria até sair como `turn/start`. `operation_id` é o da operação persistida (igual à entrada).
+/// entrada própria até a entrega. `operation_id` é o da operação persistida (igual à entrada).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReservedAsyncAnswer {
     pub request_id: String,
@@ -82,6 +82,9 @@ pub struct ReservedAsyncAnswer {
     pub entry_id: String,
     pub operation_id: String,
     pub text: String,
+    /// Orientação só vale no turno em que a pessoa respondeu; depois dele, espera um turno novo.
+    #[serde(default)]
+    pub steer_turn: Option<String>,
 }
 
 impl ReservedAsyncAnswer {

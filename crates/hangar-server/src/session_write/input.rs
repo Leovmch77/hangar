@@ -315,15 +315,17 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         let (mut direct, mut note) = super::delivery_timing::decide(&ctx.st, &message, &task).await;
         if direct {
             let after = ctx.target.handle.snapshot().await.ok();
-            if !super::delivery_timing::same_work(before.as_ref(), after.as_ref()) { direct = false; note = "uncertain"; }
+            if !super::delivery_timing::same_work(before.as_ref(), after.as_ref()) { direct = false; note = "work_changed"; }
         }
         let expected = direct.then(|| before.as_ref().and_then(|snapshot| crate::runtime::protocol::turn_marker(&snapshot["view"]))).flatten();
         (direct, Some(note), expected)
     } else { (steer, None, None) };
     let mut result = send(&ctx.st, &ctx.name, &ctx.target, &text, steer, expected_turn).await;
     if let Some(note) = note {
-        result.1["timing_note"] = json!(if steer && result.1["delivered"] != true { "refused" }
-            else if !steer && result.1["delivered"] == true { "delivered" } else { note });
+        let outcome = if steer && result.1["delivered"] != true { "refused" }
+            else if !steer && result.1["delivered"] == true { "delivered" } else { note };
+        tracing::info!(target: "delivery_timing", session=%ctx.name, outcome, "decisão de entrega aplicada");
+        result.1["timing_note"] = json!(outcome);
     }
     answer(&ctx, result)
 }

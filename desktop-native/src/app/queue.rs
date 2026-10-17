@@ -72,7 +72,7 @@ impl Hangar {
         cx.notify();
     }
 
-    fn queue_jev_ready(&self) -> bool {
+    pub(super) fn queue_jev_ready(&self) -> bool {
         self.selected_key().and_then(|k| self.queue.jev.get(&k.server)).is_some_and(|(_, _, result)| matches!(result, Some(Ok(true))))
     }
 
@@ -104,13 +104,20 @@ impl Hangar {
         if direct { return SendTiming::Direct; }
         if ordinary && appearance::get().jev_delivery && self.queue_jev_ready()
             && sends_direct(true, &self.chat.state.state, self.provider().0) {
-            let task = self.chat.events.iter().rev().find(|e| e.kind == "user_msg" && !e.queued() && !e.id.starts_with("pending-") && peer_of(e).is_none())
-                .map(|e| {
+            let latest = self.chat.events.iter().rposition(|e| e.kind == "user_msg" && !e.queued() && !e.id.starts_with("pending-") && peer_of(e).is_none());
+            let task = latest.map(|index| {
+                    let e = &self.chat.events[index];
                     let body = e.body();
                     let caption = composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body);
                     let (_, task) = super::quotes::split_refs(&caption);
-                    task.chars().take(1000).collect()
+                    task.to_owned()
                 }).unwrap_or_default();
+            let recent = self.chat.ask.as_ref().filter(|ask| ask.payload.is_async)
+                .map(|ask| ask.payload.questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("\n"))
+                .or_else(|| latest.and_then(|index| self.chat.events[index + 1..].iter().rev()
+                    .find(|e| e.kind == "assistant_msg" && !e.body().trim().is_empty()).map(|e| e.body())))
+                .unwrap_or_default();
+            let task = crate::delivery::timing_context(&task, &recent);
             let task = if message.chars().count() > 2000 { String::new() } else { task };
             return SendTiming::Jev { task, message: message.chars().take(2000).collect() };
         }
