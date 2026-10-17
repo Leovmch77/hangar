@@ -97,21 +97,53 @@ describe('SessionRow', () => {
     }
   });
 
-  it('servidor longo encolhe em uma linha sem remover motor', async () => {
+  it.each([false, true])('motor não encolhe e metadados longos cedem largura (compact=%s)', async (compact) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol',
+        cwd: '/repos/projeto-com-pasta-muito-longa', branch: 'fix/branch-com-nome-muito-longo' },
+      { compact },
+    );
+    try {
+      const mark = container.querySelector('[data-symbol="gearshape"]');
+      const engine = mark?.parentElement;
+      const text = Array.from(engine?.querySelectorAll('span') ?? []).find(el => el.textContent === 'gpt-6-1-sol');
+      expect(engine?.style.flexShrink).toBe('0');
+      expect(text?.style.flexShrink).toBe('0');
+      const metadata = engine?.nextElementSibling as HTMLElement | null;
+      expect(metadata?.textContent).toBe(' · projeto-com-pasta-muito-longa · fix/branch-com-nome-muito-longo');
+      expect(metadata?.style.flexShrink).toBe('1');
+      expect(metadata?.getAttribute('data-number-of-lines')).toBe('1');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    { engine: undefined, label: 'Claude' },
+    { engine: 'gpt-6-1-sol', label: 'gpt-6-1-sol' },
+  ])('separador do servidor fica fora do texto truncável (provedor=$label)', async ({ engine, label }) => {
     Platform.OS = 'ios';
     const serverLabel = 'servidor-com-nome-longo-para-disputar-a-largura';
     const { container, root } = await render(
-      { ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol', serverLabel, cwd: '/repo' },
+      { ...base, name: 'api', provider: 'claude', engine, serverLabel, cwd: '/repo' },
       { mostrarServidor: true },
     );
     try {
-      const server = Array.from(container.querySelectorAll('span')).find(el => el.textContent === `${serverLabel} · `);
+      const server = Array.from(container.querySelectorAll('span')).find(el => el.textContent?.startsWith(serverLabel));
+      expect(server?.textContent).toBe(serverLabel);
       expect(server?.getAttribute('data-number-of-lines')).toBe('1');
       expect(server?.style.flexShrink).toBe('1');
-      const mark = server?.parentElement?.querySelector('[data-symbol="gearshape"]');
-      expect(mark).not.toBeNull();
-      expect(mark?.parentElement?.textContent).toBe('gpt-6-1-sol');
-      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain('gpt-6-1-sol');
+      const separator = server?.nextElementSibling as HTMLElement | null;
+      expect(separator?.textContent).toBe(' · ');
+      expect(separator?.style.flexShrink).toBe('0');
+      expect(separator?.nextElementSibling?.textContent).toContain(label);
+      if (engine) {
+        const mark = server?.parentElement?.querySelector('[data-symbol="gearshape"]');
+        expect(mark).not.toBeNull();
+        expect(mark?.parentElement?.textContent).toBe('gpt-6-1-sol');
+      }
+      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(label);
     } finally {
       act(() => root.unmount());
     }
