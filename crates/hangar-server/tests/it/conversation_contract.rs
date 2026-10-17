@@ -184,7 +184,7 @@ async fn codex_terminal_answers_and_refuses_in_rust() {
 /// A ponte privada do Claude: corpo intacto (o `interaction_id` chega à conferência do Rust), resposta e
 /// código do Rust, 421 para o que ele não atende, e a rota de personalizações intacta.
 #[tokio::test]
-async fn claude_bridge_serves_only_answer_and_select_of_a_rust_claude() {
+async fn claude_bridge_serves_input_answers_and_queue_of_a_rust_claude() {
     let (dir, store) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
     let (registry, _plugin) = registry_with_plugin(&store).await;
     open_headless(&registry, dir.path(), "s").await;
@@ -215,9 +215,14 @@ async fn claude_bridge_serves_only_answer_and_select_of_a_rust_claude() {
     assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some(STALE)), "o ID do corpo chegou intacto");
     let (status, reply) = post("s/answer", r#"{"answers":"x"}"#.into()).await;
     assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
+    let (status, reply) = post("s/input", json!({"text":"oi","jev_task":"","jev_message":"oi"}).to_string()).await;
+    assert_eq!((status, reply["ok"].as_bool(), reply["timing_note"].as_str()), (200, Some(true), Some("uncertain")), "{reply}");
+    let (status, reply) = post("s/input", json!({"text":"oi","jev_task":"t"}).to_string()).await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
+    assert_eq!(call(reqwest::Method::POST, "s/input", r#"{"text":"oi"}"#, false).await.0, 404);
     // Fora do recorte: aba Submit sem pane, outra rota, outro método, sessão desconhecida.
     assert_eq!(post("s/select/submit", "{}".into()).await.0, 421);
-    assert_eq!(post("s/input", json!({"text": "oi"}).to_string()).await.0, 421);
+    assert_eq!(post("s/not-a-route", "{}".into()).await.0, 421);
     assert_eq!(call(reqwest::Method::GET, "s/answer", "", true).await.0, 421);
     assert_eq!(post("nada/answer", json!({"answers": [option()]}).to_string()).await.0, 421);
     // O painel da fila: corpo fora de forma é do Rust (422); id com barra e leitura não são rotas dele.

@@ -70,8 +70,9 @@ pub fn area_of(path: &str) -> usize {
             _ => "session",
         });
     }
-    let table: [(&[&str], &str); 17] = [
+    let table: [(&[&str], &str); 18] = [
         (&["/api/sessions"], "list"),
+        (&["/api/jev/delivery"], "send"),
         (&["/mcp"], "mcp"),
         (&["/api/fs"], "workspace"),
         (&["/api/worktrees"], "worktrees"),
@@ -104,7 +105,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
-            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy") {
+            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy" | "/api/jev/delivery") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
