@@ -98,7 +98,7 @@ function disconnect(id: string, abortPending = true) {
   clearTimeout(retryTimers.get(id));
   retryTimers.delete(id);
   const attempt = connecting.get(id);
-  if (attempt && !attempt.routing) connecting.delete(id);
+  if (!abortPending && attempt && !attempt.routing) connecting.delete(id);
   if (abortPending) attempt?.abort.abort();
   esquecerRota(id);
 }
