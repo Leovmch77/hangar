@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
   baseOf, loadLiveVoiceSettings, saveLiveVoiceSettings, listVoiceMemory, forgetVoiceMemory,
-  listarCredenciais, modelOptionsForServer, probeServerResponse, registrarDiag,
+  listarCredenciais, modelOptionsForServer, probeServerResponse, registrarDiag, motivoDoServidor,
 } from '@hangar/core';
 import type { LiveVoiceAction, LiveVoiceHandlers, LiveVoiceScreen, LiveVoiceSettings, Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
@@ -59,7 +59,7 @@ const sameServer = (a: Server | null | undefined, b: Server) => a?.id === b.id &
 const callable = (server: Server) => !server.invite && !server.inviteEnded && !server.removed && !server.disabled && !!server.token;
 const inCall = (view: LiveVoiceView) => view.phase === 'connecting' || view.phase === 'live';
 const errorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : 'connection_lost';
-const errorText = (error: unknown) => error instanceof Error ? error.message : m.live_voice_error_failed();
+const errorText = (error: unknown) => motivoDoServidor(error) ?? (error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.message : m.native_network_error());
 const CONFIG_SECTIONS = new Set(['geral', 'aparencia', 'usage-log', 'sobre', 'maquinas', 'sync', 'shared-config',
   'contas', 'orchestration', 'harnesses', 'voice', 'jev', 'notifications', 'shortcuts', 'attachments', 'worktrees', 'advanced']);
 

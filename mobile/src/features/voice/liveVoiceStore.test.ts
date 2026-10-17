@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { LiveVoiceRequestError } from '@hangar/core';
 import type { LiveVoiceHandlers, LiveVoiceSettingsReply, LiveVoiceState, Server, VoiceMemory } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
@@ -592,9 +593,25 @@ describe('coexistência com ditado', () => {
 });
 
 describe('configuração e memória do servidor capturado', () => {
+  test('falha de rede ao carregar ajustes mostra mensagem traduzida sem detalhe do transporte', async () => {
+    const transportError = 'fetch failed: Fetch request has been canceled';
+    api.settings.mockRejectedValueOnce(new Error(transportError));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    expect(useLiveVoice.getState().view.settings.error).toBe(m.native_network_error());
+    expect(useLiveVoice.getState().view.settings.error).not.toContain(transportError);
+  });
+
+  test('falha HTTP com código preserva mensagem e detalhe ao carregar ajustes', async () => {
+    api.settings.mockRejectedValueOnce(new LiveVoiceRequestError('account_missing', 'chosen-account', 409));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'account_missing: chosen-account', loading: false, reply: null });
+  });
+
   test('resposta antiga de settings não vence retry; erro aparece e retry recupera', async () => {
     const old = deferred<LiveVoiceSettingsReply>();
-    api.settings.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new Error('settings_failed')).mockResolvedValueOnce(reply('new-account'));
+    api.settings.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new LiveVoiceRequestError('settings_failed')).mockResolvedValueOnce(reply('new-account'));
     openA();
     await useLiveVoice.getState().retry();
     expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'settings_failed', loading: false, reply: null });
@@ -615,10 +632,18 @@ describe('configuração e memória do servidor capturado', () => {
     expect(api.models).toHaveBeenLastCalledWith(a, 'codex', null, null, 'changed-on-another-device');
   });
 
+  test('falha HTTP sem código preserva causa ao carregar modelos', async () => {
+    api.models.mockRejectedValueOnce(Object.assign(new Error('502: erro_codex_model_list: catálogo indisponível'), { status: 502 }));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    useLiveVoice.getState().openSettings(); await settle();
+    expect(useLiveVoice.getState().view.settings.modelsError).toBe('502: erro_codex_model_list: catálogo indisponível');
+  });
+
   test('salva PUT inteiro, sem otimismo destrutivo ou dois saves em voo; erro preserva configuração', async () => {
     openA(); await settle();
     const pending = deferred<LiveVoiceSettingsReply['settings']>();
-    api.save.mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new Error('save_failed'));
+    api.save.mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new LiveVoiceRequestError('save_failed'));
     const next = { ...reply().settings, voice: null, codex_account: 'next-account' };
     const saving = useLiveVoice.getState().saveSettings(next);
     await useLiveVoice.getState().saveSettings(next);
@@ -647,11 +672,11 @@ describe('configuração e memória do servidor capturado', () => {
 
   test('falhas de credenciais/modelos/memória não viram listas vazias sem causa', async () => {
     openA(); await settle();
-    api.accounts.mockRejectedValueOnce(new Error('accounts_failed'));
-    api.models.mockRejectedValueOnce(new Error('models_failed'));
-    api.memory.mockRejectedValueOnce(new Error('memory_failed'));
+    api.accounts.mockRejectedValueOnce(Object.assign(new Error('503: accounts_failed'), { status: 503 }));
+    api.models.mockRejectedValueOnce(Object.assign(new Error('502: models_failed'), { status: 502 }));
+    api.memory.mockRejectedValueOnce(new LiveVoiceRequestError('memory_failed'));
     useLiveVoice.getState().openSettings(); await settle();
-    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'accounts_failed', modelsError: 'models_failed' });
+    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: '503: accounts_failed', modelsError: '502: models_failed' });
     expect(useLiveVoice.getState().view.memory.error).toBe('memory_failed');
     useLiveVoice.getState().openSettings(); await settle();
     expect(useLiveVoice.getState().view.settings.error).toBeNull();
