@@ -387,6 +387,7 @@
   "orq_panel_file_error": "Não consegui ler {file}: {error}",
   "orq_panel_fetch_error": "Painel indisponível: {error}",
   "orq_mobile_file_read_error": "Não foi possível ler {file}.",
+  "orq_mobile_plan_read_error": "Não foi possível ler o plano.",
   "orq_mobile_metadata_read_error": "Não foi possível ler os dados desta execução.",
   "orq_mobile_load_error": "Não foi possível carregar a orquestração.",
   "orq_panel_retry": "Tentar de novo",

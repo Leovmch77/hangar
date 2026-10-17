@@ -156,7 +156,7 @@ export function OrchestrationContent({ panel, history = false, live = NO_LIVE, o
       text('plan', m.orq_history_plan({ path: panel.metadata.plan.trim() ? panel.metadata.plan : '—' }));
       if (panel.metadata.error) text('metadata-error', m.orq_mobile_metadata_read_error(), panel.metadata.error, true);
     }
-    panel.errors.forEach((error, index) => text(`error-${index}`, m.orq_mobile_file_read_error({ file: error.file }), error.error, true));
+    panel.errors.forEach((error, index) => text(`error-${index}`, error.file === 'plan' ? m.orq_mobile_plan_read_error() : m.orq_mobile_file_read_error({ file: error.file }), error.error, true));
     if (panel.empty) { text('empty', m.orq_panel_empty()); return out; }
     const allCollapsed = collapsed.size === SECTIONS.length;
     action('collapse', allCollapsed ? m.orq_expand_all() : m.orq_collapse_all(), () => setCollapsed(allCollapsed ? new Set() : new Set(SECTIONS)));

@@ -81,6 +81,26 @@ it.each([false, true])('panel metadata error separates the warning title from th
   expect(container.textContent).toContain('T2 · future-task');
 });
 
+it.each([false, true])('plan read error uses a translated title and preserves smaller detail and partial data with history=%s', async (history) => {
+  const panel = panelFixture();
+  const error = "FileNotFoundError: [Errno 2] No such file or directory: '/repo/fixture/plans/fixture.md'";
+  panel.errors.push({ file: 'plan', error });
+  await renderContent(panel, history);
+  const texts = [...container.querySelectorAll('span')];
+  const title = texts.find(text => text.textContent === 'Could not read the plan.');
+  const detail = texts.find(text => text.textContent === error);
+  expect(title, 'translated plan warning title must be separate from the technical error').toBeDefined();
+  expect(detail, 'complete technical detail must remain visible').toBeDefined();
+  expect(title!.parentElement).toBe(detail!.parentElement);
+  expect(Number.parseFloat(detail!.style.fontSize)).toBeLessThan(Number.parseFloat(title!.style.fontSize));
+  expect(detail!.style.color).not.toBe(title!.style.color);
+  expect(container.textContent).toContain('fixture-title');
+  expect(container.textContent).toContain('T2 · future-task');
+  expect(texts.some(text => text.textContent === 'Could not read events.')).toBe(true);
+  expect(container.textContent).toContain('partial-events');
+  expect(m.orq_mobile_plan_read_error({}, { locale: 'pt' })).toBe('Não foi possível ler o plano.');
+});
+
 it('erro de arquivo mostra frase traduzida e causa técnica em detalhe menor', async () => {
   const panel = panelFixture();
   const error = "FileNotFoundError: [Errno 2] No such file or directory: '/run/orq.json'";

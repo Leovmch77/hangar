@@ -387,6 +387,7 @@
   "orq_panel_file_error": "Could not read {file}: {error}",
   "orq_panel_fetch_error": "Panel unavailable: {error}",
   "orq_mobile_file_read_error": "Could not read {file}.",
+  "orq_mobile_plan_read_error": "Could not read the plan.",
   "orq_mobile_metadata_read_error": "Could not read the data for this run.",
   "orq_mobile_load_error": "Could not load the orchestration.",
   "orq_panel_retry": "Try again",
