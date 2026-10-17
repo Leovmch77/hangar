@@ -809,6 +809,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             let pending = roots.get_mut(&id).unwrap();
             pending.preparing = false;
             if pending.cancelled || pending.timed_out { continue; }
+            if matches!(pending.command.kind,OperationKind::SteerQueue | OperationKind::Steer)
+                && pending.command.payload.get("expected_turn").is_some_and(|expected|turn_marker(&engine.view()).as_ref()!=Some(expected)) {
+                effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,payload:json!({"code":"queue_steer_work_changed"}) });
+                continue;
+            }
             if pending.command.kind == OperationKind::SteerQueue {
                 if let Some((code,text)) = steer_refusal(&engine.view(),&target.provider) {
                     effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,payload:json!({"error":text,"code":code}) });
@@ -816,6 +821,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 }
                 let queue = queue.clone(); let target = target.clone(); let sender = internal.clone(); let sample = clock(start);
                 let entry_id = pending.command.payload["entry_id"].as_str().map(str::to_owned);
+                let expected_turn = pending.command.payload.get("expected_turn").cloned();
                 jobs.spawn(async move {
                     let result = async {
                         let claimed = queue.exec(target.generation,&format!("steer-claim:{id}"),sample,
@@ -830,8 +836,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                     Action::SetDelivered { entry_id:entry,value:false,steered:false }).await.map_err(io_failure)?;
                                 continue;
                             }
-                            let command = RuntimeCommand { operation_id:format!("{id}:{entry}"),kind:OperationKind::Steer,
-                                payload:json!({"text":row["text"],"entry_id":entry,"pre_transcript":row["pre_transcript"].as_bool().unwrap_or(false)}) };
+                            let mut payload=json!({"text":row["text"],"entry_id":entry,"pre_transcript":row["pre_transcript"].as_bool().unwrap_or(false)});
+                            if let Some(expected)=&expected_turn {
+                                payload["expected_turn"]=expected.clone();
+                                if expected["turn_id"].is_string() {payload["turn_id"]=expected["turn_id"].clone();}
+                            }
+                            let command = RuntimeCommand { operation_id:format!("{id}:{entry}"),kind:OperationKind::Steer,payload };
                             let (response,receive) = oneshot::channel();
                             sender.send(Message::Command { command,response,from_queue:false,generation:target.generation }).await.map_err(|_|failure("runtime_closed"))?;
                             replies.push((entry,receive));

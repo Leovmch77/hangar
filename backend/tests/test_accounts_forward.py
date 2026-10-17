@@ -109,6 +109,16 @@ def test_jev_aux_goes_to_the_rust_owner_and_needs_it(rust, monkeypatch):
     assert len(_Rust.seen) == 1
 
 
+def test_jev_delivery_availability_goes_to_rust_without_exposing_configuration(rust):
+    _Rust.reply = (200, {"available": True})
+    response = TestClient(app).get("/api/jev/delivery", headers=AUTH)
+    assert (response.status_code, response.json()) == (200, {"available": True})
+    [seen] = _Rust.seen
+    assert (seen["path"], seen["account_path"]) == ("/__hangar_server/forwarded", "/api/jev/delivery")
+    assert TestClient(app).get("/api/jev/delivery").status_code == 401
+    assert len(_Rust.seen) == 1
+
+
 def test_plan_routes_and_catalog_go_to_the_rust_owner(rust):
     _Rust.reply = (200, {"plans": [], "pinned": None})
     response = TestClient(app).get("/api/sessions/s1/plans?x=1", headers=AUTH)

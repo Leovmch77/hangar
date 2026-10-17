@@ -110,6 +110,7 @@ struct Session {
     questions: BTreeMap<String, Question>,
     closed: HashMap<String, (String, Option<Receipt>)>,
     state: Option<(Instant, String, Option<String>)>,
+    state_revision: u64,
     suggestion: String,
     plan: Option<PlanNotice>,
     agents: HashMap<String, AgentLife>,
@@ -205,7 +206,7 @@ impl Store {
         }
         if let Some(old) = memory.sessions.remove(&binding.key) { finish_session(old); }
         memory.sessions.insert(binding.key.clone(), Session { binding: binding.clone(), owner: None, waiter: None,
-            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None,
+            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, state_revision: 0, suggestion: String::new(), plan: None,
             agents: HashMap::new(), agent_waits: HashMap::new(), agent_late: VecDeque::new(), agent_outbox: VecDeque::new(), agent_next: 0, ended: None, reported: None });
         self.notify(&binding.key);
         Ok(())
@@ -521,8 +522,18 @@ impl Store {
         if state == "working" { s.suggestion.clear(); }
         if state == "fim" { s.ended = Some(now); }
         s.state = Some((now, state, reason));
+        s.state_revision += 1;
         self.notify(&binding.key);
         Ok(())
+    }
+
+    /// Só eventos do plugin provam o turno terminal; polling e alterações da fila não trocam esta marca.
+    pub fn working_revision(&self, binding: &InteractionBinding, now: Instant) -> Result<Option<u64>, ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let s = session(&mut memory, binding)?;
+        Ok(s.state.as_ref().filter(|(at, state, _)| state == "working" && s.state_revision > 0
+            && (s.waiter.is_some() || now.saturating_duration_since(*at) <= Duration::from_secs(90)))
+            .map(|_| s.state_revision))
     }
     pub fn suggest(&self, binding: &InteractionBinding, text: String, shown: bool) -> Result<(), ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;

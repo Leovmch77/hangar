@@ -1085,6 +1085,7 @@ impl Hangar {
                         if sent.contains_key("jev_aux_cliproxy") { s.aux_use_cliproxy = None; }
                         s.follow_readers();
                         s.saved = Some(seq);
+                        if sent.contains_key("jev_api_key") { self.invalidate_queue_jev(&self.active_key()); }
                         self.fill_config_inputs(window, cx);
                         self.load_dictation_style(cx);
                         cx.spawn(async move |this, cx| {

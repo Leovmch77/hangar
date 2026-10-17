@@ -38,13 +38,27 @@ struct SendRecord {
 #[derive(Default)]
 pub struct DeliveryTracker {
     records: HashMap<SessionKey, SendRecord>,
-    /// Texto mandado com outro envio em voo, na ordem; o `bool` é o `steer`, e o grupo é o decidido no Enter.
+    /// Texto mandado com outro envio em voo, na ordem; modo e grupo são os decididos no Enter.
     held: HashMap<SessionKey, VecDeque<Held>>,
     /// Transcript trocado na mesma sessão (`/clear`): a resposta do envio em voo chega com a chave antiga.
     moved: HashMap<SessionKey, SessionKey>,
 }
 
-pub type Held = (String, bool, Option<Vec<String>>);
+#[derive(Clone, Debug, PartialEq)]
+pub enum SendTiming { Queued, Direct, Jev { task: String, message: String } }
+
+impl From<bool> for SendTiming {
+    fn from(direct: bool) -> Self { if direct { Self::Direct } else { Self::Queued } }
+}
+
+impl SendTiming {
+    /// Sem a identidade do turno no Enter, uma espera local não pode orientar automaticamente outro trabalho.
+    pub fn after_wait(self) -> Self {
+        match self { Self::Jev { message, .. } => Self::Jev { task: String::new(), message }, other => other }
+    }
+}
+
+pub type Held = (String, SendTiming, Option<Vec<String>>);
 
 impl DeliveryTracker {
     pub fn begin(&mut self, key: SessionKey, text: String, known: HashSet<String>) -> bool {
@@ -65,8 +79,8 @@ impl DeliveryTracker {
     }
 
     /// Enter com outro envio em voo: o texto espera a vez em vez de se perder.
-    pub fn hold(&mut self, key: SessionKey, text: String, steer: bool, group: Option<Vec<String>>) {
-        self.held.entry(key).or_default().push_back((text, steer, group));
+    pub fn hold(&mut self, key: SessionKey, text: String, timing: impl Into<SendTiming>, group: Option<Vec<String>>) {
+        self.held.entry(key).or_default().push_back((text, timing.into(), group));
     }
 
     pub fn next_held(&mut self, key: &SessionKey) -> Option<Held> {
@@ -271,10 +285,26 @@ mod tests {
         assert_eq!(tracker.typed(&key("one"), "first").as_deref(), Some("first"));
         tracker.complete(&key("one"), "first", SendOutcome::Queued);
         assert_eq!(tracker.typed(&key("one"), "first"), None);
-        assert_eq!(tracker.next_held(&key("one")), Some(("second".into(), false, None)));
+        assert_eq!(tracker.next_held(&key("one")), Some(("second".into(), SendTiming::Queued, None)));
         assert_eq!(tracker.outgoing(&key("one")), vec!["third"]);
-        assert_eq!(tracker.next_held(&key("one")), Some(("third".into(), true, None)));
+        assert_eq!(tracker.next_held(&key("one")), Some(("third".into(), SendTiming::Direct, None)));
         assert_eq!(tracker.next_held(&key("one")), None);
+    }
+
+    #[test]
+    fn a_held_jev_send_keeps_the_task_and_message_from_enter() {
+        let mut tracker = DeliveryTracker::default();
+        let timing = SendTiming::Jev { task: "Criar a tela".into(), message: "Use azul".into() };
+        tracker.hold(key("one"), "Use azul".into(), timing.clone(), None);
+        assert_eq!(tracker.next_held(&key("one")), Some(("Use azul".into(), timing, None)));
+    }
+
+    #[test]
+    fn waiting_for_another_send_or_upload_cannot_steer_a_later_turn() {
+        let timing = SendTiming::Jev { task: "Criar a tela".into(), message: "Use azul".into() };
+        assert_eq!(timing.after_wait(), SendTiming::Jev { task: String::new(), message: "Use azul".into() });
+        assert_eq!(SendTiming::Direct.after_wait(), SendTiming::Direct);
+        assert_eq!(SendTiming::Queued.after_wait(), SendTiming::Queued);
     }
 
     #[test]
@@ -315,7 +345,7 @@ mod tests {
         tracker.begin(key("one"), "first".into(), HashSet::new());
         tracker.hold(key("one"), "to all".into(), false, Some(vec!["same-name".into(), "peer".into()]));
         tracker.complete(&key("one"), "first", SendOutcome::Delivered);
-        assert_eq!(tracker.next_held(&key("one")), Some(("to all".into(), false, Some(vec!["same-name".into(), "peer".into()]))));
+        assert_eq!(tracker.next_held(&key("one")), Some(("to all".into(), SendTiming::Queued, Some(vec!["same-name".into(), "peer".into()]))));
     }
 
     #[test]

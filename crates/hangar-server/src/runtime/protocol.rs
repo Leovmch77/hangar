@@ -5,6 +5,22 @@ use std::path::PathBuf;
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub const MAX_ENVELOPE: usize = 2 * MAX_FRAME + 1024;
 
+/// Identidade estável do trabalho em andamento; prévias e alterações da fila não a modificam.
+pub fn turn_marker(view: &Value) -> Option<Value> {
+    if view["terminal"] == true {
+        return view["working_revision"].as_u64().filter(|revision| *revision > 0)
+            .map(|revision| serde_json::json!({"working_revision": revision}));
+    }
+    if view["in_progress"] != true { return None; }
+    for key in ["turn_id", "turn_started"] {
+        let value = &view[key];
+        if value.is_number() || value.as_str().is_some_and(|s| !s.is_empty()) {
+            return Some(serde_json::json!({(key): value}));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClockSample {

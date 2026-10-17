@@ -220,7 +220,7 @@ impl ClaudeEngine {
     pub fn view(&self) -> Value {
         let state = self.public_state();
         json!({"public_state":state,"alive":self.alive,"iniciando":self.initializing,"initialized":self.initialized,
-            "in_progress":self.in_progress,"pending":self.pending.iter().map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
+            "in_progress":self.in_progress,"turn_started":self.turn_start,"pending":self.pending.iter().map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
             "question":self.question,"model":self.model,"effort":self.effort,"permission_mode":self.permission_mode,
             "previous_non_plan":self.previous_non_plan,"commands":self.commands,"terminal_commands":self.terminal_commands,
             "usage":self.usage,"context_window":self.context_window,"cost":self.cost,"effort_intent":self.effort_intent,

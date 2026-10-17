@@ -419,7 +419,7 @@ impl Executor {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
-            "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
+            "view":{"terminal":true,"working_revision":self.working_revision(),"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
                 "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))
                     .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))
                     .or_else(||self.no_safe_delivery.then(||"no_safe_delivery".to_owned()))
@@ -1376,7 +1376,7 @@ impl Executor {
     /// que leva junto o que já estava na fila interna do Claude Code (limite dele).
     async fn steer_entry(&mut self,id:&str,payload:&Value)->Result<RuntimeReply,RuntimeError> {
         if !valid_operation_id(id) {return Err(error("operation_id"));}
-        let entry=payload["entry_id"].as_str().filter(|entry|!entry.is_empty() && payload.as_object().is_some_and(|p|p.len()==1))
+        let entry=payload["entry_id"].as_str().filter(|entry|!entry.is_empty() && payload.as_object().is_some_and(|p|p.keys().all(|key|matches!(key.as_str(),"entry_id"|"expected_turn"))))
             .ok_or_else(||error("terminal_payload"))?.to_owned();
         // A que já saiu (ou nunca esteve) responde antes de ler a tela: nenhuma tecla.
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
@@ -1387,6 +1387,7 @@ impl Executor {
         let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
         if facts.binding!=self.target.binding {return Ok(reply(id,Disposition::Deferred,json!({"code":"queue_steer_not_delivered","cleanup":"not_needed"})));}
         if facts.open_question {return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_steer_question_open","cleanup":"not_needed"})));}
+        if !self.expected_work(payload) {return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_steer_work_changed","cleanup":"not_needed"})));}
         if self.action(Action::Promote {entry_id:entry.clone()}).await?!=json!("moved") {
             return Ok(reply(id,Disposition::Rejected,json!({"code":"queue_entry_gone","cleanup":"not_needed"})));
         }
@@ -1405,6 +1406,7 @@ impl Executor {
             _=>return Ok(reply(id,Disposition::Deferred,json!({"code":"queue_steer_not_delivered","cleanup":"not_needed"}))),
         }
         let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
+        if !self.expected_work(payload) {return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":1})));}
         // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o Claude estava parado
         // (ou o turno acabou no meio) e já levou a mensagem: entregue igual, sem promover. Parado, a entrega abriu
         // o turno com ela: uma leitura basta, sem as esperas.
@@ -1413,12 +1415,20 @@ impl Executor {
         for _ in 1..tries {
             if steered.disposition!=input::Disposition::Deferred {break;}
             tokio::time::sleep(self.options.limits.settle).await;
+            if !self.expected_work(payload) {break;}
             steered=driver.steer().await;
         }
         if steered.disposition==input::Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"a mensagem entrou na fila do Claude Code, mas o ctrl+x ctrl+s não se comprovou");
         }
         Ok(reply(id,Disposition::Accepted,json!({"steered":steered.disposition==input::Disposition::Accepted,"drained":1})))
+    }
+
+    fn working_revision(&self)->Option<u64> {
+        self.options.plugin.as_ref()?.working_revision(&crate::terminal_facts::LocalTerminalFacts::binding(&self.target),std::time::Instant::now()).ok().flatten()
+    }
+    fn expected_work(&self,payload:&Value)->bool {
+        payload.get("expected_turn").is_none_or(|expected|self.working_revision().is_some_and(|revision|*expected==json!({"working_revision":revision})))
     }
     /// `/steer` sem corpo (chip de app antigo): com mensagem esperando no Hangar, é o Orientar da primeira, que não
     /// pode ficar para trás da fila interna; sem nenhuma, promove a fila do Claude Code como antes. A resposta da

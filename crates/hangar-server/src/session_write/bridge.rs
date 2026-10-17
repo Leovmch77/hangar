@@ -1,6 +1,6 @@
 //! Pontes privadas do Rust para o que entra pelo Python (convidado 8766, Connect 8768, broadcast, grupo,
 //! par, MCP): a do Codex (com e sem terminal), que também recebe o `DELETE` que ele administra, e a das
-//! respostas de pergunta e do painel da fila do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
+//! entrada, respostas de pergunta e painel da fila do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
 //! como a do dono, com o corpo intacto, e o que o Rust não atende volta como 421, para o Python tratar
 //! sozinho (nunca outro repasse ao Rust).
 use std::net::SocketAddr;
@@ -37,17 +37,17 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
     true
 }
 
-/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit` e
+/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit` e
 /// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
 /// mesma rota do dono. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
-    use super::{answer, control, permissions};
+    use super::{answer, control, input, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {
-        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
+        Method::POST => matches!(rest.as_str(), "input" | "answer" | "select" | "select/submit" | "permission-mode"),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
@@ -58,6 +58,7 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if let Some(route) = queue { return control::queue_dispatch(route, st, peer, req).await; }
     let (s, c) = (State(st), ConnectInfo(peer));
     match rest.as_str() {
+        "input" => input::input(s, c, req).await,
         "answer" => answer::answer(s, c, req).await,
         "select" => control::select(s, c, req).await,
         "permission-mode" => permissions::set_mode(s, c, req).await,

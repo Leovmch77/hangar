@@ -391,6 +391,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(fallback.clone()))
         // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
         .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(fallback.clone()))
+        .route("/api/jev/delivery", get(crate::session_write::delivery_timing::availability).fallback(fallback.clone()))
         .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(fallback.clone()))
         .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(fallback.clone()))
         .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(fallback.clone()))

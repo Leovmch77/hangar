@@ -5,7 +5,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
-    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::{tr, tr_shared}, theme,
+    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SendTiming, SessionKey}, i18n::{tr, tr_shared}, theme,
     interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion, source_map};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
@@ -227,7 +227,8 @@ enum Payload {
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
     /// A legenda e as referências do Enter vão com os uploads até a mensagem sair.
-    UploadsDone(SessionKey, String, Vec<crate::context_refs::ContextRef>, bool, HashSet<String>, Option<Vec<String>>),
+    UploadsDone(SessionKey, String, Vec<crate::context_refs::ContextRef>, SendTiming, HashSet<String>, Option<Vec<String>>),
+    QueueJev(String, u64, Result<bool, String>),
     Commands(String, u64, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
@@ -1561,6 +1562,7 @@ impl Hangar {
     fn receive(&mut self, envelope: Envelope, window: &mut Window, cx: &mut Context<Self>) {
         // Resultados amarrados à identidade da sessão valem mesmo depois de trocar a seleção.
         let payload = match envelope.payload {
+            Payload::QueueJev(server, seq, result) => { self.receive_queue_jev(server, seq, result); cx.notify(); return; }
             Payload::Sent(key, text, draft, result) => {
                 self.receive_sent(key, text, draft, result, window, cx);
                 cx.notify();
@@ -1903,7 +1905,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..)
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..) | Payload::QueueJev(..)
                 | Payload::Mermaid(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
@@ -1927,6 +1929,17 @@ impl Hangar {
         };
         let typed = self.delivery.typed(&key, &text);
         if !self.delivery.complete(&key, &text, outcome) { return; }
+        if let Some(note) = result.as_ref().ok().and_then(|d| d.timing_note.as_deref()) {
+            let (message, warning) = match note {
+                "direct" => ("queue_jev_direct", false),
+                "queue" => ("queue_jev_queued", false),
+                "delivered" => ("queue_jev_delivered", false),
+                "uncertain" => ("queue_jev_uncertain", true),
+                "refused" => ("queue_jev_refused", true),
+                _ => ("queue_jev_unavailable", true),
+            };
+            self.action_feedback.insert(key.clone(), (tr(message), warning));
+        }
         if result.is_ok() { self.bridge_sending(key.clone(), cx); }
         self.sync_working_row(cx);
         let current = self.selected_key().as_ref() == Some(&key);
@@ -2543,6 +2556,8 @@ impl Hangar {
         // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
         let group = if steer { None } else { self.group_targets(&key, &text) };
         let steer = steer || group.is_none() && !command && self.queue_sends_direct();
+        let steer = self.queue_timing(steer, group.is_none() && !command, &text);
+        let steer = if flying || attached { steer.after_wait() } else { steer };
         // Sem terminal, o `/btw` só sai traduzido e com o plugin anunciando que o atende; mesmo com a lista de
         // comandos ainda vazia (sem `blocked_command`), nunca vai cru ao Claude Code.
         let surface_btw = group.is_none() && self.plugin_source == Some(crate::plugin_ui::UiSource::Surface) && composer::side_question(&text);
@@ -2591,8 +2606,8 @@ impl Hangar {
     }
 
     /// `group`: com o "mandar pro grupo" ligado no Enter, os nomes que recebem (ela e os membros).
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
-        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return false; }
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: impl Into<SendTiming>, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+        if !self.post(key.clone(), text, draft, steer.into(), known, group, cx) { return false; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
@@ -2603,7 +2618,7 @@ impl Hangar {
     }
 
     /// O envio em si, sem mexer na conversa aberta: serve também ao texto que esperava a vez noutra sessão.
-    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
         // Sessão fora da tela (envio nomeado pela voz, fila de outra sessão) usa a conexão guardada da máquina dela.
         let Some(api) = self.api_for(&key.server).or_else(|| self.machine_api(&servers::norm(&key.server))) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
@@ -2611,26 +2626,21 @@ impl Hangar {
             return false;
         };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
-        // No Claude com terminal o `/steer` ignora o texto e orienta a primeira que espera: a mensagem entra na fila e
-        // sai junto com as que já esperavam (uma orientação por mensagem). A sessão é a da mensagem, não a aberta.
+        // O `/steer` do Claude com terminal ignora o texto; `/input` orienta somente a entrada deste envio.
         let selected = self.selected_key().as_ref() == Some(&key);
         let kind = self.sessions_of(&key.server).iter().find(|s| s.name == key.name).map(|s| (s.provider == "claude", s.headless))
             .or_else(|| selected.then(|| { let (provider, headless) = self.provider(); (provider == "claude", headless) }));
-        let terminal_claude = steer && kind == Some((true, false));
-        let waiting = if selected { self.queued_count() } else { 0 };
+        let terminal_claude = steer == SendTiming::Direct && kind == Some((true, false));
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = match group {
                 Some(names) => api.broadcast(&names, &text).await.and_then(|results| group_sheet::group_delivery(&key.name, results)),
-                None if terminal_claude => match api.send(&key.name, &text).await {
-                    Ok(delivery) if !delivery.delivered => {
-                        // Orientar recusado deixa a mensagem à vista no painel "Na fila", como sem a opção.
-                        for _ in 0..=waiting { if api.steer_waiting(&key.name).await.is_err() { break; } }
-                        Ok(delivery)
-                    }
-                    other => other,
-                },
-                None if steer => api.steer_text(&key.name, &text).await,
+                None if terminal_claude => api.send_direct(&key.name, &text).await,
+                None if steer == SendTiming::Direct => api.steer_text(&key.name, &text).await,
+                None if matches!(steer, SendTiming::Jev { .. }) => {
+                    let SendTiming::Jev { task, message } = steer else { unreachable!() };
+                    api.send_decided(&key.name, &text, &task, &message).await
+                }
                 None => api.send(&key.name, &text).await,
             };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sent(key, text, draft, result) }).await;
@@ -2639,7 +2649,7 @@ impl Hangar {
     }
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
-    fn start_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+    fn start_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
@@ -2675,7 +2685,7 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
         let uploads: Option<Vec<_>> = self.attachments.get(&key).and_then(|list| list.iter().filter(|a| batch.contains(&a.id))
             .map(|attachment| match &attachment.state {
