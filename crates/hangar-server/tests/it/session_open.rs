@@ -157,7 +157,8 @@ async fn the_command_resolves_from_the_same_files_with_the_server_down() {
     let caller = [("CLAUDE_CONFIG_DIR", root.join("home/.claude-b").to_string_lossy().into_owned()), ("CP_JEV_PADRAO", "true".into())];
     // Porta 1: ninguém atende.
     let bin = install(&root, "CP_AUTH_TOKEN=x\nCP_PORT=1\n");
-    let body = fixture["scenario"]["steps"][0]["json"].to_string().replace("<ROOT>", &root.to_string_lossy());
+    // Dentro de string JSON: a barra invertida do Windows vai escapada.
+    let body = fixture["scenario"]["steps"][0]["json"].to_string().replace("<ROOT>", &root.to_string_lossy().replace('\\', "\\\\"));
     let expected = &fixture["result"]["steps"][0]["body"];
     let launched = &fixture["result"]["records"]["<ROOT>/home/.hangar/claude-headless/filha.json"]["created"]["json"];
     for command in ["resolve", "open"] {
@@ -166,7 +167,7 @@ async fn the_command_resolves_from_the_same_files_with_the_server_down() {
         let spec = &out["spec"];
         assert_eq!(spec["name"], expected["name"]);
         assert_eq!(spec["surface"] == "headless", expected["headless"] == true);
-        assert_eq!(spec["account"]["config_dir"].as_str().map(|d| d.replace(&*root.to_string_lossy(), "<ROOT>")).as_deref(),
+        assert_eq!(spec["account"]["config_dir"].as_str().map(|d| d.replace(&*root.to_string_lossy(), "<ROOT>").replace('\\', "/")).as_deref(),
             expected["config_dir"].as_str(), "{command}: {out}");
         assert_eq!(spec["account_source"], expected["account_source"]);
         assert_eq!(out["warnings"], expected["avisos"]);

@@ -267,7 +267,8 @@ mod tests {
 
     fn launch_of(case: &Case, runtime: &Value) -> Launch {
         let env = AccountEnvironment::from_map(case.server_env());
-        let roots = [case.repo.join("plugins/hangar"), case.repo.join("plugins/github-actions")].map(|p| p.to_string_lossy().into_owned());
+        // Na forma do fixture (`<REPO>/plugins/...`), que o Python montou com `/`.
+        let roots = ["hangar", "github-actions"].map(|p| format!("{}/plugins/{p}", case.repo.display()));
         let bridge = PluginBridge { port: 8765, secret: "hso-token".into() };
         let ctx = Context { env: &env, runtime_config: runtime, plugin_roots: &roots, bridge: Some(&bridge), engine_route: None, fast: false };
         plan(&case.spec(), &case.meta(), &ctx).unwrap()
