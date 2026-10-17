@@ -43,17 +43,49 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(serverId: string, orq = false, name = 'conversation') {
+async function render(serverId: string, orq = false, name = 'conversation', provider?: string | null) {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
   const onClose = vi.fn();
-  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name, orq })); });
+  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name, orq, provider })); });
   return { container, onClose };
 }
 
 const shareButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.compartilhar_menu()}"]`);
 const gitButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.sessao_git()}"]`);
+
+test('troca de conta: Claude no servidor próprio fecha o menu e abre a mesma conversa mesmo com convidado ativo', async () => {
+  const { container, onClose } = await render(own.id, false, 'same-conversation', 'claude');
+  const account = container.querySelector<HTMLButtonElement>(`[aria-label="${m.bastao_menu()}"]`);
+  expect(account, 'ação de continuar em outra conta').not.toBeNull();
+  expect(account!.textContent).toContain(m.conta_mesma_conversa_sub());
+  await act(async () => { account!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/same-conversation/account');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([
+  { kind: 'guest', serverId: guest.id, orq: false, provider: 'claude' },
+  { kind: 'removed', serverId: removed.id, orq: false, provider: 'claude' },
+  { kind: 'unknown-server', serverId: 'unknown', orq: false, provider: 'claude' },
+  { kind: 'orq', serverId: own.id, orq: true, provider: 'claude' },
+  { kind: 'codex', serverId: own.id, orq: false, provider: 'codex' },
+  { kind: 'pi', serverId: own.id, orq: false, provider: 'pi' },
+  { kind: 'omp', serverId: own.id, orq: false, provider: 'omp' },
+  { kind: 'kimi', serverId: own.id, orq: false, provider: 'kimi' },
+  { kind: 'unknown-provider', serverId: own.id, orq: false, provider: 'other' },
+  { kind: 'null-provider', serverId: own.id, orq: false, provider: null },
+  { kind: 'missing-provider', serverId: own.id, orq: false, provider: undefined },
+])('troca de conta: não oferece ação para $kind mesmo com servidor próprio ativo', async ({ serverId, orq, provider }) => {
+  useServers.setState({ activeId: own.id });
+  const { container, onClose } = await render(serverId, orq, 'conversation', provider);
+  expect(container.querySelector(`[aria-label="${m.bastao_menu()}"]`)).toBeNull();
+  expect(onClose).not.toHaveBeenCalled();
+  expect(boundary.push).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
 
 test.each([false, true])('git abre a rota da conversa e fecha o menu no servidor próprio, orq=%s', async orq => {
   const { container, onClose } = await render(own.id, orq);
