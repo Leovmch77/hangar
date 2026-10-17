@@ -24,12 +24,14 @@ export const ToolGroup = memo(function ToolGroup({
   summary,
   resultOf,
   onAbrir,
+  onExpand,
   look = 'tree',
 }: {
   parts: ChatEvent[];
   summary?: FoldSummary;
   resultOf: (t: ChatEvent) => ChatEvent | null;
   onAbrir: (use: ChatEvent) => void;
+  onExpand?: () => void;
   look?: Ferramentas;
 }) {
   const { theme } = useUnistyles();
@@ -64,7 +66,10 @@ export const ToolGroup = memo(function ToolGroup({
   return (
     <View style={styles.wrap}>
       <Pressable
-        onPress={() => setVirado((v) => !v)}
+        onPress={() => {
+          if (!aberto) onExpand?.();
+          setVirado((v) => !v);
+        }}
         style={({ pressed }) => [styles.head, pressed && { backgroundColor: theme.tokens.bg.hover }]}
         accessibilityRole="button"
         accessibilityLabel={[titulo + chamadas, falhas].filter(Boolean).join(', ')}
@@ -84,7 +89,7 @@ export const ToolGroup = memo(function ToolGroup({
         <View style={chips ? undefined : [styles.fio, { borderLeftColor: theme.tokens.border.default }]}>
           {chips ? tabela(visiveis) : visiveis.map(linha)}
           {!tudo && linhas.length > TETO ? (
-            <Pressable onPress={() => setTudo(true)} style={({ pressed }) => [styles.mais, pressed && { backgroundColor: theme.tokens.bg.hover }]} accessibilityRole="button">
+            <Pressable onPress={() => { onExpand?.(); setTudo(true); }} style={({ pressed }) => [styles.mais, pressed && { backgroundColor: theme.tokens.bg.hover }]} accessibilityRole="button">
               <Text style={[styles.maisTxt, { color: theme.tokens.text.secondary }]}>{m.tool_mostrar_todas({ n: linhas.length })}</Text>
             </Pressable>
           ) : null}

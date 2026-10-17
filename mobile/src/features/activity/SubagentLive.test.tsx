@@ -46,11 +46,14 @@ vi.mock('../../chat/tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
 vi.mock('../../features/attachments/LightboxModal', () => ({ LightboxModal: () => null }));
 vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('article', null, markdown) }));
 vi.mock('expo-image', () => ({ Image: ({ source }: { source: { uri: string } }) => createElement('img', { src: source.uri }) }));
-const legendList = vi.hoisted(() => ({ alignment: vi.fn() }));
+type ListConfig = { nestedScrollEnabled?: boolean; maintainScrollAtEnd?: boolean; initialScrollAtEnd?: boolean; maintainVisibleContentPosition?: boolean };
+const legendList = vi.hoisted(() => ({ alignment: vi.fn(), config: vi.fn<(props: ListConfig) => void>() }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent, onStartReached, alignItemsAtEnd }: {
+  LegendList: (props: ListConfig & {
     data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode; onStartReached: () => void; alignItemsAtEnd?: boolean;
   }) => {
+    const { data, renderItem, ListFooterComponent, onStartReached, alignItemsAtEnd } = props;
+    legendList.config(props);
     legendList.alignment(alignItemsAtEnd);
     return createElement('div', null,
       createElement('button', { onClick: onStartReached, 'aria-label': 'load-older' }),
@@ -100,6 +103,7 @@ async function poll() {
 
 beforeEach(() => {
   legendList.alignment.mockClear();
+  legendList.config.mockClear();
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-17T10:00:30Z'));
   requests.length = 0;
@@ -117,6 +121,35 @@ afterEach(() => {
   act(() => { for (const root of roots.splice(0)) root.unmount(); });
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('detalhe habilita pausa de grupo e nested scroll preservando polling e paginação', async () => {
+  const { container, render } = mount();
+  await render();
+  const page = detail('one', 'conversa');
+  page.events = [
+    { id: 'thought-1', kind: 'thinking', text: 'first-thought' },
+    { id: 'thought-2', kind: 'thinking', text: 'second-thought' },
+    ...Array.from({ length: 198 }, (_, i) => ({ id: `notice-${i}`, kind: 'notice' as const, text: `notice-${i}` })),
+  ];
+  await reply(0, page);
+  const config = () => legendList.config.mock.lastCall![0];
+  expect(config().nestedScrollEnabled).toBe(true);
+  expect(config().initialScrollAtEnd).toBe(true);
+  expect(config().maintainVisibleContentPosition).toBe(true);
+  expect(legendList.alignment.mock.lastCall![0]).toBe(false);
+  const list = container.querySelector('[aria-label="load-older"]')!.parentElement!;
+  await act(async () => list.querySelectorAll('button')[1].click());
+  expect(container.textContent).toContain('first-thought');
+  expect(config().maintainScrollAtEnd).toBe(false);
+  await poll();
+  await reply(1, JSON.parse(JSON.stringify(page)));
+  expect(config().maintainScrollAtEnd).toBe(false);
+  await act(async () => (container.querySelector('[aria-label="load-older"]') as HTMLElement).click());
+  expect(requests[2].url).toBe('http://remote.test:8765/api/sessions/sess/subagents/one?events=400');
+  await reply(2, { ...page, events: [...page.events!, { id: 'new-notice', kind: 'notice', text: 'new-notice' }] });
+  expect(config().maintainScrollAtEnd).toBe(false);
+  expect(container.textContent).toContain('new-notice');
 });
 
 it('detalhe do subagente alinha conversa curta no topo da LegendList', async () => {

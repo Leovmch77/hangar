@@ -5,6 +5,7 @@ import { expect, it, vi } from 'vitest';
 import type { ChatEvent } from '@hangar/core';
 import { projectConversation, type ProjectionInput } from '../conversationProjection';
 import { ToolGroup } from './ToolGroup';
+import * as m from '../../paraglide/messages';
 
 vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: () => null }));
 vi.mock('expo-file-system', () => ({}));
@@ -22,6 +23,47 @@ vi.mock('expo-blur', () => ({}));
 vi.mock('@lodev09/react-native-true-sheet', () => ({ TrueSheet: () => null }));
 vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, getNumber: () => undefined, getBoolean: () => undefined, set: () => {}, remove: () => {} }) }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+it('avisa antes de expandir o grupo real, mas não ao recolher', () => {
+  const parts: ChatEvent[] = [
+    { id: 'first', kind: 'thinking', text: 'first-thought' },
+    { id: 'second', kind: 'thinking', text: 'second-thought' },
+  ];
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onExpand = vi.fn(() => expect(container.textContent).not.toContain('first-thought'));
+  try {
+    act(() => root.render(createElement(ToolGroup, { parts, resultOf: () => null, onAbrir: () => {}, onExpand })));
+    const head = container.querySelector('button')!;
+    act(() => head.click());
+    expect(onExpand).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('first-thought');
+    act(() => head.click());
+    expect(onExpand).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain('first-thought');
+  } finally {
+    act(() => root.unmount());
+  }
+});
+
+it('avisa antes de Mostrar todas no grupo real', () => {
+  const parts: ChatEvent[] = Array.from({ length: 41 }, (_, i) => ({ id: `thought-${i}`, kind: 'thinking', text: `thought-${i}-text` }));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onExpand = vi.fn(() => expect(container.textContent).not.toContain('thought-40-text'));
+  try {
+    act(() => root.render(createElement(ToolGroup, { parts, resultOf: () => null, onAbrir: () => {}, onExpand })));
+    act(() => container.querySelector('button')!.click());
+    onExpand.mockClear();
+    const showAll = [...container.querySelectorAll('button')].find(button => button.textContent === m.tool_mostrar_todas({ n: 41 }))!;
+    expect(container.textContent).not.toContain('thought-40-text');
+    act(() => showAll.click());
+    expect(onExpand).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('thought-40-text');
+  } finally {
+    act(() => root.unmount());
+  }
+});
 
 it('trecho recolhido com 5000 chamadas e 200 appends não reconta o histórico', () => {
   let reads = 0;

@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ComponentProps, type ReactNode } from 'react';
+import { act, createElement, useImperativeHandle, type ComponentProps, type ReactNode, type Ref } from 'react';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
+import type { LegendListRef } from '@legendapp/list/react-native';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, configureLocale, type ChatEvent, type OrqEntry, type SessionInfo } from '@hangar/core';
@@ -38,15 +40,34 @@ vi.mock('../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
 vi.mock('./LiveWork', () => ({ AgentesRodando: () => null, PensamentoVivo: () => null, WorkingLine: () => null }));
 vi.mock('./TaskList', () => ({ TaskList: () => null }));
-vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
 vi.mock('./tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
-const list = vi.hoisted(() => ({ render: vi.fn(), data: vi.fn(), alignment: vi.fn() }));
+type ListHandle = Pick<LegendListRef, 'scrollToEnd'> & {
+  getState: () => Partial<ReturnType<LegendListRef['getState']>>;
+};
+type ListProps = {
+  ref?: Ref<ListHandle>;
+  data: { id: string }[];
+  renderItem: (row: { item: unknown }) => ReactNode;
+  ListFooterComponent?: ReactNode;
+  alignItemsAtEnd?: boolean;
+  maintainScrollAtEnd?: boolean;
+  initialScrollAtEnd?: boolean;
+  maintainVisibleContentPosition?: boolean;
+  nestedScrollEnabled?: boolean;
+  recycleItems?: boolean;
+  onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  onContentSizeChange?: (width: number, height: number) => void;
+  onStartReached?: () => void;
+};
+const list = vi.hoisted(() => ({ render: vi.fn(), data: vi.fn(), alignment: vi.fn(), props: vi.fn<(props: ListProps) => void>(),
+  scrollToEnd: vi.fn<LegendListRef['scrollToEnd']>(), geometry: {} as Partial<ReturnType<LegendListRef['getState']>> }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent, alignItemsAtEnd }: {
-    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode; alignItemsAtEnd?: boolean;
-  }) => {
+  LegendList: (props: ListProps) => {
+    const { data, renderItem, ListFooterComponent, alignItemsAtEnd, ref } = props;
+    useImperativeHandle(ref, () => ({ scrollToEnd: list.scrollToEnd, getState: () => list.geometry }));
+    list.props(props);
     list.render(renderItem);
     list.data(data);
     list.alignment(alignItemsAtEnd);
@@ -76,6 +97,9 @@ beforeEach(() => {
   list.render.mockClear();
   list.data.mockClear();
   list.alignment.mockClear();
+  list.props.mockClear();
+  list.scrollToEnd.mockClear();
+  list.geometry = {};
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
   // B está ativo, mas o chat abaixo é de A.
   configureApi({ getBaseUrl: () => servers.servers[1].baseUrl, getToken: () => 'token-b', onUnauthorized: () => {}, origin: null,
@@ -86,6 +110,148 @@ afterEach(() => {
   _resetChatsForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+const groupEvents = (count = 2): ChatEvent[] => Array.from({ length: count }, (_, i) => ({ id: `thought-${i}`, kind: 'thinking', text: `thought-${i}-text` }));
+const latestList = () => list.props.mock.lastCall![0];
+const expandGroup = (container: HTMLElement) => act(() => container.querySelector<HTMLButtonElement>('[data-row] button')!.click());
+
+it('expansão manual pausa todos os gatilhos e resiste a clone, append e callbacks agendados', () => {
+  vi.useFakeTimers();
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  const renderItem = latestList().renderItem;
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(frames).toHaveLength(1);
+  expandGroup(container);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(latestList().renderItem).toBe(renderItem);
+  expect(container.textContent).toContain('thought-0-text');
+  act(() => { frames.forEach(frame => frame(0)); vi.advanceTimersByTime(300); });
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+  const cloned: ChatEvent[] = JSON.parse(JSON.stringify(initial.events));
+  act(() => root.render(createElement(MessageList, { ...initial, events: cloned })));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...cloned, event({ id: 'new-row' })], bottomInset: 40 })));
+  act(() => { frames.forEach(frame => frame(0)); vi.advanceTimersByTime(300); });
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+});
+
+const scrollList = (y: number, height: number, viewport: number) => act(() => latestList().onScroll({
+  nativeEvent: { contentOffset: { y }, contentSize: { height }, layoutMeasurement: { height: viewport } },
+} as NativeSyntheticEvent<NativeScrollEvent>));
+
+it('scroll atrasado não desfaz pausa antes nem depois da nova medida', () => {
+  vi.useFakeTimers();
+  list.geometry = { contentLength: 400, scroll: 0, scrollLength: 400 };
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  scrollList(0, 400, 400); // Evento anterior à expansão, ainda sem nova medida.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => latestList().onContentSizeChange?.(390, 2000));
+  scrollList(0, 400, 400); // O estado da lista também ainda não acompanhou a medida.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = {};
+  scrollList(0, 400, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  scrollList(0, 400, 400); // Agora só o evento está atrasado.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...initial.events, event({ id: 'new-row' })] })));
+  act(() => vi.advanceTimersByTime(300));
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expandGroup(container);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  expandGroup(container);
+  act(() => latestList().onContentSizeChange?.(390, 2000));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400); // Altura igual à anterior, mas confirmada pelo callback.
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+});
+
+it('retoma só no fim medido pelo scroll ou pelo botão Ir pro fim', () => {
+  vi.useFakeTimers();
+  list.geometry = { contentLength: 400, scroll: 0, scrollLength: 400 };
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  scrollList(0, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...initial.events, event({ id: 'new-row' })] })));
+  act(() => vi.advanceTimersByTime(300));
+  expect(list.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+  expandGroup(container); // Recolhe sem pausar.
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expandGroup(container);
+  list.geometry = { contentLength: 2400, scroll: 0, scrollLength: 400 };
+  scrollList(0, 2400, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.scrollToEnd.mockClear();
+  act(() => container.querySelector<HTMLButtonElement>(`[aria-label="${m.msg_ir_ultima()}"]`)!.click());
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(list.scrollToEnd).toHaveBeenCalledWith({ animated: true });
+});
+
+it('medida real libera expansão que coube e Mostrar todas pausa novamente', () => {
+  vi.useFakeTimers();
+  const { container } = mount(createElement(MessageList, props(groupEvents(41), { preserveToolGroupPosition: true })));
+  expandGroup(container);
+  const measure = (height: number) => act(() => latestList().onContentSizeChange?.(390, height));
+  measure(430); // Sem medida da viewport, não presume zero.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 0, isWithinMaintainScrollAtEndThreshold: true };
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 400, isWithinMaintainScrollAtEndThreshold: true };
+  measure(2000); // O sinal guardado de proximidade não decide a retomada.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scrollLength: 400 };
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 400, isWithinMaintainScrollAtEndThreshold: false };
+  measure(Number.NaN);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  const showAll = [...container.querySelectorAll('button')].find(button => button.textContent === m.tool_mostrar_todas({ n: 41 }))!;
+  act(() => showAll.click());
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(container.textContent).toContain('thought-40-text');
+  measure(2100);
+  act(() => vi.advanceTimersByTime(300));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+});
+
+it('defaults preservam acompanhamento e virtualização; nested scroll é opt-in', () => {
+  const onLoadOlder = vi.fn();
+  const initial = props(groupEvents(), { onLoadOlder });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(latestList().nestedScrollEnabled).toBeUndefined();
+  expect(latestList().onContentSizeChange).toBeUndefined();
+  expect(latestList().initialScrollAtEnd).toBe(true);
+  expect(latestList().maintainVisibleContentPosition).toBe(true);
+  expect(latestList().recycleItems).toBe(false);
+  expect(latestList().onStartReached).toBe(onLoadOlder);
+  act(() => root.render(createElement(MessageList, { ...initial, nestedScrollEnabled: true })));
+  expect(latestList().nestedScrollEnabled).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, nestedScrollEnabled: false })));
+  expect(latestList().nestedScrollEnabled).toBe(false);
 });
 
 it('alinhamento da conversa mantém fim por padrão e permite topo explícito', () => {

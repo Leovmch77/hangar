@@ -49,6 +49,8 @@ interface Props {
   // Altura da caixa que flutua por cima do fim da lista: o último item rola até ficar acima dela.
   bottomInset?: number;
   alignItemsAtEnd?: boolean;
+  preserveToolGroupPosition?: boolean;
+  nestedScrollEnabled?: boolean;
   // Bloco "trabalhando" do fim (ausente = lista só de leitura, como a do subagente).
   stateEvent?: StateEvent | null;
   turnSeen?: number | null;
@@ -84,6 +86,8 @@ export function MessageList({
   serverId,
   bottomInset = 0,
   alignItemsAtEnd = true,
+  preserveToolGroupPosition = false,
+  nestedScrollEnabled,
   stateEvent = null,
   turnSeen = null,
   pensamento = '',
@@ -118,6 +122,21 @@ export function MessageList({
   // Toque numa citação: rola até a resposta de origem pelo índice da linha (a lista é virtualizada,
   // então não há nó para procurar). Origem fora do histórico carregado: nada acontece.
   const lista = useRef<LegendListRef>(null);
+  const reading = useRef({ y: 0, atEnd: true });
+  const [toolGroupPaused, setToolGroupPaused] = useState(false);
+  const toolGroupPausedRef = useRef(false);
+  const toolGroupMeasurement = useRef<{ before?: number; height?: number }>({});
+  const pauseForToolGroup = useCallback(() => {
+    reading.current.atEnd = false;
+    toolGroupPausedRef.current = true;
+    toolGroupMeasurement.current = { before: lista.current?.getState().contentLength };
+    setToolGroupPaused(true);
+  }, []);
+  const resumeFollowing = useCallback(() => {
+    reading.current.atEnd = true;
+    toolGroupPausedRef.current = false;
+    setToolGroupPaused(false);
+  }, []);
   const dataRef = useRef(data);
   useEffect(() => { dataRef.current = data; }, [data]);
   // Medidas lidas na hora do toque, por referência: como dependência, cada mudança de altura do
@@ -166,7 +185,7 @@ export function MessageList({
   const renderItem = useCallback(({ item }: { item: MessageRow }) => {
     switch (item.type) {
       case 'fold':
-        return <ToolGroup parts={item.parts} summary={item.summary} resultOf={item.resultOf!} onAbrir={abrirDetalhe} look={look} />;
+        return <ToolGroup parts={item.parts} summary={item.summary} resultOf={item.resultOf!} onAbrir={abrirDetalhe} onExpand={preserveToolGroupPosition ? pauseForToolGroup : undefined} look={look} />;
       case 'tasks':
         return <TaskList tasks={item.tasks} />;
       case 'page':
@@ -203,7 +222,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
+  }, [abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote, preserveToolGroupPosition, pauseForToolGroup]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
@@ -213,15 +232,40 @@ export function MessageList({
     if (!longeDoFim) vistoAte.current = events.length;
   }, [longeDoFim, events.length]);
   const temNovas = longeDoFim && events.length > vistoAte.current;
-  // Ponto de leitura atual, para o modal da citação devolver a conversa onde estava e para a lista
-  // seguir colada no fim quando o rodapé muda de altura.
-  const reading = useRef({ y: 0, atEnd: true });
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    const falta = contentSize.height - contentOffset.y - layoutMeasurement.height;
-    reading.current = { y: contentOffset.y, atEnd: falta < 64 };
-    setLongeDoFim(falta > layoutMeasurement.height);
-  }, []);
+    let y = contentOffset.y;
+    let height = contentSize.height;
+    let viewport = layoutMeasurement.height;
+    if (toolGroupPausedRef.current) {
+      const state = lista.current?.getState();
+      if (!state || !Number.isFinite(state.contentLength) || !(state.contentLength > 0)
+        || !Number.isFinite(state.scroll) || !Number.isFinite(state.scrollLength) || !(state.scrollLength > 0)) return;
+      // O evento pode ter sido retido antes da expansão, até antes da nova medida.
+      const measurement = toolGroupMeasurement.current;
+      if (!(Number.isFinite(measurement.before) && state.contentLength !== measurement.before)
+        && state.contentLength !== measurement.height) return;
+      y = state.scroll;
+      height = state.contentLength;
+      viewport = state.scrollLength;
+    }
+    if (!Number.isFinite(y) || !Number.isFinite(height) || !(viewport > 0)) return;
+    const falta = height - y - viewport;
+    reading.current = { y, atEnd: falta < 64 };
+    if (reading.current.atEnd && toolGroupPausedRef.current) resumeFollowing();
+    setLongeDoFim(falta > viewport);
+  }, [resumeFollowing]);
+  const onContentSizeChange = useCallback((_width: number, height: number) => {
+    if (!toolGroupPausedRef.current || !Number.isFinite(height) || !(height > 0)) return;
+    toolGroupMeasurement.current.height = height;
+    const state = lista.current?.getState();
+    if (!state || !Number.isFinite(state.scroll) || !Number.isFinite(state.scrollLength) || !(state.scrollLength > 0)) return;
+    // O sinal de proximidade da lista ainda pode ser o de antes da expansão.
+    const remaining = height - state.scroll - state.scrollLength;
+    reading.current = { y: state.scroll, atEnd: remaining < 64 };
+    setLongeDoFim(remaining > state.scrollLength);
+    if (reading.current.atEnd) resumeFollowing();
+  }, [resumeFollowing]);
   // A caixa de baixo muda de altura (a bandeja some no envio, o campo encolhe) e a bolha enviada
   // entra no rodapé: quem estava no fim continua no fim. Sem isto, com o teclado aberto, a bolha e
   // a resposta ficavam atrás do campo. De novo depois da medida da bolha formatada. Linha nova e
@@ -230,8 +274,10 @@ export function MessageList({
   const rowCount = data.length;
   const hasPreview = !!visiblePreview;
   useEffect(() => {
-    if (!reading.current.atEnd) return;
-    const keepAtEnd = () => { if (reading.current.atEnd) void lista.current?.scrollToEnd({ animated: false }); };
+    if (!reading.current.atEnd || toolGroupPausedRef.current) return;
+    const keepAtEnd = () => {
+      if (reading.current.atEnd && !toolGroupPausedRef.current) void lista.current?.scrollToEnd({ animated: false });
+    };
     const frame = requestAnimationFrame(keepAtEnd);
     const later = setTimeout(keepAtEnd, 250);
     return () => { cancelAnimationFrame(frame); clearTimeout(later); };
@@ -260,9 +306,10 @@ export function MessageList({
     });
   }, [serverId, sessionName]);
   const irProFim = useCallback(() => {
+    if (toolGroupPausedRef.current) resumeFollowing();
     setLongeDoFim(false);
     void lista.current?.scrollToEnd({ animated: true });
-  }, []);
+  }, [resumeFollowing]);
 
   // Largura da coluna (Aparência › Texto da conversa): abaixo de 100% a conversa estreita no meio.
   const recuo = ((width - 2 * theme.base.space[4]) * (1 - theme.conversa.coluna)) / 2;
@@ -280,7 +327,9 @@ export function MessageList({
     <LegendList
       ref={lista}
       onScroll={onScroll}
+      onContentSizeChange={preserveToolGroupPosition ? onContentSizeChange : undefined}
       scrollEventThrottle={100}
+      nestedScrollEnabled={nestedScrollEnabled}
       data={data}
       keyExtractor={keyOf}
       renderItem={renderItem}
@@ -288,7 +337,7 @@ export function MessageList({
       estimatedItemSize={72}
       alignItemsAtEnd={alignItemsAtEnd}
       initialScrollAtEnd
-      maintainScrollAtEnd
+      maintainScrollAtEnd={!toolGroupPaused}
       maintainVisibleContentPosition
       keyboardShouldPersistTaps="handled"
       // Android: o toque longo que seleciona texto foca o TextView, e o ScrollView do RN rolava até
