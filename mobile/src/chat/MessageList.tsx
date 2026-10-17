@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Pressable, Text, View, useWindowDimensions, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
@@ -12,15 +12,15 @@ import { PreviewBubble } from './PreviewBubble';
 import { ToolGroup } from './tools/ToolGroup';
 import { ToolCard } from './tools/ToolCard';
 import { AgentesRodando, PensamentoVivo, WorkingLine } from './LiveWork';
-import { turnStart } from './liveWork';
+import { projectConversation, type ConversationProjection, type MessageRow } from './conversationProjection';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
-import { foldConversation, type ConversationRow } from './tools/fold';
+import type { ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
-import { dayStarts, locateInMarkdown, type QuoteRef } from '@hangar/core';
+import { locateInMarkdown, type QuoteRef } from '@hangar/core';
 import { useCiteDialog } from '../stores/citeDialog';
 import { contextRefsKey } from '../stores/contextRefs';
 import { flashQuoteSource } from '../stores/quoteFlash';
-import { agruparConversa, echoInQueuePanel, entraNoPensamento, foldTasks, hexParaRgb, hiddenByQueuePanel, htmlPageFromResult, planDisplayText, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
+import { echoInQueuePanel, hexParaRgb, planDisplayText, type AgentRun, type ChatEvent, type QueuePanel, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -35,6 +35,7 @@ import * as m from '../paraglide/messages';
 
 interface Props {
   events: ChatEvent[];
+  eventsRevision?: number;
   preview: string;
   previewMd?: boolean; // prévia do agente = markdown (default true = comportamento antigo)
   previewFull?: boolean;
@@ -65,58 +66,11 @@ interface Props {
 
 const SEM_AGENTES: AgentRun[] = [];
 
-// Bolha sem texto não vira item nenhum, salvo a de imagem colada no terminal (só `image_count`).
-// O tool_result é descartado pelo agruparConversa (entra na linha do tool_use pareado).
-function visivel(ev: ChatEvent): boolean {
-  if (ev.kind === 'user_msg') return !!ev.text || !!ev.image_count;
-  if (ev.kind === 'assistant_msg') return !!ev.text;
-  return true;
-}
-
-const SEM_TAREFAS: ReturnType<typeof foldTasks> = [];
-const ehTask = (ev: ChatEvent) => ev.kind === 'tool_use' && (ev.tool_name === 'TaskCreate' || ev.tool_name === 'TaskUpdate');
-
-// Com a Lista de tarefas ligada, as chamadas de tarefa saem da conversa e o bloco entra ONDE a
-// última delas aconteceu: logo depois da linha que tem o evento anterior a ela (como o web).
-function comTarefas(rows: ConversationRow[], eventos: ChatEvent[], tasks: ReturnType<typeof foldTasks>): ConversationRow[] {
-  let ancora: string | null = null;
-  let tem = false;
-  for (let i = eventos.length - 1; i >= 0 && !tem; i--) {
-    if (!ehTask(eventos[i])) continue;
-    tem = true;
-    for (let j = i - 1; j >= 0; j--) {
-      if (!ehTask(eventos[j]) && eventos[j].kind !== 'tool_result') { ancora = eventos[j].id; break; }
-    }
-  }
-  if (!tem) return rows;
-  const pos = ancora === null ? -1
-    : rows.findIndex((r) => (r.type === 'event' || r.type === 'page' ? r.ev.id === ancora : r.type === 'fold' && r.parts.some((p) => p.id === ancora)));
-  const out = [...rows];
-  out.splice(pos + 1, 0, { type: 'tasks', id: 'tasks', tasks });
-  return out;
-}
-
-const resultKey = (ev: ChatEvent) => ev.tool_use_id ?? '';
-
-// A linha que não mudou (mesmos eventos, mesmos resultados) devolve o objeto da rodada anterior: a
-// célula da lista e o item `memo` comparam por referência, e cada evento novo refaz todas as linhas.
-type MessageRow = ConversationRow & { dayTs?: number };
-function sameRow(a: MessageRow, b: MessageRow, now: Map<string, ChatEvent>, before: Map<string, ChatEvent>): boolean {
-  if (a.dayTs !== b.dayTs) return false;
-  const sameResult = (ev: ChatEvent) => now.get(resultKey(ev)) === before.get(resultKey(ev));
-  switch (a.type) {
-    case 'event': return b.type === 'event' && a.ev === b.ev;
-    case 'page': return b.type === 'page' && a.ev === b.ev && sameResult(a.ev);
-    case 'tasks': return b.type === 'tasks' && a.tasks === b.tasks;
-    case 'fold': return b.type === 'fold' && a.parts.length === b.parts.length
-      && a.parts.every((p, i) => p === b.parts[i] && sameResult(p));
-  }
-}
-
 const keyOf = (row: ConversationRow) => row.id;
 
 export function MessageList({
   events,
+  eventsRevision,
   preview,
   previewMd = true,
   previewFull = false,
@@ -146,56 +100,18 @@ export function MessageList({
   const folha = useAparencia((s) => (s.leitura === 'sheet' ? s.solidezFolha : null));
   const { theme } = useUnistyles();
   const { width } = useWindowDimensions();
-  const results = useMemo(() => {
-    const mapa = new Map<string, ChatEvent>();
-    for (const e of events) if (e.kind === 'tool_result' && e.tool_use_id) mapa.set(e.tool_use_id, e);
-    return mapa;
-  }, [events]);
-  // As três referências abaixo precisam ser ESTÁVEIS, e isso não é zelo: a prévia do streaming
-  // muda a cada token, o que re-renderiza este componente dezenas de vezes por segundo. Com
-  // `renderItem` novo a cada render, a virtualização não segura nada — toda linha visível é
-  // refeita a cada token, em vez de só o rodapé, que é onde a prévia mora. Os itens são `memo`
-  // pelo mesmo motivo; sem as duas metades, qualquer uma sozinha não adianta.
+  const previous = useRef<ConversationProjection | null>(null);
+  const projection = projectConversation(previous.current, {
+    events, eventsRevision, pref, merge: look === 'tree', tasksEnabled: tarefasLigadas,
+    pagesEnabled: !!sessionName, running: new Set(agentesRodando.map((a) => a.id)), queuePanel,
+  });
+  // Render descartado ou repetido não publica o seu cache nem modifica o snapshot anterior.
+  useLayoutEffect(() => { previous.current = projection; }, [projection]);
+  const data = projection.data;
+  const results = projection.results;
   const resultDe = useCallback((t: ChatEvent) => results.get(t.tool_use_id ?? '') ?? null, [results]);
-  // Para as linhas, a leitura é pelo mapa atual sem trocar de função: quem tem resultado novo já
-  // recebe linha nova pelo `sameRow`, e o resto não refaz a cada evento.
-  const resultsRef = useRef(results);
-  resultsRef.current = results;
-  const resultOfRow = useCallback((t: ChatEvent) => resultsRef.current.get(t.tool_use_id ?? '') ?? null, []);
-  const days = useMemo(() => dayStarts(events), [events]);
-  const previous = useRef<{ rows: Map<string, MessageRow>; results: Map<string, ChatEvent> }>({ rows: new Map(), results: new Map() });
-  // Layout do nativo: o que vem entre duas mensagens (raciocínio, chamadas, grupos) vira UM trecho
-  // dobrado. O agrupamento continua o do core; o foldConversation só junta o desenho.
-  const tasks = useMemo(
-    () => (tarefasLigadas ? foldTasks(events, (id) => results.get(id)) : SEM_TAREFAS),
-    [tarefasLigadas, events, results],
-  );
-  const rodandoIds = useMemo(() => new Set(agentesRodando.map((a) => a.id)), [agentesRodando]);
-  const inicioDoAgente = useCallback((id: string) => {
-    const ts = events.find((e) => e.kind === 'tool_use' && e.tool_use_id === id)?.ts;
-    return ts ? ts * 1000 : null;
-  }, [events]);
-  const data = useMemo(() => {
-    // A bolha escondida sai antes da lista: um item vazio deixaria o respiro dele na conversa.
-    const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e))
-      && !(e.kind === 'tool_use' && rodandoIds.has(e.tool_use_id ?? ''))
-      && !(queuePanel && hiddenByQueuePanel(e, queuePanel)));
-    // Página só com resultado de sucesso; sem sessão (lista do subagente) não há de onde baixá-la.
-    const pageOf = (ev: ChatEvent) => {
-      const r = results.get(ev.tool_use_id ?? '');
-      return sessionName && r && !r.is_error ? htmlPageFromResult(ev.tool_name, r.result) : null;
-    };
-    const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree', pageOf);
-    const fresh = tarefasLigadas && tasks.length ? comTarefas(rows, events, tasks) : rows;
-    const before = previous.current;
-    const out = fresh.map((row): MessageRow => {
-      const dated = row.type === 'event' && row.ev.orq ? { ...row, dayTs: days.get(row.ev.id) } : row;
-      const old = before.rows.get(row.id);
-      return old && sameRow(dated, old, results, before.results) ? old : dated;
-    });
-    previous.current = { rows: new Map(out.map((r) => [r.id, r])), results };
-    return out;
-  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks, rodandoIds, queuePanel, days]);
+  const starts = projection.starts;
+  const inicioDoAgente = useCallback((id: string) => starts.get(id) ?? null, [starts]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
   // Toque numa citação: rola até a resposta de origem pelo índice da linha (a lista é virtualizada,
   // então não há nó para procurar). Origem fora do histórico carregado: nada acontece.
@@ -238,7 +154,8 @@ export function MessageList({
     });
   }, []);
   const working = stateEvent?.state === 'working';
-  const desde = useMemo(() => (working ? turnStart(events, turnSeen) : null), [working, events, turnSeen]);
+  const desde = !working ? null : projection.lastSent === null ? turnSeen
+    : turnSeen === null ? projection.lastSent : Math.max(projection.lastSent, turnSeen);
   const ferramentaEv = useMemo<ChatEvent | null>(
     () => (ferramenta ? { kind: 'tool_use', id: 'ferramenta-viva', tool_name: ferramenta.nome, tool_input: ferramenta.input } : null),
     [ferramenta],
@@ -247,7 +164,7 @@ export function MessageList({
   const renderItem = useCallback(({ item }: { item: MessageRow }) => {
     switch (item.type) {
       case 'fold':
-        return <ToolGroup parts={item.parts} resultOf={resultOfRow} onAbrir={abrirDetalhe} look={look} />;
+        return <ToolGroup parts={item.parts} summary={item.summary} resultOf={item.resultOf!} onAbrir={abrirDetalhe} look={look} />;
       case 'tasks':
         return <TaskList tasks={item.tasks} />;
       case 'page':
@@ -284,7 +201,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultOfRow, abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
+  }, [abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.

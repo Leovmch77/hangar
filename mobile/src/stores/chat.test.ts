@@ -146,6 +146,124 @@ test('(a) history inicial + message novo via SSE = N+1 com ids únicos', async (
   }
 });
 
+test('ingestão ativa não relê histórico de 5000 eventos para 200 mensagens sem fila', async () => {
+  async function measure(size: number) {
+    const reads = { id: 0, kind: 0, text: 0 };
+    const history = Array.from({ length: size }, (_, i) => new Proxy(ev({
+      id: `history:${i}`, kind: i % 2 ? 'assistant_msg' : 'user_msg', text: `histórico ${i}`,
+    }), {
+      get(target, key, receiver) {
+        if (key === 'id' || key === 'kind' || key === 'text') reads[key]++;
+        return Reflect.get(target, key, receiver);
+      },
+    }));
+    // Instrumenta o corpo já desserializado na fronteira HTTP, não funções internas do store.
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const response = new Response(null, { status: 200 });
+      response.json = async () => history;
+      return response;
+    }));
+    const chat = chatStore('srv1', `active-${size}`);
+    chat.retain();
+    await tick();
+    expect(chat.use.getState().events).toHaveLength(size);
+    const original = chat.use.getState().events;
+    const source = created.at(-1)!;
+    reads.id = reads.kind = reads.text = 0;
+    for (let i = 0; i < 200; i++) {
+      source.trigger('message', JSON.stringify(ev({ id: `live:${i}`, text: `nova ${i}` })));
+    }
+    const append = { ...reads };
+    reads.id = reads.kind = reads.text = 0;
+    source.trigger('message', JSON.stringify(ev({ id: 'replace', kind: 'assistant_msg' })));
+    for (let i = 0; i < 200; i++) {
+      source.trigger('message', JSON.stringify(ev({ id: 'replace', kind: 'assistant_msg', text: `versão ${i}` })));
+    }
+    const replace = { ...reads };
+    reads.id = reads.kind = reads.text = 0;
+    vi.useFakeTimers();
+    try {
+      for (let i = 0; i < 200; i++) {
+        source.trigger('preview', JSON.stringify({ text: `prévia ${i}` }));
+        source.trigger('state', JSON.stringify({ session: `active-${size}`, state: 'working' }));
+      }
+      expect(chat.use.getState().preview).toBe('prévia 0');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(chat.use.getState().preview).toBe('prévia 199');
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+    const previewState = { ...reads };
+    reads.id = reads.kind = reads.text = 0;
+    source.trigger('message', JSON.stringify(ev({ id: 'queued-new', text: 'fila sem correspondente' })));
+    // O Proxy não conta comparações com os textos reais cacheados, ainda percorridos pelo sintético.
+    const queued = { ...reads };
+    const measured = { append, replace, previewState, queued };
+    expect(chat.use.getState().events).toHaveLength(size + 202);
+    expect(original).toHaveLength(size);
+    expect(chat.use.getState().events[0]).toBe(history[0]);
+    chat.release();
+    return measured;
+  }
+  const short = await measure(50);
+  const long = await measure(5000);
+  console.info('ingestão ativa: leituras históricas em 200 mensagens', { short, long });
+  for (const reads of Object.values(long)) expect(reads).toEqual({ id: 0, kind: 0, text: 0 });
+  expect(long).toEqual(short);
+});
+
+test('eventsRevision só conserva a revisão no append e invalida replace, remoção, histórico e reset', async () => {
+  historyResponses = [
+    [ev({ id: 'tail:1' })],
+    [ev({ id: 'older:1' }), ev({ id: 'tail:1' })],
+    [ev({ id: 'reset:1' })],
+  ];
+  const chat = chatStore('srv1', 'sess');
+  expect(chat.use.getState().eventsRevision).toBe(0);
+  chat.retain();
+  await tick();
+  let revision = chat.use.getState().eventsRevision;
+  expect(revision).toBeGreaterThan(0);
+  const source = created[0];
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-a', text: 'primeira fila' })));
+  source.trigger('message', JSON.stringify(ev({ id: 'tail:2', kind: 'assistant_msg' })));
+  expect(chat.use.getState().eventsRevision).toBe(revision);
+  const original = chat.use.getState().events;
+  source.trigger('message', JSON.stringify(ev({ id: 'tail:2', kind: 'assistant_msg', text: 'atualizada' })));
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  expect(original.at(-1)?.text).toBe('tail:2');
+  revision = chat.use.getState().eventsRevision;
+  source.trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  revision = chat.use.getState().eventsRevision;
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-owner', text: 'entrega real' })));
+  source.trigger('message', JSON.stringify(ev({ id: 'real-owner', text: 'entrega real' })));
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  expect(chat.use.getState().events.some(e => e.id === 'queued-owner')).toBe(false);
+  revision = chat.use.getState().eventsRevision;
+  chat.loadOlder();
+  await tick();
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  expect(chat.use.getState().events[0].id).toBe('older:1');
+  revision = chat.use.getState().eventsRevision;
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-b', text: 'segunda fila' })));
+  source.trigger('queue', JSON.stringify({ entries: [], removed: ['b'], actions: true }));
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  revision = chat.use.getState().eventsRevision;
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-c', text: 'terceira fila' })));
+  chat.applySteer({ queued_ids: ['queued-c'] });
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  revision = chat.use.getState().eventsRevision;
+  chat.applySteer({ promoted: true });
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  revision = chat.use.getState().eventsRevision;
+  source.trigger('reset', '{}');
+  await tick();
+  expect(chat.use.getState().eventsRevision).toBeGreaterThan(revision);
+  expect(chat.use.getState().events.map(e => e.id)).toEqual(['reset:1']);
+});
+
 test('confirmação retira apenas o eco da fila e preserva índices no próximo evento', async () => {
   historyResponses = [[ev({ id: 'queued-a' }), ev({ id: 'real' }), ev({ id: 'queued-b' })]];
   const chat = chatStore('srv1', 'sess');
@@ -376,6 +494,60 @@ test('virada para working vista ao vivo marca o começo do turno; aberta no meio
   expect(chat.use.getState().turnSeen).toEqual(expect.any(Number));
 });
 
+test('replay idêntico conserva referências; metadados e conteúdo novos ainda substituem', async () => {
+  historyResponses = [[ev({ id: 'a:1', kind: 'assistant_msg', text: 'igual', cache_read: 10 })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const original = chat.use.getState();
+  const listener = vi.fn();
+  const unsubscribe = chat.use.subscribe(listener);
+  try {
+    created[0].trigger('message', JSON.stringify(original.events[0]));
+    expect(chat.use.getState()).toBe(original);
+    expect(listener).not.toHaveBeenCalled();
+    created[0].trigger('message', JSON.stringify({ ...original.events[0], cache_read: 20 }));
+    expect(chat.use.getState().events[0].cache_read).toBe(20);
+    expect(chat.use.getState().eventsRevision).toBeGreaterThan(original.eventsRevision);
+    created[0].trigger('message', JSON.stringify(ev({ id: 'a:1', kind: 'assistant_msg', text: 'cresceu' })));
+    expect(chat.use.getState().events[0].text).toBe('cresceu');
+    expect(chat.use.getState().events[0]).not.toHaveProperty('cache_read');
+    expect(original.events[0]).toMatchObject({ text: 'igual', cache_read: 10 });
+  } finally {
+    unsubscribe();
+  }
+});
+
+test.each([
+  ev({ id: 'tool', kind: 'tool_use', tool_input: { command: 'ls', options: { paths: ['src'] } } }),
+  ev({ id: 'result', kind: 'tool_result', result: 'ok', patch: [{ old_start: 1, new_start: 1, lines: ['+linha'] }] }),
+])('replay estruturado idêntico conserva referências e revisão: $kind', async (event) => {
+  historyResponses = [[event]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const original = chat.use.getState();
+  const listener = vi.fn();
+  const unsubscribe = chat.use.subscribe(listener);
+  try {
+    created[0].trigger('message', JSON.stringify(event));
+    expect(chat.use.getState()).toBe(original);
+    expect(listener).not.toHaveBeenCalled();
+    const changed = event.kind === 'tool_use'
+      ? { ...event, tool_input: { command: 'ls', options: { paths: ['other'] } } }
+      : { ...event, patch: [{ old_start: 1, new_start: 1, lines: ['+outra linha'] }] };
+    created[0].trigger('message', JSON.stringify(changed));
+    expect(chat.use.getState().events[0]).toEqual(changed);
+    expect(chat.use.getState().eventsRevision).toBeGreaterThan(original.eventsRevision);
+    const removed = ev({ id: event.id, kind: event.kind });
+    created[0].trigger('message', JSON.stringify(removed));
+    expect(chat.use.getState().events[0]).toEqual(removed);
+    expect(original.events[0]).toEqual(event);
+  } finally {
+    unsubscribe();
+  }
+});
+
 test('(d) message duplicado (mesmo id) não entra; conteúdo novo substitui', async () => {
   historyResponses = [[ev({ id: 'a:1', text: 'v1' })]];
   const chat = chatStore('srv1', 'sess');
@@ -467,13 +639,59 @@ test('(e) user_msg da fila (queued-) sai quando o real chega com o mesmo texto',
   expect(events[0]?.id).toBe('a:9');
 });
 
-test.each([false, true])('real já conhecido: %s — remover a fila dona preserva os vizinhos no replay SSE', async (known) => {
+test.each([
+  { queue: ['Vamos fazer', 'Vamos fazer hoje'], real: 'Vamos fazer hoje', remaining: 'queued-0' },
+  { queue: ['Vamos fazer', 'Vamos fazer hoje'], real: 'Vamos fazer hoje agora', remaining: 'queued-0' },
+  { queue: ['Vamos fazer', 'Vamos fazer hoje — 📎 imagem: /tmp/foto.png'], real: 'Vamos fazer hoje', remaining: 'queued-0' },
+  { queue: ['igual', 'igual'], real: 'igual', remaining: 'queued-1' },
+])('dedup preserva dono e especificidade: $real / $queue', async ({ queue, real, remaining }) => {
+  historyResponses = [queue.map((text, i) => ev({ id: `queued-${i}`, text }))];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('message', JSON.stringify(ev({ id: 'real', text: real })));
+  expect(chat.use.getState().events.map(e => e.id)).toEqual([remaining, 'real']);
+});
+
+test('sintético respeita fila mais específica antes de considerar a cobertura pelo real', async () => {
+  historyResponses = [[ev({ id: 'real', text: 'Vamos fazer hoje agora' }),
+    ev({ id: 'queued-specific', text: 'Vamos fazer hoje' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-short', text: 'Vamos fazer' })));
+  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-exact', text: 'Vamos fazer hoje agora' })));
+  expect(chat.use.getState().events.map(e => e.id)).toEqual(['real', 'queued-specific', 'queued-short']);
+});
+
+test('índices de candidatos acompanham substituição de texto e kind sem mudar desempate por posição', async () => {
+  historyResponses = [[ev({ id: 'queued-first', text: 'texto antigo' }),
+    ev({ id: 'queued-second', text: 'texto igual' }), ev({ id: 'real', text: 'texto conhecido' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const source = created[0];
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-first', text: 'texto igual' })));
+  source.trigger('message', JSON.stringify(ev({ id: 'confirmed', text: 'texto igual' })));
+  expect(chat.use.getState().events.map(e => e.id)).toEqual(['queued-second', 'real', 'confirmed']);
+  // O texto real indexado cobre o sintético, até a linha deixar de ser user_msg.
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-specific', text: 'texto conhecido' })));
+  expect(chat.use.getState().events.some(e => e.id === 'queued-specific')).toBe(false);
+  source.trigger('message', JSON.stringify(ev({ id: 'real', kind: 'assistant_msg', text: 'texto conhecido' })));
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-specific', text: 'texto conhecido' })));
+  expect(chat.use.getState().events.at(-1)?.id).toBe('queued-specific');
+  source.trigger('message', JSON.stringify(ev({ id: 'real', text: 'texto conhecido com sufixo' })));
+  source.trigger('message', JSON.stringify(ev({ id: 'queued-short', text: 'texto conhecido' })));
+  expect(chat.use.getState().events.some(e => e.id === 'queued-short')).toBe(false);
+});
+
+test.each([false, true, 'identical'] as const)('real já conhecido: %s — remover a fila dona preserva os vizinhos no replay SSE', async (known) => {
   const before = ev({ id: 'a:1', kind: 'assistant_msg', text: 'antes' });
   const neighbor = ev({ id: 'a:2', kind: 'assistant_msg', text: 'vizinho' });
   const otherQueue = ev({ id: 'queued-other', text: 'outra mensagem' });
   const real = ev({ id: 'a:3', text: 'mensagem confirmada' });
   historyResponses = [[before, ev({ id: 'queued-owner', text: real.text }), neighbor, otherQueue,
-    ...(known ? [{ ...real, text: 'texto parcial' }] : [])]];
+    ...(known ? [{ ...real, text: known === 'identical' ? real.text : 'texto parcial' }] : [])]];
   const chat = chatStore('srv1', 'sess');
   chat.retain();
   await tick();

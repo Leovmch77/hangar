@@ -30,7 +30,8 @@ import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
 import { useLiveVoice } from '../../../../src/features/voice/liveVoiceStore';
 import { PlanActions } from '../../../../src/chat/PlanActions';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode, currentQueuePanel } from '@hangar/core';
+import { askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, setPermissionMode } from '@hangar/core';
+import { createEventProjection } from '../../../../src/chat/eventProjection';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -114,7 +115,8 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, existe]);
 
-  const events = chat.use((s) => s.events);
+  const { events, eventsRevision } = chat.use(useShallow((s) => ({ events: s.events, eventsRevision: s.eventsRevision })));
+  const projectEvents = useMemo(() => createEventProjection(), [chat]);
   const stateEvent = chat.use((s) => s.stateEvent);
   const bufferingAnnounced = useRef(false);
   useEffect(() => {
@@ -136,7 +138,6 @@ export default function ChatScreen() {
   const pending = chat.use((s) => s.pending);
   // O mesmo painel que o Composer desenha: as mensagens dele saem da conversa enquanto esperam.
   const serverQueue = chat.use((s) => s.queuePanel) ?? null;
-  const queuePanel = useMemo(() => currentQueuePanel(serverQueue, events), [serverQueue, events]);
   const askOpen = chat.use((s) => s.askOpen);
   const askPayload = chat.use((s) => s.askPayload);
   const askPiId = chat.use((s) => s.askPiId);
@@ -236,6 +237,10 @@ export default function ChatScreen() {
     };
   }, [ready, servidorSumiu, serverId, name]);
   const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
+  const { queuePanel, pendingAsk, proposedPlan, replyPlan } = useMemo(
+    () => projectEvents(events, eventsRevision, provider, serverQueue),
+    [projectEvents, events, eventsRevision, provider, serverQueue],
+  );
   const orq = isOrq({ provider });
   // Par em "ver e mandar recado": a conversa é de outra pessoa e só se acompanha.
   const soLeitura = currentSession?.guest_kind === 'pair';
@@ -258,7 +263,7 @@ export default function ChatScreen() {
 
   // Pi/Kimi: pergunta vem como tool_use, não como SSE ask_question
   useEffect(() => {
-    const q = provider ? pendingAskFromEvents(events, provider) : null;
+    const q = pendingAsk;
     if (!q) {
       if (askPiId) chat.markAskDismissed();
       return;
@@ -270,7 +275,7 @@ export default function ChatScreen() {
       return;
     }
     chat.openAsk(payload, q.id);
-  }, [events, provider, askOpen, askPiId, askPiDismissed, chat]);
+  }, [pendingAsk, provider, askOpen, askPiId, askPiDismissed, chat]);
 
   // A pergunta da lista (fora do quadro ou segurada pelo plugin) abre o passo a passo na hora, com o ID do
   // formulário: responde pelo `/answer` sem esperar o stream. Uma vez por formulário, para fechar não reabrir.
@@ -410,12 +415,12 @@ export default function ChatScreen() {
   // Plano à espera de decisão: o do Codex vem marcado na resposta; no Claude sem terminal em modo
   // plano ninguém pergunta "implementar?", então a última resposta do turno é o plano.
   const decidablePlan = useMemo(() => {
-    if (provider === 'codex') return pendingProposedPlan(events);
+    if (provider === 'codex') return proposedPlan;
     if (provider === 'claude' && headless && stateEvent?.claude_permission_mode === 'plan' && stateEvent.state === 'idle') {
-      return pendingReplyPlan(events);
+      return replyPlan;
     }
     return null;
-  }, [provider, headless, events, stateEvent?.claude_permission_mode, stateEvent?.state]);
+  }, [provider, headless, proposedPlan, replyPlan, stateEvent?.claude_permission_mode, stateEvent?.state]);
   const implementPlan = async (plan: string) => {
     const live = chat.use.getState();
     if (live.stateEvent?.state !== 'idle' || plan !== decidablePlan?.plan) throw new Error(m.chat_plan_indisponivel());
@@ -570,6 +575,7 @@ export default function ChatScreen() {
               <LiveMessageList
                 chat={chat}
                 events={events}
+                eventsRevision={eventsRevision}
                 session={currentSession}
                 olderFailed={olderFailed}
                 onLoadOlder={chat.loadOlder}

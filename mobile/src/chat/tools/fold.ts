@@ -1,4 +1,4 @@
-import { toolGroupTitulo, type ChatEvent, type HtmlPageRef, type ItemConversa, type Task } from '@hangar/core';
+import { toolGroupTitulo, toolPhase, type ChatEvent, type HtmlPageRef, type ItemConversa, type Task } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 // Linha da lista do chat no layout do nativo: mensagem, ou um trecho de trabalho (raciocínios e
@@ -40,13 +40,75 @@ export function foldConversation(
     }
     const parts = item.type === 'tool' ? [item.ev] : item.type === 'group' ? item.tools : item.eventos;
     if (!merge) rows.push({ type: 'fold', id: `f-${item.id}`, parts, source: item.type });
-    else if (open) open.parts = [...open.parts, ...parts];
+    else if (open) { for (const part of parts) open.parts.push(part); }
     else {
-      open = { type: 'fold', id: `f-${item.id}`, parts };
+      open = { type: 'fold', id: `f-${item.id}`, parts: parts.slice() };
       rows.push(open);
     }
   }
   return rows;
+}
+
+export interface FoldSummary {
+  lines: ChatEvent[];
+  calls: number;
+  thoughts: number;
+  counts: number[];
+  failures: number;
+  live: Set<ChatEvent>;
+}
+
+function family(name: string | null | undefined): number {
+  switch (name) {
+    case 'Read': case 'NotebookRead': return 0;
+    case 'Grep': case 'Glob': case 'WebSearch': case 'WebFetch': return 1;
+    case 'Edit': case 'MultiEdit': case 'NotebookEdit': return 2;
+    case 'Write': return 3;
+    case 'Bash': case 'exec': case 'exec_command': return 4;
+    default: return 5;
+  }
+}
+
+export function appendFoldSummary(before: FoldSummary | undefined, parts: ChatEvent[], resultOf: (ev: ChatEvent) => ChatEvent | null): FoldSummary {
+  const out: FoldSummary = before ? { ...before, lines: before.lines.slice(), counts: before.counts.slice(), live: new Set(before.live) }
+    : { lines: [], calls: 0, thoughts: 0, counts: [0, 0, 0, 0, 0, 0], failures: 0, live: new Set() };
+  for (const ev of parts) {
+    if (ev.kind === 'thinking') { out.thoughts++; out.lines.push(ev); }
+    else if (ev.kind === 'tool_use' && ev.tool_name !== 'ToolSearch') {
+      out.lines.push(ev); out.calls++; out.counts[family(ev.tool_name)]++;
+      const phase = toolPhase(resultOf(ev));
+      if (phase === 'pending') out.live.add(ev);
+      if (phase === 'error') out.failures++;
+    }
+  }
+  return out;
+}
+
+export function updateFoldSummary(before: FoldSummary, uses: ChatEvent[], oldResult: ChatEvent | null, result: ChatEvent | null): FoldSummary {
+  const oldPhase = toolPhase(oldResult), phase = toolPhase(result);
+  if (oldPhase === phase) return before;
+  const out = { ...before, live: new Set(before.live) };
+  for (const ev of uses) {
+    if (ev.tool_name === 'ToolSearch') continue;
+    if (phase === 'pending') out.live.add(ev); else out.live.delete(ev);
+    out.failures += Number(phase === 'error') - Number(oldPhase === 'error');
+  }
+  return out;
+}
+
+export function summaryTitle(summary: FoldSummary): string {
+  const n = summary.counts;
+  const parts = [
+    n[0] ? (n[0] === 1 ? m.tool_titulo_leu_1() : m.tool_titulo_leu({ n: n[0] })) : '',
+    n[1] ? (n[1] === 1 ? m.tool_titulo_buscou_1() : m.tool_titulo_buscou({ n: n[1] })) : '',
+    n[2] ? (n[2] === 1 ? m.tool_titulo_editou_1() : m.tool_titulo_editou({ n: n[2] })) : '',
+    n[3] ? (n[3] === 1 ? m.tool_titulo_criou_1() : m.tool_titulo_criou({ n: n[3] })) : '',
+    n[4] ? (n[4] === 1 ? m.tool_titulo_rodou_1() : m.tool_titulo_rodou({ n: n[4] })) : '',
+    n[5] ? (n[5] === 1 ? m.tool_titulo_outra_1() : m.tool_titulo_outras({ n: n[5] })) : '',
+  ].filter(Boolean).join(' · ');
+  const thought = !summary.thoughts ? '' : summary.thoughts === 1 ? m.native_thinking() : m.native_tree_thoughts({ n: summary.thoughts });
+  const counts = thought ? parts : parts.charAt(0).toUpperCase() + parts.slice(1);
+  return thought && counts ? `${thought} · ${counts.charAt(0).toLowerCase()}${counts.slice(1)}` : thought || counts;
 }
 
 /** Chamadas do trecho, sem o carregador de ferramentas: "select:WebSearch" é encanamento, não ação. */
