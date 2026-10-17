@@ -518,7 +518,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
   console dele vai pro `/dev/null`. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
-- **Uma configuração do Jev para navegador, orquestração, voz e Computer Use.** `jev_api_key`,
+- **Uma configuração do Jev para navegador, orquestração, voz, Computer Use e escolha de envio.** `jev_api_key`,
   `jev_endpoint` e `jev_model` no `runtime_config`; no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT`
   e `JEV_MODEL`, já resolvidos. Não existe chave do Jev só para o Computer Use. A regra do destino
   (chave `sk-or-` ou endereço do OpenRouter) tem cinco cópias que mudam juntas: `destino_jev`,
@@ -583,7 +583,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (renomear, trocar de conta) e a reabre depois; fechada pela troca de conversa, recusa na hora
   (409), fechada por congelamento curto, a escrita espera. A saúde diz o que o Rust atende em
   `owns` (`table::owned_modes`). No convidado e no Connect (8766/8768) o Python autentica e repassa
-  num sentido, corpo, método e query intactos: `answer`/`select`/`select/submit` e as rotas
+  num sentido, corpo, método e query intactos: `input`/`answer`/`select`/`select/submit` e as rotas
   `queue/*` do Claude a `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust (`queue/*`
   incluídas) a
   `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast, grupo, par e

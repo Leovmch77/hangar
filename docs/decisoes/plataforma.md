@@ -731,6 +731,22 @@ por decisão explícita — o app Expo fica para depois.
 
 ## Uma configuração do Jev para os quatro usos
 
+16/10/2026: o envio pelo nativo também usa essa configuração no servidor da sessão. No painel
+"Na fila", "Jev Decide" e "Mandar direto" são escolhas exclusivas. Ambas desligadas conservam a
+fila comum. O Jev recebe até 2.000 caracteres do texto digitado e 1.000 do pedido atual, sem o
+conteúdo de arquivos, imagens ou saídas de ferramentas. Só uma decisão de mandar direto com
+probabilidade de pelo menos 0,9 orienta a entrada específica. Consulta com prazo de 2 s, erro,
+contexto insuficiente, mensagem maior que 2.000 caracteres, resposta duvidosa ou sessão alterada
+durante a consulta mantêm a entrega comum e mostram um aviso. O ator confere novamente o turno
+antes de orientar; no Claude terminal a prova vem dos eventos do plugin, nunca da revisão da fila.
+Sem essa prova, a entrega segue pela fila comum. Envios que esperam outro envio ou upload também
+conservam a fila comum: o contexto do Enter pode pertencer a um turno que já terminou. A fila
+continua com edição, ordem e exclusão; editar não pede outra classificação. Não há interrupção
+automática. A decisão é do Rust; não instala hooks nem um roteador adicional nos agentes.
+`GET /api/jev/delivery` confirma suporte nesta conexão e configuração, sem devolver a chave.
+No Connect, o Python só autentica e repassa a disponibilidade e o corpo original do envio ao
+Rust, antes de validar o formato antigo da entrada. Não há classificação nem outra fila no Python.
+
 09/10/2026, decisão do Jefferson. Navegador (`objetivo`/`confere`), orquestração, voz e Computer Use
 (Windows e Linux) leem a MESMA chave, URL e modelo: `jev_api_key`, `jev_endpoint` e `jev_model` no
 `runtime_config`, no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT` e `JEV_MODEL`. A chave separada do

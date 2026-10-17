@@ -89,7 +89,7 @@ pub(super) fn group_delivery(me: &str, results: Vec<(String, Delivery, Option<St
     let (reached, failed): (Vec<_>, Vec<_>) = results.iter().partition(|(_, delivery, _)| delivery.ok);
     let Some((_, _, reason)) = failed.first() else {
         let delivered = results.iter().any(|(name, delivery, _)| name == me && delivery.delivered);
-        return Ok(Delivery { ok: true, delivered });
+        return Ok(Delivery { ok: true, delivered, ..Default::default() });
     };
     let reached = if reached.is_empty() { String::new() } else { web_with("chat_chegou_mas", "n", &names(&reached)) };
     let reason = reason.clone().unwrap_or_else(|| web("board_falha_envio"));
@@ -497,10 +497,10 @@ mod tests {
 
     #[test]
     fn group_send_fails_when_any_member_did_not_get_it() {
-        let ok = |delivered| Delivery { ok: true, delivered };
+        let ok = |delivered| Delivery { ok: true, delivered, ..Default::default() };
         let sent = group_delivery("a", vec![("a".into(), ok(true), None), ("b".into(), ok(false), None)]).expect("todos receberam");
         assert!(sent.delivered, "a entrega é a desta sessão");
-        let error = group_delivery("a", vec![("a".into(), ok(true), None), ("b".into(), Delivery { ok: false, delivered: false }, Some("morta".into()))])
+        let error = group_delivery("a", vec![("a".into(), ok(true), None), ("b".into(), Delivery { ok: false, delivered: false, ..Default::default() }, Some("morta".into()))])
             .expect_err("b não recebeu");
         assert!(error.detail.contains('a') && error.detail.ends_with("b (morta)"), "{}", error.detail);
     }

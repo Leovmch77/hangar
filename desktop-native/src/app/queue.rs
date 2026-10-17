@@ -28,6 +28,8 @@ impl Render for QueueDragChip {
 /// Estado do painel na tela: a edição em curso (de qual conversa), recolhido e onde o arrasto soltaria.
 #[derive(Default)]
 pub(super) struct QueueUi {
+    jev: HashMap<String, (Instant, u64, Option<Result<bool, String>>)>,
+    jev_seq: u64,
     edit: Option<(SessionKey, QueueEdit)>,
     collapsed: bool,
     /// Linha sob o ponteiro no arrasto e se ele está na metade de baixo dela.
@@ -41,7 +43,7 @@ impl QueueUi {
     pub(super) fn on_select(&mut self) { self.collapsed = false; self.drop = None; self.dragged = None; }
 }
 
-/// "Mandar direto enquanto trabalha": só Claude e Codex têm o Orientar por mensagem, e só com o agente trabalhando.
+/// "Mandar direto": só Claude e Codex têm o Orientar por mensagem, e só com o agente trabalhando.
 pub(super) fn sends_direct(enabled: bool, state: &str, provider: &str) -> bool {
     enabled && state == "working" && matches!(provider, "claude" | "codex")
 }
@@ -57,8 +59,62 @@ impl Hangar {
     fn set_queue_direct(&mut self, on: bool, cx: &mut Context<Self>) {
         let mut next = appearance::get();
         next.steer_while_working = on;
+        if on { next.jev_delivery = false; }
         self.apply_appearance(next, true, cx);
         cx.notify();
+    }
+
+    fn set_queue_jev(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut next = appearance::get();
+        next.jev_delivery = on;
+        if on { next.steer_while_working = false; }
+        self.apply_appearance(next, true, cx);
+        cx.notify();
+    }
+
+    fn queue_jev_ready(&self) -> bool {
+        self.selected_key().and_then(|k| self.queue.jev.get(&k.server)).is_some_and(|(_, _, result)| matches!(result, Some(Ok(true))))
+    }
+
+    fn refresh_queue_jev(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_key() else { return };
+        if self.queue.jev.get(&key.server).is_some_and(|(at, _, result)| result.is_none() || at.elapsed() < Duration::from_secs(30)) { return; }
+        let Some(api) = self.api_for(&key.server) else { return };
+        self.queue.jev_seq += 1;
+        let seq = self.queue.jev_seq;
+        self.queue.jev.insert(key.server.clone(), (Instant::now(), seq, None));
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.server_read(&["jev", "delivery"], &[], 10).await
+                .and_then(|config| config["available"].as_bool().ok_or_else(|| Failure::local("invalid_response")))
+                .map_err(|error| if error.status == Some(404) { tr("queue_jev_unsupported") } else { Hangar::fetch_failure(&error) });
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::QueueJev(key.server, seq, result) }).await;
+        });
+    }
+
+    pub(super) fn receive_queue_jev(&mut self, server: String, seq: u64, result: Result<bool, String>) {
+        if self.queue.jev.get(&server).is_some_and(|(_, current, _)| *current == seq) {
+            self.queue.jev.insert(server, (Instant::now(), seq, Some(result)));
+        }
+    }
+
+    pub(super) fn invalidate_queue_jev(&mut self, server: &str) { self.queue.jev.remove(server); }
+
+    pub(super) fn queue_timing(&self, direct: bool, ordinary: bool, message: &str) -> SendTiming {
+        if direct { return SendTiming::Direct; }
+        if ordinary && appearance::get().jev_delivery && self.queue_jev_ready()
+            && sends_direct(true, &self.chat.state.state, self.provider().0) {
+            let task = self.chat.events.iter().rev().find(|e| e.kind == "user_msg" && !e.queued() && !e.id.starts_with("pending-") && peer_of(e).is_none())
+                .map(|e| {
+                    let body = e.body();
+                    let caption = composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body);
+                    let (_, task) = super::quotes::split_refs(&caption);
+                    task.chars().take(1000).collect()
+                }).unwrap_or_default();
+            let task = if message.chars().count() > 2000 { String::new() } else { task };
+            return SendTiming::Jev { task, message: message.chars().take(2000).collect() };
+        }
+        SendTiming::Queued
     }
 
     pub(super) fn queue_edit_active(&self) -> bool {
@@ -162,10 +218,18 @@ impl Hangar {
         let panel = self.chat.queue_panel();
         let direct = appearance::get().steer_while_working;
         let supports = matches!(self.provider().0, "claude" | "codex");
-        if panel.entries.is_empty() && !self.queue_sends_direct() { return None; }
+        if panel.entries.is_empty() && !(supports && self.chat.state.state == "working") { return None; }
         // Uma cópia por quadro, dividida pelas linhas e pelos handlers de setas e de soltar.
         let (entries, actions): (Rc<[QueueEntry]>, bool) = (panel.entries.iter().cloned().collect(), panel.actions);
         drop(panel);
+        if supports { self.refresh_queue_jev(cx); }
+        let jev_ready = self.queue_jev_ready();
+        let jev_help = self.selected_key().and_then(|key| self.queue.jev.get(&key.server)).map(|(_, _, state)| match state {
+            None => tr("queue_jev_loading"),
+            Some(Err(error)) => tr("queue_jev_read_error").replace("{error}", error),
+            Some(Ok(false)) => tr("queue_jev_setup"),
+            Some(Ok(true)) => tr("queue_jev_help"),
+        }).unwrap_or_else(|| tr("queue_jev_loading"));
         let expanded = !self.queue.collapsed;
         let header_focus = window.use_keyed_state("queue-panel-header-focus", cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let weak = cx.entity().downgrade();
@@ -187,7 +251,12 @@ impl Hangar {
         // Fora do cabeçalho: clicar na caixinha não abre nem fecha o painel.
         let toggle = supports.then(|| Checkbox::new("queue-direct").small().label(tr("queue_panel_direct")).checked(direct)
             .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_direct(*checked, cx))));
-        let top = div().flex().items_center().gap(px(6.)).pr(px(10.)).child(div().flex_1().min_w_0().child(header)).children(toggle);
+        let jev_toggle = supports.then(|| Checkbox::new("queue-jev").small().label(tr("queue_jev"))
+            .checked(appearance::get().jev_delivery && jev_ready).disabled(!jev_ready)
+            .tooltip(jev_help)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_jev(*checked, cx))));
+        let top = div().flex().flex_wrap().items_center().gap(px(6.)).pr(px(10.))
+            .child(div().flex_1().min_w_0().child(header)).children(toggle).children(jev_toggle);
         // Mesmo material do cartão do composer, colado acima dele.
         let body = div().id("queue-panel").flex().flex_col().rounded(px(12.)).border_1().border_color(theme::border_strong())
             .bg(theme::boxed()).child(top).children(list);

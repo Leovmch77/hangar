@@ -25,6 +25,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     let method = req.method();
     let owned = if method == Method::GET && path == crate::claude_customizations::CATALOG_PATH {
         Owned::Catalog
+    } else if method == Method::GET && path == "/api/jev/delivery" {
+        Owned::JevDelivery
     } else if method == Method::GET && crate::commands::matches(&path) {
         Owned::Commands
     } else if method == Method::POST && path == crate::mermaid::PATH {
@@ -45,6 +47,7 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     req.headers_mut().remove("x-hangar-internal");
     req.headers_mut().remove("x-hangar-path");
     match owned {
+        Owned::JevDelivery => crate::session_write::delivery_timing::availability_reply(&st).await,
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
@@ -54,4 +57,4 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees }
+enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery }

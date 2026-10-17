@@ -99,10 +99,9 @@ pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent,
     }
 }
 
-/// Sem terminal, ou Codex com terminal (o turno é do app-server, como o `steer_queue` do Python): o Claude
-/// com terminal não promove (só o Kimi).
+/// A orientação afeta só a entrada criada por este pedido, em qualquer modo do Claude e Codex.
 pub fn wants_steer_queue(p: &Params, sent: &Sent) -> bool {
-    (!p.terminal || p.codex) && p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
+    p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
 }
 
 pub fn was_steered(operation_id: &str, promoted: &Result<RuntimeReply, RuntimeError>) -> bool {
@@ -224,13 +223,27 @@ pub(crate) fn scrub_lone_surrogates(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> 
     out.map_or(std::borrow::Cow::Borrowed(bytes), std::borrow::Cow::Owned)
 }
 
-/// Corpo do `InputBody` do FastAPI: só `text` (texto) e `steer` (booleano); o resto é 422 dele.
-fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
+/// `jev_task` e `jev_message` pedem a decisão automática; não se combinam com orientação explícita.
+fn parse_input(bytes: &Bytes) -> Option<(String, bool, Option<(String, String)>)> {
     let object = serde_json::from_slice::<Value>(&scrub_lone_surrogates(bytes)).ok()?;
     let object = object.as_object()?;
-    if object.keys().any(|k| k != "text" && k != "steer") { return None; }
+    if object.keys().any(|k| !matches!(k.as_str(), "text" | "steer" | "jev_task" | "jev_message")) { return None; }
     let steer = match object.get("steer") { None => false, Some(Value::Bool(b)) => *b, Some(_) => return None };
-    Some((object.get("text")?.as_str()?.to_owned(), steer))
+    let task = match object.get("jev_task") {
+        None if !object.contains_key("jev_message") => None,
+        Some(Value::String(task)) if task.chars().count() <= 1000 && !steer => {
+            let message = object.get("jev_message")?.as_str()?;
+            if message.chars().count() > 2000 { return None; }
+            Some((task.clone(), message.to_owned()))
+        }
+        _ => return None,
+    };
+    Some((object.get("text")?.as_str()?.to_owned(), steer, task))
+}
+
+fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
+    let (text, steer, task) = parse_input(bytes)?;
+    task.is_none().then_some((text, steer))
 }
 
 /// O FastAPI só lê o corpo como JSON sem `Content-Type` ou com `application/json`; outro tipo é 422 dele.
@@ -258,7 +271,7 @@ fn report(st: &AppState, name: &str, diary: Diary) {
 }
 
 /// O miolo do `/input` depois da admissão: envia ao ator, orienta se pedido e responde como o Python.
-async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer: bool) -> (StatusCode, Value) {
+async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer: bool, expected_turn: Option<Value>) -> (StatusCode, Value) {
     let operation_id = random_hex(16);
     let params = Params { text, steer, terminal: target.terminal, codex: target.provider == "codex", operation_id: &operation_id };
     let sent = target.handle.command(RuntimeCommand { operation_id: operation_id.clone(), kind: OperationKind::Input,
@@ -267,8 +280,15 @@ async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer
     report(st, name, diary);
     let mut steered = false;
     if wants_steer_queue(&params, &sent) {
+        let mut payload = json!({"entry_id": operation_id});
+        if let Some(expected) = expected_turn { payload["expected_turn"] = expected; }
+        if let crate::runtime::gateway::EntryHandle::Terminal { handle, .. } = &target.handle {
+            let result = handle.control(random_hex(16), "steer_entry".into(), payload).await;
+            let (status, reply) = super::control::queue_steer_terminal(&result);
+            return input_answer(&sent, status.is_success() && reply["steered"] == true);
+        }
         let promoted = target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::SteerQueue,
-            payload: json!({"entry_id": operation_id}) }).await;
+            payload }).await;
         // O recado já está na fila: falha de orientação nunca desfaz nem repete o envio.
         if let Err(error) = &promoted { tracing::warn!(session = %name, code = %error.code, "orientação do recado falhou; ele segue na fila"); }
         steered = was_steered(&operation_id, &promoted);
@@ -282,7 +302,7 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let Some((text, steer, task)) = parse_input(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     if is_codex_clear(&ctx.target.provider, &text) {
         return answer(&ctx, super::codex::clear(&ctx.target, &text, Some(ctx.st.term.clone())).await);
     }
@@ -290,7 +310,21 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
         let result = super::codex::compact(&ctx.target, &text).await;
         return answer(&ctx, result);
     }
-    let result = send(&ctx.st, &ctx.name, &ctx.target, &text, steer).await;
+    let (steer, note, expected_turn) = if let Some((task, message)) = task.filter(|_| !text.trim_start().starts_with('/')) {
+        let before = ctx.target.handle.snapshot().await.ok();
+        let (mut direct, mut note) = super::delivery_timing::decide(&ctx.st, &message, &task).await;
+        if direct {
+            let after = ctx.target.handle.snapshot().await.ok();
+            if !super::delivery_timing::same_work(before.as_ref(), after.as_ref()) { direct = false; note = "uncertain"; }
+        }
+        let expected = direct.then(|| before.as_ref().and_then(|snapshot| crate::runtime::protocol::turn_marker(&snapshot["view"]))).flatten();
+        (direct, Some(note), expected)
+    } else { (steer, None, None) };
+    let mut result = send(&ctx.st, &ctx.name, &ctx.target, &text, steer, expected_turn).await;
+    if let Some(note) = note {
+        result.1["timing_note"] = json!(if steer && result.1["delivered"] != true { "refused" }
+            else if !steer && result.1["delivered"] == true { "delivered" } else { note });
+    }
     answer(&ctx, result)
 }
 
@@ -332,7 +366,7 @@ pub async fn write_input(st: &AppState, name: &str, text: &str, steer: bool) -> 
             result
         }
         Write::Rust(held, target) => {
-            let result = send(st, name, &target, text, steer).await;
+            let result = send(st, name, &target, text, steer, None).await;
             drop(held);
             result
         }
@@ -467,6 +501,22 @@ pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 #[cfg(test)]
 mod broadcast_tests {
     use super::*;
+
+    #[test]
+    fn automatic_delivery_requires_bounded_context_and_cannot_override_explicit_steering() {
+        let b = |s: &str| Bytes::copy_from_slice(s.as_bytes());
+        assert_eq!(parse_input(&b(r#"{"text":"oi","jev_task":"Criar a tela","jev_message":"Use azul"}"#)),
+            Some(("oi".into(), false, Some(("Criar a tela".into(), "Use azul".into())))));
+        for refused in [r#"{"text":"oi","jev_task":"Criar a tela"}"#,
+            r#"{"text":"oi","jev_message":"Use azul"}"#,
+            r#"{"text":"oi","steer":true,"jev_task":"t","jev_message":"m"}"#,
+            r#"{"text":"oi","jev_task":true,"jev_message":"m"}"#] {
+            assert!(parse_input(&b(refused)).is_none());
+        }
+        assert!(parse_input(&b(&json!({"text":"oi","jev_task":"t","jev_message":"á".repeat(2001)}).to_string())).is_none());
+        assert!(parse_input(&b(&json!({"text":"oi","jev_task":"á".repeat(1001),"jev_message":"m"}).to_string())).is_none());
+        assert!(parse_body(&b(r#"{"text":"oi","jev_task":"t","jev_message":"m"}"#)).is_none(), "Orientar explícito não aceita contexto automático");
+    }
 
     #[test]
     fn broadcast_body_is_as_strict_as_the_fastapi_model() {

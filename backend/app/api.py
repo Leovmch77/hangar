@@ -502,7 +502,7 @@ class _RustReply(Exception):
 
 async def _codex_rust_port(name: str, request: Request):
     """Escrita que entrou pelo convite ou pelo Connect num Codex com terminal do Rust: a autenticação foi a
-    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A pergunta do Claude vai do mesmo
+    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A entrada e a pergunta do Claude vão do mesmo
     jeito à ponte do Claude. Fora disso (421 do Rust) não faz nada."""
     from app import runtime_coordinator
     from app.config import GUEST_PORT
@@ -516,7 +516,7 @@ async def _codex_rust_port(name: str, request: Request):
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
-        if reply is None and (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} or rota.startswith("queue/")) \
+        if reply is None and (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes"} or rota.startswith("queue/")) \
                 and getattr(await _cached_info(name), "provider", "claude") == "claude":
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
@@ -670,12 +670,15 @@ async def _worktrees_pelo_rust(request: Request, call_next):
 
 @app.middleware("http")
 async def _jev_aux_pelo_rust(request: Request, call_next):
-    """A busca de modelos do Jev é do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
+    """A busca de modelos e a disponibilidade do Jev são do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
     leria como servidor antigo."""
-    if not request.url.path.startswith("/api/jev/aux/"):
+    delivery = request.url.path == "/api/jev/delivery"
+    if not delivery and not request.url.path.startswith("/api/jev/aux/"):
         return await call_next(request)
+    if delivery and (guest_of(request) is not None or guest_users.current.get() is not None):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     return await _repasse_ao_rust(request, erro("erro_jev_aux_precisa_rust", "o servidor está sem o processo Rust; reinicie o Hangar"),
-                                  "/__hangar_server/jev/aux")
+                                  "/__hangar_server/forwarded" if delivery else "/__hangar_server/jev/aux")
 
 
 # Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
