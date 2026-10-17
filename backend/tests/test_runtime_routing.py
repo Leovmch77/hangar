@@ -1139,3 +1139,21 @@ def test_boot_sweeps_orphans_only_when_python_owns(monkeypatch, mode, swept):
     runtime = SimpleNamespace(mode=mode, mode_hooks={})
     asyncio.run(api._boot_sessions(runtime))
     assert bool(calls) is swept, "com o Rust de pé a varredura de órfãos é dele"
+
+
+def test_python_never_drains_a_terminal_claude_queue_the_rust_owns(monkeypatch):
+    # A trava da fila é do Rust: o drain do Python bateria nela (BlockingIOError) e a cadeia de
+    # reavaliação desistiria com as mensagens paradas.
+    from app.runtime_coordinator import RuntimeCoordinator
+    owner = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    monkeypatch.setattr(api, "_headless", lambda name: False)
+    def locked(*args):
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+    monkeypatch.setattr(api, "drain", locked)
+    for mode in ("rust", "pending"):
+        owner.mode = mode
+        assert api._drenar("terminal", "chat", "claude") == 0, mode
+    owner.mode = "python"
+    monkeypatch.setattr(api, "drain", lambda *args: 2)
+    assert api._drenar("terminal", "chat", "claude") == 2, "no modo python o Python segue drenando"

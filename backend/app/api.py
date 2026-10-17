@@ -1331,6 +1331,8 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
         chave = "codex"
     elif _headless(name):
         chave = CLAUDE_HEADLESS
+    elif provider == "claude" and coordinator is not None and coordinator.mode in {"pending", "rust"} and coordinator.rust_owns("claude", False):
+        return 0    # a fila do Claude com terminal é do Rust: quem drena é o Monitor dele, e a trava é dele
     else:
         return drain(name, jsonl, provider)
     loop = _loop_servidor
