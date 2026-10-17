@@ -51,10 +51,10 @@ export function SectionTabs<K extends string>({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   sticky: { paddingVertical: 6 },
   rail: { flexGrow: 0, borderWidth: 1, borderRadius: 10 },
   railContent: { padding: 3, gap: 4 },
   tab: { height: 32, paddingHorizontal: 11, borderRadius: 7, justifyContent: 'center' },
-  text: { fontSize: 15, fontWeight: '500' },
-});
+  text: { fontSize: theme.base.text.sm, fontWeight: '500' },
+}));

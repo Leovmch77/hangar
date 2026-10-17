@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Text, View } from 'react-native';
+import { Alert, Text, View } from 'react-native';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import {
@@ -192,7 +193,7 @@ export default function LoopSheet() {
   return (
     <>
       <Stack.Screen options={{ headerShown: false, headerTransparent: true, sheetAllowedDetents: [0.76], contentStyle: { backgroundColor: 'transparent' } }} />
-      <KeyboardAvoidingView behavior="padding" style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
+      <KeyboardAvoidingView behavior="padding" automaticOffset style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
         {routeMissing ? (
           <View style={styles.missing}>
             <Text style={[styles.error, { color: theme.tokens.status.error }]} accessibilityRole="alert">

@@ -138,7 +138,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   text: {
     fontFamily: theme.base.fontMono,
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
   },
   dot: {
     width: 6,

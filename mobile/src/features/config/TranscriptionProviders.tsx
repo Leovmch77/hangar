@@ -210,19 +210,19 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   line: { borderTopWidth: 1, paddingVertical: 14, paddingHorizontal: 16 },
   item: { gap: 10 },
   addLine: { paddingVertical: 10, flexDirection: 'row' },
   head: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  title: { flex: 1, minWidth: 0, fontSize: 15, fontWeight: '500' },
+  title: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm, fontWeight: '500' },
   iconBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   off: { opacity: 0.4 },
   remove: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 32, paddingHorizontal: 6 },
-  removeText: { fontSize: 13.5, fontWeight: '500' },
+  removeText: { fontSize: theme.base.text.xs, fontWeight: '500' },
   labeled: { gap: 4 },
-  small: { fontSize: 13.5, lineHeight: 17 },
-  help: { fontSize: 14, lineHeight: 18 },
+  small: { fontSize: theme.base.text.xs, lineHeight: 17 },
+  help: { fontSize: theme.base.text.xs, lineHeight: 18 },
   errorLine: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
   flex: { flex: 1 },
-});
+}));

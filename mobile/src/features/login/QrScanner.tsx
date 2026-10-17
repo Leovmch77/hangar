@@ -91,5 +91,5 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  closeText: { color: '#fff', fontSize: 20, fontWeight: '600' },
+  closeText: { color: '#fff', fontSize: theme.base.text.lg, fontWeight: '600' },
 }));

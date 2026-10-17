@@ -50,12 +50,12 @@ export function SectionCard({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   box: { borderRadius: 14, borderWidth: 1, overflow: 'hidden' },
   head: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
   square: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
   texts: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: 15, fontWeight: '600' },
-  subtitle: { fontSize: 13.5 },
+  title: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  subtitle: { fontSize: theme.base.text.xs },
   bare: { marginTop: -1 },
-});
+}));

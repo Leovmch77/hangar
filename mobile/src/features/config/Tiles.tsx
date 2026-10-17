@@ -56,12 +56,12 @@ export function Tiles<T extends string>({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', gap: 8 },
   cell: { flex: 1, minWidth: 0 },
   frame: { borderRadius: 11, borderWidth: 2 },
   button: { padding: 5, borderRadius: 9, gap: 6 },
   art: { height: 56, borderRadius: 7, overflow: 'hidden' },
   caption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 },
-  captionText: { fontSize: 13.5, flexShrink: 1 },
-});
+  captionText: { fontSize: theme.base.text.xs, flexShrink: 1 },
+}));

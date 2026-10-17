@@ -223,7 +223,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingBottom: 40,
   },
   title: {
-    fontSize: 20,
+    fontSize: theme.base.text.lg,
     fontWeight: '600',
   },
   field: {
@@ -271,14 +271,14 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 44,
     borderWidth: 1,
     borderRadius: theme.base.radius.md,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     paddingHorizontal: theme.base.space[3],
   },
   goalInput: {
     minHeight: 112,
     borderWidth: 1,
     borderRadius: theme.base.radius.md,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     lineHeight: 22,
     padding: theme.base.space[3],
   },
@@ -352,7 +352,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.sm,
   },
   chevron: {
-    fontSize: 20,
+    fontSize: theme.base.text.lg,
   },
   chevronOpen: {
     transform: [{ rotate: '90deg' }],

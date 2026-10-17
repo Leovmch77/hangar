@@ -77,10 +77,10 @@ export function useMachineAction() {
   }, []);
   return { busy, error, message, run };
 }
-export const styles = StyleSheet.create({
+export const styles = StyleSheet.create((theme) => ({
   sheet: { padding: 16, gap: 16 },
   field: { gap: 8, paddingVertical: 8 },
-  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderRadius: 8, fontSize: 15 },
+  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderRadius: 8, fontSize: theme.base.text.sm },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingVertical: 8 },
   content: { padding: 16, gap: 12 },
-});
+}));

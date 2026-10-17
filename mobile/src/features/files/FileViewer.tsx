@@ -155,13 +155,13 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
               onPress={() => setVerArquivo(false)}
               style={[styles.segBtn, !verArquivo ? { backgroundColor: theme.tokens.accent.dim } : null]}
             >
-              <Text style={{ color: !verArquivo ? theme.tokens.accent.base : theme.tokens.text.secondary, fontSize: 13 }}>{m.arq_ver_alteracoes()}</Text>
+              <Text style={{ color: !verArquivo ? theme.tokens.accent.base : theme.tokens.text.secondary, fontSize: theme.base.text.xs }}>{m.arq_ver_alteracoes()}</Text>
             </Pressable>
             <Pressable
               onPress={() => setVerArquivo(true)}
               style={[styles.segBtn, verArquivo ? { backgroundColor: theme.tokens.accent.dim } : null]}
             >
-              <Text style={{ color: verArquivo ? theme.tokens.accent.base : theme.tokens.text.secondary, fontSize: 13 }}>{m.arq_ver_arquivo()}</Text>
+              <Text style={{ color: verArquivo ? theme.tokens.accent.base : theme.tokens.text.secondary, fontSize: theme.base.text.xs }}>{m.arq_ver_arquivo()}</Text>
             </Pressable>
           </View>
           <Pressable
@@ -236,7 +236,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   path: {
     flex: 1,
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '500',
   },
   editBtn: {
@@ -246,7 +246,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.tokens.accent.dim,
   },
   editTxt: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '600',
   },
   segRow: {
@@ -275,10 +275,10 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: 6,
   },
   escopoTxt: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
   },
   motivo: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     flex: 1,
   },
   aviso: {
@@ -312,16 +312,16 @@ const styles = StyleSheet.create((theme) => ({
   lineNo: {
     width: 32,
     textAlign: 'right',
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     fontFamily: theme.base.fontMono,
   },
   lineTxt: {
     flex: 1,
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontFamily: theme.base.fontMono,
   },
   mono: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     fontFamily: theme.base.fontMono,
     padding: theme.base.space[3],
   },

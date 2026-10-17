@@ -218,7 +218,7 @@ const styles = StyleSheet.create((theme, rt) => ({
     borderColor: theme.tokens.border.default,
     borderRadius: theme.base.radius.md,
     color: theme.tokens.text.primary,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     paddingHorizontal: theme.base.space[4],
   },
   errorBox: {

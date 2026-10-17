@@ -132,10 +132,10 @@ export function BubbleActions({ text, ts, serverId, ouvir = true, defaultOpen = 
   );
 }
 
-const styles = StyleSheet.create(() => ({
+const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'center', gap: 0, minHeight: 24 },
   // 44pt de toque sem crescer a linha: a margem negativa devolve a altura extra à conversa.
   btn: { width: 44, height: 44, marginVertical: -10, alignItems: 'center', justifyContent: 'center' },
   fim: { justifyContent: 'flex-end' },
-  hora: { fontSize: 12 },
+  hora: { fontSize: theme.base.text.xxs },
 }));

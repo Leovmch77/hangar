@@ -152,7 +152,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
   },
   tick: {
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     fontWeight: '700',
   },
   closeBtn: {

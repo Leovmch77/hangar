@@ -14,6 +14,7 @@ import { AgentDetailView } from '../../../../src/features/activity/AgentDetailVi
 import { SubagentLive } from '../../../../src/features/activity/SubagentLive';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
+import { Icon } from '../../../../src/ui/Icon';
 
 type Level = 'list' | 'workflow' | 'agent' | 'subagent';
 
@@ -217,8 +218,8 @@ export default function ActivitySheet() {
       <View style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
         <View style={[styles.header, { borderBottomColor: theme.tokens.border.subtle }]}>
           {level !== 'list' ? (
-            <Pressable onPress={back} style={styles.headBtn} accessibilityLabel={m.comum_voltar()} accessibilityRole="button">
-              <Text style={[styles.headIcon, { color: theme.tokens.text.secondary }]}>‹</Text>
+            <Pressable onPress={back} hitSlop={6} style={styles.headBtn} accessibilityLabel={m.comum_voltar()} accessibilityRole="button">
+              <Icon name="ChevronLeft" size={22} color={theme.tokens.text.secondary} />
             </Pressable>
           ) : null}
           <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1}>
@@ -385,7 +386,6 @@ const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3], borderBottomWidth: 1 },
   headBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-  headIcon: { fontSize: 22, lineHeight: 22 },
   title: { flex: 1, fontSize: theme.base.text.base, fontWeight: '600', minWidth: 0 },
   count: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, fontVariant: ['tabular-nums'] },
   wfStatus: { fontSize: theme.base.text.xs, fontWeight: '600', paddingHorizontal: theme.base.space[2], paddingVertical: 2, borderRadius: theme.base.radius.full, overflow: 'hidden' },
@@ -402,9 +402,9 @@ const styles = StyleSheet.create((theme) => ({
   agentBody: { flex: 1, gap: 3, minWidth: 0 },
   agentHead: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
   agentDesc: { fontSize: theme.base.text.sm, minWidth: 0, flexShrink: 1 },
-  tag: { fontFamily: theme.base.fontMono, fontSize: 11, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   tagMuted: {},
-  agentNow: { fontFamily: theme.base.fontMono, fontSize: 11 },
+  agentNow: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs },
   shellCmd: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
   concluido: { opacity: 0.6 },
   chevron: { fontSize: theme.base.text.base, lineHeight: theme.base.text.base },
