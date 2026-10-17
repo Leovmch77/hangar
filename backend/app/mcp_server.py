@@ -507,10 +507,11 @@ async def _jev_cli(ctx: Context, sessao: str, args: list[str], teto_s: float) ->
 @mcp.tool(description="O Jev dirige o navegador desta sessão sozinho até cumprir um objetivo (navegar até uma "
                       "tela, preencher um cadastro, escolher num combobox): uma chamada no lugar de vários "
                       "snapshot+click. Só em sessão aberta com o Jev. `dados`: valores para os campos, com as "
-                      "chaves que quiser (o Jev casa cada um com o rótulo). Resposta: os passos, `parou:`, `url:`, "
+                      "chaves que quiser (o Jev casa cada um com o rótulo). Resposta: os passos, `parou:`, `trajeto:` "
+                      "(JSONL com cada decisão do Jev e do auxiliar, para ver por que parou), `url:`, "
                       "`texto:` e, se faltou valor, `falta-dado: <campo>` — chame de novo com ele em `dados`; a "
                       "página fica onde parou. Erro = não cumpriu. O objetivo que deu certo vira roteiro em "
-                      "`.hangar/roteiros/` na raiz do git da sessão (ou em `pasta`) e a próxima chamada igual o "
+                      "`automacao/gravacoes/` na raiz do git da sessão (ou em `pasta`) e a próxima chamada igual o "
                       "repete sem o Jev decidir cada passo; `refazer: true` ignora o roteiro." + _SESSAO_DESC)
 async def browser_goal(ctx: Context, objetivo: str, dados: dict[str, Any] | None = None, passos: int = 15,
                        refazer: bool = False, pasta: str = "", sessao: str = "") -> str:
