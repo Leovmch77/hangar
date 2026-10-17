@@ -88,6 +88,8 @@ export default function Layout() {
           />
           {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
           <Stack.Screen name="config" options={{ headerShown: false }} />
+          <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
+          <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
           {/* A borda esquerda do chat abre a gaveta de sessões; voltar fica no botão do cabeçalho
               (e no voltar do Android, que este gesto não desliga). */}
           <Stack.Screen name="s/[server]/[name]/index" options={{ gestureEnabled: false }} />
