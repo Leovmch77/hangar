@@ -114,7 +114,8 @@ async fn model_effort_b13_b21_terminal_route_drives_the_actor() {
     let registry = registry(&terms).await;
     let log = open_terminal(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry, terms, None, Duration::from_secs(5)).await;
-    assert_eq!(post(server, "t", r#"{"model":"sonnet"}"#).await, (409, json!({"detail": "model picker did not open"})));
+    let (status, reply) = post(server, "t", r#"{"model":"sonnet"}"#).await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some("erro_seletor_modelo_nao_abriu")), "{reply}");
     // `/model`, Enter, o 2º Enter e o Esc.
     assert_eq!(keys_sent(&log), 4);
     assert_eq!(python.hits_to("/api/sessions/t/model-effort"), 0);

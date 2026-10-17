@@ -142,6 +142,8 @@ fn printable(c: char) -> bool {
 pub struct Refusal { pub detail: String, pub code: Option<&'static str>, pub uncertain: bool }
 
 fn refused(detail: impl Into<String>) -> Refusal { Refusal { detail: detail.into(), code: None, uncertain: false } }
+fn coded(code: &'static str, detail: impl Into<String>) -> Refusal { Refusal { detail: detail.into(), code: Some(code), uncertain: false } }
+fn rank(level: &str) -> Option<usize> { EFFORT_ORDER.iter().position(|l| *l == level) }
 fn io(failure: IoFailure, typed: bool) -> Refusal {
     let detail = match failure.code {
         "terminal_panel_active" | "terminal_panel_open" => "Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",
@@ -167,6 +169,7 @@ impl Picker<'_> {
         sent
     }
     async fn abort(&self, detail: impl Into<String>) -> Refusal { let _ = self.sequence.escape().await; refused(detail) }
+    async fn abort_coded(&self, code: &'static str, detail: impl Into<String>) -> Refusal { let _ = self.sequence.escape().await; coded(code, detail) }
 
     /// Com o Claude trabalhando o `/model` viraria mensagem na fila; com menu aberto, navegaria o menu errado.
     async fn require_drivable(&self) -> Result<(), Refusal> {
@@ -194,7 +197,7 @@ impl Picker<'_> {
         if let Some(pane) = self.wait_drawn().await? { return Ok(pane); }
         self.press("Enter").await?;
         if let Some(pane) = self.wait_drawn().await? { return Ok(pane); }
-        Err(self.abort("model picker did not open").await)
+        Err(self.abort_coded("erro_seletor_modelo_nao_abriu", "o seletor do /model não abriu no terminal da sessão").await)
     }
 
     /// Título sem rodapé no prazo ainda é seletor aberto: devolve assim mesmo, nunca outro Enter.
@@ -227,24 +230,32 @@ pub async fn drive(driver: &TerminalDriver, model: Option<&str>, effort: Option<
         sleep(SETTLE).await;
         pane = picker.screen().await?;
     }
-    // Esquerda/direita dá a volta e o conjunto depende do modelo: lê o marcador a cada passo e para no
-    // alvo ou na volta completa (nível indisponível fica no atual, calado).
-    if let Some(target) = effort.filter(|e| !e.is_empty()) {
-        let mut current = parse_current_effort(&pane);
-        if current.as_deref().is_some_and(|c| c != target) {
-            let start = current.clone();
-            for _ in 0..=EFFORT_ORDER.len() {
-                picker.press("Right").await?;
+    // O slider não dá a volta (Right no Max fica Max) e o conjunto depende do modelo: anda na direção do
+    // alvo, lê o marcador a cada passo e recusa quando ele para ou pula o alvo, sem confirmar outro nível.
+    if let Some(target) = effort.filter(|e| !e.is_empty())
+        && let Some(start) = parse_current_effort(&pane).filter(|c| c != target)
+    {
+        let unavailable = || format!("o esforço {target} não está disponível para este modelo no seletor do /model");
+        let (Some(from), Some(to)) = (rank(&start), rank(target)) else { return Err(picker.abort_coded("erro_esforco_indisponivel", unavailable()).await) };
+        let key = if to > from { "Right" } else { "Left" };
+        let mut previous = from;
+        loop {
+            picker.press(key).await?;
+            sleep(SETTLE).await;
+            pane = picker.screen().await?;
+            let mut current = parse_current_effort(&pane);
+            if current.is_none() {
                 sleep(SETTLE).await;
                 pane = picker.screen().await?;
                 current = parse_current_effort(&pane);
-                if current.is_none() {
-                    sleep(SETTLE).await;
-                    pane = picker.screen().await?;
-                    current = parse_current_effort(&pane);
-                }
-                if current.as_deref() == Some(target) || current == start { break; }
             }
+            let Some(now) = current.as_deref().and_then(rank) else {
+                return Err(picker.abort_coded("erro_esforco_ilegivel", "não consegui ler o esforço no seletor do /model").await);
+            };
+            if now == to { break; }
+            let toward = if to > from { now > previous && now < to } else { now < previous && now > to };
+            if !toward { return Err(picker.abort_coded("erro_esforco_indisponivel", unavailable()).await); }
+            previous = now;
         }
     }
     let scope = if default_scope { "default" } else { "session" };
