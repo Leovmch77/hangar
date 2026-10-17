@@ -29,13 +29,14 @@ export function LoopChip({ status, iter, max, onPress }: Props) {
       style={[styles.chip, { backgroundColor: superficie(theme), borderColor: color }]}
       accessibilityRole="button"
       accessibilityLabel={m.loop_titulo()}
+      hitSlop={{ top: 8, bottom: 8 }}
     >
       <Text style={[styles.text, { color }]}>{badge.label}</Text>
     </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   chip: {
     minHeight: 28,
     maxWidth: 68,
@@ -46,8 +47,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   text: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },
-});
+}));

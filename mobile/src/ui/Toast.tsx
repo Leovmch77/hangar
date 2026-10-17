@@ -1,4 +1,5 @@
 import { toast as sonner, Toaster } from 'sonner-native';
+import { haptic } from './haptics';
 
 const MOD_TEXT_MAX = 300;
 const MOD_VISIBLE_MAX = 4;
@@ -11,8 +12,8 @@ function modGone(id: string | number): void {
 }
 
 export const toast = {
-  ok: (msg: string) => sonner.success(msg),
-  erro: (msg: string) => sonner.error(msg),
+  ok: (msg: string) => { haptic.success(); return sonner.success(msg); },
+  erro: (msg: string) => { haptic.error(); return sonner.error(msg); },
   aviso: (msg: string) => sonner(msg, { duration: 12_000 }),
   /** Aviso de um mod do Claude Code: o nome do mod é o título, como na caixa do terminal. */
   mod: (msg: string, plugin: string, ms: number) => {

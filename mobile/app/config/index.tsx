@@ -150,7 +150,7 @@ function ServerPicker() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   search: {
     height: 40,
     flexDirection: 'row',
@@ -160,10 +160,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 6,
   },
-  searchInput: { flex: 1, height: 40, fontSize: 15, padding: 0 },
+  searchInput: { flex: 1, height: 40, fontSize: theme.base.text.sm, padding: 0 },
   list: { gap: 2 },
-  none: { paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
+  none: { paddingHorizontal: 10, paddingVertical: 8, fontSize: theme.base.text.xs },
   picker: { maxWidth: 180, flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 7, height: 7, borderRadius: 4 },
-  pickerText: { flexShrink: 1, fontSize: 13.5 },
-});
+  pickerText: { flexShrink: 1, fontSize: theme.base.text.xs },
+}));

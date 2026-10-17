@@ -3,6 +3,60 @@
 Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
 a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 
+## App iOS (mobile/): interface e desempenho (16/10/2026)
+
+Duas rodadas no app Expo, no iPhone. A de desempenho mediu a CPU do app com o chat aberto: de ~68%
+para ~39% acima da referência (app parado na tela inicial). A de interface foi uma auditoria contra
+as Apple Human Interface Guidelines, com 12 achados, todos aplicados. As regras do `CLAUDE.md` são o
+que não pode voltar; abaixo, o porquê de cada uma.
+
+**Desempenho** (commits 2624e1b32, bca5eb54f, 47ccadd6c):
+
+- **Prévia publicada a cada ~50 ms.** Cada token da resposta ao vivo virava um render do chat
+  inteiro. O store junta os tokens e publica no máximo uma vez por quadro de 50 ms, o primeiro na
+  hora (`mobile/src/stores/chat.ts:220`).
+- **`memo` no Composer e no ChatHeader, com callbacks estáveis.** Sem isso, todo `state` do SSE
+  redesenhava os dois (`mobile/app/s/[server]/[name]/index.tsx:55`). Quem assina a prévia é o
+  invólucro da lista, não a tela.
+- **Animação parada fora da tela e a ~20 fps.** A marca de "trabalhando" girava a 60 fps em telas
+  escondidas e na gaveta fechada (`mobile/src/ui/WorkingMark.tsx:14`, pausa por
+  `WorkingMarkPaused` em `mobile/src/features/sessions/SessionsDrawer.tsx:111`).
+- **Escondido não monta.** A lista da gaveta, o seletor de sessões e o vidro da gaveta só nascem
+  na primeira abertura (`mobile/src/chat/SessionPickerSheet.tsx:27`); fechados, assinavam a lista
+  e pintavam desfoque que ninguém via.
+- **Linha igual mantém a identidade.** Cada publicação da lista trazia o JSON inteiro e cada
+  evento do chat refazia todas as linhas; o `memo` das células comparava objetos sempre novos.
+  O store reaproveita a sessão cujo JSON não mudou (`mobile/src/stores/sessions.ts:129`) e a lista
+  devolve a linha anterior quando eventos e resultados são os mesmos
+  (`mobile/src/chat/MessageList.tsx:100`).
+
+**Interface** (auditoria de 16/10/2026):
+
+- **Voltar pela borda.** O chat desligava o arrasto de voltar do iOS para a gaveta abrir pela
+  borda, e isso quebra memória muscular (HIG, Gestos). Agora a borda de 0–20 pt é do voltar
+  (`mobile/app/_layout.tsx:92`), e a gaveta do chat fica travada fechada para o arrasto dela e abre
+  por uma faixa de 20–52 pt (`mobile/src/features/sessions/SessionsDrawer.tsx:54` e `:73`). O
+  gesture-handler fixa a faixa da gaveta colada na borda, por isso o arrasto de dentro é um `Pan`
+  próprio, com `hitSlop` de `left` negativo. No Android nada mudou.
+- **44 pt e símbolo, não caractere.** O voltar da atividade tinha 32×32 e um "‹" de texto; o
+  LoopChip tinha 28 pt (`mobile/src/chat/LoopChip.tsx:32`).
+- **Teclado do formulário do loop.** O `KeyboardAvoidingView` do React Native, sem offset, dentro de
+  um formSheet, deixava o Salvar sob o teclado (`mobile/app/s/[server]/[name]/loop.tsx:196`).
+- **Vibração no resultado.** Responder permissão ou pergunta é a ação mais comum pelo celular e não
+  vibrava. Um módulo só decide plataforma e tipo (`mobile/src/ui/haptics.ts`); o toast cobre o
+  resto do app (`mobile/src/ui/Toast.tsx:15`).
+- **Cabeçalho nativo.** Compartilhar, página e conversa arquivada tinham cabeçalho feito à mão; o
+  da pilha dá o voltar e o título do sistema. O vidro é o mesmo das configurações
+  (`mobile/src/ui/glassHeader.tsx`, uso em `mobile/app/s/[server]/[name]/share.tsx:31`). O voltar
+  mostra só o chevron: as telas de origem não têm título de navegação e o rótulo seria o nome da
+  rota.
+- **Escala de texto.** Eram ~230 `fontSize` numéricos, três deles abaixo de 11 pt. Todos foram para
+  `theme.base.text.*` pelo mais próximo, empate para baixo (14 → 13, 16 → 15), para nenhum layout
+  crescer; a trava é `mobile/src/theme/fontScaleGuard.test.ts`.
+- **SF Symbols no iOS.** `Icon` desenha o símbolo do sistema quando o mapa tem um de mesmo sentido
+  (`mobile/src/ui/Icon.tsx:29`, `mobile/src/ui/sfSymbols.ts`); Android e nome sem símbolo ficam no
+  Lucide, que é o do desktop e do PWA.
+
 ## Mods: altura estável e pergunta no mesmo espaço (16/10/2026)
 
 O painel nativo dos mods usava apenas um teto de altura: abas curtas encolhiam, mudando a área

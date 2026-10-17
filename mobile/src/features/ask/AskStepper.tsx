@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { buildAnswers, type PickState } from './buildAnswers';
+import { haptic } from '../../ui/haptics';
 import { Icon } from '../../ui/Icon';
 import { semEmoji } from '../../ui/semEmoji';
 import { superficie } from '../../theme/superficie';
@@ -50,6 +51,7 @@ function AskStepperContent({ payload, onSubmit, onClose }: Props) {
     if (!cur || cur.kind !== 'option') return;
     const q = questions[step];
     if (!q) return;
+    haptic.selection();
     if (!q.multiSelect) {
       const next = picks.map((p, idx) => (idx === step ? ({ kind: 'option', indices: [i] } as PickState) : p));
       setPicks(next);
@@ -81,7 +83,9 @@ function AskStepperContent({ payload, onSubmit, onClose }: Props) {
     setError('');
     try {
       await onSubmit(buildAnswers(questions, picks), displayed);
+      haptic.success();
     } catch (e) {
+      haptic.error();
       setError(e instanceof Error ? e.message : m.askq_erro_envio());
     } finally {
       setSending(false);
@@ -121,7 +125,8 @@ function AskStepperContent({ payload, onSubmit, onClose }: Props) {
             pergunta (ou na única) só tinha saída pelo cancelar, que descarta tudo. */}
         <View style={styles.stepNav}>
           <Pressable onPress={goBack} hitSlop={8} disabled={sending} style={styles.backLink} accessibilityRole="button">
-            <Text style={[styles.backTxt, { color: theme.tokens.accent.base }]}>{'‹ '}{m.comum_voltar()}</Text>
+            <Icon name="ChevronLeft" size={18} color={theme.tokens.accent.base} />
+            <Text style={[styles.backTxt, { color: theme.tokens.accent.base }]}>{m.comum_voltar()}</Text>
           </Pressable>
           <Text style={[styles.counter, { color: theme.tokens.text.muted }]}>{questions.length} / {questions.length}</Text>
         </View>
@@ -162,7 +167,8 @@ function AskStepperContent({ payload, onSubmit, onClose }: Props) {
       <View style={styles.stepNav}>
         {step > 0 ? (
           <Pressable onPress={goBack} hitSlop={8} style={styles.backLink} accessibilityRole="button">
-            <Text style={[styles.backTxt, { color: theme.tokens.accent.base }]}>{'‹ '}{m.comum_voltar()}</Text>
+            <Icon name="ChevronLeft" size={18} color={theme.tokens.accent.base} />
+            <Text style={[styles.backTxt, { color: theme.tokens.accent.base }]}>{m.comum_voltar()}</Text>
           </Pressable>
         ) : (
           <View />
@@ -331,7 +337,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
   },
   statusBadgeText: {
-    fontSize: 11,
+    fontSize: theme.base.text.xxxs,
     fontWeight: '700',
     textTransform: 'uppercase',
   },
@@ -342,7 +348,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   backLink: {
     minHeight: 44,
-    justifyContent: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
   },
   backTxt: {
     fontSize: theme.base.text.sm,
@@ -362,7 +370,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '600',
   },
   sheetTitle: {
-    fontSize: 20,
+    fontSize: theme.base.text.lg,
     fontWeight: '600',
   },
   question: {
@@ -403,7 +411,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
   },
   checkMark: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '700',
     lineHeight: 14,
   },
@@ -481,7 +489,7 @@ const styles = StyleSheet.create((theme) => ({
     height: 44,
     borderWidth: 1,
     borderRadius: theme.base.radius.md,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     paddingHorizontal: theme.base.space[3],
   },
   textActions: {

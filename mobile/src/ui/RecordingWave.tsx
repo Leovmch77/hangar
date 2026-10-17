@@ -64,11 +64,11 @@ export function RecordingWave({ rms, onCancel }: { rms: number; onCancel?: () =>
 
 const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  label: { fontSize: 14, color: theme.tokens.text.muted },
-  time: { fontSize: 14, fontFamily: theme.base.fontMono, color: theme.tokens.text.muted, fontVariant: ['tabular-nums'] },
+  label: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
+  time: { fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono, color: theme.tokens.text.muted, fontVariant: ['tabular-nums'] },
   wave: { flex: 1, minWidth: 0, height: HEIGHT, flexDirection: 'row', alignItems: 'center', gap: GAP, overflow: 'hidden' },
   bar: { width: BAR, borderRadius: BAR, backgroundColor: theme.tokens.accent.base },
   cancel: { minHeight: 32, paddingHorizontal: 8, borderRadius: 6, justifyContent: 'center' },
   pressed: { backgroundColor: theme.tokens.border.subtle },
-  cancelTxt: { fontSize: 14, color: theme.tokens.text.secondary },
+  cancelTxt: { fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
 }));

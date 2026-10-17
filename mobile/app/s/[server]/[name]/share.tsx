@@ -1,11 +1,18 @@
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
+import type { Edge } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useServers } from '../../../../src/stores/servers';
 import { SharePanel } from '../../../../src/features/share/SharePanel';
 import { Screen } from '../../../../src/ui/Screen';
-import { Icon } from '../../../../src/ui/Icon';
+import { HeaderBack, useGlassHeader } from '../../../../src/ui/glassHeader';
 import * as m from '../../../../src/paraglide/messages';
+
+// iOS: o painel rola por baixo do cabeçalho de vidro (`automatic` no ScrollView dele) e cuida dos
+// recuos de cima e de baixo. Android: a tela começa abaixo do cabeçalho.
+const IOS = Platform.OS === 'ios';
+const EDGES: Edge[] = IOS ? ['left', 'right'] : ['bottom', 'left', 'right'];
 
 export default function ShareRoute() {
   const { theme } = useUnistyles();
@@ -21,37 +28,40 @@ export default function ShareRoute() {
     else router.replace('/');
   };
 
+  const header = useGlassHeader();
+  const headerHeight = useHeaderHeight();
+  const top = { paddingTop: headerHeight };
+  const canGoBack = router.canGoBack();
+
   return (
-    <Screen>
-      <Stack.Screen options={{ headerShown: false }} />
-      <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel={m.comum_voltar()} onPress={close} style={styles.back}>
-          <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </Pressable>
-        <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>{m.compartilhar_titulo({ nome: name })}</Text>
-      </View>
+    <Screen edges={EDGES}>
+      <Stack.Screen options={{
+        ...header,
+        title: m.compartilhar_titulo({ nome: name }),
+        headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={close} />,
+      }} />
       {!ready ? (
-        <View style={styles.state}>
+        <View style={[styles.state, top]}>
           <ActivityIndicator color={theme.tokens.text.muted} />
           <Text style={styles.muted}>{m.comum_carregando()}</Text>
         </View>
       ) : unavailable || server?.invite ? (
-        <View style={styles.state}>
+        <View style={[styles.state, top]}>
           <Text style={styles.error} accessibilityRole="alert">
             {unavailable ? m.compare_servidor_nao_encontrado() : m.mobile_share_owner_only()}
           </Text>
         </View>
       ) : (
-        <SharePanel key={`${serverId}::${name}`} server={server!} name={name} />
+        <View style={[styles.flex, IOS ? null : top]}>
+          <SharePanel key={`${serverId}::${name}`} server={server!} name={name} />
+        </View>
       )}
     </Screen>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], paddingHorizontal: theme.base.space[2] },
-  back: { minWidth: 44, minHeight: 44, justifyContent: 'center', alignItems: 'center' },
-  title: { flexShrink: 1, fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
+  flex: { flex: 1 },
   state: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: theme.base.space[4], gap: theme.base.space[2] },
   muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, textAlign: 'center' },

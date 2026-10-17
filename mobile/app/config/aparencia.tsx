@@ -472,10 +472,10 @@ export default function Aparencia() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   tiles: { paddingHorizontal: 16, paddingBottom: 16 },
   imageLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   thumb: { width: 48, height: 32, borderRadius: 4 },
-  value: { fontSize: 13.5, fontVariant: ['tabular-nums'] },
-  sublabel: { fontSize: 13.5, fontWeight: '500', paddingTop: 4, paddingBottom: 8 },
-});
+  value: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
+  sublabel: { fontSize: theme.base.text.xs, fontWeight: '500', paddingTop: 4, paddingBottom: 8 },
+}));

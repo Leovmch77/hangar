@@ -171,8 +171,8 @@ export function EngineEditor({ server, name, engine, names, onSaved, onClose }: 
 
 const styles = StyleSheet.create(theme => ({
   body: { padding: 16, paddingBottom: 32, gap: 12 },
-  input: { minHeight: 44, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
-  error: { color: theme.tokens.status.error, fontSize: 14 },
-  muted: { color: theme.tokens.text.muted, fontSize: 14 },
+  input: { minHeight: 44, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: theme.base.text.sm },
+  error: { color: theme.tokens.status.error, fontSize: theme.base.text.xs },
+  muted: { color: theme.tokens.text.muted, fontSize: theme.base.text.xs },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
 }));

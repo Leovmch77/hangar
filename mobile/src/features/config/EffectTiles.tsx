@@ -86,12 +86,12 @@ export function EffectTiles({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', gap: 6 },
   cell: { flex: 1, minWidth: 0 },
   frame: { borderRadius: 11, borderWidth: 2 },
   button: { padding: 4, borderRadius: 9, gap: 5 },
   art: { height: 48, borderRadius: 7, overflow: 'hidden' },
   caption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
-  captionText: { fontSize: 12.5, flexShrink: 1 },
-});
+  captionText: { fontSize: theme.base.text.xxs, flexShrink: 1 },
+}));
