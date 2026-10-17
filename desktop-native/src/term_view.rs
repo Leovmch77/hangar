@@ -239,14 +239,17 @@ impl TermView {
         let bytes = if !can_send || event.modifiers.shift {
             None
         } else if mode.intersects(TermMode::MOUSE_MODE) {
-            let col = (x / self.cell_width).floor().max(0.) as usize + 1;
-            let row = (y / self.line_height).floor().max(0.) as usize + 1;
+            let col = ((x / self.cell_width).floor().max(0.) as usize + 1).min(self.term.grid().columns());
+            let row = ((y / self.line_height).floor().max(0.) as usize + 1).min(self.term.grid().screen_lines());
             let button = if lines > 0 { 64 } else { 65 };
             if mode.contains(TermMode::SGR_MOUSE) {
                 Some(format!("[<{button};{col};{row}M").into_bytes())
             } else if col <= 223 && row <= 223 {
                 Some(vec![0x1b, b'[', b'M', 32 + button as u8, 32 + col as u8, 32 + row as u8])
-            } else { None }
+            } else {
+                // O X10 não alcança a célula; rolar o histórico local num programa com mouse confundiria a tela.
+                return false;
+            }
         } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let app = mode.contains(TermMode::APP_CURSOR);
             Some(match (lines > 0, app) { (true, false) => b"[A".to_vec(), (true, true) => b"OA".to_vec(),
@@ -632,6 +635,9 @@ mod tests {
         let big = ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 40.)), ..Default::default() };
         view.scroll_wheel(&big, x, y, true);
         assert_eq!(view.take_output().concat(), b"[<64;4;2M".repeat(5));
+        // Ponteiro além da grade (folga da borda) cai na última célula.
+        view.scroll_wheel(&up, view.cell_width * 99., view.line_height * 99., true);
+        assert_eq!(view.take_output().concat(), b"[<64;20;5M".to_vec());
         // Tela alternativa sem mouse: setas, como o alternateScroll do xterm.
         let mut alt = TermView::new(20, 5);
         alt.feed(b"[?1049h");

@@ -261,7 +261,7 @@ export function registerVerificar(on: On) {
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e);
     const { now, runs } = await read($, board);
-    // Comandos em segundo plano ficam só no /andamento: na faixa, no Windows, não dava para confiar no estado.
+    // Comandos em segundo plano ficam só no painel do /andamento.
     if (runs.length === 0) return next(e);
     const { Box, Text } = $.ui.resolve(e);
     // A faixa é dividida com os outros mods: responder sem `next` os esconde.

@@ -600,21 +600,29 @@ impl Hangar {
         cx.notify();
     }
 
-    fn flush_terminal(slot: &mut Slot) { Self::flush(slot, false); }
+    fn flush_terminal(slot: &mut Slot) {
+        let Some(socket) = &slot.socket else { return };
+        for bytes in slot.view.take_output() {
+            if let Err(error) = socket.send(&bytes) {
+                crate::log_line(&format!("terminal {}: envio falhou ({} bytes): {error:?}", slot.name, bytes.len()));
+                slot.status = Status::Failed(socket_error(error));
+            }
+        }
+    }
 
-    /// Um quadro só por envio: a fila do socket tem 8 lugares. `droppable` (a roda) perde o quadro com a
-    /// fila cheia em vez de dar o terminal como desconectado; tecla e colagem nunca se perdem calados.
-    fn flush(slot: &mut Slot, droppable: bool) {
+    /// A roda num quadro só (a fila do socket tem 8 lugares) e, com a fila cheia, perdida em vez de dar o
+    /// terminal como desconectado. Só os bytes da roda: o pendente sai antes pelo `flush_terminal`.
+    fn flush_wheel(slot: &mut Slot) {
         let Some(socket) = &slot.socket else { return };
         let bytes = slot.view.take_output().concat();
         if bytes.is_empty() { return; }
         match socket.send(&bytes) {
-            Err(crate::ws::Error::QueueFull) if droppable => crate::log_line(&format!("terminal {}: fila cheia, rolagem descartada ({} bytes)", slot.name, bytes.len())),
+            Ok(_) => {}
+            Err(crate::ws::Error::QueueFull) => crate::log_line(&format!("terminal {}: fila cheia, rolagem descartada", slot.name)),
             Err(error) => {
-                crate::log_line(&format!("terminal {}: envio falhou ({} bytes): {error:?}", slot.name, bytes.len()));
+                crate::log_line(&format!("terminal {}: envio da roda falhou: {error:?}", slot.name));
                 slot.status = Status::Failed(socket_error(error));
             }
-            Ok(_) => {}
         }
     }
 
@@ -858,8 +866,9 @@ impl Hangar {
                 if let Some(slot) = this.terminal.as_mut().and_then(|panel| panel.tabs.get_mut(panel.active)) {
                     let at = event.position - slot.bounds.get().origin;
                     let can_send = slot.accepts_input();
+                    Self::flush_terminal(slot);
                     if slot.view.scroll_wheel(event, f32::from(at.x), f32::from(at.y), can_send) { cx.notify(); }
-                    Self::flush(slot, true);
+                    Self::flush_wheel(slot);
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyTerminal, _, cx| {
