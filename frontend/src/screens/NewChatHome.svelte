@@ -1,6 +1,6 @@
 <script lang="ts">
   import { flushSync, onMount, untrack } from 'svelte';
-  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type Provider, type SessionOpeningExtras, type WorktreeChoice } from '@hangar/core';
+  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type AggSession, type Provider, type SessionOpeningExtras, type WorktreeChoice } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -17,6 +17,7 @@
   import NewChatMic from '../components/newchat/NewChatMic.svelte';
   import HomeSessions from '../components/HomeSessions.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
+  import { homeSessionsView } from '../lib/homeSessions';
   import { homeScreen, type HomeScreen } from '../lib/homeScreen.svelte';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota } from '../lib/cota';
@@ -29,6 +30,58 @@
   // Tela inicial do celular: lista das sessões abertas com a faixa "Nova conversa…" embaixo; a faixa
   // cresce até a nova conversa no desenho do nativo (`render_new_chat`), na mesma tela.
   let { onOpenList, onOpenChat }: { onOpenList: () => void; onOpenChat: (name: string) => void } = $props();
+
+  let freezeList = () => {};
+  function openHomeChat(name: string) {
+    freezeList();
+    onOpenChat(name);
+  }
+  function rememberList(el: HTMLDivElement, _rows: AggSession[]) {
+    let restoreTarget = homeSessionsView.scrollTop;
+    let leaving = false;
+    let frame = 0;
+    let thaw: ReturnType<typeof setTimeout> | undefined;
+    const restore = () => {
+      cancelAnimationFrame(frame);
+      if (restoreTarget <= 0 || leaving) return;
+      el.style.overflowAnchor = 'none';
+      // Cada onda tenta de novo depois do layout, sem perder o alvo quando ainda não cabe.
+      frame = requestAnimationFrame(() => {
+        if (restoreTarget <= 0 || leaving || !el.isConnected) return;
+        el.scrollTop = restoreTarget;
+        if (restoreTarget - el.scrollTop <= 1) { restoreTarget = 0; el.style.overflowAnchor = ''; }
+      });
+    };
+    const save = () => {
+      if (leaving || restoreTarget > 0) return;
+      homeSessionsView.scrollTop = el.scrollTop;
+    };
+    const stopRestoring = (event: Event) => {
+      if (event instanceof KeyboardEvent && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
+      restoreTarget = 0;
+      el.style.overflowAnchor = '';
+      save();
+    };
+    freezeList = () => {
+      save();
+      // O teardown pode emitir scroll(0) antes de desmontar a tela.
+      leaving = true;
+      clearTimeout(thaw);
+      thaw = setTimeout(() => { leaving = false; restore(); }, 1000);
+    };
+    const gestures = ['wheel', 'touchmove', 'keydown'];
+    el.addEventListener('scroll', save);
+    for (const event of gestures) el.addEventListener(event, stopRestoring, { passive: true });
+    restore();
+    return {
+      update: restore,
+      destroy() {
+        cancelAnimationFrame(frame); clearTimeout(thaw);
+        el.removeEventListener('scroll', save);
+        for (const event of gestures) el.removeEventListener(event, stopRestoring);
+      },
+    };
+  }
 
   // A entrada do histórico marca a nova conversa aberta: Voltar do navegador fecha antes de sair.
   const COMPOSE = 'cpHomeCompose';
@@ -166,8 +219,8 @@
     </div>
   {:else}
     <div class="middle">
-      <div class="layer list-layer" inert={!collapsed}>
-        <HomeSessions {onOpenChat} />
+      <div class="layer list-layer" inert={!collapsed} use:rememberList={sessionsStore.rows}>
+        <HomeSessions onOpenChat={openHomeChat} />
       </div>
       <div class="layer greeting" inert={collapsed}>
         {#if draft.serverObj}<HomeUsage server={draft.serverObj} />{/if}

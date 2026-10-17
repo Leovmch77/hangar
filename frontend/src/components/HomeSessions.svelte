@@ -5,7 +5,7 @@
   import ConfirmSheet from './ConfirmSheet.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel } from '../lib/sessionListModel.svelte';
-  import { groupHomeSessions, type HomeState } from '../lib/homeSessions';
+  import { groupHomeSessions, homeSessionsView, type HomeState } from '../lib/homeSessions';
   import * as m from '../paraglide/messages';
 
   // Sessões abertas de todas as máquinas na tela inicial do celular, agrupadas pelo que pedem de você.
@@ -14,7 +14,7 @@
   const model = createSessionListModel({ variant: 'mobile', onOpen: (n) => onOpenChat(n), onCompare: () => {} });
   onMount(() => model.mount());
 
-  let readyExpanded = $state(false);
+  let readyExpanded = $state(homeSessionsView.readyExpanded);
   let deleteError = $state('');
   const groups = $derived(groupHomeSessions(sessionsStore.rows, readyExpanded));
   const machines = $derived(sessionsStore.byServer.filter((b) => b.error || !b.loaded));
@@ -59,14 +59,21 @@
           <span>{LABEL[g.state]()}</span>
           <span class="count">{g.total}</span>
         </h2>
-        {#each g.sessions as session (session.serverId + '::' + session.name)}
-          <SessionCard {session}
-            serverBadge={manyServers ? { label: session.serverLabel, color: session.serverColor } : null}
-            onClick={() => { deleteError = ''; model.open(session); }}
-            onDelete={() => { deleteError = ''; model.requestDelete(session.name, session.serverId, session.state); }} />
+        {#each g.servers as server (server.id)}
+          <section class="server-group" aria-label={server.label}>
+            <h3 class="server-head">
+              <span class="dot" style:background={server.color} aria-hidden="true"></span>
+              <span>{server.label}</span>
+            </h3>
+            {#each server.sessions as session (session.name)}
+              <SessionCard {session}
+                onClick={() => { deleteError = ''; model.open(session); }}
+                onDelete={() => { deleteError = ''; model.requestDelete(session.name, session.serverId, session.state); }} />
+            {/each}
+          </section>
         {/each}
         {#if g.state === 'idle' && g.total > 1}
-          <button type="button" class="more" aria-expanded={readyExpanded} onclick={() => (readyExpanded = !readyExpanded)}>
+          <button type="button" class="more" aria-expanded={readyExpanded} onclick={() => (homeSessionsView.readyExpanded = readyExpanded = !readyExpanded)}>
             {readyExpanded ? m.sessao_recolher() : m.home_sessions_more_ready({ n: g.total - 1 })}
           </button>
         {/if}
@@ -93,6 +100,10 @@
   .group-head {
     display: flex; align-items: center; gap: 8px; margin: 0; padding: var(--space-3) var(--space-4) var(--space-1);
     font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
+  }
+  .server-head {
+    display: flex; align-items: center; gap: var(--space-2); margin: 0; padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm); font-weight: 600; color: var(--text-primary);
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .count { font-weight: 500; color: var(--text-muted); font-variant-numeric: tabular-nums; }
