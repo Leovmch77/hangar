@@ -38,7 +38,7 @@ export function CostsScreen() {
   const activeFilter = dimensions.some((d) => filter[d]?.length) || filter.sub !== undefined;
   const rates = tarifasPorModelo(report.rates);
   const validRate = report.usd_brl !== null && Number.isFinite(report.usd_brl) && report.usd_brl > 0;
-  const money = (value: number) => brl && validRate ? new Intl.NumberFormat(intlLocale(), { style: 'currency', currency: 'BRL', maximumFractionDigits: 4 }).format(value * report.usd_brl!) : dollars(value);
+  const money = (value: number) => brl && validRate ? new Intl.NumberFormat(intlLocale(), { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value * report.usd_brl!) : dollars(value);
   const cost = (bucket: Pick<DimBucket, 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'>, model?: string) => priceLabel(bucket, model) === 'priced' ? money(bucket.cost) : '—';
   const labelPrice = (bucket: DimBucket, model?: string) => priceLabel(bucket, model) === 'free' ? m.custos_gratis() : custoDesconhecido(bucket) ? m.custos_sem_tarifa() : '';
   const names = dimensionNames();
@@ -80,8 +80,8 @@ export function CostsScreen() {
       <View style={{ flexDirection: 'row' }}><Action label={m.custos_custo()} selected={metric === 'cost'} onPress={() => setMetric('cost')} /><Action label={m.ctx_tokens()} selected={metric === 'tokens'} onPress={() => setMetric('tokens')} /></View>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}><Action label={m.custos_tipo_token()} selected={layer === 'type'} onPress={() => setLayer('type')} />{dimensions.map((dim) => <Action key={dim} label={names[dim]} selected={layer === dim} disabled={!view.cross} onPress={() => setLayer(dim)} />)}</View>
       {layer === 'type' && <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{tokenTypes.map((type) => <Action key={type} label={types[type]} selected={visibleTypes.includes(type)} onPress={() => setVisibleTypes((old) => old.includes(type) ? old.filter((v) => v !== type) : [...old, type])} />)}</View>}
-      <Copy muted>{m.custos_empilhado_por({ modo: layer === 'type' ? m.custos_tipo_token() : names[layer] })}</Copy>
-      <Copy muted>{m.custos_hover_detalhe()}</Copy>
+      <Copy muted>{m.mobile_costs_daily_description({ mode: layer === 'type' ? m.custos_tipo_token() : names[layer] })}</Copy>
+      <Copy muted>{m.mobile_costs_daily_hint()}</Copy>
       <Paged key={`${period}:${layer}:${metric}`} items={days} render={(item) => <View>
         <Bar label={item.key} value={valueOf(item)} max={max} detail={metric === 'tokens' ? number(rawTokens(item)) : cost(item as DimBucket)} onPress={() => setDay(item.key)} />
         {layer === 'type' ? visibleTypes.map((type) => <Bar key={type} label={types[type]} value={metric === 'tokens' ? item[type] : (item as DimBucket)[`cost_${type}`] ?? 0} max={max} detail={metric === 'tokens' ? number(item[type]) : custoDesconhecido(item as DimBucket) && item[type] > 0 ? '—' : money((item as DimBucket)[`cost_${type}`] ?? 0)} />)
@@ -163,7 +163,7 @@ export function CostsScreen() {
         <Copy title>{m.uso_graf_areas()}</Copy><Copy muted>{m.uso_graf_areas_nota()}</Copy><Copy muted>{m.mobile_costs_area_scope()}</Copy>
         <ReportStatus {...areaLoad} selected={areaServers.length} />
         {areaLoad.accepted && <Paged items={areas.by_area} render={(item) => <Bar label={item.label ?? item.key} value={rawTokens(item)} max={areasMax} detail={`${number(rawTokens(item))} · ${cost(item)}`} />} />}
-        {areaLoad.accepted && <Paged items={areas.by_area_dia} render={(item) => <Copy>{`${item.key}: ${number(rawTokens(item))} · ${cost(item)}`}</Copy>} />}
+        {areaLoad.accepted && <Paged items={areas.by_area_dia} render={(item) => <View><Copy>{item.key.slice(0, 10)}</Copy><Copy>{`${item.key.slice(11)}: ${number(rawTokens(item))} · ${cost(item)}`}</Copy></View>} />}
       </Card> : <Card><Copy title>{m.custos_como_calculamos()}</Copy><Copy>{m.custos_custo_tabela()}{m.custos_nao_fatura()}{m.custos_assinatura()}</Copy><Copy>{m.custos_metodo_standard()}</Copy><Copy>{m.custos_metodo_codex()}</Copy><Copy>{m.custos_equivalente_metodo()}</Copy><Copy>{m.custos_tarifas_models()}</Copy></Card>}
       {day !== null && <Sheet open onDismiss={() => setDay(null)} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}><Copy title>{day}</Copy>{dayBucket && <><Copy>{`${number(rawTokens(dayBucket))} · ${cost(dayBucket)}`}</Copy>{renderTypes(dayBucket)}</>}<Action label={m.native_close()} onPress={() => setDay(null)} /></ScrollView></Sheet>}
     </>}

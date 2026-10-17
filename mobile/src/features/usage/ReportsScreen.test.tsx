@@ -26,6 +26,7 @@ import StatsScreen from '../../../app/stats';
 import { useServers } from '../../stores/servers';
 import { useUsagePreferences } from './ReportUI';
 import * as m from '../../paraglide/messages';
+import { getLocale, overwriteGetLocale } from '../../paraglide/runtime';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const a: Server = { id: 'a', label: 'Machine A', baseUrl: 'https://a.test', token: 'token' };
 const b: Server = { ...a, id: 'b', label: 'Machine B' };
@@ -44,8 +45,10 @@ const click = async (label: string) => {
   await act(async () => button!.click());
 };
 const previousLocale = localeAtual();
+const previousMessageLocale = getLocale();
 beforeEach(() => {
   configureLocale({ getLocale: () => 'pt' });
+  overwriteGetLocale(() => 'pt');
   vi.clearAllMocks(); net.focused = true; net.canGoBack = false;
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve(costs(period)));
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve(usage(period, filters)));
@@ -53,7 +56,7 @@ beforeEach(() => {
   useUsagePreferences.setState({ period: '30d', off: [] });
   node = document.createElement('div'); root = createRoot(node);
 });
-afterEach(async () => { await act(async () => root.unmount()); configureLocale({ getLocale: () => previousLocale }); });
+afterEach(async () => { await act(async () => root.unmount()); configureLocale({ getLocale: () => previousLocale }); overwriteGetLocale(() => previousMessageLocale); });
 
 it.each([false, true])('relatórios configuram cabeçalho nativo e voltar alternativo somente sem histórico: %s', async (canGoBack) => {
   net.canGoBack = canGoBack;
@@ -123,6 +126,26 @@ it('custos públicos têm cartões honestos, painéis tocáveis, comparação, �
   expect(net.back).toHaveBeenCalledTimes(1);
 });
 
+it.each([
+  ['pt', 'Detalhado por tipo de token. Cada linha é um dia.', 'toque numa linha para o detalhe do dia', 'Detalhado por conta / provedor. Cada linha é um dia.'],
+  ['en', 'Detailed by token type. Each row is a day.', "tap a row for the day's detail", 'Detailed by account / provider. Each row is a day.'],
+] as const)('instruções diárias descrevem linhas e sublinhas sem empilhamento em %s', async (locale, description, hint, providerDescription) => {
+  configureLocale({ getLocale: () => locale });
+  overwriteGetLocale(() => locale);
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  expect(node.textContent).toContain(description);
+  expect(node.textContent).toContain(hint);
+  expect(node.textContent).not.toContain(m.custos_empilhado_por({ modo: m.custos_tipo_token() }));
+  expect(node.textContent).not.toContain(m.custos_hover_detalhe());
+  const day = [...node.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('2026-10-01: '));
+  expect(day?.parentElement?.textContent).toContain(m.custos_input_sem_cache());
+  expect(day?.parentElement?.textContent).toContain(m.custos_output_total());
+  const provider = [...node.querySelectorAll('button')].filter((button) => button.getAttribute('aria-label') === m.custos_dim_provedor()).at(-1);
+  expect(provider).toBeTruthy();
+  await act(async () => provider!.click());
+  expect(node.textContent).toContain(providerDescription);
+});
+
 it('estatísticas conservam filtros, detalhe usa foco sem refazer tabela e abas não ficam escondidas montadas', async () => {
   await act(async () => root.render(React.createElement(StatsScreen)));
   expect(node.textContent).toContain(m.uso_resp_skill_contexto());
@@ -143,6 +166,60 @@ it('estatísticas conservam filtros, detalhe usa foco sem refazer tabela e abas 
   expect(net.back).toHaveBeenCalledTimes(1);
 });
 
+it('imagens exibem rótulos humanos na lista e no detalhe mantendo o foco técnico na API', async () => {
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_imagem: [{ ...skill, key: 'lida:Read' }, { ...skill, key: 'enviada' }, { ...skill, key: 'lida:mcp:captura' }],
+    by_tool: [{ ...skill, key: 'Read', label: 'ferramenta preservada' }],
+    by_plugin: [{ ...skill, key: '@repo', label: 'plugin preservado' }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  await click(m.uso_aba_imagens());
+  expect(node.textContent).toContain('lidas por Read');
+  expect(node.textContent).toContain('enviadas por você');
+  expect(node.textContent).toContain('lidas por mcp:captura');
+  expect(node.innerHTML).not.toContain('lida:');
+  const before = net.usage.mock.calls.filter((call) => !call[2].foco).length;
+  await click('lidas por Read');
+  expect(net.usage).toHaveBeenCalledWith(a, '30d', { foco: 'lida:Read' }, false);
+  expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { foco: 'lida:Read' }, false);
+  expect(net.usage.mock.calls.filter((call) => !call[2].foco)).toHaveLength(before);
+  expect(node.querySelector('aside')?.textContent).toContain('foco: lidas por Read');
+  expect(node.querySelector('aside')?.textContent).not.toContain('lida:Read');
+  await click(m.native_close());
+  await click('enviadas por você');
+  expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { foco: 'enviada' }, false);
+  expect(node.querySelector('aside')?.textContent).toContain('foco: enviadas por você');
+  await click(m.native_close());
+  for (const [tab, label] of [[m.uso_aba_tools(), 'ferramenta preservada'], [m.uso_aba_plugins(), 'plugin preservado'], [m.uso_aba_agentes(), 'reviewer'], [m.uso_aba_contexto(), 'instructions']] as const) {
+    await click(tab);
+    expect(node.textContent).toContain(label);
+  }
+});
+
+it.each(['pt', 'en'] as const)('busca de imagens inclui rótulos exibidos e preserva chaves e metadados em %s', async (locale) => {
+  configureLocale({ getLocale: () => locale });
+  overwriteGetLocale(() => locale);
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters),
+    by_imagem: [{ ...skill, key: 'lida:Read', label: 'read-metadata', plugin: 'read-plugin' }, { ...skill, key: 'enviada', label: 'sent-metadata', plugin: 'sent-plugin' }],
+  }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  await click(m.uso_aba_imagens());
+  const readLabel = m.uso_img_lida({ tool: 'Read' });
+  const sentLabel = m.uso_img_enviada();
+  const search = node.querySelector<HTMLInputElement>(`input[aria-label="${m.uso_busca()}"]`);
+  expect(search).toBeTruthy();
+  for (const [query, expected, hidden] of [
+    [readLabel, readLabel, sentLabel], [sentLabel, sentLabel, readLabel],
+    ['lida:Read', readLabel, sentLabel], ['enviada', sentLabel, readLabel],
+    ['read-metadata', readLabel, sentLabel], ['sent-metadata', sentLabel, readLabel],
+    ['read-plugin', readLabel, sentLabel], ['sent-plugin', sentLabel, readLabel],
+  ]) {
+    await act(async () => { search!.value = query; search!.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(node.querySelectorAll(`button[aria-label^="${expected}: "]`)).toHaveLength(1);
+    expect(node.querySelector(`button[aria-label^="${hidden}: "]`)).toBeNull();
+  }
+});
+
 it('cartões dividem custo por tokens processados e cache de uma hora pela escrita, como no desktop', async () => {
   net.costs.mockImplementation((_server: Server, period: string) => {
     const priced = { ...combo, input: 100_000, output: 100_000, cache_write: 100_000, cache_read: 700_000, cache_write_1h: 50_000, regravado: 10_000, custo_regravado: 0.25, cost: 2, cost_input: 0.4, cost_output: 1, cost_cache_write: 0.5, cost_cache_read: 0.1 };
@@ -152,6 +229,31 @@ it('cartões dividem custo por tokens processados e cache de uma hora pela escri
   const card = (label: string) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)?.parentElement;
   expect(card(m.custos_custo_por_milhao())?.textContent?.replace(/\s/g, '')).toContain('US$2,00');
   expect(card(m.custos_cache_1h())?.textContent).toContain('50%');
+});
+
+it.each([
+  ['pt', 0, 'US$ 0,00', 'R$ 0,00'],
+  ['pt', 91.9602, 'US$ 91,96', 'R$ 459,80'],
+  ['pt', 1_234_567.8912, 'US$ 1.234.567,89', 'R$ 6.172.839,46'],
+  ['en', 0, 'US$ 0.00', 'R$0.00'],
+  ['en', 91.9602, 'US$ 91.96', 'R$459.80'],
+  ['en', 1_234_567.8912, 'US$ 1,234,567.89', 'R$6,172,839.46'],
+] as const)('moedas dos relatórios mantêm duas casas em %s para %s', async (locale, value, usd, brl) => {
+  configureLocale({ getLocale: () => locale });
+  overwriteGetLocale(() => locale);
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), usd_brl: 5, combos: [{ ...combo, input: value === 0 ? 0 : 100, output: 0, cache_write: 0, cache_read: 0, cost: value, cost_input: value }] }));
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_agente: [{ ...skill, key: 'reviewer', cost: value }], by_day: [{ ...skill, key: '2026-10-02', cost: value }] }));
+  const amount = (label: string, index = 1) => [...node.querySelectorAll('span')].find((span) => span.textContent === label)?.parentElement?.querySelectorAll('span')[index]?.textContent?.replace(/\s/g, ' ');
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  expect.soft(amount(m.custos_custo_periodo())).toBe(usd);
+  await click('BRL');
+  expect.soft(amount(m.custos_custo_periodo())).toBe(brl);
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  expect.soft(amount(m.uso_resp_agente_caro(), 2)).toBe(usd);
+  await click(m.uso_aba_agentes());
+  await click('reviewer');
+  expect(node.querySelector('aside')?.textContent?.replace(/\s/g, ' ')).toContain(`${m.uso_col_custo_real()}: ${usd}`);
 });
 
 it('cache perdido medido sem tarifa mostra traço em vez de custo zero', async () => {
@@ -285,6 +387,21 @@ it('detalhe de plugin conserva chamadas contexto e custo sem inventar tokens rea
   expect(detail?.textContent?.replace(/\s/g, '')).toContain('US$0,20');
 });
 
+it('áreas diárias separam data e área inteira sem trocar tokens ou custo', async () => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [], by_area_dia: [
+    { ...zeroUso('2026-09-17|back: serviços de autorização'), input: 153_583_509, cost: 91.96 },
+    { ...zeroUso('2026-09-18|front – área compartilhada'), output: 43, cache_read: 7, cost: 2.5 },
+  ] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.uso_graf_areas());
+  const dates = [...node.querySelectorAll('span')].filter((span) => ['2026-09-17', '2026-09-18'].includes(span.textContent ?? ''));
+  expect(dates.map((span) => span.textContent)).toEqual(['2026-09-17', '2026-09-18']);
+  expect(dates[0].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-17back:serviçosdeautorização:153.583.509·US$91,96');
+  expect(dates[1].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-18front–áreacompartilhada:50·US$2,50');
+  expect(node.textContent).not.toContain('|');
+});
+
 it('áreas sem tarifa mantêm traço e barras interativas anunciam valores além do nome', async () => {
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [{ ...skill, key: 'front', cost: 0 }], by_area_dia: [{ ...skill, key: '2026-10-01|front', cost: 0 }] }));
   await act(async () => root.render(React.createElement(CostsScreen)));
@@ -294,8 +411,8 @@ it('áreas sem tarifa mantêm traço e barras interativas anunciam valores além
   await click(m.uso_graf_areas());
   const area = node.querySelector('[aria-label^="front:"]');
   expect(area?.getAttribute('aria-label')).toContain('—');
-  const daily = [...node.querySelectorAll('span')].find((span) => span.textContent?.startsWith('2026-10-01|front:'));
-  expect(daily?.textContent).toContain('—');
+  const daily = [...node.querySelectorAll('span')].find((span) => span.textContent === '2026-10-01');
+  expect(daily?.parentElement?.textContent).toContain('front: 24 · —');
 });
 
 it('áreas respeitam a máquina do filtro sem consultar ou somar a outra máquina', async () => {

@@ -4335,6 +4335,8 @@
   "uso_graf_areas_nota": "Real tokens of each turn (Claude and Codex), split across the areas of the files its tools touched, in proportion to the number of tools in each. A turn with no file counts as conversation. Per-project areas are edited in ~/.hangar/uso-areas.json.",
   "custos_areas_sem_recorte": "Provider, source and machine filters don't apply here.",
   "mobile_costs_area_scope": "Areas use the period, projects and models on the selected machines. Provider, source and conversation/subagent filters do not apply here.",
+  "mobile_costs_daily_description": "Detailed by {mode}. Each row is a day.",
+  "mobile_costs_daily_hint": "tap a row for the day's detail",
   "custos_areas_carregando": "reading the areas…",
   "custos_areas_erro": "Couldn't read the areas from any machine.",
   "custos_areas_pct": "% of tokens",

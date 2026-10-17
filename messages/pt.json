@@ -4335,6 +4335,8 @@
   "uso_graf_areas_nota": "Tokens reais de cada turno (Claude e Codex), divididos entre as áreas dos arquivos que as ferramentas tocaram, na proporção do número de ferramentas em cada uma. Turno sem arquivo conta como conversa. As áreas por projeto se editam em ~/.hangar/uso-areas.json.",
   "custos_areas_sem_recorte": "Filtros de provedor, fonte e máquina não se aplicam aqui.",
   "mobile_costs_area_scope": "Áreas usam o período, os projetos e os modelos nas máquinas escolhidas. Filtros de provedor, fonte e conversa/subagente não se aplicam aqui.",
+  "mobile_costs_daily_description": "Detalhado por {mode}. Cada linha é um dia.",
+  "mobile_costs_daily_hint": "toque numa linha para o detalhe do dia",
   "custos_areas_carregando": "lendo as áreas…",
   "custos_areas_erro": "Não consegui ler as áreas de nenhuma máquina.",
   "custos_areas_pct": "% dos tokens",
