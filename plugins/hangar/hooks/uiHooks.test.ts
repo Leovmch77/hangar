@@ -171,6 +171,8 @@ test("botão do próprio plugin num painel vai ao app com o dono, e o de outro m
     walk(node.children);
   };
   walk(lastUi(posts).trees);
+  expect(lastUi(posts).ids).toEqual(expect.arrayContaining(["hangar-andamento", "controle"]));
+  expect([...owners.values()].every(Boolean)).toBe(true);
   expect(owners.get("parar-b1")).toBe("hangar");
   expect(owners.get("abrir")).toBe("paineis");
   await outro.unmount();

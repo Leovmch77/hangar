@@ -606,6 +606,8 @@ impl Hangar {
             if let Err(error) = socket.send(&bytes) {
                 crate::log_line(&format!("terminal {}: envio falhou ({} bytes): {error:?}", slot.name, bytes.len()));
                 slot.status = Status::Failed(socket_error(error));
+                // O resto não pode chegar ao programa com um buraco no meio.
+                break;
             }
         }
     }
@@ -865,8 +867,8 @@ impl Hangar {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if let Some(slot) = this.terminal.as_mut().and_then(|panel| panel.tabs.get_mut(panel.active)) {
                     let at = event.position - slot.bounds.get().origin;
-                    let can_send = slot.accepts_input();
                     Self::flush_terminal(slot);
+                    let can_send = slot.accepts_input();
                     if slot.view.scroll_wheel(event, f32::from(at.x), f32::from(at.y), can_send) { cx.notify(); }
                     Self::flush_wheel(slot);
                 }
