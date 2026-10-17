@@ -173,9 +173,9 @@ const styles = StyleSheet.create((theme) => ({
   metaErr: { fontSize: theme.base.text.xs },
   chatBox: { flex: 1, minHeight: 320, maxHeight: 520, borderWidth: 1, borderRadius: theme.base.radius.md, overflow: 'hidden' },
   toolsRow: { gap: theme.base.space[1] },
-  rotulo: { fontSize: 11.5, letterSpacing: 0.8, textTransform: 'uppercase', fontWeight: '600' },
+  rotulo: { fontSize: theme.base.text.xxxs, letterSpacing: 0.8, textTransform: 'uppercase', fontWeight: '600' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1] },
   chip: { paddingHorizontal: theme.base.space[2], paddingVertical: 3, borderRadius: theme.base.radius.sm, borderWidth: 1 },
-  chipTxt: { fontFamily: theme.base.fontMono, fontSize: 12 },
-  rodape: { textAlign: 'center', fontSize: 12.5, fontStyle: 'italic', borderTopWidth: 1, paddingTop: theme.base.space[2] },
+  chipTxt: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxs },
+  rodape: { textAlign: 'center', fontSize: theme.base.text.xxs, fontStyle: 'italic', borderTopWidth: 1, paddingTop: theme.base.space[2] },
 }));

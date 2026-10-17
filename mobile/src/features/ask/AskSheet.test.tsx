@@ -45,6 +45,9 @@ vi.mock('react-native', async (original) => ({
   }),
 }));
 
+const haptic = vi.hoisted(() => ({ selection: vi.fn(), success: vi.fn(), error: vi.fn() }));
+vi.mock('../../ui/haptics', () => ({ haptic }));
+
 import AskSheet from '../../../app/s/[server]/[name]/ask';
 import { AskStepper } from './AskStepper';
 
@@ -373,7 +376,7 @@ test('volta da revisão para a pergunta em vez de obrigar o cancelar', async () 
   }] });
   await click('Segunda');
   expect(container.textContent).toContain(m.askq_revisar());
-  await click(`‹ ${m.comum_voltar()}`);
+  await click(m.comum_voltar());
   expect(container.textContent).not.toContain(m.askq_revisar());
   await click('Primeira');
   await click(m.lista_enviar());
@@ -403,4 +406,15 @@ test('troca a pergunta aberta pelo ID novo e protege texto secreto na entrada e 
   expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)).toMatchObject({
     request_id: 42, answers: [{ question_id: 'secret', value: 'valor-secreto' }],
   });
+});
+
+test('marcar opção vibra seleção; envio vibra sucesso ou erro', async () => {
+  const onSubmit = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('x'));
+  await act(async () => root.render(React.createElement(AskStepper, { payload, onSubmit })));
+  await click('Primeira');
+  expect(haptic.selection).toHaveBeenCalledTimes(1);
+  await click(m.lista_enviar());
+  expect(haptic.success).toHaveBeenCalledTimes(1);
+  await click(m.lista_enviar());
+  expect(haptic.error).toHaveBeenCalledTimes(1);
 });

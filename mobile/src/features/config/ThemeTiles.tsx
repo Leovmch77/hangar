@@ -95,7 +95,7 @@ export function ThemeTiles({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', gap: 12 },
   tile: { flex: 1, minWidth: 0, alignItems: 'center', gap: 8 },
   frame: { alignSelf: 'stretch', borderWidth: 2, borderRadius: 10 },
@@ -108,5 +108,5 @@ const styles = StyleSheet.create({
   bars: { gap: 5 },
   bar: { height: 4, borderRadius: 2 },
   caption: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  captionText: { fontSize: 14 },
-});
+  captionText: { fontSize: theme.base.text.xs },
+}));

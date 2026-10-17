@@ -23,7 +23,7 @@ function colorOf(provider: string, dark: boolean): [string, string] {
 
 // Selo do provider: quadradinho com 20% da cor da marca e o logo (ou a letra) por cima.
 export function ProviderGlyph({ provider, size = 16 }: { provider: string; size?: number }) {
-  const { rt } = useUnistyles();
+  const { rt, theme } = useUnistyles();
   const [color, letter] = colorOf(provider, rt.themeName !== 'light');
   const d = LOGO[provider];
   return (
@@ -35,7 +35,7 @@ export function ProviderGlyph({ provider, size = 16 }: { provider: string; size?
       {d ? (
         <Svg width={size * 0.72} height={size * 0.72} viewBox="0 0 24 24" fill={color}><Path d={d} /></Svg>
       ) : (
-        <Text style={{ color, fontSize: 11, fontWeight: '700' }} maxFontSizeMultiplier={1}>{letter}</Text>
+        <Text style={{ color, fontSize: theme.base.text.xxxs, fontWeight: '700' }} maxFontSizeMultiplier={1}>{letter}</Text>
       )}
     </View>
   );

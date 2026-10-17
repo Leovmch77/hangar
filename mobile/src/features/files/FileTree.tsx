@@ -55,7 +55,7 @@ export function FileTree({ entries, abertos, selecionado, onToggle, onPick, list
               ]}
               accessibilityRole="button"
             >
-              <Text style={[styles.chev, { color: theme.tokens.text.muted }]}>{isDir ? (aberta ? '▾' : '▸') : ''}</Text>
+              <View style={styles.chev}>{isDir ? <Icon name={aberta ? 'ChevronDown' : 'ChevronRight'} size={12} color={theme.tokens.text.muted} /> : null}</View>
               <View style={styles.icon}><Icon name={isDir ? 'Folder' : 'File'} size={13} color={theme.tokens.text.muted} /></View>
               <Text style={[styles.nome, { color: isDir ? theme.tokens.text.primary : theme.tokens.text.secondary }]} numberOfLines={1}>
                 {ent.name}
@@ -106,8 +106,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   chev: {
     width: 12,
-    textAlign: 'center',
-    fontSize: 10,
+    alignItems: 'center',
   },
   icon: {
     width: 14,
@@ -115,23 +114,23 @@ const styles = StyleSheet.create((theme) => ({
   },
   nome: {
     flex: 1,
-    fontSize: 14,
+    fontSize: theme.base.text.xs,
   },
   numView: {
     flexDirection: 'row',
   },
   numAdd: {
-    fontSize: 11.5,
+    fontSize: theme.base.text.xxxs,
     fontFamily: theme.base.fontMono,
   },
   numDel: {
-    fontSize: 11.5,
+    fontSize: theme.base.text.xxxs,
     fontFamily: theme.base.fontMono,
   },
   marca: {
     width: 14,
     textAlign: 'center',
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     fontWeight: '600',
     fontFamily: theme.base.fontMono,
   },

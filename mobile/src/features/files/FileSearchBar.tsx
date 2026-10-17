@@ -125,7 +125,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   input: {
     flex: 1,
-    fontSize: 15,
+    fontSize: theme.base.text.sm,
     padding: 0,
   },
   seg: {
@@ -143,7 +143,7 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.subtle,
   },
   segTxt: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '500',
   },
   resultArea: {
@@ -162,14 +162,14 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 44,
   },
   hitNome: {
-    fontSize: 15,
+    fontSize: theme.base.text.sm,
     fontWeight: '500',
   },
   hitPath: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
   },
   hitTrecho: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontFamily: theme.base.fontMono,
   },
 }));

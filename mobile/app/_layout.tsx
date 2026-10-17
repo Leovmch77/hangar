@@ -90,9 +90,8 @@ export default function Layout() {
           <Stack.Screen name="config" options={{ headerShown: false }} />
           <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
           <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
-          {/* A borda esquerda do chat abre a gaveta de sessões; voltar fica no botão do cabeçalho
-              (e no voltar do Android, que este gesto não desliga). */}
-          <Stack.Screen name="s/[server]/[name]/index" options={{ gestureEnabled: false }} />
+          {/* A borda esquerda do chat é o voltar do iOS; a gaveta abre mais para dentro (SessionsDrawer `edgeStart`). */}
+          <Stack.Screen name="s/[server]/[name]/index" />
           {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}
           <Stack.Screen name="s/[server]/[name]/page" options={{ headerShown: false }} />
           <Stack.Screen name="s/[server]/[name]/ask" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />

@@ -1,6 +1,9 @@
 import type { ComponentType } from 'react';
+import { Platform } from 'react-native';
 import * as Lucide from 'lucide-react-native';
+import { SymbolView } from 'expo-symbols';
 import { useUnistyles } from 'react-native-unistyles';
+import { sfSymbol } from './sfSymbols';
 
 // Exclui os membros do namespace que não são ícones (helpers/contexto do pacote).
 export type IconName = Exclude<keyof typeof Lucide, 'Icon' | 'createLucideIcon' | 'useLucideContext' | 'LucideProvider'>;
@@ -11,6 +14,7 @@ type IconCmp = ComponentType<{ size: number; color: string; strokeWidth?: number
 // Mira ~1.6px na tela em qualquer tamanho.
 const traco = (size: number) => Math.max(1.5, Math.min(2.5, (1.6 * 24) / size));
 
+// iOS: SF Symbol do sistema quando há equivalente; Android e nome sem símbolo ficam no Lucide.
 export function Icon({ name, size = 18, color }: { name: IconName; size?: number; color?: string }) {
   const { theme } = useUnistyles();
   const cor = color ?? theme.tokens.text.secondary;
@@ -19,5 +23,8 @@ export function Icon({ name, size = 18, color }: { name: IconName; size?: number
     console.warn('Icon: nome desconhecido', name);
     return <Lucide.CircleAlert size={size} color={cor} strokeWidth={1.75} />;
   }
-  return <Cmp size={size} color={cor} strokeWidth={traco(size)} />;
+  const lucide = <Cmp size={size} color={cor} strokeWidth={traco(size)} />;
+  const symbol = sfSymbol(name, Platform.OS);
+  if (!symbol) return lucide;
+  return <SymbolView name={symbol} size={size} tintColor={cor} weight="regular" fallback={lucide} />;
 }

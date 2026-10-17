@@ -78,6 +78,6 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     gap: 6,
   },
-  text: { flexShrink: 1, maxWidth: 220, fontSize: 13.5, color: theme.tokens.text.muted },
+  text: { flexShrink: 1, maxWidth: 220, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   disabled: { opacity: 0.5 },
 }));

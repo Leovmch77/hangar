@@ -138,5 +138,5 @@ const styles = StyleSheet.create((theme) => ({
   agenteCorpo: { flex: 1, minWidth: 0, gap: 2 },
   agenteCab: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
   agenteDesc: { flexShrink: 1, fontSize: theme.base.text.sm },
-  tag: { fontFamily: theme.base.fontMono, fontSize: 11, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
 }));

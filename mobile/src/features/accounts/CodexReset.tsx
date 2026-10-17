@@ -123,7 +123,7 @@ export function ResetFeedback({ server, credentialIds, onDefinitive }: {
 
 const styles = StyleSheet.create(theme => ({
   block: { gap: 8, marginTop: 8 },
-  text: { fontSize: 13, color: theme.tokens.text.secondary },
-  error: { fontSize: 13, color: theme.tokens.status.error },
+  text: { fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
+  error: { fontSize: theme.base.text.xs, color: theme.tokens.status.error },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
 }));

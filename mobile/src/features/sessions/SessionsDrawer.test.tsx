@@ -23,7 +23,7 @@ vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
   default: ({ renderNavigationView, children }: {
     renderNavigationView: (p: { value: number }) => ReactNode; children: (p: { value: number }) => ReactNode;
   }) => createElement('div', null, renderNavigationView(drawer.progress), children(drawer.progress)),
-  DrawerType: {}, DrawerKeyboardDismissMode: {},
+  DrawerType: {}, DrawerKeyboardDismissMode: {}, DrawerLockMode: { UNLOCKED: 0, LOCKED_CLOSED: 1 },
 }));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../ui/Glass', () => ({ Glass: () => createElement('span', { 'data-testid': 'glass' }) }));
@@ -33,7 +33,7 @@ vi.mock('./SessionList', async () => {
   return { SessionList: () => createElement('span', { 'data-testid': 'list', 'data-paused': String(useContext(WorkingMarkPaused)) }) };
 });
 
-import { SessionsDrawer } from './SessionsDrawer';
+import { drawerEdgeSlop, SessionsDrawer, shouldOpenDrawer } from './SessionsDrawer';
 
 it('vidro só com a gaveta aberta; a lista nasce na primeira abertura e fica, com as marcas paradas fechada', async () => {
   const container = document.createElement('div');
@@ -54,4 +54,15 @@ it('vidro só com a gaveta aberta; a lista nasce na primeira abertura e fica, co
   expect(list()).not.toBeNull();
   expect(list()!.getAttribute('data-paused')).toBe('true');
   act(() => root.unmount());
+});
+
+it('a faixa de arrasto começa depois da borda reservada ao voltar do iOS', () => {
+  // hitSlop do gesture-handler: left negativo desloca a origem para dentro, width fixa a faixa.
+  expect(drawerEdgeSlop(20)).toEqual({ left: -20, width: 32 });
+});
+
+it('abre com arrasto longo ou rápido, não com toque de leve', () => {
+  expect(shouldOpenDrawer(41, 0)).toBe(true);
+  expect(shouldOpenDrawer(10, 600)).toBe(true);
+  expect(shouldOpenDrawer(20, 100)).toBe(false);
 });

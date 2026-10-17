@@ -227,15 +227,15 @@ function ModelField({ cfg, models, onOpen, notice, failed }: {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   trigger: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  triggerText: { flex: 1, fontSize: 15 },
+  triggerText: { flex: 1, fontSize: theme.base.text.sm },
   panel: { gap: 8, padding: 4 },
   models: { maxHeight: 360 },
   block: { gap: 8 },
   row: { flexDirection: 'row' },
-  note: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
+  note: { fontSize: theme.base.text.xs, lineHeight: 18, paddingHorizontal: 4 },
   // 44 pt: alvo de toque mínimo.
   model: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderTopWidth: StyleSheet.hairlineWidth },
-  modelText: { fontSize: 14 },
-});
+  modelText: { fontSize: theme.base.text.xs },
+}));
