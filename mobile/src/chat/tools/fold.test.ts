@@ -30,6 +30,7 @@ describe('foldConversation', () => {
     let copies = 0;
     Array.prototype[Symbol.iterator] = function* () {
       for (const value of iterator.call(this)) { copies++; yield value; }
+      return undefined;
     };
     let rows;
     try { rows = foldConversation(items); } finally { Array.prototype[Symbol.iterator] = iterator; }
