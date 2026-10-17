@@ -382,12 +382,19 @@ pub(super) struct Worktrees {
     size_poll: bool,
     size_tries: u32,
     /// Repositórios cujo fetch falhou na última atualização.
-    fetch_failed: Vec<String>,
+    fetch_failed: Vec<(String, String)>,
 }
 
 impl Worktrees {
     pub(super) fn status(&self, server: &str, path: &str) -> Option<&WorktreeStatus> { self.cache.get(&worktree_id(server, path)) }
     fn busy(&self) -> bool { self.deleting || self.create.as_ref().is_some_and(|c| c.busy) }
+
+    fn fetch_failure_labels(&self) -> Vec<String> {
+        self.fetch_failed.iter().map(|(server, repo)| {
+            let machine = self.machines.get(server).map(|m| m.label.as_str()).unwrap_or(server);
+            format!("{machine} · {}", base_name(repo))
+        }).collect()
+    }
 
     fn forget(&mut self, w: &WorktreeStatus) {
         self.cache.remove(&w.id());
@@ -624,7 +631,8 @@ impl Hangar {
         // Todos ao mesmo tempo: cada fetch é um repositório diferente, e o progresso conta o que já voltou.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // A que não responder (tarefa que caiu sem mandar nada) entra como falha, nunca some da conta.
-        let mut pending: HashSet<String> = repos.iter().map(|r| worktree_id(&r.server, &r.repo)).collect();
+        let mut pending: HashMap<String, (String, String)> = repos.iter()
+            .map(|r| (worktree_id(&r.server, &r.repo), (r.server.clone(), r.repo.clone()))).collect();
         for repo in repos {
             let api = self.worktree_api(&repo.server);
             let tx = tx.clone();
@@ -642,7 +650,7 @@ impl Hangar {
             let mut failed = Vec::new();
             while let Some((id, repo, ok)) = rx.recv().await {
                 pending.remove(&id);
-                if !ok { failed.push(format!("{} · {}", repo.server, repo.repo)); }
+                if !ok { failed.push((repo.server, repo.repo)); }
                 let current = this.update(cx, |this, cx| {
                     let current = this.worktrees.fetch.seq == seq;
                     if current { this.worktrees.fetch_progress.0 += 1; cx.notify(); }
@@ -650,7 +658,7 @@ impl Hangar {
                 });
                 if !matches!(current, Ok(true)) { return; }
             }
-            failed.extend(pending);
+            failed.extend(pending.into_values());
             let _ = this.update(cx, |this, cx| if this.worktrees.fetch.finish(seq, Ok(())) {
                 this.worktrees.fetch_failed = failed;
                 this.load_worktrees(false, cx);
@@ -1008,7 +1016,7 @@ impl Hangar {
 
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
-            .children(self.worktrees.fetch_failed.iter().map(|repo| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", &base_name(repo))]), theme::warning())));
+            .children(self.worktrees.fetch_failure_labels().iter().map(|label| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", label)]), theme::warning())));
         let repos = self.worktrees.repos.ok().map(Vec::as_slice).unwrap_or_default();
         let now = super::side::now_seconds();
         let selected = self.worktrees.server_filter.as_deref();
@@ -1767,6 +1775,15 @@ mod tests {
         assert_eq!(wt.detail.ok().unwrap().dirty, 3);
         assert_eq!(wt.status("a", "/r/shared").unwrap().dirty, 3);
         assert_eq!(wt.repos.ok().unwrap().iter().find(|r| r.server == "a").unwrap().worktrees[0].dirty, 3);
+    }
+
+    #[test]
+    fn remote_fetch_failures_name_each_machine_even_when_repositories_have_the_same_name() {
+        let mut wt = Worktrees::default();
+        wt.begin_machines(&[("a".into(), "Desktop".into()), ("b".into(), "Notebook".into())]);
+        wt.fetch_failed = vec![("a".into(), "/projects/repo".into()), ("b".into(), "/projects/repo".into()),
+            ("removed-machine".into(), "/projects/repo".into())];
+        assert_eq!(wt.fetch_failure_labels(), ["Desktop · repo", "Notebook · repo", "removed-machine · repo"]);
     }
 
     #[test]
