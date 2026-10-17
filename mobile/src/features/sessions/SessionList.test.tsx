@@ -14,6 +14,10 @@ const calls = vi.hoisted(() => ({
   push: vi.fn(),
   organizar: 'sessions',
   realRow: false,
+  listHeight: 4000,
+  listContentSize: null as ((height: number) => void) | null,
+  listLayout: null as ((height: number) => void) | null,
+  scrollTo: vi.fn(),
   listeners: new Map<string, (event: { data: string }) => void>(),
   stream: { addEventListener: vi.fn(), close: vi.fn(), onerror: null },
   sessions: [{ name: 'fixture', state: 'idle', jsonl: '/tmp/fixture.jsonl' }] as SessionInfo[],
@@ -80,6 +84,9 @@ vi.mock('../../paraglide/messages', () => ({ ...Object.fromEntries((
 ).split(' ').map((key) => [key, () => key])),
   home_sessions_more_ready: ({ n }: { n: number }) => `home_sessions_more_ready:${n}`,
   lista_servidor_offline: ({ label }: { label: string }) => `${label}:offline`,
+  pair_leave_outside: ({ dono }: { dono: string }) => `leave-${dono}`,
+  pair_from_owner: ({ dono }: { dono: string }) => `from-${dono}`,
+  pair_level_view: () => 'view-only',
 }));
 
 interface Section { id: string; data: AggSession[] }
@@ -89,16 +96,53 @@ vi.mock('react-native', async (original) => ({
   RefreshControl: () => null,
   TextInput: ({ value, onChangeText, accessibilityLabel }: { value: string; onChangeText: (value: string) => void; accessibilityLabel: string }) =>
     React.createElement('input', { value, 'aria-label': accessibilityLabel, onInput: (event: React.FormEvent<HTMLInputElement>) => onChangeText(event.currentTarget.value) }),
-  SectionList: ({ sections, ListHeaderComponent, ListEmptyComponent, renderSectionHeader, renderSectionFooter, renderItem }: {
+  SectionList: ({ ref, sections, ListHeaderComponent, ListEmptyComponent, renderSectionHeader, renderSectionFooter, renderItem,
+    contentOffset, onScroll, onScrollBeginDrag, onLayout, onContentSizeChange }: {
+    ref?: React.Ref<{ getScrollResponder: () => { scrollTo: (offset: { x: number; y: number; animated: boolean }) => void } }>;
     sections: Section[]; ListHeaderComponent: React.ReactNode; ListEmptyComponent: React.ReactNode;
+    contentOffset?: { x: number; y: number };
+    onScroll?: (event: { nativeEvent: { contentOffset: { x: number; y: number } } }) => void;
+    onScrollBeginDrag?: (event: { nativeEvent: { contentOffset: { x: number; y: number } } }) => void;
+    onLayout?: (event: { nativeEvent: { layout: { width: number; height: number; x: number; y: number } } }) => void;
+    onContentSizeChange?: (width: number, height: number) => void;
     renderSectionFooter?: (props: { section: Section }) => React.ReactNode;
     renderSectionHeader: (props: { section: Section }) => React.ReactNode;
-    renderItem: (props: { item: AggSession; section: Section }) => React.ReactNode;
-  }) => React.createElement('div', null, ListHeaderComponent, sections.length ? sections.map((section) =>
-    React.createElement('div', { key: section.id, 'data-section': section.id }, renderSectionHeader({ section }),
-      section.data.map((item) => React.createElement(React.Fragment, { key: `${item.serverId}::${item.name}` }, renderItem({ item, section }))),
-      renderSectionFooter?.({ section }),
-    )) : ListEmptyComponent),
+    renderItem: (props: { item: AggSession; section: Section; index: number }) => React.ReactNode;
+  }) => {
+    const list = React.useRef<HTMLDivElement>(null);
+    const viewport = React.useRef(300);
+    const height = React.useRef(calls.listHeight);
+    const scroll = (offset: { x: number; y: number }) => {
+      if (!list.current) return;
+      list.current.scrollLeft = offset.x;
+      list.current.scrollTop = Math.max(0, Math.min(offset.y, height.current - viewport.current));
+      onScroll?.({ nativeEvent: { contentOffset: { x: list.current.scrollLeft, y: list.current.scrollTop } } });
+    };
+    React.useImperativeHandle(ref, () => ({ getScrollResponder: () => ({ scrollTo: (offset: { x: number; y: number; animated: boolean }) => {
+      calls.scrollTo(offset);
+      scroll(offset);
+    } }) }));
+    calls.listContentSize = (value) => { height.current = value; onContentSizeChange?.(390, value); };
+    calls.listLayout = (value) => {
+      viewport.current = value;
+      onLayout?.({ nativeEvent: { layout: { width: 390, height: value, x: 0, y: 0 } } });
+    };
+    React.useLayoutEffect(() => {
+      scroll(contentOffset ?? { x: 0, y: 0 });
+      calls.listLayout?.(viewport.current);
+      calls.listContentSize?.(height.current);
+    }, []);
+    return React.createElement('div', { ref: list, 'data-native-list': true,
+      onTouchStart: () => onScrollBeginDrag?.({ nativeEvent: { contentOffset: { x: list.current!.scrollLeft, y: list.current!.scrollTop } } }),
+      onScroll: (event: React.UIEvent<HTMLDivElement>) => onScroll?.({ nativeEvent: {
+        contentOffset: { x: event.currentTarget.scrollLeft, y: event.currentTarget.scrollTop },
+      } }),
+    }, ListHeaderComponent, sections.length ? sections.map((section) =>
+      React.createElement('div', { key: section.id, 'data-section': section.id }, renderSectionHeader({ section }),
+        section.data.map((item, index) => React.createElement(React.Fragment, { key: `${item.serverId}::${item.name}` }, renderItem({ item, section, index }))),
+        renderSectionFooter?.({ section }),
+      )) : ListEmptyComponent);
+  },
 }));
 
 import { useServers } from '../../stores/servers';
@@ -129,6 +173,9 @@ beforeEach(() => {
   calls.deleteSession.mockReset();
   calls.organizar = 'sessions';
   calls.realRow = false;
+  calls.listHeight = 4000;
+  calls.listContentSize = null;
+  calls.listLayout = null;
   calls.sessions = [{ name: 'fixture', state: 'idle', jsonl: '/tmp/fixture.jsonl' }];
   calls.listeners.clear();
   calls.stream.addEventListener.mockImplementation((event: string, listener: (event: { data: string }) => void) => calls.listeners.set(event, listener));
@@ -139,6 +186,15 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await act(async () => {
+    [...container.querySelectorAll('button')].find((button) => button.textContent === 'sessao_recolher')?.click();
+    const list = container.querySelector<HTMLDivElement>('[data-native-list]');
+    if (list) {
+      list.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event('scroll'));
+    }
+  });
   await act(async () => root.unmount());
   _resetSessionsForTests();
   container.remove();
@@ -193,6 +249,139 @@ describe('SessionList', () => {
     expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(calls.push.mock.invocationCallOrder[0]);
   });
 
+  it('home faz agrupamento por servidor dentro dos estados e mantém prontas e pares globais', async () => {
+    calls.realRow = true;
+    await mount({ variant: 'home' });
+    const row = useSessions.getState().rows[0];
+    const session = (name: string, state: AggSession['state'], serverId: string, last_activity = 0): AggSession => ({
+      ...row, name, state, serverId, serverLabel: serverId === 'srv1' ? 'machine-a' : 'machine-b', last_activity,
+    });
+    const rows = [
+      session('waiting-a1', 'awaiting_input', 'srv1'), session('waiting-b', 'awaiting_input', 'srv2'),
+      session('waiting-a2', 'awaiting_input', 'srv1'),
+      session('working-b1', 'working', 'srv2'), session('working-a', 'working', 'srv1'),
+      session('working-b2', 'working', 'srv2'),
+      session('ready-a-old', 'idle', 'srv1', 100), session('ready-b-new', 'idle', 'srv2', 400),
+      session('ready-a-new', 'idle', 'srv1', 300), session('ready-b-old', 'idle', 'srv2', 200),
+      { ...session('outside-partner', 'awaiting_input', 'outside'), serverLabel: 'outside-machine',
+        outside: { alias: 'peer', owner: 'owner', localServerId: 'srv2', localSession: 'working-b1' } },
+    ];
+    await act(async () => useSessions.setState({ rows, loading: false }));
+    const sequence = (state: string) => [...container.querySelectorAll(`[data-section="${state}"] [role="header"], [data-section="${state}"] button[aria-label]`)]
+      .map((el) => el.getAttribute('aria-label')!.split(',')[0]);
+    expect(sequence('awaiting_input')).toEqual(['home_sessions_awaiting', 'machine-a', 'waiting-a1', 'waiting-a2', 'machine-b', 'waiting-b']);
+    expect(sequence('working')).toEqual(['home_sessions_working', 'machine-b', 'working-b1', 'outside-partner', 'working-b2', 'machine-a', 'working-a']);
+    expect(sequence('idle')).toEqual(['home_sessions_ready', 'machine-b', 'ready-b-new']);
+    expect(container.querySelector('[aria-label="home_sessions_awaiting, 3"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="home_sessions_working, 3"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="home_sessions_ready, 4"]')).not.toBeNull();
+    expect(container.querySelector('[role="header"][aria-label="outside-machine"]')).toBeNull();
+    expect(container.textContent).toContain('home_sessions_more_ready:3');
+    await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'home_sessions_more_ready:3')!.click());
+    expect(sequence('idle')).toEqual(['home_sessions_ready', 'machine-b', 'ready-b-new', 'ready-b-old', 'machine-a', 'ready-a-new', 'ready-a-old']);
+    await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'sessao_recolher')!.click());
+    expect(sequence('idle')).toEqual(['home_sessions_ready', 'machine-b', 'ready-b-new']);
+  });
+
+  it('gaveta mantém agrupamento por projeto sem o agrupamento por servidor da home', async () => {
+    calls.realRow = true;
+    await mount();
+    const row = useSessions.getState().rows[0];
+    await act(async () => useSessions.setState({ loading: false, rows: [
+      { ...row, name: 'from-a', cwd: '/repo/shared', state: 'working', serverLabel: 'machine-a' },
+      { ...row, name: 'from-b', cwd: '/repo/shared', state: 'working', serverId: 'srv2', serverLabel: 'machine-b' },
+    ] }));
+    expect(container.querySelector('[role="header"][aria-label="machine-a"]')).toBeNull();
+    expect(container.querySelector('[role="header"][aria-label="machine-b"]')).toBeNull();
+    expect([...container.querySelectorAll('button[aria-label^="from-"]')].map((el) => el.getAttribute('aria-label')!.split(',')[0])).toEqual(['from-a', 'from-b']);
+    expect(container.querySelector('button[aria-label="shared, 2 lista_sessoes_plural"]')).not.toBeNull();
+  });
+
+  it('home preserva expansão e posição ao abrir sessão e voltar com remount', async () => {
+    calls.realRow = true;
+    calls.sessions = [
+      { name: 'ready-old', state: 'idle', jsonl: '/tmp/old.jsonl', last_activity: 100 },
+      { name: 'ready-new', state: 'idle', jsonl: '/tmp/new.jsonl', last_activity: 300 },
+      { name: 'ready-middle', state: 'idle', jsonl: '/tmp/middle.jsonl', last_activity: 200 },
+    ];
+    await mount({ variant: 'home' });
+    // A tela inicial e o chat também retêm o store durante a navegação.
+    const release = useSessions.getState().retain();
+    try {
+      await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'home_sessions_more_ready:2')!.click());
+      const list = container.querySelector<HTMLDivElement>('[data-native-list]')!;
+      await act(async () => { list.scrollTop = 480; list.dispatchEvent(new Event('scroll')); });
+      const row = () => container.querySelector<HTMLButtonElement>('button[aria-label^="ready-old,"]');
+      expect(row()).not.toBeNull();
+      await act(async () => row()!.click());
+      expect(calls.push).toHaveBeenCalledWith('/s/srv1/ready-old');
+      await act(async () => root.render(null));
+      await mount({ variant: 'drawer' });
+      const drawer = container.querySelector<HTMLDivElement>('[data-native-list]')!;
+      expect(drawer.scrollTop).toBe(0);
+      await act(async () => { drawer.scrollTop = 75; drawer.dispatchEvent(new Event('scroll')); });
+      await act(async () => root.render(null));
+      await mount({ variant: 'home' });
+      expect(row(), 'pronta antiga continua visível após remontar a home').not.toBeNull();
+      expect(container.textContent).not.toContain('home_sessions_more_ready:2');
+      expect(container.querySelector<HTMLDivElement>('[data-native-list]')!.scrollTop, 'posição da home não herda a da gaveta').toBe(480);
+    } finally { release(); }
+  });
+
+  it.each(['crescimento', 'novo remount', 'gesto'])('home restaura lista longa com altura insuficiente: %s', async (scenario) => {
+    calls.realRow = true;
+    calls.sessions = Array.from({ length: 40 }, (_, index) => ({
+      name: `ready-${index}`, state: 'idle', jsonl: `/tmp/ready-${index}.jsonl`, last_activity: 100 - index,
+    }));
+    await mount({ variant: 'home' });
+    const release = useSessions.getState().retain();
+    const list = () => container.querySelector<HTMLDivElement>('[data-native-list]')!;
+    try {
+      await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'home_sessions_more_ready:39')!.click());
+      await act(async () => { list().scrollTop = 1500; list().dispatchEvent(new Event('scroll')); });
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label^="ready-20,"]')!.click());
+      expect(calls.push).toHaveBeenCalledWith('/s/srv1/ready-20');
+      await act(async () => root.render(null));
+      calls.listHeight = 500;
+      await mount({ variant: 'home' });
+      expect(list().scrollTop, 'altura nativa inicial limita a rolagem').toBe(200);
+      expect(container.textContent).not.toContain('home_sessions_more_ready:39');
+      if (scenario === 'novo remount') {
+        await act(async () => root.render(null));
+        calls.listHeight = 2000;
+        await mount({ variant: 'home' });
+        expect(list().scrollTop, 'scroll intermediário não substitui o alvo guardado').toBe(1500);
+      } else {
+        await act(async () => calls.listContentSize!(1000));
+        expect(list().scrollTop, 'crescimento permite avançar até o novo limite').toBe(700);
+        if (scenario === 'gesto') {
+          await act(async () => {
+            list().dispatchEvent(new Event('touchstart', { bubbles: true }));
+            list().scrollTop = 120;
+            list().dispatchEvent(new Event('scroll'));
+          });
+          const attempts = calls.scrollTo.mock.calls.length;
+          await act(async () => { calls.listContentSize!(2500); calls.listLayout!(200); });
+          expect(calls.scrollTo).toHaveBeenCalledTimes(attempts);
+          expect(list().scrollTop, 'gesto cancela reposicionamento automático').toBe(120);
+          await act(async () => root.render(null));
+          calls.listHeight = 2500;
+          await mount({ variant: 'home' });
+          expect(list().scrollTop, 'próximo remount guarda a posição escolhida no gesto').toBe(120);
+        } else {
+          await act(async () => calls.listLayout!(200));
+          expect(list().scrollTop, 'layout também retenta a posição pendente').toBe(800);
+          await act(async () => calls.listContentSize!(2000));
+          expect(list().scrollTop, 'altura suficiente alcança o alvo').toBe(1500);
+          const attempts = calls.scrollTo.mock.calls.length;
+          await act(async () => { calls.listContentSize!(2500); calls.listLayout!(300); });
+          expect(calls.scrollTo).toHaveBeenCalledTimes(attempts);
+          expect(list().scrollTop).toBe(1500);
+        }
+      }
+    } finally { release(); }
+  });
+
   it('home mostra recolhida a pronta que terminou por último', async () => {
     await mount({ variant: 'home' });
     const row = useSessions.getState().rows[0];
@@ -227,6 +416,7 @@ describe('SessionList', () => {
     expect(container.querySelector('[aria-label="config_modal_titulo"]')).toBeNull();
     await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'home_sessions_more_ready:1')!.click());
     expect(container.querySelector('[data-row="srv2::ready-b"]')).not.toBeNull();
+    await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'sessao_recolher')!.click());
     await act(async () => container.querySelector<HTMLButtonElement>('[data-open="srv2::waiting-b"]')!.click());
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(calls.push).toHaveBeenCalledWith('/s/srv2/waiting-b');

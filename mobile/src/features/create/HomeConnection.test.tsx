@@ -17,13 +17,13 @@ vi.mock('react-native', async (original) => {
       React.createElement('textarea', { value, 'aria-label': accessibilityLabel, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onChangeText?.(event.currentTarget.value) }),
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: {
       sections: { id: string; data: SessionInfo[] }[];
-      renderItem: (args: { item: SessionInfo; section: unknown }) => ReactNode;
+      renderItem: (args: { item: SessionInfo; section: unknown; index: number }) => ReactNode;
       renderSectionHeader: (args: { section: unknown }) => ReactNode;
       renderSectionFooter?: (args: { section: unknown }) => ReactNode;
       ListHeaderComponent?: ReactNode; ListEmptyComponent?: ReactNode;
     }) => React.createElement('div', null, ListHeaderComponent, sections.length ? sections.map((section) =>
-      React.createElement('div', { key: section.id }, renderSectionHeader({ section }), section.data.map((item) =>
-        React.createElement(React.Fragment, { key: item.name }, renderItem({ item, section }))), renderSectionFooter?.({ section }))) : ListEmptyComponent),
+      React.createElement('div', { key: section.id }, renderSectionHeader({ section }), section.data.map((item, index) =>
+        React.createElement(React.Fragment, { key: item.name }, renderItem({ item, section, index }))), renderSectionFooter?.({ section }))) : ListEmptyComponent),
     RefreshControl: () => null,
     BackHandler: { addEventListener: () => ({ remove() {} }) },
     PanResponder: { create: () => ({ panHandlers: {} }) },

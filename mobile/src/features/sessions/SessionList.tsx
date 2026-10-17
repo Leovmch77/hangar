@@ -45,6 +45,9 @@ const ROTULO_AGRUPAR: Record<GroupBy, () => string> = {
 // corpo da resposta (o `warning` do excluir), e aplicado a um Error devolve o código cru.
 const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+// O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
+const homeView = { readyExpanded: false, contentOffset: { x: 0, y: 0 } };
+
 // Um grupo do painel: "Precisa de você" no topo, depois os grupos do Agrupar por. `total` sobrevive
 // ao grupo recolhido (aí `data` fica vazio e o cabeçalho continua contando).
 interface Section {
@@ -77,7 +80,16 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const agrupar = useAparencia((s) => s.agrupar);
   const organizar = useAparencia((s) => s.organizar);
   const conversas = !home && organizar === 'conversations';
-  const [readyExpanded, setReadyExpanded] = useState(false);
+  const [readyExpanded, setReadyExpanded] = useState(() => home && homeView.readyExpanded);
+  const initialHomeOffset = useRef(homeView.contentOffset).current;
+  const homeList = useRef<SectionList<AggSession, Section>>(null);
+  const pendingHomeOffset = useRef<{ x: number; y: number } | null>(
+    home && (initialHomeOffset.x !== 0 || initialHomeOffset.y !== 0) ? initialHomeOffset : null,
+  );
+  const restoreHomeOffset = useCallback(() => {
+    const target = pendingHomeOffset.current;
+    if (target) homeList.current?.getScrollResponder()?.scrollTo({ ...target, animated: false });
+  }, []);
   const activeId = useServers((s) => s.activeId);
   const byServer = useSessions((s) => s.byServer);
   const [filtro, setFiltro] = useState('');
@@ -252,7 +264,13 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
       if (state === 'idle') anchors.sort((a, b) => (b.last_activity ?? 0) - (a.last_activity ?? 0));
       if (!anchors.length) return [];
       const visible = state === 'idle' && !readyExpanded ? anchors.slice(0, 1) : anchors;
-      const data = visible.flatMap((anchor) => [anchor, ...rows.filter((row) => row.state !== 'dead' &&
+      const serverGroups = new Map<string, AggSession[]>();
+      for (const anchor of visible) {
+        const group = serverGroups.get(anchor.serverId) ?? [];
+        group.push(anchor);
+        serverGroups.set(anchor.serverId, group);
+      }
+      const data = [...serverGroups.values()].flat().flatMap((anchor) => [anchor, ...rows.filter((row) => row.state !== 'dead' &&
         row.outside?.localServerId === anchor.serverId && row.outside.localSession === anchor.name)]);
       const label = state === 'awaiting_input' ? m.home_sessions_awaiting()
         : state === 'working' ? m.home_sessions_working() : m.home_sessions_ready();
@@ -440,6 +458,22 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     corpo = (
       <SectionList
         sections={sections}
+        ref={home ? homeList : undefined}
+        contentOffset={home ? initialHomeOffset : undefined}
+        onLayout={home ? restoreHomeOffset : undefined}
+        onContentSizeChange={home ? restoreHomeOffset : undefined}
+        onScroll={home ? ({ nativeEvent: { contentOffset } }) => {
+          const target = pendingHomeOffset.current;
+          // A lista virtualizada pode ainda não ter altura para chegar à posição guardada.
+          if (target && (Math.abs(contentOffset.x - target.x) >= 1 || Math.abs(contentOffset.y - target.y) >= 1)) return;
+          pendingHomeOffset.current = null;
+          homeView.contentOffset = contentOffset;
+        } : undefined}
+        onScrollBeginDrag={home ? ({ nativeEvent: { contentOffset } }) => {
+          pendingHomeOffset.current = null;
+          homeView.contentOffset = contentOffset;
+        } : undefined}
+        scrollEventThrottle={home ? 16 : undefined}
         keyExtractor={(item) => `${item.serverId}::${item.name}`}
         // Sem cabeçalho fixo: o painel é vidro, e um cabeçalho fixo transparente deixaria as linhas
         // passarem por baixo do texto dele.
@@ -482,24 +516,36 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
           );
         }}
         renderSectionFooter={({ section }) => home && section.id === 'idle' && section.total > 1 ? (
-          <Pressable onPress={() => setReadyExpanded((value) => !value)} style={styles.moreReady}
+          <Pressable onPress={() => {
+            homeView.readyExpanded = !readyExpanded;
+            setReadyExpanded(homeView.readyExpanded);
+          }} style={styles.moreReady}
             accessibilityRole="button" accessibilityState={{ expanded: readyExpanded }}>
             <Text style={styles.moreReadyTxt}>{readyExpanded ? m.sessao_recolher() : m.home_sessions_more_ready({ n: section.total - 1 })}</Text>
           </Pressable>
         ) : null}
-        renderItem={({ item, section }) => (
-          <SessionRow
-            session={item}
-            compact={home}
-            mostrarServidor={variosServidores && (home || section.attention || modo !== 'server')}
-            onPress={abrir}
-            onGit={abrirGit}
-            onExcluir={excluir}
-            onRenomear={setRenomeando}
-            onResume={retomar}
-            onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
-            onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
-          />
+        renderItem={({ item, section, index }) => (
+          <>
+            {home && !item.outside && (index === 0 ||
+              (section.data[index - 1].outside?.localServerId ?? section.data[index - 1].serverId) !== item.serverId) ? (
+              <View style={styles.grupo} accessible accessibilityRole="header" accessibilityLabel={item.serverLabel}>
+                <View style={[styles.ponto, { backgroundColor: item.serverColor ?? theme.tokens.text.muted }]} />
+                <Text style={[styles.grupoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{item.serverLabel}</Text>
+              </View>
+            ) : null}
+            <SessionRow
+              session={item}
+              compact={home}
+              mostrarServidor={!home && variosServidores && (section.attention || modo !== 'server')}
+              onPress={abrir}
+              onGit={abrirGit}
+              onExcluir={excluir}
+              onRenomear={setRenomeando}
+              onResume={retomar}
+              onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
+              onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
+            />
+          </>
         )}
         ListEmptyComponent={home && machineErrors.length ? null
           : busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}

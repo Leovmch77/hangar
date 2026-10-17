@@ -1,7 +1,10 @@
-import type { AggSession } from '@hangar/core';
+import { grupoDaSessao, type AggSession, type GrupoSessoes } from '@hangar/core';
 
 export type HomeState = 'awaiting_input' | 'working' | 'idle';
-export interface HomeGroup { state: HomeState; total: number; sessions: AggSession[] }
+export interface HomeGroup { state: HomeState; total: number; servers: GrupoSessoes[] }
+
+// Memória da home entre rotas, sem virar preferência permanente.
+export const homeSessionsView = { readyExpanded: false, scrollTop: 0 };
 
 const ORDER: HomeState[] = ['awaiting_input', 'working', 'idle'];
 
@@ -12,6 +15,13 @@ export function groupHomeSessions(rows: AggSession[], readyExpanded: boolean): H
     if (!all.length) return [];
     // Prontas: a que terminou por último aparece primeiro, e é a que fica à vista recolhida.
     if (state === 'idle') all.sort((a, b) => (b.last_activity ?? 0) - (a.last_activity ?? 0));
-    return [{ state, total: all.length, sessions: state === 'idle' && !readyExpanded ? all.slice(0, 1) : all }];
+    const visible = state === 'idle' && !readyExpanded ? all.slice(0, 1) : all;
+    const servers = new Map<string, GrupoSessoes>();
+    for (const session of visible) {
+      const group = servers.get(session.serverId) ?? { ...grupoDaSessao(session, 'server'), sessions: [] };
+      group.sessions.push(session);
+      servers.set(group.id, group);
+    }
+    return [{ state, total: all.length, servers: [...servers.values()].sort((a, b) => a.label.localeCompare(b.label)) }];
   });
 }
