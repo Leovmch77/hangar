@@ -470,7 +470,7 @@ impl Executor {
             state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":since,"raised":raised});
             self.action(Action::SetRuntimeState {state}).await?;
         }
-        if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
+        if self.cleared(&*self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
         if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&self.snapshot().await?); }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1160,7 +1160,7 @@ impl Executor {
             && !matches!(result.payload["stage"].as_str(),Some("validate"|"identity"|"ready")) {self.footer_misses=None;}
         let clear_raised=slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload);
         if clear_raised {
-            let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
+            let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state.clone();
             state["preserve_binding"]=json!(true);
             state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":dispatched_at,"raised":sample().epoch_s});
             self.action(Action::SetRuntimeState {state}).await?;
@@ -1457,7 +1457,7 @@ impl Executor {
         let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         let legacy=if self.cleared(&current) {Vec::new()} else {super::queue::legacy_rows(&current)};
         for row in legacy {
-            let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences;
+            let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences.clone();
             let (Some(entry_id),Some((occurrence,normalized_text)))=(row["id"].as_str().map(str::to_owned),self.receipt.match_legacy(&row,&used)) else {continue;};
             // Falha numa legada não desfaz as despachadas já confirmadas: fica para a próxima rodada.
             match self.action(Action::ConfirmLegacy {entry_id,occurrence,normalized_text}).await {
@@ -1617,7 +1617,7 @@ impl Executor {
                 self.clear_watch=Some(now+self.options.clear_wait); return false;
             }
         }
-        let mut runtime=match self.queue.snapshot().await {Ok(state)=>state.runtime_state,Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}};
+        let mut runtime=match self.queue.snapshot().await {Ok(state)=>state.runtime_state.clone(),Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}};
         if let Some(fields)=runtime.as_object_mut() {fields.remove("clear_barrier"); fields.remove("preserve_binding");}
         if let Err(failure)=self.action(Action::SetRuntimeState {state:runtime}).await {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"trava do /clear não saiu do diário; tenta de novo");
