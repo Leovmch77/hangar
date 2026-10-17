@@ -4,7 +4,6 @@ import { esquecerRota, mergeImportedMachines, reconcilePairEntries, registrarDia
 import type { ExternalPair, InviteRedeemResult, LanInfo, PairAttach, Server } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { readIdentifier } from '../features/machines/api';
-import { toast } from '../ui/Toast';
 
 const KEY = 'cp_servers_v1';
 
@@ -35,6 +34,7 @@ function isPersisted(value: unknown): value is Persisted {
 export type AvisoServidores =
   | { tipo: 'persistencia' }
   | { tipo: 'vault_unread' }
+  | { tipo: 'identification'; message: string }
   | { tipo: 'token'; label: string };
 
 export interface ServersState {
@@ -180,7 +180,7 @@ export const useServers = create<ServersState>((set, get) => {
       if (!identity.identificador) throw new Error(m.mobile_machines_invalid_response());
       change((p) => ({ ...p, servers: p.servers.map((s) => s.id === server.id ? { ...s, label: identity.identificador } : s) }), false);
     } catch (error) {
-      if (isCurrent()) toast.aviso(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) warn({ tipo: 'identification', message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (naming.get(server.id) === controller) naming.delete(server.id);
     }

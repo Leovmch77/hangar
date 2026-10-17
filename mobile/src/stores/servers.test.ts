@@ -3,10 +3,8 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 const vault = vi.hoisted(() => new Map<string, string>());
 const diag = vi.hoisted(() => vi.fn());
 const probe = vi.hoisted(() => vi.fn());
-const warning = vi.hoisted(() => vi.fn());
 const realCore = await vi.importActual<typeof import('@hangar/core')>('@hangar/core');
 vi.mock('@hangar/core', () => ({ ...realCore, registrarDiag: diag, probeServerResponse: probe }));
-vi.mock('sonner-native', () => ({ toast: warning, Toaster: () => null }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(),
   setItemAsync: vi.fn(),
@@ -22,7 +20,6 @@ beforeEach(async () => {
   vault.clear();
   diag.mockClear();
   probe.mockReset().mockImplementation(async () => new Response(JSON.stringify({ identificador: '', lan_url: '' })));
-  warning.mockClear();
   vi.mocked(SecureStore.getItemAsync).mockReset().mockImplementation(async (k) => vault.get(k) ?? null);
   vi.mocked(SecureStore.setItemAsync).mockReset().mockImplementation(async (k, v) => { vault.set(k, v); });
   vi.mocked(SecureStore.deleteItemAsync).mockReset().mockImplementation(async (k) => { vault.delete(k); });
@@ -135,7 +132,7 @@ describe('proteção do cofre', () => {
     vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error('bloqueado'));
     await useServers.getState().load();
     useServers.getState().limparAviso();
-    const added = useServers.getState().add({ baseUrl: 'http://10.0.0.3:8765', token: 'memory-token' });
+    const added = useServers.getState().add({ baseUrl: 'http://10.0.0.3:8765', token: 'memory-token', label: 'fixture-memory' });
     await settle();
 
     expect(SecureStore.getItemAsync).toHaveBeenCalledTimes(2);
@@ -485,7 +482,7 @@ describe('label no add', () => {
     await settle();
     expect(useServers.getState().active()?.label).toBe('machine-home');
     expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe('machine-home');
-    expect(warning).not.toHaveBeenCalled();
+    expect(useServers.getState().aviso).toBeNull();
   });
 
   test('conserva o nome explícito em memória e no cofre', async () => {
@@ -571,7 +568,7 @@ describe('label no add', () => {
     expect(JSON.parse(vault.get(VAULT_KEY)!).servers[0].label).toBe(m.native_settings_group_server());
     const cause = failure === 'resposta vazia' ? m.mobile_machines_invalid_response()
       : failure === 'HTTP recusado' ? '503: identity-refused' : 'identity-offline';
-    expect(warning).toHaveBeenCalledExactlyOnceWith(cause, expect.any(Object));
+    expect(takeWarnings()).toEqual([{ tipo: 'identification', message: cause }]);
   });
 
   test('cadastro salvo descoberto durante load conserva apelido e não consulta nome', async () => {

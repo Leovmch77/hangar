@@ -64,7 +64,8 @@ export default function Layout() {
   // de um chat. O layout é o único lugar montado o tempo todo.
   useEffect(() => {
     if (!aviso) return;
-    toast.erro(
+    if (aviso.tipo === 'identification') toast.aviso(aviso.message);
+    else toast.erro(
       aviso.tipo === 'token'
         ? m.servidores_aviso_token({ label: aviso.label })
         : aviso.tipo === 'vault_unread'
