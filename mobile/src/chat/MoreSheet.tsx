@@ -50,6 +50,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
     : panes > 1 ? m.mods_celular_mostrar_paineis({ n: String(panes) }) : m.mods_celular_mostrar();
 
   const items: Item[] = [
+    { icon: 'Search', label: m.switcher_buscar_conversas(), route: 'search', onPress: () => router.push('/search' as never) },
     ...(hasMods ? [{ icon: 'PanelsTopLeft' as IconName, label: modsLabel, sub: m.mods_celular_sub(), route: 'mods',
       onPress: () => useMods.getState().setVisible(!visible) }] : []),
     ...(recarregar ? [{

@@ -73,6 +73,20 @@ test.each([guest.id, removed.id, 'unknown'])('git não aparece no servidor %s me
   expect(gitButton(container)).toBeNull();
 });
 
+test('busca global fecha Mais e abre rota independente da sessão sem mudar ações existentes', async () => {
+  const { container, onClose } = await render(own.id);
+  const search = container.querySelector<HTMLButtonElement>(`[aria-label="${m.switcher_buscar_conversas()}"]`);
+  expect(search, 'ação de busca global').not.toBeNull();
+  await act(async () => { search!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/search');
+  boundary.push.mockClear(); onClose.mockClear();
+  await act(async () => { container.querySelector<HTMLButtonElement>(`[aria-label="${m.arq_aba()}"]`)!.click(); });
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/files');
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
 test('servidor próprio da conversa oferece compartilhar entre grupo e arquivos mesmo com convidado ativo', async () => {
   const { container, onClose } = await render(own.id);
   const share = shareButton(container);

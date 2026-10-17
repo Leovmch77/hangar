@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { configureApi } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { verifyLoginMachine } from './loginMachine';
+import * as m from '../../paraglide/messages';
 
 const mocks = vi.hoisted(() => ({ vault: new Map<string, string>(), fetch: vi.fn(), warning: vi.fn() }));
 vi.mock('expo-secure-store', () => ({
@@ -14,7 +15,7 @@ const baseUrl = 'http://10.0.2.2:8765';
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
   status, headers: { 'Content-Type': 'application/json' },
 });
-const addMachine = (label = '10.0.2.2') => useServers.getState().add({ baseUrl, token: 'machine-token', label });
+const addMachine = (label: string = m.native_settings_group_server()) => useServers.getState().add({ baseUrl, token: 'machine-token', label });
 
 beforeEach(async () => {
   mocks.vault.clear();
@@ -89,7 +90,7 @@ describe('verifyLoginMachine', () => {
 
   test('verifica a máquina passada mesmo com outra ativa e persiste o identificador do IP', async () => {
     const machine = addMachine();
-    const other = useServers.getState().add({ baseUrl: 'https://other.test', token: 'other-token' });
+    const other = useServers.getState().add({ baseUrl: 'https://other.test', token: 'other-token', label: 'fixture-other' });
     const paths: string[] = [];
     loginNetwork(async (url: string, init: RequestInit) => {
       paths.push(url);
@@ -109,7 +110,7 @@ describe('verifyLoginMachine', () => {
     expect(mocks.warning).not.toHaveBeenCalled();
   });
 
-  test('identificador vazio mantém o IP completo', async () => {
+  test('identificador vazio mantém rótulo neutro e avisa resposta inválida', async () => {
     const machine = addMachine();
     loginNetwork(async (url: string) => url.endsWith('/api/sessions')
       ? json([]) : json({ identificador: '  ', lan_url: '' }));
@@ -117,8 +118,8 @@ describe('verifyLoginMachine', () => {
     await verifyLoginMachine(machine, true);
 
     expect(useServers.getState().servers).toEqual([machine]);
-    expect(useServers.getState().servers[0].label).toBe('10.0.2.2');
-    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(useServers.getState().servers[0].label).toBe(m.native_settings_group_server());
+    expect(mocks.warning).toHaveBeenCalledExactlyOnceWith(m.mobile_machines_invalid_response(), expect.any(Object));
   });
 
   test('cadastro existente preserva o apelido e não consulta identidade', async () => {
@@ -141,14 +142,14 @@ describe('verifyLoginMachine', () => {
     ['identificador de tipo inválido', () => json({ identificador: 10 }), /resposta inválida|invalid response/i],
     ['identificador ausente', () => json({}), /resposta inválida|invalid response/i],
     ['tempo esgotado', () => { throw new DOMException('identity-timeout', 'TimeoutError'); }, 'identity-timeout'],
-  ] as const)('%s avisa a causa sem desfazer login nem truncar o IP', async (_name, identity, cause) => {
+  ] as const)('%s avisa a causa sem desfazer login nem usar IP como nome', async (_name, identity, cause) => {
     const machine = addMachine();
     loginNetwork(async (url: string) => url.endsWith('/api/sessions') ? json([]) : identity());
 
     await expect(verifyLoginMachine(machine, true)).resolves.toBeUndefined();
 
     expect(useServers.getState().servers).toEqual([machine]);
-    expect(useServers.getState().servers[0].label).toBe('10.0.2.2');
+    expect(useServers.getState().servers[0].label).toBe(m.native_settings_group_server());
     expect(useServers.getState().activeId).toBe(machine.id);
     expect(mocks.warning).toHaveBeenCalledWith(cause instanceof RegExp ? expect.stringMatching(cause) : cause, expect.any(Object));
   });

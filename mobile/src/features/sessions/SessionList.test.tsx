@@ -72,7 +72,7 @@ vi.mock('./RenameSheet', () => ({ RenameSheet: () => null }));
 vi.mock('../worktrees/WorktreeSheet', () => ({ WorktreeSheet: () => null }));
 vi.mock('../../paraglide/messages', () => ({ ...Object.fromEntries((
   'lista_agrupar_nenhum lista_agrupar_servidor lista_agrupar_projeto lista_agrupar ' +
-  'native_brand lista_buscar lista_filtrar lista_filtro_limpar native_connected config_modal_titulo ' +
+  'native_brand lista_buscar lista_filtrar lista_filtro_limpar native_connected config_modal_titulo switcher_buscar_conversas ' +
   'native_new_chat_title native_sidebar_all_sessions lista_sessoes_plural sessao_expandir sessao_recolher ' +
   'lista_carregando lista_vazia_filtro lista_nenhuma_ativa comum_cancelar sessao_excluir sessao_excluir_curto servidor_nao_existe ' +
   'comum_carregando lista_nenhum_servidor lista_pareie_qr native_sidebar_awaiting home_sessions_awaiting home_sessions_working home_sessions_ready sessao_recolher ' +
@@ -170,6 +170,15 @@ describe('SessionList', () => {
     expect(useServers.getState().servers.map((s) => s.id)).toEqual(['srv1']);
     expect(calls.deleteSession).not.toHaveBeenCalled();
     expect(calls.push).not.toHaveBeenCalled();
+  });
+
+  it.each(['home', 'conversations', 'sessions'])('acesso à busca global permanece visível em %s', async (mode) => {
+    calls.organizar = mode === 'conversations' ? 'conversations' : 'sessions';
+    await mount({ variant: mode === 'home' ? 'home' : 'drawer' });
+    const search = container.querySelector<HTMLButtonElement>('[aria-label="switcher_buscar_conversas"]');
+    expect(search, 'ação Buscar nas conversas').not.toBeNull();
+    await act(async () => search!.click());
+    expect(calls.push).toHaveBeenCalledExactlyOnceWith('/search');
   });
 
   it('home mostra recolhida a pronta que terminou por último', async () => {
