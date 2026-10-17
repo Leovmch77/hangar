@@ -92,7 +92,8 @@ pub fn parse_current_effort(pane: &str) -> Option<String> {
 pub fn effort_confirm_open(pane: &str) -> bool { P.confirm.is_match(pane) }
 
 pub fn parse_result_line(pane: &str) -> Option<String> {
-    lines(pane).into_iter().rev().map(|l| trim(trim(l).trim_start_matches('⎿'))).find(|s| s.starts_with("Set model to") || s.starts_with("Kept model")).map(str::to_owned)
+    // A borda `│` é do painel do plugin ao lado da conversa, na mesma linha do pane.
+    lines(pane).into_iter().rev().map(|l| trim(trim(l.split('│').next().unwrap_or(l)).trim_start_matches('⎿'))).find(|s| s.starts_with("Set model to") || s.starts_with("Kept model")).map(str::to_owned)
 }
 
 /// A validação do Python antes da trava, com o mesmo texto: palavra-chave e esforço em minúsculas sem
@@ -379,6 +380,13 @@ mod tests {
             Some("Set model to Sonnet 4.6 for this session only with high effort"));
         assert!(parse_result_line("  ⎿  Set model to Opus 4.8 and saved as your default for new sessions\n❯ \n").unwrap().contains("saved as your default"));
         assert_eq!(parse_result_line("❯ \nsem resultado\n"), None);
+    }
+
+    /// Painel do plugin à direita da conversa: a borda dele e o espaço até ela não são do resultado.
+    #[test]
+    fn result_line_stops_at_the_side_panel_border() {
+        assert_eq!(parse_result_line("  ⎿  Set model to Opus 4.8 for this session only with medium effort      │ hangar-btw   \n❯ \n").as_deref(),
+            Some("Set model to Opus 4.8 for this session only with medium effort"));
     }
 
     /// B9 (`test_set_model_effort_requires_model_or_effort`, `test_set_model_effort_rejects_malformed_model`,
