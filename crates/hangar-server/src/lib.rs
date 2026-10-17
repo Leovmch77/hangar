@@ -24,6 +24,7 @@ pub mod mods;
 pub mod pages;
 pub(crate) mod queue_feed;
 pub mod plugin;
+pub mod problem_gate;
 pub mod proxy;
 pub mod query;
 pub mod queue_panel;

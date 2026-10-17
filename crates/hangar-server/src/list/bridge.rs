@@ -259,6 +259,9 @@ pub struct ListBridge {
     pub published: Arc<crate::state::published::Published>,
     plugin_runtime: std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>,
     plugin_projection: Mutex<HashMap<String, (crate::interactions::InteractionBinding, hangar_api::state::StateEvent)>>,
+    /// O `problema` de cada linha só sai depois de valer pelo prazo (`problem_gate`); o tique da lista reconfere.
+    problems: Mutex<HashMap<String, crate::problem_gate::ProblemGate>>,
+    problem_hold_ms: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     test_plugins: Mutex<Option<BTreeMap<String, Result<crate::state::facts::PluginReading, String>>>>,
     /// Transcripts da última rodada do dono, para a limpeza das páginas; `None` = rodada incerta.
@@ -285,7 +288,8 @@ impl ListBridge {
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
             state_facts: Arc::default(), demoted, published: Arc::default(), live_jsonl: Mutex::default(),
-            plugin_runtime: std::sync::OnceLock::new(), plugin_projection: Mutex::default(),
+            plugin_runtime: std::sync::OnceLock::new(), plugin_projection: Mutex::default(), problems: Mutex::default(),
+            problem_hold_ms: std::sync::atomic::AtomicU64::new(if cfg!(test) { 0 } else { crate::problem_gate::HOLD.as_millis() as u64 }),
             #[cfg(test)] test_plugins: Mutex::default(),
         }
     }
@@ -563,6 +567,7 @@ impl ListBridge {
         self.project_plugins(&mut changed, &plugins);
         public_problems(&mut changed);
         list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
+        self.gate_problems(&mut changed, false);
         self.demote(effects);
         let mut rows = (*snap.rows).clone();
         for new in changed {
@@ -653,6 +658,7 @@ impl ListBridge {
         public_problems(&mut rows);
         rows.extend(aside);
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
+        if !input.shadow { self.gate_problems(&mut rows, true); }
         if !input.shadow {
             self.prune_gone(&rows, Instant::now());
             self.record_live(&rows, fetched.fresh);
@@ -859,6 +865,25 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
 /// Falha ao identificar a pergunta de uma linha Claude (sidecar, plugin, vínculo do Rust): a tela recebe um
 /// código só, com frase; o código interno vai ao diário da lista.
 pub(crate) const INTERACTION_UNAVAILABLE: &str = "interacao_indisponivel";
+impl ListBridge {
+    /// Linha com problema que ainda não valeu pelo prazo sai sem ele. `complete`: rodada com todas as
+    /// linhas; o portão de quem sumiu da lista vai embora.
+    fn gate_problems(&self, rows: &mut [SessionRow], complete: bool) {
+        use crate::problem_gate::Gate;
+        let hold = Duration::from_millis(self.problem_hold_ms.load(std::sync::atomic::Ordering::Relaxed));
+        let now = tokio::time::Instant::now().into_std();
+        let mut gates = lock(&self.problems);
+        if complete { gates.retain(|name, _| rows.iter().any(|row| &row.name == name)); }
+        for row in rows.iter_mut() {
+            let gate = gates.entry(row.name.clone()).or_default();
+            if matches!(gate.admit(row.problema.as_deref(), now, hold), Gate::Hold(_)) { row.problema = None; }
+        }
+    }
+
+    /// Prazo do portão de problemas da lista; os testes dos produtores o zeram.
+    pub fn set_problem_hold(&self, hold: Duration) { self.problem_hold_ms.store(hold.as_millis() as u64, std::sync::atomic::Ordering::Relaxed); }
+}
+
 fn public_problems(rows: &mut [SessionRow]) {
     for row in rows.iter_mut().filter(|row| row.provider == "claude") {
         let Some(code) = row.problema.as_deref() else { continue };
@@ -1251,6 +1276,26 @@ mod tests {
         let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
         bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
         assert_eq!((rows[0].state.as_str(), rows[0].stalled), ("awaiting_input", false));
+    }
+
+    /// O problema da linha só sai depois de valer pelo prazo, reconferido a cada rodada; resolvido some na
+    /// hora, e o estado da linha não espera.
+    #[tokio::test(start_paused = true)]
+    async fn a_row_problem_shows_only_after_it_held() {
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        bridge.set_problem_hold(crate::problem_gate::HOLD);
+        let round = |problema: Option<&str>| {
+            let mut rows = vec![serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","state":"dead","problema":problema})).unwrap()];
+            bridge.gate_problems(&mut rows, true);
+            (rows[0].state.clone(), rows[0].problema.clone())
+        };
+        assert_eq!(round(Some("list_capture_failed")), ("dead".into(), None), "o estado sai já, o problema espera");
+        tokio::time::advance(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(round(Some("list_capture_failed")).1, None);
+        tokio::time::advance(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(round(Some("list_capture_failed")).1.as_deref(), Some("list_capture_failed"), "duas rodadas e o prazo: sai");
+        assert_eq!(round(None).1, None, "resolvido some na hora");
     }
 
     /// Decisão M11: a pergunta que o plugin segura chega ao card com o formulário e o ID dele, para o `/answer`.

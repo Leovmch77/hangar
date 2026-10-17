@@ -54,6 +54,8 @@ pub async fn server(root: &Path, n: usize) -> Server {
     let list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
         capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
         FactsClient::new(upstream, SECRET.into())));
+    // Estes testes provam quem produz o problema da linha; o prazo do portão tem teste próprio.
+    list.set_problem_hold(Duration::ZERO);
     // Como a subida do servidor: a lista lê a pergunta segurada do plugin pelo registro.
     list.set_plugin_runtime(Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(upstream, SECRET.into(), "instance-test".into())
         .with_plugin(state.plugin.clone())));
