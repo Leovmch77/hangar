@@ -41,8 +41,8 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onNewConversation, onO
     .hitSlop(drawerEdgeSlop(edgeStart))
     .activeOffsetX(10)
     .failOffsetY([-15, 15])
-    .onEnd((e) => {
-      if (shouldOpenDrawer(e.translationX, e.velocityX)) inner.current?.openDrawer({ initialVelocity: e.velocityX });
+    .onEnd((e, success) => {
+      if (success && shouldOpenDrawer(e.translationX, e.velocityX)) inner.current?.openDrawer({ initialVelocity: e.velocityX });
     }), [edgeStart]);
   const content = (progress?: SharedValue<number>) => <DrawerContent progress={progress}>{children}</DrawerContent>;
   return (

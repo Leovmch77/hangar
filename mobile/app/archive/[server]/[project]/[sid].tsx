@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -243,6 +243,23 @@ export default function ArchivedConversation() {
   const pasta = entry?.cwd ? basename(entry.cwd) : '';
   const destino = [pasta, server?.label].filter(Boolean).join(' @ ');
   const muted = theme.tokens.text.muted;
+  const provider = entry?.provider;
+  const textColor = theme.tokens.text.primary;
+  const canGoBack = router.canGoBack();
+  // Memo: digitar no rascunho redesenha a tela, e opções novas reconfiguram o cabeçalho nativo.
+  const headerOptions = useMemo(() => ({
+    ...header,
+    headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={() => router.replace('/')} />,
+    headerTitle: () => (
+      <View style={styles.titleRow}>
+        {provider ? <ProviderGlyph provider={provider} size={18} /> : <Icon name="MessageCircle" size={18} color={muted} />}
+        <View style={styles.titles}>
+          <Text style={[styles.title, { color: textColor }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
+          {destino ? <Text style={[styles.destino, { color: muted }]} numberOfLines={1}>{destino}</Text> : null}
+        </View>
+      </View>
+    ),
+  }), [header, canGoBack, router, provider, muted, textColor, title, destino]);
 
   let body;
   if (loading) {
@@ -275,19 +292,7 @@ export default function ArchivedConversation() {
 
   return (
     <Screen edges={EDGES}>
-      <Stack.Screen options={{
-        ...header,
-        headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={() => router.replace('/')} />,
-        headerTitle: () => (
-          <View style={styles.titleRow}>
-            {entry ? <ProviderGlyph provider={entry.provider} size={18} /> : <Icon name="MessageCircle" size={18} color={muted} />}
-            <View style={styles.titles}>
-              <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
-              {destino ? <Text style={[styles.destino, { color: muted }]} numberOfLines={1}>{destino}</Text> : null}
-            </View>
-          </View>
-        ),
-      }} />
+      <Stack.Screen options={headerOptions} />
       <KeyboardAvoidingView behavior="padding" automaticOffset style={[styles.flex, { paddingTop: headerHeight }]}>
         <View style={styles.flex}>{body}</View>
         {entry && !error ? (

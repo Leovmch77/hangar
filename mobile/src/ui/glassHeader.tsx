@@ -1,4 +1,4 @@
-import type { ComponentProps } from 'react';
+import { useMemo, type ComponentProps } from 'react';
 import { Pressable } from 'react-native';
 import { Stack } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -12,17 +12,21 @@ type Options = Exclude<ComponentProps<typeof Stack.Screen>['options'], ((...args
 // acompanha o tema. Voltar só com o chevron: as telas anteriores não têm título de navegação.
 export function useGlassHeader(): Options {
   const { theme } = useUnistyles();
-  return {
+  const tint = theme.tokens.accent.base;
+  const text = theme.tokens.text.primary;
+  return useMemo(() => ({
     headerShown: true,
     headerTransparent: true,
     headerShadowVisible: false,
-    headerBackground: () => <Glass style={[StyleSheet.absoluteFill, styles.bar]} />,
-    headerTintColor: theme.tokens.accent.base,
-    headerTitleStyle: { color: theme.tokens.text.primary },
+    headerBackground,
+    headerTintColor: tint,
+    headerTitleStyle: { color: text },
     headerBackButtonDisplayMode: 'minimal',
     title: '',
-  };
+  }), [tint, text]);
 }
+
+const headerBackground = () => <Glass style={[StyleSheet.absoluteFill, styles.bar]} />;
 
 /** Voltar para quando a tela abriu sem histórico (link direto): a pilha não desenha o dela. */
 export function HeaderBack({ onPress }: { onPress: () => void }) {

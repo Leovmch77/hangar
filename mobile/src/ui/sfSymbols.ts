@@ -2,7 +2,8 @@ import type { SFSymbol } from 'expo-symbols';
 import type { IconName } from './Icon';
 
 // Equivalente do sistema para cada Lucide que o app usa. Nome fora daqui fica no Lucide também no iOS
-// (melhor um traço diferente do que um símbolo com outro sentido).
+// (melhor um traço diferente do que um símbolo com outro sentido). Só símbolos do iOS 16.4 (mínimo
+// do expo-symbols): nome que o aparelho não tem desenha vazio, sem cair no Lucide.
 export const SF_SYMBOLS: Partial<Record<IconName, SFSymbol>> = {
   Activity: 'waveform.path.ecg',
   ArrowDown: 'arrow.down',
@@ -94,7 +95,6 @@ export const SF_SYMBOLS: Partial<Record<IconName, SFSymbol>> = {
   Smartphone: 'iphone',
   Sparkles: 'sparkles',
   SquarePen: 'square.and.pencil',
-  SquareTerminal: 'apple.terminal',
   Star: 'star',
   Terminal: 'terminal',
   Trash2: 'trash',
