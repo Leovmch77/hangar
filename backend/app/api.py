@@ -444,8 +444,8 @@ async def _codex_rust_port(name: str, request: Request):
         if reply is None and (rota == "btw" or (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
                 and getattr(await _cached_info(name), "provider", "claude") == "claude"):
             # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
-            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body,
-                                            200 if rota == "btw" else 90)
+            prazo = (200,) if rota == "btw" else ()
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo)
         if reply:
             raise _RustReply(*reply)
 

@@ -2216,6 +2216,9 @@ async fn model_picker_b11_repeated_id_answers_from_the_journal() {
     assert_eq!(io.keys.lock().unwrap().len(),typed,"a repetição não digita");
     assert_eq!(again.map(|r|r.disposition).ok(),first.map(|r|r.disposition).ok());
     assert!(typed>0);
+    h.stop().await.unwrap();
+}
+
 /// O executor com terminal falso e prazos curtos da pergunta lateral.
 fn btw_actor(f:&Fixture,open:Duration)->hangar_server::runtime::terminal::TerminalHandle {
     let lease=crate::lease_when_free(&f.target.lease_path);
