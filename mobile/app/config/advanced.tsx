@@ -142,16 +142,16 @@ function Env({ cfg }: { cfg: ServerConfig }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   flex: { flex: 1, minWidth: 0 },
   chips: { flexDirection: 'row', gap: 6 },
   line: { borderTopWidth: 1, paddingHorizontal: 16, paddingVertical: 12 },
   rootRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   pair: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 },
   envRow: { gap: 4 },
-  help: { fontSize: 15 },
-  mono: { fontSize: 13.5 },
+  help: { fontSize: theme.base.text.sm },
+  mono: { fontSize: theme.base.text.xs },
   value: { flexShrink: 1, maxWidth: '60%', textAlign: 'right' },
-  small: { fontSize: 13.5, lineHeight: 17 },
+  small: { fontSize: theme.base.text.xs, lineHeight: 17 },
   italic: { fontStyle: 'italic' },
-});
+}));

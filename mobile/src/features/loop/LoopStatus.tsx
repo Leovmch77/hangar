@@ -134,7 +134,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingBottom: 40,
   },
   title: {
-    fontSize: 20,
+    fontSize: theme.base.text.lg,
     fontWeight: '600',
   },
   statusRow: {

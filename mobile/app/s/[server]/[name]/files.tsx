@@ -106,7 +106,7 @@ export default function FilesSheet() {
           {m.chat_servidor_removido()}
         </Text>
         <Pressable onPress={() => router.back()} accessibilityRole="button">
-          <Text style={{ color: theme.tokens.accent.base, fontSize: 13 }}>{m.comum_voltar()}</Text>
+          <Text style={{ color: theme.tokens.accent.base, fontSize: theme.base.text.xs }}>{m.comum_voltar()}</Text>
         </Pressable>
       </View>
     );
@@ -201,7 +201,7 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomColor: 'transparent',
   },
   tabTxt: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '600',
   },
   center: {

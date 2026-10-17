@@ -124,7 +124,7 @@ const styles = StyleSheet.create((theme) => ({
   cwd: { fontSize: theme.base.text.xs },
   paired: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 0 },
   pairedTxt: { fontSize: theme.base.text.xs },
-  chevron: { fontSize: 24, lineHeight: 24 },
+  chevron: { fontSize: theme.base.text.xl, lineHeight: 24 },
   addingBlock: { gap: theme.base.space[3] },
   empty: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[3] },
   secondary: { minHeight: 44, borderWidth: 1, borderStyle: 'dashed', borderRadius: theme.base.radius.md, alignItems: 'center', justifyContent: 'center', paddingHorizontal: theme.base.space[3] },

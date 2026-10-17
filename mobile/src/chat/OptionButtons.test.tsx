@@ -14,6 +14,8 @@ vi.mock('../paraglide/messages', () => ({
 }));
 vi.mock('../stores/aparencia', () => ({ useAparencia: () => 'amber' }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
+const haptic = vi.hoisted(() => ({ selection: vi.fn(), success: vi.fn(), error: vi.fn() }));
+vi.mock('../ui/haptics', () => ({ haptic }));
 
 import { OptionButtons } from './OptionButtons';
 
@@ -119,6 +121,36 @@ describe('OptionButtons: links na pergunta', () => {
   it('sem URL não há link', async () => {
     const { container, root } = await render('Aprovar o plano?');
     expect(container.querySelector('[role="link"]')).toBeNull();
+    act(() => root.unmount());
+  });
+});
+
+describe('OptionButtons: haptics', () => {
+  async function mount(options: string[], onSelect: () => Promise<void>) {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(OptionButtons, { question: 'q', options, onSelect, onCancel: vi.fn() })));
+    return { container, root };
+  }
+
+  it('resposta aceita vibra sucesso; recusada vibra erro', async () => {
+    vi.clearAllMocks();
+    const ok = await mount(['Sim'], vi.fn().mockResolvedValue(undefined));
+    await act(async () => ok.container.querySelector('button')!.click());
+    expect(haptic.success).toHaveBeenCalledTimes(1);
+    act(() => ok.root.unmount());
+    const bad = await mount(['Sim'], vi.fn().mockRejectedValue(new Error('x')));
+    await act(async () => bad.container.querySelector('button')!.click());
+    expect(haptic.error).toHaveBeenCalledTimes(1);
+    act(() => bad.root.unmount());
+  });
+
+  it('marcar caixa de múltipla escolha é seleção, não resultado', async () => {
+    vi.clearAllMocks();
+    const { container, root } = await mount(['[ ] Alfa'], vi.fn().mockResolvedValue(undefined));
+    await act(async () => container.querySelector('button')!.click());
+    expect(haptic.selection).toHaveBeenCalledTimes(1);
+    expect(haptic.success).not.toHaveBeenCalled();
     act(() => root.unmount());
   });
 });

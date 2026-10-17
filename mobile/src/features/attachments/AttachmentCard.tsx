@@ -98,10 +98,10 @@ const styles = StyleSheet.create((theme) => ({
     overflow: 'hidden',
   },
   meta: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
     fontVariant: ['tabular-nums'],
   },
   prazo: {
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
   },
 }));

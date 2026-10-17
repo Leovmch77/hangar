@@ -181,9 +181,9 @@ const styles = StyleSheet.create((theme) => ({
   inner: { paddingHorizontal: 16, paddingBottom: 16, gap: 12 },
   block: { gap: 10 },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  text: { fontSize: 15, lineHeight: 20 },
-  strong: { fontSize: 15, fontWeight: '600' },
+  text: { fontSize: theme.base.text.sm, lineHeight: 20 },
+  strong: { fontSize: theme.base.text.sm, fontWeight: '600' },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error },
   address: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 },
-  mono: { fontFamily: theme.base.fontMono, fontSize: 14 },
+  mono: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
 }));

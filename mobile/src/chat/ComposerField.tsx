@@ -84,6 +84,6 @@ const styles = StyleSheet.create((theme) => ({
   disabled: { opacity: 0.5 },
   roundBtn: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
   queueBadge: { position: 'absolute', top: 0, right: 0, minWidth: 15, height: 15, paddingHorizontal: 3, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  queueBadgeText: { fontSize: 11, fontWeight: '700', lineHeight: 13 },
+  queueBadgeText: { fontSize: theme.base.text.xxxs, fontWeight: '700', lineHeight: 13 },
   sendPressed: { opacity: 0.8 },
 }));
