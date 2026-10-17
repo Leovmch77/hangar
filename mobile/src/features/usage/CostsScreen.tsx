@@ -165,7 +165,7 @@ export function CostsScreen() {
         {areaLoad.accepted && <Paged items={areas.by_area} render={(item) => <Bar label={item.label ?? item.key} value={rawTokens(item)} max={areasMax} detail={`${number(rawTokens(item))} · ${cost(item)}`} />} />}
         {areaLoad.accepted && <Paged items={areas.by_area_dia} render={(item) => <Copy>{`${item.key}: ${number(rawTokens(item))} · ${cost(item)}`}</Copy>} />}
       </Card> : <Card><Copy title>{m.custos_como_calculamos()}</Copy><Copy>{m.custos_custo_tabela()}{m.custos_nao_fatura()}{m.custos_assinatura()}</Copy><Copy>{m.custos_metodo_standard()}</Copy><Copy>{m.custos_metodo_codex()}</Copy><Copy>{m.custos_equivalente_metodo()}</Copy><Copy>{m.custos_tarifas_models()}</Copy></Card>}
-      <Sheet open={day !== null} onDismiss={() => setDay(null)} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}><Copy title>{day}</Copy>{dayBucket && <><Copy>{`${number(rawTokens(dayBucket))} · ${cost(dayBucket)}`}</Copy>{renderTypes(dayBucket)}</>}<Action label={m.native_close()} onPress={() => setDay(null)} /></ScrollView></Sheet>
+      {day !== null && <Sheet open onDismiss={() => setDay(null)} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}><Copy title>{day}</Copy>{dayBucket && <><Copy>{`${number(rawTokens(dayBucket))} · ${cost(dayBucket)}`}</Copy>{renderTypes(dayBucket)}</>}<Action label={m.native_close()} onPress={() => setDay(null)} /></ScrollView></Sheet>}
     </>}
   </ReportFrame>;
 }

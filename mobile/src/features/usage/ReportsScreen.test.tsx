@@ -3,12 +3,22 @@ import React, { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureLocale, localeAtual, mergeReports, zeroUso, type ComboRow, type CostReport, type Server, type UsoFiltros } from '@hangar/core';
-const net = vi.hoisted(() => ({ costs: vi.fn(), usage: vi.fn(), push: vi.fn(), back: vi.fn(), focused: true }));
+const net = vi.hoisted(() => ({ costs: vi.fn(), usage: vi.fn(), push: vi.fn(), back: vi.fn(), screen: vi.fn(), canGoBack: false, focused: true }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), fetchCostsForServer: net.costs, fetchUsoForServer: net.usage }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: net.push, back: net.back }), useIsFocused: () => net.focused }));
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ push: net.push, back: net.back, canGoBack: () => net.canGoBack }),
+  useIsFocused: () => net.focused,
+  Stack: { Screen: ({ options }: { options: { title: string; headerLeft?: () => ReactNode } }) => {
+    net.screen(options);
+    return options.headerLeft?.() ?? null;
+  } },
+}));
+vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 72 }));
+vi.mock('expo-blur', () => ({ BlurView: ({ children }: { children: ReactNode }) => children }));
+vi.mock('expo-glass-effect', () => ({ GlassView: ({ children }: { children: ReactNode }) => children, isLiquidGlassAvailable: () => false }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: vi.fn(async () => null), setItemAsync: vi.fn(async () => {}), deleteItemAsync: vi.fn(async () => {}) }));
 vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => children }));
-vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open: boolean; children: ReactNode }) => open ? React.createElement('aside', null, children) : null }));
+vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open: boolean; children: ReactNode }) => React.createElement('section', { 'data-sheet-mounted': true }, open ? React.createElement('aside', null, children) : null) }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(), TextInput: ({ value, onChangeText, accessibilityLabel }: { value: string; onChangeText: (text: string) => void; accessibilityLabel: string }) => React.createElement('input', { value, 'aria-label': accessibilityLabel, onInput: (event: React.FormEvent<HTMLInputElement>) => onChangeText(event.currentTarget.value) }) }));
 import CostsScreen from '../../../app/costs';
@@ -36,7 +46,7 @@ const click = async (label: string) => {
 const previousLocale = localeAtual();
 beforeEach(() => {
   configureLocale({ getLocale: () => 'pt' });
-  vi.clearAllMocks(); net.focused = true;
+  vi.clearAllMocks(); net.focused = true; net.canGoBack = false;
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve(costs(period)));
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve(usage(period, filters)));
   useServers.setState({ servers: [a, b, { ...a, id: 'guest', invite: true }, { ...a, id: 'disabled', disabled: true }] });
@@ -44,6 +54,46 @@ beforeEach(() => {
   node = document.createElement('div'); root = createRoot(node);
 });
 afterEach(async () => { await act(async () => root.unmount()); configureLocale({ getLocale: () => previousLocale }); });
+
+it.each([false, true])('relatórios configuram cabeçalho nativo e voltar alternativo somente sem histórico: %s', async (canGoBack) => {
+  net.canGoBack = canGoBack;
+  for (const [Screen, title, sibling] of [
+    [CostsScreen, m.nav_custos(), m.uso_painel_titulo()],
+    [StatsScreen, m.uso_painel_titulo(), m.uso_ir_custos()],
+  ] as const) {
+    await act(async () => root.render(React.createElement(Screen)));
+    expect(net.screen).toHaveBeenLastCalledWith(expect.objectContaining({ title, headerShown: true, headerTransparent: true }));
+    const options = net.screen.mock.calls.at(-1)![0];
+    expect(typeof options.headerBackground).toBe('function');
+    if (canGoBack) {
+      expect(options.headerLeft).toBeUndefined();
+      expect(node.querySelector(`button[aria-label="${m.comum_voltar()}"]`)).toBeNull();
+    } else {
+      expect(typeof options.headerLeft).toBe('function');
+      const before = net.back.mock.calls.length;
+      await click(m.comum_voltar());
+      expect(net.back).toHaveBeenCalledTimes(before + 1);
+    }
+    await click(sibling);
+  }
+  expect(net.push).toHaveBeenCalledWith('/stats');
+});
+
+it.each(['costs', 'stats'] as const)('folhas fechadas não montam e desmontam ao fechar em %s', async (screen) => {
+  await act(async () => root.render(React.createElement(screen === 'costs' ? CostsScreen : StatsScreen)));
+  const sheets = () => node.querySelectorAll('[data-sheet-mounted]');
+  expect(sheets()).toHaveLength(0);
+  await click(m.custos_servidores_relatorio());
+  expect(sheets()).toHaveLength(1);
+  expect(node.querySelector('aside')?.textContent).toContain('Machine A');
+  await click(m.native_close());
+  expect(sheets()).toHaveLength(0);
+  await click(screen === 'costs' ? '2026-10-01' : 'heavy');
+  expect(sheets()).toHaveLength(1);
+  expect(node.querySelector('aside')?.textContent).toContain(screen === 'costs' ? '360' : '2026-10-02');
+  await click(m.native_close());
+  expect(sheets()).toHaveLength(0);
+});
 
 it('custos públicos têm cartões honestos, painéis tocáveis, comparação, áreas e navegação inteira', async () => {
   await act(async () => root.render(React.createElement(CostsScreen)));

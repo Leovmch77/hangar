@@ -4,7 +4,9 @@ import { useUnistyles } from 'react-native-unistyles';
 import { create } from 'zustand';
 import { intlLocale, type Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
-import { Screen } from '../../ui/Screen';
+import { Stack, useRouter } from 'expo-router';
+import { HeaderBack, useGlassHeader } from '../../ui/glassHeader';
+import { Pagina } from '../config/Pagina';
 import { Sheet } from '../../ui/Sheet';
 import { Icon, type IconName } from '../../ui/Icon';
 import { useSettingsColors } from '../config/colors';
@@ -71,7 +73,7 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
   return <>
     <Action label={label} icon="ListFilter" selected={values.length > 0} onPress={() => setOpen(true)} />
     {values.length > 0 && <Copy muted>{values.map((key) => all.find((item) => item.key === key)?.label ?? key).join(' · ')}</Copy>}
-    <Sheet open={open} onDismiss={() => setOpen(false)} sizes={['large']} scrollable>
+    {open && <Sheet open onDismiss={() => setOpen(false)} sizes={['large']} scrollable>
       <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }} keyboardShouldPersistTaps="handled">
         <Copy title>{label}</Copy>
         <Search value={query} onChange={setQuery} />
@@ -81,19 +83,19 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
           icon={values.includes(item.key) ? 'CheckSquare' : 'Square'} onPress={() => onChange(values.includes(item.key) ? values.filter((v) => v !== item.key) : max === 1 ? [item.key] : [...values, item.key])} />} />
         <Action label={m.native_close()} icon="X" onPress={() => setOpen(false)} />
       </ScrollView>
-    </Sheet>
+    </Sheet>}
   </>;
 }
 
 export function ReportFrame({ title, back, sibling, onSibling, children }: { title: string; back: () => void; sibling: string; onSibling: () => void; children: ReactNode }) {
-  return <Screen><View style={{ flex: 1 }}>
-    <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8 }}>
-      <Action label={m.comum_voltar()} icon="ArrowLeft" onPress={back} /><View style={{ flex: 1 }}><Copy title>{title}</Copy></View>
-    </View>
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }} keyboardShouldPersistTaps="handled">
+  const router = useRouter();
+  const header = useGlassHeader();
+  return <>
+    <Stack.Screen options={{ ...header, title, headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={back} /> }} />
+    <Pagina>
       <Action label={sibling} icon="ChartNoAxesCombined" onPress={onSibling} />{children}
-    </ScrollView>
-  </View></Screen>;
+    </Pagina>
+  </>;
 }
 
 export function ReportControls({ own, refresh }: { own: Server[]; refresh: () => void }) {
