@@ -131,6 +131,23 @@ async fn a_parked_headless_session_goes_to_a_terminal_resuming_the_same_conversa
     fx.finish();
 }
 
+/// D-006 depois do reboot: a sessão sem terminal fica estacionada (sidecar sem cano), nada sobe na subida, e
+/// a primeira escrita a sobe pelo sidecar, sem terminal. A montagem não tem o cano de verdade que cria o
+/// `claude` filho: a subida chega até esperar por ele (`relaunch_agent_identity`), o que prova o caminho.
+#[tokio::test]
+async fn a_headless_session_parked_by_a_reboot_is_launched_by_the_next_write() {
+    let fx = fixture();
+    let key = "cd".repeat(16);
+    fx.transcript();
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"manual","cano":null}));
+    let registry = fx.registry().await;
+    assert!(!registry.has_entry(Some(&key),"s1").await,"nada sobe na subida");
+    let opened = registry.adopt_now("s1").await.expect("é sessão Claude sem terminal daqui").map_err(|e|e.code);
+    assert_eq!(opened,Err("relaunch_agent_identity".into()),"a escrita subiu o cano e esperou o claude dele");
+    assert!(fx.args().is_empty(),"nenhum terminal nasceu");
+}
+
 #[tokio::test]
 async fn switching_to_the_mode_the_session_is_in_changes_nothing() {
     let fx = fixture();
