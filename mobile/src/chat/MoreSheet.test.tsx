@@ -43,12 +43,12 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(serverId: string, orq = false) {
+async function render(serverId: string, orq = false, name = 'conversation') {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
   const onClose = vi.fn();
-  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name: 'conversation', orq })); });
+  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name, orq })); });
   return { container, onClose };
 }
 
@@ -71,6 +71,29 @@ test.each([guest.id, removed.id, 'unknown'])('git não aparece no servidor %s me
   useServers.setState({ activeId: own.id });
   const { container } = await render(serverId);
   expect(gitButton(container)).toBeNull();
+});
+
+test.each([
+  { kind: 'normal', orq: false, name: 'conversation' },
+  { kind: 'orq', orq: true, name: 'orq-run' },
+])('Time do trabalho: dono da conversa $kind abre o editor no servidor explícito', async ({ orq, name }) => {
+  const { container, onClose } = await render(own.id, orq, name);
+  const team = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orqcfg_aba_papeis()}"]`);
+  expect(team).not.toBeNull();
+  await act(async () => { team!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith(`/s/own/${name}/orchestration-team`);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([guest.id, removed.id, 'unknown'])('Time do trabalho: servidor %s não oferece editor em conversa normal nem orq', async serverId => {
+  useServers.setState({ activeId: own.id });
+  for (const orq of [false, true]) {
+    const { container } = await render(serverId, orq);
+    expect(container.querySelector(`[aria-label="${m.orqcfg_aba_papeis()}"]`)).toBeNull();
+  }
+  expect(boundary.push).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 test('busca global fecha Mais e abre rota independente da sessão sem mudar ações existentes', async () => {
@@ -112,6 +135,25 @@ test('conversa de orquestração em servidor próprio não oferece compartilhar'
   const { container } = await render(own.id, true);
   expect(container.querySelector(`[aria-label="${m.arq_aba()}"]`)).not.toBeNull();
   expect(shareButton(container)).toBeNull();
+});
+
+test('orquestração abre seu painel no lugar de Atividade e sessão comum mantém Atividade', async () => {
+  const { container, onClose } = await render(own.id, true);
+  const panel = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orq_tab_title()}"]`);
+  expect(panel).not.toBeNull();
+  expect(container.querySelector(`[aria-label="${m.ctx_atividade()}"]`)).toBeNull();
+  await act(async () => { panel!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/orchestration');
+
+  boundary.push.mockClear();
+  const normal = await render(own.id);
+  expect(normal.container.querySelector(`[aria-label="${m.orq_tab_title()}"]`)).toBeNull();
+  const activity = normal.container.querySelector<HTMLButtonElement>(`[aria-label="${m.ctx_atividade()}"]`);
+  expect(activity).not.toBeNull();
+  await act(async () => { activity!.click(); });
+  expect(normal.onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/activity');
 });
 
 test('servidor inexistente não oferece compartilhar', async () => {

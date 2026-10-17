@@ -7,6 +7,7 @@ import { superficie } from '../theme/superficie';
 import { UserBubble } from './UserBubble';
 import { QueuedBubble } from './QueuedBubble';
 import { AssistantBubble } from './AssistantBubble';
+import { OrqTimelineEntry } from './OrqTimelineEntry';
 import { PreviewBubble } from './PreviewBubble';
 import { ToolGroup } from './tools/ToolGroup';
 import { ToolCard } from './tools/ToolCard';
@@ -15,7 +16,7 @@ import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
-import { locateInMarkdown, type QuoteRef } from '@hangar/core';
+import { dayStarts, locateInMarkdown, type QuoteRef } from '@hangar/core';
 import { useCiteDialog } from '../stores/citeDialog';
 import { contextRefsKey } from '../stores/contextRefs';
 import { flashQuoteSource } from '../stores/quoteFlash';
@@ -99,7 +100,9 @@ const resultKey = (ev: ChatEvent) => ev.tool_use_id ?? '';
 
 // A linha que não mudou (mesmos eventos, mesmos resultados) devolve o objeto da rodada anterior: a
 // célula da lista e o item `memo` comparam por referência, e cada evento novo refaz todas as linhas.
-function sameRow(a: ConversationRow, b: ConversationRow, now: Map<string, ChatEvent>, before: Map<string, ChatEvent>): boolean {
+type MessageRow = ConversationRow & { dayTs?: number };
+function sameRow(a: MessageRow, b: MessageRow, now: Map<string, ChatEvent>, before: Map<string, ChatEvent>): boolean {
+  if (a.dayTs !== b.dayTs) return false;
   const sameResult = (ev: ChatEvent) => now.get(resultKey(ev)) === before.get(resultKey(ev));
   switch (a.type) {
     case 'event': return b.type === 'event' && a.ev === b.ev;
@@ -159,7 +162,8 @@ export function MessageList({
   const resultsRef = useRef(results);
   resultsRef.current = results;
   const resultOfRow = useCallback((t: ChatEvent) => resultsRef.current.get(t.tool_use_id ?? '') ?? null, []);
-  const previous = useRef<{ rows: Map<string, ConversationRow>; results: Map<string, ChatEvent> }>({ rows: new Map(), results: new Map() });
+  const days = useMemo(() => dayStarts(events), [events]);
+  const previous = useRef<{ rows: Map<string, MessageRow>; results: Map<string, ChatEvent> }>({ rows: new Map(), results: new Map() });
   // Layout do nativo: o que vem entre duas mensagens (raciocínio, chamadas, grupos) vira UM trecho
   // dobrado. O agrupamento continua o do core; o foldConversation só junta o desenho.
   const tasks = useMemo(
@@ -184,13 +188,14 @@ export function MessageList({
     const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree', pageOf);
     const fresh = tarefasLigadas && tasks.length ? comTarefas(rows, events, tasks) : rows;
     const before = previous.current;
-    const out = fresh.map((row) => {
+    const out = fresh.map((row): MessageRow => {
+      const dated = row.type === 'event' && row.ev.orq ? { ...row, dayTs: days.get(row.ev.id) } : row;
       const old = before.rows.get(row.id);
-      return old && sameRow(row, old, results, before.results) ? old : row;
+      return old && sameRow(dated, old, results, before.results) ? old : dated;
     });
     previous.current = { rows: new Map(out.map((r) => [r.id, r])), results };
     return out;
-  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks, rodandoIds, queuePanel]);
+  }, [events, results, sessionName, pref, look, tarefasLigadas, tasks, rodandoIds, queuePanel, days]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
   // Toque numa citação: rola até a resposta de origem pelo índice da linha (a lista é virtualizada,
   // então não há nó para procurar). Origem fora do histórico carregado: nada acontece.
@@ -239,7 +244,7 @@ export function MessageList({
     [ferramenta],
   );
 
-  const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
+  const renderItem = useCallback(({ item }: { item: MessageRow }) => {
     switch (item.type) {
       case 'fold':
         return <ToolGroup parts={item.parts} resultOf={resultOfRow} onAbrir={abrirDetalhe} look={look} />;
@@ -260,6 +265,7 @@ export function MessageList({
           return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} eventId={ev.id} canQuote={canQuote} />;
         }
         if (ev.kind === 'notice') {
+          if (ev.orq) return <OrqTimelineEntry event={ev} serverId={serverId} sessionName={sessionName} dayTs={item.dayTs} />;
           // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
           // aviso novo do harness não sumir calado.
           const conhecido = ev.text === 'interrupted' || ev.text === 'turn_aborted';

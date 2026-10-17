@@ -614,7 +614,7 @@ export default function ChatScreen() {
                 </View>
               )
               : orq
-              ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
+              ? <OrqFooter serverId={serverId} name={name} arbiter={listSession ? listSession.orq_arbiter : currentSession?.orq_arbiter} />
               : soLeitura
               ? <Text style={styles.notice} accessibilityRole="text">{m.native_par_so_leitura()}</Text>
               : (

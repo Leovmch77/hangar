@@ -62,7 +62,10 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
       disabled: recarregar.bloqueado,
     }] : []),
     ...(orq || !temPergunta ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
-    { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
+    ...(canShare ? [{ icon: 'Users' as IconName, label: m.orqcfg_aba_papeis(), route: 'orchestration-team' }] : []),
+    orq
+      ? { icon: 'PanelsTopLeft', label: m.orq_tab_title(), route: 'orchestration' }
+      : { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
     ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
     ...(!orq && canShare ? [{ icon: 'Share2' as IconName, label: m.compartilhar_menu(), route: 'share' }] : []),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },

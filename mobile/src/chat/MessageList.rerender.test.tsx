@@ -7,7 +7,10 @@ import { MessageList } from './MessageList';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('../paraglide/messages', () => ({ msg_aria_mensagens: () => 'msg_aria_mensagens' }));
+vi.mock('../paraglide/messages', async (original) => ({ ...await original<typeof import('../paraglide/messages')>(), msg_aria_mensagens: () => 'msg_aria_mensagens' }));
+vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('article', null, markdown) }));
+vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('section', null, children) }));
+vi.mock('../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
 vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: () => {}, remove: () => {} }) }));
 vi.mock('../stores/servers', () => ({ useServers: { getState: () => ({ servers: [] }) } }));
 const aparencia = vi.hoisted(() => ({ tarefas: false }));
@@ -29,7 +32,7 @@ vi.mock('./UserBubble', async () => {
 });
 vi.mock('./AssistantBubble', async () => {
   const { memo: m } = await import('react');
-  return { AssistantBubble: m(({ eventId }: { eventId?: string }) => { renders.log.push(`assistant:${eventId}`); return null; }) };
+  return { AssistantBubble: m(({ eventId }: { eventId?: string }) => { renders.log.push(`assistant:${eventId}`); return null; }), mkMarkdownStyle: () => ({}) };
 });
 vi.mock('./tools/ToolGroup', async () => {
   const { memo: m } = await import('react');
