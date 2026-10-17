@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import React, { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { AppState, type AppStateStatus } from 'react-native';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureLocale, localeAtual, mergeReports, zeroUso, type ComboRow, type CostReport, type Server, type UsoFiltros } from '@hangar/core';
 const net = vi.hoisted(() => ({ costs: vi.fn(), usage: vi.fn(), push: vi.fn(), back: vi.fn(), screen: vi.fn(), canGoBack: false, focused: true }));
@@ -210,7 +211,7 @@ it('custos públicos têm cartões honestos, seções sequenciais, comparação,
 
 it.each([
   ['pt', '311,8 mi', 'US$ 2,7 mil', 'R$ 13,7 mil'],
-  ['en', '311.8M', 'US$ 2.7K', 'R$13.7K'],
+  ['en', '311.8M', 'US$ 2.7K', 'R$ 13.7K'],
 ] as const)('gráfico compacta eixo e datas sem perder moeda ou valores exatos em %s', async (locale, tokenAxis, usdAxis, brlAxis) => {
   configureLocale({ getLocale: () => locale }); overwriteGetLocale(() => locale);
   useServers.setState({ servers: [a] });
@@ -236,6 +237,33 @@ it.each([
   await click('BRL');
   expect(text(axis(m.custos_estimativa_api()).firstElementChild!)).toBe(brlAxis);
   expect(chart(m.custos_estimativa_api()).querySelector('button')!.getAttribute('aria-label')).toMatch(locale === 'pt' ? /R\$\s13\.654,40/ : /R\$13,654\.40/);
+});
+
+it.each([
+  ['pt', 'R$ 13,7 mil', 'R$ 13.654,40'],
+  ['en', 'R$ 13.7K', 'R$13,654.40'],
+] as const)('eixo BRL compacto funciona sem compactação de moeda do Hermes em %s', async (locale, compact, detailed) => {
+  const original = Number.prototype.toLocaleString;
+  const formatter = vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(function (this: number, locales, options) {
+    return original.call(this, locales, options?.style === 'currency' && options.notation === 'compact' ? { ...options, notation: 'standard' } : options);
+  });
+  try {
+    configureLocale({ getLocale: () => locale }); overwriteGetLocale(() => locale);
+    useServers.setState({ servers: [a] });
+    net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), usd_brl: 5, combos: [{ ...combo, cost: 2_730.88 }] }));
+    await act(async () => root.render(React.createElement(CostsScreen)));
+    await click(m.custos_estimativa_api()); await click('BRL');
+    const chart = node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: m.custos_estimativa_api() })}"]`)!;
+    const axis = chart.firstElementChild!.firstElementChild!;
+    expect(axis.firstElementChild!.textContent?.replace(/ /g, ' ')).toBe(compact);
+    expect(axis.lastElementChild!.textContent?.replace(/ /g, ' ')).toBe('R$ 0');
+    const day = chart.querySelector<HTMLButtonElement>('button[aria-label^="2026-10-01:"]')!;
+    expect(day.getAttribute('aria-label')?.replace(/ /g, ' ')).toContain(detailed);
+    await act(async () => day.click());
+    expect(node.querySelector('aside')?.textContent?.replace(/ /g, ' ')).toContain(detailed);
+  } finally {
+    formatter.mockRestore();
+  }
 });
 
 it.each(['pt', 'en'] as const)('diário usa colunas empilhadas tocáveis, legenda e custo por fonte em %s', async (locale) => {
@@ -348,6 +376,24 @@ it.each([true, false])('provedores usam nomes das contas e prefixo único sem pe
   if (crossed) expect(comparison.querySelector('button[aria-label^="2026-10-01:"]')?.getAttribute('aria-label')).toContain('Claude Code · Conta Azul: 180');
 });
 
+it.each([
+  ['Conta Azul', 'claude · Claude Code · Conta Azul · missing · Machine A'],
+  [undefined, 'claude · Claude Code · anthropic:11111111-1111-4111-8111-111111111111 · missing · Machine A'],
+] as const)('sessões caras usam conta legível quando disponível sem inventar rótulo: %s', async (label, expected) => {
+  useServers.setState({ servers: [a] });
+  const provider = 'anthropic:11111111-1111-4111-8111-111111111111';
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period),
+    by_provider: [{ ...combo, key: provider, label }],
+    sessoes: [{ ...combo, provider, session_id: 'one', inicio: combo.dia, fim: combo.dia, subagentes: 0, custo_regravado: 0 }],
+  }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const sessions = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_sessoes_caras())!.parentElement!;
+  const line = [...sessions.querySelectorAll('span')].find((span) => span.textContent?.startsWith('claude · '))!;
+  expect(line.textContent).toBe(expected);
+  if (label) expect(line.textContent).not.toContain('11111111-1111-4111-8111-111111111111');
+  else expect(line.textContent).not.toContain('Conta');
+});
+
 it('comparação mostra média diária de tokens inteira sem arredondar total ou custo', async () => {
   useServers.setState({ servers: [a] });
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: ['provider-one', 'provider-two'].map((provider) => ({ ...combo, provider, input: 320, output: 0, cache_write: 0, cache_read: 0, cost: 2.73 })) }));
@@ -392,6 +438,28 @@ it('custos composição conserva custos e percentuais, economia e áreas ordenad
   expect(node.querySelector('button[aria-label="' + m.custos_por_maquina() + '"]')).toBeNull();
 });
 
+it('réguas de custo usam participação em dólares na tela e no detalhe diário sem alterar tokens', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, cost: 10, cost_input: 2, cost_output: 6, cost_cache_write: 1, cost_cache_read: 1 }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const check = (section: Element) => {
+    [
+      [m.custos_input_sem_cache(), '100 · US$ 2,00', '20%'],
+      [m.custos_output_total(), '20 · US$ 6,00', '60%'],
+      [m.custos_tipo_cache_escrito(), '10 · US$ 1,00', '10%'],
+      [m.custos_tipo_cache_lido(), '50 · US$ 1,00', '10%'],
+    ].forEach(([label, detail, width]) => {
+      const bar = section.querySelector(`[aria-label^="${label}:"]`)!;
+      expect(bar.getAttribute('aria-label')).toBe(`${label}: ${detail} · ${m.custos_col_pct_conta()}: ${width}`);
+      expect((bar.firstElementChild!.lastElementChild!.firstElementChild as HTMLElement).style.width).toBe(width);
+    });
+  };
+  const costsSection = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_para_onde_dolar())!.parentElement!;
+  check(costsSection);
+  await click('2026-10-01');
+  check(node.querySelector('aside')!);
+});
+
 it('projetos carregam doze e mais cinquenta por toque com recolher antes das linhas expandidas', async () => {
   useServers.setState({ servers: [a] });
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: Array.from({ length: 1_338 }, (_, index) => ({ ...combo, project: `/project-${String(index).padStart(4, '0')}`, cost: 2 })) }));
@@ -412,6 +480,77 @@ it('projetos carregam doze e mais cinquenta por toque com recolher antes das lin
   await act(async () => collapse.click());
   expect(rows()).toHaveLength(12);
   expect(projects.textContent).not.toContain('/project-0111');
+});
+
+it.each(['atualizar', 'segundo plano'] as const)('projetos preservam ocultos e expansão sem mostrar dados velhos ao %s', async (transition) => {
+  const listeners = new Set<(state: AppStateStatus) => void>();
+  const appState = vi.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+    listeners.add(listener);
+    return { remove: () => { listeners.delete(listener); } };
+  });
+  try {
+    useServers.setState({ servers: [a] });
+    const rows = Array.from({ length: 120 }, (_, index) => ({ ...combo, project: `/project-${String(index).padStart(4, '0')}`, cost: 2 }));
+    net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: rows }));
+    await act(async () => root.render(React.createElement(CostsScreen)));
+    await click(m.custos_tirar_da_lista({ nome: '/project-0000' }));
+    await click(m.custos_ver_projetos({ n: 119 }));
+    const section = () => [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_projeto())?.parentElement;
+    expect(section()!.querySelectorAll('button[aria-label^="/project-"][aria-label*=":"]')).toHaveLength(62);
+    let finish!: (report: Partial<CostReport>) => void;
+    net.costs.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    if (transition === 'atualizar') await click(m.custos_atualizar());
+    else {
+      await act(async () => listeners.forEach((listener) => listener('background')));
+      expect(section()).toBeUndefined();
+      expect(node.textContent).not.toContain('/project-0001');
+      expect(node.textContent).not.toContain(m.custos_custo_periodo());
+      await act(async () => listeners.forEach((listener) => listener('active')));
+    }
+    expect(node.textContent).toContain(m.custos_carregando_maquinas({ n: 1 }));
+    expect(section()).toBeUndefined();
+    expect(node.textContent).not.toContain('/project-0001');
+    expect(node.textContent).not.toContain(m.custos_custo_periodo());
+    await act(async () => finish({ ...costs('30d'), combos: rows.map((row) => ({ ...row, cost: 3 })) }));
+    expect(section()!.querySelector('button[aria-label^="/project-0000:"]')).toBeNull();
+    expect(section()!.querySelectorAll('button[aria-label^="/project-"][aria-label*=":"]')).toHaveLength(62);
+    expect(section()!.textContent).toContain(m.custos_fora_da_lista({ n: 1, valor: 'US$ 3,00' }));
+    const total = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_custo_periodo())!.parentElement!;
+    expect(total.textContent).toContain('US$ 360,00');
+  } finally {
+    appState.mockRestore();
+  }
+});
+
+it('projetos locais não recalculam o relatório ao esconder, restaurar, expandir e recolher', async () => {
+  useServers.setState({ servers: [a] });
+  const rows = Array.from({ length: 120 }, (_, index) => ({ ...combo, project: `/project-${String(index).padStart(4, '0')}`, cost: 2 }));
+  let comboReads = 0;
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), get combos() { comboReads++; return rows; } }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const projects = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_projeto())!.parentElement!;
+  const total = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_custo_periodo())!.parentElement!;
+  const visible = () => [...projects.querySelectorAll('button[aria-label^="/project-"]')];
+  const loadedReads = comboReads;
+  expect(loadedReads).toBeGreaterThan(0);
+  const unchanged = () => { expect(comboReads).toBe(loadedReads); expect(total.textContent).toContain('US$ 240,00'); };
+  expect(visible()).toHaveLength(12);
+  await click(m.custos_tirar_da_lista({ nome: '/project-0000' }));
+  expect(visible().some((row) => row.getAttribute('aria-label')?.startsWith('/project-0000:'))).toBe(false);
+  expect(projects.textContent).toContain(m.custos_fora_da_lista({ n: 1, valor: 'US$ 2,00' }));
+  unchanged();
+  await click(m.custos_mostrar_todos());
+  expect(visible().some((row) => row.getAttribute('aria-label')?.startsWith('/project-0000:'))).toBe(true);
+  expect(projects.textContent).not.toContain(m.custos_fora_da_lista({ n: 1, valor: 'US$ 2,00' }));
+  unchanged();
+  await click(m.custos_ver_projetos({ n: 120 }));
+  expect(visible()).toHaveLength(62); unchanged();
+  await click(m.uso_mostrar_mais({ n: 50 }));
+  expect(visible()).toHaveLength(112); unchanged();
+  const collapse = projects.querySelector<HTMLButtonElement>(`button[aria-label="${m.custos_mostrar_menos()}"]`)!;
+  expect(collapse.compareDocumentPosition(visible()[12]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await act(async () => collapse.click());
+  expect(visible()).toHaveLength(12); unchanged();
 });
 
 it('modelos com cache lido preservam asteriscos e mostram uma nota depois da lista', async () => {
