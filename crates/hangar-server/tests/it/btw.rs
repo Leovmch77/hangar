@@ -157,7 +157,9 @@ exit {code}
         assert_eq!(argv.last().unwrap(), "quanto é 2+2?");
         assert_eq!(argv[argv.iter().position(|a| a == "--model").unwrap() + 1], "haiku");
         assert_eq!(ran(&c, "conta").unwrap(), c.meta["config_dir"].as_str().unwrap());
-        assert_eq!(ran(&c, "cwd").unwrap().trim(), c.meta["cwd"].as_str().unwrap());
+        // O processo vê o caminho real: no macOS o temporário passa por um link (`/var` → `/private/var`).
+        let cwd = std::fs::canonicalize(c.meta["cwd"].as_str().unwrap()).unwrap();
+        assert_eq!(Path::new(ran(&c, "cwd").unwrap().trim()), cwd);
         let left: Vec<_> = std::fs::read_dir(project(&c)).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         assert_eq!(left, ["sid-antigo.jsonl"], "só a conversa original fica");
     }

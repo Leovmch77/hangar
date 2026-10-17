@@ -136,12 +136,16 @@ async fn a_parked_headless_session_goes_to_a_terminal_resuming_the_same_conversa
 /// `claude` filho: a subida chega até esperar por ele (`relaunch_agent_identity`), o que prova o caminho.
 #[tokio::test]
 async fn a_headless_session_parked_by_a_reboot_is_launched_by_the_next_write() {
+    // O cano desta compilação e um `claude` que não prova a identidade: sem os dois, o teste usava o
+    // `~/.hangar/bin` e o `claude` de verdade da máquina, e no CI (sem nenhum) parava antes.
+    crate::use_cano_bin();
     let fx = fixture();
     let key = "cd".repeat(16);
     fx.transcript();
     fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
         "permission_mode":"manual","cano":null}));
     let registry = fx.registry().await;
+    crate::write_executable(&fx.home.join("bin/claude"),"#!/bin/sh\nexec sleep 30\n");
     assert!(!registry.has_entry(Some(&key),"s1").await,"nada sobe na subida");
     let opened = registry.adopt_now("s1").await.expect("é sessão Claude sem terminal daqui").map_err(|e|e.code);
     assert_eq!(opened,Err("relaunch_agent_identity".into()),"a escrita subiu o cano e esperou o claude dele");

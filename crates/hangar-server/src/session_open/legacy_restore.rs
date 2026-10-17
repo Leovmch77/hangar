@@ -280,7 +280,8 @@ mod tests {
         assert!(tmux.run(&["new-session", "-d", "-s", "tarde", "sh"]));
         let tarde = tmux.pane_pid("tarde");
         assert!(tmux.run(&["new-session", "-d", "-s", "vazia", "sleep 300 & exec sh"]));
-        assert!(tmux.run(&["new-session", "-d", "-s", "ocupada", "sleep 300"]));
+        // Em argumentos separados o tmux roda direto, sem o `/bin/sh -c` (o dash fica de pai, o bash se troca).
+        assert!(tmux.run(&["new-session", "-d", "-s", "ocupada", "sleep", "300"]));
         assert!(tmux.run(&["new-session", "-d", "-s", "com-chave", "sh"]));
         assert!(tmux.run(&["set-environment", "-t", "=com-chave", "CP_SESSION_KEY", &"ab".repeat(16)]));
         let vazia = tmux.pane_pid("vazia");

@@ -688,7 +688,9 @@ mod tests {
         std::fs::write(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n")).unwrap();
         std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let run = |args: &[&str]| std::process::Command::new(&program).args(args).status().unwrap().success();
-        assert!(run(&["new-session", "-d", "-s", "parada", "sh"]) && run(&["new-session", "-d", "-s", "viva", "sleep", "60"]));
+        // Em argumentos separados o tmux roda direto, como o lançamento: o `/bin/sh -c` do comando único fica
+        // de pai no dash e se troca no bash.
+        assert!(run(&["new-session", "-d", "-s", "parada", "sh", "-i"]) && run(&["new-session", "-d", "-s", "viva", "sleep", "60"]));
         let program = program.as_os_str();
         assert_eq!(agent_up(program, "viva", Duration::from_secs(5)).await, Some(true));
         assert_eq!(agent_up(program, "parada", Duration::from_millis(600)).await, Some(false), "shell parado");
