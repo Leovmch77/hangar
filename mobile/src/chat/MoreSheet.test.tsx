@@ -53,6 +53,25 @@ async function render(serverId: string, orq = false) {
 }
 
 const shareButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.compartilhar_menu()}"]`);
+const gitButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.sessao_git()}"]`);
+
+test.each([false, true])('git abre a rota da conversa e fecha o menu no servidor próprio, orq=%s', async orq => {
+  const { container, onClose } = await render(own.id, orq);
+  const git = gitButton(container);
+  expect(git).not.toBeNull();
+  expect(git!.previousElementSibling?.getAttribute('aria-label')).toBe(m.arq_aba());
+  expect(git!.textContent).toContain(m.chat_acao_git_detalhe());
+  await act(async () => { git!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/git');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([guest.id, removed.id, 'unknown'])('git não aparece no servidor %s mesmo com servidor próprio ativo', async serverId => {
+  useServers.setState({ activeId: own.id });
+  const { container } = await render(serverId);
+  expect(gitButton(container)).toBeNull();
+});
 
 test('busca global fecha Mais e abre rota independente da sessão sem mudar ações existentes', async () => {
   const { container, onClose } = await render(own.id);

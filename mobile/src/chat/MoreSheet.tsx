@@ -66,6 +66,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, prov
     ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
     ...(!orq && canShare ? [{ icon: 'Share2' as IconName, label: m.compartilhar_menu(), route: 'share' }] : []),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },
+    ...(canShare ? [{ icon: 'GitBranch' as IconName, label: m.sessao_git(), sub: m.chat_acao_git_detalhe(), route: 'git' }] : []),
     ...(orq || semTerminal ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
     ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),
     ...(provider === 'codex' ? [{ icon: 'Gauge' as IconName, label: m.codex_limites_titulo(), sub: m.ctx_limites(), route: 'codex-limits' }] : []),
