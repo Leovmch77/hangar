@@ -42,13 +42,14 @@ vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
 vi.mock('./tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
-const list = vi.hoisted(() => ({ render: vi.fn(), data: vi.fn() }));
+const list = vi.hoisted(() => ({ render: vi.fn(), data: vi.fn(), alignment: vi.fn() }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent }: {
-    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode;
+  LegendList: ({ data, renderItem, ListFooterComponent, alignItemsAtEnd }: {
+    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode; alignItemsAtEnd?: boolean;
   }) => {
     list.render(renderItem);
     list.data(data);
+    list.alignment(alignItemsAtEnd);
     return createElement('div', null,
       ...data.map((item) => createElement('div', { key: item.id, 'data-row': item.id }, renderItem({ item }))), ListFooterComponent);
   },
@@ -74,6 +75,7 @@ const discardButtons = (container: HTMLElement) => [...container.querySelectorAl
 beforeEach(() => {
   list.render.mockClear();
   list.data.mockClear();
+  list.alignment.mockClear();
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
   // B está ativo, mas o chat abaixo é de A.
   configureApi({ getBaseUrl: () => servers.servers[1].baseUrl, getToken: () => 'token-b', onUnauthorized: () => {}, origin: null,
@@ -84,6 +86,14 @@ afterEach(() => {
   _resetChatsForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('alinhamento da conversa mantém fim por padrão e permite topo explícito', () => {
+  const initial = props([event()]);
+  const { root } = mount(createElement(MessageList, initial));
+  expect(list.alignment.mock.lastCall?.[0]).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, alignItemsAtEnd: false })));
+  expect(list.alignment.mock.lastCall?.[0]).toBe(false);
 });
 
 it('timeline orq entra antes do aviso genérico e atualiza só a fronteira do dia ao carregar anteriores', () => {

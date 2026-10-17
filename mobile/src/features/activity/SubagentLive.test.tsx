@@ -46,12 +46,16 @@ vi.mock('../../chat/tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
 vi.mock('../../features/attachments/LightboxModal', () => ({ LightboxModal: () => null }));
 vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('article', null, markdown) }));
 vi.mock('expo-image', () => ({ Image: ({ source }: { source: { uri: string } }) => createElement('img', { src: source.uri }) }));
+const legendList = vi.hoisted(() => ({ alignment: vi.fn() }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent, onStartReached }: {
-    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode; onStartReached: () => void;
-  }) => createElement('div', null,
-    createElement('button', { onClick: onStartReached, 'aria-label': 'load-older' }),
-    ...data.map(item => createElement('div', { key: item.id }, renderItem({ item }))), ListFooterComponent),
+  LegendList: ({ data, renderItem, ListFooterComponent, onStartReached, alignItemsAtEnd }: {
+    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode; onStartReached: () => void; alignItemsAtEnd?: boolean;
+  }) => {
+    legendList.alignment(alignItemsAtEnd);
+    return createElement('div', null,
+      createElement('button', { onClick: onStartReached, 'aria-label': 'load-older' }),
+      ...data.map(item => createElement('div', { key: item.id }, renderItem({ item }))), ListFooterComponent);
+  },
 }));
 
 function deferred<T>() {
@@ -95,6 +99,7 @@ async function poll() {
 }
 
 beforeEach(() => {
+  legendList.alignment.mockClear();
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-17T10:00:30Z'));
   requests.length = 0;
@@ -112,6 +117,14 @@ afterEach(() => {
   act(() => { for (const root of roots.splice(0)) root.unmount(); });
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('detalhe do subagente alinha conversa curta no topo da LegendList', async () => {
+  const { container, render } = mount();
+  await render();
+  await reply(0, detail('one', 'conversa curta'));
+  expect(container.textContent).toContain('conversa curta');
+  expect(legendList.alignment.mock.lastCall?.[0]).toBe(false);
 });
 
 it.each([

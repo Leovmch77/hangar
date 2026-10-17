@@ -48,6 +48,7 @@ interface Props {
   serverId?: string;
   // Altura da caixa que flutua por cima do fim da lista: o último item rola até ficar acima dela.
   bottomInset?: number;
+  alignItemsAtEnd?: boolean;
   // Bloco "trabalhando" do fim (ausente = lista só de leitura, como a do subagente).
   stateEvent?: StateEvent | null;
   turnSeen?: number | null;
@@ -82,6 +83,7 @@ export function MessageList({
   sessionName,
   serverId,
   bottomInset = 0,
+  alignItemsAtEnd = true,
   stateEvent = null,
   turnSeen = null,
   pensamento = '',
@@ -284,7 +286,7 @@ export function MessageList({
       renderItem={renderItem}
       recycleItems={false}
       estimatedItemSize={72}
-      alignItemsAtEnd
+      alignItemsAtEnd={alignItemsAtEnd}
       initialScrollAtEnd
       maintainScrollAtEnd
       maintainVisibleContentPosition

@@ -5,13 +5,12 @@ import { createActivityFolder } from '@hangar/core';
 import type { Activity, ChatEvent } from '@hangar/core';
 
 type Folder = ReturnType<typeof createActivityFolder>;
-export type FeedCursor = { count: number; firstId: string | undefined };
+export type FeedCursor = { count: number; firstId: string | undefined; eventsRevision: number };
 
-// Lista que encolheu ou trocou de cabeça (loadOlder põe o histórico antigo NA FRENTE) não é
-// crescimento pela cauda: empurrar só o fim repetiria eventos e perderia os antigos.
-export function feedFolder(folder: Folder, cursor: FeedCursor, events: ChatEvent[]): FeedCursor {
+// Revisão mudou ou histórico entrou na frente: não é append, e só ler a cauda perderia alterações.
+export function feedFolder(folder: Folder, cursor: FeedCursor, events: ChatEvent[], eventsRevision: number): FeedCursor {
   const firstId = events[0]?.id;
-  if (events.length < cursor.count || firstId !== cursor.firstId) {
+  if (eventsRevision !== cursor.eventsRevision || events.length < cursor.count || firstId !== cursor.firstId) {
     folder.reset(events);
   } else {
     for (let i = cursor.count; i < events.length; i++) {
@@ -19,15 +18,15 @@ export function feedFolder(folder: Folder, cursor: FeedCursor, events: ChatEvent
       if (ev) folder.push(ev);
     }
   }
-  return { count: events.length, firstId };
+  return { count: events.length, firstId, eventsRevision };
 }
 
-export function useActivity(events: ChatEvent[]): Activity {
+export function useActivity(events: ChatEvent[], eventsRevision: number): Activity {
   const folder = useRef(createActivityFolder());
-  const cursor = useRef<FeedCursor>({ count: 0, firstId: undefined });
+  const cursor = useRef<FeedCursor>({ count: 0, firstId: undefined, eventsRevision });
 
   // precisa acontecer durante o render, antes do snapshot — é o que evita re-varrer tudo
-  cursor.current = feedFolder(folder.current, cursor.current, events);
+  cursor.current = feedFolder(folder.current, cursor.current, events, eventsRevision);
 
-  return useMemo(() => folder.current.snapshot(), [events]);
+  return useMemo(() => folder.current.snapshot(), [events, eventsRevision]);
 }
