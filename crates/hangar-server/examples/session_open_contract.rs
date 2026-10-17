@@ -3,7 +3,7 @@
 //!
 //!   session_open_contract prepare <cenário.json> <raiz> <repo>
 //!   session_open_contract run <cenário.json> <raiz> <repo> <saída.json>
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
     use hangar_server::session_open::contract;
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,5 +26,5 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {}

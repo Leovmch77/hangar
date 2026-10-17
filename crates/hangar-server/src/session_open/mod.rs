@@ -6,7 +6,7 @@ pub mod archive;
 pub mod claude;
 pub mod cli;
 pub mod codex;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod contract;
 pub mod facts;
