@@ -13,7 +13,7 @@ const { generateTerminalDocument, watchTerminalDocument } = require(builderPath)
 
 it('regenera documento ao mudar JS/CSS, sem regravar conteúdo igual, e encerra observação', async () => {
   const terminal = mkdtempSync(path.join(tmpdir(), 'hangar-terminal-document-'));
-  const output = path.join(terminal, 'terminalDocument.generated.ts');
+  const output = path.join(terminal, 'terminalDocument.generated.json');
   let observer: ReturnType<typeof watch> | undefined;
   let outputObserver: ReturnType<typeof watch> | undefined;
   try {
@@ -97,7 +97,7 @@ it('preparação i18n anterior ao tsc gera documento do zero sem Metro/Vitest', 
     symlinkSync(path.join(mobileDirectory, 'node_modules'), path.join(mobile, 'node_modules'), 'dir');
     symlinkSync(path.resolve(mobileDirectory, '../messages'), path.join(fixture, 'messages'), 'dir');
     cpSync(path.resolve(mobileDirectory, '../project.inlang'), path.join(fixture, 'project.inlang'), { recursive: true });
-    const output = path.join(terminal, 'terminalDocument.generated.ts');
+    const output = path.join(terminal, 'terminalDocument.generated.json');
     expect(existsSync(output)).toBe(false);
     const result = spawnSync('npm', ['run', 'i18n:compile'], { cwd: mobile, encoding: 'utf8', timeout: 20000 });
     expect(result.error).toBeUndefined();
@@ -127,8 +127,8 @@ it('gera HTML autocontido com UMD/CSS/licenças instalados, CSP sem rede e runti
   expect(document.querySelectorAll('script')[2].textContent).toContain('__hangarTerminalReceive');
   expect(document.querySelector('style')!.textContent).toContain('.xterm-accessibility-tree');
   expect(html).not.toContain('injectedObjectJson');
-  const generated = require.resolve('./terminalDocument.generated.ts');
-  expect(readFileSync(generated, 'utf8')).toBe(`export const terminalDocument = ${JSON.stringify(html)};\n`);
+  const generated = require.resolve('./terminalDocument.generated.json');
+  expect(readFileSync(generated, 'utf8')).toBe(`${JSON.stringify(html)}\n`);
   const modified = statSync(generated).mtimeMs;
   expect(generateTerminalDocument()).toBe(html);
   expect(statSync(generated).mtimeMs).toBe(modified);

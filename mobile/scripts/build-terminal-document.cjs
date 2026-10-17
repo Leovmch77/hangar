@@ -20,8 +20,9 @@ function generateTerminalDocument(terminal = terminalDirectory) {
 ${libraries.join('\n')}
 ${script(read(path.join(terminal, 'terminalPage.js')))}
 </body></html>`;
-  const output = path.join(terminal, 'terminalDocument.generated.ts');
-  const content = `export const terminalDocument = ${JSON.stringify(html)};\n`;
+  // Dado JSON, não código: a trava de fontSize não varre o CSS do xterm embutido.
+  const output = path.join(terminal, 'terminalDocument.generated.json');
+  const content = JSON.stringify(html) + '\n';
   let previous;
   try { previous = read(output); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (previous !== content) writeFileSync(output, content);

@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, type Ref } from 'react';
 import WebView, { type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
-import { terminalDocument } from './terminalDocument.generated';
+import terminalDocument from './terminalDocument.generated.json';
 import * as m from '../../paraglide/messages';
 
 const source = { html: terminalDocument };

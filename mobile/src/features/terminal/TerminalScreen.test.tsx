@@ -204,9 +204,9 @@ describe('terminal screen with native WebSocket and DOM boundary', () => {
     expect(boundary.writes).toEqual([[226, 130], [172]]);
     expect(boundary.dom).toBe(propsBefore);
     await click(m.term_seta_cima());
-    expect([...(socket.sent[0] as Uint8Array)]).toEqual([27, 91, 65]);
+    expect([...(socket.sent.at(-1) as Uint8Array)]).toEqual([27, 91, 65]);
     await act(async () => boundary.dom?.onData('ç\u0003', false));
-    expect([...(socket.sent[1] as Uint8Array)]).toEqual([195, 167, 3]);
+    expect([...(socket.sent.at(-1) as Uint8Array)]).toEqual([195, 167, 3]);
     expect(boundary.pane).not.toHaveBeenCalled();
   });
 

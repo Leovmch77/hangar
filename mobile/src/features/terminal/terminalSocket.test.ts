@@ -204,6 +204,64 @@ describe('native terminal socket', () => {
     terminal.close();
   });
 
+  it('depois da primeira saída não vazia manda o par de resize direto, com a grade mais recente', () => {
+    const { terminal, socket, output } = connect();
+    const order: string[] = [];
+    output.mockImplementation(() => order.push(`output:${socket.sent.length}`));
+    socket.open();
+    terminal.resize(120, 40);
+    vi.advanceTimersByTime(150);
+    expect(socket.sent).toEqual(['{"t":"resize","cols":120,"rows":40}']);
+    terminal.resize(130, 50);
+    socket.onmessage?.({ data: new ArrayBuffer(0) });
+    expect(socket.sent).toHaveLength(1);
+    socket.onmessage?.({ data: new Uint8Array([65]).buffer });
+    expect(order).toEqual(['output:1', 'output:1']);
+    expect(socket.sent.slice(1)).toEqual(['{"t":"resize","cols":129,"rows":50}', '{"t":"resize","cols":130,"rows":50}']);
+    vi.advanceTimersByTime(150);
+    expect(socket.sent).toHaveLength(3);
+    socket.onmessage?.({ data: new Uint8Array([66]).buffer });
+    expect(socket.sent).toHaveLength(3);
+    terminal.resize(90, 30);
+    vi.advanceTimersByTime(149);
+    expect(socket.sent).toHaveLength(3);
+    vi.advanceTimersByTime(1);
+    expect(socket.sent.at(-1)).toBe('{"t":"resize","cols":90,"rows":30}');
+    terminal.close();
+  });
+
+  it('par de resize usa a grade inicial, limita cols 20 para 21 e não sai no onopen', () => {
+    const output = vi.fn();
+    const terminal = openTerminalSocket(server, 'x', { cols: 5, rows: 1 }, { output, status: vi.fn() });
+    const socket = Socket.instances.at(-1)!;
+    socket.open();
+    expect(socket.sent).toEqual([]);
+    socket.onmessage?.({ data: new Uint8Array([65]).buffer });
+    expect(socket.sent).toEqual(['{"t":"resize","cols":21,"rows":5}', '{"t":"resize","cols":20,"rows":5}']);
+    terminal.close();
+  });
+
+  it('par de resize não sai após close/erro e para no primeiro envio que falha', () => {
+    const closed = connect();
+    closed.socket.open();
+    closed.terminal.close();
+    closed.socket.onmessage?.({ data: new Uint8Array([65]).buffer });
+    expect(closed.socket.sent).toEqual([]);
+    const errored = connect();
+    errored.socket.open();
+    errored.socket.onerror?.();
+    errored.socket.onmessage?.({ data: new Uint8Array([65]).buffer });
+    expect(errored.socket.sent).toEqual([]);
+    const failing = connect();
+    failing.socket.open();
+    let calls = 0;
+    failing.socket.send = () => { calls++; throw new Error('native-send-failed'); };
+    failing.socket.onmessage?.({ data: new Uint8Array([65]).buffer });
+    expect(failing.output).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
+    expect(failing.socket.closed).toBe(true);
+  });
+
   it('motivo ausente mostra desconexão sem inventar 403; callbacks antigos não escrevem após close', () => {
     const { terminal, socket, output, status } = connect();
     socket.open();

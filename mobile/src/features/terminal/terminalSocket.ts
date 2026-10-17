@@ -9,6 +9,8 @@ export function openTerminalSocket(server: Server, name: string, size: { cols: n
   let alive = true;
   let errored = false;
   let pendingSize: { cols: number; rows: number } | undefined;
+  let latestSize: { cols: number; rows: number } | undefined;
+  let nudged = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let openingTimer: ReturnType<typeof setTimeout> | undefined;
   const limit = (value: number, min: number, max: number) => Math.max(min, Math.min(max, Number.isFinite(value) ? Math.floor(value) : min));
@@ -28,6 +30,7 @@ export function openTerminalSocket(server: Server, name: string, size: { cols: n
   try {
     const base = baseOf(server).replace(/\/+$/, '').replace(/^http/, 'ws');
     const initial = grid(size.cols, size.rows);
+    latestSize = initial;
     socket = new WebSocket(`${base}/api/sessions/${encodeURIComponent(name)}/term?token=${encodeURIComponent(server.token)}&cols=${initial.cols}&rows=${initial.rows}`);
     socket.binaryType = 'arraybuffer';
     openingTimer = setTimeout(() => fail(m.mobile_terminal_connect_timeout()), 20_000);
@@ -52,6 +55,15 @@ export function openTerminalSocket(server: Server, name: string, size: { cols: n
         return;
       }
       callbacks.output(Array.from(new Uint8Array(event.data)));
+      // O PTY nasce antes do attach e só escuta resize depois; trocar a largura força o TUI a redesenhar.
+      if (nudged || event.data.byteLength === 0 || !alive || errored || !latestSize) return;
+      nudged = true;
+      clearTimeout(timer);
+      pendingSize = undefined;
+      const { cols, rows } = latestSize;
+      if (sendFrame(JSON.stringify({ t: 'resize', cols: cols === 20 ? 21 : cols - 1, rows }))) {
+        sendFrame(JSON.stringify({ t: 'resize', cols, rows }));
+      }
     };
     socket.onclose = event => {
       clearTimeout(openingTimer);
@@ -93,6 +105,7 @@ export function openTerminalSocket(server: Server, name: string, size: { cols: n
       clearTimeout(timer);
       if (!alive || errored) return;
       pendingSize = grid(cols, rows);
+      latestSize = pendingSize;
       timer = setTimeout(() => {
         if (socket?.readyState !== 1 || !pendingSize) return;
         sendFrame(JSON.stringify({ t: 'resize', ...pendingSize }));
