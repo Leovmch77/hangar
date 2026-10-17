@@ -1157,3 +1157,29 @@ def test_python_never_drains_a_terminal_claude_queue_the_rust_owns(monkeypatch):
     owner.mode = "python"
     monkeypatch.setattr(api, "drain", lambda *args: 2)
     assert api._drenar("terminal", "chat", "claude") == 2, "no modo python o Python segue drenando"
+
+
+def test_a_terminal_claude_the_rust_already_adopted_opens_without_taking_its_queue_lock(tmp_path, monkeypatch):
+    # O Rust adota o Claude com terminal sozinho (drenagem, limite, lista) e segura a trava da fila: a
+    # rota do Python que chega primeiro depois (esforço, modo, tecla) não pode cair no BlockingIOError.
+    import fcntl
+    from app import runtime_terminal
+    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
+    owner = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    monkeypatch.setattr(runtime_terminal, "validate_binding", lambda descriptor: None)
+    monkeypatch.setattr("app.runtime_process.reconcile_startup", lambda allow_current=True: None)
+    binding = Binding("s1", "k" * 32, "claude", False, {"terminal": {"pane": "%1"}}, str(tmp_path / "c.jsonl"),
+                      tmp_path / "projection", tmp_path / "state.json", tmp_path / "state.lock", 1)
+    rust = open(binding.lock_path, "w")
+    fcntl.flock(rust, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    async def rpc(descriptor, command, operation_id):
+        return {"state": {"phase": "idle"}}
+    owner._rpc = rpc
+    owner._check_opened = lambda ready, descriptor: None
+    try:
+        slot = asyncio.run(owner._open_terminal("s1", binding))
+        assert slot.phase == Phase.Rust
+        assert not binding.state_path.exists(), "a fila é do Rust: o Python não a reescreve"
+    finally:
+        rust.close()

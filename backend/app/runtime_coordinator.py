@@ -566,7 +566,10 @@ class RuntimeCoordinator:
         alinhada e vínculo gravado, com a trava tomada e solta antes do `open`."""
         from app.runtime_process import reconcile_startup
         reconcile_startup(allow_current=True)
-        lease = WriterLease(binding.lock_path)
+        try:
+            lease = WriterLease(binding.lock_path)
+        except BlockingIOError:
+            return  # o Rust já adotou a sessão e é dono da fila; o `open` dele reconhece a mesma vida
         try:
             rows = []
             projection = binding.projection_dir / f"{self._sanitize(binding.name)}.jsonl"
