@@ -246,8 +246,12 @@ pub async fn stage(io:&dyn TerminalIo,binding:&TerminalBinding,endpoint:&str)->R
     let executable=exe.to_str().ok_or_else(||failure("relaunch_binary"))?;
     let mut command=[executable,super::claude_relaunch::RELAUNCH_FLAG,endpoint].iter().map(|arg|super::claude_relaunch::quote(arg,binding.windows)).collect::<Vec<_>>().join(" ");
     if !binding.windows {command=format!("exec {command}");}
-    let output=mux(io,binding,vec!["new-window".into(),"-d".into(),"-P".into(),"-F".into(),
-        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-t".into(),format!("={}",binding.name),command]).await?;
+    let mut args:Vec<String>=vec!["new-window".into(),"-d".into(),"-P".into(),"-F".into(),
+        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-t".into(),format!("={}",binding.name)];
+    // Em argumentos separados o tmux roda direto, sem o `default-shell` do usuário (o fish carrega o `conf.d`).
+    if !binding.windows {args.extend(["/bin/sh".into(),"-c".into()]);}
+    args.push(command);
+    let output=mux(io,binding,args).await?;
     if !output.success {return Err(failure("relaunch_stage"));}
     let raw=std::str::from_utf8(&output.stdout).map_err(|_|failure("relaunch_stage"))?;
     let fields:Vec<_>=raw.trim_end().split('\t').collect();
@@ -270,6 +274,24 @@ mod tests {
     }
     fn binding()->TerminalBinding {
         TerminalBinding {name:"session".into(),pane:"%2".into(),conversation:"sid".into(),generation:4,created:1000,mux_argv:vec!["tmux".into()],windows:false,clipboard_lock_path:None}
+    }
+    /// A relançada não passa pelo `default-shell` do usuário: argumentos separados, o tmux roda direto.
+    #[tokio::test]
+    async fn the_relaunch_window_does_not_go_through_the_user_default_shell() {
+        struct Seen(std::sync::Mutex<Vec<CommandRequest>>);
+        impl TerminalIo for Seen {
+            fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> {
+                self.0.lock().unwrap().push(r);
+                Box::pin(async {Ok(CommandOutput {success:true,stdout:b"session\t0\t1\t%3\t42\n".to_vec()})})
+            }
+            fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>)->IoFuture<'a,WriteOutcome> {Box::pin(async {panic!("lifecycle não entrega entrada")})}
+        }
+        let io=Seen(std::sync::Mutex::new(vec![]));
+        stage(&io,&binding(),"http://127.0.0.1:1/x").await.unwrap();
+        let args=io.0.lock().unwrap()[0].args.clone();
+        let tail=&args[args.len()-3..];
+        assert_eq!((tail[0].as_str(),tail[1].as_str()),("/bin/sh","-c"),"{args:?}");
+        assert!(tail[2].starts_with("exec ")&&tail[2].contains(super::super::claude_relaunch::RELAUNCH_FLAG),"{args:?}");
     }
     #[tokio::test]
     async fn missing_capture_is_not_definitive_death() {

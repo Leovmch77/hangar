@@ -540,6 +540,16 @@ def _rule_s63(expected: dict, raw: dict, scenario: dict) -> bool | None:
     return found if created else None
 
 
+def _rule_no_default_shell(expected: dict, raw: dict, scenario: dict) -> bool | None:
+    """O comando vai em `/bin/sh -c` separados: o tmux roda direto, sem o `default-shell` do usuário."""
+    created, found = _new_sessions(raw), False
+    for p in created:
+        if p["argv"][-3:-1] == ["/bin/sh", "-c"]:
+            del p["argv"][-3:-1]
+            found = True
+    return found if created else None
+
+
 def _rule_session_key(expected: dict, raw: dict, scenario: dict) -> bool | None:
     """Matriz, item 2 (D-012): `CP_SESSION_KEY` em toda sessão, também no Claude com terminal."""
     created = _new_sessions(raw)
@@ -832,6 +842,7 @@ RUST_DIFFERENCES = (
     ("só leitura sem terminal recusado antes da conta", _rule_headless_read_only),
     ("ordem: nome antes da trava da conta", _rule_name_before_lock),
     ("S-63", _rule_s63),
+    ("sem o default-shell do usuário", _rule_no_default_shell),
     ("S-58/S-73 (CP_PI_SESSION e OMP_PROFILE por -e)", _rule_pi_session_env),
     ("matriz item 16 (skills sincronizadas)", _rule_skills_sync),
     ("matriz item 2 (CP_SESSION_KEY)", _rule_session_key),

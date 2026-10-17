@@ -166,6 +166,9 @@ pub fn new_session_argv(env: &TerminalEnv, pane: &PaneSpec) -> Vec<String> {
     let own = |var: &&str| pane.env.iter().any(|(key, _)| key == var);
     let unset: Vec<&str> = exported.is_none().then_some("CLAUDE_CONFIG_DIR").into_iter()
         .chain(NOT_INHERITED.iter().copied().filter(|var| !own(var))).chain(SERVER_SECRETS).collect();
+    // Em argumentos separados o tmux roda direto, sem o `default-shell`: o fish carrega o `conf.d` até
+    // com `-c`, e o que trava lá segura a sessão sem prazo.
+    argv.extend(["/bin/sh".to_owned(), "-c".to_owned()]);
     argv.push(format!("exec env {} {command}", unset.iter().map(|var| format!("-u {var}")).collect::<Vec<_>>().join(" ")));
     argv
 }
@@ -444,8 +447,8 @@ pub(crate) mod tests {
                 "/repo/plugins/github-actions", "--permission-mode", "bypassPermissions"].map(str::to_owned).into() }
     }
 
-    /// O mesmo argv do Python, mais o `CP_SESSION_KEY` (matriz, item 2): conta padrão com `env -u`,
-    /// conta escolhida por `-e`.
+    /// O mesmo argv do Python, mais o `CP_SESSION_KEY` (matriz, item 2) e o `/bin/sh -c` que tira o
+    /// `default-shell` do caminho: conta padrão com `env -u`, conta escolhida por `-e`.
     #[test]
     fn the_new_session_argv_is_the_python_one_plus_the_session_key() {
         for (fixture, config_dir) in [("create_claude_terminal_default", None), ("create_claude_terminal_account_b", Some("/r/home/.claude-b"))] {
@@ -453,6 +456,8 @@ pub(crate) mod tests {
             let at = python.iter().position(|a| a == "CP_PROVIDER=claude").unwrap() + 1;
             python.splice(at..at, ["-e".to_owned(), format!("CP_SESSION_KEY={}", "k".repeat(32))]);
             python.insert(0, "tmux".into());
+            let last = python.len() - 1;
+            python.splice(last..last, ["/bin/sh".to_owned(), "-c".to_owned()]);
             let mut ours = new_session_argv(&machine(), &claude(env, config_dir));
             let command = ours.pop().unwrap();
             ours.push(undo_not_inherited(&command));
@@ -475,6 +480,36 @@ pub(crate) mod tests {
         }
         let out = out.join(" ");
         out.strip_prefix("exec env ").filter(|rest| !rest.starts_with("-u ")).map_or(out.clone(), |rest| format!("exec {rest}"))
+    }
+
+    /// O comando do agente não passa pelo shell do usuário: o `config.fish` que trava (keyring preso)
+    /// seguraria a sessão sem prazo.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_agent_command_does_not_go_through_the_user_default_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (marker, ran) = (dir.path().join("shell-do-usuario"), dir.path().join("rodou"));
+        let shell = dir.path().join("fakeshell");
+        std::fs::write(&shell, format!("#!/bin/sh\ntouch '{}'\nexec /bin/sh \"$@\"\n", marker.display())).unwrap();
+        let conf = dir.path().join("tmux.conf");
+        std::fs::write(&conf, format!("set -g default-shell '{}'\n", shell.display())).unwrap();
+        let program = dir.path().join("tmux");
+        let socket = format!("hangar-shell-{}", std::process::id());
+        std::fs::write(&program, format!("#!/bin/sh\nexec tmux -L {socket} -f '{}' \"$@\"\n", conf.display())).unwrap();
+        for file in [&shell, &program] {
+            std::fs::set_permissions(file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let env = TerminalEnv { program: program.to_string_lossy().into_owned(), ..machine() };
+        let mut pane = claude(Vec::new(), None);
+        pane.cwd = dir.path().to_string_lossy().into_owned();
+        pane.command = vec!["touch".into(), ran.to_string_lossy().into_owned()];
+        let argv = new_session_argv(&env, &pane);
+        let status = std::process::Command::new(&argv[0]).args(&argv[1..]).status().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(15);
+        while !ran.exists() && std::time::Instant::now() < end { std::thread::sleep(Duration::from_millis(50)); }
+        let _ = std::process::Command::new(&program).arg("kill-server").status();
+        assert!(status.success() && ran.exists(), "o comando rodou: {argv:?}");
+        assert!(!marker.exists(), "o default-shell do usuário não entra: {argv:?}");
     }
 
     /// O pane nasce com as variáveis de tela do servidor e as que faltam nele (o Computer Use recusa
