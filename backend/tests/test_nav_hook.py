@@ -1,5 +1,5 @@
-"""nav_hook: com navegador aberto diz a página; fechado, a dica só vai em mensagem de tela (Jev
-primeiro, regex sem ele), com ou sem terminal."""
+"""nav_hook: com navegador aberto diz a página; fechado, a dica só vai em mensagem de tela (regex
+primeiro, Jev só confirma o que ela achou), com ou sem terminal."""
 import importlib.util
 import io
 import json
@@ -53,13 +53,15 @@ def test_navegador_aberto_sempre_diz_a_url(tmp_path, monkeypatch, capsys):
     assert "http://x" in capsys.readouterr().out
 
 
-def test_jev_decide_antes_da_regex_e_regex_vale_quando_ele_falha(monkeypatch):
+def test_regex_filtra_e_jev_so_confirma_o_que_ela_achou(monkeypatch):
     mod = carregar()
     monkeypatch.setattr(mod, "_jev_precisa", lambda p: False)
     assert mod.precisa_de_navegador("abre a página de login") is False
-    monkeypatch.setattr(mod, "_jev_precisa", lambda p: True)
-    assert mod.precisa_de_navegador("faz o commit agora") is True
-    assert mod.precisa_de_navegador("faz o commit") is False
+    consultas = []
+    monkeypatch.setattr(mod, "_jev_precisa", lambda p: consultas.append(p) or True)
+    assert mod.precisa_de_navegador("faz o commit agora") is False
+    assert consultas == []
+    assert mod.precisa_de_navegador("abre a página de login") is True
     monkeypatch.setattr(mod, "_jev_precisa", lambda p: None)
     assert mod.precisa_de_navegador("abre a página de login") is True
     assert mod.precisa_de_navegador("faz o commit") is False

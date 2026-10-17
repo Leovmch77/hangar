@@ -11,7 +11,6 @@ import subprocess
 import sys
 import time
 import unicodedata
-import urllib.request
 
 
 def _nav_dir() -> str:
@@ -112,7 +111,7 @@ def texto(url: str | None) -> str:
             f"open <url>` no shell; skill hangar-preview). Não use agent-browser nem ver-front.{jev}")
 
 
-# Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela. Palavra que aparece
+# A regex decide se a mensagem tem cara de tarefa de tela; o Jev só barra falso positivo. Palavra que aparece
 # em qualquer conversa de código (testa, ui, url, login, interface) fica de fora: sozinha, ela
 # mandava a dica em "roda os testes" e "a interface do adapter".
 _TELA = re.compile(
@@ -165,6 +164,7 @@ def _jev_precisa(prompt: str) -> bool | None:
             return None
     except OSError:
         pass
+    import urllib.request   # ~60 ms de import: só paga quem vai chamar o Jev
     pergunta = {"precisa": {"type": "noul", "instructions": (
         "Will handling this message require opening, looking at, clicking or testing a web page or "
         "an app screen in a browser?")}}
@@ -192,9 +192,11 @@ def _jev_precisa(prompt: str) -> bool | None:
 def precisa_de_navegador(prompt: str) -> bool:
     if not prompt.strip() or any(m in prompt.lstrip()[:400] for m in _NAO_E_PEDIDO):
         return False
-    # Resposta curta ("A", "sim") fica na regex: o Jev custava ~0,5 s antes de toda mensagem.
+    # O Jev custa ~0,5 s de rede: só confirma o que a regex achou, e resposta curta ("A", "sim") nem isso.
+    if not _TELA.search(_sem_acento(prompt)):
+        return False
     pelo_jev = _jev_precisa(prompt) if len(prompt.split()) >= 4 else None
-    return pelo_jev if pelo_jev is not None else bool(_TELA.search(_sem_acento(prompt)))
+    return pelo_jev is not False
 
 
 def _prompt() -> str:
