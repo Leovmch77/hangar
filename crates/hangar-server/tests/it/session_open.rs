@@ -95,19 +95,27 @@ fn fixture(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+/// `<ROOT>/a/b` vira o caminho desta máquina, com o separador dela (o fixture foi gravado no Linux e
+/// as contas comparam o caminho como texto); `json` escapa a barra invertida para dentro de string JSON.
+fn place(text: &str, root: &Path, json: bool) -> String {
+    let root = root.to_string_lossy();
+    regex::Regex::new(r#"<ROOT>((?:/[^"/\s]*)*)"#).unwrap().replace_all(text, |c: &regex::Captures| {
+        let path = format!("{root}{}", &c[1]).replace('/', std::path::MAIN_SEPARATOR_STR);
+        if json { path.replace('\\', "\\\\") } else { path }
+    }).into_owned()
+}
+
 /// O estado inicial do cenário numa raiz de verdade, como o harness o monta para o Python.
 fn materialize(fixture: &Value, root: &Path) {
-    let root_text = root.to_string_lossy();
-    let place = |raw: &str| raw.replace("<ROOT>", &root_text);
     let state = &fixture["scenario"]["state"];
     for dir in state["dirs"].as_array().into_iter().flatten() {
-        std::fs::create_dir_all(place(dir.as_str().unwrap())).unwrap();
+        std::fs::create_dir_all(place(dir.as_str().unwrap(), root, false)).unwrap();
     }
     for (path, content) in state["files"].as_object().into_iter().flatten() {
-        let path = place(path);
+        let path = place(path, root, false);
         std::fs::create_dir_all(Path::new(&path).parent().unwrap()).unwrap();
-        let text = match content { Value::String(text) => text.clone(), json => json.to_string() };
-        std::fs::write(path, place(&text)).unwrap();
+        let text = match content { Value::String(text) => place(text, root, false), json => place(&json.to_string(), root, true) };
+        std::fs::write(path, text).unwrap();
     }
 }
 
@@ -157,8 +165,7 @@ async fn the_command_resolves_from_the_same_files_with_the_server_down() {
     let caller = [("CLAUDE_CONFIG_DIR", root.join("home/.claude-b").to_string_lossy().into_owned()), ("CP_JEV_PADRAO", "true".into())];
     // Porta 1: ninguém atende.
     let bin = install(&root, "CP_AUTH_TOKEN=x\nCP_PORT=1\n");
-    // Dentro de string JSON: a barra invertida do Windows vai escapada.
-    let body = fixture["scenario"]["steps"][0]["json"].to_string().replace("<ROOT>", &root.to_string_lossy().replace('\\', "\\\\"));
+    let body = place(&fixture["scenario"]["steps"][0]["json"].to_string(), &root, true);
     let expected = &fixture["result"]["steps"][0]["body"];
     let launched = &fixture["result"]["records"]["<ROOT>/home/.hangar/claude-headless/filha.json"]["created"]["json"];
     for command in ["resolve", "open"] {
