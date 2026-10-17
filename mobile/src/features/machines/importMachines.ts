@@ -83,7 +83,7 @@ export async function discoverSavedMachines(sources?: Server[]): Promise<Machine
     const imported = await importMachines(discovered.candidates);
     result = { added: imported.added, issues: [...discovered.issues, ...imported.issues] };
   } catch {
-    toast.aviso(useServers.getState().vaultReadable ? m.mobile_machines_invalid_response() : m.servers_warning_vault_unread());
+    toast.passive(useServers.getState().vaultReadable ? m.mobile_machines_invalid_response() : m.servers_warning_vault_unread());
     return { added: [], issues: [{ stage: 'invalid_item' }] };
   }
   const freshIssues = result.issues.filter((issue) => {
@@ -96,7 +96,7 @@ export async function discoverSavedMachines(sources?: Server[]): Promise<Machine
     // A busca roda a cada abertura: o aviso diz só onde falhou; o motivo de cada uma fica na importação explícita.
     const hosts = [...new Set(freshIssues.flatMap((issue) => [issue.machine, issue.source])
       .map(shortHost).filter(Boolean))];
-    toast.aviso(hosts.length ? m.machine_import_warning_short({ hosts: hosts.join(', ') }) : m.machine_import_warning({ count: freshIssues.length }));
+    toast.passive(hosts.length ? m.machine_import_warning_short({ hosts: hosts.join(', ') }) : m.machine_import_warning({ count: freshIssues.length }));
   }
   return result;
 }

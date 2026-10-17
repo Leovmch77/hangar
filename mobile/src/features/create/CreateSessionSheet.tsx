@@ -84,6 +84,11 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   active: Server; machines: Server[]; onPickMachine: (id: string) => void; onClose?: () => void; keyboardOffset?: number; home?: HomePresentation;
 }) {
   const router = useRouter();
+  const [initialized, setInitialized] = useState(home?.mode !== 'sessions');
+  const enabled = initialized || home?.mode !== 'sessions';
+  useEffect(() => {
+    if (home?.mode !== 'sessions') setInitialized(true);
+  }, [home?.mode]);
   // O form remonta por máquina: estas são as escolhas guardadas para ela.
   const [remembered] = useState(() => readChoices(active.id));
   // O que a pessoa quer de modelo e nível; reaplicado sempre que a lista do provider recarrega.
@@ -202,6 +207,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   }, [provider, active]);
 
   useEffect(() => {
+    if (!enabled) return;
     const generation = ++codexGeneration.current;
     codexController.current?.abort();
     const controller = new AbortController();
@@ -229,7 +235,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
         if (generation === codexGeneration.current && !controller.signal.aborted) setCodexLoading(false);
       });
     return () => { retry.cancel(); controller.abort(); codexGeneration.current++; };
-  }, [provider, active, active?.id, active?.baseUrl, active?.token, codexTry, startCodexRetry]);
+  }, [enabled, provider, active, active?.id, active?.baseUrl, active?.token, codexTry, startCodexRetry]);
 
   // Retomar uma carga não desfaz escolhas: só a mudança de destino limpa o formulário.
   useEffect(() => {
@@ -245,6 +251,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   }, [active]);
 
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const retry = startConfigsRetry();
     setConfigsError('');
@@ -263,9 +270,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       })
       .finally(() => { if (alive) setConfigsLoading(false); });
     return () => { alive = false; retry.cancel(); };
-  }, [active, configsTry, startConfigsRetry]);
+  }, [enabled, active, configsTry, startConfigsRetry]);
 
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const controller = new AbortController();
     const retry = startProvidersRetry();
@@ -289,9 +297,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       })
       .finally(() => { if (alive) setProvidersLoading(false); });
     return () => { alive = false; retry.cancel(); controller.abort(); };
-  }, [active, providersTry, startProvidersRetry]);
+  }, [enabled, active, providersTry, startProvidersRetry]);
 
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     void probeServerResponse(active, '/api/cotas')
       .then((response) => {
@@ -303,9 +312,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       })
       .catch(() => {});
     return () => { alive = false; };
-  }, [active]);
+  }, [enabled, active]);
 
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const retry = startEnginesRetry();
     setEnginesError('');
@@ -322,7 +332,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
         retry.failed(cause);
       });
     return () => { alive = false; retry.cancel(); };
-  }, [active, enginesTry, startEnginesRetry]);
+  }, [enabled, active, enginesTry, startEnginesRetry]);
 
   const catalogEngine = provider === 'codex' ? null : engine || null;
   const catalogConfig = provider === 'codex' ? null : selectedConfig;
@@ -341,6 +351,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   }, [provider, catalogEngine, catalogConfig, catalogAccount, active]);
 
   useEffect(() => {
+    if (!enabled) return;
     setModelsLoading(false);
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi' && provider !== 'omp') {
       setModelos([]);
@@ -391,9 +402,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       retry.cancel();
       controller.abort();
     };
-  }, [provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token, modelsTry, startModelsRetry]);
+  }, [enabled, provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token, modelsTry, startModelsRetry]);
 
   useEffect(() => {
+    if (!enabled) return;
     const generation = ++archiveGeneration.current;
     archiveController.current?.abort();
     const controller = new AbortController();
@@ -411,7 +423,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
         if (generation === archiveGeneration.current && !controller.signal.aborted) setRetomaveis([]);
       });
     return () => { controller.abort(); archiveGeneration.current++; };
-  }, [provider, picked, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
+  }, [enabled, provider, picked, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
 
   // Conta lembrada (ou a ativa) com a janela geral esgotada sai sozinha para a de mais folga, como no PC
   // e no web; a troca não é gravada como escolha, e motor escolhido não passa por aqui.
@@ -543,14 +555,14 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     }
   };
 
-  const destination = (
+  const destination = enabled ? (
     <View style={styles.field}>
       <Text style={styles.label}>{active.label}</Text>
       <View style={styles.pickerWrap}>
         <CwdPicker server={active} onPick={handlePick} selected={picked} />
       </View>
     </View>
-  );
+  ) : null;
 
   const modelLabel = displayModel?.id === 'default' ? m.criar_padrao() : displayModel?.name ?? (modelo || displayModel?.id || m.config_motores_modelo_padrao());
   const modelContext = displayModel?.context ?? (displayModel?.context_length ? ctxWindow(displayModel.context_length).toUpperCase() : '');
