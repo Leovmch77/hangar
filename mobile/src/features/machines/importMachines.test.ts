@@ -190,6 +190,20 @@ describe('identidades confirmadas das máquinas', () => {
 });
 
 describe('descoberta autenticada só acrescenta', () => {
+  test('busca automática avisa brevemente em canal separado sem perder detalhes da falha', async () => {
+    const source = { ...owner, baseUrl: 'https://automatic-warning.test' };
+    network((url) => url === `${source.baseUrl}/api/peers` ? json({}, 503) : undefined);
+
+    const result = await discoverSavedMachines([source]);
+
+    expect(result.issues).toEqual([{ stage: 'source_peers', status: 503, machine: 'automatic-warning.test' }]);
+    expect(mocks.warning).toHaveBeenCalledTimes(1);
+    const [message, options] = mocks.warning.mock.calls[0];
+    expect(message).toContain('automatic-warning.test');
+    expect(options.duration).toBeLessThanOrEqual(3_500);
+    expect(options.toasterId).toBe('passive');
+  });
+
   test.each(['source', 'peer', 'candidate'] as const)('identifica duas falhas 403 distintas no aviso de %s sem corpo, caminho ou token', async (kind) => {
     network((url) => {
       if (kind === 'source' && url.endsWith('/api/peers')) return json({ detail: `leaked:${owner.token}:${remote.token}` }, 403);
