@@ -303,6 +303,30 @@ async fn missing_discovery_root_warns_even_when_no_repositories_are_found() {
     assert_eq!(body["warning"], "worktree_discovery_incomplete");
     assert_eq!(body["repos"], serde_json::json!([]));
 }
+
+#[tokio::test]
+async fn owner_cleans_a_missing_registration_even_after_its_branch_was_deleted() {
+    let dir = scene();
+    let root = hangar_workspace::real(dir.path());
+    let repo = root.join("repo");
+    let path = root.join("orphan");
+    git(&repo, &["worktree", "add", "-b", "orphan", path.to_str().unwrap()]);
+    std::fs::remove_dir_all(&path).unwrap();
+    git(&repo, &["update-ref", "-d", "refs/heads/orphan"]);
+    let f = fixture(&root, true).await;
+    let r = client().post(format!("http://{}/api/worktrees/delete", f.addr))
+        .bearer_auth(OWNER).header("content-type", "application/json")
+        .body(serde_json::json!({"repo": repo, "path": path, "keep_branch": true}).to_string())
+        .send().await.unwrap();
+    let status = r.status();
+    let body: Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(std::path::Path::new(body["removed"].as_str().unwrap()), path);
+    assert_eq!(body["branch_deleted"], false);
+    assert!(!hangar_workspace::worktrees::worktree_paths(repo.to_str().unwrap()).iter().any(|p| std::path::Path::new(p) == path));
+    assert!(root.join("repo-wt/.git").is_file());
+    assert_eq!(f.hits(), 0);
+}
 #[tokio::test]
 async fn merged_batch_accepts_a_repository_subdirectory() {
     let dir = scene();
