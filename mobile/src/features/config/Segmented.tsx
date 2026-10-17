@@ -44,7 +44,7 @@ export function Segmented<T extends string>({
             accessibilityLabel={o.aria ?? o.label}
             accessibilityState={{ selected: on, disabled }}
           >
-            <Text style={[styles.text, { color: on ? c.accentText : c.muted }]} numberOfLines={1}>
+            <Text style={[styles.text, { color: on ? c.accentText : c.muted }]}>
               {o.label}
             </Text>
           </Pressable>
@@ -56,6 +56,6 @@ export function Segmented<T extends string>({
 
 const styles = StyleSheet.create((theme) => ({
   rail: { flexDirection: 'row', alignSelf: 'stretch', borderWidth: 1, borderRadius: 6, overflow: 'hidden' },
-  option: { flex: 1, height: 36, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center' },
-  text: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  option: { flex: 1, minHeight: 36, paddingHorizontal: 11, paddingVertical: 8, alignItems: 'center', justifyContent: 'center' },
+  text: { fontSize: theme.base.text.sm, fontWeight: '500', textAlign: 'center' },
 }));

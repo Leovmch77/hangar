@@ -27,17 +27,19 @@ export function AddMachineSheet({ owner, onClose, onQr }: { owner: Server | null
     const baseUrl = normalizeUrl(address);
     const credential = token.trim();
     if (!credential) throw new Error(m.mobile_machines_token_required());
-    const candidate = { id: `machine-probe:${baseUrl}`, baseUrl, token: credential, label: label.trim() || new URL(baseUrl).hostname };
+    const candidate = { id: `machine-probe:${baseUrl}`, baseUrl, token: credential, label: label.trim() || m.native_settings_group_server() };
     const config = await getConfigForServer(candidate, 15_000);
     ensureActive(signal);
     if (!config || !config.campos || typeof config.campos !== 'object') throw new Error(m.mobile_machines_invalid_response());
     const warnings: string[] = [];
     let identifier = '';
-    try { identifier = (await readIdentifier(candidate, signal)).identificador; }
-    catch (error) { ensureActive(signal); warnings.push(reason(error)); }
+    try {
+      identifier = (await readIdentifier(candidate, signal)).identificador;
+      if (!identifier && !label.trim()) throw new Error(m.mobile_machines_invalid_response());
+    } catch (error) { ensureActive(signal); warnings.push(reason(error)); }
     ensureActive(signal);
     const typedLabel = label.trim();
-    const saved = useServers.getState().add({ baseUrl, token: credential, label: typedLabel || identifier || new URL(baseUrl).hostname });
+    const saved = useServers.getState().add({ baseUrl, token: credential, label: typedLabel || identifier || m.native_settings_group_server() });
     if (typedLabel && saved.label !== typedLabel) useServers.getState().update(saved.id, { label: typedLabel });
     void discoverSavedMachines();
     const result: Added = { warnings, registered: false };

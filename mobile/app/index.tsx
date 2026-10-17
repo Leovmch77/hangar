@@ -66,7 +66,7 @@ export default function Index() {
   }), [mode, showSessions]);
 
   // Pressable do gesture-handler recebe o toque mesmo na faixa de arrasto da gaveta no Android.
-  const topButton = (icon: 'Server' | 'Settings', label: string, onPress: () => void) => (
+  const topButton = (icon: 'Server' | 'Settings' | 'ChartNoAxesCombined', label: string, onPress: () => void) => (
     <Pressable onPress={onPress} style={styles.icon} accessibilityRole="button" accessibilityLabel={label} hitSlop={4}>
       <Icon name={icon} size={20} color={theme.tokens.text.secondary} />
     </Pressable>
@@ -86,6 +86,7 @@ export default function Index() {
           </Pressable>
           <View style={styles.spacer} />
           {activeId ? <LiveVoiceChatButton serverId={activeId} /> : null}
+          {topButton('ChartNoAxesCombined', m.nav_custos(), () => router.push('/costs' as never))}
           {topButton('Server', m.maquinas_este_aparelho(), () => setServersOpen(true))}
           {topButton('Settings', m.config_modal_titulo(), () => router.push('/config' as never))}
         </View>

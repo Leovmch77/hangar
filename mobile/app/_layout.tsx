@@ -64,7 +64,8 @@ export default function Layout() {
   // de um chat. O layout é o único lugar montado o tempo todo.
   useEffect(() => {
     if (!aviso) return;
-    toast.erro(
+    if (aviso.tipo === 'identification') toast.aviso(aviso.message);
+    else toast.erro(
       aviso.tipo === 'token'
         ? m.servidores_aviso_token({ label: aviso.label })
         : aviso.tipo === 'vault_unread'
@@ -88,6 +89,8 @@ export default function Layout() {
           />
           {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
           <Stack.Screen name="config" options={{ headerShown: false }} />
+          <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
+          <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
           {/* A borda esquerda do chat é o voltar do iOS; a gaveta abre mais para dentro (SessionsDrawer `edgeStart`). */}
           <Stack.Screen name="s/[server]/[name]/index" />
           {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}

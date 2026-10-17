@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CampoConfig } from '@hangar/core';
 import Voice from '../../../app/config/voice';
 import * as m from '../../paraglide/messages';
+import { getLocale, overwriteGetLocale } from '../../paraglide/runtime';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -79,6 +80,36 @@ const edit = (label: string, value: string) => act(async () => {
 const render = () => act(async () => root.render(createElement(Voice)));
 
 describe('organização do ditado na tela de Voz', () => {
+  it('organização ocupa a largura sem recuo e preserva rótulos, seleção e rascunho', async () => {
+    const resolveLocale = getLocale;
+    overwriteGetLocale(() => 'pt');
+    try {
+      await render();
+      expect(container.textContent!.split(m.native_voice_cleanup()).length - 1).toBe(1);
+      const group = container.querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${m.native_voice_cleanup()}"]`)!;
+      expect(group.parentElement?.style.paddingLeft).toBe('0px');
+      expect([...group.querySelectorAll('button')].map((el) => el.textContent)).toEqual([
+        'Sem organização', 'Harness da conversa', 'API externa',
+      ]);
+      expect([...group.querySelectorAll('button')].map((el) => el.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false']);
+
+      await click(m.native_voice_organization_harness());
+      expect(button(m.native_voice_organization_harness()).getAttribute('aria-selected')).toBe('true');
+      expect(button(m.native_voice_organization_none()).getAttribute('aria-selected')).toBe('false');
+      expect(input(m.native_voice_harness_model_claude())?.parentElement?.style.paddingLeft).toBe('50px');
+      await edit(m.native_voice_harness_model_claude(), 'claude-draft');
+      expect(calls.patch).not.toHaveBeenCalled();
+      expect(fields.dictation_organization_mode.valor).toBe('none');
+      expect(fields.dictation_claude_model.valor).toBe('claude-old');
+      await click(m.native_server_save());
+      expect(calls.patch).toHaveBeenCalledExactlyOnceWith(server, {
+        dictation_organization_mode: 'harness', dictation_claude_model: 'claude-draft',
+      });
+    } finally {
+      overwriteGetLocale(resolveLocale);
+    }
+  });
+
   it('limite de gravação continua visível e salvável com organização desligada', async () => {
     await render();
     expect(container.textContent).not.toContain(m.native_voice_style());

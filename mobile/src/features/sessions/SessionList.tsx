@@ -294,6 +294,11 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     setRecolhidos(new Set());
   }, []);
 
+  const openCosts = useCallback(() => {
+    onClose();
+    router.push('/costs' as never);
+  }, [router, onClose]);
+
   const abrirConfig = useCallback(() => {
     onClose();
     router.push('/config' as never);
@@ -311,6 +316,15 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         : ativo.label
     : '';
 
+  const searchAction = <Pressable
+    onPress={() => { onClose(); router.push('/search' as never); }}
+    style={home ? styles.searchHome : styles.icone}
+    accessibilityRole="button" accessibilityLabel={m.switcher_buscar_conversas()}
+  >
+    <Icon name="Search" size={20} color={theme.tokens.text.secondary} />
+    {home ? <Text style={styles.searchLabel}>{m.switcher_buscar_conversas()}</Text> : null}
+  </Pressable>;
+
   const topo = (
     <View style={styles.topo}>
       <HangarMark size={20} color={theme.tokens.text.primary} />
@@ -319,6 +333,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
       </Text>
       {/* Agrupar não se aplica à lista de conversas, que é só por recência. */}
       <View style={styles.topoAcoes}>
+        {searchAction}
         {ativo ? <LiveVoiceChatButton serverId={ativo.id} /> : null}
         {conversas ? null : <MenuView
           onPressAction={({ nativeEvent }) => {
@@ -386,6 +401,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
           <Text style={[styles.ativoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={activeError ? undefined : 1}>{activeError ? `${ativo.label}: ${activeError}` : ativo.label}</Text>
         </Pressable>
       ) : <View style={styles.ativo} />}
+      <Pressable onPress={openCosts} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.nav_custos()}>
+        <Icon name="ChartNoAxesCombined" size={20} color={theme.tokens.text.secondary} />
+      </Pressable>
       <Pressable onPress={abrirConfig} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()}>
         <Icon name="Settings" size={20} color={theme.tokens.text.secondary} />
       </Pressable>
@@ -497,7 +515,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
       {/* Sem caixa: a lista fica direto sobre o fundo escolhido em Aparência, como no app de PC. */}
       {/* A gaveta passa por baixo da barra de status e do indicador de início: a margem segura é daqui. */}
       <View style={[styles.painel, !home && { paddingTop: insets.top + 8, paddingBottom: Math.max(insets.bottom, 8) }]}>
-        {home ? machineStatus : topo}
+        {home ? <>{searchAction}{machineStatus}</> : topo}
         {home || conversas ? null : campoBusca}
         <View style={styles.corpo}>{corpo}</View>
         {home ? null : rodape}
@@ -522,6 +540,8 @@ const styles = StyleSheet.create((theme) => ({
   marca: { flexShrink: 1, fontSize: theme.base.text.xl, fontWeight: '700' },
   topoAcoes: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto' },
   icone: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  searchHome: { alignSelf: 'flex-end', minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
+  searchLabel: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   campo: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, marginBottom: 8, paddingHorizontal: 12, borderRadius: theme.base.radius.lg, minHeight: 40 },
   input: { flex: 1, fontSize: theme.base.text.base, paddingVertical: 8 },
   corpo: { flex: 1 },

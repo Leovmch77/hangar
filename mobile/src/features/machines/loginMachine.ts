@@ -18,7 +18,8 @@ export async function verifyLoginMachine(server: Server, resolveName: boolean): 
       throw new Error(m.mobile_machines_invalid_response());
     }
     const label = identity.identificador.trim();
-    if (label) useServers.getState().update(server.id, { label });
+    if (!label) throw new Error(m.mobile_machines_invalid_response());
+    useServers.getState().update(server.id, { label });
   } catch (error) {
     toast.aviso(error instanceof Error ? error.message : String(error));
   }

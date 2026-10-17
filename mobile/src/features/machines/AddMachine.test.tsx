@@ -101,13 +101,55 @@ describe('adicionar máquina', () => {
     expect(useServers.getState().servers.at(-1)?.baseUrl).toBe('http://10.2.3.4:8765');
   });
 
-  it.each([{ id: 'remote', expected: 'remote' }, { id: '', expected: '10.2.3.4' }])('sem nome usa identificador ou IP inteiro: $expected', async ({ id, expected }) => {
+  it.each([{ id: 'remote', expected: 'remote' }, { id: '', expected: null }])('sem nome usa identificador ou rótulo neutro: $id', async ({ id, expected }) => {
     const original = mocks.fetch.getMockImplementation()!;
     mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/identificador') ? json({ identificador: id, lan_url: '' }) : original(url));
     await render(); await type(m.mobile_machines_endpoint(), 'http://10.2.3.4:8765'); await type(m.mobile_machines_token(), 'remote-secret');
     expect(mocks.fetch).not.toHaveBeenCalled();
     await click(m.mobile_machines_save());
-    expect(useServers.getState().servers.at(-1)?.label).toBe(expected);
+    expect(useServers.getState().servers.at(-1)?.label).toBe(expected ?? m.native_settings_group_server());
+    if (!id) expect(el.textContent).toContain(m.mobile_machines_invalid_response());
+  });
+
+  it('sem nome mantém rótulo neutro quando a consulta falha', async () => {
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/identificador')
+      ? json({ detail: 'fixture-identity-unavailable' }, 503) : original(url));
+    await render(); await type(m.mobile_machines_endpoint(), 'http://10.2.3.4:8765'); await type(m.mobile_machines_token(), 'remote-secret');
+
+    await click(m.mobile_machines_save());
+
+    expect(useServers.getState().servers.at(-1)?.label).toBe(m.native_settings_group_server());
+    expect(el.textContent).toContain('fixture-identity-unavailable');
+  });
+
+  it('sem nome aguarda identificador atrasado sem salvar o IP', async () => {
+    const original = mocks.fetch.getMockImplementation()!;
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((yes) => { resolve = yes; });
+    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/identificador') ? pending : original(url));
+    await render(); await type(m.mobile_machines_endpoint(), 'http://10.2.3.4:8765'); await type(m.mobile_machines_token(), 'remote-secret');
+
+    await click(m.mobile_machines_save());
+    expect(useServers.getState().servers).toEqual([owner]);
+    await act(async () => { resolve(json({ identificador: 'remote', lan_url: '' })); });
+
+    expect(useServers.getState().servers.at(-1)?.label).toBe('remote');
+    expect(mocks.fetch.mock.calls.filter(([url]) => String(url).endsWith('/identificador'))).toHaveLength(1);
+  });
+
+  it.each(['digitado', 'salvo'])('nome %s prevalece sobre identificador da máquina', async (source) => {
+    const saved = { id: 'saved-remote', label: 'fixture-saved', baseUrl: 'http://10.2.3.4:8765', token: 'saved-token' };
+    if (source === 'salvo') {
+      mocks.vault.set('cp_servers_v1', JSON.stringify({ servers: [owner, saved], activeId: owner.id }));
+      await useServers.getState().load();
+    }
+    await render(); await type(m.mobile_machines_endpoint(), saved.baseUrl); await type(m.mobile_machines_token(), 'remote-secret');
+    if (source === 'digitado') await type(m.mobile_machines_label(), 'fixture-custom');
+
+    await click(m.mobile_machines_save());
+
+    expect(useServers.getState().servers.at(-1)?.label).toBe(source === 'salvo' ? 'fixture-saved' : 'fixture-custom');
   });
 
   it('registra ida e volta sem gravar loopback na outra ponta e mostra falha parcial', async () => {

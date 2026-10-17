@@ -59,7 +59,7 @@ export default function Login() {
 
     // add é síncrono em memória, mas persist é async (emenda 2) — o probe só roda depois
     const existing = useServers.getState().servers.some((s) => s.baseUrl === p.base && !s.invite);
-    const added = useServers.getState().add({ baseUrl: p.base, token: p.token, label: new URL(p.base).hostname });
+    const added = useServers.getState().add({ baseUrl: p.base, token: p.token, label: m.native_settings_group_server() });
 
     try {
       await verifyLoginMachine(added, !existing);

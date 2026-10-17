@@ -36,8 +36,9 @@ export interface SessionsState {
 // internas — fora do set() para não virar proxy
 const slots = new Map<string, Slot>();
 const streams = new Map<string, ReturnType<typeof openSessionsStream>>();
-type ConnectionAttempt = { server: Server; generation: number; abort: AbortController };
+type ConnectionAttempt = { server: Server; generation: number; abort: AbortController; routing: boolean };
 const connecting = new Map<string, ConnectionAttempt>();
+const routeDeadlines = new WeakMap<Promise<void>, number>();
 const failures = new Map<string, number>();
 const retryAt = new Map<string, number>();
 // Falha da lista não é necessariamente queda de rede; só lista SSE válida encerra este recuo.
@@ -91,19 +92,21 @@ function isCurrent(attempt: ConnectionAttempt) {
   return foreground && refs > 0 && attempt.generation === generation && !attempt.abort.signal.aborted && hasServer(attempt.server);
 }
 
-function disconnect(id: string) {
+function disconnect(id: string, abortPending = true) {
   const stream = streams.get(id);
   streams.delete(id);
   stream?.close();
   clearTimeout(retryTimers.get(id));
   retryTimers.delete(id);
-  connecting.get(id)?.abort.abort();
+  const attempt = connecting.get(id);
+  if (!abortPending && attempt && !attempt.routing) connecting.delete(id);
+  if (abortPending) attempt?.abort.abort();
   esquecerRota(id);
 }
 
 function pause() {
   generation++;
-  for (const id of new Set([...streams.keys(), ...retryTimers.keys(), ...connecting.keys()])) disconnect(id);
+  for (const id of new Set([...streams.keys(), ...retryTimers.keys(), ...connecting.keys()])) disconnect(id, false);
 }
 
 function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
@@ -236,7 +239,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
       continue;
     }
     if (estaDesligado(s.id)) slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
-    const attempt = { server: { ...s }, generation, abort: new AbortController() };
+    const attempt = { server: { ...s }, generation, abort: new AbortController(), routing: true };
     connecting.set(s.id, attempt);
     void synchronize(attempt, get, set);
   }
@@ -300,7 +303,29 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     return false;
   };
   try {
-    if (!rotaDecidida(s.id)) await decidirRota(s);
+    if (!rotaDecidida(s.id)) {
+      const route = decidirRota(s);
+      const deadline = routeDeadlines.get(route) ?? Date.now() + 6000;
+      routeDeadlines.set(route, deadline);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // O fetch pode ignorar o abort; o prazo corta a espera, não a decisão compartilhada.
+        const timedOut = await Promise.race([
+          route.then(() => {
+            if (!hasServer(s)) esquecerRota(s.id);
+            return false;
+          }),
+          new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), Math.max(0, deadline - Date.now())); }),
+        ]);
+        if (timedOut && isCurrent(attempt)) {
+          esquecerRota(s.id);
+          registrarDiag({ evento: 'rota.falhou', nivel: 'aviso', codigo: 'route_timeout' }, s.baseUrl);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    attempt.routing = false;
     if (!isCurrent(attempt)) return;
     let httpResponse = false;
     try {

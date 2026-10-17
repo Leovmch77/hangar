@@ -103,7 +103,7 @@ describe('InvitePanel', () => {
   });
 
   it('não consome convite de máquina própria no mesmo endereço', async () => {
-    const own = useServers.getState().add({ baseUrl: 'https://GUEST.ts.net:8443/', token: 'owner-token' });
+    const own = useServers.getState().add({ baseUrl: 'https://GUEST.ts.net:8443/', token: 'owner-token', label: 'fixture-owner' });
     const { el } = await mount(LINK);
     await click(el);
     expect(el.textContent).toContain(m.mobile_share_invite_own_server());
@@ -152,7 +152,7 @@ describe('InvitePanel', () => {
     await click(el);
     await act(async () => { root.unmount(); });
     roots.splice(roots.indexOf(root), 1);
-    const own = useServers.getState().add({ baseUrl: 'http://10.0.0.1:8765', token: 'owner-token' });
+    const own = useServers.getState().add({ baseUrl: 'http://10.0.0.1:8765', token: 'owner-token', label: 'fixture-owner' });
     await act(async () => { pending.resolve(RESULT); });
     const saved = useServers.getState().servers.find((server) => server.invite);
     expect(saved).toMatchObject({ token: 'new-token', invite: true, ephemeral: false });
@@ -197,7 +197,7 @@ describe('InvitePanel', () => {
       roots.splice(roots.indexOf(root), 1);
     }
     let own!: Server;
-    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
+    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token', label: 'fixture-owner' }); });
     await act(async () => { pending.resolve(RESULT); });
     const saved = useServers.getState().servers.find((server) => server.invite);
     expect(saved).toMatchObject({ token: 'new-token', invite: true });
@@ -218,7 +218,7 @@ describe('InvitePanel', () => {
     const { el, root } = await mount(LINK);
     await click(el);
     let own!: Server;
-    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
+    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token', label: 'fixture-owner' }); });
     boundary.readFailure = true;
     await act(async () => { await useServers.getState().load(); root.unmount(); });
     roots.splice(roots.indexOf(root), 1);
@@ -241,7 +241,7 @@ describe('InvitePanel', () => {
     const { el, root } = await mount(LINK);
     await click(el);
     let own!: Server;
-    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token' }); });
+    await act(async () => { own = useServers.getState().add({ baseUrl: RESULT.address, token: 'owner-token', label: 'fixture-owner' }); });
     await settle();
     await act(async () => { root.unmount(); });
     roots.splice(roots.indexOf(root), 1);
