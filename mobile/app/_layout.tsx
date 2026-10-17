@@ -89,6 +89,8 @@ export default function Layout() {
           />
           {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
           <Stack.Screen name="config" options={{ headerShown: false }} />
+          <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
+          <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
           {/* A borda esquerda do chat é o voltar do iOS; a gaveta abre mais para dentro (SessionsDrawer `edgeStart`). */}
           <Stack.Screen name="s/[server]/[name]/index" />
           {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}

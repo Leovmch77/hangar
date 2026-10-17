@@ -294,6 +294,11 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     setRecolhidos(new Set());
   }, []);
 
+  const openCosts = useCallback(() => {
+    onClose();
+    router.push('/costs' as never);
+  }, [router, onClose]);
+
   const abrirConfig = useCallback(() => {
     onClose();
     router.push('/config' as never);
@@ -396,6 +401,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
           <Text style={[styles.ativoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={activeError ? undefined : 1}>{activeError ? `${ativo.label}: ${activeError}` : ativo.label}</Text>
         </Pressable>
       ) : <View style={styles.ativo} />}
+      <Pressable onPress={openCosts} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.nav_custos()}>
+        <Icon name="ChartNoAxesCombined" size={20} color={theme.tokens.text.secondary} />
+      </Pressable>
       <Pressable onPress={abrirConfig} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()}>
         <Icon name="Settings" size={20} color={theme.tokens.text.secondary} />
       </Pressable>
