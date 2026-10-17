@@ -16,6 +16,8 @@ import { useServers } from '../../stores/servers';
 import { rememberProject } from '../../stores/createPreferences';
 import type { NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
+import { loadErrorText } from './loadError';
+import { useCanceledLoadRetry } from './useCanceledLoadRetry';
 import { ProviderPicker } from './ProviderPicker';
 import { BranchPicker } from './BranchPicker';
 import { CodexContextControl, useCodexContextControl } from './CodexContextControl';
@@ -97,7 +99,19 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   const [branchOpen, setBranchOpen] = useState(false);
   const [hasSameFolder, setHasSameFolder] = useState(false);
   const [error, setError] = useState('');
-  const [catalogError, setCatalogError] = useState('');
+  const [configsError, setConfigsError] = useState('');
+  const [enginesError, setEnginesError] = useState('');
+  const catalogError = [configsError, enginesError].filter(Boolean).join('\n');
+  const [configsTry, setConfigsTry] = useState(0);
+  const [enginesTry, setEnginesTry] = useState(0);
+  const [providersTry, setProvidersTry] = useState(0);
+  const [modelsTry, setModelsTry] = useState(0);
+  const [codexTry, setCodexTry] = useState(0);
+  const startConfigsRetry = useCanceledLoadRetry(useCallback(() => setConfigsTry((n) => n + 1), []));
+  const startEnginesRetry = useCanceledLoadRetry(useCallback(() => setEnginesTry((n) => n + 1), []));
+  const startProvidersRetry = useCanceledLoadRetry(useCallback(() => setProvidersTry((n) => n + 1), []));
+  const startModelsRetry = useCanceledLoadRetry(useCallback(() => setModelsTry((n) => n + 1), []));
+  const startCodexRetry = useCanceledLoadRetry(useCallback(() => setCodexTry((n) => n + 1), []));
   const [projectWarning, setProjectWarning] = useState('');
   const pickGeneration = useRef(0);
 
@@ -181,39 +195,44 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   }, []);
 
   useEffect(() => {
+    setCodexAccounts([]);
+    setCodexAccount('');
+    setCodexProgress('');
+    setRetomando(false);
+  }, [provider, active]);
+
+  useEffect(() => {
     const generation = ++codexGeneration.current;
     codexController.current?.abort();
     const controller = new AbortController();
+    const retry = startCodexRetry();
     codexController.current = controller;
-    setCodexAccounts([]);
-    setCodexAccount('');
     setCodexError('');
-    setCodexProgress('');
-    setRetomando(false);
     if (provider !== 'codex' || !active) {
       setCodexLoading(false);
-      return () => { controller.abort(); codexGeneration.current++; };
+      return () => { retry.cancel(); controller.abort(); codexGeneration.current++; };
     }
     setCodexLoading(true);
     void getCodexAccountsForServer(active, controller.signal)
       .then((accounts) => {
         if (generation !== codexGeneration.current || controller.signal.aborted) return;
         setCodexAccounts(accounts);
-        setCodexAccount(defaultCodexAccount(accounts, remembered.codexAccount)?.id ?? '');
+        setCodexAccount((current) => accounts.some((account) => account.id === current) ? current
+          : defaultCodexAccount(accounts, remembered.codexAccount)?.id ?? '');
       })
       .catch((cause: unknown) => {
         if (generation !== codexGeneration.current || controller.signal.aborted) return;
-        setCodexError(cause instanceof Error ? cause.message : m.codex_ui_login_error());
+        setCodexError(loadErrorText(cause, m.codex_ui_login_error()));
+        retry.failed(cause);
       })
       .finally(() => {
         if (generation === codexGeneration.current && !controller.signal.aborted) setCodexLoading(false);
       });
-    return () => { controller.abort(); codexGeneration.current++; };
-  }, [provider, active, active?.id, active?.baseUrl, active?.token]);
+    return () => { retry.cancel(); controller.abort(); codexGeneration.current++; };
+  }, [provider, active, active?.id, active?.baseUrl, active?.token, codexTry, startCodexRetry]);
 
-  // Cada catálogo pertence ao destino capturado, mesmo após trocar de máquina.
+  // Retomar uma carga não desfaz escolhas: só a mudança de destino limpa o formulário.
   useEffect(() => {
-    let alive = true;
     setConfigs([]);
     setSelectedConfig(null);
     accountTouched.current = false;
@@ -222,37 +241,58 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     setMotores({});
     setEngine('');
     setCotas([]);
-    setCatalogError('');
+    setProviderProbe(null);
+  }, [active]);
+
+  useEffect(() => {
+    let alive = true;
+    const retry = startConfigsRetry();
+    setConfigsError('');
     setConfigsLoading(true);
     void listClaudeConfigsForServer(active)
       .then((cs) => {
         if (!alive) return;
         setConfigs(cs);
         const sel = cs.find((c) => c.path === remembered.configDir)?.path ?? cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null;
-        setSelectedConfig(sel);
+        setSelectedConfig((current) => cs.some((c) => c.path === current) ? current : sel);
       })
       .catch((cause: unknown) => {
-        if (alive) setCatalogError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
+        if (!alive) return;
+        setConfigsError(loadErrorText(cause, m.criar_sessao_erro()));
+        retry.failed(cause);
       })
       .finally(() => { if (alive) setConfigsLoading(false); });
-    setProviderProbe(null);
+    return () => { alive = false; retry.cancel(); };
+  }, [active, configsTry, startConfigsRetry]);
+
+  useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
+    const retry = startProvidersRetry();
     setProvidersLoading(true);
     setProvidersError('');
     // Sonda falhou: todos ficam oferecidos, e o backend recusa o que não estiver instalado.
-    void getProvidersForServer(active)
+    void getProvidersForServer(active, controller.signal)
       .then((probe) => {
         if (!alive) return;
         setProviderProbe(probe);
         const preferred = SESSION_PROVIDERS.find((p) => probe[p]?.default && probe[p]?.disponivel);
-        if (!providerTouched.current && preferred && preferred !== provider) {
+        if (!providerTouched.current && preferred && preferred !== provider && (providersTry === 0 || !probe[provider]?.disponivel)) {
           desired.current = { model: '', effort: '' };
           setProvider(preferred);
         }
       })
       .catch((cause: unknown) => {
-        if (alive && !providerTouched.current) setProvidersError(cause instanceof Error ? cause.message : m.criar_providers_erro());
+        if (!alive) return;
+        if (!providerTouched.current) setProvidersError(loadErrorText(cause, m.criar_providers_erro()));
+        retry.failed(cause);
       })
       .finally(() => { if (alive) setProvidersLoading(false); });
+    return () => { alive = false; retry.cancel(); controller.abort(); };
+  }, [active, providersTry, startProvidersRetry]);
+
+  useEffect(() => {
+    let alive = true;
     void probeServerResponse(active, '/api/cotas')
       .then((response) => {
         if (!response.ok) throw new Error(String(response.status));
@@ -262,20 +302,27 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
         if (alive) setCotas(cs);
       })
       .catch(() => {});
+    return () => { alive = false; };
+  }, [active]);
+
+  useEffect(() => {
+    let alive = true;
+    const retry = startEnginesRetry();
+    setEnginesError('');
     void getEnginesForServer(active)
       .then((r) => {
         if (alive) {
           setMotores(r.motores);
-          if (r.arquivo_corrompido) setCatalogError(m.criar_motores_erro());
+          if (r.arquivo_corrompido) setEnginesError(m.criar_motores_erro());
         }
       })
       .catch((cause: unknown) => {
-        if (alive) setCatalogError(cause instanceof Error ? cause.message : m.criar_motores_erro());
+        if (!alive) return;
+        setEnginesError(loadErrorText(cause, m.criar_motores_erro()));
+        retry.failed(cause);
       });
-    return () => {
-      alive = false;
-    };
-  }, [active]);
+    return () => { alive = false; retry.cancel(); };
+  }, [active, enginesTry, startEnginesRetry]);
 
   const catalogEngine = provider === 'codex' ? null : engine || null;
   const catalogConfig = provider === 'codex' ? null : selectedConfig;
@@ -291,6 +338,9 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     setServiceTier(undefined);
     setEsforco('');
     setSubagente('');
+  }, [provider, catalogEngine, catalogConfig, catalogAccount, active]);
+
+  useEffect(() => {
     setModelsLoading(false);
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi' && provider !== 'omp') {
       setModelos([]);
@@ -306,6 +356,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     }
     let alive = true;
     const controller = new AbortController();
+    const retry = startModelsRetry();
     setErroModelos('');
     setModelsLoading(true);
     // Só volta o que a lista nova ainda oferece; o resto abre no padrão.
@@ -330,15 +381,17 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       .catch((e) => {
         if (!alive) return;
         setModelos([]);
-        setErroModelos(e instanceof Error ? e.message : m.criar_modelos_erro());
+        setErroModelos(loadErrorText(e, m.criar_modelos_erro()));
         restore([]);
+        retry.failed(e);
       })
       .finally(() => { if (alive) setModelsLoading(false); });
     return () => {
       alive = false;
+      retry.cancel();
       controller.abort();
     };
-  }, [provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token]);
+  }, [provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token, modelsTry, startModelsRetry]);
 
   useEffect(() => {
     const generation = ++archiveGeneration.current;

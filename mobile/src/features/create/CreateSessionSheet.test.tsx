@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const calls = vi.hoisted(() => ({
   roots: vi.fn(), scan: vi.fn(), sessions: vi.fn(), configs: vi.fn(), engines: vi.fn(), save: vi.fn(),
+  appState: 'active', appListeners: new Set<(state: string) => void>(), focused: true,
   startDictation: vi.fn(), stopDictation: vi.fn(), transcribe: vi.fn(),
   activeId: 'server-b', startPending: null as Promise<void> | null,
   target: null as null | { id: string; label: string; baseUrl: string; token: string },
@@ -32,11 +33,21 @@ const calls = vi.hoisted(() => ({
 }));
 const server = { id: 'server-b', label: 'Servidor B', baseUrl: 'https://b.local', token: 'token-b' };
 
-vi.mock('expo-router', () => ({ useRouter: () => ({ replace: calls.replace }) }));
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ replace: calls.replace }),
+  useFocusEffect: (callback: () => void | (() => void)) => useEffect(() => calls.focused ? callback() : undefined, [callback, calls.focused]),
+}));
 vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return {
   ...actual,
+  AppState: {
+    get currentState() { return calls.appState; },
+    addEventListener: (_event: string, listener: (state: string) => void) => {
+      calls.appListeners.add(listener);
+      return { remove: () => calls.appListeners.delete(listener) };
+    },
+  },
   AccessibilityInfo: { ...actual.AccessibilityInfo, sendAccessibilityEvent: vi.fn(), announceForAccessibility: vi.fn() },
   Switch: ({ value, onValueChange, disabled, accessibilityLabel }: { value: boolean; onValueChange: (v: boolean) => void; disabled?: boolean; accessibilityLabel?: string }) =>
     createElement('button', { role: 'switch', 'aria-label': accessibilityLabel, 'aria-checked': value, disabled, onClick: () => onValueChange(!value) }),
@@ -219,7 +230,7 @@ vi.mock('../../paraglide/messages', () => ({
     'home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming ' +
     'home_usage_warming_timeout native_close native_create_checkout_branch native_create_checkout_current native_create_checkout_failed ' +
     'native_create_checkout_loading native_create_checkout_worktree ' +
-    'native_create_codex_account native_loading native_new_chat_machine ' +
+    'native_create_codex_account native_loading native_new_chat_machine native_network_error criar_providers_erro ' +
     'native_new_chat_no_accounts nova_conversa_anexo_falhou nova_conversa_candidata nova_conversa_conferir_erro nova_conversa_criando ' +
     'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry ' +
     'worktree_base worktree_modo worktree_modo_ajuda worktree_nome_branch worktree_nova_branch ' +
@@ -241,10 +252,20 @@ const connected = { id: 'work', credential_id: 'codex:/work', name: 'Trabalho', 
 const defaultAccount = { id: 'default', credential_id: 'codex:/default', name: 'Padrão', home: '/default', is_default: true, auth: { method: 'oauth', status: 'connected', email: 'default@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } };
 const archived = { project: '-repo', cwd: '/repo', session_id: 'sid-1', mtime: 1, preview: 'continuação', ultima: 'última mensagem', live: false, config_dir: null, conta: 'Trabalho', provider: 'codex', codex_account: 'work', codex_home: '/work' };
 
+const nativeCanceled = () => new Error('fetch failed: FetchRequestCanceledException: Fetch request has been canceled (at Expo/NativeResponse.swift:63)');
+
+async function appState(state: string) {
+  await act(async () => {
+    calls.appState = state;
+    for (const listener of calls.appListeners) listener(state);
+  });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 describe('CreateSessionSheet Codex', () => {
@@ -253,6 +274,9 @@ describe('CreateSessionSheet Codex', () => {
     calls.contextFetch.mockReset().mockImplementation(async () => new Response(JSON.stringify({ contexto_estendido: true })));
     vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => calls.contextFetch(input, init));
     calls.dismiss = null;
+    calls.appState = 'active';
+    calls.appListeners.clear();
+    calls.focused = true;
     calls.pickerActive = 0;
     calls.pickerPeak = 0;
     calls.pickerHistory = [];
@@ -356,6 +380,377 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => Promise.resolve());
     return { container, root };
   }
+
+  it.each([
+    ['roots', 'active', false], ['roots', 'active', true], ['roots', 'focus', false], ['roots', 'focus', true],
+    ['scan', 'active', false], ['scan', 'active', true], ['scan', 'focus', false], ['scan', 'focus', true],
+  ] as const)('retomada de pasta repete só %s cancelado por %s (tardio=%s)', async (operation, event, late) => {
+    const pending = deferred<never>();
+    calls[operation].mockReturnValueOnce(pending.promise);
+    const { container, root } = await renderSheet(false, false);
+    const focus = async (value: boolean) => {
+      calls.focused = value;
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+    };
+    try {
+      if (event === 'active') await appState('background');
+      else await focus(false);
+      if (!late) await act(async () => pending.reject(nativeCanceled()));
+      if (event === 'active') await appState('active');
+      else await focus(true);
+      if (late) await act(async () => pending.reject(nativeCanceled()));
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      expect(container.textContent).not.toContain('native_network_error');
+      expect(calls.roots).toHaveBeenCalledTimes(operation === 'roots' ? 2 : 1);
+      expect(calls.scan).toHaveBeenCalledTimes(operation === 'scan' ? 2 : 1);
+      await appState('active');
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      expect(calls[operation]).toHaveBeenCalledTimes(2);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de pasta não entra em loop se o cancelamento persistir', async () => {
+    calls.roots.mockRejectedValue(nativeCanceled());
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await appState('background');
+      await appState('active');
+      expect(calls.roots).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain('native_network_error');
+      await appState('active');
+      await appState('active');
+      expect(calls.roots).toHaveBeenCalledTimes(2);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de scan inicial não repete raiz com resposta HTTP anterior', async () => {
+    calls.roots.mockResolvedValue([{ name: 'Missing', path: '/missing' }, { name: 'Repo', path: '/repo' }]);
+    calls.scan.mockResolvedValueOnce({ entries: [], error: 'not_found' }).mockRejectedValueOnce(nativeCanceled());
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await appState('background');
+      await appState('active');
+      expect(calls.scan.mock.calls.filter((call) => call[1] === '/missing')).toHaveLength(1);
+      expect(calls.scan.mock.calls.filter((call) => call[1] === '/repo')).toHaveLength(2);
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      expect(calls.roots).toHaveBeenCalledTimes(1);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('scan inicial mantém tentativa manual na pasta lembrada sem repetir raízes', async () => {
+    localStorage.setItem('create.project.v1:server-b', '{"root":"/repo","cwd":"/repo/child"}');
+    calls.scan.mockRejectedValueOnce(new TypeError('Network request failed'));
+    const { container, root } = await renderSheet(false, false);
+    try {
+      expect(container.textContent).toContain('native_network_error');
+      expect(button(container, 'native_retry')).toBeTruthy();
+      await act(async () => button(container, 'native_retry')!.click());
+      expect(button(container, 'native_new_chat_folder: child')).toBeTruthy();
+      expect(calls.roots).toHaveBeenCalledTimes(1);
+      expect(calls.scan).toHaveBeenLastCalledWith(server, '/repo', '/repo/child', expect.any(AbortSignal));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de scan aberto preserva caminho e não repete raízes', async () => {
+    const { container, root } = await renderSheet(false, false);
+    calls.scan.mockRejectedValueOnce(nativeCanceled());
+    try {
+      await openFolder(container);
+      expect(container.textContent).toContain('native_network_error');
+      const reads = calls.roots.mock.calls.length;
+      const scans = calls.scan.mock.calls.length;
+      await appState('background');
+      await appState('active');
+      expect(container.textContent).not.toContain('native_network_error');
+      expect(button(container, 'native_create_use_folder')).toBeTruthy();
+      expect(calls.roots).toHaveBeenCalledTimes(reads);
+      expect(calls.scan).toHaveBeenCalledTimes(scans + 1);
+      expect(calls.scan).toHaveBeenLastCalledWith(server, '/repo', '/repo', expect.any(AbortSignal));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it.each((['configs', 'engines', 'providers', 'models', 'accounts'] as const).flatMap((operation) =>
+    (['active', 'focus'] as const).flatMap((event) => [false, true].map((late) => ({ operation, event, late }))),
+  ))('retomada de catálogo recupera $operation por $event (tardio=$late)', async ({ operation, event, late }) => {
+    const pending = deferred<never>();
+    calls[operation].mockReturnValueOnce(pending.promise);
+    const { container, root } = await renderSheet(false, operation === 'accounts');
+    const focus = async (value: boolean) => {
+      calls.focused = value;
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+    };
+    try {
+      if (event === 'active') await appState('background');
+      else await focus(false);
+      if (!late) await act(async () => pending.reject(nativeCanceled()));
+      if (event === 'active') await appState('active');
+      else await focus(true);
+      if (late) await act(async () => pending.reject(nativeCanceled()));
+      expect(calls[operation]).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain('native_network_error');
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      const counts = [calls.configs, calls.engines, calls.providers, calls.models, calls.accounts].map((load) => load.mock.calls.length);
+      await appState('active');
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      expect([calls.configs, calls.engines, calls.providers, calls.models, calls.accounts].map((load) => load.mock.calls.length)).toEqual(counts);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de providers preserva provider lembrado ainda disponível, modelo e esforço', async () => {
+    localStorage.setItem('create.choices.v1:server-b', '{"provider":"codex","model":"sol","effort":"high","codexAccount":"work"}');
+    calls.providers.mockRejectedValueOnce(nativeCanceled()).mockResolvedValue({
+      claude: { disponivel: true, default: true }, codex: { disponivel: true, default: false },
+    });
+    calls.models.mockResolvedValue({ kind: 'codex', reduced: false, models: [{ id: 'sol', name: 'Sol', efforts: ['low', 'high'] }] });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      expect(button(container, 'composer_session_settings')!.textContent).toContain('Sol high');
+      await appState('background');
+      await appState('active');
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
+        cwd: '/repo', provider: 'codex', codex_account: 'work', model: 'sol', effort: 'high',
+      }));
+      expect(calls.providers).toHaveBeenCalledTimes(2);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de engines conserva escolhas e HTTP de configs sem refazer os outros catálogos', async () => {
+    calls.configs.mockRejectedValue(Object.assign(new Error('500: fetch failed no servidor (configs_failed)'), { status: 500, code: 'configs_failed' }));
+    calls.engines.mockRejectedValueOnce(nativeCanceled());
+    calls.models.mockResolvedValue({ kind: 'claude', reduced: false, models: [{ id: 'opus', name: 'Opus' }] });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await openSettings(container);
+      await act(async () => button(container, 'Opus')!.click());
+      await act(async () => button(container, 'reasoning_level_high')!.click());
+      await openOptions(container);
+      await act(async () => {
+        const field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="comum_nome"]')!;
+        field.value = 'kept-name';
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => button(container, 'criar_modo_exec: criar_modo_exec_headless')!.click());
+      await act(async () => button(container, 'criar_modo_exec_tmux')!.click());
+      await appState('background');
+      await appState('active');
+      expect(calls.engines).toHaveBeenCalledTimes(2);
+      expect(calls.configs).toHaveBeenCalledTimes(1);
+      expect(calls.providers).toHaveBeenCalledTimes(1);
+      expect(calls.models).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain('500: fetch failed no servidor (configs_failed)');
+      await send(container, 'kept-draft');
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
+        cwd: '/repo', name: 'kept-name', provider: 'claude', model: 'opus', effort: 'high', headless: false,
+      }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de pasta na primeira chegada de foco recupera carga iniciada fora da tela', async () => {
+    calls.focused = false;
+    calls.roots.mockRejectedValueOnce(nativeCanceled());
+    const { container, root } = await renderSheet(false, false);
+    try {
+      calls.focused = true;
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      expect(calls.roots).toHaveBeenCalledTimes(2);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it.each(['roots', 'scan', 'configs', 'engines', 'providers', 'models', 'accounts'] as const)(
+    'cancelamento nativo traduz erro de %s sem expor Swift', async (operation) => {
+      const message = 'fetch failed: FetchRequestCanceledException: Fetch request has been canceled (at Expo/NativeResponse.swift:63)';
+      calls[operation].mockRejectedValue(new Error(message));
+      const { container, root } = await renderSheet(false, operation === 'accounts');
+      try {
+        expect(container.textContent).toContain('native_network_error');
+        expect(container.textContent).not.toContain(message);
+        expect(container.textContent).not.toContain('NativeResponse.swift');
+      } finally { await act(async () => root.unmount()); }
+    },
+  );
+
+  it.each([
+    new DOMException('aborted', 'AbortError'), new DOMException('timed out', 'TimeoutError'),
+    new TypeError('Network request failed'), new TypeError('Failed to fetch'), new Error('fetch failed'),
+    new TypeError('Load failed'), new Error('NetworkError when attempting to fetch resource.'),
+  ])('transporte traduz configs: %s', async (error) => {
+    calls.configs.mockRejectedValue(error);
+    const { container, root } = await renderSheet(false, false);
+    try { expect(container.textContent).toContain('native_network_error'); }
+    finally { await act(async () => root.unmount()); }
+  });
+
+  it.each([
+    Object.assign(new Error('500: fetch failed no servidor'), { status: 500 }),
+    new Error('500: fetch failed no servidor'),
+    Object.assign(new Error('fetch failed no servidor (catalog_failed)'), { code: 'catalog_failed', envelope: { code: 'catalog_failed' } }),
+    new Error('configuracao_local_invalida'),
+  ])('preserva motivo HTTP ou local de configs: %s', async (error) => {
+    calls.configs.mockRejectedValue(error);
+    const { container, root } = await renderSheet(false, false);
+    try { expect(container.textContent).toContain(error.message); }
+    finally { await act(async () => root.unmount()); }
+  });
+
+  it.each((['roots', 'scan', 'configs', 'engines', 'providers', 'models', 'accounts'] as const).flatMap((operation) => [
+    { operation, kind: 'status', error: Object.assign(nativeCanceled(), { status: 500 }), network: false },
+    { operation, kind: 'envelope', error: Object.assign(nativeCanceled(), { code: 'server_failed', envelope: { code: 'server_failed' } }), network: false },
+    { operation, kind: 'HTTP', error: new Error('500: fetch failed no servidor'), network: false },
+    { operation, kind: 'timeout', error: new DOMException('timed out', 'TimeoutError'), network: true },
+    { operation, kind: 'rede', error: new TypeError('Network request failed'), network: true },
+  ]))('retomada não repete $operation por $kind nem apaga o motivo', async ({ operation, error, network }) => {
+    calls[operation].mockRejectedValue(error);
+    const { container, root } = await renderSheet(false, operation === 'accounts');
+    try {
+      const reads = calls[operation].mock.calls.length;
+      await appState('background');
+      await appState('active');
+      calls.focused = false;
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      calls.focused = true;
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      expect(container.textContent).toContain(network ? 'native_network_error' : error.message);
+      expect(calls[operation]).toHaveBeenCalledTimes(reads);
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it.each((['roots', 'scan', 'configs', 'engines', 'providers', 'models', 'accounts'] as const).flatMap((operation) =>
+    [false, true].map((late) => ({ operation, late })),
+  ))('cleanup de destino descarta cancelamento de $operation (tardio=$late)', async ({ operation, late }) => {
+    calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
+    const pending = deferred<never>();
+    calls[operation].mockReturnValueOnce(pending.promise);
+    const { container, root } = await renderSheet(false, operation === 'accounts');
+    try {
+      if (!late) await act(async () => pending.reject(nativeCanceled()));
+      await act(async () => button(container, 'native_new_chat_machine: Servidor B')!.click());
+      await act(async () => button(container, 'Servidor C')!.click());
+      const counts = [calls.roots, calls.scan, calls.configs, calls.engines, calls.providers, calls.models, calls.accounts].map((load) => load.mock.calls.length);
+      if (late) await act(async () => pending.reject(nativeCanceled()));
+      await appState('background');
+      await appState('active');
+      expect(button(container, 'native_new_chat_machine: Servidor C')).toBeTruthy();
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      expect(container.textContent).not.toContain('native_network_error');
+      expect([calls.roots, calls.scan, calls.configs, calls.engines, calls.providers, calls.models, calls.accounts].map((load) => load.mock.calls.length)).toEqual(counts);
+    } finally { await act(async () => root.unmount()); }
+    expect(calls.appListeners.size).toBe(0);
+  });
+
+  it.each([false, true])('cleanup ao desmontar descarta pendências e rejeição tardia (tardio=%s)', async (late) => {
+    const pending = deferred<never>();
+    calls.configs.mockReturnValueOnce(pending.promise);
+    const { root } = await renderSheet(false, false);
+    if (!late) await act(async () => pending.reject(nativeCanceled()));
+    await act(async () => root.unmount());
+    expect(calls.appListeners.size).toBe(0);
+    if (late) await act(async () => pending.reject(nativeCanceled()));
+    await appState('background');
+    await appState('active');
+    expect(calls.configs).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleanup de modelos por troca de conta não recupera a carga antiga', async () => {
+    localStorage.setItem('create.choices.v1:server-b', '{"provider":"codex","codexAccount":"work"}');
+    calls.accounts.mockResolvedValue([defaultAccount, connected]);
+    const pending = deferred<never>();
+    calls.models.mockImplementation((_server, provider, _engine, _config, account) => provider === 'codex' && account === 'work'
+      ? pending.promise : Promise.resolve({ models: [], reduced: false }));
+    const { container, root } = await renderSheet(false, false);
+    try {
+      const oldRequest = calls.models.mock.calls.find((call) => call[4] === 'work')!;
+      await pickAccount(container, 'Padrão');
+      expect((oldRequest[5] as AbortSignal).aborted).toBe(true);
+      await act(async () => pending.reject(nativeCanceled()));
+      const reads = calls.models.mock.calls.length;
+      await appState('background');
+      await appState('active');
+      expect(calls.models).toHaveBeenCalledTimes(reads);
+      expect(container.textContent).not.toContain('native_network_error');
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex', codex_account: 'default' }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('cleanup do picker fechado ignora cancelamento tardio sem refazer scan', async () => {
+    const { container, root } = await renderSheet(false, false);
+    const pending = deferred<never>();
+    calls.scan.mockReturnValueOnce(pending.promise);
+    try {
+      await openFolder(container);
+      const scan = calls.scan.mock.calls.at(-1)!;
+      await closePanel(container, 'native_new_chat_folder');
+      expect((scan[3] as AbortSignal).aborted).toBe(true);
+      await flushDismiss();
+      await act(async () => pending.reject(nativeCanceled()));
+      const reads = calls.scan.mock.calls.length;
+      await appState('background');
+      await appState('active');
+      expect(calls.scan).toHaveBeenCalledTimes(reads);
+      expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+      expect(container.textContent).not.toContain('native_network_error');
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('cleanup de contas ao trocar provider ignora cancelamento tardio', async () => {
+    const pending = deferred<never>();
+    calls.accounts.mockReturnValueOnce(pending.promise);
+    const { container, root } = await renderSheet();
+    try {
+      const signal = calls.accounts.mock.calls[0][1] as AbortSignal;
+      await openSettings(container);
+      await act(async () => button(container, 'Claude')!.click());
+      expect(signal.aborted).toBe(true);
+      await act(async () => pending.reject(nativeCanceled()));
+      await appState('background');
+      await appState('active');
+      expect(calls.accounts).toHaveBeenCalledTimes(1);
+      expect(container.textContent).not.toContain('native_network_error');
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it.each(['claude', 'codex'])('retomada conserva conta e provider %s escolhidos manualmente', async (provider) => {
+    calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
+    calls.accounts.mockResolvedValue([defaultAccount, connected]);
+    calls.providers.mockRejectedValueOnce(nativeCanceled()).mockResolvedValue({
+      claude: { disponivel: true, default: provider !== 'claude' }, codex: { disponivel: true, default: provider !== 'codex' },
+    });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await openSettings(container);
+      await act(async () => button(container, provider === 'codex' ? 'Codex' : 'Claude')!.click());
+      await closePanel(container, 'composer_session_settings');
+      await pickAccount(container, provider === 'codex' ? 'Trabalho' : 'Conta B', provider === 'codex');
+      const modelReads = calls.models.mock.calls.length;
+      const configReads = calls.configs.mock.calls.length;
+      const accountReads = calls.accounts.mock.calls.length;
+      await appState('background');
+      await appState('active');
+      expect(calls.models).toHaveBeenCalledTimes(modelReads);
+      expect(calls.configs).toHaveBeenCalledTimes(configReads);
+      expect(calls.accounts).toHaveBeenCalledTimes(accountReads);
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining(provider === 'codex'
+        ? { provider: 'codex', codex_account: 'work' } : { provider: 'claude', config_dir: '/b' }));
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('retomada de catálogo com cancelamento persistente espera outro retorno, sem loop', async () => {
+    calls.engines.mockRejectedValue(nativeCanceled());
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await appState('background');
+      await appState('active');
+      await appState('active');
+      await act(async () => root.render(createElement(CreateSessionSheet)));
+      expect(calls.engines).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain('native_network_error');
+    } finally { await act(async () => root.unmount()); }
+  });
 
   it('home mantém campo, anexo e destino montados entre lista e criação, e uso durante a escrita', async () => {
     const container = document.createElement('div');

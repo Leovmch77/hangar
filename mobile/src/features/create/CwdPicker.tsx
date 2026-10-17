@@ -4,6 +4,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getRootsForServer, relativeTime, scanDirForServer } from '@hangar/core';
 import type { FsRoot, FsEntry, FsScanError, Server } from '@hangar/core';
 import { readProject } from '../../stores/createPreferences';
+import { loadErrorText } from './loadError';
+import { useCanceledLoadRetry } from './useCanceledLoadRetry';
 import { Icon } from '../../ui/Icon';
 import { useSettingsColors } from '../config/colors';
 import { TextTabs } from '../usage/HomeUsageCard';
@@ -65,11 +67,14 @@ export function CwdPicker({
   const [searchFocused, setSearchFocused] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
-  const scanController = useRef<AbortController | null>(null);
   const selectedAtOpen = useRef(selected);
+  const initialScanIndex = useRef(0);
+  const startRootsRetry = useCanceledLoadRetry(useCallback(() => setRootsTry((n) => n + 1), []));
+  const startScanRetry = useCanceledLoadRetry(useCallback(() => setScanTry((n) => n + 1), []));
 
   useEffect(() => {
     const controller = new AbortController();
+    const retry = startRootsRetry();
     setRootsLoading(true);
     setRootsError('');
     setScanError(null);
@@ -86,15 +91,37 @@ export function CwdPicker({
         setPath(current && current !== root.path && current.startsWith(root.path) ? parentOf(current) : root.path);
         return;
       }
-      if (saved && !r.some((root) => root.path === saved.root)) {
+    })().catch((cause: unknown) => {
+      if (controller.signal.aborted) return;
+      setRootsError(loadErrorText(cause, m.arquivo_carregar_raizes_erro()));
+      retry.failed(cause);
+    }).finally(() => {
+      if (!controller.signal.aborted) setRootsLoading(false);
+    });
+    return () => { retry.cancel(); controller.abort(); };
+  }, [server, autoSelect, rootsTry, startRootsRetry]);
+
+  useEffect(() => { initialScanIndex.current = 0; }, [server, roots, autoSelect]);
+
+  useEffect(() => {
+    if (rootsLoading || rootsError || !roots.length || !autoSelect) return;
+    const controller = new AbortController();
+    const retry = startScanRetry();
+    setScanError(null);
+    setScanFailed(false);
+    void (async () => {
+      const saved = readProject(server.id);
+      if (saved && !roots.some((root) => root.path === saved.root)) {
         setScanError(m.criar_projeto_indisponivel());
         return;
       }
-      for (const root of saved ? r.filter((root) => root.path === saved.root) : r) {
+      const candidates = saved ? roots.filter((root) => root.path === saved.root) : roots;
+      for (const root of candidates.slice(initialScanIndex.current)) {
         const cwd = saved?.cwd ?? root.path;
         const result = await scanDirForServer(server, root.path, cwd, controller.signal);
         if (controller.signal.aborted) return;
         if (result.error) {
+          initialScanIndex.current++;
           setScanError(saved ? `${m.criar_projeto_indisponivel()} ${scanMessage(result.error)}` : scanMessage(result.error));
           continue;
         }
@@ -102,39 +129,37 @@ export function CwdPicker({
         return;
       }
     })().catch((cause: unknown) => {
-      if (!controller.signal.aborted) setRootsError(cause instanceof Error ? cause.message : m.arquivo_carregar_raizes_erro());
-    }).finally(() => {
-      if (!controller.signal.aborted) setRootsLoading(false);
+      if (controller.signal.aborted) return;
+      setScanError(loadErrorText(cause, m.arquivo_ler_falhou()));
+      setScanFailed(true);
+      retry.failed(cause);
     });
-    return () => { controller.abort(); scanController.current?.abort(); };
-  }, [server, onPick, autoSelect, rootsTry]);
+    return () => { retry.cancel(); controller.abort(); };
+  }, [server, onPick, autoSelect, roots, rootsLoading, rootsError, scanTry, startScanRetry]);
 
-  const doScan = useCallback(async (rootPath: string, target: string) => {
-    scanController.current?.abort();
+  useEffect(() => {
+    if (rootsLoading || !activeRoot) return;
     const controller = new AbortController();
-    scanController.current = controller;
+    const retry = startScanRetry();
     setScanning(true);
     setScanError(null);
     setScanFailed(false);
-    try {
-      const res = await scanDirForServer(server, rootPath, target, controller.signal);
-      if (controller.signal.aborted) return;
-      setEntries(res.error ? [] : res.entries);
-      if (res.error) setScanError(scanMessage(res.error));
-    } catch (e) {
-      if (controller.signal.aborted) return;
-      setScanError(e instanceof Error ? e.message : m.arquivo_ler_falhou());
-      setScanFailed(true);
-      setEntries([]);
-    } finally {
-      if (!controller.signal.aborted) setScanning(false);
-    }
-  }, [server]);
-
-  useEffect(() => {
-    if (!rootsLoading && activeRoot) void doScan(activeRoot.path, path || activeRoot.path);
-    return () => scanController.current?.abort();
-  }, [activeRoot, path, doScan, rootsLoading, scanTry]);
+    void scanDirForServer(server, activeRoot.path, path || activeRoot.path, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setEntries(res.error ? [] : res.entries);
+        if (res.error) setScanError(scanMessage(res.error));
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        setScanError(loadErrorText(e, m.arquivo_ler_falhou()));
+        setScanFailed(true);
+        setEntries([]);
+        retry.failed(e);
+      })
+      .finally(() => { if (!controller.signal.aborted) setScanning(false); });
+    return () => { retry.cancel(); controller.abort(); };
+  }, [activeRoot, path, server, rootsLoading, scanTry, startScanRetry]);
 
   // Raiz escolhida já é a pasta, como no menu do PC; o painel continua aberto para descer nela.
   const selectRoot = (r: FsRoot) => {
@@ -185,7 +210,10 @@ export function CwdPicker({
     const manualValid = !!manualPath.trim();
 
     const cRows = !activeRoot ? (
-      scanError ? note(scanError, true) : null
+      scanError ? <View style={styles.cState}>
+        {note(scanError, true)}
+        {scanFailed ? textRetry(() => setScanTry((n) => n + 1)) : null}
+      </View> : null
     ) : scanning ? (
       <View style={styles.cSkeletons}>
         {[120, 168, 96].map((w) => <View key={w} style={[styles.cSkeleton, { width: w, backgroundColor: c.border }]} />)}
@@ -357,7 +385,10 @@ export function CwdPicker({
   );
 
   const rows = !activeRoot ? (
-    scanError ? <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text> : null
+    scanError ? <View style={styles.state}>
+      <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text>
+      {scanFailed ? retry(() => setScanTry((n) => n + 1)) : null}
+    </View> : null
   ) : scanning ? (
     // Cinco linhas de esqueleto: nome e detalhe, como o render_rows do PC.
     <View style={styles.skeletonList}>
