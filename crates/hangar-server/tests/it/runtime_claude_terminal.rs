@@ -189,11 +189,49 @@ async fn the_turn_end_of_a_restored_claude_hands_its_weekly_limit_to_the_switche
     registry.set_limit_sink(sink);
     registry.adopt_now("s1").await.unwrap().unwrap();
     let binding = registry.interaction_binding_readonly("s1").await.unwrap();
-    let checked = registry.turn_limit("s1",&binding,1792249428.0).await.map_err(|e|e.code).unwrap();
+    let checked = registry.turn_limit("s1",&binding,1792249428.0,Duration::ZERO).await.map_err(|e|e.code).unwrap();
     assert!(matches!(checked,TurnLimit::Checked { sent:true,.. }),"{checked:?}");
     let hit = hits.try_recv().expect("o vigia recebeu");
     assert_eq!((hit.name.as_str(),hit.limit.window.as_str(),hit.limit.resets_at),("s1","seven_day",Some(1792270800.0)));
     assert_eq!(hit.account.map(std::path::PathBuf::from).map(|p|p.canonicalize().unwrap()),Some(fx.home.join(".claude").canonicalize().unwrap()));
+    registry.close(&key,1).await.unwrap();
+    finish(&mut agent);
+}
+
+/// O Claude avisa o fim do turno antes de gravar o `jsonl`: o aviso de limite que chega 80 ms depois ainda
+/// vai ao vigia; sem aviso nenhum, a releitura para no teto.
+#[tokio::test]
+async fn the_turn_end_rereads_the_transcript_written_after_it() {
+    use hangar_server::runtime::gateway::TurnLimit;
+    let fx = fixture();
+    let mut agent = claude();
+    named(&agent).await;
+    fx.pane("s1",agent.id(),1700000000);
+    fx.native(agent.id(),SID);
+    let key = "cc".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
+    let projects = fx.home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(&fx.root.to_string_lossy()));
+    std::fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{SID}.jsonl"));
+    std::fs::write(&transcript,"{\"type\":\"user\",\"isSidechain\":false,\"message\":{\"content\":\"continua\"}}\n").unwrap();
+    let registry = fx.registry().await;
+    let (sink,mut hits) = tokio::sync::mpsc::unbounded_channel();
+    registry.set_limit_sink(sink);
+    registry.adopt_now("s1").await.unwrap().unwrap();
+    let binding = registry.interaction_binding_readonly("s1").await.unwrap();
+    let started = std::time::Instant::now();
+    let none = registry.turn_limit("s1",&binding,1792249428.0,Duration::from_millis(400)).await.map_err(|e|e.code).unwrap();
+    assert!(matches!(none,TurnLimit::Checked { limit:None,.. }) && started.elapsed() >= Duration::from_millis(400),"para no teto: {none:?}");
+    let path = transcript.clone();
+    let late = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        std::io::Write::write_all(&mut file,include_str!("fixtures/usage_limit/claude_weekly_limit_tui_2026_10.jsonl").as_bytes()).unwrap();
+    });
+    let checked = registry.turn_limit("s1",&binding,1792249428.0,Duration::from_secs(3)).await.map_err(|e|e.code).unwrap();
+    late.await.unwrap();
+    assert!(matches!(checked,TurnLimit::Checked { sent:true,.. }),"{checked:?}");
+    assert_eq!(hits.try_recv().expect("o vigia recebeu").limit.window,"seven_day");
     registry.close(&key,1).await.unwrap();
     finish(&mut agent);
 }
